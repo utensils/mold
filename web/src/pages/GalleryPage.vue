@@ -375,7 +375,7 @@ onMounted(async () => {
 
 <template>
   <div
-    class="relative mx-auto flex min-h-[100svh] max-w-[1800px] flex-col px-4 pb-32 sm:px-6 lg:px-10"
+    class="relative mx-auto flex min-h-[100svh] max-w-[1800px] flex-col px-4 pb-40 sm:px-6 lg:px-10"
   >
     <TopBar
       :filter="filter"

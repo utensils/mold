@@ -2645,6 +2645,7 @@ mod tests {
                 used_by_mold: 0,
                 used_by_other: 0,
             },
+            cpu: None,
         });
 
         let app = create_router(state);

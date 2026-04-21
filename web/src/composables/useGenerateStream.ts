@@ -1,4 +1,4 @@
-import { reactive, ref, type Ref } from "vue";
+import { reactive, ref, watch, type Ref } from "vue";
 import { generateChainStream, generateStream } from "../api";
 import type {
   ChainProgressEvent,
@@ -200,12 +200,96 @@ export interface UseGenerateStream {
   submit: (req: GenerateRequestWire, decision?: ChainRoutingDecision) => string;
   cancel: (id: string) => void;
   clearDone: () => void;
+  /** Remove a specific job from the list (used to dismiss persisted cards). */
+  remove: (id: string) => void;
+}
+
+const STORAGE_KEY = "mold.generate.jobs";
+
+/** Shape we persist to localStorage — everything in `Job` minus the
+ * non-serializable `AbortController`, plus a marker so we can short-circuit
+ * loads from a future schema bump. */
+interface PersistedJob {
+  id: string;
+  request: GenerateRequestWire;
+  startedAt: number;
+  progress: JobProgress;
+  result: SseCompleteEvent | null;
+  error: string | null;
+  state: Job["state"];
+  chain: ChainJobMeta | null;
+}
+
+function loadPersistedJobs(): Job[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as PersistedJob[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((p) => {
+      // Running jobs can't survive a reload — the SSE stream is gone and we
+      // have no request-id to reconnect to. Mark them so the user can see
+      // "this was running when I hit refresh" and either retry or dismiss,
+      // but don't pretend they're still alive.
+      const state: Job["state"] = p.state === "running" ? "error" : p.state;
+      const error =
+        p.state === "running"
+          ? "Disconnected — generation may still be running on the server"
+          : p.error;
+      return {
+        id: p.id,
+        request: p.request,
+        startedAt: p.startedAt,
+        // Dangling controllers from prior sessions aren't used — cancel()
+        // bails early for non-running jobs anyway.
+        controller: new AbortController(),
+        progress: p.progress ?? emptyProgress(),
+        result: p.result,
+        error,
+        state,
+        chain: p.chain,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+function persistJobs(jobs: Job[]) {
+  try {
+    const serializable: PersistedJob[] = jobs.map((j) => ({
+      id: j.id,
+      request: j.request,
+      startedAt: j.startedAt,
+      progress: j.progress,
+      result: j.result,
+      error: j.error,
+      state: j.state,
+      chain: j.chain,
+    }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
+  } catch {
+    /* quota / privacy mode — silently drop */
+  }
 }
 
 export function useGenerateStream(
   onComplete?: (job: Job) => void,
 ): UseGenerateStream {
-  const jobs = ref<Job[]>([]);
+  const jobs = ref<Job[]>(loadPersistedJobs());
+
+  // Persist whenever the list or any job's mutable state changes. 200 ms
+  // debounce keeps writes out of the SSE hot path (we get a progress event
+  // roughly every 50 ms during denoising).
+  let persistTimer: ReturnType<typeof setTimeout> | null = null;
+  watch(
+    jobs,
+    (v) => {
+      if (persistTimer) clearTimeout(persistTimer);
+      persistTimer = setTimeout(() => persistJobs(v), 200);
+    },
+    { deep: true },
+  );
 
   function submit(
     req: GenerateRequestWire,
@@ -306,5 +390,9 @@ export function useGenerateStream(
     jobs.value = jobs.value.filter((j) => j.state === "running");
   }
 
-  return { jobs, submit, cancel, clearDone };
+  function remove(id: string) {
+    jobs.value = jobs.value.filter((j) => j.id !== id);
+  }
+
+  return { jobs, submit, cancel, clearDone, remove };
 }

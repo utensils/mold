@@ -1006,6 +1006,11 @@ pub struct ResourceSnapshot {
     pub timestamp: i64,
     pub gpus: Vec<GpuSnapshot>,
     pub system_ram: RamSnapshot,
+    /// System-wide CPU utilization (averaged across all cores). `None` when
+    /// the aggregator hasn't had two samples yet (CPU usage is computed from
+    /// deltas — the first snapshot always reports zero).
+    #[serde(default)]
+    pub cpu: Option<CpuSnapshot>,
 }
 
 /// Per-GPU memory snapshot.
@@ -1021,6 +1026,18 @@ pub struct GpuSnapshot {
     pub vram_used_by_mold: Option<u64>,
     /// `vram_used - vram_used_by_mold`. `None` whenever `vram_used_by_mold` is.
     pub vram_used_by_other: Option<u64>,
+    /// GPU core utilization in percent (0-100). `None` on Metal and on the
+    /// `nvidia-smi` fallback path — only NVML exposes this cheaply.
+    #[serde(default)]
+    pub gpu_utilization: Option<u8>,
+}
+
+/// Aggregate CPU snapshot. `usage_percent` is a 0-100 average across every
+/// logical core.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CpuSnapshot {
+    pub cores: u16,
+    pub usage_percent: f32,
 }
 
 /// System RAM snapshot. Per-process fields are always populated (via sysinfo).
@@ -2233,6 +2250,7 @@ mod tests {
                 vram_used: 14_200_000_000,
                 vram_used_by_mold: Some(10_100_000_000),
                 vram_used_by_other: Some(4_100_000_000),
+                gpu_utilization: Some(42),
             }],
             system_ram: RamSnapshot {
                 total: 64_000_000_000,
@@ -2240,6 +2258,10 @@ mod tests {
                 used_by_mold: 22_100_000_000,
                 used_by_other: 16_300_000_000,
             },
+            cpu: Some(CpuSnapshot {
+                cores: 16,
+                usage_percent: 27.5,
+            }),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: ResourceSnapshot = serde_json::from_str(&json).unwrap();
@@ -2269,6 +2291,7 @@ mod tests {
             vram_used: 38_000_000_000,
             vram_used_by_mold: None,
             vram_used_by_other: None,
+            gpu_utilization: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         // Both fields are present as `null` (not elided) so the SPA can

@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { DevicePlacement, GenerateFormState } from "../types";
+import type {
+  DevicePlacement,
+  GenerateFormState,
+  OutputFormat,
+} from "../types";
 import PlacementPanel from "./PlacementPanel.vue";
+import { outputFormatsForFamily } from "../composables/useGenerateForm";
 
 import type { ChainRoutingDecision } from "../lib/chainRouting";
 
@@ -75,6 +80,15 @@ const statusLine = computed(() => {
 function updatePlacement(p: DevicePlacement | null) {
   emit("update:modelValue", { ...props.modelValue, placement: p });
 }
+
+const outputFormats = computed(() => outputFormatsForFamily(props.family));
+
+function updateOutputFormat(v: string) {
+  emit("update:modelValue", {
+    ...props.modelValue,
+    outputFormat: v as OutputFormat,
+  });
+}
 </script>
 
 <template>
@@ -110,6 +124,23 @@ function updatePlacement(p: DevicePlacement | null) {
       />
 
       <div class="flex flex-shrink-0 flex-col gap-1 sm:flex-row">
+        <label class="sr-only" for="composer-output-format"
+          >Output format</label
+        >
+        <select
+          id="composer-output-format"
+          data-test="composer-output-format"
+          :value="modelValue.outputFormat"
+          class="h-9 rounded-full bg-slate-900/60 px-3 text-sm text-slate-100 focus:outline-none"
+          :title="`Output format — default: ${outputFormats[0]}`"
+          @change="
+            updateOutputFormat(($event.target as HTMLSelectElement).value)
+          "
+        >
+          <option v-for="f in outputFormats" :key="f" :value="f">
+            {{ f }}
+          </option>
+        </select>
         <button
           type="button"
           class="icon-btn"

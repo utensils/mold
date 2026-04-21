@@ -24,6 +24,27 @@ const { supportsAdvanced } = usePlacement();
 const tier2 = computed(() => supportsAdvanced(props.family));
 const advancedOpen = ref(false);
 
+// The whole placement section collapses by default — most users never touch
+// these controls, so keeping them folded cleans up the composer. State is
+// persisted so power users who keep it open don't have to re-expand it.
+const STORAGE_KEY = "mold.composer.placement.open";
+function loadOpen(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+const sectionOpen = ref(loadOpen());
+function toggleSection() {
+  sectionOpen.value = !sectionOpen.value;
+  try {
+    localStorage.setItem(STORAGE_KEY, sectionOpen.value ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+
 const tier1Value = computed<DeviceRef>(
   () => props.modelValue?.text_encoders ?? { kind: "auto" },
 );
@@ -120,9 +141,21 @@ const isDirty = computed(() => props.modelValue !== null);
 <template>
   <section class="glass flex flex-col gap-2 rounded-2xl p-3 text-sm">
     <header class="flex items-center justify-between">
-      <span class="font-medium text-slate-200">Device placement</span>
       <button
-        v-if="isDirty"
+        type="button"
+        class="flex items-center gap-2 text-left font-medium text-slate-200 hover:text-slate-50"
+        :aria-expanded="sectionOpen"
+        data-test="placement-section-toggle"
+        @click="toggleSection"
+      >
+        <span>{{ sectionOpen ? "▾" : "▸" }}</span>
+        <span>Device placement</span>
+        <span v-if="isDirty && !sectionOpen" class="text-xs text-brand-400">
+          · custom
+        </span>
+      </button>
+      <button
+        v-if="isDirty && sectionOpen"
         type="button"
         data-test="save-default"
         class="text-xs text-brand-400 hover:underline"
@@ -132,7 +165,7 @@ const isDirty = computed(() => props.modelValue !== null);
       </button>
     </header>
 
-    <div v-if="gpus.length > 0" class="flex items-center gap-2">
+    <div v-if="sectionOpen && gpus.length > 0" class="flex items-center gap-2">
       <label class="text-slate-400">Text encoders</label>
       <select
         data-test="tier1-select"
@@ -148,7 +181,7 @@ const isDirty = computed(() => props.modelValue !== null);
       </select>
     </div>
 
-    <div class="flex items-center gap-2">
+    <div v-if="sectionOpen" class="flex items-center gap-2">
       <button
         type="button"
         data-test="advanced-toggle"
@@ -165,7 +198,10 @@ const isDirty = computed(() => props.modelValue !== null);
       </button>
     </div>
 
-    <div v-if="tier2 && advancedOpen" class="flex flex-col gap-1 pl-4">
+    <div
+      v-if="sectionOpen && tier2 && advancedOpen"
+      class="flex flex-col gap-1 pl-4"
+    >
       <div class="flex items-center gap-2">
         <label class="w-24 text-slate-400">Transformer</label>
         <select

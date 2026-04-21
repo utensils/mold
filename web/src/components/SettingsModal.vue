@@ -1,17 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type {
-  GenerateFormState,
-  ModelInfoExtended,
-  OutputFormat,
-  Scheduler,
-} from "../types";
+import type { GenerateFormState, ModelInfoExtended, Scheduler } from "../types";
 import {
   NO_CFG_FAMILIES,
   UNET_SCHEDULER_FAMILIES,
   VIDEO_FAMILIES,
 } from "../types";
 import ModelPicker from "./ModelPicker.vue";
+import { outputFormatsForFamily } from "../composables/useGenerateForm";
 
 const props = defineProps<{
   open: boolean;
@@ -58,6 +54,13 @@ function selectModel(m: ModelInfoExtended) {
     next.frames = null;
     next.fps = null;
   }
+  // Reset output format to the family's default when it's no longer valid
+  // (e.g. switching from FLUX → LTX-2 leaves `png` selected, which the
+  // server would reject).
+  const formats = outputFormatsForFamily(m.family);
+  if (!formats.includes(next.outputFormat)) {
+    next.outputFormat = formats[0];
+  }
   emit("update:modelValue", next);
 }
 
@@ -66,6 +69,39 @@ function clampFrames(n: number): number {
   if (!Number.isFinite(n)) return 25;
   const rounded = Math.max(9, Math.round((n - 1) / 8) * 8 + 1);
   return rounded;
+}
+
+// Video length is a pure UI convenience — the backend only consumes frames.
+// We derive it from frames / fps and let the user edit either side; the
+// other recomputes (see onChangeLength / onChangeFps).
+const videoLength = computed(() => {
+  const frames = props.modelValue.frames ?? 25;
+  const fps = props.modelValue.fps ?? 24;
+  return fps > 0 ? frames / fps : 0;
+});
+
+function onChangeFrames(raw: string) {
+  const n = clampFrames(Number(raw));
+  patch("frames", n);
+}
+
+function onChangeLength(raw: string) {
+  const secs = Number(raw);
+  if (!Number.isFinite(secs) || secs <= 0) return;
+  const fps = props.modelValue.fps ?? 24;
+  patch("frames", clampFrames(secs * fps));
+}
+
+function onChangeFps(raw: string) {
+  const nextFps = Number(raw);
+  if (!Number.isFinite(nextFps) || nextFps <= 0) return;
+  // Changing fps keeps length steady and adjusts frames.
+  const length = videoLength.value;
+  emit("update:modelValue", {
+    ...props.modelValue,
+    fps: nextFps,
+    frames: clampFrames(length * nextFps),
+  });
 }
 
 const advancedOpen = ref(false);
@@ -79,9 +115,6 @@ const schedulerOptions: Scheduler[] = [
   "euler-ancestral",
   "unipc",
 ];
-const outputFormatOptions = computed<OutputFormat[]>(() =>
-  showVideo.value ? ["mp4", "gif", "apng", "webp"] : ["png", "jpeg", "webp"],
-);
 </script>
 
 <template>
@@ -295,7 +328,7 @@ const outputFormatOptions = computed<OutputFormat[]>(() =>
 
         <section
           v-if="showVideo"
-          class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2"
+          class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3"
         >
           <div>
             <label class="text-xs uppercase text-slate-400"
@@ -306,12 +339,21 @@ const outputFormatOptions = computed<OutputFormat[]>(() =>
               :value="modelValue.frames ?? 25"
               class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
               @change="
-                patch(
-                  'frames',
-                  clampFrames(
-                    Number(($event.target as HTMLInputElement).value),
-                  ),
-                )
+                onChangeFrames(($event.target as HTMLInputElement).value)
+              "
+            />
+          </div>
+          <div>
+            <label class="text-xs uppercase text-slate-400">Length (s)</label>
+            <input
+              type="number"
+              step="0.1"
+              min="0.1"
+              :value="videoLength.toFixed(2)"
+              class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
+              data-test="video-length"
+              @change="
+                onChangeLength(($event.target as HTMLInputElement).value)
               "
             />
           </div>
@@ -321,12 +363,7 @@ const outputFormatOptions = computed<OutputFormat[]>(() =>
               type="number"
               :value="modelValue.fps ?? 24"
               class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
-              @change="
-                patch(
-                  'fps',
-                  Number(($event.target as HTMLInputElement).value) || 24,
-                )
-              "
+              @change="onChangeFps(($event.target as HTMLInputElement).value)"
             />
           </div>
         </section>
@@ -362,25 +399,6 @@ const outputFormatOptions = computed<OutputFormat[]>(() =>
                   :value="s"
                 >
                   {{ s }}
-                </option>
-              </select>
-            </div>
-            <div>
-              <label class="text-xs uppercase text-slate-400"
-                >Output format</label
-              >
-              <select
-                :value="modelValue.outputFormat"
-                class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
-                @change="
-                  patch(
-                    'outputFormat',
-                    ($event.target as HTMLSelectElement).value as OutputFormat,
-                  )
-                "
-              >
-                <option v-for="f in outputFormatOptions" :key="f" :value="f">
-                  {{ f }}
                 </option>
               </select>
             </div>

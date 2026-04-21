@@ -413,6 +413,8 @@ export interface GpuSnapshot {
   vram_used: number;
   vram_used_by_mold: number | null;
   vram_used_by_other: number | null;
+  /** 0-100. `null` on Metal and on the `nvidia-smi` fallback path. */
+  gpu_utilization?: number | null;
 }
 
 export interface RamSnapshot {
@@ -422,9 +424,17 @@ export interface RamSnapshot {
   used_by_other: number;
 }
 
+export interface CpuSnapshot {
+  cores: number;
+  /** 0-100 averaged across all cores. */
+  usage_percent: number;
+}
+
 export interface ResourceSnapshot {
   hostname: string;
   timestamp: number;
   gpus: GpuSnapshot[];
   system_ram: RamSnapshot;
+  /** `null` on the first sample (sysinfo needs a prior refresh to compute deltas). */
+  cpu?: CpuSnapshot | null;
 }

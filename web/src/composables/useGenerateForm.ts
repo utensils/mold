@@ -3,6 +3,7 @@ import type {
   GenerateFormState,
   GenerateRequestWire,
   ModelInfoExtended,
+  OutputFormat,
   Scheduler,
 } from "../types";
 import {
@@ -10,6 +11,19 @@ import {
   UNET_SCHEDULER_FAMILIES,
   VIDEO_FAMILIES,
 } from "../types";
+
+/** Output-format options for a given model family, ordered by preference.
+ * The first entry is the default the UI auto-selects when a model is
+ * chosen. */
+export function outputFormatsForFamily(family: string): OutputFormat[] {
+  return VIDEO_FAMILIES.includes(family)
+    ? ["mp4", "gif", "apng", "webp"]
+    : ["png", "jpeg", "webp"];
+}
+
+export function defaultOutputFormat(family: string): OutputFormat {
+  return outputFormatsForFamily(family)[0];
+}
 
 const STORAGE_KEY = "mold.generate.form";
 
@@ -100,6 +114,14 @@ export function useGenerateForm(): UseGenerateForm {
       } else {
         state.value.frames = null;
         state.value.fps = null;
+      }
+      // Auto-pick a valid output format whenever the model family changes so
+      // users never have to manually toggle this — switching from an image
+      // to a video family and back would otherwise leave an invalid format
+      // (e.g. `png` on LTX-2) stuck in the form.
+      const formats = outputFormatsForFamily(m.family);
+      if (!formats.includes(state.value.outputFormat)) {
+        state.value.outputFormat = formats[0];
       }
     },
     toRequest: () => {

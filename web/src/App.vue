@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
 import DownloadsDrawer from "./components/DownloadsDrawer.vue";
+import ResourceTray from "./components/ResourceTray.vue";
 import {
   computeEtaSeconds,
   onDownloadComplete,
@@ -67,6 +68,7 @@ provide(RESOURCES_INJECTION_KEY, resources);
 
 <template>
   <router-view />
+  <ResourceTray />
   <DownloadsDrawer
     :open="drawerOpen"
     :active="downloads.active.value"

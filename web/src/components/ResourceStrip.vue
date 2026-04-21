@@ -1,19 +1,24 @@
 <script setup lang="ts">
 /**
- * Always-visible VRAM + system-RAM telemetry panel.
+ * VRAM + GPU-utilization + system-RAM + CPU telemetry rows. Consumed by
+ * the bottom tray (`ResourceTray.vue`) as the expanded body and by the
+ * TopBar as a compact chip on narrow viewports.
  *
  * Modes:
- *  - `variant="full"` (default) — docked at the bottom of the Composer column
- *    on /generate. One row per GPU plus one for system RAM, click-to-expand
- *    side sheet.
- *  - `variant="chip"` — compact single-line summary for the TopBar on
- *    narrow viewports (< lg).
+ *  - `variant="full"` (default) — one row per GPU (with VRAM + core-util
+ *    bars) plus system-RAM and CPU rows.
+ *  - `variant="chip"` — compact single-line summary.
  *
  * Data comes from the `useResources` singleton provided by App.vue.
  */
-import { computed, inject, ref } from "vue";
+import { computed, inject } from "vue";
 import { RESOURCES_INJECTION_KEY } from "../composables/useResources";
-import type { GpuSnapshot, ResourceSnapshot, RamSnapshot } from "../types";
+import type {
+  CpuSnapshot,
+  GpuSnapshot,
+  ResourceSnapshot,
+  RamSnapshot,
+} from "../types";
 import type { ComputedRef, Ref } from "vue";
 
 type UseResourcesShape = {
@@ -42,12 +47,7 @@ const gpus = computed<GpuSnapshot[]>(() => injected?.gpuList.value ?? []);
 const ram = computed<RamSnapshot | null>(
   () => snapshot.value?.system_ram ?? null,
 );
-
-const sheetOpen = ref(false);
-function toggleSheet() {
-  sheetOpen.value = !sheetOpen.value;
-}
-void sheetOpen;
+const cpu = computed<CpuSnapshot | null>(() => snapshot.value?.cpu ?? null);
 
 function fmtGb(bytes: number): string {
   return (bytes / 1_000_000_000).toFixed(1);
@@ -61,23 +61,29 @@ function pct(used: number, total: number): number {
 const chipSummary = computed(() => {
   const s = snapshot.value;
   if (!s) return "…";
-  const ramStr = ram.value
-    ? `${fmtGb(ram.value.used)} / ${fmtGb(ram.value.total)} GB`
-    : "…";
-  if (s.gpus.length === 0) return `RAM ${ramStr}`;
-  const primary = s.gpus[0];
-  return `GPU ${fmtGb(primary.vram_used)} / ${fmtGb(primary.vram_total)} · RAM ${ramStr}`;
+  const parts: string[] = [];
+  if (s.gpus.length > 0) {
+    const g = s.gpus[0];
+    const mem = `${fmtGb(g.vram_used)}/${fmtGb(g.vram_total)}`;
+    const util = g.gpu_utilization != null ? ` ${g.gpu_utilization}%` : "";
+    parts.push(`GPU ${mem}${util}`);
+  }
+  if (ram.value) {
+    parts.push(`RAM ${fmtGb(ram.value.used)}/${fmtGb(ram.value.total)}`);
+  }
+  if (cpu.value) {
+    parts.push(`CPU ${Math.round(cpu.value.usage_percent)}%`);
+  }
+  return parts.join(" · ");
 });
 </script>
 
 <template>
   <div v-if="variant === 'chip'" class="inline-flex">
-    <button
+    <span
       data-test="resource-chip"
-      type="button"
-      class="inline-flex h-9 items-center gap-2 rounded-full border border-white/5 bg-white/5 px-3 text-[13px] font-medium text-ink-200 transition hover:text-white"
+      class="inline-flex h-9 items-center gap-2 rounded-full border border-white/5 bg-white/5 px-3 text-[13px] font-medium text-ink-200"
       :title="snapshot?.hostname ?? ''"
-      @click="toggleSheet"
     >
       <svg
         viewBox="0 0 24 24"
@@ -92,46 +98,62 @@ const chipSummary = computed(() => {
         />
       </svg>
       <span class="tabular-nums">{{ chipSummary }}</span>
-    </button>
+    </span>
   </div>
 
-  <aside
-    v-else
-    class="glass rounded-2xl px-4 py-3"
-    role="region"
-    aria-label="Resource telemetry"
-  >
-    <div v-if="!snapshot" class="text-[13px] text-ink-400">…</div>
+  <div v-else role="region" aria-label="Resource telemetry" class="text-[13px]">
+    <div v-if="!snapshot" class="text-ink-400">…</div>
 
-    <div v-else class="flex flex-col gap-2 text-[13px]">
+    <div v-else class="flex flex-col gap-2">
       <div
         v-for="gpu in gpus"
         :key="gpu.ordinal"
         data-test="resource-row"
-        class="flex items-center gap-3"
+        class="flex flex-col gap-1"
       >
-        <div class="w-28 shrink-0 font-medium text-ink-100">
-          GPU {{ gpu.ordinal }} · {{ gpu.name }}
-        </div>
-        <div class="w-32 shrink-0 tabular-nums text-ink-200">
-          {{ fmtGb(gpu.vram_used) }} / {{ fmtGb(gpu.vram_total) }} GB
-        </div>
-        <div
-          class="relative h-2 flex-1 overflow-hidden rounded-full bg-white/5"
-        >
+        <div class="flex items-center gap-3">
+          <div class="w-28 shrink-0 font-medium text-ink-100">
+            GPU {{ gpu.ordinal }} · {{ gpu.name }}
+          </div>
+          <div class="w-32 shrink-0 tabular-nums text-ink-200">
+            {{ fmtGb(gpu.vram_used) }} / {{ fmtGb(gpu.vram_total) }} GB
+          </div>
           <div
-            class="absolute inset-y-0 left-0 bg-brand-400/70"
-            :style="{ width: `${pct(gpu.vram_used, gpu.vram_total)}%` }"
-          />
+            class="relative h-2 flex-1 overflow-hidden rounded-full bg-white/5"
+          >
+            <div
+              class="absolute inset-y-0 left-0 bg-brand-400/70"
+              :style="{ width: `${pct(gpu.vram_used, gpu.vram_total)}%` }"
+            />
+          </div>
+          <div
+            v-if="
+              gpu.vram_used_by_mold !== null &&
+              gpu.vram_used_by_other !== null &&
+              gpu.vram_used_by_mold !== undefined
+            "
+            class="w-40 shrink-0 text-right text-[11px] text-ink-400 tabular-nums"
+          >
+            mold {{ fmtGb(gpu.vram_used_by_mold) }} · other
+            {{ fmtGb(gpu.vram_used_by_other ?? 0) }}
+          </div>
         </div>
-        <div
-          v-if="
-            gpu.vram_used_by_mold !== null && gpu.vram_used_by_other !== null
-          "
-          class="w-40 shrink-0 text-right text-[11px] text-ink-400 tabular-nums"
-        >
-          mold {{ fmtGb(gpu.vram_used_by_mold) }} · other
-          {{ fmtGb(gpu.vram_used_by_other) }}
+        <div v-if="gpu.gpu_utilization != null" class="flex items-center gap-3">
+          <div class="w-28 shrink-0 pl-3 text-[11px] uppercase text-ink-500">
+            core load
+          </div>
+          <div class="w-32 shrink-0 tabular-nums text-ink-200">
+            {{ gpu.gpu_utilization }}%
+          </div>
+          <div
+            class="relative h-2 flex-1 overflow-hidden rounded-full bg-white/5"
+          >
+            <div
+              class="absolute inset-y-0 left-0 bg-amber-400/70"
+              :style="{ width: `${gpu.gpu_utilization}%` }"
+            />
+          </div>
+          <div class="w-40 shrink-0"></div>
         </div>
       </div>
 
@@ -160,10 +182,28 @@ const chipSummary = computed(() => {
         </div>
       </div>
 
+      <div v-if="cpu" data-test="resource-row" class="flex items-center gap-3">
+        <div class="w-28 shrink-0 font-medium text-ink-100">
+          CPU · {{ cpu.cores }} cores
+        </div>
+        <div class="w-32 shrink-0 tabular-nums text-ink-200">
+          {{ cpu.usage_percent.toFixed(1) }}%
+        </div>
+        <div
+          class="relative h-2 flex-1 overflow-hidden rounded-full bg-white/5"
+        >
+          <div
+            class="absolute inset-y-0 left-0 bg-sky-400/70"
+            :style="{ width: `${Math.min(100, cpu.usage_percent)}%` }"
+          />
+        </div>
+        <div class="w-40 shrink-0"></div>
+      </div>
+
       <div class="pt-1 text-[11px] text-ink-500">
         host {{ snapshot.hostname }} · updated
         {{ new Date(snapshot.timestamp).toLocaleTimeString() }}
       </div>
     </div>
-  </aside>
+  </div>
 </template>

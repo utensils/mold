@@ -113,6 +113,9 @@ pub(crate) mod nvml_source {
                         .sum::<u64>()
                 });
                 let used_by_other = used_by_mold.map(|m| mem.used.saturating_sub(m));
+                // NVML's GPU-core utilization over the last sample period.
+                // Cheap — this is just a driver query, not a counter reset.
+                let gpu_util = dev.utilization_rates().ok().map(|u| u.gpu.min(100) as u8);
                 out.push(GpuSnapshot {
                     ordinal: ordinal as usize,
                     name,
@@ -121,6 +124,7 @@ pub(crate) mod nvml_source {
                     vram_used: mem.used,
                     vram_used_by_mold: used_by_mold,
                     vram_used_by_other: used_by_other,
+                    gpu_utilization: gpu_util,
                 });
             }
             out
@@ -160,8 +164,8 @@ pub fn parse_nvidia_smi_line(line: &str) -> Option<(usize, String, u64, u64)> {
     Some((ordinal, name, total_mb * 1_000_000, used_mb * 1_000_000))
 }
 
-use mold_core::RamSnapshot;
-use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+use mold_core::{CpuSnapshot, RamSnapshot};
+use sysinfo::{CpuRefreshKind, Pid, ProcessRefreshKind, RefreshKind, System};
 
 /// Metal unified-memory snapshot — macOS only. Off-Darwin returns an empty
 /// Vec so callers on Linux/CUDA hosts can unconditionally call this.
@@ -188,6 +192,7 @@ pub fn metal_snapshot() -> Vec<GpuSnapshot> {
             vram_used: used,
             vram_used_by_mold: None,
             vram_used_by_other: None,
+            gpu_utilization: None,
         }]
     }
     #[cfg(not(target_os = "macos"))]
@@ -265,6 +270,7 @@ impl SmiSource {
                     vram_used: used,
                     vram_used_by_mold: None,
                     vram_used_by_other: None,
+                    gpu_utilization: None,
                 })
             })
             .collect()
@@ -276,7 +282,15 @@ impl SmiSource {
 ///
 /// Source priority on CUDA: NVML (if linked) → `nvidia-smi` subprocess → empty.
 /// On macOS: `metal_snapshot()`.
+///
+/// CPU utilization is `None` — call `build_snapshot_with_cpu` with a
+/// persistent `System` to populate it (sysinfo computes CPU usage from
+/// deltas between refreshes, so the aggregator needs to hold state).
 pub fn build_snapshot() -> ResourceSnapshot {
+    build_snapshot_inner(None)
+}
+
+fn build_snapshot_inner(cpu: Option<CpuSnapshot>) -> ResourceSnapshot {
     let hostname = hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
@@ -294,6 +308,40 @@ pub fn build_snapshot() -> ResourceSnapshot {
         timestamp,
         gpus,
         system_ram,
+        cpu,
+    }
+}
+
+/// Holds the persistent `System` sysinfo needs for CPU delta computation.
+pub struct CpuSampler {
+    sys: System,
+    cores: u16,
+}
+
+impl CpuSampler {
+    pub fn new() -> Self {
+        let mut sys = System::new_with_specifics(
+            RefreshKind::nothing().with_cpu(CpuRefreshKind::everything().with_cpu_usage()),
+        );
+        // Prime the sampler. The first `global_cpu_usage()` read always
+        // returns 0 — the real number shows up on the second refresh.
+        sys.refresh_cpu_usage();
+        let cores = sys.cpus().len().min(u16::MAX as usize) as u16;
+        Self { sys, cores }
+    }
+
+    pub fn sample(&mut self) -> CpuSnapshot {
+        self.sys.refresh_cpu_usage();
+        CpuSnapshot {
+            cores: self.cores,
+            usage_percent: self.sys.global_cpu_usage().clamp(0.0, 100.0),
+        }
+    }
+}
+
+impl Default for CpuSampler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -326,27 +374,45 @@ fn collect_gpus() -> Vec<GpuSnapshot> {
 pub fn spawn_aggregator(bcast: Arc<ResourceBroadcaster>) -> JoinHandle<()> {
     tokio::spawn(async move {
         // Immediate first tick so `latest()` is populated before any HTTP
-        // request arrives.
-        bcast.publish(build_snapshot());
+        // request arrives. CPU usage is None on this first sample (no delta
+        // to compute against yet).
+        bcast.publish(build_snapshot_inner(None));
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Consume the first tick (it fires immediately) so we don't double-emit.
         interval.tick().await;
+
+        // The sampler lives on the blocking thread across ticks — sysinfo
+        // computes CPU usage from deltas, so we can't rebuild it every tick.
+        let mut sampler: Option<CpuSampler> = None;
         loop {
             interval.tick().await;
-            let snap = tokio::task::spawn_blocking(build_snapshot)
-                .await
-                .unwrap_or_else(|_| ResourceSnapshot {
-                    hostname: "unknown".to_string(),
-                    timestamp: 0,
-                    gpus: Vec::new(),
-                    system_ram: mold_core::RamSnapshot {
-                        total: 0,
-                        used: 0,
-                        used_by_mold: 0,
-                        used_by_other: 0,
+            let taken = sampler.take();
+            let (snap, returned) = tokio::task::spawn_blocking(move || {
+                let mut s = taken.unwrap_or_default();
+                let cpu = s.sample();
+                let snap = build_snapshot_inner(Some(cpu));
+                (snap, s)
+            })
+            .await
+            .unwrap_or_else(|_| {
+                (
+                    ResourceSnapshot {
+                        hostname: "unknown".to_string(),
+                        timestamp: 0,
+                        gpus: Vec::new(),
+                        system_ram: mold_core::RamSnapshot {
+                            total: 0,
+                            used: 0,
+                            used_by_mold: 0,
+                            used_by_other: 0,
+                        },
+                        cpu: None,
                     },
-                });
+                    CpuSampler::new(),
+                )
+            });
+            sampler = Some(returned);
             bcast.publish(snap);
         }
     })
