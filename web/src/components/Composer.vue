@@ -3,6 +3,8 @@ import { computed, nextTick, ref, watch } from "vue";
 import type { DevicePlacement, GenerateFormState } from "../types";
 import PlacementPanel from "./PlacementPanel.vue";
 
+import type { ChainRoutingDecision } from "../lib/chainRouting";
+
 const props = defineProps<{
   modelValue: GenerateFormState;
   queueDepth: number | null;
@@ -14,6 +16,10 @@ const props = defineProps<{
   family: string; // family of the currently-selected model
   placementGpus: { ordinal: number; name: string }[];
   // ──────────────────────────────────────────────────────────────────
+  /** Chain routing decision for the current form settings. When `chain`,
+   * the Composer shows a "will render as N clips" cue so users understand
+   * why the request will take much longer than a single-clip submit. */
+  chainDecision: ChainRoutingDecision;
 }>();
 
 const emit = defineEmits<{
@@ -138,6 +144,23 @@ function updatePlacement(p: DevicePlacement | null) {
 
     <div v-if="statusLine" class="px-1 text-xs text-slate-500">
       {{ statusLine }}
+    </div>
+
+    <div
+      v-if="chainDecision.kind === 'chain'"
+      class="rounded-lg bg-brand-900/40 px-3 py-1.5 text-xs text-brand-200"
+    >
+      Will render as
+      <span class="font-semibold">{{ chainDecision.stageCount }}</span>
+      chained clips of {{ chainDecision.clipFrames }} frames (motion-tail
+      {{ chainDecision.motionTail }}) — expect this to take substantially longer
+      than a single clip.
+    </div>
+    <div
+      v-else-if="chainDecision.kind === 'reject'"
+      class="rounded-lg bg-red-900/40 px-3 py-1.5 text-xs text-red-200"
+    >
+      {{ chainDecision.reason }}
     </div>
 
     <!-- Agent C (model-ui-overhaul §3): device placement -->

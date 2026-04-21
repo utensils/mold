@@ -17,6 +17,7 @@ import {
 } from "../api";
 import { useGenerateForm } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
+import { decideChainRouting } from "../lib/chainRouting";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
   ExpandFormState,
@@ -144,13 +145,30 @@ const topBarCounts = computed(() => ({
   filtered: galleryEntries.value.length,
 }));
 
+const chainDecision = computed(() =>
+  decideChainRouting(
+    form.state.value.frames,
+    currentModel.value?.family ?? null,
+    form.state.value.model,
+  ),
+);
+
 function onSubmit() {
   if (!form.state.value.model) {
     showSettings.value = true;
     return;
   }
+  const decision = chainDecision.value;
+  if (decision.kind === "reject") {
+    // Block submit on a well-defined routing rejection (non-chainable
+    // family over its per-clip budget). Keeping this as alert() matches
+    // the existing terse validation UX — a toast system would be a
+    // separate piece of work.
+    alert(decision.reason);
+    return;
+  }
   const req = form.toRequest();
-  stream.submit(req);
+  stream.submit(req, decision);
 }
 
 function onClearSource() {
@@ -261,6 +279,7 @@ onMounted(async () => {
         :settings-dirty="settingsDirty"
         :family="currentModel?.family ?? ''"
         :placement-gpus="gpuListForPlacement"
+        :chain-decision="chainDecision"
         @submit="onSubmit"
         @open-settings="showSettings = true"
         @open-expand="showExpand = true"

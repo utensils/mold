@@ -1,4 +1,6 @@
 import type {
+  ChainProgressEvent,
+  ChainRequestWire,
   ExpandRequestWire,
   ExpandResponseWire,
   GalleryImage,
@@ -6,6 +8,7 @@ import type {
   ModelInfoExtended,
   ServerCapabilities,
   ServerStatus,
+  SseChainCompleteEvent,
   SseCompleteEvent,
   SseProgressEvent,
 } from "./types";
@@ -163,6 +166,75 @@ export async function generateStream(
     void res;
   } catch (err) {
     if (signal?.aborted) return; // user canceled
+    handlers.onError({
+      kind: "network",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+export interface ChainStreamHandlers {
+  onProgress: (evt: ChainProgressEvent) => void;
+  onComplete: (evt: SseChainCompleteEvent) => void;
+  onError: (
+    err:
+      | { kind: "http"; status: number; retryAfter?: number; body: string }
+      | { kind: "network"; message: string },
+  ) => void;
+}
+
+/** POST /api/generate/chain/stream — SSE stream for chained video
+ * generation. Same SSE framing as `/api/generate/stream` but with a
+ * `ChainRequest` body and chain-shaped progress/complete events. */
+export async function generateChainStream(
+  req: ChainRequestWire,
+  handlers: ChainStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    const res = await streamSse({
+      url: `${base}/api/generate/chain/stream`,
+      body: req,
+      signal,
+      onEvent: (evt) => {
+        if (!evt.data) return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(evt.data);
+        } catch {
+          return;
+        }
+        if (evt.event === "complete") {
+          handlers.onComplete(parsed as SseChainCompleteEvent);
+        } else if (evt.event === "error") {
+          handlers.onError({ kind: "http", status: 0, body: evt.data });
+        } else {
+          handlers.onProgress(parsed as ChainProgressEvent);
+        }
+      },
+      onHttpError: (res) => {
+        const retryAfterHeader = res.headers.get("Retry-After");
+        const retryAfter = retryAfterHeader
+          ? Number.parseFloat(retryAfterHeader)
+          : undefined;
+        res
+          .text()
+          .then((body) =>
+            handlers.onError({
+              kind: "http",
+              status: res.status,
+              retryAfter: Number.isFinite(retryAfter) ? retryAfter : undefined,
+              body,
+            }),
+          )
+          .catch(() =>
+            handlers.onError({ kind: "http", status: res.status, body: "" }),
+          );
+      },
+    });
+    void res;
+  } catch (err) {
+    if (signal?.aborted) return;
     handlers.onError({
       kind: "network",
       message: err instanceof Error ? err.message : String(err),
