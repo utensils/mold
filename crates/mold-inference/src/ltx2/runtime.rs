@@ -412,7 +412,7 @@ impl Ltx2RuntimeSession {
         // Chain path fast-path: if a previous `prepare()` already encoded
         // the exact same prompt+unconditional combo, reuse those embeddings
         // instead of demanding the encoder back. Disabled when the
-        // `MOLD_LTX_ALT_PROMPT` debug hook is active because that branch
+        // `MOLD_LTX_DEBUG_ALT_PROMPT` debug hook is active because that branch
         // still needs the live encoder.
         let cache_hit = alt_prompt_env.is_none()
             && self.cached_prompt_encoding.as_ref().is_some_and(|cached| {

@@ -49,11 +49,19 @@ nix profile install github:utensils/mold
 
 ::: code-group
 
-```bash [Linux (CUDA)]
+```bash [Linux (CUDA), fast local build]
+./scripts/ensure-web-dist.sh && cargo build --profile dev-fast -p mold-ai --features cuda
+```
+
+```bash [macOS (Metal), fast local build]
+./scripts/ensure-web-dist.sh && cargo build --profile dev-fast -p mold-ai --features metal
+```
+
+```bash [Linux (CUDA), shipping build]
 cargo build --release -p mold-ai --features cuda
 ```
 
-```bash [macOS (Metal)]
+```bash [macOS (Metal), shipping build]
 cargo build --release -p mold-ai --features metal
 ```
 
@@ -65,6 +73,10 @@ Optional features can be added to the same build, for example
 `--features cuda,preview,expand,discord,tui` or
 `--features metal,preview,expand,discord,tui` if you also want terminal preview,
 local prompt expansion, the Discord bot, or the interactive TUI.
+
+`dev-fast` is the repo's local-iteration profile: it keeps debuginfo, enables
+incremental compilation, and uses thin LTO plus more codegen units so optimized
+builds stay much faster than the shipping `--release` profile.
 
 ## Docker
 

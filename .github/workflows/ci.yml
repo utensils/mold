@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "1"
 
 # Note: CUDA builds are not run in CI — they require a GPU host with NixOS + CUDA.
 # CI only checks non-CUDA compilation, lints, and tests.
@@ -56,59 +57,48 @@ jobs:
         working-directory: web
         run: bun run build
 
-  fmt:
+  rust:
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+          components: rustfmt,clippy
+      - name: Install Rust build deps
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
+      - uses: mozilla-actions/sccache-action@v0.0.7
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace-default
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Format
+        run: cargo fmt --all -- --check
       - name: Check
         run: cargo check --workspace
-
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: workspace-default
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: workspace-default
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Check with all optional features
+        run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4
 
   coverage:
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust build deps
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
+
+      - uses: mozilla-actions/sccache-action@v0.0.7
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -127,17 +117,3 @@ jobs:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
-
-  check-features:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: workspace-all-features
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install system deps for optional features
-        run: sudo apt-get update && sudo apt-get install -y nasm libwebp-dev
-      - name: Check with all features (preview, discord, expand, tui, webp, mp4)
-        run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4

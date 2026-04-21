@@ -27,7 +27,11 @@
 set -euo pipefail
 
 STATE_FILE="/tmp/mold-tui-uat.state"
-MOLD_BIN="${MOLD_BIN:-./target/debug/mold}"
+DEFAULT_MOLD_BIN="./target/dev-fast/mold"
+if [ ! -x "$DEFAULT_MOLD_BIN" ]; then
+    DEFAULT_MOLD_BIN="./target/debug/mold"
+fi
+MOLD_BIN="${MOLD_BIN:-$DEFAULT_MOLD_BIN}"
 
 # ── Helpers ─────────────────────────────────────────────────────────
 

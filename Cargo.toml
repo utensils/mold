@@ -30,3 +30,11 @@ name = "mold"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+[profile.dev-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true
+debug = 1
+strip = false
