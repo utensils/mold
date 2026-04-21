@@ -84,10 +84,10 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
 
 <template>
   <div
-    class="pointer-events-none fixed inset-x-0 bottom-0 z-30 flex justify-center px-2 pb-2 sm:px-4 sm:pb-3"
+    class="pointer-events-none fixed inset-x-0 bottom-0 z-30 flex justify-center"
   >
     <div
-      class="pointer-events-auto w-full max-w-[1800px] rounded-2xl border border-white/5 bg-slate-950/80 backdrop-blur-md"
+      class="pointer-events-auto w-full border-t border-white/5 bg-slate-950"
     >
       <button
         type="button"

@@ -90,14 +90,16 @@ function clearSearch() {
 
 <template>
   <!--
-    Sticky positioning is sm-and-up only. On mobile the header scrolls
-    away with the content so the feed has the full viewport height (a
-    persistent bar eats 10-15 % of vertical space, which matters on
-    phones). A "back to top" FAB in `App.vue` brings the user back when
-    they want to reach the header again.
+    Sticky positioning is sm-and-up only AND gallery-only. On mobile the
+    header scrolls away with the content so the feed has the full viewport
+    height (a persistent bar eats 10-15 % of vertical space, which matters
+    on phones). On /generate the header always scrolls — the Composer owns
+    the top of the viewport once the user starts filling it out, and a
+    sticky bar there competes with the ResourceTray at the bottom.
   -->
   <header
-    class="glass relative z-30 flex flex-col gap-3 rounded-3xl px-4 py-3 sm:sticky sm:top-4 sm:flex-row sm:items-center sm:gap-4 sm:px-5 sm:py-3.5"
+    class="glass relative z-30 flex flex-col gap-3 rounded-3xl px-4 py-3 sm:flex-row sm:items-center sm:gap-4 sm:px-5 sm:py-3.5"
+    :class="route.name === 'gallery' ? 'sm:sticky sm:top-4' : ''"
   >
     <!-- Brand -->
     <div class="flex shrink-0 items-center gap-3">
