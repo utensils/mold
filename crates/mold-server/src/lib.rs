@@ -13,6 +13,7 @@ pub mod rate_limit;
 pub mod request_id;
 pub mod resources;
 pub mod routes;
+pub mod routes_chain;
 pub mod state;
 pub mod web_ui;
 

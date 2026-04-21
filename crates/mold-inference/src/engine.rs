@@ -35,6 +35,17 @@ pub trait InferenceEngine: Send + Sync {
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
         None
     }
+
+    /// Returns a [`ChainStageRenderer`] view of this engine if the family
+    /// supports chained video generation. Default is `None` — only LTX-2
+    /// distilled overrides this in v1.
+    ///
+    /// Callers (the server chain route) invoke this once per stage to drive
+    /// [`crate::ltx2::Ltx2ChainOrchestrator::run`]; engines that don't support
+    /// chaining return `None` and the caller responds with 422.
+    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::ltx2::ChainStageRenderer> {
+        None
+    }
 }
 
 /// Restores an `Option<T>` slot even if the current scope unwinds.

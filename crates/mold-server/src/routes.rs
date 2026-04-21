@@ -133,7 +133,19 @@ use crate::queue::clean_error_message;
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(generate, generate_stream, expand_prompt, list_models, load_model, pull_model_endpoint, unload_model, server_status, health),
+    paths(
+        generate,
+        generate_stream,
+        expand_prompt,
+        list_models,
+        load_model,
+        pull_model_endpoint,
+        unload_model,
+        server_status,
+        health,
+        crate::routes_chain::generate_chain,
+        crate::routes_chain::generate_chain_stream,
+    ),
     components(schemas(
         mold_core::GenerateRequest,
         mold_core::GenerateResponse,
@@ -148,6 +160,11 @@ use crate::queue::clean_error_message;
         mold_core::SseProgressEvent,
         mold_core::SseCompleteEvent,
         mold_core::SseErrorEvent,
+        mold_core::ChainRequest,
+        mold_core::ChainResponse,
+        mold_core::ChainStage,
+        mold_core::ChainProgressEvent,
+        mold_core::SseChainCompleteEvent,
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,
@@ -171,6 +188,14 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/api/generate", post(generate))
         .route("/api/generate/stream", post(generate_stream))
+        .route(
+            "/api/generate/chain",
+            post(crate::routes_chain::generate_chain),
+        )
+        .route(
+            "/api/generate/chain/stream",
+            post(crate::routes_chain::generate_chain_stream),
+        )
         .route("/api/expand", post(expand_prompt))
         .route("/api/models", get(list_models))
         .route("/api/models/load", post(load_model))

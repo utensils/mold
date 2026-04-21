@@ -159,11 +159,11 @@ pub struct ChainRunOutput {
 /// Drives the per-stage render loop for a chained generation. Borrows its
 /// renderer mutably so the loop can re-enter the engine on the same GPU
 /// context across stages.
-pub struct Ltx2ChainOrchestrator<'a, R: ChainStageRenderer> {
+pub struct Ltx2ChainOrchestrator<'a, R: ChainStageRenderer + ?Sized> {
     renderer: &'a mut R,
 }
 
-impl<'a, R: ChainStageRenderer> Ltx2ChainOrchestrator<'a, R> {
+impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
     pub fn new(renderer: &'a mut R) -> Self {
         Self { renderer }
     }

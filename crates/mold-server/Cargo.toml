@@ -25,6 +25,7 @@ default = []
 cuda = ["mold-inference/cuda"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
+mp4 = ["mold-inference/mp4"]
 metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 nvml = ["dep:nvml-wrapper"]
 
@@ -72,3 +73,7 @@ async-stream = "0.3"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+# Chain route tests build a synthetic motion-tail Tensor via the same
+# candle APIs the inference crate uses — keep this in lockstep with
+# mold-inference's pinned candle-core-mold version.
+candle-core = { package = "candle-core-mold", version = "0.9.10" }

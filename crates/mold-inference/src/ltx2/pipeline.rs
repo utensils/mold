@@ -720,6 +720,10 @@ impl InferenceEngine for Ltx2Engine {
     fn model_paths(&self) -> Option<&ModelPaths> {
         Some(&self.paths)
     }
+
+    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::ltx2::ChainStageRenderer> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]
