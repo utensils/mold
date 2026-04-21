@@ -346,12 +346,22 @@ impl Ltx2RuntimeSession {
         }
     }
 
+    /// Arm the pre-VAE-decode latent capture slot. The distilled render
+    /// path writes its `final_video_latents` into the returned slot when
+    /// this is set, letting a caller drain the raw latents after a render
+    /// completes. Kept after the v1.1 decoded-pixel-carryover switch in
+    /// case future work (e.g. quality-diagnostic tooling) wants access
+    /// to the pre-decode tensor; the production chain path no longer
+    /// arms it.
+    #[allow(dead_code)]
     pub(crate) fn arm_tail_capture(&mut self) -> std::sync::Arc<std::sync::Mutex<Option<Tensor>>> {
         let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.tail_capture = Some(std::sync::Arc::clone(&slot));
         slot
     }
 
+    /// Disarm the latent capture slot. See [`arm_tail_capture`].
+    #[allow(dead_code)]
     pub(crate) fn clear_tail_capture(&mut self) {
         self.tail_capture = None;
     }
@@ -1341,17 +1351,13 @@ fn maybe_load_stage_video_conditioning(
     }
 
     // The VAE is needed for staged images, reference video ingest, and —
-    // on chain continuations — re-encoding `causal_first_frame_rgb` on a
-    // StagedLatent so the causal-first slot is filled with a proper single-
-    // pixel-frame latent instead of the emitting stage's continuation-slot
-    // tokens. Pure pre-encoded latent carryover still skips the VAE load.
+    // on chain continuations — re-encoding the emitting stage's trailing
+    // RGB frames into a proper-slot-semantics conditioning latent. Every
+    // StagedLatent now carries RGB frames, so any non-empty
+    // plan.conditioning.latents implies a VAE load.
     let need_vae = !plan.conditioning.images.is_empty()
         || include_reference_video
-        || plan
-            .conditioning
-            .latents
-            .iter()
-            .any(|s| s.causal_first_frame_rgb.is_some());
+        || !plan.conditioning.latents.is_empty();
     let mut vae = if need_vae {
         let mut loaded = load_ltx2_video_vae(plan, device, dtype)?;
         loaded.use_tiling = false;
@@ -1408,45 +1414,28 @@ fn maybe_load_stage_video_conditioning(
                 )?);
         }
     }
-    // Pre-encoded latents (chain carryover). VAE is only touched when a
-    // `causal_first_frame_rgb` rides along — in that case the runtime re-
-    // encodes that RGB frame as a single-frame causal-first latent and
-    // swaps it in for latent frame 0 of the staged tensor, fixing the
-    // causal-vs-continuation slot mismatch before patchify. For v1 chain
-    // this path only ever produces a frame-0 replacement; appended
-    // (non-frame-0) is kept as a forward-compat branch for the movie-maker.
+    // Chain carryover: every StagedLatent is a contiguous RGB window from
+    // the end of the emitting stage. Re-encoding on the receiving side
+    // (rather than slicing the emitting stage's final latent tensor) keeps
+    // slot semantics aligned with the receiving clip's time axis — slot 0
+    // is a proper causal 1-pixel encoding, slot 1+ are proper 8-pixel
+    // continuation encodings, with no ambiguity about which latent slot
+    // corresponds to which pixel-frame range.
     for staged in &plan.conditioning.latents {
-        let mut latents = staged.latents.to_device(device)?.to_dtype(DType::F32)?;
-        if let Some(rgb) = staged.causal_first_frame_rgb.as_ref() {
-            let vae = vae.as_mut().expect(
-                "need_vae guarantees the VAE is loaded whenever a staged latent carries a causal_first_frame_rgb",
+        if staged.tail_rgb_frames.is_empty() {
+            anyhow::bail!(
+                "StagedLatent has an empty tail_rgb_frames; at least one frame is required"
             );
-            let video = video_tensor_from_frames(std::slice::from_ref(rgb), device, dtype)
-                .context("encode causal first frame into pixel tensor for chain carryover")?;
-            let causal_latent = vae.encode(&video).context(
-                "failed to encode chain-carryover causal first frame through the LTX-2 video VAE",
-            )?;
-            // `causal_latent` shape: [1, 128, 1, H/32, W/32]. Splice in
-            // as latent frame 0 of the staged tail so only the causal
-            // slot is overwritten; continuation slots (frames 1..K of
-            // `staged.latents`) stay as the emitting stage's true tail
-            // tokens, which already share the continuation-slot semantics
-            // of the receiving clip's slots 1..K.
-            let causal_latent = causal_latent.to_dtype(DType::F32)?;
-            let (_b, _c, causal_frames, _h, _w) = causal_latent.dims5()?;
-            if causal_frames != 1 {
-                anyhow::bail!(
-                    "VAE encode of a single RGB frame produced {causal_frames} latent frames; expected exactly 1"
-                );
-            }
-            let tail_frames = latents.dim(2)?;
-            latents = if tail_frames <= 1 {
-                causal_latent
-            } else {
-                let continuation = latents.narrow(2, 1, tail_frames - 1)?;
-                Tensor::cat(&[&causal_latent, &continuation], 2)?.contiguous()?
-            };
         }
+        let vae = vae.as_mut().expect(
+            "need_vae guarantees the VAE is loaded whenever plan.conditioning.latents is non-empty",
+        );
+        let video = video_tensor_from_frames(&staged.tail_rgb_frames, device, dtype)
+            .context("encode chain tail RGB frames into pixel tensor for carryover")?;
+        let latents = vae
+            .encode(&video)
+            .context("failed to encode chain tail RGB frames through the LTX-2 video VAE")?
+            .to_dtype(DType::F32)?;
         let use_guiding_latent = matches!(plan.pipeline, PipelineKind::Keyframe);
         if staged.frame == 0 && !use_guiding_latent {
             let tokens = patchifier.patchify(&latents)?;

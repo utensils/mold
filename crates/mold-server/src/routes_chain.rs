@@ -527,7 +527,6 @@ pub async fn generate_chain_stream(
 mod tests {
     use super::*;
     use anyhow::Result;
-    use candle_core::{DType, Device, Tensor};
     use image::{Rgb, RgbImage};
     use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage};
     use mold_core::{GenerateRequest, GenerateResponse};
@@ -587,18 +586,17 @@ mod tests {
                 let shade = (idx as u8).wrapping_mul(17).wrapping_add(f as u8);
                 frames.push(RgbImage::from_pixel(width, height, Rgb([shade, 0, 0])));
             }
-            let last_frame = frames.last().cloned().unwrap();
-            let latent = Tensor::zeros(
-                (1, 128, 1, height as usize / 32, width as usize / 32),
-                DType::F32,
-                &Device::Cpu,
-            )?;
+            let tail_pixel_frames = 4usize;
+            let take_from = frames
+                .len()
+                .saturating_sub(tail_pixel_frames)
+                .min(frames.len());
+            let tail_rgb_frames = frames[take_from..].to_vec();
             Ok(StageOutcome {
                 frames,
                 tail: ChainTail {
-                    frames: 4,
-                    latents: latent,
-                    last_rgb_frame: last_frame,
+                    frames: tail_pixel_frames as u32,
+                    tail_rgb_frames,
                 },
                 generation_time_ms: 10,
             })

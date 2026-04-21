@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use candle_core::Tensor;
 use image::RgbImage;
 use mold_core::{GenerateRequest, TimeRange};
 use std::fs;
@@ -13,17 +12,23 @@ pub(crate) struct StagedImage {
     pub(crate) strength: f32,
 }
 
-/// Pre-encoded latent block used as conditioning input, bypassing the
-/// staged-image path's VAE encode. Populated by the render-chain
-/// orchestrator when handing a motion-tail off between stages; empty for
+/// Pre-decoded RGB frame window that the runtime re-encodes through the
+/// video VAE into conditioning tokens. Populated by the render-chain
+/// orchestrator with the trailing frames of the emitting stage; empty for
 /// every non-chain caller today.
 ///
-/// Tensor shape must be `[batch=1, channels=128, T_latent, H/32, W/32]`
-/// to match the LTX-2 video VAE output. The runtime patchifies it directly
-/// into conditioning tokens.
+/// Re-encoding on the receiving side (rather than narrowing the emitting
+/// stage's final latent tensor) is what keeps slot semantics correct: the
+/// first latent produced from `tail_rgb_frames` is a proper causal 1-pixel
+/// encoding and subsequent latents are proper 8-pixel continuation
+/// encodings at the receiving clip's own time axis, with no ambiguity
+/// about which latent slot corresponds to which pixel-frame range.
 #[derive(Debug, Clone)]
 pub(crate) struct StagedLatent {
-    pub(crate) latents: Tensor,
+    /// Contiguous, in-capture-order RGB frames from the end of the emitting
+    /// stage. Must be non-empty; the receiving runtime VAE-encodes them
+    /// into `tail_latent_frame_count(tail_rgb_frames.len())` latent slots.
+    pub(crate) tail_rgb_frames: Vec<RgbImage>,
     /// Starting pixel frame for this latent block. `0` routes the tokens
     /// through `StageVideoConditioning::replacements`; non-zero values
     /// build a `VideoTokenAppendCondition` like the keyframe image path.
@@ -31,27 +36,17 @@ pub(crate) struct StagedLatent {
     /// Replacement/append strength. `1.0` for chain motion-tail carryover
     /// (hard-overwrite), matching the keyframe image strength convention.
     pub(crate) strength: f32,
-    /// Optional RGB frame that the runtime re-encodes through the video VAE
-    /// and swaps in for the first latent frame of `latents` before
-    /// patchifying. Used by the chain orchestrator to fix a semantic
-    /// mismatch: raw tail latents come from the emitting clip's
-    /// *continuation* slots (each encoding 8 pixel frames), but when
-    /// replayed at `frame: 0` of the next clip they land in the VAE's
-    /// *causal* slot (which decodes to a single pixel frame). Encoding the
-    /// last decoded RGB frame as a proper causal-first latent removes that
-    /// mismatch and makes `clip_N+1`'s first pixel frame visually match
-    /// `clip_N`'s last pixel frame.
-    pub(crate) causal_first_frame_rgb: Option<RgbImage>,
 }
 
 /// Conditioning inputs staged for a single run. Carries both disk-backed
 /// files (images, audio, reference video — existing single-clip flow) and
-/// in-memory latent blocks (chain carryover — new, empty for non-chain
+/// in-memory RGB frame blocks (chain carryover — new, empty for non-chain
 /// callers).
 ///
-/// Not `PartialEq` because `StagedLatent` wraps a `candle_core::Tensor`
-/// which doesn't implement meaningful structural equality. Existing tests
-/// only compare individual fields so this is safe to drop.
+/// Not `PartialEq` because `StagedLatent` wraps `image::RgbImage` which
+/// doesn't implement meaningful structural equality beyond raw byte
+/// comparison. Existing tests only compare individual fields so this is
+/// safe to drop.
 #[derive(Debug, Clone)]
 pub(crate) struct StagedConditioning {
     pub(crate) images: Vec<StagedImage>,

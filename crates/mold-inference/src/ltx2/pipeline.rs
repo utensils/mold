@@ -1,6 +1,6 @@
 #![allow(clippy::type_complexity)]
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use candle_core::Device;
 use mold_core::{
     GenerateRequest, GenerateResponse, Ltx2PipelineMode, ModelPaths, OutputFormat, VideoData,
@@ -11,9 +11,7 @@ use std::time::Instant;
 
 use super::assets;
 use super::backend::Ltx2Backend;
-use super::chain::{
-    extract_tail_latents, ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent,
-};
+use super::chain::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
 use super::conditioning::{self, StagedLatent};
 use super::execution;
 use super::lora;
@@ -26,6 +24,14 @@ use super::text::prompt_encoder::NativePromptEncoder;
 use crate::engine::{gpu_dtype, rand_seed, InferenceEngine, LoadStrategy};
 use crate::ltx_video::video_enc;
 use crate::progress::ProgressCallback;
+
+/// Soft-conditioning strength for the cross-stage identity anchor on chain
+/// continuations. The denoise mask at the anchor token becomes
+/// `1 - strength = 0.6`, so the denoiser blends ~60% generated / ~40%
+/// reference on every step — a gentle pull toward the source image rather
+/// than a hard pin (hard-pinning a single pixel frame past the motion tail
+/// would make continuations feel like cuts back to the starting shot).
+const CHAIN_SOFT_ANCHOR_STRENGTH: f32 = 0.4;
 
 pub struct Ltx2Engine {
     model_name: String,
@@ -589,30 +595,51 @@ impl Ltx2Engine {
         let native_output = work_dir.path().join("ltx2-native-output.mp4");
         let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
 
-        // Inject carryover tail latents as StagedLatent on frame 0. The
-        // runtime detects a non-empty `conditioning.latents` and bypasses
-        // the VAE load entirely, patchifying the pre-encoded tokens into
-        // conditioning replacements directly (see conditioning.rs
-        // StagedLatent docstring + runtime.rs
-        // maybe_load_stage_video_conditioning).
+        // Inject carryover RGB frames as a StagedLatent at frame 0. The
+        // runtime VAE-encodes them fresh on the receiving side so every
+        // resulting latent slot has correct causal/continuation semantics
+        // in this clip's own time axis (see conditioning.rs StagedLatent
+        // docstring + runtime.rs maybe_load_stage_video_conditioning).
+        //
+        // When the chain request carries a starting image (i2v flow), the
+        // orchestrator passes it through on every stage. Stage 0 uses it
+        // as the frame-0 i2v replacement — great. On continuations the
+        // motion-tail pin owns frame 0, so we re-route any frame-0 staged
+        // image to a non-zero frame with reduced "soft anchor" strength:
+        // the image becomes a durable identity reference appended to the
+        // token sequence (via the `VideoTokenAppendCondition` path in
+        // `maybe_load_stage_video_conditioning`), giving the free-region
+        // denoise a persistent cross-attention anchor for subject / scene
+        // appearance without freezing any tokens. Without this anchor,
+        // identity drift compounds stage-over-stage because each clip's
+        // only long-range reference is its own drifted last-frame carry.
         if let Some(tail) = carry {
-            // The caller (orchestrator) is responsible for blanking
-            // source_image on continuation stages, but defence-in-depth:
-            // clear staged images so they can't compete with the latent
-            // carryover.
-            plan.conditioning.images.clear();
-            // Hand the RGB last frame to the runtime so it can re-encode
-            // it as a proper causal-first latent and swap in for the first
-            // latent frame before patchifying. The raw tail latents from
-            // the emitting stage's tail encode 8 pixel frames per slot;
-            // dropped straight into token 0 they'd collide with the VAE's
-            // causal-first-frame convention at the decode step and produce
-            // a visible seam on each continuation.
+            if tail.tail_rgb_frames.is_empty() {
+                bail!(
+                    "render_chain_stage: carry.tail_rgb_frames is empty; caller must provide at least one frame"
+                );
+            }
+
+            // Re-route any frame-0 staged image into the soft-anchor
+            // append slot. The anchor frame is the first pixel past the
+            // motion-tail pin, so the reference token's RoPE sits exactly
+            // where new content starts — cross-attention propagates
+            // identity into the free region most directly from there.
+            // `CHAIN_SOFT_ANCHOR_STRENGTH = 0.4` gives the denoise mask a
+            // value of `1 - 0.4 = 0.6` at the anchor token, so the
+            // denoiser blends ~60% generated / ~40% reference every step.
+            let anchor_frame = motion_tail_pixel_frames;
+            for image in plan.conditioning.images.iter_mut() {
+                if image.frame == 0 {
+                    image.frame = anchor_frame;
+                    image.strength = CHAIN_SOFT_ANCHOR_STRENGTH;
+                }
+            }
+
             plan.conditioning.latents.push(StagedLatent {
-                latents: tail.latents.clone(),
+                tail_rgb_frames: tail.tail_rgb_frames.clone(),
                 frame: 0,
                 strength: 1.0,
-                causal_first_frame_rgb: Some(tail.last_rgb_frame.clone()),
             });
         }
 
@@ -626,50 +653,32 @@ impl Ltx2Engine {
             Some(runtime) if runtime.can_reuse_for(&plan) => runtime,
             _ => self.create_runtime_session(&plan)?,
         };
-        let slot = runtime.arm_tail_capture();
 
         self.emit("Executing native LTX-2 chain stage runtime");
         let prepared = match runtime.prepare(&plan) {
             Ok(prepared) => prepared,
             Err(err) => {
-                runtime.clear_tail_capture();
                 self.native_runtime = Some(runtime);
                 return Err(err);
             }
         };
         let render_result =
             runtime.render_native_video(&plan, &prepared, self.on_progress.as_ref());
-        runtime.clear_tail_capture();
         self.native_runtime = Some(runtime);
         let rendered = render_result?;
 
-        // Drain captured latents. The slot must have been populated by
-        // the distilled render path — if it's empty, that's a wiring bug,
-        // not a user error.
-        let captured = slot
-            .lock()
-            .map_err(|_| anyhow!("chain tail-capture mutex was poisoned mid-render"))?
-            .take()
-            .ok_or_else(|| {
-                anyhow!(
-                    "distilled render completed without populating the chain tail-capture slot; \
-                     this is a pipeline wiring bug"
-                )
-            })?;
-
-        // `extract_tail_latents` returns a narrow view; make it
-        // contiguous so it survives independently of the runtime's
-        // working tensors.
-        let tail_slice = extract_tail_latents(&captured, motion_tail_pixel_frames)?;
-        let tail_latents = tail_slice
-            .contiguous()
-            .context("materializing chain tail latents into an owned tensor")?;
-
         let frames = rendered.frames;
-        let last_rgb_frame = frames
-            .last()
-            .ok_or_else(|| anyhow!("distilled render returned zero frames"))?
-            .clone();
+        let tail_pixel_frames = motion_tail_pixel_frames as usize;
+        if frames.len() < tail_pixel_frames {
+            bail!(
+                "distilled render returned {} pixel frames but the chain caller requested a {}-frame tail; \
+                 this is a pipeline wiring bug",
+                frames.len(),
+                motion_tail_pixel_frames,
+            );
+        }
+        let tail_start = frames.len() - tail_pixel_frames;
+        let tail_rgb_frames = frames[tail_start..].to_vec();
 
         let generation_time_ms = start.elapsed().as_millis() as u64;
         Self::log_timing("pipeline.render_chain_stage", start);
@@ -678,8 +687,7 @@ impl Ltx2Engine {
             frames,
             tail: ChainTail {
                 frames: motion_tail_pixel_frames,
-                latents: tail_latents,
-                last_rgb_frame,
+                tail_rgb_frames,
             },
             generation_time_ms,
         })

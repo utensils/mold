@@ -399,11 +399,20 @@ fn build_auto_expand_stages(
     }
 
     let mut stages = Vec::with_capacity(count_usize);
-    for idx in 0..stage_count {
+    for _ in 0..stage_count {
+        // Every stage carries the starting image: stage 0 uses it as the
+        // i2v replacement at frame 0, and continuation stages use it as a
+        // soft identity anchor through the append path (see
+        // `Ltx2Engine::render_chain_stage`). Keeping a durable reference
+        // across stages is what stops scene/identity drift past the first
+        // clip, whose effects were traced in render-chain v1 as the
+        // dominant cause of "strange" continuations — the motion tail
+        // alone only carries ~0.7 s of pixel context, nowhere near enough
+        // for the model to remember the scene across an 8-stage chain.
         stages.push(ChainStage {
             prompt: prompt.to_string(),
             frames: per_stage_frames,
-            source_image: if idx == 0 { source_image.clone() } else { None },
+            source_image: source_image.clone(),
             negative_prompt: None,
             seed_offset: None,
         });
@@ -504,23 +513,22 @@ mod tests {
     }
 
     #[test]
-    fn normalise_preserves_first_stage_image() {
+    fn normalise_preserves_starting_image_across_all_stages() {
         let png = vec![0x89, 0x50, 0x4e, 0x47, 0xde, 0xad, 0xbe, 0xef];
         let normalised = auto_expand_request("test", 200, 97, 4, Some(png.clone()))
             .normalise()
             .expect("normalise should succeed");
 
         assert!(normalised.stages.len() >= 2);
-        assert_eq!(
-            normalised.stages[0].source_image.as_deref(),
-            Some(png.as_slice()),
-            "stage 0 must carry the starting image",
-        );
-        for stage in &normalised.stages[1..] {
-            assert!(
-                stage.source_image.is_none(),
-                "continuation stages must not carry a source image; conditioning flows \
-                 through motion-tail latents instead",
+        for (idx, stage) in normalised.stages.iter().enumerate() {
+            // Every stage must carry the starting image. Stage 0 uses it
+            // as the i2v replacement at frame 0; continuations use it as a
+            // soft identity anchor through the append path so scene and
+            // subject identity stay coherent past the motion-tail window.
+            assert_eq!(
+                stage.source_image.as_deref(),
+                Some(png.as_slice()),
+                "stage {idx} must carry the starting image for cross-stage identity anchoring",
             );
         }
     }

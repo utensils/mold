@@ -22,9 +22,17 @@ use crate::ltx2::model::shapes::SpatioTemporalScaleFactors;
 
 /// Opaque carryover payload handed from one chain stage to the next.
 ///
-/// Holds the final VAE latents of the emitting stage's motion tail, not the
-/// decoded pixels — so the receiving stage can patchify the tokens directly
-/// into its conditioning without a VAE re-encode.
+/// Holds the last `frames` decoded RGB frames of the emitting stage, not the
+/// raw tail latents. The receiving stage re-encodes them fresh through the
+/// LTX-2 video VAE so every resulting latent slot has correct causal /
+/// continuation semantics in the receiving clip's frame of reference — a
+/// direct latent slice from the emitting stage's continuation slots would
+/// appear at the receiving stage's position 0/1 with slot-meaning mismatched
+/// against the VAE's causal-first-frame convention.
+///
+/// The VAE encode cost on the receiving side is negligible (≈tens of ms for
+/// 17 frames at 704×1216), and it's paid inside a VAE load that's already
+/// needed for the source-image anchor path (see pipeline.rs).
 #[derive(Debug, Clone)]
 pub struct ChainTail {
     /// Number of *pixel* frames this tail represents (not latent frames).
@@ -33,21 +41,14 @@ pub struct ChainTail {
     /// plus the LTX-2 VAE's 8× causal temporal ratio.
     pub frames: u32,
 
-    /// Latent tokens for the tail.
-    ///
-    /// Shape: `[batch=1, channels=128, tail_latent_frames, H/32, W/32]`
-    /// where `tail_latent_frames = tail_latent_frame_count(self.frames)`.
-    ///
-    /// Dtype is whatever the denoise loop produced — typically `F32`.
-    /// Device is the engine's active device (GPU or CPU); the orchestrator
-    /// is responsible for ensuring the next stage runs on the same device.
-    pub latents: Tensor,
-
-    /// The last decoded pixel frame of the emitting stage. Kept for
-    /// debugging, progress UIs that want a thumbnail of the handoff point,
-    /// and as a fallback rendering target if latent carryover ever needs
-    /// to be disabled at runtime.
-    pub last_rgb_frame: RgbImage,
+    /// The last `frames` decoded RGB frames of the emitting stage, in
+    /// capture order. The receiving stage VAE-encodes this contiguous pixel
+    /// window into `tail_latent_frame_count(frames)` latent slots. Each
+    /// resulting latent slot then carries correct causal (slot 0, 1 pixel)
+    /// or continuation (slots 1+, 8 pixels each) semantics for the receiving
+    /// clip's pinned region — monotonic, forward-in-time, no slot meaning
+    /// mismatch with the RoPE positions in the receiving clip.
+    pub tail_rgb_frames: Vec<RgbImage>,
 }
 
 /// Number of latent frames corresponding to `pixel_frames` pixel frames
@@ -79,6 +80,11 @@ pub fn tail_latent_frame_count(pixel_frames: u32) -> usize {
 /// Errors if the tensor is not rank-5 or the requested tail exceeds the
 /// available time axis — the latter would mean the orchestrator asked for
 /// more tail than the stage produced, which indicates a caller bug.
+///
+/// Kept after the v1.1 decoded-pixel-carryover switch because the utility
+/// still reads cleanly from tests and is useful for ad-hoc debugging /
+/// future experiments, but the production chain path no longer calls it.
+#[allow(dead_code)]
 pub fn extract_tail_latents(final_latents: &Tensor, pixel_frames: u32) -> Result<Tensor> {
     let dims = final_latents.dims();
     if dims.len() != 5 {
@@ -314,15 +320,13 @@ fn estimate_stitched_frames(req: &ChainRequest) -> u32 {
 fn derive_stage_seed(base_seed: u64, _idx: usize, stage: &ChainStage) -> u64 {
     // Keep the seed stable across stages by default. An earlier revision
     // XORed `(idx as u64) << 32` into each stage's seed so the initial
-    // noise tensor differed per clip; with the motion-tail pin re-
-    // grounded on a proper causal-first latent (see
-    // `StagedLatent::causal_first_frame_rgb`) that diversification just
-    // amplifies drift at the stitch point — the replacement region is
-    // frozen by `video_denoise_mask` anyway, so same-seed noise in the
-    // pinned tokens is a no-op, and same-seed noise in the free region
-    // lets the continuation settle on a consistent motion profile.
-    // Callers who want per-stage variation supply `stage.seed_offset`
-    // explicitly.
+    // noise tensor differed per clip; with the motion tail now re-encoded
+    // from the emitting stage's trailing RGB frames (see `ChainTail` +
+    // `StagedLatent`) the pinned region is frozen by `video_denoise_mask`
+    // anyway, so same-seed noise in the pinned tokens is a no-op, and
+    // same-seed noise in the free region lets the continuation settle on a
+    // consistent motion profile. Callers who want per-stage variation
+    // supply `stage.seed_offset` explicitly.
     if let Some(offset) = stage.seed_offset {
         base_seed ^ offset
     } else {
@@ -352,15 +356,19 @@ fn build_stage_generate_request(
         output_format: OutputFormat::Mp4,
         embed_metadata: None,
         scheduler: None,
-        // Stage 0 carries the optional starting image; continuations
-        // get their conditioning from motion-tail latents via the
-        // `carry` argument to `render_stage`.
-        source_image: if idx == 0 {
-            stage.source_image.clone()
-        } else {
-            None
-        },
+        // Every stage carries the starting image. Stage 0 uses it as the
+        // i2v replacement at frame 0; continuation stages have their
+        // frame-0 slot pinned by the motion-tail carryover latent, so
+        // `render_chain_stage` re-routes the staged image into the append
+        // path at a non-zero frame with soft strength — turning it into a
+        // durable identity anchor rather than a frame-0 replacement.
+        source_image: stage.source_image.clone(),
         edit_images: None,
+        // Replacement strength from the chain request is only meaningful
+        // for stage 0's frame-0 i2v pin. Continuations override this at
+        // `render_chain_stage` time (the anchor uses a lower soft-
+        // strength constant there), so the value we plant here is inert
+        // on continuations.
         strength: if idx == 0 { chain.strength } else { 1.0 },
         mask_image: None,
         control_image: None,
@@ -501,7 +509,6 @@ mod tests {
     #[derive(Debug, Clone)]
     struct CallRecord {
         seed: Option<u64>,
-        frames: Option<u32>,
         has_source_image: bool,
         has_carry: bool,
     }
@@ -528,7 +535,6 @@ mod tests {
             let idx = self.calls.len();
             self.calls.push(CallRecord {
                 seed: stage_req.seed,
-                frames: stage_req.frames,
                 has_source_image: stage_req.source_image.is_some(),
                 has_carry: carry.is_some(),
             });
@@ -536,7 +542,7 @@ mod tests {
                 bail!("{msg}");
             }
             if self.emit_progress {
-                if let Some(cb) = stage_progress.as_deref_mut() {
+                if let Some(cb) = stage_progress.as_mut() {
                     cb(StageProgressEvent::DenoiseStep { step: 1, total: 1 });
                 }
             }
@@ -553,24 +559,22 @@ mod tests {
                 let channel = (idx as u8).wrapping_mul(37).wrapping_add(frame_num as u8);
                 frames.push(RgbImage::from_pixel(width, height, Rgb([channel, 0, 0])));
             }
-            let last_frame = frames.last().cloned().unwrap();
 
-            // Build a synthetic tail latent at the "right" shape for the
-            // requested motion tail. Shape isn't validated by the
-            // orchestrator itself — the engine impl in Phase 1d will check.
-            let latent = Tensor::zeros(
-                (1, 128, 1, height as usize / 32, width as usize / 32),
-                DType::F32,
-                &Device::Cpu,
-            )
-            .unwrap();
+            // Synthesize a 4-pixel-frame tail from the trailing RGB frames
+            // so orchestrator tests can assert on the count/shape without
+            // loading a real VAE.
+            let tail_pixel_frames: u32 = 4;
+            let take_from = frames
+                .len()
+                .saturating_sub(tail_pixel_frames as usize)
+                .min(frames.len());
+            let tail_rgb_frames = frames[take_from..].to_vec();
 
             Ok(StageOutcome {
                 frames,
                 tail: ChainTail {
-                    frames: 4,
-                    latents: latent,
-                    last_rgb_frame: last_frame,
+                    frames: tail_pixel_frames,
+                    tail_rgb_frames,
                 },
                 generation_time_ms: 100,
             })
@@ -696,20 +700,31 @@ mod tests {
     }
 
     #[test]
-    fn chain_only_stage0_carries_source_image() {
+    fn chain_propagates_source_image_to_every_stage() {
+        // Every stage must receive the starting image in its GenerateRequest.
+        // Stage 0 uses it as the frame-0 i2v replacement; continuations use
+        // it at the engine level as a soft identity anchor (routed through
+        // the append path by `Ltx2Engine::render_chain_stage`). Identity
+        // drift past the first clip was traced to the prior behaviour of
+        // dropping the image on continuations — no long-range identity
+        // anchor meant each continuation was anchored only to the drifted
+        // last frame of the prior clip, compounding errors stage-over-stage.
         let mut stages = vec![stage("a", 9), stage("a", 9)];
         stages[0].source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]); // PNG magic
-                                                                     // If a caller forgets to clear later stages' source_image, the
-                                                                     // orchestrator still suppresses it — continuations must always
-                                                                     // condition on motion-tail latents, never on a staged image.
         stages[1].source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
         let req = chain_req(stages, 0);
         let mut renderer = FakeRenderer::new();
         renderer.frame_count_override = Some(9);
         let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
         orch.run(&req, None).expect("chain runs");
-        assert!(renderer.calls[0].has_source_image);
-        assert!(!renderer.calls[1].has_source_image);
+        assert!(
+            renderer.calls[0].has_source_image,
+            "stage 0 must carry source_image (frame-0 i2v replacement)",
+        );
+        assert!(
+            renderer.calls[1].has_source_image,
+            "continuation stage must also carry source_image (soft identity anchor)",
+        );
     }
 
     #[test]

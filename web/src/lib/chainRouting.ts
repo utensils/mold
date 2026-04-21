@@ -12,12 +12,14 @@
  */
 
 export const LTX2_DISTILLED_CLIP_CAP = 97;
-// 9 pixel frames → 2 LTX-2 latent frames of carryover under the VAE's 8× causal
-// temporal compression (causal-first slot + one continuation slot). Four frames
-// — the prior default — only pinned the causal slot, which the decoder
-// reconstructs as a single pixel frame, leaving the inter-clip stitch visibly
-// jumpy. Keep this in sync with `default_value_t` on --motion-tail in mold-cli.
-export const DEFAULT_MOTION_TAIL = 9;
+// 17 pixel frames → 3 LTX-2 latent frames of carryover under the VAE's 8×
+// causal temporal compression (causal-first slot + two continuation slots).
+// The prior 9-frame default only pinned one continuation slot (≈0.4 s at
+// 24 fps), which was too little context to keep scene identity coherent past
+// the first clip; bumping to 17 gives the denoiser ≈0.7 s of hard-pinned
+// pixel context at the stitch boundary. Keep this in sync with
+// `default_value_t` on --motion-tail in mold-cli.
+export const DEFAULT_MOTION_TAIL = 17;
 
 export type ChainRoutingDecision =
   | { kind: "single" }
