@@ -82,13 +82,29 @@ export interface UseGenerateStream {
   clearDone: () => void;
 }
 
+/*
+ * `crypto.randomUUID` is only available in a secure context — serving the
+ * SPA over a bare LAN IP (`http://10.x.y.z:5173`) leaves it undefined and
+ * the submit path throws. IDs here are purely client-side correlation
+ * keys, so a non-cryptographic fallback is fine.
+ */
+function makeJobId(): string {
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
+    return crypto.randomUUID();
+  }
+  return `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export function useGenerateStream(
   onComplete?: (job: Job) => void,
 ): UseGenerateStream {
   const jobs = ref<Job[]>([]);
 
   function submit(req: GenerateRequestWire): string {
-    const id = crypto.randomUUID();
+    const id = makeJobId();
     const controller = new AbortController();
     // Wrap in reactive() so that property mutations during SSE streaming
     // (stage, step, state, result) trigger RunningJobCard re-renders. The

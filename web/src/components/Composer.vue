@@ -38,8 +38,14 @@ function updatePrompt(value: string) {
   emit("update:modelValue", { ...props.modelValue, prompt: value });
 }
 
+/*
+ * Submit on Cmd+Enter (mac) or Ctrl+Enter (everywhere else). Bare Enter
+ * inserts a newline — the Discord / Slack / ChatGPT convention — so
+ * multi-line prompts don't accidentally fire the generator.
+ * `e.isComposing` guards IME composition.
+ */
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) {
     e.preventDefault();
     if (props.modelValue.prompt.trim().length === 0) return;
     emit("submit");
@@ -130,7 +136,7 @@ function updatePlacement(p: DevicePlacement | null) {
       <textarea
         ref="textarea"
         :value="modelValue.prompt"
-        placeholder="Describe what to generate — Enter to submit, Shift+Enter for a newline"
+        placeholder="Describe what to generate — ⌘/Ctrl+Enter to submit"
         class="gen-prompt"
         style="flex: 1; min-height: 40px"
         @input="updatePrompt(($event.target as HTMLTextAreaElement).value)"
