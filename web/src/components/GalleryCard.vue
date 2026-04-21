@@ -20,13 +20,35 @@ const props = withDefaults(
     // the header toggle, subsequent videos entering the viewport pick up
     // the preference automatically.
     muted?: boolean;
+    // Multi-select state. When `selectMode` is true, clicks toggle the
+    // selection instead of opening the detail drawer.
+    selectMode?: boolean;
+    selected?: boolean;
+    // Hide mode renders a blurred overlay over the media until the user
+    // clicks the reveal button (per-item) or flips the global toggle.
+    hideMode?: boolean;
+    revealed?: boolean;
   }>(),
-  { variant: "grid", muted: true },
+  {
+    variant: "grid",
+    muted: true,
+    selectMode: false,
+    selected: false,
+    hideMode: false,
+    revealed: false,
+  },
 );
 
 const emit = defineEmits<{
   (e: "open", item: GalleryImage): void;
+  (
+    e: "toggle-select",
+    payload: { item: GalleryImage; shift: boolean; meta: boolean },
+  ): void;
+  (e: "reveal", item: GalleryImage): void;
 }>();
+
+const isHidden = computed(() => props.hideMode && !props.revealed);
 
 /*
  * Lifecycle
@@ -129,26 +151,64 @@ function onVideoError() {
   stage.value = "broken";
 }
 
-function openDetail() {
+function onCardClick(evt: MouseEvent) {
+  if (props.selectMode) {
+    emit("toggle-select", {
+      item: props.item,
+      shift: evt.shiftKey,
+      meta: evt.metaKey || evt.ctrlKey,
+    });
+    return;
+  }
   emit("open", props.item);
+}
+
+function onCardKey(evt: KeyboardEvent) {
+  if (props.selectMode) {
+    emit("toggle-select", {
+      item: props.item,
+      shift: evt.shiftKey,
+      meta: evt.metaKey || evt.ctrlKey,
+    });
+    return;
+  }
+  emit("open", props.item);
+}
+
+function onReveal(evt: Event) {
+  evt.stopPropagation();
+  emit("reveal", props.item);
 }
 </script>
 
 <template>
   <article
     ref="root"
-    class="group relative block w-full cursor-zoom-in overflow-hidden bg-ink-900/80 shadow-[var(--shadow-card)] transition hover:ring-brand-400/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400"
+    :data-filename="item.filename"
+    :data-selected="selected ? 'true' : 'false'"
+    class="group relative block w-full overflow-hidden bg-ink-900/80 shadow-[var(--shadow-card)] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400"
     :class="[
       variant === 'feed'
         ? 'ring-0 sm:rounded-3xl sm:ring-1 sm:ring-white/5'
         : 'rounded-2xl ring-1 ring-white/5',
+      selectMode ? 'cursor-pointer' : 'cursor-zoom-in hover:ring-brand-400/50',
+      selected
+        ? 'ring-2 ring-brand-400 sm:ring-2'
+        : selectMode
+          ? 'ring-1 ring-white/10'
+          : '',
     ]"
     role="button"
     tabindex="0"
-    :aria-label="`Open ${item.filename}`"
-    @click="openDetail"
-    @keydown.enter.prevent="openDetail"
-    @keydown.space.prevent="openDetail"
+    :aria-pressed="selectMode ? selected : undefined"
+    :aria-label="
+      selectMode
+        ? `${selected ? 'Deselect' : 'Select'} ${item.filename}`
+        : `Open ${item.filename}`
+    "
+    @click="onCardClick"
+    @keydown.enter.prevent="onCardKey"
+    @keydown.space.prevent="onCardKey"
   >
     <!-- Media frame: aspect-ratio preserved, media absolutely positioned -->
     <div class="relative w-full overflow-hidden" :style="aspectStyle">
@@ -253,6 +313,65 @@ function openDetail() {
         class="absolute right-3 top-3 rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-white/85 backdrop-blur"
       >
         {{ item.format }}
+      </div>
+
+      <!-- Selection checkbox (top-left). Always visible in select mode so
+           users can see what's pickable before touching anything. -->
+      <div
+        v-if="selectMode"
+        class="pointer-events-none absolute left-3 top-3 z-10 inline-flex h-7 w-7 items-center justify-center rounded-full border-2 transition"
+        :class="
+          selected
+            ? 'border-brand-400 bg-brand-500 text-white shadow'
+            : 'border-white/60 bg-black/40 text-transparent backdrop-blur'
+        "
+        aria-hidden="true"
+      >
+        <svg
+          class="h-4 w-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="3"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="m5 12 5 5L20 7" />
+        </svg>
+      </div>
+
+      <!-- Hide shroud. Covers the media with a heavy blur + dim layer. The
+           reveal button lets users peek one item without flipping the global
+           toggle — useful for scanning a NSFW feed with a coworker nearby. -->
+      <div
+        v-if="isHidden"
+        class="absolute inset-0 z-[5] flex flex-col items-center justify-center gap-2 bg-ink-950/70 text-ink-100 backdrop-blur-2xl"
+      >
+        <svg
+          class="h-6 w-6 text-ink-300"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path
+            d="M10.6 5.1A10 10 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.3 4.2"
+          />
+          <path d="M6.7 6.7A17 17 0 0 0 2 12s4 7 10 7a9.7 9.7 0 0 0 5.3-1.7" />
+          <path d="m3 3 18 18" />
+          <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+        </svg>
+        <button
+          type="button"
+          class="rounded-full bg-white/10 px-3 py-1 text-[12px] font-medium text-ink-100 transition hover:bg-white/20"
+          @click="onReveal"
+          @keydown.stop
+        >
+          Reveal
+        </button>
       </div>
 
       <!-- Grid variant: bottom-anchored hover overlay (compact). -->

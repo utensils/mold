@@ -19,20 +19,38 @@ function openDownloadsDrawer() {
   window.dispatchEvent(new CustomEvent("mold:open-downloads"));
 }
 
-const props = defineProps<{
-  filter: FilterKind;
-  search: string;
-  view: ViewMode;
-  muted: boolean;
-  counts: { total: number; images: number; video: number; filtered: number };
-  loading: boolean;
-}>();
+// Gallery-only props (`hideMode`, `selectMode`, `selectionCount`,
+// `canDelete`) are optional. The Generate page mounts this same TopBar
+// without a gallery underneath it, so their defaults keep the toolbar
+// in its "no bulk actions" state.
+const props = withDefaults(
+  defineProps<{
+    filter: FilterKind;
+    search: string;
+    view: ViewMode;
+    muted: boolean;
+    counts: { total: number; images: number; video: number; filtered: number };
+    loading: boolean;
+    hideMode?: boolean;
+    selectMode?: boolean;
+    selectionCount?: number;
+    canDelete?: boolean;
+  }>(),
+  {
+    hideMode: false,
+    selectMode: false,
+    selectionCount: 0,
+    canDelete: false,
+  },
+);
 
 const emit = defineEmits<{
   (e: "update:filter", value: FilterKind): void;
   (e: "update:search", value: string): void;
   (e: "update:view", value: ViewMode): void;
   (e: "update:muted", value: boolean): void;
+  (e: "update:hide-mode", value: boolean): void;
+  (e: "update:select-mode", value: boolean): void;
   (e: "refresh"): void;
 }>();
 
@@ -351,6 +369,93 @@ function clearSearch() {
           <path d="M15.5 8.5a5 5 0 0 1 0 7" />
           <path d="M18.5 5.5a9 9 0 0 1 0 13" />
         </svg>
+      </button>
+
+      <!-- Hide/blur toggle. Flipping it on blurs every gallery item; flipping
+           it back off reveals everything. Per-item "Reveal" still lets users
+           peek a single tile without disabling the global shroud. -->
+      <button
+        class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/5 text-ink-200 transition hover:text-white"
+        :class="hideMode ? 'bg-brand-500 text-white' : 'bg-white/5'"
+        :aria-pressed="hideMode"
+        :aria-label="hideMode ? 'Unhide gallery' : 'Hide gallery'"
+        :title="hideMode ? 'Unhide gallery' : 'Hide gallery'"
+        @click="emit('update:hide-mode', !hideMode)"
+      >
+        <svg
+          v-if="!hideMode"
+          class="h-4 w-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+        <svg
+          v-else
+          class="h-4 w-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path
+            d="M10.6 5.1A10 10 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.3 4.2"
+          />
+          <path d="M6.7 6.7A17 17 0 0 0 2 12s4 7 10 7a9.7 9.7 0 0 0 5.3-1.7" />
+          <path d="m3 3 18 18" />
+          <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+        </svg>
+      </button>
+
+      <!-- Select mode toggle. Opens a bulk-edit mode where clicks select
+           instead of opening the detail drawer, shift-clicks extend the
+           range, and drag draws a marquee. Only shown when the server
+           actually allows deletion — the only destructive action we gate
+           behind selection today. -->
+      <button
+        v-if="canDelete"
+        class="inline-flex h-10 items-center gap-1.5 rounded-full border border-white/5 px-3 text-[13px] font-medium transition hover:text-white"
+        :class="
+          selectMode ? 'bg-brand-500 text-white' : 'bg-white/5 text-ink-200'
+        "
+        :aria-pressed="selectMode"
+        :title="selectMode ? 'Exit select mode' : 'Select multiple'"
+        @click="emit('update:select-mode', !selectMode)"
+      >
+        <svg
+          class="h-4 w-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <rect x="3" y="3" width="7" height="7" rx="1.2" />
+          <path d="m14 5 3 3 5-5" />
+          <rect x="3" y="14" width="7" height="7" rx="1.2" />
+          <rect x="14" y="14" width="7" height="7" rx="1.2" />
+        </svg>
+        <span class="hidden sm:inline">
+          {{ selectMode ? `Selected ${selectionCount}` : "Select" }}
+        </span>
+        <span
+          v-if="selectMode && selectionCount > 0"
+          class="sm:hidden"
+          aria-hidden="true"
+        >
+          {{ selectionCount }}
+        </span>
       </button>
 
       <button
