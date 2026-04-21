@@ -315,10 +315,7 @@ impl Ltx2RuntimeSession {
         }
     }
 
-    pub fn new_deferred_cuda(
-        prompt_encoder: NativePromptEncoder,
-        gpu_ordinal: usize,
-    ) -> Self {
+    pub fn new_deferred_cuda(prompt_encoder: NativePromptEncoder, gpu_ordinal: usize) -> Self {
         Self {
             device: None,
             prompt_encoder: Some(prompt_encoder),
