@@ -1,6 +1,6 @@
 #![allow(clippy::type_complexity)]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use candle_core::Device;
 use mold_core::{
     GenerateRequest, GenerateResponse, Ltx2PipelineMode, ModelPaths, OutputFormat, VideoData,
@@ -11,7 +11,10 @@ use std::time::Instant;
 
 use super::assets;
 use super::backend::Ltx2Backend;
-use super::conditioning;
+use super::chain::{
+    extract_tail_latents, ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent,
+};
+use super::conditioning::{self, StagedLatent};
 use super::execution;
 use super::lora;
 use super::media::{self, ProbeMetadata};
@@ -521,6 +524,147 @@ impl Ltx2Engine {
             seed_used: plan.seed,
             gpu: None,
         })
+    }
+
+    /// Render a single chain stage, optionally conditioning on a carryover
+    /// tail from the prior stage.
+    ///
+    /// `motion_tail_pixel_frames` is the number of pixel frames to narrow
+    /// off the emitted latents for the *next* stage's carryover. `0`
+    /// returns an error (nonsensical — use the regular single-clip path
+    /// if no tail is wanted).
+    ///
+    /// Scope: distilled LTX-2 pipeline only. Other pipeline families
+    /// return an error up-front so the chain orchestrator fails fast.
+    pub(crate) fn render_chain_stage(
+        &mut self,
+        req: &GenerateRequest,
+        carry: Option<&ChainTail>,
+        motion_tail_pixel_frames: u32,
+    ) -> Result<StageOutcome> {
+        if motion_tail_pixel_frames == 0 {
+            bail!("render_chain_stage: motion_tail_pixel_frames must be > 0");
+        }
+        if !self.loaded {
+            self.load()?;
+        }
+        let start = Instant::now();
+        self.emit("Preparing native LTX-2 chain stage");
+
+        let pipeline = self.select_pipeline(req)?;
+        if !matches!(pipeline, PipelineKind::Distilled) {
+            bail!(
+                "render-chain v1 only supports the distilled LTX-2 pipeline, got {:?}",
+                pipeline,
+            );
+        }
+
+        let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
+        let native_output = work_dir.path().join("ltx2-native-output.mp4");
+        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+
+        // Inject carryover tail latents as StagedLatent on frame 0. The
+        // runtime detects a non-empty `conditioning.latents` and bypasses
+        // the VAE load entirely, patchifying the pre-encoded tokens into
+        // conditioning replacements directly (see conditioning.rs
+        // StagedLatent docstring + runtime.rs
+        // maybe_load_stage_video_conditioning).
+        if let Some(tail) = carry {
+            // The caller (orchestrator) is responsible for blanking
+            // source_image on continuation stages, but defence-in-depth:
+            // clear staged images so they can't compete with the latent
+            // carryover.
+            plan.conditioning.images.clear();
+            plan.conditioning.latents.push(StagedLatent {
+                latents: tail.latents.clone(),
+                frame: 0,
+                strength: 1.0,
+            });
+        }
+
+        // Reuse an existing runtime session if we have one; otherwise
+        // build one. Arm the tail-capture slot on the session before
+        // render.
+        let mut runtime = match self.native_runtime.take() {
+            Some(runtime) => runtime,
+            None => self.create_runtime_session(&plan)?,
+        };
+        let slot = runtime.arm_tail_capture();
+
+        self.emit("Executing native LTX-2 chain stage runtime");
+        let prepared = match runtime.prepare(&plan) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                runtime.clear_tail_capture();
+                self.native_runtime = Some(runtime);
+                return Err(err);
+            }
+        };
+        let render_result =
+            runtime.render_native_video(&plan, &prepared, self.on_progress.as_ref());
+        runtime.clear_tail_capture();
+        self.native_runtime = Some(runtime);
+        let rendered = render_result?;
+
+        // Drain captured latents. The slot must have been populated by
+        // the distilled render path — if it's empty, that's a wiring bug,
+        // not a user error.
+        let captured = slot
+            .lock()
+            .map_err(|_| anyhow!("chain tail-capture mutex was poisoned mid-render"))?
+            .take()
+            .ok_or_else(|| {
+                anyhow!(
+                    "distilled render completed without populating the chain tail-capture slot; \
+                     this is a pipeline wiring bug"
+                )
+            })?;
+
+        // `extract_tail_latents` returns a narrow view; make it
+        // contiguous so it survives independently of the runtime's
+        // working tensors.
+        let tail_slice = extract_tail_latents(&captured, motion_tail_pixel_frames)?;
+        let tail_latents = tail_slice
+            .contiguous()
+            .context("materializing chain tail latents into an owned tensor")?;
+
+        let frames = rendered.frames;
+        let last_rgb_frame = frames
+            .last()
+            .ok_or_else(|| anyhow!("distilled render returned zero frames"))?
+            .clone();
+
+        let generation_time_ms = start.elapsed().as_millis() as u64;
+        Self::log_timing("pipeline.render_chain_stage", start);
+
+        Ok(StageOutcome {
+            frames,
+            tail: ChainTail {
+                frames: motion_tail_pixel_frames,
+                latents: tail_latents,
+                last_rgb_frame,
+            },
+            generation_time_ms,
+        })
+    }
+}
+
+impl ChainStageRenderer for Ltx2Engine {
+    fn render_stage(
+        &mut self,
+        stage_req: &GenerateRequest,
+        carry: Option<&ChainTail>,
+        motion_tail_pixel_frames: u32,
+        _stage_progress: Option<&mut dyn FnMut(StageProgressEvent)>,
+    ) -> Result<StageOutcome> {
+        // `_stage_progress` is intentionally unused in v1: per-stage
+        // denoise events flow through `self.on_progress` already. Phase 2's
+        // server route will install an on_progress callback that forwards
+        // those events onto the chain SSE stream with `stage_idx` tagged
+        // in. If the orchestrator later needs denoise-step events routed
+        // through its own channel, we can plumb `stage_progress` into a
+        // temporary ProgressCallback wrapper here.
+        self.render_chain_stage(stage_req, carry, motion_tail_pixel_frames)
     }
 }
 
@@ -1086,5 +1230,48 @@ mod tests {
         assert_eq!(video.fps, 12);
         assert!(!video.has_audio);
         assert!(engine.native_runtime.is_none());
+    }
+
+    #[test]
+    fn render_chain_stage_rejects_non_distilled_pipeline() {
+        // A model name without "distilled" in it selects `PipelineKind::TwoStage`
+        // via `select_pipeline`, which must be rejected up-front by the chain
+        // entry point before any runtime work happens.
+        let mut engine = Ltx2Engine::with_runtime_session(
+            "ltx-2-19b:fp8".to_string(),
+            dummy_paths(),
+            runtime_session(),
+        );
+        engine.loaded = true;
+        let req = request(OutputFormat::Mp4, Some(false));
+        let err = engine
+            .render_chain_stage(&req, None, 4)
+            .expect_err("must fail on non-distilled pipeline");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("distilled"),
+            "error must name the pipeline constraint, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn render_chain_stage_rejects_zero_motion_tail() {
+        // Zero-frame motion tail is nonsensical — it would narrow nothing off
+        // for the next stage. Fast-fail before any allocation.
+        let mut engine = Ltx2Engine::with_runtime_session(
+            "ltx-2-19b-distilled:fp8".to_string(),
+            dummy_paths(),
+            runtime_session(),
+        );
+        engine.loaded = true;
+        let req = request(OutputFormat::Mp4, Some(false));
+        let err = engine
+            .render_chain_stage(&req, None, 0)
+            .expect_err("must fail on zero motion tail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("motion_tail_pixel_frames"),
+            "error must name the motion_tail constraint, got: {msg}",
+        );
     }
 }

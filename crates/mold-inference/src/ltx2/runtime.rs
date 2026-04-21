@@ -291,6 +291,11 @@ impl Ltx2VaeLatentStats {
 pub struct Ltx2RuntimeSession {
     device: Option<candle_core::Device>,
     prompt_encoder: Option<NativePromptEncoder>,
+    /// Optional slot wired into `render_real_distilled_av` so
+    /// `Ltx2Engine::render_chain_stage` can snapshot the pre-VAE-decode
+    /// final latents and forward them to the next chain stage as a
+    /// [`super::chain::ChainTail`]. `None` outside chain flow.
+    pub(crate) tail_capture: Option<std::sync::Arc<std::sync::Mutex<Option<Tensor>>>>,
 }
 
 impl Ltx2RuntimeSession {
@@ -298,6 +303,7 @@ impl Ltx2RuntimeSession {
         Self {
             device: Some(device),
             prompt_encoder: Some(prompt_encoder),
+            tail_capture: None,
         }
     }
 
@@ -305,7 +311,18 @@ impl Ltx2RuntimeSession {
         Self {
             device: None,
             prompt_encoder: Some(prompt_encoder),
+            tail_capture: None,
         }
+    }
+
+    pub(crate) fn arm_tail_capture(&mut self) -> std::sync::Arc<std::sync::Mutex<Option<Tensor>>> {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.tail_capture = Some(std::sync::Arc::clone(&slot));
+        slot
+    }
+
+    pub(crate) fn clear_tail_capture(&mut self) {
+        self.tail_capture = None;
     }
 
     pub fn prepare(&mut self, plan: &Ltx2GeneratePlan) -> Result<NativePreparedRun> {
@@ -597,7 +614,13 @@ impl Ltx2RuntimeSession {
             return Ok(None);
         }
         let render = match plan.pipeline {
-            PipelineKind::Distilled => render_real_distilled_av(plan, prepared, device, progress),
+            PipelineKind::Distilled => render_real_distilled_av(
+                plan,
+                prepared,
+                device,
+                progress,
+                self.tail_capture.as_ref(),
+            ),
             PipelineKind::OneStage => render_real_one_stage_av(plan, prepared, device, progress),
             PipelineKind::TwoStage
             | PipelineKind::TwoStageHq
@@ -1724,6 +1747,7 @@ fn render_real_distilled_av(
     prepared: &NativePreparedRun,
     device: &candle_core::Device,
     progress: Option<&ProgressCallback>,
+    tail_capture: Option<&std::sync::Arc<std::sync::Mutex<Option<Tensor>>>>,
 ) -> Result<NativeRenderedVideo> {
     let debug_enabled = ltx_debug_enabled();
     let prompt_inputs = prepare_render_prompt_inputs(
@@ -2008,6 +2032,16 @@ fn render_real_distilled_av(
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let decode_start = Instant::now();
+    // Chain-stage hook: capture the pre-decode F32 latents so
+    // `Ltx2Engine::render_chain_stage` can narrow the tail off for the next
+    // stage's conditioning. Cheap shallow clone (candle tensors are
+    // Arc-backed). A poisoned mutex is ignored here — the outer caller
+    // detects an empty slot and emits a clear error.
+    if let Some(slot) = tail_capture {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(latents.clone());
+        }
+    }
     let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
     if debug_enabled {
         log_tensor_stats("decoded_video", &video)?;

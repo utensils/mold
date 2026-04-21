@@ -136,6 +136,7 @@ pub trait ChainStageRenderer {
         &mut self,
         stage_req: &GenerateRequest,
         carry: Option<&ChainTail>,
+        motion_tail_pixel_frames: u32,
         stage_progress: Option<&mut dyn FnMut(StageProgressEvent)>,
     ) -> Result<StageOutcome>;
 }
@@ -226,12 +227,19 @@ impl<'a, R: ChainStageRenderer> Ltx2ChainOrchestrator<'a, R> {
                             });
                         }
                     };
-                    self.renderer
-                        .render_stage(&stage_req, carry.as_ref(), Some(&mut wrapping))?
+                    self.renderer.render_stage(
+                        &stage_req,
+                        carry.as_ref(),
+                        req.motion_tail_frames,
+                        Some(&mut wrapping),
+                    )?
                 }
-                None => self
-                    .renderer
-                    .render_stage(&stage_req, carry.as_ref(), None)?,
+                None => self.renderer.render_stage(
+                    &stage_req,
+                    carry.as_ref(),
+                    req.motion_tail_frames,
+                    None,
+                )?,
             };
 
             let mut frames = outcome.frames;
@@ -257,7 +265,7 @@ impl<'a, R: ChainStageRenderer> Ltx2ChainOrchestrator<'a, R> {
             }
         }
 
-        if let Some(cb) = chain_progress.as_deref_mut() {
+        if let Some(cb) = chain_progress.as_mut() {
             cb(ChainProgressEvent::Stitching {
                 total_frames: accumulated_frames.len() as u32,
             });
@@ -501,6 +509,7 @@ mod tests {
             &mut self,
             stage_req: &GenerateRequest,
             carry: Option<&ChainTail>,
+            _motion_tail_pixel_frames: u32,
             mut stage_progress: Option<&mut dyn FnMut(StageProgressEvent)>,
         ) -> Result<StageOutcome> {
             let idx = self.calls.len();
