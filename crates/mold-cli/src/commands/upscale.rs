@@ -161,10 +161,14 @@ async fn upscale_local(
     let req_clone = req.clone();
 
     let resp = tokio::task::spawn_blocking(move || -> Result<mold_core::UpscaleResponse> {
+        // CLI upscale runs locally on the best available GPU (ordinal 0
+        // on single-GPU hosts). The multi-GPU server path routes through
+        // `gpu_worker`, which passes its own ordinal.
         let mut engine = mold_inference::create_upscale_engine(
             model_name_owned,
             weights_path,
             mold_inference::LoadStrategy::Sequential,
+            0,
         )?;
 
         // Set up progress callback for stderr

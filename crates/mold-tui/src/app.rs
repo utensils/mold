@@ -1452,6 +1452,7 @@ impl App {
                     model_name_local.clone(),
                     weights_path,
                     mold_inference::LoadStrategy::Eager,
+                    0,
                 )?;
 
                 engine.set_on_progress(Box::new(move |event| {

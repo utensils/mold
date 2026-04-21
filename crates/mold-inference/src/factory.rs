@@ -181,7 +181,12 @@ pub fn create_engine_with_pool(
                 shared_pool,
             )))
         }
-        "ltx2" | "ltx-2" => Ok(Box::new(Ltx2Engine::new(model_name, paths, load_strategy))),
+        "ltx2" | "ltx-2" => Ok(Box::new(Ltx2Engine::new(
+            model_name,
+            paths,
+            load_strategy,
+            gpu_ordinal,
+        ))),
         "wuerstchen" | "wuerstchen-v2" => Ok(Box::new(WuerstchenEngine::new(
             model_name,
             paths,

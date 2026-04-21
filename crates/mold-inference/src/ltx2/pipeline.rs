@@ -34,6 +34,11 @@ pub struct Ltx2Engine {
     native_runtime: Option<Ltx2RuntimeSession>,
     on_progress: Option<ProgressCallback>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// GPU ordinal this engine is pinned to. Every `Device::new_cuda` and
+    /// `reclaim_gpu_memory` call must use this ordinal — hardcoding `0` here
+    /// is what took down the process on killswitch when LTX-2 ran alongside
+    /// SD3.5 on a multi-GPU host.
+    gpu_ordinal: usize,
 }
 
 impl Ltx2Engine {
@@ -54,7 +59,12 @@ impl Ltx2Engine {
         }
     }
 
-    pub fn new(model_name: String, paths: ModelPaths, _load_strategy: LoadStrategy) -> Self {
+    pub fn new(
+        model_name: String,
+        paths: ModelPaths,
+        _load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+    ) -> Self {
         Self {
             model_name,
             paths,
@@ -62,6 +72,7 @@ impl Ltx2Engine {
             native_runtime: None,
             on_progress: None,
             pending_placement: None,
+            gpu_ordinal,
         }
     }
 
@@ -78,6 +89,7 @@ impl Ltx2Engine {
             native_runtime: Some(runtime),
             on_progress: None,
             pending_placement: None,
+            gpu_ordinal: 0,
         }
     }
 
@@ -220,7 +232,7 @@ impl Ltx2Engine {
         match backend {
             Ltx2Backend::Cuda => {
                 self.info("CUDA detected, using native LTX-2 GPU path");
-                let device = Device::new_cuda(0)?;
+                let device = Device::new_cuda(self.gpu_ordinal)?;
                 configure_native_ltx2_cuda_device(&device)?;
                 Ok(device)
             }
@@ -261,9 +273,16 @@ impl Ltx2Engine {
         )?;
         Self::log_timing("pipeline.create_runtime.load_prompt_encoder", load_start);
         if prompt_device.is_cuda() {
-            Ok(Ltx2RuntimeSession::new_deferred_cuda(prompt_encoder))
+            Ok(Ltx2RuntimeSession::new_deferred_cuda(
+                prompt_encoder,
+                self.gpu_ordinal,
+            ))
         } else {
-            Ok(Ltx2RuntimeSession::new(device, prompt_encoder))
+            Ok(Ltx2RuntimeSession::new(
+                device,
+                prompt_encoder,
+                self.gpu_ordinal,
+            ))
         }
     }
 
@@ -294,7 +313,7 @@ impl Ltx2Engine {
                 self.info(
                     "Native LTX-2 prompt path ran out of CUDA memory; retrying with CPU fallback",
                 );
-                crate::device::reclaim_gpu_memory(0);
+                crate::device::reclaim_gpu_memory(self.gpu_ordinal);
                 self.load_runtime_session_on_device(plan, Device::Cpu)
             }
             Err(err) => Err(err),
@@ -1003,7 +1022,7 @@ mod tests {
             .unwrap(),
             PaddingSide::Left,
         );
-        Ltx2RuntimeSession::new(Device::Cpu, prompt_encoder)
+        Ltx2RuntimeSession::new(Device::Cpu, prompt_encoder, 0)
     }
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
@@ -1053,6 +1072,7 @@ mod tests {
             "ltx-2.3-22b-distilled:fp8".to_string(),
             dummy_paths(),
             LoadStrategy::Sequential,
+            0,
         );
         let req = GenerateRequest {
             prompt: "test".to_string(),
@@ -1114,6 +1134,7 @@ mod tests {
             "ltx-2-19b-distilled:fp8".to_string(),
             dummy_paths(),
             LoadStrategy::Sequential,
+            0,
         );
         assert_eq!(engine.request_quantization(), Some("fp8-cast".to_string()));
     }
@@ -1133,6 +1154,7 @@ mod tests {
             "ltx-2-19b-distilled:fp8".to_string(),
             dummy_paths_with_gemma_root(gemma_dir.path()),
             LoadStrategy::Sequential,
+            0,
         );
         let req = GenerateRequest {
             prompt: "test".to_string(),
@@ -1200,6 +1222,7 @@ mod tests {
             "ltx-2-19b-distilled:fp8".to_string(),
             paths,
             LoadStrategy::Sequential,
+            0,
         );
 
         engine.load().unwrap();

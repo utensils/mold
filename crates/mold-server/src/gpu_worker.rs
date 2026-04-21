@@ -21,6 +21,10 @@ pub fn spawn_gpu_thread(
     std::thread::Builder::new()
         .name(format!("gpu-worker-{}", worker.gpu.ordinal))
         .spawn(move || {
+            // Bind this thread to its GPU ordinal so `create_device` /
+            // `reclaim_gpu_memory` can debug-assert callers don't drift onto
+            // a sibling GPU's context. See device::init_thread_gpu_ordinal.
+            mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
             tracing::info!(
                 gpu = worker.gpu.ordinal,
                 name = %worker.gpu.name,

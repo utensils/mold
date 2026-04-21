@@ -296,22 +296,34 @@ pub struct Ltx2RuntimeSession {
     /// final latents and forward them to the next chain stage as a
     /// [`super::chain::ChainTail`]. `None` outside chain flow.
     pub(crate) tail_capture: Option<std::sync::Arc<std::sync::Mutex<Option<Tensor>>>>,
+    /// GPU ordinal inherited from `Ltx2Engine`. Used for the deferred CUDA
+    /// device creation in `prepare()` and for post-OOM context reset.
+    gpu_ordinal: usize,
 }
 
 impl Ltx2RuntimeSession {
-    pub fn new(device: candle_core::Device, prompt_encoder: NativePromptEncoder) -> Self {
+    pub fn new(
+        device: candle_core::Device,
+        prompt_encoder: NativePromptEncoder,
+        gpu_ordinal: usize,
+    ) -> Self {
         Self {
             device: Some(device),
             prompt_encoder: Some(prompt_encoder),
             tail_capture: None,
+            gpu_ordinal,
         }
     }
 
-    pub fn new_deferred_cuda(prompt_encoder: NativePromptEncoder) -> Self {
+    pub fn new_deferred_cuda(
+        prompt_encoder: NativePromptEncoder,
+        gpu_ordinal: usize,
+    ) -> Self {
         Self {
             device: None,
             prompt_encoder: Some(prompt_encoder),
             tail_capture: None,
+            gpu_ordinal,
         }
     }
 
@@ -414,8 +426,8 @@ impl Ltx2RuntimeSession {
         let device_handoff_start = Instant::now();
         if prompt_device_is_cuda {
             if self.device.is_none() {
-                crate::device::reclaim_gpu_memory(0);
-                self.device = Some(new_native_cuda_device()?);
+                crate::device::reclaim_gpu_memory(self.gpu_ordinal);
+                self.device = Some(new_native_cuda_device(self.gpu_ordinal)?);
             } else if let Some(device) = self.device.as_ref() {
                 if device.is_cuda() {
                     device.synchronize()?;
@@ -864,8 +876,8 @@ fn overlay_alpha(overlay: &ConditioningOverlay, frame_idx: u32, total_frames: u3
 }
 
 #[cfg(feature = "cuda")]
-fn new_native_cuda_device() -> Result<candle_core::Device> {
-    let device = candle_core::Device::new_cuda(0)?;
+fn new_native_cuda_device(ordinal: usize) -> Result<candle_core::Device> {
+    let device = candle_core::Device::new_cuda(ordinal)?;
     let cuda = device.as_cuda_device()?;
     if cuda.is_event_tracking() {
         unsafe {
@@ -876,7 +888,7 @@ fn new_native_cuda_device() -> Result<candle_core::Device> {
 }
 
 #[cfg(not(feature = "cuda"))]
-fn new_native_cuda_device() -> Result<candle_core::Device> {
+fn new_native_cuda_device(_ordinal: usize) -> Result<candle_core::Device> {
     anyhow::bail!("CUDA backend is unavailable in this build")
 }
 
@@ -4990,7 +5002,7 @@ mod tests {
             .unwrap(),
             PaddingSide::Left,
         );
-        Ltx2RuntimeSession::new(candle_core::Device::Cpu, prompt_encoder)
+        Ltx2RuntimeSession::new(candle_core::Device::Cpu, prompt_encoder, 0)
     }
 
     fn build_plan(

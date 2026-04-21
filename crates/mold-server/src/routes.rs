@@ -656,10 +656,15 @@ async fn upscale(
                 .as_ref()
                 .is_none_or(|e| e.model_name() != model_name_owned);
             if needs_new {
+                // Server-side upscaler cache is process-global today and
+                // intentionally pinned to GPU 0 (matches prior behavior).
+                // If multi-GPU upscale becomes interesting, migrate this to
+                // a per-worker cache on `GpuWorker` and route via the pool.
                 let new_engine = mold_inference::create_upscale_engine(
                     model_name_owned,
                     weights_path,
                     mold_inference::LoadStrategy::Eager,
+                    0,
                 )?;
                 *cache = Some(new_engine);
             }
@@ -824,6 +829,7 @@ async fn upscale_stream(
                     model_name_owned,
                     weights_path,
                     mold_inference::LoadStrategy::Eager,
+                    0,
                 ) {
                     Ok(new_engine) => {
                         *cache = Some(new_engine);
