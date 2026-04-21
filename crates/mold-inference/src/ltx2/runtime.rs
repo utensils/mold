@@ -1219,17 +1219,32 @@ fn maybe_load_stage_video_conditioning(
     dtype: DType,
     include_reference_video: bool,
 ) -> Result<StageVideoConditioning> {
-    if plan.conditioning.images.is_empty() && !include_reference_video {
+    if plan.conditioning.images.is_empty()
+        && plan.conditioning.latents.is_empty()
+        && !include_reference_video
+    {
         return Ok(StageVideoConditioning::default());
     }
 
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
-    vae.use_tiling = false;
-    vae.use_framewise_decoding = false;
+    // The VAE is only needed when we have images to encode or a reference
+    // video to ingest. Pre-encoded staged latents (chain carryover) skip
+    // VAE load entirely — that's the whole point of latent carryover.
+    let need_vae = !plan.conditioning.images.is_empty() || include_reference_video;
+    let mut vae = if need_vae {
+        let mut loaded = load_ltx2_video_vae(plan, device, dtype)?;
+        loaded.use_tiling = false;
+        loaded.use_framewise_decoding = false;
+        Some(loaded)
+    } else {
+        None
+    };
 
     let patchifier = VideoLatentPatchifier::new(1);
     let mut conditioning = StageVideoConditioning::default();
     for image in &plan.conditioning.images {
+        let vae = vae.as_mut().expect(
+            "need_vae guarantees the VAE is loaded whenever plan.conditioning.images is non-empty",
+        );
         let bytes = std::fs::read(&image.path).with_context(|| {
             format!(
                 "failed to read staged LTX-2 conditioning image '{}'",
@@ -1271,7 +1286,36 @@ fn maybe_load_stage_video_conditioning(
                 )?);
         }
     }
+    // Pre-encoded latents (chain carryover). No VAE needed — tokens come
+    // straight from the caller. For v1 chain this only ever holds a frame-0
+    // replacement (motion-tail latents from the prior stage); appended
+    // (non-frame-0) is kept as a forward-compat branch for the movie-maker.
+    for staged in &plan.conditioning.latents {
+        let latents = staged.latents.to_device(device)?.to_dtype(DType::F32)?;
+        let use_guiding_latent = matches!(plan.pipeline, PipelineKind::Keyframe);
+        if staged.frame == 0 && !use_guiding_latent {
+            let tokens = patchifier.patchify(&latents)?;
+            conditioning.replacements.push(VideoTokenReplacement {
+                start_token: 0,
+                tokens,
+                strength: staged.strength as f64,
+            });
+        } else {
+            conditioning
+                .appended
+                .push(append_condition_from_video_latents(
+                    &latents,
+                    pixel_shape,
+                    staged.frame,
+                    1,
+                    staged.strength as f64,
+                )?);
+        }
+    }
     if include_reference_video {
+        let vae = vae.as_mut().expect(
+            "need_vae guarantees the VAE is loaded whenever include_reference_video is true",
+        );
         let video_path = plan.conditioning.video_path.as_ref().with_context(|| {
             format!(
                 "native {:?} stage requested reference video conditioning without a staged source_video",
@@ -5782,6 +5826,26 @@ mod tests {
             clean.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             vec![0.0, 1.0, 2.0, 3.0]
         );
+    }
+
+    #[test]
+    fn staged_latent_patchifies_to_same_token_shape_as_image_at_single_latent_frame() {
+        // A 4-pixel-frame motion tail at 1216×704 output lands on a latent
+        // block of shape [1, 128, 1, 22, 38]. The render-chain orchestrator
+        // produces this block from the prior stage's denoise result; the
+        // image-conditioning path produces the same shape after VAE encode.
+        // Both must patchify to [1, T*H*W, C] = [1, 1*22*38, 128] tokens so
+        // the downstream replacement pass sees them identically regardless
+        // of which path produced them.
+        let latents = Tensor::zeros(
+            (1, LTX2_VIDEO_LATENT_CHANNELS, 1, 22, 38),
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let patchifier = super::VideoLatentPatchifier::new(1);
+        let tokens = patchifier.patchify(&latents).expect("patchify");
+        assert_eq!(tokens.dims(), &[1, 22 * 38, LTX2_VIDEO_LATENT_CHANNELS]);
     }
 
     #[test]

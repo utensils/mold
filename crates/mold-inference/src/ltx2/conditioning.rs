@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use candle_core::Tensor;
 use mold_core::{GenerateRequest, TimeRange};
 use std::fs;
 use std::ops::RangeInclusive;
@@ -11,9 +12,38 @@ pub(crate) struct StagedImage {
     pub(crate) strength: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Pre-encoded latent block used as conditioning input, bypassing the
+/// staged-image path's VAE encode. Populated by the render-chain
+/// orchestrator when handing a motion-tail off between stages; empty for
+/// every non-chain caller today.
+///
+/// Tensor shape must be `[batch=1, channels=128, T_latent, H/32, W/32]`
+/// to match the LTX-2 video VAE output. The runtime patchifies it directly
+/// into conditioning tokens.
+#[derive(Debug, Clone)]
+pub(crate) struct StagedLatent {
+    pub(crate) latents: Tensor,
+    /// Starting pixel frame for this latent block. `0` routes the tokens
+    /// through `StageVideoConditioning::replacements`; non-zero values
+    /// build a `VideoTokenAppendCondition` like the keyframe image path.
+    pub(crate) frame: u32,
+    /// Replacement/append strength. `1.0` for chain motion-tail carryover
+    /// (hard-overwrite), matching the keyframe image strength convention.
+    pub(crate) strength: f32,
+}
+
+/// Conditioning inputs staged for a single run. Carries both disk-backed
+/// files (images, audio, reference video — existing single-clip flow) and
+/// in-memory latent blocks (chain carryover — new, empty for non-chain
+/// callers).
+///
+/// Not `PartialEq` because `StagedLatent` wraps a `candle_core::Tensor`
+/// which doesn't implement meaningful structural equality. Existing tests
+/// only compare individual fields so this is safe to drop.
+#[derive(Debug, Clone)]
 pub(crate) struct StagedConditioning {
     pub(crate) images: Vec<StagedImage>,
+    pub(crate) latents: Vec<StagedLatent>,
     pub(crate) audio_path: Option<String>,
     pub(crate) video_path: Option<String>,
 }
@@ -99,6 +129,7 @@ pub(crate) fn stage_conditioning(
 
     Ok(StagedConditioning {
         images,
+        latents: Vec::new(),
         audio_path,
         video_path,
     })
@@ -222,6 +253,29 @@ mod tests {
         assert!(mask[..8].iter().all(|value| *value == 0.0));
         assert!(mask[8..18].iter().all(|value| *value == 1.0));
         assert!(mask[18..].iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn stage_conditioning_leaves_latents_empty_for_non_chain_callers() {
+        // Single-clip callers build `StagedConditioning` via this function;
+        // the `latents` field (used by the render-chain orchestrator to inject
+        // pre-encoded motion-tail tokens) must stay empty so existing runs
+        // keep routing conditioning through the image path with VAE encode.
+        let work_dir = tempfile::tempdir().unwrap();
+        let mut req = req();
+        req.source_image = Some(fake_png_bytes());
+        req.keyframes = Some(vec![KeyframeCondition {
+            frame: 8,
+            image: fake_png_bytes(),
+        }]);
+        req.source_video = Some(fake_mp4_bytes());
+        req.audio_file = Some(fake_wav_bytes());
+
+        let staged = stage_conditioning(&req, work_dir.path()).unwrap();
+        assert!(
+            staged.latents.is_empty(),
+            "non-chain callers must leave latents empty",
+        );
     }
 
     #[test]
