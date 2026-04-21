@@ -317,7 +317,17 @@ fn find_flux_reference_gguf(
 
     // Dev candidates satisfy both schnell and dev targets (schnell tensors are a
     // subset of dev). Schnell candidates only satisfy schnell targets.
-    let mut candidates: Vec<&str> = vec!["flux-dev:q8", "flux-dev:q6", "flux-dev:q4"];
+    // flux-krea is a dev-family fine-tune shipped as complete GGUFs by
+    // QuantStack, so it carries the full embedding set including guidance_in —
+    // fall back to it before asking the user to download flux-dev.
+    let mut candidates: Vec<&str> = vec![
+        "flux-dev:q8",
+        "flux-dev:q6",
+        "flux-dev:q4",
+        "flux-krea:q8",
+        "flux-krea:q6",
+        "flux-krea:q4",
+    ];
     if !needs_guidance {
         candidates.extend(["flux-schnell:q8", "flux-schnell:q4"]);
     }
@@ -2585,6 +2595,35 @@ mod tests {
         let picked = super::find_flux_reference_gguf(false, Some(&models_dir))
             .expect("dev candidate satisfies schnell targets too");
         assert_eq!(picked, dev_path);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_flux_reference_accepts_krea_when_no_base_dev() {
+        // flux-krea is a dev-family fine-tune shipped as complete GGUFs — it
+        // should serve as a reference for city96-format fine-tunes (UltraReal,
+        // etc.) even when the base flux-dev GGUF isn't downloaded.
+        let dir = std::env::temp_dir().join(format!(
+            "mold-ref-krea-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let models_dir = dir.join("models");
+        let krea_dir = models_dir.join("flux-krea-q8");
+        std::fs::create_dir_all(&krea_dir).unwrap();
+        let krea_path = krea_dir.join("flux1-krea-dev-Q8_0.gguf");
+
+        let mut complete: Vec<&str> = super::FLUX_EMBEDDING_TENSORS.to_vec();
+        complete.extend_from_slice(super::FLUX_GUIDANCE_EMBEDDING_TENSORS);
+        write_test_gguf(&krea_path, &complete);
+
+        let picked = super::find_flux_reference_gguf(true, Some(&models_dir))
+            .expect("complete flux-krea reference must be accepted for dev targets");
+        assert_eq!(picked, krea_path);
 
         std::fs::remove_dir_all(&dir).ok();
     }
