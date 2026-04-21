@@ -8,6 +8,8 @@ When running `mold serve`, you get a REST API for remote image generation.
 | -------- | ------------------------------ | ------------------------------------ |
 | `POST`   | `/api/generate`                | Generate images from prompt          |
 | `POST`   | `/api/generate/stream`         | Generate with SSE progress streaming |
+| `POST`   | `/api/generate/chain`          | Chained video generation (LTX-2)     |
+| `POST`   | `/api/generate/chain/stream`   | Chained video with SSE progress      |
 | `POST`   | `/api/expand`                  | Expand a prompt using LLM            |
 | `GET`    | `/api/models`                  | List available models                |
 | `POST`   | `/api/models/load`             | Load/swap the active model           |
@@ -222,6 +224,161 @@ server internally.
 ::: tip RunPod Note
 RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long generations to keep the connection alive.
 :::
+
+## `/api/generate/chain`
+
+Chained video generation for LTX-2 distilled models. Splits a long video into
+N per-clip renders, threads a motion-tail of latents across each clip
+boundary, and returns a single stitched MP4. See the
+[LTX-2 chained video output guide](/models/ltx2#chained-video-output) for the
+user-facing story; this section documents the wire format.
+
+The request body maps to `mold_core::chain::ChainRequest`; the response body
+maps to `mold_core::chain::ChainResponse`. The canonical schema lives in the
+interactive docs at `/api/docs` (served by the running mold server) and in the
+OpenAPI JSON at `/api/openapi.json`.
+
+The server accepts either a pre-authored `stages[]` body or the auto-expand
+form (single `prompt` + `total_frames` + `clip_frames`). Auto-expand is the
+shape `mold run` sends; the canonical `stages[]` shape is reserved for the
+forthcoming movie-maker UI that will author per-stage prompts/keyframes. Both
+normalise to the same internal `Vec<ChainStage>` before any engine work kicks
+off.
+
+**Auto-expand body** (what `mold run --frames N` emits):
+
+```json
+{
+  "model": "ltx-2-19b-distilled:fp8",
+  "prompt": "a cat walking through autumn leaves",
+  "total_frames": 400,
+  "clip_frames": 97,
+  "source_image": "<base64 PNG>",
+  "motion_tail_frames": 4,
+  "width": 1216,
+  "height": 704,
+  "fps": 24,
+  "seed": 42,
+  "steps": 8,
+  "guidance": 3.0,
+  "strength": 1.0,
+  "output_format": "mp4"
+}
+```
+
+**Canonical body** (what the v2 movie-maker UI will author):
+
+```json
+{
+  "model": "ltx-2-19b-distilled:fp8",
+  "stages": [
+    { "prompt": "a cat walking", "frames": 97, "source_image": "<base64 PNG>" },
+    { "prompt": "a cat walking", "frames": 97 },
+    { "prompt": "a cat walking", "frames": 97 },
+    { "prompt": "a cat walking", "frames": 97 }
+  ],
+  "motion_tail_frames": 4,
+  "width": 1216,
+  "height": 704,
+  "fps": 24,
+  "seed": 42,
+  "steps": 8,
+  "guidance": 3.0,
+  "strength": 1.0,
+  "output_format": "mp4"
+}
+```
+
+**Response:**
+
+```json
+{
+  "video": {
+    "data": "<base64 mp4>",
+    "format": "mp4",
+    "width": 1216,
+    "height": 704,
+    "frames": 400,
+    "fps": 24,
+    "thumbnail": "<base64 png>",
+    "gif_preview": "<base64 gif>",
+    "has_audio": false,
+    "duration_ms": 16666
+  },
+  "stage_count": 5,
+  "gpu": 0
+}
+```
+
+**Error cases:**
+
+- `422 Unprocessable Entity` — validation failure (missing `prompt` +
+  `total_frames` in the auto-expand form, a stage with non-`8k+1` `frames`,
+  `motion_tail_frames >= clip_frames`, more than 16 stages, etc.).
+- `422 Unprocessable Entity` — unsupported model family. Only LTX-2 distilled
+  engines expose a chain renderer; other families are rejected with an
+  error that names the constraint.
+- `502 Bad Gateway` — a stage errored mid-chain. The whole chain is discarded
+  and nothing is written to the gallery; v1 is fail-closed and partial
+  resume is a v2 feature.
+
+::: tip Queue behaviour
+The chain handler deliberately **bypasses the single-job queue**. A chain is a
+multi-minute compound operation that would stall the FIFO queue for every
+other request, so the handler takes the engine out of `ModelCache` for the
+full chain duration and restores it on completion (or error). Chains
+therefore run one-at-a-time on a given GPU; submit chains to separate GPUs
+via `MOLD_GPUS` / `--gpus` if you need parallelism.
+:::
+
+## `/api/generate/chain/stream`
+
+Same request body as `/api/generate/chain`, with the response delivered as
+Server-Sent Events. Progress frames stream as `event: progress` and the
+terminal frame is either `event: complete` (success) or `event: error`
+(failure; the connection closes after the error frame).
+
+Progress event payloads map to `mold_core::chain::ChainProgressEvent` variants:
+
+```text
+event: progress
+data: {"type":"chain_start","stage_count":5,"estimated_total_frames":485}
+
+event: progress
+data: {"type":"stage_start","stage_idx":0}
+
+event: progress
+data: {"type":"denoise_step","stage_idx":0,"step":1,"total":8}
+
+event: progress
+data: {"type":"stage_done","stage_idx":0,"frames_emitted":97}
+
+event: progress
+data: {"type":"stitching","total_frames":385}
+
+event: complete
+data: {"video":"<base64 mp4>","format":"mp4","width":1216,"height":704,"frames":400,"fps":24,"thumbnail":"<base64 png>","gif_preview":"<base64 gif>","has_audio":false,"duration_ms":16666,"stage_count":5,"gpu":0,"generation_time_ms":226812}
+```
+
+The `complete` event payload maps to `mold_core::chain::SseChainCompleteEvent`.
+Non-denoise engine events (weight loads, cache hits, etc.) are intentionally
+not forwarded in v1 — the UX goal is per-stage progress, not per-component
+telemetry.
+
+```bash
+curl -N -X POST http://localhost:7680/api/generate/chain/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ltx-2-19b-distilled:fp8",
+    "prompt": "a cat walking through autumn leaves",
+    "total_frames": 400,
+    "clip_frames": 97,
+    "motion_tail_frames": 4,
+    "width": 1216, "height": 704, "fps": 24,
+    "steps": 8, "guidance": 3.0,
+    "output_format": "mp4"
+  }'
+```
 
 ## `/api/status`
 
