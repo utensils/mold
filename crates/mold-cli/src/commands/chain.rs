@@ -354,7 +354,7 @@ async fn run_chain_local(
         .unwrap_or(0);
 
     let mut engine = mold_inference::create_engine(
-        &model_name,
+        model_name,
         paths,
         &effective_config,
         load_strategy,
