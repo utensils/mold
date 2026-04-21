@@ -1672,9 +1672,10 @@ fn reapply_stage_video_conditioning(
 
     let mut parts = vec![base];
     for condition in &conditioning.appended {
-        if condition.strength < 1.0 {
-            continue;
-        }
+        // Appended conditioning tokens must remain present for the whole
+        // denoise loop. Their strength is expressed via the denoise mask;
+        // dropping "soft" appended tokens here desynchronizes the token
+        // count from the cached clean latents and mask tensors.
         parts.push(
             condition
                 .tokens
@@ -5956,6 +5957,32 @@ mod tests {
         assert_eq!(
             stripped.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             vec![7.0, 8.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn reapply_stage_video_conditioning_keeps_soft_appended_tokens() {
+        let latents =
+            Tensor::from_vec(vec![0.0f32, 0.0, 1.0, 1.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let conditioning = StageVideoConditioning {
+            replacements: vec![],
+            appended: vec![VideoTokenAppendCondition {
+                tokens: Tensor::from_vec(vec![9.0f32, 10.0], (1, 1, 2), &Device::Cpu).unwrap(),
+                positions: Tensor::from_vec(
+                    vec![30.0f32, 40.0, 50.0],
+                    (1, 3, 1, 1),
+                    &Device::Cpu,
+                )
+                .unwrap(),
+                strength: 0.4,
+            }],
+        };
+
+        let reapplied = reapply_stage_video_conditioning(&latents, 2, &conditioning).unwrap();
+        assert_eq!(reapplied.dims3().unwrap(), (1, 3, 2));
+        assert_eq!(
+            reapplied.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![0.0, 0.0, 1.0, 1.0, 9.0, 10.0]
         );
     }
 
