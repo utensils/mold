@@ -170,8 +170,10 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
 
     /// Run every stage in `req.stages` and return the accumulated frames.
     ///
-    /// Behaviour invariants (from the 2026-04-20 sign-off):
-    /// - Per-stage seeds are derived as `base_seed ^ ((stage_idx as u64) << 32)`.
+    /// Behaviour invariants (from the 2026-04-20 sign-off, amended 2026-04-21):
+    /// - Per-stage seeds default to the shared `base_seed` so the continuation
+    ///   denoise starts from matching noise. Stages can opt in to variation by
+    ///   setting `seed_offset`, which XORs into the base seed.
     /// - Stage 0's output is kept whole; continuations drop their leading
     ///   `req.motion_tail_frames` pixel frames because those duplicate the
     ///   prior stage's tail that was threaded back as latent conditioning.
@@ -309,11 +311,22 @@ fn estimate_stitched_frames(req: &ChainRequest) -> u32 {
         .sum()
 }
 
-fn derive_stage_seed(base_seed: u64, idx: usize, stage: &ChainStage) -> u64 {
+fn derive_stage_seed(base_seed: u64, _idx: usize, stage: &ChainStage) -> u64 {
+    // Keep the seed stable across stages by default. An earlier revision
+    // XORed `(idx as u64) << 32` into each stage's seed so the initial
+    // noise tensor differed per clip; with the motion-tail pin re-
+    // grounded on a proper causal-first latent (see
+    // `StagedLatent::causal_first_frame_rgb`) that diversification just
+    // amplifies drift at the stitch point — the replacement region is
+    // frozen by `video_denoise_mask` anyway, so same-seed noise in the
+    // pinned tokens is a no-op, and same-seed noise in the free region
+    // lets the continuation settle on a consistent motion profile.
+    // Callers who want per-stage variation supply `stage.seed_offset`
+    // explicitly.
     if let Some(offset) = stage.seed_offset {
         base_seed ^ offset
     } else {
-        base_seed ^ ((idx as u64) << 32)
+        base_seed
     }
 }
 
@@ -663,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn chain_derives_per_stage_seed_from_base_seed() {
+    fn chain_holds_seed_stable_across_stages_by_default() {
         let stages = vec![stage("a", 9), stage("a", 9), stage("a", 9)];
         let mut req = chain_req(stages, 0);
         req.seed = Some(42);
@@ -671,10 +684,15 @@ mod tests {
         renderer.frame_count_override = Some(9);
         let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
         orch.run(&req, None).expect("chain runs");
-        // Per the sign-off: stage_seed = base ^ ((idx as u64) << 32).
+        // The orchestrator used to XOR `(idx as u64) << 32` into each
+        // stage's seed so initial noise differed per clip. With the
+        // motion-tail pin grounded on a proper causal-first latent,
+        // per-stage noise diversity just amplifies drift at the stitch
+        // point — same-seed noise stays frozen in the pinned region and
+        // produces a more consistent motion profile in the free region.
         assert_eq!(renderer.calls[0].seed, Some(42));
-        assert_eq!(renderer.calls[1].seed, Some(42 ^ (1u64 << 32)));
-        assert_eq!(renderer.calls[2].seed, Some(42 ^ (2u64 << 32)));
+        assert_eq!(renderer.calls[1].seed, Some(42));
+        assert_eq!(renderer.calls[2].seed, Some(42));
     }
 
     #[test]
@@ -791,7 +809,7 @@ mod tests {
         assert_eq!(
             renderer.calls[1].seed,
             Some(100 ^ 0xDEADBEEFu64),
-            "seed_offset must take precedence over the default index-derived seed",
+            "seed_offset must XOR into the stable base seed when a stage opts in to variation",
         );
     }
 }

@@ -397,8 +397,11 @@ Examples:
         /// Motion-tail overlap between chained clips in pixel frames. Each clip
         /// after the first reuses this many trailing latents from the prior
         /// clip, trimming the duplicated pixel frames at stitch time. 0 disables
-        /// latent carryover (simple concat). Default 4.
-        #[arg(long, value_name = "N", default_value_t = 4, help_heading = "Video")]
+        /// latent carryover (simple concat). Default 9 — two LTX-2 latent frames
+        /// of carryover at the 8× causal temporal compression, covering the
+        /// causal-first-frame slot plus one continuation slot so the stitch
+        /// point has enough anchor to stay coherent.
+        #[arg(long, value_name = "N", default_value_t = 9, help_heading = "Video")]
         motion_tail: u32,
 
         /// Enable synchronized audio for LTX-2 / LTX-2.3 generation.
@@ -2180,7 +2183,7 @@ mod tests {
     }
 
     #[test]
-    fn run_motion_tail_defaults_to_four() {
+    fn run_motion_tail_defaults_to_nine() {
         let cli = parse(&["run", "ltx-2-19b-distilled:fp8", "a cat", "--frames", "200"]);
         match cli.command {
             Commands::Run {
@@ -2188,7 +2191,10 @@ mod tests {
                 clip_frames,
                 ..
             } => {
-                assert_eq!(motion_tail, 4, "default motion tail must be 4 frames");
+                assert_eq!(
+                    motion_tail, 9,
+                    "default motion tail must be 9 frames (two LTX-2 latent frames)"
+                );
                 assert_eq!(clip_frames, None);
             }
             _ => panic!("expected Run"),

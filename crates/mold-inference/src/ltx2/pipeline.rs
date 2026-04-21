@@ -601,10 +601,18 @@ impl Ltx2Engine {
             // clear staged images so they can't compete with the latent
             // carryover.
             plan.conditioning.images.clear();
+            // Hand the RGB last frame to the runtime so it can re-encode
+            // it as a proper causal-first latent and swap in for the first
+            // latent frame before patchifying. The raw tail latents from
+            // the emitting stage's tail encode 8 pixel frames per slot;
+            // dropped straight into token 0 they'd collide with the VAE's
+            // causal-first-frame convention at the decode step and produce
+            // a visible seam on each continuation.
             plan.conditioning.latents.push(StagedLatent {
                 latents: tail.latents.clone(),
                 frame: 0,
                 strength: 1.0,
+                causal_first_frame_rgb: Some(tail.last_rgb_frame.clone()),
             });
         }
 

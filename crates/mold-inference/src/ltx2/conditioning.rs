@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use candle_core::Tensor;
+use image::RgbImage;
 use mold_core::{GenerateRequest, TimeRange};
 use std::fs;
 use std::ops::RangeInclusive;
@@ -30,6 +31,17 @@ pub(crate) struct StagedLatent {
     /// Replacement/append strength. `1.0` for chain motion-tail carryover
     /// (hard-overwrite), matching the keyframe image strength convention.
     pub(crate) strength: f32,
+    /// Optional RGB frame that the runtime re-encodes through the video VAE
+    /// and swaps in for the first latent frame of `latents` before
+    /// patchifying. Used by the chain orchestrator to fix a semantic
+    /// mismatch: raw tail latents come from the emitting clip's
+    /// *continuation* slots (each encoding 8 pixel frames), but when
+    /// replayed at `frame: 0` of the next clip they land in the VAE's
+    /// *causal* slot (which decodes to a single pixel frame). Encoding the
+    /// last decoded RGB frame as a proper causal-first latent removes that
+    /// mismatch and makes `clip_N+1`'s first pixel frame visually match
+    /// `clip_N`'s last pixel frame.
+    pub(crate) causal_first_frame_rgb: Option<RgbImage>,
 }
 
 /// Conditioning inputs staged for a single run. Carries both disk-backed
