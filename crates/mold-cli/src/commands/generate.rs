@@ -157,6 +157,11 @@ fn apply_local_engine_env_overrides(
 pub struct Ltx2Options {
     pub frames: Option<u32>,
     pub fps: Option<u32>,
+    /// Per-clip cap for chained rendering. `None` = use the model-family default
+    /// (currently 97 for LTX-2 distilled). Only read when `frames > cap`.
+    pub clip_frames: Option<u32>,
+    /// Motion-tail overlap between chained clips (pixel frames).
+    pub motion_tail: u32,
     pub enable_audio: Option<bool>,
     pub audio_file: Option<Vec<u8>>,
     pub source_video: Option<Vec<u8>>,
@@ -210,6 +215,8 @@ pub async fn run(
     let Ltx2Options {
         frames,
         fps,
+        clip_frames,
+        motion_tail,
         enable_audio,
         audio_file,
         source_video,
@@ -243,6 +250,117 @@ pub async fn run(
     } else {
         format
     };
+
+    // ── Chain routing ─────────────────────────────────────────────────────
+    // When --frames exceeds the per-clip cap, auto-build a ChainRequest and
+    // delegate to the chain helper. Only LTX-2 distilled is chainable in v1;
+    // other video families error fast rather than silently over-producing.
+    {
+        use super::chain::{decide_chain_routing, warn_if_clamped, ChainRoutingDecision};
+        let decision = decide_chain_routing(
+            effective_frames,
+            family.as_deref(),
+            model,
+            clip_frames,
+            motion_tail,
+        );
+        match decision {
+            ChainRoutingDecision::SingleClip => {
+                // Fall through to the existing single-clip path below.
+            }
+            ChainRoutingDecision::Rejected { reason } => {
+                anyhow::bail!(reason);
+            }
+            ChainRoutingDecision::Chain {
+                clip_frames: cf,
+                motion_tail: mt,
+            } => {
+                warn_if_clamped(clip_frames, super::chain::LTX2_DISTILLED_CLIP_CAP);
+                let (eff_w, eff_h) = effective_dimensions(
+                    &config,
+                    &model_cfg,
+                    family.as_deref(),
+                    width,
+                    height,
+                    source_image.as_deref(),
+                    edit_images.as_deref(),
+                )?;
+                let eff_steps = steps.unwrap_or_else(|| model_cfg.effective_steps(&config));
+                let eff_guidance = guidance.unwrap_or_else(|| model_cfg.effective_guidance());
+                let eff_fps = effective_fps.unwrap_or(24);
+                let total_frames = effective_frames
+                    .expect("decide_chain_routing only returns Chain when frames is Some");
+
+                // Chain path doesn't use batch/edit_images/mask/control/loras —
+                // those are single-clip concepts. If the user set them, warn and
+                // continue (we don't hard-error to keep the UX lenient).
+                if batch > 1 {
+                    status!(
+                        "{} --batch has no effect in chain mode; rendering a single stitched video",
+                        theme::icon_warn(),
+                    );
+                }
+
+                let inputs = super::chain::ChainInputs {
+                    prompt: prompt.to_string(),
+                    model: model.to_string(),
+                    width: eff_w,
+                    height: eff_h,
+                    steps: eff_steps,
+                    guidance: eff_guidance,
+                    strength,
+                    seed,
+                    fps: eff_fps,
+                    output_format,
+                    total_frames,
+                    clip_frames: cf,
+                    motion_tail: mt,
+                    source_image: source_image.clone(),
+                    placement: placement.clone(),
+                };
+                // Consume otherwise-unused LTX-2 knobs that chain v1 ignores so
+                // clippy doesn't fire `unused_variables` on the early return.
+                let _ = (
+                    &audio_file,
+                    &source_video,
+                    &keyframes,
+                    &pipeline,
+                    &loras,
+                    &retake_range,
+                    &spatial_upscale,
+                    &temporal_upscale,
+                    &enable_audio,
+                    &mask_image,
+                    &control_image,
+                    &control_model,
+                    control_scale,
+                    &negative_prompt,
+                    &original_prompt,
+                    &batch_prompts,
+                    &lora,
+                    &scheduler,
+                    expand,
+                );
+                return super::chain::run_chain(
+                    inputs,
+                    host,
+                    output,
+                    no_metadata,
+                    preview,
+                    local,
+                    gpus,
+                    t5_variant,
+                    qwen3_variant,
+                    qwen2_variant,
+                    qwen2_text_encoder_mode,
+                    eager,
+                    offload,
+                )
+                .await;
+            }
+        }
+    }
+
     let piped = is_piped();
 
     // Reject batch > 1 when output goes to stdout (piped with no --output, or --output -)
