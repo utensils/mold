@@ -192,8 +192,10 @@ map_key() {
     fi
 
     # Special key names (case-insensitive matching)
+    # NOTE: Ghostty's AppleScript API uses "enter", not "return" —
+    # sending "return" errors silently with `Unknown key name`.
     case "${input,,}" in
-        enter|return)     echo "key:return" ;;
+        enter|return)     echo "key:enter" ;;
         escape|esc)       echo "key:escape" ;;
         tab)              echo "key:tab" ;;
         space)            echo "key:space" ;;
@@ -761,6 +763,92 @@ cmd_settings_focus() {
     echo "OK: settings focus → $target"
 }
 
+# Switch the active model via the Parameters → Model → Enter picker
+# path. We deliberately avoid Ctrl+M because AppleScript's
+# `send key "m" modifiers "control"` gets aliased to CR (Enter) by
+# many terminals — the app never sees the modifier, and the filter
+# text gets typed into whatever handler was active, including 'q' →
+# Quit. The Parameters-focused Enter path is boring and reliable.
+cmd_model() {
+    require_session
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        echo "ERROR: $0 model <name-or-filter>" >&2
+        exit 1
+    fi
+    local term_id
+    term_id=$(load_state)
+    cmd_view generate >/dev/null
+    # Reach Parameters reliably: Escape → Nav mode → Shift+Tab (FocusPrev
+    # from Nav lands directly on Parameters, regardless of whether the
+    # Negative pane is visible). Then up-key to row 0 (Model) and Enter
+    # to open the picker.
+    send_one_key "$term_id" escape
+    sleep 0.2
+    send_one_key "$term_id" shift+tab
+    sleep 0.2
+    local _
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        send_one_key "$term_id" k
+    done
+    sleep 0.2
+    send_one_key "$term_id" enter
+    sleep 0.4
+    # Type the filter text character-by-character so each char is an
+    # `input text` event (not a `send key`, which would pass modifier
+    # state through).
+    local i ch
+    for (( i=0; i<${#name}; i++ )); do
+        ch="${name:$i:1}"
+        send_one_key "$term_id" "$ch"
+        sleep 0.02
+    done
+    sleep 0.2
+    send_one_key "$term_id" enter
+    sleep 0.4
+    # Escape regex metacharacters in the model name (`:` is fine in
+    # BRE/ERE, but `\.`-style escapes or `+`-like chars would break).
+    # Use plain `fgrep` semantics via `grep -F` on the row prefix and a
+    # secondary `grep -F "$name"` check to avoid regex surprises.
+    if capture | grep -F '│Model' | grep -F "$name" >/dev/null; then
+        echo "OK: model switched to $name"
+    else
+        echo "NOTE: switch attempted; current Model row:" >&2
+        capture | grep -F '│Model' | head -1 >&2
+        return 1
+    fi
+}
+
+# Assert a single `model_prefs` column for a given model. Example:
+#   db-model-assert flux-dev:q4 width 1024
+cmd_db_model_assert() {
+    require_session
+    if [ $# -lt 3 ]; then
+        echo "ERROR: $0 db-model-assert <model> <column> <value>" >&2
+        exit 1
+    fi
+    local model="$1" column="$2" expect="$3"
+    local db_path
+    db_path=$(load_db_path)
+    # Column name must be an allow-listed field; don't interpolate raw
+    # input into SQL. This keeps the helper from growing an injection
+    # hole if someone paths user input in from a CI script.
+    case "$column" in
+        width|height|steps|guidance|scheduler|seed_mode|batch|format|\
+lora_path|lora_scale|expand|offload|strength|control_scale|frames|fps|\
+last_prompt|last_negative) ;;
+        *) echo "ERROR: unknown model_prefs column '$column'." >&2; exit 1 ;;
+    esac
+    local actual
+    actual=$(sqlite3 "$db_path" "SELECT IFNULL($column,'') FROM model_prefs WHERE model='$model';")
+    if [ "$actual" = "$expect" ]; then
+        echo "PASS: model_prefs[$model].$column = $expect"
+        return 0
+    fi
+    echo "FAIL: model_prefs[$model].$column = '$actual' (expected '$expect')" >&2
+    return 1
+}
+
 # Set the TUI theme by slug. Navigates to Appearance, then cycles the
 # current selection until the desired preset is active. Asserts on the
 # visible ✓ marker to confirm success.
@@ -883,6 +971,14 @@ case "${1:-help}" in
     theme-set)
         shift
         cmd_theme_set "$@"
+        ;;
+    model)
+        shift
+        cmd_model "$@"
+        ;;
+    db-model-assert)
+        shift
+        cmd_db_model_assert "$@"
         ;;
     help|*)
         cat <<'USAGE'

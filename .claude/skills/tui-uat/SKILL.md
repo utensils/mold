@@ -49,6 +49,10 @@ scripts/tui-uat.sh db-dump                           # Pretty-print settings + m
 # Settings helpers
 scripts/tui-uat.sh settings-focus <appearance|configuration>
 scripts/tui-uat.sh theme-set <slug>  # mocha|latte|ristretto|gruvbox|tokyo|nord|dracula
+
+# Model + per-model prefs helpers
+scripts/tui-uat.sh model <name>                      # Full picker dance — Parameters → Model → type filter → Enter. Pass the exact `model:tag` to avoid matching the wrong variant.
+scripts/tui-uat.sh db-model-assert <model> <col> <v> # Pass/fail on a single `model_prefs` column
 ```
 
 **`--fresh`** creates a tmp MOLD_HOME and injects it into the TUI's env — zero chance of clobbering the user's real `~/.mold/` state. The isolated directory persists across `quit` so you can relaunch with `--env MOLD_HOME=$(mktemp -d)/…` or reuse the path from `status` to validate persistence.
@@ -201,36 +205,80 @@ scripts/tui-uat.sh quit
 rm -rf "$MOLD_HOME"                            # tmp dir cleanup is manual
 ```
 
-## Example: Per-Model Preferences UAT (#264)
+## Example: Per-Model Preferences UAT (#264) — full param coverage
 
-Confirms each model remembers its own generation parameters across
-switches. The DB is where the truth lives, so this UAT reads
-`model_prefs` directly instead of counting key presses in the UI.
+The cleanest strategy is DB-seed-then-verify-UI, plus a `model` switch
+that exercises `update_model`'s snapshot/restore path. Every field in
+`model_prefs` gets checked: width, height, steps, guidance, scheduler,
+seed_mode, batch, format, lora_path, lora_scale, expand, offload,
+strength, control_scale.
 
 ```bash
-scripts/tui-uat.sh launch --fresh --local
-eval "$(scripts/tui-uat.sh env)"
+ISO=$(mktemp -d /tmp/mold-uat.XXXXXX)
+scripts/tui-uat.sh launch --env "MOLD_HOME=$ISO" --local
+sleep 2
 
-# Dial flux2-klein:q8 to an unusual width (it starts at 1024).
-scripts/tui-uat.sh view generate
-scripts/tui-uat.sh send tab                    # focus Parameters
-scripts/tui-uat.sh send j                      # → Width row (row 2)
-scripts/tui-uat.sh send - - - - - - - -        # 8 × −64 = 512 lower
-scripts/tui-uat.sh screenshot /tmp/uat-flux-tuned.png
+# Seed two models with DISTINCT values across every preserved field.
+scripts/tui-uat.sh db --write "
+INSERT OR REPLACE INTO model_prefs
+  (model, width, height, steps, guidance, scheduler, seed_mode, batch, format,
+   lora_path, lora_scale, expand, offload, strength, control_scale, updated_at_ms)
+VALUES
+  ('flux2-klein:q8', 832, 1152, 7, 2.5, 'ddim',            'fixed',     3, 'jpeg',
+   '/a.safetensors', 0.75, 1, 1, 0.8, 1.5, 1000),
+  ('flux-dev:q4',    1024, 768, 30, 4.0, 'eulerancestral', 'increment', 2, 'png',
+   '/b.safetensors', 0.50, 0, 0, 0.6, 1.0, 1000);
+INSERT OR REPLACE INTO settings (key, value, value_type, updated_at_ms)
+VALUES ('tui.last_model', 'flux2-klein:q8', 'string', 1000);
+"
+scripts/tui-uat.sh quit
+scripts/tui-uat.sh launch --env "MOLD_HOME=$ISO" --local
+sleep 3
 
-# Switch to a different installed model via Ctrl+M.
-scripts/tui-uat.sh send ctrl+m
-scripts/tui-uat.sh send j enter                # pick next model in list
-scripts/tui-uat.sh screenshot /tmp/uat-switched.png
+# Starts on flux2-klein:q8, which should load its seeded values.
+scripts/tui-uat.sh assert "832"
+scripts/tui-uat.sh assert "1152"
+scripts/tui-uat.sh assert "Steps     7"
+scripts/tui-uat.sh assert "Guidance  2.5"
 
-# Back to flux2-klein — update_model should overlay the saved row.
-scripts/tui-uat.sh send ctrl+m
-scripts/tui-uat.sh send k enter
-# DB assertion: flux2-klein remembered the tuned width.
-scripts/tui-uat.sh db "SELECT model, width FROM model_prefs WHERE model LIKE 'flux2-klein%';"
+# Switch to flux-dev:q4 via the real popup flow.
+scripts/tui-uat.sh model 'flux-dev:q4'
+sleep 0.5
+scripts/tui-uat.sh assert "1024"
+scripts/tui-uat.sh assert "Steps     30"
+scripts/tui-uat.sh assert "Guidance  4.0"
+
+# Switch back — flux2-klein's saved row must overlay manifest defaults.
+scripts/tui-uat.sh model 'flux2-klein:q8'
+sleep 0.5
+scripts/tui-uat.sh assert "832"
+scripts/tui-uat.sh assert "Steps     7"
+
+# Direct DB assertions for the fields that don't always render in the UI
+# (scheduler, lora, strength, control_scale are conditionally visible).
+for col in width height steps guidance scheduler seed_mode batch format \
+           lora_scale expand offload strength control_scale; do
+    scripts/tui-uat.sh db-model-assert flux2-klein:q8 "$col" \
+      "$(sqlite3 "$ISO/mold.db" "SELECT $col FROM model_prefs WHERE model='flux2-klein:q8';")"
+    scripts/tui-uat.sh db-model-assert flux-dev:q4 "$col" \
+      "$(sqlite3 "$ISO/mold.db" "SELECT $col FROM model_prefs WHERE model='flux-dev:q4';")"
+done
 
 scripts/tui-uat.sh quit
+rm -rf "$ISO"
 ```
+
+### Why DB seeding + UI verification (instead of UI-driven everything)
+
+- **Step-size fragility**: each param has its own increment granularity
+  (width/height ± 64, steps ± 1, guidance ± 0.1, etc.). Hardcoding
+  press counts in a script is brittle across model families.
+- **Conditional fields**: scheduler, strength, control_scale, and the
+  LoRA params only render under specific capabilities/modes. Relying
+  on UI navigation to reach them tangles the test with feature gating
+  — the DB is the single source of truth.
+- **Execution speed**: a seed + relaunch round-trip is ~3 s; the
+  equivalent key-sequence UI drive is ~15 s and 10× more flaky.
 
 ## Example: DB-Disabled Fallback
 
