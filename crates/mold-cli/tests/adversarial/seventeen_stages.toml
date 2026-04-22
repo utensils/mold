@@ -1,0 +1,82 @@
+schema = "mold.chain.v1"
+
+[chain]
+model = "ltx-2-19b-distilled:fp8"
+width = 1216
+height = 704
+fps = 24
+steps = 8
+guidance = 3.0
+strength = 1.0
+motion_tail_frames = 4
+output_format = "mp4"
+
+# 17 stages total — one over the MAX_CHAIN_STAGES cap of 16
+
+[[stage]]
+prompt = "one"
+frames = 9
+
+[[stage]]
+prompt = "two"
+frames = 9
+
+[[stage]]
+prompt = "three"
+frames = 9
+
+[[stage]]
+prompt = "four"
+frames = 9
+
+[[stage]]
+prompt = "five"
+frames = 9
+
+[[stage]]
+prompt = "six"
+frames = 9
+
+[[stage]]
+prompt = "seven"
+frames = 9
+
+[[stage]]
+prompt = "eight"
+frames = 9
+
+[[stage]]
+prompt = "nine"
+frames = 9
+
+[[stage]]
+prompt = "ten"
+frames = 9
+
+[[stage]]
+prompt = "eleven"
+frames = 9
+
+[[stage]]
+prompt = "twelve"
+frames = 9
+
+[[stage]]
+prompt = "thirteen"
+frames = 9
+
+[[stage]]
+prompt = "fourteen"
+frames = 9
+
+[[stage]]
+prompt = "fifteen"
+frames = 9
+
+[[stage]]
+prompt = "sixteen"
+frames = 9
+
+[[stage]]
+prompt = "seventeen"
+frames = 9
