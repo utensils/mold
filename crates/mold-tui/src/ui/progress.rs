@@ -1,30 +1,26 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
+use ratatui::widgets::{Gauge, Paragraph};
 
 use crate::app::{App, ProgressLogEntry, ProgressStyle as PStyle};
 use crate::ui::theme::Theme;
+use crate::ui::widgets::panel_block;
 
-/// Render the progress panel at the bottom of the Generate view.
+/// Render the progress/timeline panel.
+///
+/// The panel shows a rolling log of completed stages on top and any active
+/// bars (spinner, download, weight-load, denoise) pinned to the bottom. The
+/// caller supplies the panel title so the same renderer can serve both the
+/// legacy "Progress" label and the design-system "Timeline" label.
 pub fn render(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
+    render_with_title(frame, app, area, focused, "Timeline");
+}
+
+/// Identical to [`render`] but with a caller-supplied panel title.
+pub fn render_with_title(frame: &mut Frame, app: &App, area: Rect, focused: bool, title: &str) {
     let theme = &app.theme;
     let progress = &app.generate.progress;
 
-    let border_style = if focused {
-        theme.border_focused()
-    } else {
-        theme.border()
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(" Progress ")
-        .title_style(if focused {
-            theme.title_focused()
-        } else {
-            theme.title()
-        })
-        .style(Style::default().bg(theme.bg));
+    let block = panel_block(theme, title, focused, None);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);

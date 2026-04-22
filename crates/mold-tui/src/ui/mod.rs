@@ -5,6 +5,7 @@ pub mod models;
 pub mod param_form;
 pub mod popup;
 pub mod progress;
+pub mod recent;
 pub mod settings;
 pub mod theme;
 pub mod widgets;

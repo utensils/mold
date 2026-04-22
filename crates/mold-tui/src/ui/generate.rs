@@ -1,174 +1,190 @@
+//! Generate view — the primary workspace.
+//!
+//! Layout matches the mold design system:
+//!
+//! ```text
+//! ┌── Prompt (full width) ────────────────────────────────────────┐
+//! ├── Negative (optional, full width) ────────────────────────────┤
+//! ├── Parameters (≥38 col) ────┬── Preview (flex) ────────────────┤
+//! │                            │                                  │
+//! │   Info (5 rows)            │                                  │
+//! ├── Recent (≥38 col) ────────┼── Timeline (flex) ───────────────┤
+//! └── Error (1 row when set) ──┴──────────────────────────────────┘
+//! ```
+//!
+//! - Left column is fixed at 38 cells so the Parameters form lines up even on
+//!   very wide terminals.
+//! - `Recent` and `Timeline` share a `BOTTOM_ROW_HEIGHT` row below the main
+//!   preview area.
+//! - Negative prompt is hidden entirely for models that don't support it.
+//! - Error row is 0 cells tall when no error is present — it collapses out of
+//!   the layout rather than leaving a gap.
+
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui_image::StatefulImage;
+use tui_textarea::TextArea;
 
 use crate::app::{App, GenerateFocus};
-use crate::ui::{info, param_form, progress, theme::Theme};
+use crate::ui::widgets::panel_block;
+use crate::ui::{info, param_form, progress, recent, theme::Theme};
+
+/// Width of the left column (parameters + info + recent).
+const LEFT_COL_WIDTH: u16 = 38;
+/// Height of the Info sub-panel at the bottom of the left column.
+const INFO_HEIGHT: u16 = 5;
+/// Height of the bottom row (Recent + Timeline panels).
+const BOTTOM_ROW_HEIGHT: u16 = 5;
+/// Height of the Prompt textarea (including its border).
+const PROMPT_HEIGHT: u16 = 4;
+/// Height of the Negative prompt textarea when visible (including border).
+const NEGATIVE_HEIGHT: u16 = 3;
 
 /// Render the Generate view.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
-    let theme = &app.theme;
+    let layout = vertical_layout(app, area);
 
-    // Determine if the negative prompt should be shown
+    render_prompt(frame, app, layout.prompt);
+    if let Some(neg_area) = layout.negative {
+        render_negative(frame, app, neg_area);
+    }
+    render_middle_row(frame, app, layout.middle);
+    render_bottom_row(frame, app, layout.bottom);
+    if let Some(err_area) = layout.error {
+        render_error(frame, app, err_area);
+    }
+}
+
+// ── Layout ──────────────────────────────────────────────────────────
+
+/// Resolved areas for each row in the Generate view.
+struct GenerateLayout {
+    prompt: Rect,
+    negative: Option<Rect>,
+    middle: Rect,
+    bottom: Rect,
+    error: Option<Rect>,
+}
+
+fn vertical_layout(app: &App, area: Rect) -> GenerateLayout {
     let show_negative = app.generate.capabilities.supports_negative_prompt;
+    let show_error = app.generate.error_message.is_some();
 
-    // Main vertical layout:
-    // - Prompt (2-4 lines)
-    // - Negative prompt (if applicable, 2 lines)
-    // - Middle row: Parameters (left) + Preview (right)
-    // - Progress (3-5 lines)
-    // - Error message (if any, 1 line)
-    let prompt_height = 4;
-    let neg_height = if show_negative { 3 } else { 0 };
-    let progress_height = 5;
-    let error_height = if app.generate.error_message.is_some() {
-        1
-    } else {
-        0
-    };
+    let mut constraints: Vec<Constraint> = Vec::with_capacity(5);
+    constraints.push(Constraint::Length(PROMPT_HEIGHT));
+    if show_negative {
+        constraints.push(Constraint::Length(NEGATIVE_HEIGHT));
+    }
+    constraints.push(Constraint::Min(6));
+    constraints.push(Constraint::Length(BOTTOM_ROW_HEIGHT));
+    if show_error {
+        constraints.push(Constraint::Length(1));
+    }
 
-    let constraints = if show_negative {
-        vec![
-            Constraint::Length(prompt_height),
-            Constraint::Length(neg_height),
-            Constraint::Min(8),
-            Constraint::Length(progress_height),
-            Constraint::Length(error_height),
-        ]
-    } else {
-        vec![
-            Constraint::Length(prompt_height),
-            Constraint::Min(8),
-            Constraint::Length(progress_height),
-            Constraint::Length(error_height),
-        ]
-    };
-
-    let layout = Layout::default()
+    let rects = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(area);
 
-    let (prompt_area, neg_area, middle_area, progress_area, error_area) = if show_negative {
-        (
-            layout[0],
-            Some(layout[1]),
-            layout[2],
-            layout[3],
-            layout.get(4).copied(),
-        )
+    let mut idx = 0;
+    let prompt = rects[idx];
+    idx += 1;
+    let negative = if show_negative {
+        let r = rects[idx];
+        idx += 1;
+        Some(r)
     } else {
-        (
-            layout[0],
-            None,
-            layout[1],
-            layout[2],
-            layout.get(3).copied(),
-        )
+        None
     };
+    let middle = rects[idx];
+    idx += 1;
+    let bottom = rects[idx];
+    idx += 1;
+    let error = if show_error { Some(rects[idx]) } else { None };
 
-    // Store layout areas for mouse hit-testing
-    app.layout.prompt = prompt_area;
-    if let Some(neg) = neg_area {
-        app.layout.negative_prompt = neg;
+    GenerateLayout {
+        prompt,
+        negative,
+        middle,
+        bottom,
+        error,
     }
+}
 
-    // ── Prompt ─────────────────────────────────────────────
-    render_text_area(
-        frame,
-        theme,
-        &mut app.generate.prompt,
-        " Prompt ",
-        prompt_area,
-        app.generate.focus == GenerateFocus::Prompt,
-    );
+// ── Middle row: Parameters/Info + Preview ───────────────────────────
 
-    // ── Negative Prompt ────────────────────────────────────
-    if let Some(neg_area) = neg_area {
-        render_text_area(
-            frame,
-            theme,
-            &mut app.generate.negative_prompt,
-            " Negative ",
-            neg_area,
-            app.generate.focus == GenerateFocus::NegativePrompt,
-        );
-    }
-
-    // ── Middle row: Parameters/Info (left) + Preview (right) ──
-    let middle_layout = Layout::default()
+fn render_middle_row(frame: &mut Frame, app: &mut App, area: Rect) {
+    let [left, right] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(38), // Left column (params + info)
-            Constraint::Min(20),    // Preview panel
-        ])
-        .split(middle_area);
+        .constraints([Constraint::Length(LEFT_COL_WIDTH), Constraint::Min(20)])
+        .areas(area);
 
-    // Left column: Parameters (top) + Info (bottom, 5 lines)
-    let left_layout = Layout::default()
+    let [params_area, info_area] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(5)])
-        .split(middle_layout[0]);
+        .constraints([Constraint::Min(6), Constraint::Length(INFO_HEIGHT)])
+        .areas(left);
 
-    // Store areas for mouse
-    app.layout.parameters = left_layout[0];
-    app.layout.preview = middle_layout[1];
+    app.layout.parameters = params_area;
+    app.layout.preview = right;
 
-    // Parameters
     param_form::render(
         frame,
-        theme,
+        &app.theme,
         &app.generate,
-        left_layout[0],
+        params_area,
         app.generate.focus == GenerateFocus::Parameters,
     );
+    info::render(frame, app, info_area);
+    render_preview(frame, app, right);
+}
 
-    // Info panel
-    info::render(frame, app, left_layout[1]);
+// ── Bottom row: Recent + Timeline ───────────────────────────────────
 
-    // Preview
-    render_preview(frame, app, middle_layout[1]);
+fn render_bottom_row(frame: &mut Frame, app: &App, area: Rect) {
+    let [recent_area, timeline_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(LEFT_COL_WIDTH), Constraint::Min(20)])
+        .areas(area);
 
-    // ── Progress ───────────────────────────────────────────
-    progress::render(frame, app, progress_area, false);
+    recent::render(frame, app, recent_area);
+    progress::render_with_title(frame, app, timeline_area, false, "Timeline");
+}
 
-    // ── Error message ──────────────────────────────────────
-    if let Some(error_area) = error_area {
-        if let Some(err) = &app.generate.error_message {
-            let error_line = Paragraph::new(format!(" \u{2717} {err}")).style(app.theme.error());
-            frame.render_widget(error_line, error_area);
-        }
-    }
+// ── Prompt / Negative prompt ────────────────────────────────────────
+
+fn render_prompt(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.layout.prompt = area;
+    render_text_area(
+        frame,
+        &app.theme,
+        &mut app.generate.prompt,
+        "Prompt",
+        area,
+        app.generate.focus == GenerateFocus::Prompt,
+    );
+}
+
+fn render_negative(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.layout.negative_prompt = area;
+    render_text_area(
+        frame,
+        &app.theme,
+        &mut app.generate.negative_prompt,
+        "Negative",
+        area,
+        app.generate.focus == GenerateFocus::NegativePrompt,
+    );
 }
 
 fn render_text_area<'a>(
     frame: &mut Frame,
     theme: &Theme,
-    textarea: &mut tui_textarea::TextArea<'a>,
+    textarea: &mut TextArea<'a>,
     title: &'a str,
     area: Rect,
     focused: bool,
 ) {
-    let border_style = if focused {
-        theme.border_focused()
-    } else {
-        theme.border()
-    };
-    let title_style = if focused {
-        theme.title_focused()
-    } else {
-        theme.title()
-    };
-
-    textarea.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .title(title)
-            .title_style(title_style)
-            .style(Style::default().bg(theme.bg)),
-    );
-
+    textarea.set_block(panel_block(theme, title, focused, None));
     textarea.set_style(Style::default().fg(theme.text).bg(theme.bg));
     textarea.set_cursor_style(if focused {
         Style::default().fg(theme.bg).bg(theme.accent)
@@ -176,20 +192,16 @@ fn render_text_area<'a>(
         Style::default()
     });
     textarea.set_placeholder_style(theme.dim());
-
     frame.render_widget(&*textarea, area);
 }
 
+// ── Preview ─────────────────────────────────────────────────────────
+
 fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
-    let theme = &app.theme;
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.border())
-        .title(" Preview ")
-        .title_style(theme.title())
-        .style(Style::default().bg(theme.bg));
-
+    // Preview is display-only in the current focus model, so the panel always
+    // renders with the unfocused border colour. If a focus state is added
+    // later, flip this flag.
+    let block = panel_block(&app.theme, "Preview", false, None);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -197,37 +209,39 @@ fn render_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Show the image if we have one
     if let Some(ref mut image_state) = app.generate.image_state {
         let image_widget = StatefulImage::default().resize(ratatui_image::Resize::Scale(None));
         frame.render_stateful_widget(image_widget, inner, image_state);
-    } else if app.generate.generating {
-        let status_text = if app.generate.progress.is_downloading() {
-            app.generate.progress.download_status_text()
+        return;
+    }
+
+    let status_text = if app.generate.generating {
+        if app.generate.progress.is_downloading() {
+            app.generate.progress.download_status_text().to_string()
         } else {
-            "Generating..."
-        };
-        let msg = Paragraph::new(status_text)
-            .style(theme.dim())
-            .alignment(Alignment::Center);
-        let center = Rect {
-            x: inner.x,
-            y: inner.y + inner.height / 2,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(msg, center);
+            "Generating...".to_string()
+        }
     } else {
-        // Empty state
-        let msg = Paragraph::new("Press Enter to generate")
-            .style(theme.dim())
-            .alignment(Alignment::Center);
-        let center = Rect {
-            x: inner.x,
-            y: inner.y + inner.height / 2,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(msg, center);
+        "Press Enter to generate".to_string()
+    };
+
+    let msg = Paragraph::new(status_text)
+        .style(app.theme.dim())
+        .alignment(Alignment::Center);
+    let center = Rect {
+        x: inner.x,
+        y: inner.y + inner.height / 2,
+        width: inner.width,
+        height: 1,
+    };
+    frame.render_widget(msg, center);
+}
+
+// ── Error row ───────────────────────────────────────────────────────
+
+fn render_error(frame: &mut Frame, app: &App, area: Rect) {
+    if let Some(err) = &app.generate.error_message {
+        let line = Paragraph::new(format!(" \u{2717} {err}")).style(app.theme.error());
+        frame.render_widget(line, area);
     }
 }
