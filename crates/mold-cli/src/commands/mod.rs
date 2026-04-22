@@ -1,4 +1,5 @@
 pub mod chain;
+pub mod chain_validate;
 pub mod clean;
 pub(crate) mod cleanup;
 pub mod config;

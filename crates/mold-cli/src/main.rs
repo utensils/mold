@@ -313,6 +313,19 @@ Examples:
 }
 
 #[derive(Subcommand)]
+enum ChainSub {
+    /// Parse and normalise a TOML script without submitting.
+    #[command(after_long_help = "\
+Examples:
+  mold chain validate shot.toml")]
+    Validate {
+        /// Path to the TOML chain script.
+        #[arg(value_hint = ValueHint::FilePath)]
+        path: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Generate images from a text prompt
@@ -685,6 +698,15 @@ Examples:
     Server {
         #[command(subcommand)]
         action: ServerAction,
+    },
+
+    /// Script-mode chain authoring tools
+    #[command(after_long_help = "\
+Examples:
+  mold chain validate shot.toml    Parse and normalise a TOML chain script")]
+    Chain {
+        #[command(subcommand)]
+        action: ChainSub,
     },
 
     /// Download model weights via the running server, or locally if no server is reachable
@@ -1401,6 +1423,9 @@ async fn run() -> anyhow::Result<()> {
             ServerAction::Stop => {
                 commands::server::run_stop().await?;
             }
+        },
+        Commands::Chain { action } => match action {
+            ChainSub::Validate { path } => commands::chain_validate::run(&path).await?,
         },
         Commands::Pull { model, skip_verify } => {
             let opts = mold_core::download::PullOptions { skip_verify };

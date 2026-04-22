@@ -578,3 +578,68 @@ fn repeated_prompt_flag_yields_chain() {
         .stdout(predicate::str::contains("second scene"))
         .stdout(predicate::str::contains("third scene"));
 }
+
+// ── mold chain validate ──────────────────────────────────────────────────
+
+#[test]
+fn chain_validate_reports_ok_for_valid_script() {
+    let script = r#"
+schema = "mold.chain.v1"
+
+[chain]
+model = "ltx-2-19b-distilled:fp8"
+width = 1216
+height = 704
+fps = 24
+steps = 8
+guidance = 3.0
+strength = 1.0
+motion_tail_frames = 25
+output_format = "mp4"
+
+[[stage]]
+prompt = "only stage"
+frames = 97
+"#;
+    let env = TestEnv::new();
+    let path = env.home.join("chain.toml");
+    std::fs::write(&path, script).unwrap();
+
+    env.cmd()
+        .args(["chain", "validate", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("OK"))
+        .stdout(predicate::str::contains("1 stages"));
+}
+
+#[test]
+fn chain_validate_errors_on_bad_schema() {
+    let script = r#"
+schema = "mold.chain.v99"
+
+[chain]
+model = "ltx-2-19b-distilled:fp8"
+width = 1216
+height = 704
+fps = 24
+steps = 8
+guidance = 3.0
+strength = 1.0
+motion_tail_frames = 4
+output_format = "mp4"
+
+[[stage]]
+prompt = "stage"
+frames = 97
+"#;
+    let env = TestEnv::new();
+    let path = env.home.join("bad_schema.toml");
+    std::fs::write(&path, script).unwrap();
+
+    env.cmd()
+        .args(["chain", "validate", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("schema"));
+}
