@@ -1043,27 +1043,34 @@ fn start_background_server(port: u16) -> Option<std::process::Child> {
 /// then each tab is drawn as `" N Label "` (label length + 4 columns),
 /// with a single-column divider between adjacent tabs.
 pub(crate) fn tab_at_column(col: u16, tab_bar_x: u16) -> Option<View> {
-    // The block has only `Borders::BOTTOM`, so there's no left border —
-    // just the horizontal-1 padding. Content therefore starts one column
-    // in from `tab_bar_x`. The existing hit-test subtracted 2 which
-    // happened to work through saturating underflow but made the logic
-    // hard to reason about; keep the arithmetic honest here.
+    // Mirrors what ratatui's `Tabs` widget actually renders. Each tab is:
+    //   pad_left(" ") + title(" N Label ") + pad_right(" ")
+    // followed by a one-column divider between tabs (no divider after
+    // the last). `padding_left`/`padding_right` default to " " — that's
+    // the piece the old hit-test missed, which silently mapped clicks on
+    // "Queue" to Settings because the stride was 2 cols short per tab.
+    //
+    // The block itself has no left border but does have `horizontal(1)`
+    // padding, so the first tab starts one column in from `tab_bar_x`.
     let content_start = tab_bar_x.saturating_add(1);
     if col < content_start {
-        // Click in the left padding counts as the first tab, matching
-        // what the user's eye sees (the 1-column gutter looks like part
-        // of Tab 1).
         return Some(View::ALL[0]);
     }
     let x = (col - content_start) as usize;
 
     let mut offset = 0usize;
-    for view in &View::ALL {
-        let tab_width = view.label().len() + 4; // " N Label "
-        if x < offset + tab_width {
+    let last = View::ALL.len() - 1;
+    for (i, view) in View::ALL.iter().enumerate() {
+        // pad_left(1) + " N Label "(label + 4) + pad_right(1) = label + 6
+        let tab_width = view.label().len() + 6;
+        // Fold the post-tab divider column into this tab's click zone so
+        // there's no dead pixel between tabs. The last tab has no
+        // trailing divider.
+        let zone_width = if i == last { tab_width } else { tab_width + 1 };
+        if x < offset + zone_width {
             return Some(*view);
         }
-        offset += tab_width + 1; // +1 for the divider
+        offset += zone_width;
     }
     None
 }
@@ -6522,33 +6529,58 @@ mod tests {
         // row, above the bottom border). 80-col terminal.
         let tab_bar = ratatui::layout::Rect::new(0, 0, 80, 3);
 
-        // Rendered layout with horizontal-1 padding:
-        //   col 0        → padding
-        //   col 1..=12   → " 1 Generate " (12 chars)
-        //   col 13       → divider
-        //   col 14..=24  → " 2 Gallery " (11 chars)
-        //   col 25       → divider
-        //   col 26..=35  → " 3 Models " (10 chars)
-        //   col 36       → divider
-        //   col 37..=45  → " 4 Queue " (9 chars)
-        //   col 46       → divider
-        //   col 47..=58  → " 5 Settings " (12 chars)
+        // Actual rendered layout (verified via TestBackend probe) —
+        // ratatui's Tabs widget adds its own pad_left(" ") and
+        // pad_right(" ") *around* each title, on top of the " N Label "
+        // content we pass in. Stride per tab = label.len() + 6 (pad +
+        // title + pad), plus a 1-col divider between tabs.
+        //
+        //   col 0        → block horizontal padding
+        //   col 1        → Generate pad_left
+        //   col 2..=13   → " 1 Generate " title (12 chars, "1" at col 3)
+        //   col 14       → Generate pad_right
+        //   col 15       → divider
+        //   col 16       → Gallery pad_left
+        //   col 17..=27  → " 2 Gallery " title (11 chars, "2" at col 18)
+        //   col 28       → Gallery pad_right
+        //   col 29       → divider
+        //   col 30       → Models pad_left
+        //   col 31..=40  → " 3 Models " title (10 chars, "3" at col 32)
+        //   col 41       → Models pad_right
+        //   col 42       → divider
+        //   col 43       → Queue pad_left
+        //   col 44..=52  → " 4 Queue " title (9 chars, "4" at col 45)
+        //   col 53       → Queue pad_right
+        //   col 54       → divider
+        //   col 55       → Settings pad_left
+        //   col 56..=67  → " 5 Settings " title (12 chars, "5" at col 57)
+        //   col 68       → Settings pad_right
+        //
+        // Trailing dividers fold into the preceding tab's click zone so
+        // there's no dead pixel. Cols 0..=15 → Generate, 16..=29 → Gallery,
+        // 30..=42 → Models, 43..=54 → Queue, 55..=68 → Settings.
         let cases: &[(u16, View, &str)] = &[
-            (1, View::Generate, "Generate start"),
-            (7, View::Generate, "Generate middle"),
-            (12, View::Generate, "Generate end"),
-            (14, View::Gallery, "Gallery start"),
-            (19, View::Gallery, "Gallery middle"),
-            (24, View::Gallery, "Gallery end"),
-            (26, View::Models, "Models start"),
-            (30, View::Models, "Models middle"),
-            (35, View::Models, "Models end"),
-            (37, View::Queue, "Queue start (the reported flaky position)"),
-            (41, View::Queue, "Queue middle"),
-            (45, View::Queue, "Queue end"),
-            (47, View::Settings, "Settings start"),
-            (52, View::Settings, "Settings middle"),
-            (58, View::Settings, "Settings end"),
+            (0, View::Generate, "block padding"),
+            (3, View::Generate, "Generate '1'"),
+            (9, View::Generate, "Generate 'a'"),
+            (15, View::Generate, "Generate trailing divider"),
+            (16, View::Gallery, "Gallery pad_left"),
+            (18, View::Gallery, "Gallery '2'"),
+            (24, View::Gallery, "Gallery 'r'"),
+            (29, View::Gallery, "Gallery trailing divider"),
+            (30, View::Models, "Models pad_left"),
+            (32, View::Models, "Models '3'"),
+            (38, View::Models, "Models 'e'"),
+            (42, View::Models, "Models trailing divider"),
+            (43, View::Queue, "Queue pad_left (was 'finicky')"),
+            (45, View::Queue, "Queue '4'"),
+            (48, View::Queue, "Queue 'e' (body of label)"),
+            (52, View::Queue, "Queue end of title"),
+            (54, View::Queue, "Queue trailing divider"),
+            (55, View::Settings, "Settings pad_left"),
+            (57, View::Settings, "Settings '5'"),
+            (62, View::Settings, "Settings 'n'"),
+            (68, View::Settings, "Settings pad_right"),
         ];
 
         for (col, expected, name) in cases {
@@ -6580,11 +6612,11 @@ mod tests {
         app.layout.tab_bar = ratatui::layout::Rect::new(0, 0, 80, 3);
         app.active_view = View::Generate;
 
-        // Col 70 is well past Tab 5 (cols 47..=58) — it sits under the
-        // right-aligned "mold 0.9.0" version indicator.
+        // Col 75 is well past Settings (which ends at col 68) — it sits
+        // under the right-aligned "mold 0.9.0" version indicator.
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 70,
+            column: 75,
             row: 1,
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
@@ -6594,6 +6626,61 @@ mod tests {
             View::Generate,
             "clicks past the last rendered tab must be a no-op, not a stealth jump to Settings"
         );
+    }
+
+    #[tokio::test]
+    async fn mouse_hit_test_matches_real_tab_bar_rendering() {
+        // End-to-end guard: render the real UI, scan each column of the
+        // tab bar row looking for the digit "1".."5", and assert that a
+        // click on that column lands on the matching view. If anything
+        // (padding, divider, label order) changes upstream, this test
+        // surfaces the drift before users report a flaky tab bar.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = make_settings_test_app();
+        app.active_view = View::Generate;
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let tab_bar = app.layout.tab_bar;
+        assert!(tab_bar.height >= 2, "tab bar should have room to render");
+        let tab_row = tab_bar.y + 1; // row 0 = title/indicator, row 1 = tabs
+
+        // Find the column of each digit "1".."5" in the rendered row.
+        // The Tabs widget prefixes each label with " N " — those digits
+        // anchor the hit-test and are the visually obvious click target.
+        let buf = terminal.backend().buffer();
+        let digit_to_view: &[(&str, View)] = &[
+            ("1", View::Generate),
+            ("2", View::Gallery),
+            ("3", View::Models),
+            ("4", View::Queue),
+            ("5", View::Settings),
+        ];
+        for (digit, expected) in digit_to_view {
+            let col = (0..tab_bar.width)
+                .find(|&x| buf[(tab_bar.x + x, tab_row)].symbol() == *digit)
+                .unwrap_or_else(|| panic!("digit {digit} not found in rendered tab bar"));
+            let click_col = tab_bar.x + col;
+
+            let mut click_app = make_settings_test_app();
+            click_app.layout.tab_bar = tab_bar;
+            click_app.active_view = View::Generate;
+            click_app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: click_col,
+                row: tab_row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+            assert_eq!(
+                click_app.active_view, *expected,
+                "clicking on digit '{digit}' at col {click_col} should land on {expected:?}, got {:?}",
+                click_app.active_view
+            );
+        }
     }
 
     #[tokio::test]

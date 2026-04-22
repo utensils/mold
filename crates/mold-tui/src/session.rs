@@ -67,17 +67,65 @@ impl TuiSession {
         }
     }
 
-    /// Save session to disk (best-effort, non-fatal).
+    /// Save session to disk. Writes atomically via a sibling tempfile +
+    /// rename so a crash or interrupt mid-write can never leave the
+    /// target file in a partial state (which on load would parse as an
+    /// empty `TuiSession::default()` and silently drop the theme back
+    /// to the `#[default]` preset). Failures are logged rather than
+    /// returned — the call site is "best effort, don't crash the TUI"
+    /// — but they're no longer silent, which matters when tracking
+    /// down reports like "I set Mocha but it loaded Latte next time".
     pub fn save(&self) {
         let path = match session_path() {
             Some(p) => p,
-            None => return,
+            None => {
+                tracing::warn!("tui session save skipped: could not resolve mold_dir()");
+                return;
+            }
         };
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(path = %parent.display(), error = %e, "tui session: create_dir_all failed");
+                return;
+            }
         }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
+        let json = match serde_json::to_string_pretty(self) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!(error = %e, "tui session: serialize failed");
+                return;
+            }
+        };
+
+        // Atomic write: temp file in same dir + rename.
+        let parent = match path.parent() {
+            Some(p) => p,
+            None => {
+                tracing::warn!(path = %path.display(), "tui session: no parent dir for tempfile");
+                return;
+            }
+        };
+        let tmp_name = format!(
+            "tui-session.json.tmp.{}",
+            std::process::id().wrapping_mul(0x9E37_79B1)
+                ^ std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u32)
+                    .unwrap_or(0)
+        );
+        let tmp_path = parent.join(tmp_name);
+        if let Err(e) = std::fs::write(&tmp_path, &json) {
+            tracing::warn!(path = %tmp_path.display(), error = %e, "tui session: tempfile write failed");
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, &path) {
+            tracing::warn!(
+                tmp = %tmp_path.display(),
+                dst = %path.display(),
+                error = %e,
+                "tui session: atomic rename failed",
+            );
+            let _ = std::fs::remove_file(&tmp_path);
         }
     }
 
@@ -226,6 +274,124 @@ impl TuiSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Serialize env-mutating tests — they all swap MOLD_HOME so they
+    // must not run in parallel. Poisoned lock is fine; we just want
+    // exclusive access during the test body.
+    static MOLD_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_mold_home<F: FnOnce(&std::path::Path)>(f: F) {
+        let guard = MOLD_HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-session-roundtrip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let previous = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", &tmp);
+
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&tmp)));
+
+        match previous {
+            Some(v) => std::env::set_var("MOLD_HOME", v),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        drop(guard);
+        if let Err(payload) = res {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn save_load_save_load_preserves_theme_across_many_cycles() {
+        // Regression for "I set Mocha but next session loaded Latte".
+        // The invariant under test: once a theme slug is written to
+        // disk, it must survive arbitrary save → load → save → load
+        // cycles unchanged, *including* when the loaded session is
+        // re-saved without touching the theme (the post-generation and
+        // shutdown save paths both do exactly that).
+        with_mold_home(|_home| {
+            // Seed disk with a specific non-default theme.
+            let seed = TuiSession {
+                last_prompt: "original".to_string(),
+                last_model: "flux-dev:q4".to_string(),
+                theme: Some("mocha".to_string()),
+                ..Default::default()
+            };
+            seed.save();
+
+            for i in 0..10 {
+                let loaded = TuiSession::load();
+                assert_eq!(
+                    loaded.theme.as_deref(),
+                    Some("mocha"),
+                    "iteration {i}: theme must round-trip as 'mocha', got {:?}",
+                    loaded.theme
+                );
+                // Re-save without mutating — mirrors what shutdown() /
+                // post-generation save_session() do when the user
+                // never touched the theme.
+                loaded.save();
+            }
+        });
+    }
+
+    #[test]
+    fn save_is_atomic_and_does_not_leave_tempfiles_behind() {
+        // The atomic-write implementation uses a sibling tempfile +
+        // rename. After a successful save, only the final target file
+        // should exist — no leftover `.tmp.*` files cluttering the
+        // mold dir.
+        with_mold_home(|home| {
+            let session = TuiSession {
+                theme: Some("dracula".to_string()),
+                ..Default::default()
+            };
+            for _ in 0..5 {
+                session.save();
+            }
+            let entries: Vec<_> = std::fs::read_dir(home)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                entries.contains(&"tui-session.json".to_string()),
+                "final session file must exist, got: {entries:?}"
+            );
+            let leftover: Vec<_> = entries
+                .iter()
+                .filter(|n| n.starts_with("tui-session.json.tmp"))
+                .collect();
+            assert!(
+                leftover.is_empty(),
+                "atomic write left tempfiles behind: {leftover:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn save_creates_parent_dir_if_missing() {
+        // `mold_dir()` points at `$MOLD_HOME`, which the helper creates.
+        // Remove it to simulate a fresh install where the directory
+        // doesn't exist yet; save must create it.
+        with_mold_home(|home| {
+            std::fs::remove_dir_all(home).unwrap();
+            let session = TuiSession {
+                theme: Some("nord".to_string()),
+                ..Default::default()
+            };
+            session.save();
+            let loaded = TuiSession::load();
+            assert_eq!(loaded.theme.as_deref(), Some("nord"));
+        });
+    }
 
     #[test]
     fn default_session_has_no_prompt() {
