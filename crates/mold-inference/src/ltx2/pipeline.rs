@@ -27,11 +27,14 @@ use crate::progress::ProgressCallback;
 
 /// Soft-conditioning strength for the cross-stage identity anchor on chain
 /// continuations. The denoise mask at the anchor token becomes
-/// `1 - strength = 0.6`, so the denoiser blends ~60% generated / ~40%
-/// reference on every step — a gentle pull toward the source image rather
-/// than a hard pin (hard-pinning a single pixel frame past the motion tail
-/// would make continuations feel like cuts back to the starting shot).
-const CHAIN_SOFT_ANCHOR_STRENGTH: f32 = 0.4;
+/// `1 - strength = 0.4`, so the denoiser blends ~40% generated / ~60%
+/// reference on every step — a firm pull toward the anchor without fully
+/// pinning it. Bumped from 0.4 → 0.6 alongside the 2026-04-21
+/// `source_image` rewrite (see `Ltx2ChainOrchestrator::run`): now that the
+/// anchor reliably tracks the prior clip's last frame rather than a stale
+/// original upload, leaning harder on it keeps scene identity coherent
+/// across long chains instead of drifting into unrelated content.
+const CHAIN_SOFT_ANCHOR_STRENGTH: f32 = 0.6;
 
 pub struct Ltx2Engine {
     model_name: String,
@@ -610,9 +613,16 @@ impl Ltx2Engine {
         // token sequence (via the `VideoTokenAppendCondition` path in
         // `maybe_load_stage_video_conditioning`), giving the free-region
         // denoise a persistent cross-attention anchor for subject / scene
-        // appearance without freezing any tokens. Without this anchor,
-        // identity drift compounds stage-over-stage because each clip's
-        // only long-range reference is its own drifted last-frame carry.
+        // appearance without freezing any tokens.
+        //
+        // The orchestrator rewrites `req.source_image` for every
+        // continuation to the *last decoded frame of the prior clip*, so
+        // this anchor tracks "where the scene is now" instead of "where
+        // the scene started". An earlier revision routed the original
+        // user upload here across every continuation, but that pulled
+        // drifted clips visibly back toward the starting image and was
+        // the dominant cause of the jarring "each clip is a different
+        // video" effect users reported against render-chain v1.
         if let Some(tail) = carry {
             if tail.tail_rgb_frames.is_empty() {
                 bail!(
@@ -625,9 +635,9 @@ impl Ltx2Engine {
             // motion-tail pin, so the reference token's RoPE sits exactly
             // where new content starts — cross-attention propagates
             // identity into the free region most directly from there.
-            // `CHAIN_SOFT_ANCHOR_STRENGTH = 0.4` gives the denoise mask a
-            // value of `1 - 0.4 = 0.6` at the anchor token, so the
-            // denoiser blends ~60% generated / ~40% reference every step.
+            // `CHAIN_SOFT_ANCHOR_STRENGTH = 0.6` gives the denoise mask a
+            // value of `1 - 0.6 = 0.4` at the anchor token, so the
+            // denoiser blends ~40% generated / ~60% reference every step.
             let anchor_frame = motion_tail_pixel_frames;
             for image in plan.conditioning.images.iter_mut() {
                 if image.frame == 0 {

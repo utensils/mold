@@ -238,7 +238,13 @@ pub enum ChainProgressEvent {
 }
 
 fn default_motion_tail_frames() -> u32 {
-    4
+    // Wire-level default when a client omits `motion_tail_frames`. Matches
+    // the CLI `--motion-tail` default in `crates/mold-cli/src/main.rs` and
+    // `DEFAULT_MOTION_TAIL` in `web/src/lib/chainRouting.ts` — four LTX-2
+    // latent frames of hard-pinned carryover at the 8× causal temporal
+    // compression (causal-first slot + three continuation slots, ≈1.04 s
+    // at 24 fps).
+    25
 }
 
 fn default_fps() -> u32 {
@@ -401,14 +407,15 @@ fn build_auto_expand_stages(
     let mut stages = Vec::with_capacity(count_usize);
     for _ in 0..stage_count {
         // Every stage carries the starting image: stage 0 uses it as the
-        // i2v replacement at frame 0, and continuation stages use it as a
-        // soft identity anchor through the append path (see
-        // `Ltx2Engine::render_chain_stage`). Keeping a durable reference
-        // across stages is what stops scene/identity drift past the first
-        // clip, whose effects were traced in render-chain v1 as the
-        // dominant cause of "strange" continuations — the motion tail
-        // alone only carries ~0.7 s of pixel context, nowhere near enough
-        // for the model to remember the scene across an 8-stage chain.
+        // i2v replacement at frame 0. Continuation stages seed the
+        // orchestrator's soft-anchor slot with it, but the orchestrator
+        // then *overwrites* that seed with the last decoded frame of the
+        // prior clip before invoking the engine (see
+        // `Ltx2ChainOrchestrator::run` in `mold-inference`). Propagating
+        // the upload here is still useful because it guarantees the
+        // anchor slot is populated if a downstream renderer ever skips
+        // the overwrite — but the durable identity reference the chain
+        // actually uses is the recent frame, not the original.
         stages.push(ChainStage {
             prompt: prompt.to_string(),
             frames: per_stage_frames,

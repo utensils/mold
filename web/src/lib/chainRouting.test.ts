@@ -32,8 +32,8 @@ describe("decideChainRouting", () => {
   });
 
   it("chains ltx2-distilled requests above the cap", () => {
-    // 241 frames, clip=97, DEFAULT_MOTION_TAIL=17 → effective=80,
-    // remainder=144, stageCount = 1 + ceil(144/80) = 1 + 2 = 3.
+    // 241 frames, clip=97, DEFAULT_MOTION_TAIL=25 → effective=72,
+    // remainder=144, stageCount = 1 + ceil(144/72) = 1 + 2 = 3.
     const d = decideChainRouting(241, "ltx2", "ltx-2.3-22b-distilled:fp8");
     expect(d).toEqual({
       kind: "chain",

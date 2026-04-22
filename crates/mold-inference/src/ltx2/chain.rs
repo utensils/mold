@@ -12,9 +12,11 @@
 //!
 //! See `tasks/render-chain-v1-plan.md` Phase 1.1 for context.
 
+use std::io::Cursor;
+
 use anyhow::{anyhow, bail, Context, Result};
 use candle_core::Tensor;
-use image::RgbImage;
+use image::{DynamicImage, ImageFormat, RgbImage};
 use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage};
 use mold_core::{GenerateRequest, OutputFormat};
 
@@ -183,6 +185,13 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
     /// - Stage 0's output is kept whole; continuations drop their leading
     ///   `req.motion_tail_frames` pixel frames because those duplicate the
     ///   prior stage's tail that was threaded back as latent conditioning.
+    /// - Continuation stages (idx >= 1) get `stage_req.source_image`
+    ///   overwritten with the last decoded RGB frame of the prior stage,
+    ///   encoded as PNG. `Ltx2Engine::render_chain_stage` routes that
+    ///   image to the soft-anchor slot at frame=motion_tail, so the
+    ///   anchor tracks the most recent scene state instead of the stale
+    ///   original upload. The original upload is still useful for stage
+    ///   0's frame-0 i2v replacement; it is not used past that.
     /// - Mid-chain failure returns the error immediately; partial frames are
     ///   discarded (no partial stitch is ever produced in v1).
     pub fn run(
@@ -217,7 +226,33 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
             }
 
             let stage_seed = derive_stage_seed(base_seed, idx, stage);
-            let stage_req = build_stage_generate_request(stage, req, stage_seed, idx);
+            let mut stage_req = build_stage_generate_request(stage, req, stage_seed, idx);
+
+            // Continuation stages: swap the original user upload for the
+            // most recent decoded frame of the prior clip. `render_chain_stage`
+            // already routes a continuation's `source_image` to the soft-
+            // anchor slot at frame=motion_tail with strength 0.4, so
+            // overriding the bytes here makes that anchor track "where the
+            // scene is now" instead of "where the scene started". The prior
+            // behaviour pinned every continuation's soft anchor back to the
+            // original upload, which pulled drifted continuations visibly
+            // back toward the starting image and produced the jarring "each
+            // clip is a different video" effect users reported.
+            if let Some(ref carry_ref) = carry {
+                let last_frame = carry_ref.tail_rgb_frames.last().ok_or_else(|| {
+                    anyhow!(
+                        "chain carry has empty tail_rgb_frames going into stage {stage_idx}; \
+                         prior stage must emit at least one frame",
+                    )
+                })?;
+                stage_req.source_image =
+                    Some(encode_rgb_as_png(last_frame).with_context(|| {
+                        format!(
+                            "encode last frame of stage {} carryover as PNG for stage {stage_idx}",
+                            stage_idx.saturating_sub(1),
+                        )
+                    })?);
+            }
 
             // Wrap the chain progress subscriber so per-stage denoise
             // events land on it with `stage_idx` tagged in. The wrapping
@@ -285,6 +320,18 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
             generation_time_ms: total_generation_ms,
         })
     }
+}
+
+/// Encode an RGB frame as PNG bytes so it can be plugged into a
+/// `GenerateRequest::source_image` slot. PNG is lossless, which matters here
+/// — this round-trips through the receiving stage's VAE, so any JPEG-style
+/// chroma artefacts would compound across every chain continuation.
+fn encode_rgb_as_png(frame: &RgbImage) -> Result<Vec<u8>> {
+    let mut buf = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(frame.clone())
+        .write_to(&mut buf, ImageFormat::Png)
+        .context("encode chain carry last-frame as PNG")?;
+    Ok(buf.into_inner())
 }
 
 fn validate_motion_tail(req: &ChainRequest) -> Result<()> {
@@ -510,6 +557,7 @@ mod tests {
     struct CallRecord {
         seed: Option<u64>,
         has_source_image: bool,
+        source_image_bytes: Option<Vec<u8>>,
         has_carry: bool,
     }
 
@@ -536,6 +584,7 @@ mod tests {
             self.calls.push(CallRecord {
                 seed: stage_req.seed,
                 has_source_image: stage_req.source_image.is_some(),
+                source_image_bytes: stage_req.source_image.clone(),
                 has_carry: carry.is_some(),
             });
             if let Some((_, msg)) = self.fail_on.iter().find(|(stage_idx, _)| *stage_idx == idx) {
@@ -701,14 +750,15 @@ mod tests {
 
     #[test]
     fn chain_propagates_source_image_to_every_stage() {
-        // Every stage must receive the starting image in its GenerateRequest.
-        // Stage 0 uses it as the frame-0 i2v replacement; continuations use
-        // it at the engine level as a soft identity anchor (routed through
-        // the append path by `Ltx2Engine::render_chain_stage`). Identity
-        // drift past the first clip was traced to the prior behaviour of
-        // dropping the image on continuations — no long-range identity
-        // anchor meant each continuation was anchored only to the drifted
-        // last frame of the prior clip, compounding errors stage-over-stage.
+        // Stage 0 must receive the caller-provided starting image (frame-0
+        // i2v replacement). Continuations must also have a source_image set
+        // so the soft-anchor slot is always populated — but the orchestrator
+        // rewrites the bytes to the prior stage's last frame, so the value
+        // on stage 1+ will differ from the value on stage 0. The
+        // `rewrites_source_image_to_prior_last_frame` test below asserts
+        // that rewrite explicitly; this test just guards the "never None"
+        // invariant so downstream code doesn't have to special-case a
+        // missing anchor on continuations.
         let mut stages = vec![stage("a", 9), stage("a", 9)];
         stages[0].source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]); // PNG magic
         stages[1].source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
@@ -724,6 +774,101 @@ mod tests {
         assert!(
             renderer.calls[1].has_source_image,
             "continuation stage must also carry source_image (soft identity anchor)",
+        );
+    }
+
+    #[test]
+    fn chain_rewrites_continuation_source_image_to_prior_last_frame() {
+        // The orchestrator must overwrite every continuation's
+        // `source_image` with the last decoded RGB frame of the previous
+        // stage (encoded as PNG). Previously the original upload was
+        // threaded through untouched, which pulled drifted continuations
+        // visibly back toward the starting image. This test pins that
+        // contract so nobody re-introduces the stale-anchor regression.
+        let mut stages = vec![stage("a", 9), stage("a", 9), stage("a", 9)];
+        let original_upload = vec![0x89, 0x50, 0x4e, 0x47]; // PNG magic — sentinel
+        stages[0].source_image = Some(original_upload.clone());
+        stages[1].source_image = Some(original_upload.clone());
+        stages[2].source_image = Some(original_upload.clone());
+        let req = chain_req(stages, 4);
+        let mut renderer = FakeRenderer::new();
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        orch.run(&req, None).expect("chain runs");
+
+        // Stage 0 keeps the original upload verbatim (frame-0 i2v pin).
+        assert_eq!(
+            renderer.calls[0].source_image_bytes.as_deref(),
+            Some(original_upload.as_slice()),
+            "stage 0's source_image must be the caller-provided upload",
+        );
+        // Stage 1+ must NOT be the original upload — the orchestrator
+        // swaps in the prior stage's last frame as PNG bytes.
+        assert_ne!(
+            renderer.calls[1].source_image_bytes.as_deref(),
+            Some(original_upload.as_slice()),
+            "stage 1's source_image must be rewritten to the prior last frame, not the original upload",
+        );
+        assert_ne!(
+            renderer.calls[2].source_image_bytes.as_deref(),
+            Some(original_upload.as_slice()),
+            "stage 2's source_image must be rewritten to the prior last frame, not the original upload",
+        );
+
+        // Independently verify the rewritten bytes are real PNGs (the
+        // encoder is the only path that populates them) and that every
+        // continuation got different bytes — the FakeRenderer colours its
+        // frames with `(idx * 37) + frame_num`, so stage 1's last frame
+        // and stage 2's last frame encode to different PNG payloads.
+        let stage1_bytes = renderer.calls[1]
+            .source_image_bytes
+            .as_ref()
+            .expect("stage 1 must have source_image set");
+        let stage2_bytes = renderer.calls[2]
+            .source_image_bytes
+            .as_ref()
+            .expect("stage 2 must have source_image set");
+        assert!(
+            stage1_bytes.starts_with(&[0x89, b'P', b'N', b'G']),
+            "stage 1's rewritten source_image must be a PNG",
+        );
+        assert!(
+            stage2_bytes.starts_with(&[0x89, b'P', b'N', b'G']),
+            "stage 2's rewritten source_image must be a PNG",
+        );
+        assert_ne!(
+            stage1_bytes, stage2_bytes,
+            "each continuation must track its own prior-stage last frame",
+        );
+    }
+
+    #[test]
+    fn chain_without_source_image_still_rewrites_continuations_from_carry() {
+        // Pure text-to-video chains (no user upload) must still anchor
+        // every continuation on the prior clip's last frame. Without this,
+        // the soft-anchor slot stays empty on continuations and the
+        // free-region denoise has nothing but the motion-tail pin to
+        // ground identity — exactly the drift pattern we're fixing.
+        let stages = vec![stage("a", 9), stage("a", 9)];
+        let req = chain_req(stages, 4);
+        let mut renderer = FakeRenderer::new();
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        orch.run(&req, None).expect("chain runs");
+
+        assert!(
+            !renderer.calls[0].has_source_image,
+            "stage 0 of a t2v chain starts with no source_image",
+        );
+        assert!(
+            renderer.calls[1].has_source_image,
+            "continuation must gain a source_image from the carry even when stage 0 had none",
+        );
+        let stage1_bytes = renderer.calls[1]
+            .source_image_bytes
+            .as_ref()
+            .expect("stage 1 must have rewritten source_image");
+        assert!(
+            stage1_bytes.starts_with(&[0x89, b'P', b'N', b'G']),
+            "rewritten source_image must be a PNG",
         );
     }
 
