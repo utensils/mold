@@ -1809,7 +1809,11 @@ impl App {
             height: Some(p.height),
             steps: Some(p.steps),
             guidance: Some(p.guidance),
-            scheduler: p.scheduler.map(|s| format!("{s:?}").to_lowercase()),
+            // Canonical Display form: "ddim" / "euler-ancestral" /
+            // "uni-pc". Matches `mold_core::Scheduler::Display` and what
+            // `mold-db::config_sync` writes via `mold config set`, so
+            // rows written by either surface round-trip cleanly.
+            scheduler: p.scheduler.map(|s| s.to_string()),
             seed_mode: Some(p.seed_mode.label().to_string()),
             batch: Some(p.batch),
             format: Some(format!("{:?}", p.format).to_lowercase()),
@@ -1854,12 +1858,12 @@ impl App {
             p.guidance = g;
         }
         if let Some(ref sched) = prefs.scheduler {
-            p.scheduler = match sched.as_str() {
-                "ddim" => Some(mold_core::Scheduler::Ddim),
-                "eulerancestral" => Some(mold_core::Scheduler::EulerAncestral),
-                "unipc" => Some(mold_core::Scheduler::UniPc),
-                _ => None,
-            };
+            // `Scheduler::FromStr` accepts both the canonical Display
+            // form ("euler-ancestral", "uni-pc") that we and
+            // `mold-db::config_sync` write, and the legacy debug-lower
+            // form ("eulerancestral", "unipc") written by pre-#265 TUI
+            // builds, so existing DBs don't lose their saved choice.
+            p.scheduler = sched.parse().ok();
         }
         if let Some(ref sm) = prefs.seed_mode {
             p.seed_mode = match sm.as_str() {
@@ -4509,7 +4513,7 @@ impl App {
 
                     // Save session state
                     self.save_session();
-                    Config::write_last_model(&actual_model);
+                    mold_db::settings::record_last_model(&actual_model);
 
                     // Push to prompt history
                     let neg = if neg_text.is_empty() {

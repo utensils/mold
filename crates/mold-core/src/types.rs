@@ -130,7 +130,13 @@ impl std::str::FromStr for Scheduler {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "ddim" => Ok(Scheduler::Ddim),
-            "euler-ancestral" | "euler_ancestral" => Ok(Scheduler::EulerAncestral),
+            // `eulerancestral` is the legacy debug-lower form written by
+            // pre-#265 TUI `save_prefs_for_model`; kept as a read-only
+            // alias so existing model_prefs rows still parse after the
+            // migration to canonical Display format.
+            "euler-ancestral" | "euler_ancestral" | "eulerancestral" => {
+                Ok(Scheduler::EulerAncestral)
+            }
             "uni-pc" | "unipc" | "uni_pc" => Ok(Scheduler::UniPc),
             other => Err(format!(
                 "unknown scheduler: '{other}'. Valid: ddim, euler-ancestral, uni-pc"

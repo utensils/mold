@@ -587,8 +587,10 @@ cmd_assert() {
 
 cmd_quit() {
     if [ -f "$STATE_FILE" ]; then
+        # Extract terminal id from new key=value format, with a
+        # fallback to the legacy single-line form.
         local term_id
-        term_id=$(cat "$STATE_FILE")
+        term_id=$(load_state 2>/dev/null || head -1 "$STATE_FILE")
         # Try to close the terminal via AppleScript
         osascript -e "
             tell application \"Ghostty\"
@@ -603,6 +605,103 @@ cmd_quit() {
     else
         echo "OK: No session to quit"
     fi
+}
+
+# Reap any Ghostty terminal whose on-screen content still looks like a
+# `mold tui` session — including ones whose state file was lost (crash,
+# user rm, forgotten `quit`). Useful as a cheap `trap … EXIT` hook so
+# the skill never leaks windows even when a caller abandons the
+# session mid-flow.
+cmd_cleanup() {
+    # First, handle any state-tracked session via the normal path.
+    if [ -f "$STATE_FILE" ]; then
+        cmd_quit >/dev/null 2>&1 || true
+    fi
+
+    # Then walk every live Ghostty terminal, peek at its screen, and
+    # close the ones that show mold TUI chrome. We look for the
+    # docked-view header text ("mold " + a version/tab line) plus the
+    # Generate/Gallery/Models/Queue tab strip since that combo is
+    # unique to the running TUI and won't false-positive a
+    # `mold --help` or shell pane.
+    local reaped=0
+    local prev_clip=""
+    prev_clip=$(pbpaste 2>/dev/null || echo "")
+    # shellcheck disable=SC2064
+    trap "if [ -n \"\${prev_clip:-}\" ]; then echo -n \"\$prev_clip\" | pbcopy 2>/dev/null || true; fi" RETURN
+
+    # Ask AppleScript for every terminal id across every window.
+    local ids
+    ids=$(osascript <<'APPLESCRIPT' 2>/dev/null || true
+tell application "Ghostty"
+    set out to ""
+    try
+        repeat with w in windows
+            repeat with t in (every tab of w)
+                set term to focused terminal of t
+                set out to out & (id of term) & linefeed
+            end repeat
+        end repeat
+    end try
+    return out
+end tell
+APPLESCRIPT
+)
+    # Fall back to a flat iteration if the nested form is unsupported.
+    if [ -z "$ids" ]; then
+        ids=$(osascript <<'APPLESCRIPT' 2>/dev/null || true
+tell application "Ghostty"
+    set out to ""
+    try
+        repeat with t in terminals
+            set out to out & (id of t) & linefeed
+        end repeat
+    end try
+    return out
+end tell
+APPLESCRIPT
+)
+    fi
+
+    while IFS= read -r id; do
+        [ -z "$id" ] && continue
+        # Snapshot the terminal's screen to the clipboard and read it.
+        osascript -e "
+            tell application \"Ghostty\"
+                try
+                    set term to terminal id \"$id\"
+                    perform action \"write_screen_file:copy,plain\" on term
+                end try
+            end tell
+        " >/dev/null 2>&1 || continue
+        local content=""
+        local t
+        for t in 1 2 3 4; do
+            sleep 0.1
+            content=$(pbpaste 2>/dev/null || echo "")
+            [ -n "$content" ] && break
+        done
+        # Match on the TUI's unique chrome. Require both the view-tab
+        # strip and a characteristic panel label so a plain shell
+        # running `mold --help` doesn't get yanked.
+        if echo "$content" | grep -q "Generate" && \
+           echo "$content" | grep -q "Gallery" && \
+           echo "$content" | grep -qE "(Parameters|Prompt|Installed|Available|Timeline|Recent)"; then
+            osascript -e "
+                tell application \"Ghostty\"
+                    try
+                        set term to terminal id \"$id\"
+                        close term
+                    end try
+                end tell
+            " >/dev/null 2>&1 || true
+            reaped=$((reaped + 1))
+        fi
+    done <<EOF
+$ids
+EOF
+
+    echo "OK: cleanup complete (reaped $reaped orphan TUI terminal(s))"
 }
 
 cmd_status() {
@@ -943,6 +1042,9 @@ case "${1:-help}" in
     quit)
         cmd_quit
         ;;
+    cleanup)
+        cmd_cleanup
+        ;;
     status)
         cmd_status
         ;;
@@ -990,7 +1092,10 @@ Lifecycle:
                                   --fresh creates a tmp MOLD_HOME for
                                   full isolation; --env injects extra
                                   vars into the spawned process.
-  quit                            Close UAT window
+  quit                            Close UAT window tracked in state file
+  cleanup                         Close any orphan mold-TUI Ghostty
+                                  terminals, even without state file.
+                                  Suitable for `trap ... EXIT` hooks.
   status                          Active session summary (+ MOLD_HOME)
   env                             Print MOLD_HOME / MOLD_DB_PATH in
                                   a form suitable for `eval`
