@@ -1023,12 +1023,22 @@ fn check_server_health(url: &str) -> bool {
 /// Spawn a background `mold serve` process.
 fn start_background_server(port: u16) -> Option<std::process::Child> {
     let exe = std::env::current_exe().ok()?;
-    std::process::Command::new(exe)
-        .args(["serve", "--port", &port.to_string(), "--log-file"])
+    let mut cmd = std::process::Command::new(exe);
+    configure_background_server_command(&mut cmd, port);
+    cmd.spawn().ok()
+}
+
+/// Configure the background `mold serve` command — pure helper so tests
+/// can inspect the args and env without actually spawning a process. The
+/// TUI owns this server lifecycle (starts it, talks to it over the loopback,
+/// stops it on quit), so it must opt into destructive endpoints like
+/// `DELETE /api/gallery/image/:filename` — otherwise the user's `d` in the
+/// Gallery returns 403 and the tile re-appears on the next scan.
+pub(crate) fn configure_background_server_command(cmd: &mut std::process::Command, port: u16) {
+    cmd.args(["serve", "--port", &port.to_string(), "--log-file"])
+        .env("MOLD_GALLERY_ALLOW_DELETE", "1")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()
+        .stderr(std::process::Stdio::null());
 }
 
 /// Wait for a server to become healthy, polling every 250ms.
@@ -2981,6 +2991,41 @@ impl App {
         self.generate.focus = GenerateFocus::Prompt;
     }
 
+    /// Replace the gallery with a fresh scan result, preserving the user's
+    /// current selection by filename where possible. When the previously-
+    /// selected entry is still in the new list, `selected` points at its
+    /// new index; otherwise we clamp the old index against the new length
+    /// (falling back to 0 only when the list is empty). This keeps the
+    /// viewport stable across deletes, reconnects, and any other rescan
+    /// trigger — no more "back to the first image" on every refresh.
+    pub fn apply_gallery_scan(&mut self, entries: Vec<GalleryEntry>) {
+        let previous_selected = self.gallery.selected;
+        let previous_filename = self
+            .gallery
+            .entries
+            .get(previous_selected)
+            .map(|e| e.filename());
+
+        self.gallery.thumbnail_states = vec![None; entries.len()];
+        self.gallery.thumb_dimensions = vec![None; entries.len()];
+        self.gallery.thumb_fixed_cache = vec![None; entries.len()];
+        self.gallery.entries = entries;
+        self.gallery.scanning = false;
+
+        self.gallery.selected = if self.gallery.entries.is_empty() {
+            0
+        } else if let Some(idx) = previous_filename.as_deref().and_then(|name| {
+            self.gallery
+                .entries
+                .iter()
+                .position(|e| e.filename() == name)
+        }) {
+            idx
+        } else {
+            previous_selected.min(self.gallery.entries.len() - 1)
+        };
+    }
+
     /// React to a failed server-side gallery delete: surface the server's
     /// error to the user and — when we still have a live server
     /// connection — kick off a rescan so the local gallery reconverges
@@ -4376,12 +4421,7 @@ impl App {
                     self.generate.progress.stage_started_at = None;
                 }
                 BackgroundEvent::GalleryScanComplete(entries) => {
-                    self.gallery.thumbnail_states = vec![None; entries.len()];
-                    self.gallery.thumb_dimensions = vec![None; entries.len()];
-                    self.gallery.thumb_fixed_cache = vec![None; entries.len()];
-                    self.gallery.entries = entries;
-                    self.gallery.scanning = false;
-                    self.gallery.selected = 0;
+                    self.apply_gallery_scan(entries);
 
                     // Spawn background thumbnail generation
                     let entries_info: Vec<(std::path::PathBuf, Option<String>)> = self
@@ -7835,6 +7875,125 @@ mod tests {
         assert!(
             app.gallery.scanning,
             "delete failure should trigger a gallery rescan"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_gallery_scan_preserves_selection_by_filename() {
+        // Rescans (e.g. after delete failure or reconnect) must not jump the
+        // user back to the first image — if the currently-selected entry
+        // still exists in the fresh list, its new index wins. Prior
+        // behaviour: `selected = 0` unconditionally.
+        let mut app = make_settings_test_app();
+        app.gallery.entries = vec![
+            make_test_entry_with_name("a.png"),
+            make_test_entry_with_name("b.png"),
+            make_test_entry_with_name("c.png"),
+        ];
+        app.gallery.thumbnail_states = vec![None; 3];
+        app.gallery.thumb_dimensions = vec![None; 3];
+        app.gallery.thumb_fixed_cache = vec![None; 3];
+        app.gallery.selected = 1; // b.png
+
+        // Fresh scan returns the same filenames in a different order.
+        let new_entries = vec![
+            make_test_entry_with_name("a.png"),
+            make_test_entry_with_name("c.png"),
+            make_test_entry_with_name("b.png"), // b moved to index 2
+        ];
+        app.apply_gallery_scan(new_entries);
+
+        assert_eq!(
+            app.gallery.selected, 2,
+            "selected should follow b.png to its new index, not reset to 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_gallery_scan_clamps_when_previous_filename_is_gone() {
+        // The entry we had selected no longer exists (e.g. a successful
+        // delete followed by a rescan). Fall back to clamping the old
+        // index so the viewport barely shifts — not back to 0.
+        let mut app = make_settings_test_app();
+        app.gallery.entries = vec![
+            make_test_entry_with_name("a.png"),
+            make_test_entry_with_name("b.png"),
+            make_test_entry_with_name("c.png"),
+        ];
+        app.gallery.thumbnail_states = vec![None; 3];
+        app.gallery.thumb_dimensions = vec![None; 3];
+        app.gallery.thumb_fixed_cache = vec![None; 3];
+        app.gallery.selected = 1; // b.png
+
+        // Fresh scan returned without b.png — it was really deleted.
+        let new_entries = vec![
+            make_test_entry_with_name("a.png"),
+            make_test_entry_with_name("c.png"),
+        ];
+        app.apply_gallery_scan(new_entries);
+
+        // Old index 1 clamped to new len-1 = 1, which is c.png — neighbour
+        // selection, not a jump back to a.png.
+        assert_eq!(app.gallery.selected, 1);
+    }
+
+    #[tokio::test]
+    async fn apply_gallery_scan_empty_list_resets_selected() {
+        let mut app = make_settings_test_app();
+        app.gallery.entries = vec![make_test_entry_with_name("a.png")];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.selected = 0;
+
+        app.apply_gallery_scan(Vec::new());
+
+        assert_eq!(app.gallery.selected, 0);
+        assert!(app.gallery.entries.is_empty());
+    }
+
+    fn make_test_entry_with_name(filename: &str) -> GalleryEntry {
+        GalleryEntry {
+            path: std::path::PathBuf::from(filename),
+            metadata: make_test_metadata(),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+        }
+    }
+
+    #[test]
+    fn background_server_command_enables_gallery_delete() {
+        // The TUI-spawned `mold serve` owns the same `~/.mold/output` the
+        // TUI deletes from — if the server default (`MOLD_GALLERY_ALLOW_DELETE=0`)
+        // applies, every DELETE API call returns 403, the recent
+        // `GalleryDeleteFailed` plumbing surfaces the error, and the
+        // follow-up rescan brings the tile back. Setting the env var when
+        // configuring the spawn lets the loopback server honour the delete.
+        let mut cmd = std::process::Command::new("mold");
+        super::configure_background_server_command(&mut cmd, 7680);
+
+        let env_entry = cmd
+            .get_envs()
+            .find(|(k, _)| k.to_string_lossy() == "MOLD_GALLERY_ALLOW_DELETE")
+            .map(|(_, v)| v.map(|os| os.to_string_lossy().into_owned()))
+            .expect(
+                "MOLD_GALLERY_ALLOW_DELETE must be configured on the background server command",
+            );
+
+        assert_eq!(
+            env_entry.as_deref(),
+            Some("1"),
+            "MOLD_GALLERY_ALLOW_DELETE must be '1' so loopback deletes succeed"
+        );
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.contains(&"serve".to_string()) && args.contains(&"7680".to_string()),
+            "serve subcommand and port must still be passed: {args:?}"
         );
     }
 

@@ -557,7 +557,7 @@ fn render_confirm(frame: &mut Frame, app: &App, message: String) {
     let theme = &app.theme;
     // Use larger popup when message has multiple lines (e.g. model deletion details)
     let line_count = message.lines().count();
-    let (w, h) = if line_count > 2 { (55, 35) } else { (40, 20) };
+    let (w, h) = if line_count > 2 { (55, 35) } else { (45, 30) };
     let area = centered_rect(frame.area(), w, h);
 
     frame.render_widget(Clear, area);
@@ -571,10 +571,14 @@ fn render_confirm(frame: &mut Frame, app: &App, message: String) {
 
     let mut text: Vec<Line> = message.lines().map(|l| Line::from(l.to_string())).collect();
     text.push(Line::from(""));
+    // "Enter" leads the hint because it is the default action — pressing
+    // Enter without thinking confirms the operation. Listing it last or
+    // omitting it (the older hint read `y Confirm  n Cancel`) led users
+    // to believe Enter meant cancel.
     text.push(Line::from(vec![
-        Span::styled("y", theme.status_key()),
+        Span::styled("Enter/y", theme.status_key()),
         Span::styled(" Confirm  ", Style::default().fg(theme.text)),
-        Span::styled("n", theme.status_key()),
+        Span::styled("Esc/n", theme.status_key()),
         Span::styled(" Cancel", Style::default().fg(theme.text)),
     ]));
 
@@ -668,6 +672,128 @@ fn render_settings_input(frame: &mut Frame, app: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn confirm_popup_hint_lists_enter_as_default_confirm() {
+        // Prior hint read `y Confirm  n Cancel` — Enter wasn't in the
+        // strip and users assumed it meant cancel, so gallery delete
+        // appeared to silently fail. The hint must now call out Enter.
+        let rendered = render_confirm_to_string("Delete file.png?");
+        assert!(
+            rendered.contains("Enter"),
+            "confirm popup should advertise Enter as the default: {rendered}"
+        );
+        assert!(
+            rendered.contains("Confirm"),
+            "confirm popup should still say Confirm: {rendered}"
+        );
+        assert!(
+            rendered.contains("Esc") || rendered.contains("n"),
+            "confirm popup should still expose a cancel affordance: {rendered}"
+        );
+    }
+
+    /// Drive `render_confirm` against a `TestBackend` and collapse the
+    /// buffer into a single string so assertions can use substring
+    /// matches against the visible UI.
+    fn render_confirm_to_string(message: &str) -> String {
+        use crate::app::{App, ConfirmAction, Popup};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // Build a stand-in App just for rendering — we don't need the
+        // tokio handle because render_confirm is pure.
+        let picker = ratatui_image::picker::Picker::from_fontsize((8, 16));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App {
+            active_view: crate::action::View::Gallery,
+            generate: crate::app::GenerateState {
+                prompt: tui_textarea::TextArea::default(),
+                negative_prompt: tui_textarea::TextArea::default(),
+                params: crate::app::GenerateParams::from_config(&mold_core::Config::default()),
+                focus: crate::app::GenerateFocus::Navigation,
+                param_index: 0,
+                visible_fields: Vec::new(),
+                capabilities: crate::model_info::capabilities_for_family(
+                    &crate::model_info::family_for_model("", &mold_core::Config::default()),
+                ),
+                progress: crate::app::ProgressState::default(),
+                preview_image: None,
+                image_state: None,
+                animation: None,
+                generating: false,
+                batch_remaining: 0,
+                last_seed: None,
+                last_generation_time_ms: None,
+                error_message: None,
+                model_description: String::new(),
+                negative_collapsed: false,
+            },
+            gallery: crate::app::GalleryState {
+                entries: Vec::new(),
+                selected: 0,
+                preview_image: None,
+                image_state: None,
+                animation: None,
+                scanning: false,
+                view_mode: crate::app::GalleryViewMode::Grid,
+                thumbnail_states: Vec::new(),
+                thumb_dimensions: Vec::new(),
+                thumb_fixed_cache: Vec::new(),
+                grid_cols: 3,
+                grid_scroll: 0,
+            },
+            models: crate::app::ModelsState {
+                catalog: Vec::new(),
+                selected: 0,
+                filter: String::new(),
+                filtering: false,
+            },
+            settings: crate::app::SettingsState::default(),
+            config: mold_core::Config::default(),
+            server_url: None,
+            picker,
+            theme: crate::ui::theme::Theme::default(),
+            popup: Some(Popup::Confirm {
+                message: message.to_string(),
+                on_confirm: ConfirmAction::DeleteGalleryImage,
+            }),
+            should_quit: false,
+            bg_tx: tx,
+            bg_rx: rx,
+            tokio_handle: tokio::runtime::Handle::try_current().unwrap_or_else(|_| {
+                // Build a throw-away runtime handle for non-tokio tests.
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let h = rt.handle().clone();
+                std::mem::forget(rt);
+                h
+            }),
+            resource_info: crate::ui::info::ResourceInfo::default(),
+            history: crate::history::PromptHistory::load(),
+            layout: crate::app::LayoutAreas::default(),
+            server_process: None,
+            upscale_in_progress: false,
+            upscale_task: None,
+            upscale_tile_progress: None,
+            upscale_progress: crate::app::ProgressState::default(),
+            connecting: false,
+        };
+
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+
+        // Collapse buffer into a single string — one row per line.
+        let buf = terminal.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     #[test]
     fn upscaler_manifest_has_description_and_size() {
         // All upscaler models in the manifest should have descriptions and non-zero sizes
