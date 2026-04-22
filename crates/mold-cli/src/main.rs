@@ -1244,8 +1244,7 @@ async fn run() -> anyhow::Result<()> {
                     eager,
                     offload,
                 )
-                .await
-                .map(|_| ());
+                .await;
             }
             commands::run::run(
                 model_or_prompt,
