@@ -36,6 +36,7 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
             KeyCode::Char('4') => return Action::SwitchView(View::Queue),
             KeyCode::Char('5') => return Action::SwitchView(View::Settings),
+            KeyCode::Char('6') => return Action::SwitchView(View::Script),
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 return Action::ToggleNegativePrompt;
             }
@@ -52,6 +53,7 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
         View::Models => map_models_key(key),
         View::Queue => map_queue_key(key),
         View::Settings => map_settings_key(key),
+        View::Script => map_script_key(key),
     }
 }
 
@@ -95,6 +97,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('3') => Action::SwitchView(View::Models),
             KeyCode::Char('4') => Action::SwitchView(View::Queue),
             KeyCode::Char('5') => Action::SwitchView(View::Settings),
+            KeyCode::Char('6') | KeyCode::Char('s') => Action::SwitchView(View::Script),
             KeyCode::Char('/') => Action::SearchHistory,
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Enter | KeyCode::Char('i') | KeyCode::Down => Action::FocusNext,
@@ -125,6 +128,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
             KeyCode::Char('4') => return Action::SwitchView(View::Queue),
             KeyCode::Char('5') => return Action::SwitchView(View::Settings),
+            KeyCode::Char('6') => return Action::SwitchView(View::Script),
             _ => {}
         }
     }
@@ -153,6 +157,7 @@ fn map_gallery_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('3') => Action::SwitchView(View::Models),
             KeyCode::Char('4') => Action::SwitchView(View::Queue),
             KeyCode::Char('5') => Action::SwitchView(View::Settings),
+            KeyCode::Char('6') => Action::SwitchView(View::Script),
             _ => Action::None,
         },
         GalleryViewMode::Detail => match key.code {
@@ -186,6 +191,7 @@ fn map_models_key(key: &KeyEvent) -> Action {
         KeyCode::Char('3') => Action::SwitchView(View::Models),
         KeyCode::Char('4') => Action::SwitchView(View::Queue),
         KeyCode::Char('5') => Action::SwitchView(View::Settings),
+        KeyCode::Char('6') => Action::SwitchView(View::Script),
         _ => Action::None,
     }
 }
@@ -201,6 +207,7 @@ fn map_queue_key(key: &KeyEvent) -> Action {
         KeyCode::Char('3') => Action::SwitchView(View::Models),
         KeyCode::Char('4') => Action::SwitchView(View::Queue),
         KeyCode::Char('5') => Action::SwitchView(View::Settings),
+        KeyCode::Char('6') => Action::SwitchView(View::Script),
         _ => Action::None,
     }
 }
@@ -219,6 +226,15 @@ fn map_settings_key(key: &KeyEvent) -> Action {
         KeyCode::Char('3') => Action::SwitchView(View::Models),
         KeyCode::Char('4') => Action::SwitchView(View::Queue),
         KeyCode::Char('5') => Action::SwitchView(View::Settings),
+        KeyCode::Char('6') => Action::SwitchView(View::Script),
+        _ => Action::None,
+    }
+}
+
+fn map_script_key(key: &KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => Action::SwitchView(View::Generate),
+        KeyCode::Char('q') => Action::Quit,
         _ => Action::None,
     }
 }

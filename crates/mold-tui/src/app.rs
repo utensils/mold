@@ -977,6 +977,7 @@ pub struct App {
     pub gallery: GalleryState,
     pub models: ModelsState,
     pub settings: SettingsState,
+    pub script: crate::ui::script_composer::ScriptComposerState,
     pub config: Config,
     pub server_url: Option<String>,
     pub picker: Picker,
@@ -1309,6 +1310,7 @@ impl App {
                     ..Default::default()
                 }
             },
+            script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url,
             picker,
@@ -2421,16 +2423,18 @@ impl App {
                     View::Gallery => View::Models,
                     View::Models => View::Queue,
                     View::Queue => View::Settings,
-                    View::Settings => View::Generate,
+                    View::Settings => View::Script,
+                    View::Script => View::Generate,
                 };
             }
             Action::ViewPrev => {
                 self.active_view = match self.active_view {
-                    View::Generate => View::Settings,
+                    View::Generate => View::Script,
                     View::Gallery => View::Generate,
                     View::Models => View::Gallery,
                     View::Queue => View::Models,
                     View::Settings => View::Queue,
+                    View::Script => View::Settings,
                 };
             }
             Action::FocusNext if self.active_view == View::Generate => {
@@ -2474,6 +2478,7 @@ impl App {
                 }
                 View::Queue => {}
                 View::Settings => self.settings_navigate(-1),
+                View::Script => {}
             },
             Action::Down => match self.active_view {
                 View::Generate => {
@@ -2508,6 +2513,7 @@ impl App {
                 }
                 View::Queue => {}
                 View::Settings => self.settings_navigate(1),
+                View::Script => {}
             },
             Action::Increment => {
                 if self.active_view == View::Settings {
@@ -2579,6 +2585,7 @@ impl App {
                         self.settings_confirm();
                     }
                 }
+                View::Script => {}
             },
             Action::PullModel if self.active_view == View::Models => {
                 if let Some(model) = self.models.catalog.get(self.models.selected) {
@@ -5974,6 +5981,7 @@ mod tests {
                 skip_save: true,
                 ..Default::default()
             },
+            script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url: None,
             picker,
@@ -6069,9 +6077,16 @@ mod tests {
         // Queue sits at index 3 between Models and Settings.
         assert_eq!(View::Queue.index(), 3);
         assert_eq!(View::Settings.index(), 4);
-        assert_eq!(View::ALL.len(), 5);
+        assert_eq!(View::ALL.len(), 6);
         assert_eq!(View::ALL[3], View::Queue);
         assert_eq!(View::ALL[4], View::Settings);
+        assert_eq!(View::ALL[5], View::Script);
+    }
+
+    #[test]
+    fn view_all_includes_script() {
+        assert_eq!(View::ALL.len(), 6);
+        assert_eq!(View::ALL[5], View::Script);
     }
 
     // ── Settings E2E: display values ──────────────────────
@@ -6526,8 +6541,9 @@ mod tests {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         // Tab bar is 3 rows tall; tabs render on row 1 (under the title
-        // row, above the bottom border). 80-col terminal.
-        let tab_bar = ratatui::layout::Rect::new(0, 0, 80, 3);
+        // row, above the bottom border). 120-col terminal (wide enough for
+        // all 6 tabs).
+        let tab_bar = ratatui::layout::Rect::new(0, 0, 120, 3);
 
         // Actual rendered layout (verified via TestBackend probe) —
         // ratatui's Tabs widget adds its own pad_left(" ") and
@@ -6581,6 +6597,11 @@ mod tests {
             (57, View::Settings, "Settings '5'"),
             (62, View::Settings, "Settings 'n'"),
             (68, View::Settings, "Settings pad_right"),
+            (69, View::Settings, "Settings trailing divider"),
+            (70, View::Script, "Script pad_left"),
+            (72, View::Script, "Script '6'"),
+            (76, View::Script, "Script 'p'"),
+            (81, View::Script, "Script pad_right"),
         ];
 
         for (col, expected, name) in cases {
@@ -6609,14 +6630,14 @@ mod tests {
         // on the host/version indicator silently switched views.
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut app = make_settings_test_app();
-        app.layout.tab_bar = ratatui::layout::Rect::new(0, 0, 80, 3);
+        app.layout.tab_bar = ratatui::layout::Rect::new(0, 0, 120, 3);
         app.active_view = View::Generate;
 
-        // Col 75 is well past Settings (which ends at col 68) — it sits
+        // Col 90 is well past Script (which ends around col 82) — it sits
         // under the right-aligned "mold 0.9.0" version indicator.
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 75,
+            column: 90,
             row: 1,
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
@@ -6659,6 +6680,7 @@ mod tests {
             ("3", View::Models),
             ("4", View::Queue),
             ("5", View::Settings),
+            ("6", View::Script),
         ];
         for (digit, expected) in digit_to_view {
             let col = (0..tab_bar.width)

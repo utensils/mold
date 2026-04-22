@@ -100,6 +100,7 @@ pub enum View {
     Models,
     Queue,
     Settings,
+    Script,
 }
 
 impl View {
@@ -110,6 +111,7 @@ impl View {
             View::Models => "Models",
             View::Queue => "Queue",
             View::Settings => "Settings",
+            View::Script => "Script",
         }
     }
 
@@ -120,14 +122,16 @@ impl View {
             View::Models => 2,
             View::Queue => 3,
             View::Settings => 4,
+            View::Script => 5,
         }
     }
 
-    pub const ALL: [View; 5] = [
+    pub const ALL: [View; 6] = [
         View::Generate,
         View::Gallery,
         View::Models,
         View::Queue,
         View::Settings,
+        View::Script,
     ];
 }
