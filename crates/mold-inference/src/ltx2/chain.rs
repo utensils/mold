@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn chain_runs_all_stages_and_drops_tail_prefix_from_continuations() {
+    fn chain_orchestrator_emits_full_per_stage_clips() {
         let stages = vec![stage("a", 97), stage("a", 97), stage("a", 97)];
         let req = chain_req(stages, 4);
         let mut renderer = FakeRenderer::new();
@@ -935,6 +935,44 @@ mod tests {
         orch.run(&req, None).unwrap();
         let has_carry: Vec<bool> = renderer.calls.iter().map(|c| c.has_carry).collect();
         assert_eq!(has_carry, vec![false, true, true]);
+    }
+
+    #[test]
+    fn mixed_transitions_end_to_end() {
+        let mut renderer = FakeRenderer::new();
+        let mut req = sample_chain_request(4, TransitionMode::Smooth);
+        // sample_chain_request uses motion_tail_frames=0; override so the
+        // Smooth boundary trim math has something to trim.
+        req.motion_tail_frames = 25;
+        req.stages[1].transition = TransitionMode::Smooth;
+        req.stages[2].transition = TransitionMode::Cut;
+        req.stages[3].transition = TransitionMode::Fade;
+        req.stages[3].fade_frames = Some(8);
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        let out = orch.run(&req, None).unwrap();
+
+        // Expected frame count after StitchPlan::assemble:
+        //   stage 0 kept whole (97)
+        //   + stage 1 Smooth (drop motion_tail 25) = 97 - 25 = 72
+        //   + stage 2 Cut (keep whole) = 97
+        //   + stage 3 Fade (consume 2*fade_len into fade_len, net -fade_len=8)
+        //     = 97 - 8 = 89
+        //   total = 97 + 72 + 97 + 89 = 355
+        let boundaries: Vec<_> = req.stages.iter().skip(1).map(|s| s.transition).collect();
+        let fade_lens: Vec<_> = req
+            .stages
+            .iter()
+            .skip(1)
+            .map(|s| s.fade_frames.unwrap_or(8))
+            .collect();
+        let plan = crate::ltx2::stitch::StitchPlan {
+            clips: out.stage_frames,
+            boundaries,
+            fade_lens,
+            motion_tail_frames: req.motion_tail_frames,
+        };
+        let frames = plan.assemble().unwrap();
+        assert_eq!(frames.len(), 355);
     }
 
     fn sample_chain_request(count: usize, transition: TransitionMode) -> ChainRequest {
