@@ -489,7 +489,7 @@ mod tests {
     // ── Orchestrator tests (fake renderer, weight-free) ───────────────
 
     use image::Rgb;
-    use mold_core::chain::ChainStage;
+    use mold_core::chain::{ChainStage, TransitionMode};
 
     /// Deterministic fake renderer for orchestrator tests. Records every
     /// call so assertions can inspect the per-stage request shape, emits
@@ -588,6 +588,11 @@ mod tests {
             source_image: None,
             negative_prompt: None,
             seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
         }
     }
 

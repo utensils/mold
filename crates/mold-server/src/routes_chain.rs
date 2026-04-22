@@ -528,7 +528,7 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use image::{Rgb, RgbImage};
-    use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage};
+    use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
     use mold_core::{GenerateRequest, GenerateResponse};
     use mold_inference::ltx2::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
     use mold_inference::InferenceEngine;
@@ -640,6 +640,11 @@ mod tests {
                     source_image: None,
                     negative_prompt: None,
                     seed_offset: None,
+                    transition: TransitionMode::Smooth,
+                    fade_frames: None,
+                    model: None,
+                    loras: vec![],
+                    references: vec![],
                 })
                 .collect(),
             motion_tail_frames: 0, // simplifies frame accounting for the mock

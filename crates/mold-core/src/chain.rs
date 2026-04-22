@@ -101,6 +101,32 @@ pub struct ChainStage {
     /// different seed".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_offset: Option<u64>,
+
+    // NEW in multi-prompt v2 ───────────────────────────────────────────
+    /// Boundary style between the previous stage and this stage.
+    /// Stage 0's value is coerced to `Smooth` in `normalise`.
+    #[serde(default)]
+    pub transition: TransitionMode,
+
+    /// Length in pixel frames of the crossfade when `transition == Fade`.
+    /// `None` means use the server-announced default (8 frames). Capped
+    /// at `fade_frames_max` from `/api/capabilities/chain-limits`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade_frames: Option<u32>,
+
+    // RESERVED for B/C — populated values are rejected by normalise ───
+    /// **Reserved for sub-project C.** Populating this in a request
+    /// produces 422 in this release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// **Reserved for sub-project B.** Non-empty values produce 422.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<LoraSpec>,
+
+    /// **Reserved for sub-project B.** Non-empty values produce 422.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<NamedRef>,
 }
 
 /// Chained generation request. Server accepts either the canonical form
@@ -458,6 +484,11 @@ fn build_auto_expand_stages(
             source_image: source_image.clone(),
             negative_prompt: None,
             seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
         });
     }
     Ok(stages)
@@ -525,6 +556,11 @@ mod tests {
             source_image: None,
             negative_prompt: None,
             seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
         }
     }
 
@@ -814,5 +850,44 @@ mod tests {
         // base64-encoded image via the existing base64 helper
         assert!(json.contains(r#""name":"hero""#));
         assert!(json.contains(r#""image":"#));
+    }
+
+    #[test]
+    fn chain_stage_defaults_are_backcompat() {
+        // Parsing a v1-shaped stage (no new fields) yields the same structure
+        // with defaults applied.
+        let json = r#"{
+            "prompt": "a cat",
+            "frames": 97
+        }"#;
+        let stage: ChainStage = serde_json::from_str(json).unwrap();
+        assert_eq!(stage.prompt, "a cat");
+        assert_eq!(stage.frames, 97);
+        assert_eq!(stage.transition, TransitionMode::Smooth);
+        assert_eq!(stage.fade_frames, None);
+        assert!(stage.model.is_none());
+        assert!(stage.loras.is_empty());
+        assert!(stage.references.is_empty());
+    }
+
+    #[test]
+    fn chain_stage_roundtrips_all_fields() {
+        let stage = ChainStage {
+            prompt: "scene".into(),
+            frames: 49,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Cut,
+            fade_frames: Some(12),
+            model: None,
+            loras: vec![],
+            references: vec![],
+        };
+        let json = serde_json::to_string(&stage).unwrap();
+        let back: ChainStage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.frames, 49);
+        assert_eq!(back.transition, TransitionMode::Cut);
+        assert_eq!(back.fade_frames, Some(12));
     }
 }
