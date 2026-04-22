@@ -643,3 +643,50 @@ frames = 97
         .failure()
         .stderr(predicate::str::contains("schema"));
 }
+
+// ── mold run --prompt flag conflicts ──────────────────────────────────────
+
+#[test]
+fn positional_plus_prompt_flag_errors() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args([
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "my positional prompt",
+            "--prompt",
+            "also a flag prompt",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot combine"));
+}
+
+#[test]
+fn positional_alone_still_works() {
+    // Sanity: the rejection must NOT trip when only positional is given.
+    let env = TestEnv::new();
+    env.cmd()
+        .args(["run", "a positional-only prompt", "--dry-run"])
+        .assert()
+        // May fail downstream for unrelated reasons (unknown model, etc.)
+        // but the stderr must NOT contain "cannot combine".
+        .stderr(predicate::str::contains("cannot combine").not());
+}
+
+#[test]
+fn prompt_flag_alone_still_works() {
+    // Sanity: --prompt alone must not trip the rejection.
+    let env = TestEnv::new();
+    env.cmd()
+        .args([
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "--prompt",
+            "lonely flag prompt",
+            "--dry-run",
+        ])
+        .assert()
+        .stderr(predicate::str::contains("cannot combine").not());
+}

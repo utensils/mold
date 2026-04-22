@@ -1281,6 +1281,24 @@ async fn run() -> anyhow::Result<()> {
                 )
                 .await;
             }
+
+            // Reject positional prompt + --prompt flag combo (Task 3.6).
+            if !prompt.is_empty() {
+                let config = mold_core::Config::load_or_default();
+                let has_positional_prompt = match model_or_prompt.as_deref() {
+                    Some(first) if mold_core::manifest::is_known_model(first, &config) => {
+                        !prompt_rest.is_empty()
+                    }
+                    Some(_) => true, // first positional isn't a model → it's prompt text
+                    None => !prompt_rest.is_empty(),
+                };
+                if has_positional_prompt {
+                    anyhow::bail!(
+                        "cannot combine positional prompt and --prompt; pick one or use --script"
+                    );
+                }
+            }
+
             if prompt.len() > 1 {
                 return commands::chain::run_from_sugar(
                     model_or_prompt.clone(),
