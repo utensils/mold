@@ -8430,156 +8430,77 @@ mod tests {
         );
     }
 
-    /// Theme persistence tests serialize on this mutex — they mutate
-    /// `MOLD_HOME` which is process-wide, and cargo runs tests
-    /// concurrently by default.
-    static THEME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[tokio::test]
-    async fn apply_theme_preset_persists_to_session_file_immediately() {
-        // Previously `apply_theme_preset` only updated in-memory state;
-        // the disk write happened later, in `save_session()`, which runs
-        // on shutdown and after each generation. A user who changed
-        // theme and then crashed (or killed the TUI) lost the change.
-        // TDD: the call must write the session file itself.
-        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    async fn apply_theme_preset_persists_immediately() {
+        // `apply_theme_preset` must flush state to the DB right away so a
+        // crash/force-quit right after a theme change still restores the
+        // latest choice on next launch.
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
 
-        let tmp = std::env::temp_dir().join(format!(
-            "mold-theme-persist-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let previous_home = std::env::var("MOLD_HOME").ok();
-        std::env::set_var("MOLD_HOME", &tmp);
-
-        let mut app = make_settings_test_app();
-        app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
-
-        let session_path = tmp.join("tui-session.json");
-        let persisted_ok = session_path.is_file();
-        let contents = if persisted_ok {
-            std::fs::read_to_string(&session_path).unwrap_or_default()
-        } else {
-            String::new()
-        };
-
-        // Restore env before asserting so a failure doesn't leak state.
-        match previous_home {
-            Some(v) => std::env::set_var("MOLD_HOME", v),
-            None => std::env::remove_var("MOLD_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        assert!(
-            persisted_ok,
-            "apply_theme_preset should have written tui-session.json to MOLD_HOME"
-        );
-        assert!(
-            contents.contains("\"theme\"") && contents.contains("dracula"),
-            "session file should carry the selected theme slug: {contents}"
-        );
+            // Re-read via the public load path — confirms the change
+            // actually made it into persistent storage and wasn't just
+            // cached in-memory.
+            let loaded = crate::session::TuiSession::load();
+            assert_eq!(
+                loaded.theme.as_deref(),
+                Some("dracula"),
+                "apply_theme_preset should have persisted the theme immediately"
+            );
+        });
     }
 
     #[tokio::test]
     async fn theme_save_then_load_round_trip_preserves_preset() {
-        // Full belt-and-braces guard for theme persistence: write a
-        // session via the same path the app uses (apply_theme_preset →
-        // save_session), then read the file back via TuiSession::load
-        // and confirm the slug parses to the same preset.
-        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "mold-theme-roundtrip-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let previous_home = std::env::var("MOLD_HOME").ok();
-        std::env::set_var("MOLD_HOME", &tmp);
+        crate::test_env::with_isolated_env(|_home| {
+            for preset in [
+                crate::ui::theme::ThemePreset::Mocha,
+                crate::ui::theme::ThemePreset::Latte,
+                crate::ui::theme::ThemePreset::Ristretto,
+                crate::ui::theme::ThemePreset::Gruvbox,
+                crate::ui::theme::ThemePreset::Tokyo,
+                crate::ui::theme::ThemePreset::Nord,
+                crate::ui::theme::ThemePreset::Dracula,
+            ] {
+                let mut app = make_settings_test_app();
+                app.apply_theme_preset(preset);
 
-        for preset in [
-            crate::ui::theme::ThemePreset::Mocha,
-            crate::ui::theme::ThemePreset::Latte,
-            crate::ui::theme::ThemePreset::Ristretto,
-            crate::ui::theme::ThemePreset::Gruvbox,
-            crate::ui::theme::ThemePreset::Tokyo,
-            crate::ui::theme::ThemePreset::Nord,
-            crate::ui::theme::ThemePreset::Dracula,
-        ] {
-            let mut app = make_settings_test_app();
-            app.apply_theme_preset(preset);
+                let loaded = crate::session::TuiSession::load();
+                let parsed = loaded
+                    .theme
+                    .as_deref()
+                    .map(crate::ui::theme::ThemePreset::from_slug)
+                    .unwrap_or_default();
+                assert_eq!(
+                    parsed, preset,
+                    "preset {preset:?} did not round-trip via TuiSession::load (got {parsed:?})"
+                );
+            }
+        });
+    }
 
+    #[tokio::test]
+    async fn theme_default_is_mocha_when_session_is_missing() {
+        // The default theme must always be Mocha — Latte is the light
+        // counterpart and should only appear when explicitly selected.
+        crate::test_env::with_isolated_env(|_home| {
             let loaded = crate::session::TuiSession::load();
-            let parsed = loaded
+            let resolved = loaded
                 .theme
                 .as_deref()
                 .map(crate::ui::theme::ThemePreset::from_slug)
                 .unwrap_or_default();
-            // Restore env *before* asserting so a failure on one preset
-            // doesn't leak MOLD_HOME to other tests.
             assert_eq!(
-                parsed, preset,
-                "preset {preset:?} did not round-trip via TuiSession::load (got {parsed:?})"
+                resolved,
+                crate::ui::theme::ThemePreset::Mocha,
+                "missing session must resolve to Mocha, never Latte"
             );
-        }
-
-        match previous_home {
-            Some(v) => std::env::set_var("MOLD_HOME", v),
-            None => std::env::remove_var("MOLD_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[tokio::test]
-    async fn theme_default_is_mocha_when_session_file_is_missing() {
-        // The default theme must always be Mocha — Latte is the light
-        // counterpart and should only appear when explicitly selected.
-        // Guard against a regression where `ThemePreset::default()` or
-        // the from_slug fallback gets swapped.
-        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "mold-theme-default-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let previous_home = std::env::var("MOLD_HOME").ok();
-        std::env::set_var("MOLD_HOME", &tmp);
-
-        let loaded = crate::session::TuiSession::load();
-        let resolved = loaded
-            .theme
-            .as_deref()
-            .map(crate::ui::theme::ThemePreset::from_slug)
-            .unwrap_or_default();
-
-        match previous_home {
-            Some(v) => std::env::set_var("MOLD_HOME", v),
-            None => std::env::remove_var("MOLD_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        assert_eq!(
-            resolved,
-            crate::ui::theme::ThemePreset::Mocha,
-            "missing session file must resolve to Mocha, never Latte"
-        );
-        assert!(
-            loaded.theme.is_none(),
-            "no theme key should be present in a fresh session"
-        );
+            assert!(
+                loaded.theme.is_none(),
+                "no theme key should be present in a fresh session"
+            );
+        });
     }
 
     #[tokio::test]
@@ -8603,45 +8524,21 @@ mod tests {
     #[tokio::test]
     async fn apply_theme_preset_persists_across_multiple_changes() {
         // Rapidly cycling themes should always leave the *latest* choice
-        // on disk — an earlier save_session must not be skipped because
+        // on disk — an earlier save must not be skipped because
         // something thinks the preset hasn't changed.
-        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
+            app.apply_theme_preset(crate::ui::theme::ThemePreset::Nord);
+            app.apply_theme_preset(crate::ui::theme::ThemePreset::Gruvbox);
 
-        let tmp = std::env::temp_dir().join(format!(
-            "mold-theme-cycle-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let previous_home = std::env::var("MOLD_HOME").ok();
-        std::env::set_var("MOLD_HOME", &tmp);
-
-        let mut app = make_settings_test_app();
-        app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
-        app.apply_theme_preset(crate::ui::theme::ThemePreset::Nord);
-        app.apply_theme_preset(crate::ui::theme::ThemePreset::Gruvbox);
-
-        let session_path = tmp.join("tui-session.json");
-        let contents = std::fs::read_to_string(&session_path).unwrap_or_default();
-
-        match previous_home {
-            Some(v) => std::env::set_var("MOLD_HOME", v),
-            None => std::env::remove_var("MOLD_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        assert!(
-            contents.contains("gruvbox"),
-            "latest theme (gruvbox) should be the persisted slug, got: {contents}"
-        );
-        assert!(
-            !contents.contains("dracula") || contents.matches("gruvbox").count() >= 1,
-            "old slug should have been overwritten: {contents}"
-        );
+            let loaded = crate::session::TuiSession::load();
+            assert_eq!(
+                loaded.theme.as_deref(),
+                Some("gruvbox"),
+                "latest theme (gruvbox) should be the persisted slug"
+            );
+        });
     }
 
     #[tokio::test]
