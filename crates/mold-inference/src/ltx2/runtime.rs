@@ -5968,12 +5968,8 @@ mod tests {
             replacements: vec![],
             appended: vec![VideoTokenAppendCondition {
                 tokens: Tensor::from_vec(vec![9.0f32, 10.0], (1, 1, 2), &Device::Cpu).unwrap(),
-                positions: Tensor::from_vec(
-                    vec![30.0f32, 40.0, 50.0],
-                    (1, 3, 1, 1),
-                    &Device::Cpu,
-                )
-                .unwrap(),
+                positions: Tensor::from_vec(vec![30.0f32, 40.0, 50.0], (1, 3, 1, 1), &Device::Cpu)
+                    .unwrap(),
                 strength: 0.4,
             }],
         };
