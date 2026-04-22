@@ -70,6 +70,19 @@ jobs:
       - name: Install Rust build deps
         run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
       - uses: mozilla-actions/sccache-action@v0.0.7
+      - name: Probe sccache (disable on cache outage)
+        shell: bash
+        run: |
+          set +e
+          printf 'fn main() {}\n' > /tmp/sccache_probe.rs
+          sccache rustc --edition 2021 -- /tmp/sccache_probe.rs -o /tmp/sccache_probe
+          status=$?
+          rm -f /tmp/sccache_probe /tmp/sccache_probe.rs
+          if [ $status -ne 0 ]; then
+            echo "sccache probe failed — disabling RUSTC_WRAPPER for this job"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            sccache --stop-server >/dev/null 2>&1 || true
+          fi
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace-default
@@ -99,6 +112,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
 
       - uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Probe sccache (disable on cache outage)
+        shell: bash
+        run: |
+          set +e
+          printf 'fn main() {}\n' > /tmp/sccache_probe.rs
+          sccache rustc --edition 2021 -- /tmp/sccache_probe.rs -o /tmp/sccache_probe
+          status=$?
+          rm -f /tmp/sccache_probe /tmp/sccache_probe.rs
+          if [ $status -ne 0 ]; then
+            echo "sccache probe failed — disabling RUSTC_WRAPPER for this job"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            sccache --stop-server >/dev/null 2>&1 || true
+          fi
 
       - uses: Swatinem/rust-cache@v2
         with:
