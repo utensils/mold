@@ -427,6 +427,7 @@ mod tests {
     use super::*;
 
     use crate::test_env::with_isolated_env;
+    use serial_test::serial;
 
     #[test]
     fn default_session_has_no_prompt() {
@@ -448,6 +449,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mold_env)]
     fn save_then_load_roundtrip_through_db() {
         with_isolated_env(|_home| {
             let seed = TuiSession {
@@ -483,6 +485,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mold_env)]
     fn save_load_save_load_preserves_theme_across_many_cycles() {
         // Regression (preserved from the old JSON implementation): theme
         // must survive repeated save → load cycles, *including* when the
@@ -509,6 +512,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mold_env)]
     fn legacy_json_is_imported_once_and_file_is_renamed() {
         with_isolated_env(|home| {
             // Drop a legacy session file in MOLD_HOME.
@@ -543,6 +547,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mold_env)]
     fn legacy_json_import_is_idempotent() {
         with_isolated_env(|home| {
             let src = home.join("tui-session.json");
@@ -567,6 +572,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mold_env)]
     fn db_disabled_returns_default_without_persistence() {
         with_isolated_env(|_home| {
             std::env::set_var("MOLD_DB_DISABLE", "1");

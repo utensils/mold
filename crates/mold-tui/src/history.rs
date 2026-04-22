@@ -44,6 +44,18 @@ fn open_db() -> Option<MetadataDb> {
 }
 
 impl PromptHistory {
+    /// Build an empty history without touching the DB. Used by tests
+    /// that construct ad-hoc `App` values and don't care about the
+    /// persistent history — prevents parallel test runs from racing on
+    /// `MOLD_DB_PATH` mid-flight.
+    pub fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            cursor: None,
+            draft: None,
+        }
+    }
+
     /// Load history from the DB (newest first in storage, flipped to
     /// oldest-first for the in-memory cache so `prev()`/`next()` keep
     /// their existing semantics). Returns empty when the DB is
@@ -456,8 +468,10 @@ mod tests {
     // ---------- DB round-trip ----------
 
     use crate::test_env::with_isolated_env;
+    use serial_test::serial;
 
     #[test]
+    #[serial(mold_env)]
     fn push_then_load_roundtrips_through_db() {
         with_isolated_env(|_home| {
             let mut h = PromptHistory::load();
@@ -485,6 +499,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mold_env)]
     fn legacy_jsonl_import_populates_db_and_renames_file() {
         with_isolated_env(|home| {
             let src = home.join("prompt-history.jsonl");
@@ -509,6 +524,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(mold_env)]
     fn db_disabled_keeps_history_in_memory_only() {
         with_isolated_env(|_home| {
             std::env::set_var("MOLD_DB_DISABLE", "1");

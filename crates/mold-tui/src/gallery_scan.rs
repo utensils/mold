@@ -397,6 +397,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial(mold_env)]
     fn default_gallery_dir_contains_output() {
         let dir = default_gallery_dir();
         let dir_str = dir.to_string_lossy();
@@ -407,6 +408,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(mold_env)]
     fn default_gallery_dir_under_mold() {
         let dir = default_gallery_dir();
         let mold_dir = mold_core::Config::mold_dir().expect("mold dir should resolve in tests");
@@ -419,6 +421,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(mold_env)]
     fn scan_images_local_returns_empty_for_nonexistent_dir() {
         let entries = scan_images_local();
         let _ = entries;
@@ -442,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(mold_env)]
     fn preview_cache_path_matches_server_naming() {
         // The server stores previews at `<preview_dir>/<filename>.preview.gif`
         // and the TUI cache must use the same suffix so the fetched bytes

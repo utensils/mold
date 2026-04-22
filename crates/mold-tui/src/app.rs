@@ -5601,7 +5601,7 @@ mod tests {
     fn history_nav_only_from_prompt_focus() {
         // History navigation should only work from Prompt focus,
         // not NegativePrompt — prevents clobbering the main prompt.
-        let mut history = crate::history::PromptHistory::load();
+        let mut history = crate::history::PromptHistory::empty();
         // Seed some history
         history.push_entry(crate::history::HistoryEntry {
             prompt: "old prompt".to_string(),
@@ -6018,6 +6018,9 @@ mod tests {
     /// Config mutations are tested in-memory; save_config() may fail
     /// (save_error is set) but that's fine for mutation tests.
     fn make_settings_test_app() -> App {
+        // Make sure this test process never touches a real DB unless a
+        // specific test body opts in via `test_env::with_isolated_env`.
+        crate::test_env::disable_db_for_non_isolated_tests();
         let mut config = Config {
             // Pin default model so the test doesn't depend on downloaded models
             default_model: "flux2-klein:q8".to_string(),
@@ -6106,7 +6109,10 @@ mod tests {
             bg_rx,
             tokio_handle: tokio::runtime::Handle::current(),
             resource_info: crate::ui::info::ResourceInfo::default(),
-            history: crate::history::PromptHistory::load(),
+            // Start test apps with an empty in-memory history — avoids
+            // reaching into whatever MOLD_DB_PATH currently points at,
+            // which was the source of flakes in parallel runs.
+            history: crate::history::PromptHistory::empty(),
             layout: LayoutAreas::default(),
             server_process: None,
             upscale_in_progress: false,
@@ -6199,6 +6205,7 @@ mod tests {
     // ── Settings E2E: display values ──────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_display_all_global_defaults() {
         let app = make_settings_test_app();
         assert_eq!(
@@ -6231,6 +6238,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_display_all_expand_defaults() {
         let app = make_settings_test_app();
         assert_eq!(
@@ -6265,6 +6273,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_display_all_logging_defaults() {
         let app = make_settings_test_app();
         assert_eq!(app.settings_display_value(&SettingsKey::LogLevel), "info");
@@ -6273,6 +6282,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_display_all_model_defaults() {
         let app = make_settings_test_app();
         assert_eq!(
@@ -6319,6 +6329,7 @@ mod tests {
     // ── Settings E2E: numeric adjustments ─────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_server_port() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::ServerPort, 1.0, 1024.0, 65535.0);
@@ -6328,6 +6339,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_default_width() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::DefaultWidth, 64.0, 64.0, 4096.0);
@@ -6335,6 +6347,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_default_height() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::DefaultHeight, -64.0, 64.0, 4096.0);
@@ -6342,6 +6355,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_default_steps() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::DefaultSteps, 1.0, 1.0, 200.0);
@@ -6354,6 +6368,7 @@ mod tests {
     // full keyboard path: escape the prompt → switch view → cycle theme.
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn alt_5_while_generating_from_prompt_focus_switches_to_settings() {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let mut app = make_settings_test_app();
@@ -6374,6 +6389,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn theme_cycle_applies_immediately_while_generating() {
         use crate::ui::theme::ThemePreset;
         let mut app = make_settings_test_app();
@@ -6398,6 +6414,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn esc_then_5_reaches_settings_while_generating() {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let mut app = make_settings_test_app();
@@ -6421,6 +6438,7 @@ mod tests {
     // ── Enter on the Appearance pane must not trigger settings_confirm ──
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn enter_on_appearance_pane_does_not_open_model_dialog() {
         let mut app = make_settings_test_app();
         app.active_view = View::Settings;
@@ -6438,6 +6456,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn enter_on_configuration_still_opens_popup() {
         // Regression guard for the happy path.
         let mut app = make_settings_test_app();
@@ -6452,23 +6471,30 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_cycle_theme_wraps_both_directions() {
+        // Writes to MOLD_DB_PATH via `apply_theme_preset`, so it must
+        // serialize with the other theme tests to avoid clobbering
+        // their DB state.
         use crate::ui::theme::ThemePreset;
-        let mut app = make_settings_test_app();
-        // Starts on the default (Mocha).
-        assert_eq!(app.settings.theme_preset, ThemePreset::Mocha);
-        // Forward cycles to Latte and also rebuilds `app.theme`.
-        app.settings_cycle_theme(1);
-        assert_eq!(app.settings.theme_preset, ThemePreset::Latte);
-        // `app.theme` should now match the Latte palette.
-        assert_eq!(app.theme.bg, ThemePreset::Latte.build().bg);
-        // Backward from Mocha (index 0) wraps around to Dracula (last).
-        app.apply_theme_preset(ThemePreset::Mocha);
-        app.settings_cycle_theme(-1);
-        assert_eq!(app.settings.theme_preset, ThemePreset::Dracula);
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            // Starts on the default (Mocha).
+            assert_eq!(app.settings.theme_preset, ThemePreset::Mocha);
+            // Forward cycles to Latte and also rebuilds `app.theme`.
+            app.settings_cycle_theme(1);
+            assert_eq!(app.settings.theme_preset, ThemePreset::Latte);
+            // `app.theme` should now match the Latte palette.
+            assert_eq!(app.theme.bg, ThemePreset::Latte.build().bg);
+            // Backward from Mocha (index 0) wraps around to Dracula (last).
+            app.apply_theme_preset(ThemePreset::Mocha);
+            app.settings_cycle_theme(-1);
+            assert_eq!(app.settings.theme_preset, ThemePreset::Dracula);
+        });
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_navigate_up_from_top_focuses_appearance() {
         let mut app = make_settings_test_app();
         app.settings.focus = SettingsFocus::Configuration;
@@ -6480,6 +6506,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_navigate_down_from_appearance_enters_configuration() {
         let mut app = make_settings_test_app();
         app.settings.focus = SettingsFocus::Appearance;
@@ -6495,6 +6522,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn alt_5_while_typing_prompt_switches_to_settings() {
         use crossterm::event::KeyCode;
         let mut app = make_settings_test_app();
@@ -6509,6 +6537,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn alt_4_while_typing_prompt_switches_to_queue() {
         use crossterm::event::KeyCode;
         let mut app = make_settings_test_app();
@@ -6521,6 +6550,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn alt_n_while_typing_prompt_toggles_negative_collapse() {
         use crossterm::event::KeyCode;
         let mut app = make_settings_test_app();
@@ -6535,6 +6565,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn toggle_negative_prompt_flips_collapsed_flag() {
         let mut app = make_settings_test_app();
         assert!(!app.generate.negative_collapsed);
@@ -6547,6 +6578,7 @@ mod tests {
     // ── Codex P2: focus must skip a collapsed Negative pane ──────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn tab_from_prompt_skips_negative_when_collapsed() {
         let mut app = make_settings_test_app();
         // Model supports negative prompt, but the user has collapsed it.
@@ -6563,6 +6595,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn shift_tab_from_parameters_skips_negative_when_collapsed() {
         let mut app = make_settings_test_app();
         app.generate.capabilities.supports_negative_prompt = true;
@@ -6575,6 +6608,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn tab_still_visits_negative_when_expanded() {
         // Regression guard: the skip-when-collapsed logic must not change
         // the happy-path Tab order when the negative pane is visible.
@@ -6589,6 +6623,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn mouse_click_on_gallery_tile_row_2_selects_correct_tile() {
         // Regression for "click boxes are finicky in general": the mouse
         // handler was using `cell_h = 14u16` after the grid was shrunk
@@ -6638,6 +6673,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn mouse_click_on_each_tab_switches_to_that_view() {
         // Click every tab at its start/middle/end columns and assert the
         // active_view lands on the expected tab. Regression reproducer
@@ -6724,6 +6760,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn mouse_click_past_last_tab_does_not_select_settings() {
         // The old behaviour mapped any click past the last rendered tab
         // (e.g. on the right-aligned version text or empty space) to
@@ -6751,6 +6788,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn mouse_hit_test_matches_real_tab_bar_rendering() {
         // End-to-end guard: render the real UI, scan each column of the
         // tab bar row looking for the digit "1".."5", and assert that a
@@ -6806,6 +6844,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn mouse_click_on_collapsed_negative_row_does_not_focus_it() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut app = make_settings_test_app();
@@ -6825,6 +6864,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn toggle_negative_prompt_while_focused_moves_focus_to_prompt() {
         let mut app = make_settings_test_app();
         app.generate.focus = GenerateFocus::NegativePrompt;
@@ -6836,6 +6876,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_increment_on_appearance_cycles_theme() {
         use crate::ui::theme::ThemePreset;
         let mut app = make_settings_test_app();
@@ -6847,6 +6888,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_expand_temperature() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::ExpandTemperature, 0.1, 0.0, 2.0);
@@ -6854,6 +6896,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_expand_top_p() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::ExpandTopP, -0.05, 0.0, 1.0);
@@ -6861,6 +6904,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_expand_max_tokens() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::ExpandMaxTokens, 64.0, 64.0, 4096.0);
@@ -6868,6 +6912,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_log_max_days() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::LogMaxDays, 1.0, 1.0, 365.0);
@@ -6875,6 +6920,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_model_steps() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::ModelSteps, 1.0, 1.0, 200.0);
@@ -6883,6 +6929,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_model_guidance() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::ModelGuidance, 0.5, 0.0, 30.0);
@@ -6891,6 +6938,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_model_width() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::ModelWidth, 64.0, 64.0, 4096.0);
@@ -6899,6 +6947,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_model_height() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::ModelHeight, -64.0, 64.0, 4096.0);
@@ -6907,6 +6956,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_adjust_model_lora_scale() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::ModelLoraScale, 0.1, 0.0, 2.0);
@@ -6915,6 +6965,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_numeric_clamps_at_min() {
         let mut app = make_settings_test_app();
         // Steps = 4, try decrementing by 100
@@ -6923,6 +6974,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_numeric_clamps_at_max() {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::DefaultSteps, 500.0, 1.0, 200.0);
@@ -6932,6 +6984,7 @@ mod tests {
     // ── Settings E2E: boolean toggles ─────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_toggle_embed_metadata() {
         let mut app = make_settings_test_app();
         assert!(app.config.embed_metadata);
@@ -6942,6 +6995,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_toggle_expand_enabled() {
         let mut app = make_settings_test_app();
         assert!(!app.config.expand.enabled);
@@ -6950,6 +7004,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_toggle_expand_thinking() {
         let mut app = make_settings_test_app();
         assert!(!app.config.expand.thinking);
@@ -6958,6 +7013,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_toggle_log_file() {
         let mut app = make_settings_test_app();
         assert!(!app.config.logging.file);
@@ -6968,6 +7024,7 @@ mod tests {
     // ── Settings E2E: toggle cycles ───────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_cycle_t5_variant() {
         let mut app = make_settings_test_app();
         let opts = &["auto", "fp16", "q8", "q6", "q5", "q4", "q3"];
@@ -6982,6 +7039,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_cycle_qwen3_variant() {
         let mut app = make_settings_test_app();
         let opts = &["auto", "bf16", "q8", "q6", "iq4", "q3"];
@@ -6992,6 +7050,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_cycle_log_level() {
         let mut app = make_settings_test_app();
         let opts = &["trace", "debug", "info", "warn", "error"];
@@ -7005,6 +7064,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_cycle_model_scheduler() {
         let mut app = make_settings_test_app();
         let opts = &["(none)", "ddim", "euler-ancestral", "uni-pc"];
@@ -7024,6 +7084,7 @@ mod tests {
     // ── Settings E2E: text/path apply ─────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_apply_default_model() {
         let mut app = make_settings_test_app();
         app.settings_apply_input(SettingsKey::DefaultModel, "sd15:fp16".into());
@@ -7031,6 +7092,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_apply_models_dir() {
         let mut app = make_settings_test_app();
         app.settings_apply_input(SettingsKey::ModelsDir, "/tmp/models".into());
@@ -7038,6 +7100,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_apply_output_dir() {
         let mut app = make_settings_test_app();
         app.settings_apply_input(SettingsKey::OutputDir, "/tmp/output".into());
@@ -7048,6 +7111,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_apply_default_negative_prompt() {
         let mut app = make_settings_test_app();
         app.settings_apply_input(SettingsKey::DefaultNegativePrompt, "ugly, deformed".into());
@@ -7060,6 +7124,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_apply_expand_backend() {
         let mut app = make_settings_test_app();
         app.settings_apply_input(SettingsKey::ExpandBackend, "http://localhost:11434".into());
@@ -7067,6 +7132,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_apply_expand_model() {
         let mut app = make_settings_test_app();
         app.settings_apply_input(SettingsKey::ExpandModel, "qwen3-expand:q4".into());
@@ -7074,6 +7140,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_apply_expand_api_model() {
         let mut app = make_settings_test_app();
         app.settings_apply_input(SettingsKey::ExpandApiModel, "gpt-4o".into());
@@ -7081,6 +7148,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_apply_log_dir() {
         let mut app = make_settings_test_app();
         app.settings_apply_input(SettingsKey::LogDir, "/tmp/logs".into());
@@ -7090,6 +7158,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_apply_model_negative_prompt() {
         let mut app = make_settings_test_app();
         app.settings_apply_input(SettingsKey::ModelNegativePrompt, "watermark".into());
@@ -7098,6 +7167,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_apply_model_lora() {
         let mut app = make_settings_test_app();
         app.settings_apply_input(
@@ -7115,6 +7185,7 @@ mod tests {
     // ── Settings E2E: model selector cycling ──────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_cycle_model_selector() {
         let mut app = make_settings_test_app();
         // Add a second model
@@ -7138,6 +7209,7 @@ mod tests {
     // ── Settings E2E: navigation ──────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_navigate_skips_headers() {
         let mut app = make_settings_test_app();
         // Start at index 0, which is a section header
@@ -7148,6 +7220,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_navigate_clamps_at_boundaries() {
         let mut app = make_settings_test_app();
         app.settings.row_index = 0;
@@ -7158,6 +7231,7 @@ mod tests {
     // ── Settings E2E: build_settings_rows structure ───────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_rows_have_all_sections() {
         let app = make_settings_test_app();
         let rows = app.build_settings_rows();
@@ -7175,6 +7249,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_rows_contain_read_only_paths() {
         let app = make_settings_test_app();
         let rows = app.build_settings_rows();
@@ -7194,6 +7269,7 @@ mod tests {
     // ── Settings E2E: full increment via row_index ────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_increment_via_row_index_adjusts_width() {
         let mut app = make_settings_test_app();
         let idx = find_settings_row(&app, SettingsKey::DefaultWidth);
@@ -7203,6 +7279,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_increment_via_row_index_toggles_bool() {
         let mut app = make_settings_test_app();
         let idx = find_settings_row(&app, SettingsKey::EmbedMetadata);
@@ -7213,6 +7290,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_increment_via_row_index_cycles_toggle() {
         let mut app = make_settings_test_app();
         let idx = find_settings_row(&app, SettingsKey::LogLevel);
@@ -7225,6 +7303,7 @@ mod tests {
     // ── Settings E2E: confirm opens popup for text fields ─
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_confirm_opens_popup_for_text_field() {
         let mut app = make_settings_test_app();
         let idx = find_settings_row(&app, SettingsKey::DefaultModel);
@@ -7238,6 +7317,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_confirm_toggles_bool_field() {
         let mut app = make_settings_test_app();
         let idx = find_settings_row(&app, SettingsKey::ExpandEnabled);
@@ -7249,6 +7329,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn settings_confirm_cycles_toggle_field() {
         let mut app = make_settings_test_app();
         let idx = find_settings_row(&app, SettingsKey::T5Variant);
@@ -7261,6 +7342,7 @@ mod tests {
     // ── Regression: metadata uses response model, not UI state (#161) ────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn generation_complete_metadata_uses_response_model() {
         // Simulates: user starts generation with model A, then switches UI
         // to model B before generation completes. Metadata must record
@@ -7454,6 +7536,7 @@ mod tests {
     // ── Regression: batch size unlimited in TUI (#194) ─────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn batch_increment_no_upper_cap() {
         let mut app = make_settings_test_app();
         // Switch to Generate view with Parameters focus
@@ -8025,6 +8108,7 @@ mod tests {
     // ── should_poll_remote() tests ────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn should_poll_remote_true_when_server_and_auto() {
         let mut app = make_settings_test_app();
         app.server_url = Some("http://hal9000:7680".to_string());
@@ -8033,6 +8117,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn should_poll_remote_true_when_server_and_remote() {
         let mut app = make_settings_test_app();
         app.server_url = Some("http://hal9000:7680".to_string());
@@ -8041,6 +8126,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn should_poll_remote_false_when_server_but_local_mode() {
         let mut app = make_settings_test_app();
         app.server_url = Some("http://hal9000:7680".to_string());
@@ -8052,6 +8138,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn should_poll_remote_false_when_no_server() {
         let mut app = make_settings_test_app();
         app.server_url = None;
@@ -8062,6 +8149,7 @@ mod tests {
     // ── update_model() remote vs local branching ──────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn update_model_uses_server_catalog_when_connected() {
         // Isolated env — `update_model` now consults `model_prefs` in
         // the metadata DB, so a test that doesn't scope MOLD_HOME could
@@ -8089,6 +8177,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn update_model_falls_back_to_local_when_model_not_in_catalog() {
         crate::test_env::with_isolated_env(|_home| {
             let mut app = make_settings_test_app();
@@ -8113,6 +8202,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn should_save_output_locally_false_when_connected_to_remote_server() {
         // When the TUI is connected to a server in non-Local mode, the
         // server has already saved the output to its own `~/.mold/output/`.
@@ -8127,6 +8217,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn should_save_output_locally_true_when_no_server() {
         let mut app = make_settings_test_app();
         app.server_url = None;
@@ -8135,6 +8226,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn should_save_output_locally_true_when_forced_local_even_with_server_url() {
         // User pressed `mold run --local` or toggled the Local mode in the
         // UI. The server exists but we're not using it — TUI owns the save.
@@ -8145,6 +8237,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn should_persist_response_locally_true_for_auto_mode_local_fallback() {
         // Codex finding: in Auto mode, the backend silently falls back to
         // local inference when the connected server becomes unreachable.
@@ -8171,6 +8264,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn should_persist_response_locally_respects_output_disabled() {
         let mut app = make_settings_test_app();
         app.server_url = None;
@@ -8210,6 +8304,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn delete_selected_gallery_image_empty_gallery_is_noop() {
         let mut app = make_settings_test_app();
         app.gallery.entries.clear();
@@ -8220,6 +8315,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn delete_selected_gallery_image_out_of_bounds_index_is_noop() {
         let mut app = make_settings_test_app();
         add_temp_gallery_entry(&mut app, "oob");
@@ -8230,6 +8326,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn delete_selected_gallery_image_removes_local_file_from_disk() {
         // Primary user guarantee: pressing Delete must actually remove the
         // file from disk, not just from the in-memory gallery state.
@@ -8244,6 +8341,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn delete_selected_gallery_image_removes_thumbnail_from_disk() {
         let mut app = make_settings_test_app();
         let path = add_temp_gallery_entry(&mut app, "thumb");
@@ -8263,6 +8361,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn delete_in_detail_view_advances_to_next_image_with_preview_loaded() {
         // When a user deletes from Detail (full-screen) view, they expect
         // to land on the next image with the preview pane showing it —
@@ -8338,6 +8437,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn delete_last_entry_in_detail_view_returns_to_grid() {
         // Deleting the only image in Detail view should drop back to the
         // Grid (where the empty-state banner lives) — not leave the user
@@ -8354,6 +8454,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn delete_selected_gallery_image_shrinks_parallel_arrays_in_lockstep() {
         // The gallery maintains three parallel vectors alongside `entries`
         // (thumbnail_states, thumb_dimensions, thumb_fixed_cache) — a
@@ -8416,6 +8517,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_delete_failure_surfaces_error_and_rescans() {
         // After a server-side delete fails, the UI has already optimistically
         // removed the tile — we need to (a) surface the error so the user
@@ -8441,6 +8543,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_gallery_scan_preserves_selection_by_filename() {
         // Rescans (e.g. after delete failure or reconnect) must not jump the
         // user back to the first image — if the currently-selected entry
@@ -8472,6 +8575,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_gallery_scan_clamps_when_previous_filename_is_gone() {
         // The entry we had selected no longer exists (e.g. a successful
         // delete followed by a rescan). Fall back to clamping the old
@@ -8500,6 +8604,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_gallery_scan_empty_list_resets_selected() {
         let mut app = make_settings_test_app();
         app.gallery.entries = vec![make_test_entry_with_name("a.png")];
@@ -8560,6 +8665,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_theme_preset_persists_immediately() {
         // `apply_theme_preset` must flush state to the DB right away so a
         // crash/force-quit right after a theme change still restores the
@@ -8569,8 +8675,7 @@ mod tests {
             app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
 
             // Re-read via the public load path — confirms the change
-            // actually made it into persistent storage and wasn't just
-            // cached in-memory.
+            // actually made it into persistent storage.
             let loaded = crate::session::TuiSession::load();
             assert_eq!(
                 loaded.theme.as_deref(),
@@ -8581,6 +8686,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn theme_save_then_load_round_trip_preserves_preset() {
         crate::test_env::with_isolated_env(|_home| {
             for preset in [
@@ -8610,6 +8716,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn update_model_restores_per_model_saved_params() {
         // Marquee behavior: FLUX remembers its own (width, steps, guidance);
         // SDXL remembers its own. Switching away and back restores each
@@ -8675,6 +8782,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn update_model_to_same_model_is_noop() {
         // Defensive — same-model calls shouldn't overwrite live params with
         // a stale DB snapshot.
@@ -8692,6 +8800,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn theme_default_is_mocha_when_session_is_missing() {
         // The default theme must always be Mocha — Latte is the light
         // counterpart and should only appear when explicitly selected.
@@ -8715,6 +8824,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn theme_default_is_mocha_when_slug_is_unknown_or_empty() {
         // An old session file or a hand-edited config could carry a
         // garbage slug — it must fall back to Mocha, not Latte.
@@ -8733,6 +8843,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_theme_preset_persists_across_multiple_changes() {
         // Rapidly cycling themes should always leave the *latest* choice
         // on disk — an earlier save must not be skipped because
@@ -8753,6 +8864,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_delete_failure_no_rescan_when_not_connected_to_server() {
         // In pure-local mode there's no server to re-scan against — just
         // surface the error without firing a rescan that would fail
@@ -8769,6 +8881,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn update_model_uses_local_config_when_no_server() {
         crate::test_env::with_isolated_env(|_home| {
             let mut app = make_settings_test_app();
@@ -8784,6 +8897,7 @@ mod tests {
     // ── apply_remote_model_defaults() ─────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_remote_model_defaults_updates_all_fields() {
         let mut app = make_settings_test_app();
         app.generate.params.model = "flux-dev:q4".to_string();
@@ -8810,6 +8924,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_remote_model_defaults_skips_empty_description() {
         let mut app = make_settings_test_app();
         app.generate.params.model = "flux-dev:q4".to_string();
@@ -8829,6 +8944,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_remote_model_defaults_no_match_leaves_params_unchanged() {
         let mut app = make_settings_test_app();
         app.generate.params.model = "nonexistent:q4".to_string();
@@ -8853,6 +8969,7 @@ mod tests {
     // ── ResetDefaults branching ───────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn reset_defaults_uses_server_catalog_when_connected() {
         let mut app = make_settings_test_app();
         app.server_url = Some("http://hal9000:7680".to_string());
@@ -8895,6 +9012,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn reset_defaults_uses_local_config_when_no_server() {
         let mut app = make_settings_test_app();
         app.server_url = None;
@@ -8922,6 +9040,7 @@ mod tests {
     // ── sync_resource_info_mode() ─────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn sync_resource_info_mode_local_clears_server_status() {
         let mut app = make_settings_test_app();
         app.generate.params.inference_mode = InferenceMode::Local;
@@ -8953,6 +9072,7 @@ mod tests {
     // ── ServerConnected handler ───────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn server_connected_applies_model_defaults_and_clears_connecting() {
         let mut app = make_settings_test_app();
         app.connecting = true;
@@ -8983,6 +9103,7 @@ mod tests {
     // ── ServerStatusUpdate handlers ───────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn server_status_update_some_populates_resource_info() {
         let mut app = make_settings_test_app();
         let status = mold_core::ServerStatus {
@@ -9020,6 +9141,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn server_status_update_none_clears_stale_status() {
         let mut app = make_settings_test_app();
         // Pre-populate with server status
@@ -9054,6 +9176,7 @@ mod tests {
     // ── ServerUnreachable handler ─────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn server_unreachable_clears_connecting_and_reverts_host() {
         let mut app = make_settings_test_app();
         app.connecting = true;
