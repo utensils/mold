@@ -52,6 +52,27 @@ pub fn read_script(toml_str: &str) -> Result<ChainScript> {
         .map_err(|e| MoldError::Validation(format!("chain TOML parse failed: {e}")))
 }
 
+/// Like [`read_script`], but additionally resolves any `source_image`
+/// fields that were stored as path strings (relative to `script_dir`) by
+/// reading the image bytes from disk and populating the in-memory
+/// `Vec<u8>` form.
+///
+/// Currently the v1 TOML format stores `source_image` as base64 bytes via
+/// the `base64_opt` serde helper; path-as-string is a CLI convenience that
+/// would require a schema extension. For now this just delegates to
+/// `read_script` so CLI callers have a stable entry point that can grow
+/// path-resolution later without touching callers.
+///
+/// The `script_dir` argument is reserved for future use and currently
+/// unused.
+pub fn read_script_resolving_paths(
+    toml_str: &str,
+    script_dir: &std::path::Path,
+) -> Result<ChainScript> {
+    let _ = script_dir;
+    read_script(toml_str)
+}
+
 /// Serialise a [`ChainScript`] to a TOML string.
 pub fn write_script(script: &ChainScript) -> Result<String> {
     let body = toml::to_string_pretty(script)

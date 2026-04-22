@@ -724,26 +724,129 @@ async fn render_chain_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<Chai
     parent.finish_and_clear();
 }
 
-/// Placeholder — Task 3.2 fills this in. Kept as a `todo!()` for this
-/// commit so main.rs compiles against the expected signature.
+/// Load a TOML script file, normalise it, and either submit or print a
+/// dry-run summary. Called from the `Commands::Run` early-return when
+/// `--script` is set.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_from_script(
-    _path: &std::path::Path,
-    _host: Option<String>,
-    _output: Option<String>,
-    _local: bool,
-    _dry_run: bool,
-    _no_metadata: bool,
-    _preview: bool,
-    _gpus: Option<String>,
-    _t5_variant: Option<String>,
-    _qwen3_variant: Option<String>,
-    _qwen2_variant: Option<String>,
-    _qwen2_text_encoder_mode: Option<String>,
-    _eager: bool,
-    _offload: bool,
+    path: &std::path::Path,
+    host: Option<String>,
+    output: Option<String>,
+    local: bool,
+    dry_run: bool,
+    no_metadata: bool,
+    preview: bool,
+    gpus: Option<String>,
+    t5_variant: Option<String>,
+    qwen3_variant: Option<String>,
+    qwen2_variant: Option<String>,
+    qwen2_text_encoder_mode: Option<String>,
+    eager: bool,
+    offload: bool,
 ) -> anyhow::Result<()> {
-    anyhow::bail!("--script support is not yet implemented (Task 3.2)")
+    let toml_src = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read script {}: {e}", path.display()))?;
+    let script_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let script = mold_core::chain_toml::read_script_resolving_paths(&toml_src, script_dir)
+        .map_err(|e| anyhow::anyhow!("invalid chain TOML in {}: {e}", path.display()))?;
+
+    let req = build_request_from_script(&script)?.normalise()?;
+
+    if dry_run {
+        print_dry_run_summary(&req);
+        return Ok(());
+    }
+
+    // Submit via the existing run_chain path.
+    let inputs = chain_inputs_from_request(&req);
+    run_chain(
+        inputs,
+        host,
+        output,
+        no_metadata,
+        preview,
+        local,
+        gpus,
+        t5_variant,
+        qwen3_variant,
+        qwen2_variant,
+        qwen2_text_encoder_mode,
+        eager,
+        offload,
+    )
+    .await
+}
+
+/// Build a canonical `ChainRequest` from the parsed TOML script.
+/// The result still needs `normalise()` before use.
+pub(crate) fn build_request_from_script(
+    script: &mold_core::chain::ChainScript,
+) -> anyhow::Result<ChainRequest> {
+    Ok(ChainRequest {
+        model: script.chain.model.clone(),
+        stages: script.stages.clone(),
+        motion_tail_frames: script.chain.motion_tail_frames,
+        width: script.chain.width,
+        height: script.chain.height,
+        fps: script.chain.fps,
+        seed: script.chain.seed,
+        steps: script.chain.steps,
+        guidance: script.chain.guidance,
+        strength: script.chain.strength,
+        output_format: script.chain.output_format,
+        placement: None,
+        prompt: None,
+        total_frames: None,
+        clip_frames: None,
+        source_image: None,
+    })
+}
+
+/// Re-build a `ChainInputs` bundle from a normalised `ChainRequest` so the
+/// existing `run_chain` helper can dispatch to the server or the local
+/// orchestrator. Assumes `req.stages` is non-empty (guaranteed by
+/// `normalise`).
+fn chain_inputs_from_request(req: &ChainRequest) -> ChainInputs {
+    let first = &req.stages[0];
+    ChainInputs {
+        prompt: first.prompt.clone(),
+        model: req.model.clone(),
+        width: req.width,
+        height: req.height,
+        steps: req.steps,
+        guidance: req.guidance,
+        strength: req.strength,
+        seed: req.seed,
+        fps: req.fps,
+        output_format: req.output_format,
+        total_frames: req.estimated_total_frames(),
+        clip_frames: first.frames,
+        motion_tail: req.motion_tail_frames,
+        source_image: first.source_image.clone(),
+        placement: req.placement.clone(),
+    }
+}
+
+/// Print a human-readable summary of the normalised chain for `--dry-run`
+/// mode. Written to stdout (not through the status! macro) so users can
+/// `mold run --script foo.toml --dry-run | less` cleanly.
+fn print_dry_run_summary(req: &ChainRequest) {
+    use mold_core::chain::TransitionMode;
+    let stage_count = req.stages.len();
+    let total_frames = req.estimated_total_frames();
+    let fps = req.fps.max(1);
+    let duration_s = total_frames as f64 / fps as f64;
+    println!("{stage_count} stages");
+    println!("estimated total frames: {total_frames} ({duration_s:.2}s @ {fps}fps)",);
+    for (i, s) in req.stages.iter().enumerate() {
+        let tag = match s.transition {
+            TransitionMode::Smooth => "smooth",
+            TransitionMode::Cut => "cut",
+            TransitionMode::Fade => "fade",
+        };
+        let prompt_preview: String = s.prompt.chars().take(60).collect();
+        println!("  [{i}] {tag}  {}f  \"{}\"", s.frames, prompt_preview);
+    }
 }
 
 #[cfg(test)]

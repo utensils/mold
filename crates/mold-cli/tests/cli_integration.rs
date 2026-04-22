@@ -514,3 +514,42 @@ fn update_check_runs_without_panic() {
         "expected 'Current version' in stderr: {stderr}"
     );
 }
+
+// ── mold run --script --dry-run ───────────────────────────────────────────
+
+#[test]
+fn dry_run_prints_stage_summary() {
+    let script = r#"
+schema = "mold.chain.v1"
+
+[chain]
+model = "ltx-2-19b-distilled:fp8"
+width = 1216
+height = 704
+fps = 24
+steps = 8
+guidance = 3.0
+strength = 1.0
+motion_tail_frames = 25
+output_format = "mp4"
+
+[[stage]]
+prompt = "first scene"
+frames = 97
+
+[[stage]]
+prompt = "second scene"
+frames = 49
+"#;
+    let env = TestEnv::new();
+    let path = env.home.join("chain.toml");
+    std::fs::write(&path, script).unwrap();
+
+    env.cmd()
+        .args(["run", "--script", path.to_str().unwrap(), "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 stages"))
+        .stdout(predicate::str::contains("first scene"))
+        .stdout(predicate::str::contains("second scene"));
+}
