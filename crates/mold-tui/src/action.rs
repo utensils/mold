@@ -92,6 +92,12 @@ pub enum Action {
     ScriptReorderDown,
     /// Script: move selected stage up (reorder).
     ScriptReorderUp,
+    /// Script: add a new stage after the current selection.
+    ScriptAddAfter,
+    /// Script: add a new stage before the current selection.
+    ScriptAddBefore,
+    /// Script: delete the current stage (shows confirmation if >1 stage).
+    ScriptDelete,
     /// No action (key not mapped or consumed by text input).
     None,
 }

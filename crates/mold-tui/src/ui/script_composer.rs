@@ -57,6 +57,52 @@ impl ScriptComposerState {
             self.unsaved = true;
         }
     }
+
+    pub fn add_stage_after(&mut self) {
+        let insert_at = self.selected + 1;
+        self.script.stages.insert(insert_at, ChainStage {
+            prompt: String::new(),
+            frames: 97,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
+        });
+        self.selected = insert_at;
+        self.unsaved = true;
+    }
+
+    pub fn add_stage_before(&mut self) {
+        self.script.stages.insert(self.selected, ChainStage {
+            prompt: String::new(),
+            frames: 97,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
+        });
+        // selection stays on the new stage (at the current index)
+        self.unsaved = true;
+    }
+
+    pub fn delete_stage(&mut self) {
+        if self.script.stages.len() <= 1 {
+            return;
+        }
+        self.script.stages.remove(self.selected);
+        if self.selected >= self.script.stages.len() {
+            self.selected = self.script.stages.len() - 1;
+        }
+        self.unsaved = true;
+    }
 }
 
 impl Default for ScriptComposerState {
@@ -453,6 +499,54 @@ mod tests {
         let mut s = make_state(2);
         s.reorder_up();
         assert_eq!(s.selected, 0);
+        assert!(!s.unsaved);
+    }
+
+    #[test]
+    fn add_stage_after_inserts_and_selects() {
+        let mut s = make_state(2);
+        s.selected = 0;
+        s.add_stage_after();
+        assert_eq!(s.script.stages.len(), 3);
+        assert_eq!(s.selected, 1);
+        assert!(s.script.stages[1].prompt.is_empty());
+        assert!(s.unsaved);
+    }
+
+    #[test]
+    fn add_stage_before_inserts_at_current() {
+        let mut s = make_state(2);
+        s.selected = 1;
+        s.add_stage_before();
+        assert_eq!(s.script.stages.len(), 3);
+        assert_eq!(s.selected, 1);
+        assert!(s.script.stages[1].prompt.is_empty());
+        assert!(s.unsaved);
+    }
+
+    #[test]
+    fn delete_stage_removes_current() {
+        let mut s = make_state(3);
+        s.selected = 1;
+        s.delete_stage();
+        assert_eq!(s.script.stages.len(), 2);
+        assert!(s.unsaved);
+    }
+
+    #[test]
+    fn delete_stage_adjusts_selection_at_end() {
+        let mut s = make_state(3);
+        s.selected = 2;
+        s.delete_stage();
+        assert_eq!(s.script.stages.len(), 2);
+        assert_eq!(s.selected, 1);
+    }
+
+    #[test]
+    fn cannot_delete_last_stage() {
+        let mut s = make_state(1);
+        s.delete_stage();
+        assert_eq!(s.script.stages.len(), 1);
         assert!(!s.unsaved);
     }
 }

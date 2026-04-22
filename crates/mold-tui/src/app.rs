@@ -968,6 +968,8 @@ pub enum ConfirmAction {
     /// Delete a gallery image by index.
     DeleteGalleryImage,
     RemoveModel(String),
+    /// Delete the currently selected script stage.
+    DeleteScriptStage,
 }
 
 /// The root application state.
@@ -2815,6 +2817,19 @@ impl App {
             Action::ScriptMoveUp => self.script.move_up(),
             Action::ScriptReorderDown => self.script.reorder_down(),
             Action::ScriptReorderUp => self.script.reorder_up(),
+            Action::ScriptAddAfter => self.script.add_stage_after(),
+            Action::ScriptAddBefore => self.script.add_stage_before(),
+            Action::ScriptDelete => {
+                if self.script.script.stages.len() > 1 {
+                    self.popup = Some(Popup::Confirm {
+                        message: format!(
+                            "Delete stage {}?",
+                            self.script.selected + 1,
+                        ),
+                        on_confirm: ConfirmAction::DeleteScriptStage,
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -3280,6 +3295,9 @@ impl App {
                 self.tokio_handle.spawn_blocking(move || {
                     crate::backend::remove_model(model_name, tx);
                 });
+            }
+            ConfirmAction::DeleteScriptStage => {
+                self.script.delete_stage();
             }
         }
     }
