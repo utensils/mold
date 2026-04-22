@@ -2715,4 +2715,44 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
+
+    // ── /api/capabilities/chain-limits ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn capabilities_chain_limits_returns_ltx2_cap() {
+        let app = app_empty();
+        let response = app
+            .oneshot(
+                Request::get("/api/capabilities/chain-limits?model=ltx-2-19b-distilled:fp8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(limits["frames_per_clip_cap"], 97);
+        assert_eq!(limits["max_stages"], 16);
+        assert!(limits["transition_modes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::Value::String("fade".into())));
+    }
+
+    #[tokio::test]
+    async fn capabilities_chain_limits_rejects_unknown_model() {
+        let app = app_empty();
+        let response = app
+            .oneshot(
+                Request::get("/api/capabilities/chain-limits?model=not-a-real-model")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }

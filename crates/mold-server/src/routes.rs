@@ -145,6 +145,7 @@ use crate::queue::clean_error_message;
         unload_model,
         server_status,
         health,
+        capabilities_chain_limits,
         crate::routes_chain::generate_chain,
         crate::routes_chain::generate_chain_stream,
     ),
@@ -170,6 +171,7 @@ use crate::queue::clean_error_message;
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,
+        crate::chain_limits::ChainLimits,
     )),
     tags(
         (name = "generation", description = "Image generation"),
@@ -223,6 +225,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/status", get(server_status))
         .route("/api/capabilities", get(server_capabilities))
+        .route(
+            "/api/capabilities/chain-limits",
+            get(capabilities_chain_limits),
+        )
         .route("/api/shutdown", post(shutdown_server))
         // Agent C (model-ui-overhaul §3): placement persistence.
         .route(
@@ -1619,6 +1625,56 @@ async fn server_capabilities() -> Json<mold_core::ServerCapabilities> {
             can_delete: gallery_delete_allowed(),
         },
     })
+}
+
+// ── /api/capabilities/chain-limits ───────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/api/capabilities/chain-limits",
+    tag = "server",
+    params(
+        ("model" = String, Query, description = "Model name (e.g. ltx-2-19b-distilled:fp8)")
+    ),
+    responses(
+        (status = 200, description = "Chain limits for the requested model",
+         body = crate::chain_limits::ChainLimits),
+        (status = 400, description = "Missing required 'model' query parameter"),
+        (status = 404, description = "Unknown or unsupported model"),
+    )
+)]
+async fn capabilities_chain_limits(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let raw_model = match params.get("model") {
+        Some(m) => m.clone(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "missing required 'model' query parameter\n",
+            )
+                .into_response();
+        }
+    };
+
+    let resolved = mold_core::manifest::resolve_model_name(&raw_model);
+    let Some(manifest) = mold_core::manifest::find_manifest(&resolved) else {
+        return (StatusCode::NOT_FOUND, "unknown model\n").into_response();
+    };
+    let family = manifest.family.clone();
+
+    if crate::chain_limits::family_cap(&family).is_none() {
+        return (StatusCode::NOT_FOUND, "model is not chain-capable\n").into_response();
+    }
+
+    let quant = resolved
+        .split_once(':')
+        .map(|(_, tag)| tag.to_string())
+        .unwrap_or_default();
+
+    // TODO(sub-project D): pass live free VRAM from AppState.
+    let limits = crate::chain_limits::compute_limits(&resolved, &family, &quant, 0);
+    Json(limits).into_response()
 }
 
 // ── /api/shutdown ─────────────────────────────────────────────────────────────
