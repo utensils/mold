@@ -157,6 +157,14 @@ impl PromptHistory {
         self.entries.len()
     }
 
+    /// Iterate history entries, most-recent first.
+    ///
+    /// Used by the Queue view to render the "recent" section without needing
+    /// to expose the underlying `Vec`.
+    pub fn recent(&self, max: usize) -> impl Iterator<Item = &HistoryEntry> {
+        self.entries.iter().rev().take(max)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

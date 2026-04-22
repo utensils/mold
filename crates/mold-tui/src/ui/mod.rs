@@ -5,6 +5,7 @@ pub mod models;
 pub mod param_form;
 pub mod popup;
 pub mod progress;
+pub mod queue;
 pub mod recent;
 pub mod settings;
 pub mod theme;
@@ -51,6 +52,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
         }
         View::Models => models::render(frame, app, layout[1]),
+        View::Queue => queue::render(frame, app, layout[1]),
         View::Settings => settings::render(frame, app, layout[1]),
     }
 
@@ -328,10 +330,16 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         View::Models => vec![
-            ("1-4", "Views"),
+            ("1-5", "Views"),
             ("Enter", "Select"),
             ("p", "Pull"),
             ("u", "Unload"),
+            ("Esc", "Back"),
+            ("?", "Help"),
+            ("q", "Quit"),
+        ],
+        View::Queue => vec![
+            ("1-5", "Views"),
             ("Esc", "Back"),
             ("?", "Help"),
             ("q", "Quit"),

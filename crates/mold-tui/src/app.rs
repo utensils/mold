@@ -2249,7 +2249,8 @@ impl App {
                 self.active_view = match self.active_view {
                     View::Generate => View::Gallery,
                     View::Gallery => View::Models,
-                    View::Models => View::Settings,
+                    View::Models => View::Queue,
+                    View::Queue => View::Settings,
                     View::Settings => View::Generate,
                 };
             }
@@ -2258,7 +2259,8 @@ impl App {
                     View::Generate => View::Settings,
                     View::Gallery => View::Generate,
                     View::Models => View::Gallery,
-                    View::Settings => View::Models,
+                    View::Queue => View::Models,
+                    View::Settings => View::Queue,
                 };
             }
             Action::FocusNext if self.active_view == View::Generate => {
@@ -2302,6 +2304,7 @@ impl App {
                         self.models.selected -= 1;
                     }
                 }
+                View::Queue => {}
                 View::Settings => self.settings_navigate(-1),
             },
             Action::Down => match self.active_view {
@@ -2335,6 +2338,7 @@ impl App {
                         self.models.selected += 1;
                     }
                 }
+                View::Queue => {}
                 View::Settings => self.settings_navigate(1),
             },
             Action::Increment => {
@@ -2383,6 +2387,7 @@ impl App {
                         self.generate.focus = GenerateFocus::Prompt;
                     }
                 }
+                View::Queue => {}
                 View::Settings => self.settings_confirm(),
             },
             Action::PullModel if self.active_view == View::Models => {
@@ -5760,11 +5765,18 @@ mod tests {
     }
 
     #[test]
-    fn view_settings_label_and_index() {
+    fn view_labels_and_indices() {
+        assert_eq!(View::Generate.label(), "Generate");
+        assert_eq!(View::Gallery.label(), "Gallery");
+        assert_eq!(View::Models.label(), "Models");
+        assert_eq!(View::Queue.label(), "Queue");
         assert_eq!(View::Settings.label(), "Settings");
-        assert_eq!(View::Settings.index(), 3);
-        assert_eq!(View::ALL.len(), 4);
-        assert_eq!(View::ALL[3], View::Settings);
+        // Queue sits at index 3 between Models and Settings.
+        assert_eq!(View::Queue.index(), 3);
+        assert_eq!(View::Settings.index(), 4);
+        assert_eq!(View::ALL.len(), 5);
+        assert_eq!(View::ALL[3], View::Queue);
+        assert_eq!(View::ALL[4], View::Settings);
     }
 
     // ── Settings E2E: display values ──────────────────────

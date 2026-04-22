@@ -34,7 +34,8 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('1') => return Action::SwitchView(View::Generate),
             KeyCode::Char('2') => return Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
-            KeyCode::Char('4') => return Action::SwitchView(View::Settings),
+            KeyCode::Char('4') => return Action::SwitchView(View::Queue),
+            KeyCode::Char('5') => return Action::SwitchView(View::Settings),
             KeyCode::Left => return Action::ViewPrev,
             KeyCode::Right => return Action::ViewNext,
             _ => {}
@@ -46,6 +47,7 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
         View::Generate => map_generate_key(key, app),
         View::Gallery => map_gallery_key(key, app),
         View::Models => map_models_key(key),
+        View::Queue => map_queue_key(key),
         View::Settings => map_settings_key(key),
     }
 }
@@ -88,7 +90,8 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('1') => Action::SwitchView(View::Generate),
             KeyCode::Char('2') => Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => Action::SwitchView(View::Models),
-            KeyCode::Char('4') => Action::SwitchView(View::Settings),
+            KeyCode::Char('4') => Action::SwitchView(View::Queue),
+            KeyCode::Char('5') => Action::SwitchView(View::Settings),
             KeyCode::Char('/') => Action::SearchHistory,
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Enter | KeyCode::Char('i') | KeyCode::Down => Action::FocusNext,
@@ -117,7 +120,8 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('1') => return Action::SwitchView(View::Generate),
             KeyCode::Char('2') => return Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
-            KeyCode::Char('4') => return Action::SwitchView(View::Settings),
+            KeyCode::Char('4') => return Action::SwitchView(View::Queue),
+            KeyCode::Char('5') => return Action::SwitchView(View::Settings),
             _ => {}
         }
     }
@@ -144,7 +148,8 @@ fn map_gallery_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('1') => Action::SwitchView(View::Generate),
             KeyCode::Char('2') => Action::SwitchView(View::Gallery),
             KeyCode::Char('3') => Action::SwitchView(View::Models),
-            KeyCode::Char('4') => Action::SwitchView(View::Settings),
+            KeyCode::Char('4') => Action::SwitchView(View::Queue),
+            KeyCode::Char('5') => Action::SwitchView(View::Settings),
             _ => Action::None,
         },
         GalleryViewMode::Detail => match key.code {
@@ -176,7 +181,23 @@ fn map_models_key(key: &KeyEvent) -> Action {
         KeyCode::Char('1') => Action::SwitchView(View::Generate),
         KeyCode::Char('2') => Action::SwitchView(View::Gallery),
         KeyCode::Char('3') => Action::SwitchView(View::Models),
-        KeyCode::Char('4') => Action::SwitchView(View::Settings),
+        KeyCode::Char('4') => Action::SwitchView(View::Queue),
+        KeyCode::Char('5') => Action::SwitchView(View::Settings),
+        _ => Action::None,
+    }
+}
+
+/// Queue is a read-only view in this phase — no per-row interactions yet, so
+/// the only bindings are view switches, quit, and Esc to Generate.
+fn map_queue_key(key: &KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('q') => Action::Quit,
+        KeyCode::Esc => Action::SwitchView(View::Generate),
+        KeyCode::Char('1') => Action::SwitchView(View::Generate),
+        KeyCode::Char('2') => Action::SwitchView(View::Gallery),
+        KeyCode::Char('3') => Action::SwitchView(View::Models),
+        KeyCode::Char('4') => Action::SwitchView(View::Queue),
+        KeyCode::Char('5') => Action::SwitchView(View::Settings),
         _ => Action::None,
     }
 }
@@ -193,7 +214,8 @@ fn map_settings_key(key: &KeyEvent) -> Action {
         KeyCode::Char('1') => Action::SwitchView(View::Generate),
         KeyCode::Char('2') => Action::SwitchView(View::Gallery),
         KeyCode::Char('3') => Action::SwitchView(View::Models),
-        KeyCode::Char('4') => Action::SwitchView(View::Settings),
+        KeyCode::Char('4') => Action::SwitchView(View::Queue),
+        KeyCode::Char('5') => Action::SwitchView(View::Settings),
         _ => Action::None,
     }
 }
@@ -440,14 +462,22 @@ mod tests {
         );
         assert_eq!(
             map_settings_key(&key(KeyCode::Char('4'))),
+            Action::SwitchView(View::Queue)
+        );
+        assert_eq!(
+            map_settings_key(&key(KeyCode::Char('5'))),
             Action::SwitchView(View::Settings)
         );
     }
 
     #[test]
-    fn models_view_switch_to_settings() {
+    fn models_view_switch_to_queue_and_settings() {
         assert_eq!(
             map_models_key(&key(KeyCode::Char('4'))),
+            Action::SwitchView(View::Queue)
+        );
+        assert_eq!(
+            map_models_key(&key(KeyCode::Char('5'))),
             Action::SwitchView(View::Settings)
         );
     }

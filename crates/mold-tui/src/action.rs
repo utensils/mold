@@ -85,12 +85,17 @@ pub enum Action {
     None,
 }
 
-/// The four top-level views.
+/// The five top-level views.
+///
+/// Tab indices match the design system (1-indexed in the UI, 0-indexed here).
+/// Queue sits between Models and Settings because the Models and Queue tabs
+/// are both "what's running or available" views, while Settings is config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Generate,
     Gallery,
     Models,
+    Queue,
     Settings,
 }
 
@@ -100,6 +105,7 @@ impl View {
             View::Generate => "Generate",
             View::Gallery => "Gallery",
             View::Models => "Models",
+            View::Queue => "Queue",
             View::Settings => "Settings",
         }
     }
@@ -109,9 +115,16 @@ impl View {
             View::Generate => 0,
             View::Gallery => 1,
             View::Models => 2,
-            View::Settings => 3,
+            View::Queue => 3,
+            View::Settings => 4,
         }
     }
 
-    pub const ALL: [View; 4] = [View::Generate, View::Gallery, View::Models, View::Settings];
+    pub const ALL: [View; 5] = [
+        View::Generate,
+        View::Gallery,
+        View::Models,
+        View::Queue,
+        View::Settings,
+    ];
 }
