@@ -15,6 +15,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 use crate::db::MetadataDb;
+use crate::settings::resolve_active_profile;
 
 /// A snapshot of all the per-model fields we persist. Mirrors the TUI's
 /// `GenerateParams` plus the last prompt/negative pair so users who type a
@@ -42,16 +43,22 @@ pub struct ModelPrefs {
 }
 
 impl ModelPrefs {
-    /// Load the saved prefs for `model`, returning `None` if no row exists yet.
+    /// Load prefs for `model` under the active profile (resolved from
+    /// [`resolve_active_profile`]). Returns `None` when no row exists yet.
     pub fn load(db: &MetadataDb, model: &str) -> Result<Option<Self>> {
+        Self::load_in(db, &resolve_active_profile(db), model)
+    }
+
+    /// Load prefs for `model` under an explicit profile.
+    pub fn load_in(db: &MetadataDb, profile: &str, model: &str) -> Result<Option<Self>> {
         db.with_conn(|conn| {
             let row = conn
                 .query_row(
                     "SELECT width, height, steps, guidance, scheduler, seed_mode,
                             batch, format, lora_path, lora_scale, expand, offload,
                             strength, control_scale, frames, fps, last_prompt, last_negative
-                     FROM model_prefs WHERE model = ?1",
-                    params![model],
+                     FROM model_prefs WHERE profile = ?1 AND model = ?2",
+                    params![profile, model],
                     |r| {
                         Ok(ModelPrefs {
                             width: r.get::<_, Option<i64>>(0)?.map(|v| v as u32),
@@ -80,21 +87,27 @@ impl ModelPrefs {
         })
     }
 
-    /// Persist `self` under `model`. Upserts — same model name overwrites.
+    /// Persist `self` under `model` in the active profile.
     pub fn save(&self, db: &MetadataDb, model: &str) -> Result<()> {
+        self.save_in(db, &resolve_active_profile(db), model)
+    }
+
+    /// Persist `self` under `(profile, model)`. Upserts — same
+    /// (profile, model) pair overwrites.
+    pub fn save_in(&self, db: &MetadataDb, profile: &str, model: &str) -> Result<()> {
         let ts = now_ms();
         db.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO model_prefs (
-                    model, width, height, steps, guidance, scheduler, seed_mode,
+                    profile, model, width, height, steps, guidance, scheduler, seed_mode,
                     batch, format, lora_path, lora_scale, expand, offload,
                     strength, control_scale, frames, fps, last_prompt, last_negative,
                     updated_at_ms
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                    ?16, ?17, ?18, ?19, ?20
+                    ?16, ?17, ?18, ?19, ?20, ?21
                  )
-                 ON CONFLICT(model) DO UPDATE SET
+                 ON CONFLICT(profile, model) DO UPDATE SET
                     width = excluded.width,
                     height = excluded.height,
                     steps = excluded.steps,
@@ -115,6 +128,7 @@ impl ModelPrefs {
                     last_negative = excluded.last_negative,
                     updated_at_ms = excluded.updated_at_ms",
                 params![
+                    profile,
                     model,
                     self.width.map(|v| v as i64),
                     self.height.map(|v| v as i64),
@@ -141,18 +155,24 @@ impl ModelPrefs {
         })
     }
 
-    /// List every saved model's prefs. Used by `mold config list` and the
-    /// migration exporter.
+    /// List every saved model's prefs under the active profile. Used by
+    /// `mold config list` and the migration exporter.
     pub fn list(db: &MetadataDb) -> Result<Vec<(String, ModelPrefs)>> {
+        Self::list_in(db, &resolve_active_profile(db))
+    }
+
+    /// List every saved model's prefs under an explicit profile.
+    pub fn list_in(db: &MetadataDb, profile: &str) -> Result<Vec<(String, ModelPrefs)>> {
         db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT model, width, height, steps, guidance, scheduler, seed_mode,
                         batch, format, lora_path, lora_scale, expand, offload,
                         strength, control_scale, frames, fps, last_prompt, last_negative
                  FROM model_prefs
+                 WHERE profile = ?1
                  ORDER BY model",
             )?;
-            let rows = stmt.query_map([], |r| {
+            let rows = stmt.query_map(params![profile], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     ModelPrefs {
@@ -186,9 +206,28 @@ impl ModelPrefs {
     }
 
     pub fn delete(db: &MetadataDb, model: &str) -> Result<bool> {
+        Self::delete_in(db, &resolve_active_profile(db), model)
+    }
+
+    pub fn delete_in(db: &MetadataDb, profile: &str, model: &str) -> Result<bool> {
         db.with_conn(|conn| {
-            let n = conn.execute("DELETE FROM model_prefs WHERE model = ?1", params![model])?;
+            let n = conn.execute(
+                "DELETE FROM model_prefs WHERE profile = ?1 AND model = ?2",
+                params![profile, model],
+            )?;
             Ok(n > 0)
+        })
+    }
+
+    /// Convenience: delete every row under a profile. Used by `mold config
+    /// reset --all` for a specific profile scope.
+    pub fn delete_all_in(db: &MetadataDb, profile: &str) -> Result<usize> {
+        db.with_conn(|conn| {
+            let n = conn.execute(
+                "DELETE FROM model_prefs WHERE profile = ?1",
+                params![profile],
+            )?;
+            Ok(n)
         })
     }
 }
@@ -316,6 +355,88 @@ mod tests {
             .map(|(n, _)| n)
             .collect();
         assert_eq!(names, vec!["alpha", "middle", "zeta"]);
+    }
+
+    /// Item 5: the same model under two profiles stores independent
+    /// rows so `mold config --profile portrait set model.flux…` never
+    /// clobbers the default profile's row.
+    #[test]
+    fn save_and_load_isolate_across_profiles() {
+        let db = db();
+        let default_prefs = ModelPrefs {
+            width: Some(1024),
+            steps: Some(20),
+            ..Default::default()
+        };
+        let dev_prefs = ModelPrefs {
+            width: Some(768),
+            steps: Some(40),
+            ..Default::default()
+        };
+        default_prefs
+            .save_in(&db, "default", "flux-dev:q4")
+            .unwrap();
+        dev_prefs.save_in(&db, "dev", "flux-dev:q4").unwrap();
+
+        let d = ModelPrefs::load_in(&db, "default", "flux-dev:q4")
+            .unwrap()
+            .unwrap();
+        let x = ModelPrefs::load_in(&db, "dev", "flux-dev:q4")
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.width, Some(1024));
+        assert_eq!(d.steps, Some(20));
+        assert_eq!(x.width, Some(768));
+        assert_eq!(x.steps, Some(40));
+    }
+
+    /// Item 5: `list_in` only returns rows for the requested profile.
+    #[test]
+    fn list_in_is_scoped_to_profile() {
+        let db = db();
+        ModelPrefs {
+            width: Some(1024),
+            ..Default::default()
+        }
+        .save_in(&db, "default", "flux-dev:q4")
+        .unwrap();
+        ModelPrefs {
+            width: Some(768),
+            ..Default::default()
+        }
+        .save_in(&db, "dev", "sdxl:fp16")
+        .unwrap();
+        let default_rows = ModelPrefs::list_in(&db, "default").unwrap();
+        assert_eq!(default_rows.len(), 1);
+        assert_eq!(default_rows[0].0, "flux-dev:q4");
+        let dev_rows = ModelPrefs::list_in(&db, "dev").unwrap();
+        assert_eq!(dev_rows.len(), 1);
+        assert_eq!(dev_rows[0].0, "sdxl:fp16");
+    }
+
+    /// Item 5: `delete_all_in` scopes to a single profile.
+    #[test]
+    fn delete_all_in_only_drops_target_profile_rows() {
+        let db = db();
+        ModelPrefs {
+            width: Some(1024),
+            ..Default::default()
+        }
+        .save_in(&db, "default", "flux-dev:q4")
+        .unwrap();
+        ModelPrefs {
+            width: Some(768),
+            ..Default::default()
+        }
+        .save_in(&db, "dev", "sdxl:fp16")
+        .unwrap();
+        assert_eq!(ModelPrefs::delete_all_in(&db, "dev").unwrap(), 1);
+        assert!(ModelPrefs::load_in(&db, "default", "flux-dev:q4")
+            .unwrap()
+            .is_some());
+        assert!(ModelPrefs::load_in(&db, "dev", "sdxl:fp16")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

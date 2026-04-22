@@ -9,6 +9,68 @@ use crate::types::Scheduler;
 
 static RUNTIME_MODELS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
+/// Banner comment written at the top of a `save_bootstrap_only` output so
+/// readers understand why the usual user-preference fields are missing.
+const BOOTSTRAP_ONLY_BANNER: &str = "\
+# mold config — bootstrap-only surface.
+#
+# User preferences (expand.*, generate.default_*, per-model generation
+# defaults, lora, scheduler) live in SQLite at <MOLD_HOME>/mold.db.
+# Edit them via:
+#   mold config set <key> <value>
+#   mold config get <key>
+#   mold config reset <key>     # drop the DB row, fall back to this file
+#
+# This file retains only identifiers, paths, ports, credentials, logging,
+# and per-model file-path entries. Adding generation defaults here is
+# silently overridden by the DB on load.
+
+";
+
+/// Global + per-model keys moved to the DB by issue #265. Stripped from
+/// the TOML value tree by [`Config::save_bootstrap_only_to`].
+const STRIPPED_GLOBAL_KEYS: &[&str] = &[
+    "default_width",
+    "default_height",
+    "default_steps",
+    "embed_metadata",
+    "default_negative_prompt",
+    "t5_variant",
+    "qwen3_variant",
+    "expand",
+];
+
+const STRIPPED_MODEL_KEYS: &[&str] = &[
+    "default_steps",
+    "default_guidance",
+    "default_width",
+    "default_height",
+    "scheduler",
+    "negative_prompt",
+    "lora",
+    "lora_scale",
+    "default_frames",
+    "default_fps",
+];
+
+fn strip_user_pref_fields(doc: &mut toml::Value) {
+    let Some(table) = doc.as_table_mut() else {
+        return;
+    };
+    for key in STRIPPED_GLOBAL_KEYS {
+        table.remove(*key);
+    }
+    if let Some(toml::Value::Table(models)) = table.get_mut("models") {
+        for (_, mc) in models.iter_mut() {
+            if let Some(mc_table) = mc.as_table_mut() {
+                for key in STRIPPED_MODEL_KEYS {
+                    mc_table.remove(*key);
+                }
+            }
+        }
+    }
+}
+
 /// Hook installed by callers (typically `mold-cli` at startup) that wants
 /// to overlay DB-backed user preferences onto every freshly-loaded
 /// `Config`. `mold-core` itself must not depend on `mold-db`, so the hook
@@ -25,6 +87,17 @@ static POST_LOAD_HOOK: OnceLock<ConfigPostLoadHook> = OnceLock::new();
 /// no-op so tests can't clobber each other.
 pub fn install_post_load_hook(hook: ConfigPostLoadHook) {
     let _ = POST_LOAD_HOOK.set(hook);
+}
+
+/// Hook for [`Config::read_last_model`] that lets the DB layer provide
+/// the value without `mold-core` depending on `mold-db`. When installed,
+/// the hook's return value takes precedence over the legacy sidecar file.
+pub type ReadLastModelHook = fn() -> Option<String>;
+static READ_LAST_MODEL_HOOK: OnceLock<ReadLastModelHook> = OnceLock::new();
+
+/// Register a read-last-model hook. First caller wins.
+pub fn install_read_last_model_hook(hook: ReadLastModelHook) {
+    let _ = READ_LAST_MODEL_HOOK.set(hook);
 }
 
 /// Which fallback step resolved the default model.
@@ -737,8 +810,21 @@ impl Config {
         Self::mold_dir().map(|d| d.join("last-model"))
     }
 
-    /// Read the last-used model name from the state file.
+    /// Read the last-used model. When the DB-backed read hook is
+    /// installed (production path), defers to it entirely; otherwise
+    /// reads the legacy `$MOLD_HOME/last-model` sidecar. Callers doing
+    /// one-shot sidecar migration should use
+    /// [`Self::read_last_model_from_sidecar`] directly.
     pub fn read_last_model() -> Option<String> {
+        if let Some(hook) = READ_LAST_MODEL_HOOK.get() {
+            return hook();
+        }
+        Self::read_last_model_from_sidecar()
+    }
+
+    /// Read the legacy `$MOLD_HOME/last-model` sidecar directly. Used by
+    /// the one-shot `config.toml + sidecar → DB` migration.
+    pub fn read_last_model_from_sidecar() -> Option<String> {
         let path = Self::last_model_path()?;
         std::fs::read_to_string(path).ok().and_then(|s| {
             let trimmed = s.trim().to_string();
@@ -748,16 +834,6 @@ impl Config {
                 Some(trimmed)
             }
         })
-    }
-
-    /// Write the last-used model name to the state file (best-effort, non-fatal).
-    pub fn write_last_model(model: &str) {
-        if let Some(path) = Self::last_model_path() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(path, model);
-        }
     }
 
     /// Resolve the output directory for server-mode image persistence.
@@ -1111,6 +1187,33 @@ impl Config {
         let contents = toml::to_string_pretty(self)?;
         std::fs::write(&path, contents)?;
         Ok(())
+    }
+
+    /// Serialize only the bootstrap/ops slice of the config to TOML:
+    /// identifiers, paths, ports, credentials, logging, runpod, per-model
+    /// file-path entries. User-preference fields that now live in the DB
+    /// (`expand.*`, `generate.*` globals, per-model generation defaults,
+    /// lora, scheduler) are stripped.
+    ///
+    /// Used by the post-migration rewrite to keep `config.toml` honest
+    /// after the user-preference surface has moved to SQLite.
+    pub fn save_bootstrap_only_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut doc = toml::Value::try_from(self)?;
+        strip_user_pref_fields(&mut doc);
+        let body = toml::to_string_pretty(&doc)?;
+        let contents = format!("{BOOTSTRAP_ONLY_BANNER}{body}");
+        std::fs::write(path, contents)?;
+        Ok(())
+    }
+
+    /// Save the bootstrap-only slice to the default config path.
+    pub fn save_bootstrap_only(&self) -> anyhow::Result<()> {
+        let path = Self::config_path()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine home directory for config path"))?;
+        self.save_bootstrap_only_to(&path)
     }
 
     /// Whether a config file exists on disk.

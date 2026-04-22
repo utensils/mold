@@ -759,13 +759,14 @@ pub fn run_list(json: bool) -> Result<()> {
             .map(|v| v.display())
             .unwrap_or_else(|_| "?".into());
 
+        let badge = surface_badge(info.key);
         let env_note = if let Some((var, _)) = env_override_for(info.key) {
             format!("  (env: {})", var).dimmed().to_string()
         } else {
             String::new()
         };
 
-        println!("  {:<26} = {}{}", info.key, value, env_note);
+        println!("  {} {:<26} = {}{}", badge, info.key, value, env_note);
     }
 
     // Per-model sections
@@ -777,19 +778,40 @@ pub fn run_list(json: bool) -> Result<()> {
             let value = get_model_value(&config, &full_key)
                 .map(|v| v.display())
                 .unwrap_or_else(|_| "?".into());
-            println!("  {:<26} = {}", full_key, value);
+            let badge = surface_badge(&full_key);
+            println!("  {} {:<26} = {}", badge, full_key, value);
         }
     }
 
     Ok(())
 }
 
+/// Return a 6-char right-padded coloured surface badge for display in
+/// `run_list`. `[env]` takes priority over `[db]` / `[file]` — an
+/// environment override is the authoritative runtime value.
+fn surface_badge(key: &str) -> String {
+    if env_override_for(key).is_some() {
+        return "[env] ".yellow().to_string();
+    }
+    let surface = model_field_surface(key).unwrap_or_else(|| surface_for_key(key));
+    match surface {
+        Surface::Db => "[db]  ".cyan().to_string(),
+        Surface::File => "[file]".dimmed().to_string(),
+    }
+}
+
 fn run_list_json(config: &Config) -> Result<()> {
     let mut map = serde_json::Map::new();
 
+    // Under JSON each key becomes `{ "value": ..., "surface": "db|file|env" }`
+    // so scripts can still tell where a value was read from. Raw values are
+    // kept identical for backwards compat with pre-#265 consumers.
     for info in ALL_KEYS {
         if let Ok(val) = get_static_value(config, info.key) {
-            map.insert(info.key.to_string(), val.to_json());
+            map.insert(
+                info.key.to_string(),
+                surface_annotated_value(info.key, val.to_json()),
+            );
         }
     }
 
@@ -797,7 +819,10 @@ fn run_list_json(config: &Config) -> Result<()> {
         for (field, _) in MODEL_FIELDS {
             let full_key = format!("models.{model_name}.{field}");
             if let Ok(val) = get_model_value(config, &full_key) {
-                map.insert(full_key, val.to_json());
+                map.insert(
+                    full_key.clone(),
+                    surface_annotated_value(&full_key, val.to_json()),
+                );
             }
         }
     }
@@ -805,6 +830,17 @@ fn run_list_json(config: &Config) -> Result<()> {
     let json = serde_json::to_string_pretty(&serde_json::Value::Object(map))?;
     println!("{json}");
     Ok(())
+}
+
+fn surface_annotated_value(key: &str, value: serde_json::Value) -> serde_json::Value {
+    let surface = if env_override_for(key).is_some() {
+        "env"
+    } else {
+        model_field_surface(key)
+            .unwrap_or_else(|| surface_for_key(key))
+            .as_str()
+    };
+    serde_json::json!({ "value": value, "surface": surface })
 }
 
 pub fn run_get(key: &str, raw: bool) -> Result<()> {
@@ -899,8 +935,11 @@ fn persist_value(config: &Config, key: &str) -> Result<Surface> {
             persist_model_field_to_db(config, key)?;
             return Ok(Surface::Db);
         }
-        // Path fields still live in TOML.
-        config.save()?;
+        // Path fields still live in TOML. Use the bootstrap-only writer
+        // so we don't re-serialize DB-owned fields (expand, generate
+        // defaults, per-model lora/scheduler) that the hydrate hook
+        // already mixed into `config` at load time.
+        config.save_bootstrap_only()?;
         return Ok(Surface::File);
     }
 
@@ -910,7 +949,8 @@ fn persist_value(config: &Config, key: &str) -> Result<Surface> {
             Ok(Surface::Db)
         }
         Surface::File => {
-            config.save()?;
+            // Same concern — see comment above.
+            config.save_bootstrap_only()?;
             Ok(Surface::File)
         }
     }
@@ -1004,6 +1044,164 @@ pub fn run_where(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// `mold config reset <key>` / `mold config reset --all` — drop a
+/// DB-backed key (or every DB row) so the next read falls back to
+/// `config.toml` / env / compiled default. Scoped to the active profile.
+pub fn run_reset(key: Option<&str>, all: bool, yes: bool) -> Result<()> {
+    let Some(db) = crate::metadata_db::handle() else {
+        bail!(
+            "settings DB is unavailable; reset requires MOLD_DB_DISABLE=0 \
+             and a writable MOLD_HOME/mold.db"
+        );
+    };
+    let profile = mold_db::resolve_active_profile(db);
+
+    if all {
+        if !yes && !confirm_reset_all(&profile)? {
+            println!("{} aborted", theme::icon_info());
+            return Ok(());
+        }
+        let dropped_settings = reset_user_setting_rows(db, &profile)?;
+        let dropped_model_rows = mold_db::ModelPrefs::delete_all_in(db, &profile)?;
+        println!(
+            "{} reset profile {}: dropped {} setting(s) and {} model_prefs row(s)",
+            theme::icon_ok(),
+            profile.bold(),
+            dropped_settings,
+            dropped_model_rows
+        );
+        return Ok(());
+    }
+
+    let Some(key) = key else {
+        // Clap's required_unless_present should have caught this.
+        bail!("missing key (or pass --all)");
+    };
+
+    // Validate key is known.
+    if find_static_key(key).is_none() && !key.starts_with("models.") {
+        eprintln!("{} {}", theme::icon_fail(), unknown_key_error(key));
+        return Err(AlreadyReported.into());
+    }
+
+    // TOML-only keys are rejected — reset is a DB-surface operation.
+    let surface = if key.starts_with("models.") {
+        parse_model_key(key)?;
+        model_field_surface(key).unwrap_or(Surface::File)
+    } else {
+        surface_for_key(key)
+    };
+    if surface != Surface::Db {
+        eprintln!(
+            "{} '{}' is stored in config.toml — edit the file or use `mold config set`",
+            theme::icon_fail(),
+            key
+        );
+        return Err(AlreadyReported.into());
+    }
+
+    if key.starts_with("models.") {
+        reset_model_field(db, &profile, key)?;
+    } else {
+        reset_global_key(db, &profile, key)?;
+    }
+
+    println!(
+        "{} reset {} (profile {})",
+        theme::icon_ok(),
+        key.bold(),
+        profile.dimmed()
+    );
+    Ok(())
+}
+
+/// Keys the reset-all path must NOT delete from the settings table.
+/// These are internal bookkeeping rows — removing them causes the next
+/// launch to rerun one-shot migrations, which would re-import from the
+/// already-stripped TOML and overwrite the original `.migrated` backup.
+/// `profile.active` is also preserved so `--profile` selection survives
+/// a purge.
+const RESET_ALL_SENTINEL_KEYS: &[&str] = &[
+    mold_db::settings::CONFIG_MIGRATED_FROM_TOML,
+    mold_db::settings::TUI_MIGRATED_FROM_JSON,
+    mold_db::settings::BACKUPS_CLEANED_AT_V6,
+    mold_db::settings::ACTIVE_PROFILE,
+];
+
+/// Drop every user-facing settings row under `profile` while preserving
+/// the migration/bookkeeping keys listed in
+/// [`RESET_ALL_SENTINEL_KEYS`]. Returns the count of rows actually
+/// deleted so the CLI can report it back to the user.
+fn reset_user_setting_rows(db: &mold_db::MetadataDb, profile: &str) -> Result<usize> {
+    let s = mold_db::Settings::for_profile(db, profile);
+    let mut dropped = 0usize;
+    for (k, _, _) in s.list_all()? {
+        if RESET_ALL_SENTINEL_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        if s.delete(&k)? {
+            dropped += 1;
+        }
+    }
+    Ok(dropped)
+}
+
+fn reset_global_key(db: &mold_db::MetadataDb, profile: &str, key: &str) -> Result<()> {
+    let s = mold_db::Settings::for_profile(db, profile);
+    // Map user-facing keys to their DB-side counterparts. Most are
+    // 1:1, but the global generate.* keys live under explicit row names.
+    let db_key = match key {
+        "default_width" => mold_db::settings::GENERATE_DEFAULT_WIDTH,
+        "default_height" => mold_db::settings::GENERATE_DEFAULT_HEIGHT,
+        "default_steps" => mold_db::settings::GENERATE_DEFAULT_STEPS,
+        "embed_metadata" => mold_db::settings::GENERATE_EMBED_METADATA,
+        "default_negative_prompt" => mold_db::settings::GENERATE_DEFAULT_NEGATIVE_PROMPT,
+        "t5_variant" => mold_db::settings::GENERATE_T5_VARIANT,
+        "qwen3_variant" => mold_db::settings::GENERATE_QWEN3_VARIANT,
+        _ => key,
+    };
+    s.delete(db_key)?;
+    Ok(())
+}
+
+fn reset_model_field(db: &mold_db::MetadataDb, profile: &str, key: &str) -> Result<()> {
+    let (model_name, field, _) = parse_model_key(key)?;
+    let canonical = mold_core::manifest::resolve_model_name(model_name);
+    // Load → null the matching field → save. Leaves unrelated fields
+    // (other generation defaults, last_prompt) intact so a user who
+    // only wants to forget one setting doesn't also lose their prompt
+    // history-like state.
+    let Some(mut prefs) = mold_db::ModelPrefs::load_in(db, profile, &canonical)? else {
+        // No row to begin with — treat as a no-op success.
+        return Ok(());
+    };
+    match field {
+        "default_steps" => prefs.steps = None,
+        "default_guidance" => prefs.guidance = None,
+        "default_width" => prefs.width = None,
+        "default_height" => prefs.height = None,
+        "scheduler" => prefs.scheduler = None,
+        "negative_prompt" => prefs.last_negative = None,
+        "lora" => prefs.lora_path = None,
+        "lora_scale" => prefs.lora_scale = None,
+        other => bail!("unsupported per-model reset field: {other}"),
+    }
+    prefs.save_in(db, profile, &canonical)?;
+    Ok(())
+}
+
+fn confirm_reset_all(profile: &str) -> Result<bool> {
+    use std::io::{self, Write};
+    print!("Drop every DB-backed config row for profile '{profile}'? [y/N] ");
+    io::stdout().flush().ok();
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 pub fn run_path() -> Result<()> {
     match Config::config_path() {
         Some(path) => {
@@ -1036,7 +1234,10 @@ pub fn run_edit() -> Result<()> {
     // Create default config if it doesn't exist
     if !path.exists() {
         let config = Config::load_or_default();
-        config.save()?;
+        // Post-#265: the TOML is a bootstrap-only surface. Generate
+        // defaults + expand live in the DB; writing a fresh file must
+        // not seed stripped fields.
+        config.save_bootstrap_only()?;
         println!(
             "{} Created default config at {}",
             theme::icon_info(),
@@ -1946,5 +2147,209 @@ mod tests {
                 .raw(),
             "1.2"
         );
+    }
+
+    /// Codex review (P2): after `config.toml` is stripped to the
+    /// bootstrap-only surface, a subsequent `mold config set server_port
+    /// 9999` must keep the TOML bootstrap-only. `Config::save()` would
+    /// re-serialize the hydrated view and resurrect `[expand]` /
+    /// generation defaults / per-model lora rows that now belong to the
+    /// DB. Persistence for file-backed writes goes through
+    /// `save_bootstrap_only_to`.
+    #[test]
+    fn file_surface_set_keeps_toml_bootstrap_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("config.toml");
+
+        // Simulate a post-migration state: the TOML is bootstrap-only.
+        let cfg = mold_core::Config {
+            server_port: 7680,
+            ..mold_core::Config::default()
+        };
+        cfg.save_bootstrap_only_to(&toml_path).unwrap();
+        let pre = std::fs::read_to_string(&toml_path).unwrap();
+        assert!(!pre
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .any(|l| l.contains("default_width") || l.contains("[expand]")));
+
+        // Imagine the user then runs `mold config set server_port 8080`.
+        // The hydrated runtime cfg carries expand + generate defaults,
+        // but the file-surface writer must NOT push them into the TOML.
+        let mut hydrated = mold_core::Config {
+            server_port: 8080,
+            default_width: 2048, // pretend hydrated from DB
+            ..mold_core::Config::default()
+        };
+        hydrated.expand.enabled = true; // pretend hydrated from DB
+                                        // Correct persist path for file-surface keys:
+        hydrated.save_bootstrap_only_to(&toml_path).unwrap();
+
+        let post = std::fs::read_to_string(&toml_path).unwrap();
+        let body = post
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("server_port = 8080"));
+        assert!(
+            !body.contains("default_width"),
+            "stripped fields must not return: {body}"
+        );
+        assert!(!body.contains("[expand]"));
+    }
+
+    /// Codex review (P2): `mold config reset --all` must NOT delete the
+    /// migration bookkeeping rows (`config.migrated_from_toml`,
+    /// `tui.migrated_from_json`, `migration.backups_cleaned_at_v6`,
+    /// `profile.active`). Otherwise the next launch thinks migration
+    /// hasn't run, re-imports the (already-stripped) TOML, and the
+    /// rewrite clobbers the original `.migrated` backup.
+    #[test]
+    fn reset_all_skips_migration_sentinel_keys() {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let s = mold_db::Settings::for_profile(&db, "default");
+        // Seed real user prefs + migration sentinels.
+        s.set_str(mold_db::settings::TUI_THEME, "mocha").unwrap();
+        s.set_bool(mold_db::settings::EXPAND_ENABLED, true).unwrap();
+        s.set_bool(mold_db::settings::CONFIG_MIGRATED_FROM_TOML, true)
+            .unwrap();
+        s.set_bool(mold_db::settings::TUI_MIGRATED_FROM_JSON, true)
+            .unwrap();
+        s.set_bool(mold_db::settings::BACKUPS_CLEANED_AT_V6, false)
+            .unwrap();
+
+        let dropped = super::reset_user_setting_rows(&db, "default").unwrap();
+        // User rows gone.
+        assert_eq!(dropped, 2);
+        assert!(s.get_str(mold_db::settings::TUI_THEME).unwrap().is_none());
+        assert!(s
+            .get_bool(mold_db::settings::EXPAND_ENABLED)
+            .unwrap()
+            .is_none());
+        // Sentinels preserved — next launch must not re-migrate.
+        assert_eq!(
+            s.get_bool(mold_db::settings::CONFIG_MIGRATED_FROM_TOML)
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            s.get_bool(mold_db::settings::TUI_MIGRATED_FROM_JSON)
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            s.get_bool(mold_db::settings::BACKUPS_CLEANED_AT_V6)
+                .unwrap(),
+            Some(false)
+        );
+    }
+
+    /// Item 7: reset a per-model DB field — the row stays, only the
+    /// targeted field is nulled. Leaves other fields (width, scheduler,
+    /// last_prompt) intact.
+    #[test]
+    fn reset_model_field_nulls_only_target_field() {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        mold_db::ModelPrefs {
+            width: Some(1024),
+            steps: Some(20),
+            guidance: Some(3.5),
+            lora_path: Some("/opt/lora.safetensors".into()),
+            lora_scale: Some(0.8),
+            last_negative: Some("blurry".into()),
+            last_prompt: Some("a cat".into()),
+            ..Default::default()
+        }
+        .save_in(&db, "default", "flux-dev:q4")
+        .unwrap();
+
+        super::reset_model_field(&db, "default", "models.flux-dev:q4.lora").unwrap();
+
+        let loaded = mold_db::ModelPrefs::load_in(&db, "default", "flux-dev:q4")
+            .unwrap()
+            .unwrap();
+        // Targeted field dropped.
+        assert_eq!(loaded.lora_path, None);
+        // Unrelated fields survived.
+        assert_eq!(loaded.width, Some(1024));
+        assert_eq!(loaded.steps, Some(20));
+        assert_eq!(loaded.lora_scale, Some(0.8));
+        assert_eq!(loaded.last_negative.as_deref(), Some("blurry"));
+        assert_eq!(loaded.last_prompt.as_deref(), Some("a cat"));
+    }
+
+    /// Item 7: reset a global DB key drops the row; hydrate falls back to
+    /// the TOML / default value on the next load.
+    #[test]
+    fn reset_global_key_drops_settings_row() {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let s = mold_db::Settings::for_profile(&db, "default");
+        s.set_int(mold_db::settings::GENERATE_DEFAULT_WIDTH, 2048)
+            .unwrap();
+        assert_eq!(
+            s.get_int(mold_db::settings::GENERATE_DEFAULT_WIDTH)
+                .unwrap(),
+            Some(2048)
+        );
+
+        super::reset_global_key(&db, "default", "default_width").unwrap();
+
+        assert!(s
+            .get_int(mold_db::settings::GENERATE_DEFAULT_WIDTH)
+            .unwrap()
+            .is_none());
+    }
+
+    /// Item 7: reset on an unknown per-model row is a no-op success, not
+    /// a panic — matches `mold config reset` called on a model the user
+    /// never set any DB prefs for.
+    #[test]
+    fn reset_model_field_noop_when_no_row() {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        super::reset_model_field(&db, "default", "models.sdxl:fp16.default_steps").unwrap();
+        assert!(mold_db::ModelPrefs::load_in(&db, "default", "sdxl:fp16")
+            .unwrap()
+            .is_none());
+    }
+
+    /// Item 6: the JSON form of `run_list` annotates each key with its
+    /// surface. Structure is `{ "value": ..., "surface": "db|file|env" }`
+    /// per key, so scripts and the TUI can tell which source owns a row.
+    #[test]
+    fn surface_annotated_value_tags_env_db_and_file() {
+        // env takes top priority — simulate by temporarily setting the
+        // matching MOLD_* env var for a known key.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("MOLD_DEFAULT_MODEL").ok();
+        unsafe { std::env::set_var("MOLD_DEFAULT_MODEL", "forced-by-env") };
+        let annotated =
+            super::surface_annotated_value("default_model", serde_json::json!("flux2-klein:q8"));
+        assert_eq!(annotated["surface"], "env");
+        match prev {
+            Some(v) => unsafe { std::env::set_var("MOLD_DEFAULT_MODEL", v) },
+            None => unsafe { std::env::remove_var("MOLD_DEFAULT_MODEL") },
+        }
+
+        // DB surface: expand.enabled lives in the settings table.
+        let annotated = super::surface_annotated_value("expand.enabled", serde_json::json!(false));
+        assert_eq!(annotated["surface"], "db");
+
+        // File surface: models_dir stays in TOML.
+        let annotated =
+            super::surface_annotated_value("models_dir", serde_json::json!("/opt/models"));
+        assert_eq!(annotated["surface"], "file");
+
+        // Per-model paths stay in TOML even though generation defaults don't.
+        let annotated = super::surface_annotated_value(
+            "models.flux-dev:q4.transformer",
+            serde_json::json!("/opt/flux.gguf"),
+        );
+        assert_eq!(annotated["surface"], "file");
+        let annotated = super::surface_annotated_value(
+            "models.flux-dev:q4.default_steps",
+            serde_json::json!(20),
+        );
+        assert_eq!(annotated["surface"], "db");
     }
 }

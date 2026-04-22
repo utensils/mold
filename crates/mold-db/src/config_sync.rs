@@ -14,9 +14,11 @@
 //! - [`save_expand_to_db`] / [`save_generate_globals_to_db`] — used by the
 //!   CLI `mold config set` dispatcher for expand.* / generate.* keys.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use mold_core::config::{Config, ModelConfig};
 use mold_core::expand::ExpandSettings;
+use std::path::Path;
+use std::sync::OnceLock;
 
 use crate::db::MetadataDb;
 use crate::model_prefs::ModelPrefs;
@@ -270,13 +272,106 @@ pub fn migrate_config_toml_to_db(db: &MetadataDb, cfg: &Config) -> Result<bool> 
         prefs.save(db, &canonical)?;
     }
 
-    // Legacy `$MOLD_HOME/last-model` sidecar → settings.
-    if let Some(last) = Config::read_last_model() {
+    // Legacy `$MOLD_HOME/last-model` sidecar → settings. Use the sidecar
+    // reader directly — the public `read_last_model()` now routes through
+    // the DB hook, which would return an empty result pre-migration.
+    if let Some(last) = Config::read_last_model_from_sidecar() {
         s.set_str(keys::TUI_LAST_MODEL, &last)?;
     }
 
     s.set_bool(keys::CONFIG_MIGRATED_FROM_TOML, true)?;
     Ok(true)
+}
+
+/// Move the original `config.toml` to `config.toml.migrated` and write a
+/// stripped bootstrap-only TOML in its place. Safe to call repeatedly —
+/// it's a no-op when `config_path` doesn't exist.
+///
+/// Used by the post-load hook after [`migrate_config_toml_to_db`] returns
+/// `Ok(true)` so the TOML stops carrying stale user-preference fields
+/// that the DB is now authoritative for. The `.migrated` sibling is the
+/// one-release downgrade safety net; cleanup is tracked by
+/// [`cleanup_stale_backups`].
+pub fn rewrite_stripped_config_toml(cfg: &Config, config_path: &Path) -> Result<()> {
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let backup_path = sibling_migrated_path(config_path);
+    std::fs::rename(config_path, &backup_path).with_context(|| {
+        format!(
+            "renaming {} → {}",
+            config_path.display(),
+            backup_path.display()
+        )
+    })?;
+    cfg.save_bootstrap_only_to(config_path).with_context(|| {
+        format!(
+            "writing stripped bootstrap config to {}",
+            config_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn sibling_migrated_path(p: &Path) -> std::path::PathBuf {
+    // `config.toml` → `config.toml.migrated`; works for any filename.
+    let mut s = p.as_os_str().to_os_string();
+    s.push(".migrated");
+    std::path::PathBuf::from(s)
+}
+
+/// Scan a mold home directory for stale `.migrated` backups left by the
+/// one-shot legacy-state imports (`tui-session.json.migrated`,
+/// `prompt-history.jsonl.migrated`, `config.toml.migrated`). Returns the
+/// list of paths that still exist.
+///
+/// This is the *detection* half of the cleanup. Actual deletion is
+/// deferred one release per the original `.migrated` safety-net contract
+/// — call [`cleanup_stale_backups`] once we're ready to ship that.
+pub fn detect_stale_backups(mold_dir: &Path, config_dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    for p in [
+        mold_dir.join("tui-session.json.migrated"),
+        mold_dir.join("prompt-history.jsonl.migrated"),
+        config_dir.join("config.toml.migrated"),
+    ] {
+        if p.exists() {
+            paths.push(p);
+        }
+    }
+    paths
+}
+
+/// Delete every `.migrated` backup found by [`detect_stale_backups`].
+/// Writes the [`BACKUPS_CLEANED_AT_V6`](crate::settings::BACKUPS_CLEANED_AT_V6)
+/// sentinel so subsequent launches skip the scan.
+///
+/// ### Release timing
+///
+/// Issue #265 introduces this helper but intentionally does NOT wire it
+/// into the hook: the `.migrated` renames landed only one release ago, so
+/// we keep them as a downgrade safety net for one more version. Flip the
+/// `cleanup_stale_backups_on_launch` call in `global_hook` when #265 has
+/// shipped in a stable release.
+pub fn cleanup_stale_backups(db: &MetadataDb, mold_dir: &Path, config_dir: &Path) -> Result<usize> {
+    let s = Settings::for_profile(db, keys::DEFAULT_PROFILE);
+    if s.get_bool(keys::BACKUPS_CLEANED_AT_V6)? == Some(true) {
+        return Ok(0);
+    }
+    let mut dropped = 0usize;
+    for p in detect_stale_backups(mold_dir, config_dir) {
+        match std::fs::remove_file(&p) {
+            Ok(()) => {
+                tracing::info!(path = %p.display(), "removed stale .migrated backup");
+                dropped += 1;
+            }
+            Err(e) => {
+                tracing::warn!(path = %p.display(), "failed to remove stale backup: {e}")
+            }
+        }
+    }
+    s.set_bool(keys::BACKUPS_CLEANED_AT_V6, true)?;
+    Ok(dropped)
 }
 
 /// Overlay the DB view onto `cfg` in place — call this right after
@@ -325,6 +420,80 @@ pub fn hydrate_config_from_db(db: &MetadataDb, cfg: &mut Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Migrate (once) + hydrate `cfg` using an explicit DB handle. Exposed so
+/// embedders and tests can drive the hook body without installing the
+/// process-wide `Config::load_or_default()` hook.
+///
+/// Migration idempotency is enforced by the DB-side
+/// [`CONFIG_MIGRATED_FROM_TOML`](crate::settings::CONFIG_MIGRATED_FROM_TOML)
+/// sentinel, so calling this on every load is safe but wasteful — the
+/// [`install_config_post_load_hook`] installer adds a per-process
+/// `OnceLock` fast-path on top.
+pub fn run_post_load_hook(db: &MetadataDb, cfg: &mut Config) {
+    match migrate_config_toml_to_db(db, cfg) {
+        Ok(true) => rewrite_config_toml_on_disk(cfg),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("config → DB migration skipped: {e:#}"),
+    }
+    if let Err(e) = hydrate_config_from_db(db, cfg) {
+        tracing::warn!("config DB hydration skipped: {e:#}");
+    }
+}
+
+fn rewrite_config_toml_on_disk(cfg: &Config) {
+    let Some(path) = Config::config_path() else {
+        return;
+    };
+    if let Err(e) = rewrite_stripped_config_toml(cfg, &path) {
+        tracing::warn!(
+            "stripped config.toml rewrite skipped for {}: {e:#}",
+            path.display()
+        );
+    }
+}
+
+/// Register the process-wide `Config::load_or_default()` post-load hook
+/// that migrates the TOML-held user preferences into the DB (once) and
+/// overlays DB values on every subsequent load. Uses [`crate::global_db`]
+/// — safe to call from any binary main(); idempotent on repeated calls.
+///
+/// Call this once from each binary's `main()` before anything invokes
+/// `Config::load_or_default()`. `mold-cli`, `mold-server`, and
+/// `mold-discord` all route through this entry point so they share the
+/// same SQLite-backed view.
+pub fn install_config_post_load_hook() {
+    mold_core::config::install_post_load_hook(global_hook);
+    mold_core::config::install_read_last_model_hook(db_read_last_model);
+}
+
+fn db_read_last_model() -> Option<String> {
+    let db = crate::global_db()?;
+    Settings::new(db)
+        .get_str(keys::TUI_LAST_MODEL)
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+}
+
+fn global_hook(cfg: &mut Config) {
+    // Per-process fast path: the DB sentinel is the source of truth for
+    // migration, but re-checking it on every config load is wasteful.
+    static MIGRATION_DONE: OnceLock<()> = OnceLock::new();
+    let Some(db) = crate::global_db() else {
+        return;
+    };
+    if MIGRATION_DONE.set(()).is_ok() {
+        match migrate_config_toml_to_db(db, cfg) {
+            Ok(true) => rewrite_config_toml_on_disk(cfg),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("config → DB migration skipped: {e:#}"),
+        }
+    }
+    if let Err(e) = hydrate_config_from_db(db, cfg) {
+        tracing::warn!("config DB hydration skipped: {e:#}");
+    }
 }
 
 #[cfg(test)]
@@ -646,6 +815,211 @@ mod tests {
             Scheduler::Ddim.to_string().parse::<Scheduler>(),
             Ok(Scheduler::Ddim)
         );
+    }
+
+    /// Item 2 (post-#265): `run_post_load_hook` must drive both migrate
+    /// and hydrate when given an explicit DB handle, so standalone
+    /// binaries (`mold-server`, `mold-discord`) can reuse the same
+    /// behaviour without linking against `mold-cli`.
+    #[test]
+    fn run_post_load_hook_migrates_and_hydrates() {
+        let db = db();
+
+        // First call with an "existing" TOML-shaped cfg: migration imports
+        // cfg values into the DB, hydrate reads them back.
+        let mut cfg = Config {
+            default_width: 1536,
+            default_steps: 33,
+            ..Config::default()
+        };
+        cfg.expand.enabled = true;
+        super::run_post_load_hook(&db, &mut cfg);
+
+        assert_eq!(
+            Settings::new(&db)
+                .get_bool(keys::CONFIG_MIGRATED_FROM_TOML)
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(cfg.default_width, 1536);
+
+        // Simulate a user tweak via the DB (e.g. `mold config set`).
+        Settings::new(&db)
+            .set_int(keys::GENERATE_DEFAULT_WIDTH, 2112)
+            .unwrap();
+
+        // Second call on a fresh cfg: migration short-circuits (sentinel
+        // set), hydrate pulls the new DB value in.
+        let mut cfg2 = Config {
+            default_width: 256,
+            ..Config::default()
+        };
+        super::run_post_load_hook(&db, &mut cfg2);
+        assert_eq!(cfg2.default_width, 2112);
+    }
+
+    /// Item 4 (post-#265): detect (don't delete) stale `.migrated`
+    /// backups so future releases can flip to cleanup. Files returned
+    /// match the three sidecars that land during the v5 → v6 upgrade.
+    #[test]
+    fn detect_stale_backups_lists_every_migrated_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mold = dir.path().join("mold-home");
+        let cfg = dir.path().join("config");
+        std::fs::create_dir_all(&mold).unwrap();
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(mold.join("tui-session.json.migrated"), "{}").unwrap();
+        std::fs::write(mold.join("prompt-history.jsonl.migrated"), "").unwrap();
+        std::fs::write(cfg.join("config.toml.migrated"), "# old").unwrap();
+
+        let found = super::detect_stale_backups(&mold, &cfg);
+        assert_eq!(found.len(), 3);
+    }
+
+    /// Item 4: with no backups present, detection returns an empty list
+    /// (no false positives).
+    #[test]
+    fn detect_stale_backups_is_empty_when_nothing_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::detect_stale_backups(dir.path(), dir.path()).is_empty());
+    }
+
+    /// Item 4: `cleanup_stale_backups` removes every detected file and
+    /// writes the idempotency sentinel. A second call is a no-op.
+    #[test]
+    fn cleanup_stale_backups_removes_files_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mold = dir.path().join("mold-home");
+        std::fs::create_dir_all(&mold).unwrap();
+        std::fs::write(mold.join("tui-session.json.migrated"), "{}").unwrap();
+        std::fs::write(mold.join("prompt-history.jsonl.migrated"), "").unwrap();
+
+        let db = db();
+        let dropped = super::cleanup_stale_backups(&db, &mold, &mold).unwrap();
+        assert_eq!(dropped, 2);
+        assert!(!mold.join("tui-session.json.migrated").exists());
+        assert!(!mold.join("prompt-history.jsonl.migrated").exists());
+        assert_eq!(
+            Settings::for_profile(&db, keys::DEFAULT_PROFILE)
+                .get_bool(keys::BACKUPS_CLEANED_AT_V6)
+                .unwrap(),
+            Some(true)
+        );
+        // Second call is a no-op — sentinel guards.
+        std::fs::write(mold.join("prompt-history.jsonl.migrated"), "").unwrap();
+        let dropped2 = super::cleanup_stale_backups(&db, &mold, &mold).unwrap();
+        assert_eq!(dropped2, 0);
+        assert!(mold.join("prompt-history.jsonl.migrated").exists());
+    }
+
+    /// Item 1 (post-#265): the stripped-rewrite helper must back up the
+    /// original `config.toml` to `.migrated` and write a new file that
+    /// retains bootstrap fields but drops every key that now lives in the
+    /// DB (expand, generate globals, per-model generation defaults, lora,
+    /// scheduler, negative_prompt).
+    #[test]
+    fn rewrite_stripped_config_toml_strips_user_prefs_and_backs_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let original = r#"config_version = 1
+default_model = "flux-dev:q4"
+models_dir = "/opt/models"
+server_port = 7680
+default_width = 1536
+default_height = 1024
+default_steps = 30
+embed_metadata = true
+default_negative_prompt = "ugly"
+t5_variant = "q8"
+qwen3_variant = "bf16"
+
+[expand]
+enabled = true
+temperature = 0.9
+
+[logging]
+level = "info"
+
+[runpod]
+
+[models."flux-dev:q4"]
+transformer = "/opt/flux.gguf"
+vae = "/opt/vae.safetensors"
+default_steps = 20
+default_guidance = 3.5
+default_width = 1024
+default_height = 1024
+negative_prompt = "blurry"
+lora = "/opt/lora.safetensors"
+lora_scale = 0.8
+scheduler = "euler-ancestral"
+"#;
+        std::fs::write(&config_path, original).unwrap();
+        let cfg: Config = toml::from_str(original).unwrap();
+
+        super::rewrite_stripped_config_toml(&cfg, &config_path).unwrap();
+
+        // Backup mirrors the original untouched.
+        let backup = std::fs::read_to_string(config_path.with_extension("toml.migrated"))
+            .expect(".migrated backup should exist");
+        assert!(backup.contains("default_width = 1536"));
+        assert!(backup.contains("[expand]"));
+        assert!(backup.contains("lora = \"/opt/lora.safetensors\""));
+        assert!(backup.contains("scheduler = \"euler-ancestral\""));
+
+        // Stripped file keeps the bootstrap surface.
+        let stripped = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            stripped.starts_with("# mold config"),
+            "banner comment missing:\n{stripped}"
+        );
+        assert!(stripped.contains("default_model = \"flux-dev:q4\""));
+        assert!(stripped.contains("models_dir = \"/opt/models\""));
+        assert!(stripped.contains("server_port = 7680"));
+        assert!(stripped.contains("[logging]"));
+        assert!(stripped.contains("transformer = \"/opt/flux.gguf\""));
+        assert!(stripped.contains("vae = \"/opt/vae.safetensors\""));
+
+        // …and drops every user-preference field. Assertions use ` = ` /
+        // ` =` suffixes because the banner comment at the top mentions
+        // some of these key names in prose.
+        let body = stripped
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !body.contains("default_width"),
+            "global default_width must be stripped: {body}"
+        );
+        assert!(!body.contains("default_height"));
+        assert!(!body.contains("default_steps"));
+        assert!(!body.contains("embed_metadata"));
+        assert!(!body.contains("default_negative_prompt"));
+        assert!(!body.contains("t5_variant"));
+        assert!(!body.contains("qwen3_variant"));
+        assert!(!body.contains("[expand]"));
+        assert!(
+            !body.contains("lora = "),
+            "per-model lora must be stripped: {body}"
+        );
+        assert!(!body.contains("lora_scale"));
+        assert!(!body.contains("scheduler"));
+        assert!(!body.contains("negative_prompt"));
+        assert!(!body.contains("default_guidance"));
+    }
+
+    /// Item 1: calling the rewrite when no `config.toml` exists is a
+    /// harmless no-op (e.g. a user running mold for the first time with
+    /// MOLD_* env vars and no TOML).
+    #[test]
+    fn rewrite_stripped_config_toml_is_noop_without_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nothing.toml");
+        let cfg = Config::default();
+        super::rewrite_stripped_config_toml(&cfg, &path).unwrap();
+        assert!(!path.exists());
+        assert!(!path.with_extension("toml.migrated").exists());
     }
 
     /// Codex P2: the pre-#265 TUI wrote `{s:?}`.to_lowercase() (e.g.

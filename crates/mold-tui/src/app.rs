@@ -4513,7 +4513,7 @@ impl App {
 
                     // Save session state
                     self.save_session();
-                    Config::write_last_model(&actual_model);
+                    mold_db::settings::record_last_model(&actual_model);
 
                     // Push to prompt history
                     let neg = if neg_text.is_empty() {

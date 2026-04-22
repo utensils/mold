@@ -386,11 +386,16 @@ mold config set default_width 1024        # Generation default → written to mo
 mold config set output_dir none           # Clear an optional field
 mold config set models.flux-dev:q4.default_steps 30   # Per-model generation default → model_prefs (DB)
 mold config where expand.enabled          # Print "db" or "file" so operators know the surface
+mold config reset expand.enabled          # Drop the DB row; next read falls back to config.toml/env/default
+mold config reset --all --yes             # Drop every DB row under the active profile
+mold config --profile portrait set default_steps 30   # Scope a command to an explicit profile (v6)
 mold config path                          # Show config file location
 mold config edit                          # Open config.toml in $EDITOR
 ```
 
-Keys use dot-notation matching the TOML / DB layout. Boolean values accept `true`/`false`, `on`/`off`, or `1`/`0`. Use `none` to clear optional fields. Values are validated (port range, enum options, numeric bounds) before saving. Environment variable overrides are shown when active. `mold config set` also tags the surface it wrote to (e.g. `Set expand.enabled = true [db]`). On first launch after upgrading from a pre-#265 release, mold runs a one-shot import of the `[expand]`/generation-defaults slices of `config.toml` into the DB (gated by `config.migrated_from_toml`) so existing users keep their current values.
+Keys use dot-notation matching the TOML / DB layout. Boolean values accept `true`/`false`, `on`/`off`, or `1`/`0`. Use `none` to clear optional fields. Values are validated (port range, enum options, numeric bounds) before saving. Environment variable overrides are shown when active. `mold config list` output tags each row with its surface (`[db]` / `[file]` / `[env]`), and `mold config set` tags the surface it wrote to (e.g. `Set expand.enabled = true [db]`).
+
+On first launch after upgrading from a pre-#265 release, mold imports the `[expand]`/generation-defaults slices of `config.toml` into the DB (gated by `config.migrated_from_toml`), renames the original `config.toml` to `config.toml.migrated` as a one-release downgrade safety net, and rewrites `config.toml` as a stripped **bootstrap-only** file (paths, ports, credentials, per-model file paths — nothing the DB now owns). Multi-profile scoping landed in schema v6: set `MOLD_PROFILE=dev` or pass `--profile dev` to any `mold config` subcommand.
 
 ## Self-Update
 

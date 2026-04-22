@@ -3047,6 +3047,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "toml",
  "tracing",
  "walkdir",
 ]
@@ -3057,6 +3058,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "mold-ai-core",
+ "mold-ai-db",
  "poise",
  "serde",
  "serde_json",

@@ -109,6 +109,25 @@ enum ConfigAction {
         #[arg(add = ArgValueCandidates::new(commands::config::complete_config_key))]
         key: String,
     },
+    /// Drop a DB-backed key so the next read falls back to config.toml / env / default.
+    ///
+    /// Rejects TOML-only keys with a helpful error — those are edited by
+    /// `mold config set` or by editing `config.toml` directly.
+    Reset {
+        /// Config key to reset. Use `--all` instead of a key to drop every
+        /// DB row.
+        #[arg(
+            required_unless_present = "all",
+            add = ArgValueCandidates::new(commands::config::complete_config_key)
+        )]
+        key: Option<String>,
+        /// Drop every DB row for the active profile.
+        #[arg(long, conflicts_with = "key")]
+        all: bool,
+        /// Skip the confirmation prompt when using `--all`.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -807,6 +826,10 @@ Examples:
   mold config path                                  Config file location
   mold config edit                                  Open in $EDITOR")]
     Config {
+        /// Operate on the named profile (v6 settings scoping). Overrides
+        /// the `MOLD_PROFILE` env var for the duration of this command.
+        #[arg(long, global = true, value_name = "NAME")]
+        profile: Option<String>,
         #[command(subcommand)]
         action: ConfigAction,
     },
@@ -1372,14 +1395,25 @@ async fn run() -> anyhow::Result<()> {
         Commands::Default { model } => {
             commands::default::run(model.as_deref())?;
         }
-        Commands::Config { action } => match action {
-            ConfigAction::List { json } => commands::config::run_list(json)?,
-            ConfigAction::Get { key, raw } => commands::config::run_get(&key, raw)?,
-            ConfigAction::Set { key, value } => commands::config::run_set(&key, &value)?,
-            ConfigAction::Path => commands::config::run_path()?,
-            ConfigAction::Edit => commands::config::run_edit()?,
-            ConfigAction::Where { key } => commands::config::run_where(&key)?,
-        },
+        Commands::Config { action, profile } => {
+            // Set `MOLD_PROFILE` for the duration of this command so every
+            // `Settings::new(db)` / `ModelPrefs::load(db, …)` picks up the
+            // flag automatically via `resolve_active_profile`.
+            if let Some(ref p) = profile {
+                std::env::set_var("MOLD_PROFILE", p);
+            }
+            match action {
+                ConfigAction::List { json } => commands::config::run_list(json)?,
+                ConfigAction::Get { key, raw } => commands::config::run_get(&key, raw)?,
+                ConfigAction::Set { key, value } => commands::config::run_set(&key, &value)?,
+                ConfigAction::Path => commands::config::run_path()?,
+                ConfigAction::Edit => commands::config::run_edit()?,
+                ConfigAction::Where { key } => commands::config::run_where(&key)?,
+                ConfigAction::Reset { key, all, yes } => {
+                    commands::config::run_reset(key.as_deref(), all, yes)?
+                }
+            }
+        }
         Commands::Runpod { action } => match action {
             RunpodAction::Doctor => commands::runpod::run_doctor().await?,
             RunpodAction::Gpus { all, json } => commands::runpod::run_gpus(json, all).await?,

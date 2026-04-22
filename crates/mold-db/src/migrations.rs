@@ -152,6 +152,61 @@ CREATE INDEX IF NOT EXISTS idx_prompt_hist_model
     ON prompt_history(model);
 "#;
 
+/// v6 → add a `profile` column to `settings` and `model_prefs` so the
+/// same DB can host multiple independent user preference sets (`default`,
+/// `dev`, `portrait`, …). All v5 rows land under `profile = 'default'`
+/// so existing installs keep working untouched.
+///
+/// SQLite can't change a PK in-place, so each table is recreated and the
+/// data is copied. Both steps run in the same v6 transaction — a crash
+/// mid-migration leaves the DB at v5.
+const V6_PROFILE_SCOPING: &str = r#"
+CREATE TABLE settings_v6 (
+    profile       TEXT NOT NULL DEFAULT 'default',
+    key           TEXT NOT NULL,
+    value         TEXT NOT NULL,
+    value_type    TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (profile, key)
+);
+INSERT INTO settings_v6 (profile, key, value, value_type, updated_at_ms)
+    SELECT 'default', key, value, value_type, updated_at_ms FROM settings;
+DROP TABLE settings;
+ALTER TABLE settings_v6 RENAME TO settings;
+
+CREATE TABLE model_prefs_v6 (
+    profile         TEXT NOT NULL DEFAULT 'default',
+    model           TEXT NOT NULL,
+    width           INTEGER,
+    height          INTEGER,
+    steps           INTEGER,
+    guidance        REAL,
+    scheduler       TEXT,
+    seed_mode       TEXT,
+    batch           INTEGER,
+    format          TEXT,
+    lora_path       TEXT,
+    lora_scale      REAL,
+    expand          INTEGER,
+    offload         INTEGER,
+    strength        REAL,
+    control_scale   REAL,
+    frames          INTEGER,
+    fps             INTEGER,
+    last_prompt     TEXT,
+    last_negative   TEXT,
+    updated_at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (profile, model)
+);
+INSERT INTO model_prefs_v6
+    SELECT 'default', model, width, height, steps, guidance, scheduler, seed_mode,
+           batch, format, lora_path, lora_scale, expand, offload, strength,
+           control_scale, frames, fps, last_prompt, last_negative, updated_at_ms
+    FROM model_prefs;
+DROP TABLE model_prefs;
+ALTER TABLE model_prefs_v6 RENAME TO model_prefs;
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -175,11 +230,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 5,
         kind: MigrationKind::Sql(V5_PROMPT_HISTORY_TABLE),
     },
+    Migration {
+        version: 6,
+        kind: MigrationKind::Sql(V6_PROFILE_SCOPING),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -507,15 +566,121 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_reaches_schema_version_5() {
+    fn fresh_db_reaches_schema_version_6() {
         let mut conn = Connection::open_in_memory().unwrap();
         apply_pending(&mut conn).unwrap();
         assert_eq!(
             current_version(&conn).unwrap(),
-            5,
-            "SCHEMA_VERSION should be 5 after adding settings/model_prefs/prompt_history"
+            6,
+            "SCHEMA_VERSION should be 6 after the v6 profile-scoping migration"
         );
-        assert_eq!(SCHEMA_VERSION, 5);
+        assert_eq!(SCHEMA_VERSION, 6);
+    }
+
+    /// v6: `settings` keeps every existing row under `profile = 'default'`
+    /// and the composite PK `(profile, key)` is in place.
+    #[test]
+    fn v6_moves_existing_settings_to_default_profile() {
+        // Seed a v5 DB with real settings rows, then let apply_pending
+        // migrate it forward.
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        tx.execute_batch(V3_SETTINGS_TABLE).unwrap();
+        tx.execute_batch(V4_MODEL_PREFS_TABLE).unwrap();
+        tx.execute_batch(V5_PROMPT_HISTORY_TABLE).unwrap();
+        tx.execute_batch("PRAGMA user_version = 5;").unwrap();
+        tx.commit().unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value, value_type, updated_at_ms)
+             VALUES ('tui.theme', 'mocha', 'string', 123)",
+            [],
+        )
+        .unwrap();
+
+        apply_pending(&mut conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 6);
+
+        let cols = column_names(&conn, "settings");
+        assert!(
+            cols.iter().any(|c| c == "profile"),
+            "settings must gain a profile column, got {cols:?}"
+        );
+
+        let (profile, value): (String, String) = conn
+            .query_row(
+                "SELECT profile, value FROM settings WHERE key = 'tui.theme'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(profile, "default");
+        assert_eq!(value, "mocha");
+    }
+
+    /// v6: `model_prefs` keeps every existing row under `profile = 'default'`.
+    #[test]
+    fn v6_moves_existing_model_prefs_to_default_profile() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        tx.execute_batch(V3_SETTINGS_TABLE).unwrap();
+        tx.execute_batch(V4_MODEL_PREFS_TABLE).unwrap();
+        tx.execute_batch(V5_PROMPT_HISTORY_TABLE).unwrap();
+        tx.execute_batch("PRAGMA user_version = 5;").unwrap();
+        tx.commit().unwrap();
+        conn.execute(
+            "INSERT INTO model_prefs
+                (model, width, height, steps, updated_at_ms)
+             VALUES ('flux-dev:q4', 1024, 1024, 20, 123)",
+            [],
+        )
+        .unwrap();
+
+        apply_pending(&mut conn).unwrap();
+
+        let cols = column_names(&conn, "model_prefs");
+        assert!(
+            cols.iter().any(|c| c == "profile"),
+            "model_prefs must gain a profile column, got {cols:?}"
+        );
+        let (profile, width): (String, i64) = conn
+            .query_row(
+                "SELECT profile, width FROM model_prefs WHERE model = 'flux-dev:q4'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(profile, "default");
+        assert_eq!(width, 1024);
+    }
+
+    /// v6: two rows with the same `key` but different `profile` values
+    /// coexist under the composite PK.
+    #[test]
+    fn v6_allows_same_key_across_profiles() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pending(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO settings (profile, key, value, value_type, updated_at_ms)
+             VALUES ('default', 'tui.theme', 'mocha', 'string', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings (profile, key, value, value_type, updated_at_ms)
+             VALUES ('dev', 'tui.theme', 'nord', 'string', 1)",
+            [],
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key = 'tui.theme'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "same key under distinct profiles must coexist");
     }
 
     #[test]
@@ -610,9 +775,9 @@ mod tests {
         )
         .unwrap();
 
-        // Apply the pending v3/v4/v5 migrations.
+        // Apply the pending v3/v4/v5/v6 migrations.
         apply_pending(&mut conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 5);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
 
         // Original row intact.
         let prompt: String = conn
