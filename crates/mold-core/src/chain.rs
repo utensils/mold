@@ -218,7 +218,7 @@ pub struct ChainRequest {
 /// Echoed back in [`ChainResponse::script`] so clients can save the exact
 /// form that was rendered without re-serialising the request body (which
 /// carries auto-expand sugar and other transport-only fields).
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainScript {
     pub schema: String, // always "mold.chain.v1"
     pub chain: ChainScriptChain,
@@ -226,7 +226,7 @@ pub struct ChainScript {
     pub stages: Vec<ChainStage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainScriptChain {
     pub model: String,
     pub width: u32,
@@ -258,30 +258,6 @@ impl From<&ChainRequest> for ChainScript {
                 output_format: req.output_format,
             },
             stages: req.stages.clone(),
-        }
-    }
-}
-
-impl ChainScript {
-    /// Transient placeholder while the streaming path is wired to carry the
-    /// script through the SSE `complete` event (Task 1.13). After 1.13 the
-    /// client extracts `script` from the event payload directly.
-    pub fn placeholder_for_sse_transition() -> Self {
-        ChainScript {
-            schema: "mold.chain.v1".into(),
-            chain: ChainScriptChain {
-                model: String::new(),
-                width: 0,
-                height: 0,
-                fps: 0,
-                seed: None,
-                steps: 0,
-                guidance: 0.0,
-                strength: 0.0,
-                motion_tail_frames: 0,
-                output_format: OutputFormat::Mp4,
-            },
-            stages: Vec::new(),
         }
     }
 }
@@ -360,6 +336,14 @@ pub struct SseChainCompleteEvent {
     /// Wall-clock elapsed time across all stages + stitching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_time_ms: Option<u64>,
+    /// Canonical echo of the normalised chain request, so streaming clients
+    /// can save/reload the rendered script without re-serialising the
+    /// transport-only fields in the submitted request body.
+    #[serde(default)]
+    pub script: ChainScript,
+    /// Reserved for sub-project D; `None` in this release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_estimate: Option<VramEstimate>,
 }
 
 /// Chain-specific SSE progress event. Streamed as `data:` JSON frames from

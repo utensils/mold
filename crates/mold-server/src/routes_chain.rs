@@ -41,7 +41,7 @@ use crate::state::AppState;
 /// single-stage `SseProgressEvent`.
 pub(crate) enum ChainSseMessage {
     Progress(ChainProgressEvent),
-    Complete(SseChainCompleteEvent),
+    Complete(Box<SseChainCompleteEvent>),
     Error(String),
 }
 
@@ -245,6 +245,8 @@ fn build_sse_chain_complete_event(
         stage_count: resp.stage_count,
         gpu: resp.gpu,
         generation_time_ms: Some(generation_time_ms),
+        script: resp.script.clone(),
+        vram_estimate: resp.vram_estimate.clone(),
     }
 }
 
@@ -505,7 +507,7 @@ pub async fn generate_chain_stream(
         match run_chain(&state_clone, req, Some(cb)).await {
             Ok((response, elapsed_ms)) => {
                 let complete = build_sse_chain_complete_event(&response, elapsed_ms);
-                let _ = tx_for_task.send(ChainSseMessage::Complete(complete));
+                let _ = tx_for_task.send(ChainSseMessage::Complete(Box::new(complete)));
             }
             Err(err) => {
                 let api_err: ApiError = err.into();
