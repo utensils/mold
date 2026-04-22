@@ -256,7 +256,8 @@ pub async fn run_chain(
 /// Remote chain: streaming SSE with stacked progress bars.
 async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<VideoData> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChainProgressEvent>();
-    let render = tokio::spawn(render_chain_progress(rx));
+    let stage_labels: Vec<StageLabel> = req.stages.iter().map(StageLabel::from_stage).collect();
+    let render = tokio::spawn(render_chain_progress(rx, stage_labels));
 
     let stream_result = client.generate_chain_stream(req, tx).await;
     let _ = render.await;
@@ -363,7 +364,8 @@ async fn run_chain_local(
     )?;
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChainProgressEvent>();
-    let render = tokio::spawn(render_chain_progress(rx));
+    let stage_labels: Vec<StageLabel> = req.stages.iter().map(StageLabel::from_stage).collect();
+    let render = tokio::spawn(render_chain_progress(rx, stage_labels));
 
     let fps = req.fps;
     let output_format = req.output_format;
@@ -637,9 +639,37 @@ fn synth_generate_request(inputs: &ChainInputs, video: &VideoData) -> mold_core:
     }
 }
 
+/// Per-stage metadata surfaced in the progress-bar label. Built once per
+/// run from the normalised `ChainRequest`, then moved into the render
+/// task so the `ChainRequest` doesn't have to be Send-cloned.
+#[derive(Clone, Debug)]
+struct StageLabel {
+    transition_tag: &'static str,
+    prompt_preview: String,
+}
+
+impl StageLabel {
+    fn from_stage(stage: &mold_core::chain::ChainStage) -> Self {
+        use mold_core::chain::TransitionMode;
+        let transition_tag = match stage.transition {
+            TransitionMode::Smooth => "smooth",
+            TransitionMode::Cut => "cut",
+            TransitionMode::Fade => "fade",
+        };
+        let prompt_preview: String = stage.prompt.chars().take(40).collect();
+        Self {
+            transition_tag,
+            prompt_preview,
+        }
+    }
+}
+
 /// Stacked progress bars for chain render: a parent "Chain" bar covering
 /// all pixel frames and a transient per-stage bar covering denoise steps.
-async fn render_chain_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<ChainProgressEvent>) {
+async fn render_chain_progress(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<ChainProgressEvent>,
+    stage_labels: Vec<StageLabel>,
+) {
     // Always draw to stderr so image bytes piped to stdout stay clean.
     let mp = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
 
@@ -673,18 +703,26 @@ async fn render_chain_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<Chai
                 if let Some(old) = stage_bar.take() {
                     old.finish_and_clear();
                 }
-                parent.set_message(format!("stage {}/{}", stage_idx + 1, stage_count));
+                let label = stage_labels.get(stage_idx as usize);
+                let (tag, preview) = match label {
+                    Some(l) => (l.transition_tag, l.prompt_preview.as_str()),
+                    None => ("smooth", ""),
+                };
+                parent.set_message(format!("stage {}/{} [{}]", stage_idx + 1, stage_count, tag,));
                 let sb = mp.add(ProgressBar::new(0));
                 sb.set_style(
                     ProgressStyle::default_bar()
                         .template(&format!(
-                            "  Stage {{prefix}}  [{{bar:30.{c}/dim}}] {{pos}}/{{len}} steps",
+                            "  Stage {{prefix}}  [{{bar:30.{c}/dim}}] {{pos}}/{{len}} steps {{msg}}",
                             c = theme::SPINNER_STYLE,
                         ))
                         .unwrap()
                         .progress_chars("━╸─"),
                 );
-                sb.set_prefix(format!("{}", stage_idx + 1));
+                sb.set_prefix(format!("{}/{} [{}]", stage_idx + 1, stage_count, tag));
+                if !preview.is_empty() {
+                    sb.set_message(format!("\"{preview}\""));
+                }
                 sb.enable_steady_tick(Duration::from_millis(100));
                 stage_bar = Some(sb);
             }
@@ -1086,5 +1124,48 @@ mod tests {
     fn ltx2_distilled_cap_matches_engine_constraint() {
         // 97 = 8 * 12 + 1, satisfying the VAE 8k+1 constraint.
         assert_eq!(LTX2_DISTILLED_CLIP_CAP % 8, 1);
+    }
+
+    #[test]
+    fn stage_label_from_stage_builds_tag_and_preview() {
+        use mold_core::chain::{ChainStage, TransitionMode};
+        let stage = ChainStage {
+            prompt: "a long prompt that should be truncated to forty characters here ok".into(),
+            frames: 97,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Fade,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
+        };
+        let label = super::StageLabel::from_stage(&stage);
+        assert_eq!(label.transition_tag, "fade");
+        assert_eq!(label.prompt_preview.chars().count(), 40);
+        assert!(label.prompt_preview.starts_with("a long prompt that"));
+    }
+
+    #[test]
+    fn stage_label_tags_each_transition_variant() {
+        use mold_core::chain::{ChainStage, TransitionMode};
+        let make = |transition: TransitionMode| {
+            super::StageLabel::from_stage(&ChainStage {
+                prompt: "p".into(),
+                frames: 9,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            })
+        };
+        assert_eq!(make(TransitionMode::Smooth).transition_tag, "smooth");
+        assert_eq!(make(TransitionMode::Cut).transition_tag, "cut");
+        assert_eq!(make(TransitionMode::Fade).transition_tag, "fade");
     }
 }
