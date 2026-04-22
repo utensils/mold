@@ -5,20 +5,60 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 #
+# By default the script installs the latest tagged release from
+# https://github.com/utensils/mold/releases/latest.
+#
 # Options (via environment):
 #   MOLD_INSTALL_DIR  — install directory (default: ~/.local/bin)
-#   MOLD_VERSION      — release tag (default: latest)
+#   MOLD_VERSION      — release tag to install (default: resolved from the
+#                       GitHub "latest release" redirect). Pin to a specific
+#                       tag like "v0.8.0" to reproduce an older install.
 #   MOLD_CUDA_ARCH    — force GPU architecture: sm89 or sm120 (default: auto-detect)
 
 set -e
 
 REPO="utensils/mold"
+# Empty / "latest" means "whatever /releases/latest currently redirects to".
+# We resolve this to a concrete tag name below so the status line reports the
+# real version and the download URL is deterministic.
 VERSION="${MOLD_VERSION:-latest}"
 INSTALL_DIR="${MOLD_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Detect platform
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+
+# Resolve MOLD_VERSION=latest (the default) to the tag GitHub currently
+# considers the latest release. We follow the redirect from
+# `/releases/latest` (which points at `/releases/tag/<tag>`) rather than
+# calling the JSON API so no auth token is ever needed.
+resolve_latest_tag() {
+    LATEST_URL="https://github.com/${REPO}/releases/latest"
+    RESOLVED_URL="$(curl -fsSILo /dev/null -w '%{url_effective}' "${LATEST_URL}" 2>/dev/null || true)"
+
+    # Expected: https://github.com/<owner>/<repo>/releases/tag/<tag>
+    case "${RESOLVED_URL}" in
+        */releases/tag/*)
+            RESOLVED_TAG="${RESOLVED_URL##*/tag/}"
+            RESOLVED_TAG="${RESOLVED_TAG%%/*}"
+            ;;
+        *)
+            RESOLVED_TAG=""
+            ;;
+    esac
+
+    if [ -z "${RESOLVED_TAG}" ]; then
+        echo "Error: could not resolve the latest mold release from ${LATEST_URL}" >&2
+        echo "  Set MOLD_VERSION=<tag> to install a specific version," >&2
+        echo "  e.g. MOLD_VERSION=v0.9.0 curl ... | sh" >&2
+        exit 1
+    fi
+    echo "${RESOLVED_TAG}"
+}
+
+if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+    VERSION="$(resolve_latest_tag)"
+fi
 
 # Detect NVIDIA GPU compute capability on Linux
 detect_cuda_arch() {
@@ -102,7 +142,7 @@ URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET}"
 LEGACY_ASSET="mold-x86_64-unknown-linux-gnu-cuda.tar.gz"
 LEGACY_URL="https://github.com/${REPO}/releases/download/${VERSION}/${LEGACY_ASSET}"
 
-echo "Installing mold (${VERSION}) for ${OS}/${ARCH}..."
+echo "Installing mold ${VERSION} for ${OS}/${ARCH}..."
 echo "  to:   ${INSTALL_DIR}/mold"
 
 # Create install directory
@@ -130,7 +170,7 @@ if [ "${OS}" = "Darwin" ]; then
 fi
 
 echo ""
-echo "mold installed to ${INSTALL_DIR}/mold"
+echo "mold ${VERSION} installed to ${INSTALL_DIR}/mold"
 
 # Check if install dir is in PATH
 case ":${PATH}:" in

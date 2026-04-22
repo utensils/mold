@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`install.sh` now installs the latest tagged release by default and reports the resolved version.** Previously `MOLD_VERSION=latest` (the default) built the download URL as `releases/download/latest/<asset>`, which GitHub does not honour as a tag — the only asset alias is `releases/latest/download/<asset>` (note the different path order), so the script only worked when a concrete tag happened to have been cached or when `MOLD_VERSION` was explicitly set. The script now follows the `releases/latest` redirect via `curl -I`, parses the resolved `…/releases/tag/<tag>` URL, and prints both the installing and installed version lines with the concrete tag (`Installing mold v0.9.0 for Darwin/arm64…`). Setting `MOLD_VERSION=<tag>` still pins to that tag, and the error path for an unresolvable redirect suggests setting `MOLD_VERSION` explicitly. README, `website/guide/installation.md`, `website/index.md`, and `website/guide/index.md` all carry the updated guidance and the new `MOLD_VERSION` example.
+
 ### Fixed
 
 - **TUI: five Codex-surfaced regressions in the phase 1–5 design redesign**, all addressed with TDD (failing test first):
