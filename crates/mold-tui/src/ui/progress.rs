@@ -49,22 +49,63 @@ pub fn render_with_title(frame: &mut Frame, app: &App, area: Rect, focused: bool
     if layout[1].height > 0 {
         let mut bar_area = layout[1];
 
-        if rows.spinner {
+        if rows.overall {
+            // Heartbeat row — visible for the entire generation so the
+            // user can see the pipeline is still alive between stages.
+            // Format: `▶ Generating · 4.3s · [3] Loading T5 encoder`.
+            let total = progress
+                .generation_elapsed()
+                .map(format_elapsed)
+                .unwrap_or_else(|| "0.0s".to_string());
+            let mut spans: Vec<Span> = vec![
+                Span::styled("\u{25B6} ", Style::default().fg(theme.accent)),
+                Span::styled("Generating", Style::default().fg(theme.text)),
+                Span::styled(" \u{00B7} ", theme.dim()),
+                Span::styled(total, theme.dim()),
+            ];
+            if let Some(stage) = &progress.current_stage {
+                spans.push(Span::styled(" \u{00B7} ", theme.dim()));
+                if progress.stage_index > 0 {
+                    spans.push(Span::styled(
+                        format!("[{}] ", progress.stage_index),
+                        theme.dim(),
+                    ));
+                }
+                spans.push(Span::styled(
+                    stage.as_str(),
+                    Style::default().fg(theme.text),
+                ));
+            }
+            let row = Rect {
+                height: 1,
+                ..bar_area
+            };
+            frame.render_widget(Paragraph::new(Line::from(spans)), row);
+            bar_area.y += 1;
+            bar_area.height = bar_area.height.saturating_sub(1);
+        }
+
+        if rows.spinner && bar_area.height > 0 {
             if let Some(stage) = &progress.current_stage {
                 let spinner_char = spinner_frame();
-                let line = Line::from(vec![
+                let mut spans = vec![
                     Span::styled(
                         format!("{spinner_char} "),
                         Style::default().fg(theme.accent),
                     ),
-                    Span::styled(stage, Style::default().fg(theme.text)),
-                ]);
-                let p = Paragraph::new(line);
+                    Span::styled(stage.as_str(), Style::default().fg(theme.text)),
+                ];
+                // Stage-local elapsed time — makes slow load stages feel
+                // less frozen when no sub-gauge is available to update.
+                if let Some(dur) = progress.stage_elapsed() {
+                    spans.push(Span::styled(" \u{00B7} ", theme.dim()));
+                    spans.push(Span::styled(format_elapsed(dur), theme.dim()));
+                }
                 let row = Rect {
                     height: 1,
                     ..bar_area
                 };
-                frame.render_widget(p, row);
+                frame.render_widget(Paragraph::new(Line::from(spans)), row);
                 bar_area.y += 1;
                 bar_area.height = bar_area.height.saturating_sub(1);
             }
@@ -282,6 +323,7 @@ fn spinner_frame() -> char {
 /// Timeline stays blank during the `hf-hub` handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TimelineRows {
+    pub overall: bool,
     pub spinner: bool,
     pub download: bool,
     pub placeholder: bool,
@@ -291,7 +333,8 @@ pub(crate) struct TimelineRows {
 
 impl TimelineRows {
     pub fn total(self) -> u16 {
-        self.spinner as u16
+        self.overall as u16
+            + self.spinner as u16
             + self.download as u16
             + self.placeholder as u16
             + self.weight as u16
@@ -309,12 +352,30 @@ pub(crate) fn timeline_rows(progress: &crate::app::ProgressState) -> TimelineRow
     // indeterminate "preparing" row so the Timeline is never empty
     // while a pull is actually in flight.
     let has_placeholder = progress.is_downloading() && !has_download && !has_spinner;
+    // The Overall row is the "you are still generating" heartbeat. It
+    // renders whenever a generation is in flight *and* we're not purely
+    // downloading (in which case the pull rows already tell the story).
+    let has_overall = progress.generation_started_at.is_some() && !progress.is_downloading();
     TimelineRows {
+        overall: has_overall,
         spinner: has_spinner,
         download: has_download,
         placeholder: has_placeholder,
         weight: has_weight,
         denoise: has_denoise,
+    }
+}
+
+/// Format `d` as a compact elapsed timer, e.g. `4.3s`, `1m12s`, `1h02m`.
+pub(crate) fn format_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        let total_ms = d.as_millis();
+        format!("{:.1}s", total_ms as f64 / 1000.0)
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
@@ -391,5 +452,72 @@ mod tests {
         let progress = ProgressState::default();
         let rows = timeline_rows(&progress);
         assert_eq!(rows.total(), 0);
+    }
+
+    #[test]
+    fn timeline_shows_overall_row_while_generating_even_without_gauges() {
+        // User-reported: during the model-loading phase of a local run the
+        // Timeline went silent between StageStart events — no gauge, no
+        // spinner. The Overall row is the heartbeat that's always visible
+        // while a generation is in flight, so the user can tell the
+        // pipeline is still progressing.
+        let mut progress = ProgressState::default();
+        progress.mark_generation_start();
+        assert!(progress.generation_started_at.is_some());
+
+        let rows = timeline_rows(&progress);
+        assert!(
+            rows.overall,
+            "Overall row must render for the duration of any generation"
+        );
+    }
+
+    #[test]
+    fn timeline_overall_hides_when_only_downloading() {
+        // Pure pull (no subsequent generation) already has the download
+        // gauge/placeholder telling the story — the Overall heartbeat
+        // would just duplicate it.
+        let mut progress = ProgressState::default();
+        progress.downloading = true;
+        progress.download_total = 100;
+        progress.download_bytes = 10;
+        // No generation started — we're only pulling.
+        let rows = timeline_rows(&progress);
+        assert!(!rows.overall);
+    }
+
+    #[test]
+    fn timeline_overall_row_coexists_with_stage_spinner() {
+        // During a real generation: Overall heartbeat on top, active
+        // spinner row beneath it, plus whatever gauge applies.
+        let mut progress = ProgressState::default();
+        progress.mark_generation_start();
+        progress.current_stage = Some("Loading T5 encoder".into());
+
+        let rows = timeline_rows(&progress);
+        assert!(rows.overall);
+        assert!(rows.spinner);
+        assert_eq!(rows.total(), 2);
+    }
+
+    #[test]
+    fn format_elapsed_sub_minute_has_decimal() {
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_millis(250)),
+            "0.2s"
+        );
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_millis(4_300)),
+            "4.3s"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_rolls_into_minutes_and_hours() {
+        assert_eq!(format_elapsed(std::time::Duration::from_secs(75)), "1m15s");
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_secs(3_725)),
+            "1h02m"
+        );
     }
 }

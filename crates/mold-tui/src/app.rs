@@ -105,6 +105,19 @@ pub struct ProgressState {
     pub download_total_files: usize,
     pub downloading: bool,
     download_samples: VecDeque<(u64, u64)>,
+    /// Wall-clock start of the current generation. Set by
+    /// [`ProgressState::mark_generation_start`] when the user triggers a
+    /// run and cleared when generation finishes. Drives the always-visible
+    /// "Overall" row in the Timeline panel.
+    pub generation_started_at: Option<std::time::Instant>,
+    /// Wall-clock start of the currently-active pipeline stage.
+    /// Set on each `StageStart` event, cleared on the matching `StageDone`
+    /// (or when generation finishes). Drives the per-stage elapsed suffix
+    /// appended to the spinner row.
+    pub stage_started_at: Option<std::time::Instant>,
+    /// One-based index of the currently-active pipeline stage — useful when
+    /// we want to show "step N" without knowing the total up front.
+    pub stage_index: usize,
 }
 
 impl ProgressState {
@@ -129,6 +142,30 @@ impl ProgressState {
         self.download_total_files = 0;
         self.downloading = false;
         self.download_samples.clear();
+        self.generation_started_at = None;
+        self.stage_started_at = None;
+        self.stage_index = 0;
+    }
+
+    /// Mark the start of a new generation — called from `start_generation`
+    /// right after the rest of the progress state is cleared. Stamping the
+    /// start here keeps the "Overall" Timeline row accurate even before any
+    /// SSE events arrive from the server.
+    pub fn mark_generation_start(&mut self) {
+        self.generation_started_at = Some(std::time::Instant::now());
+        self.stage_started_at = None;
+        self.stage_index = 0;
+    }
+
+    /// Wall-clock duration since [`mark_generation_start`], or `None` if a
+    /// generation isn't in flight.
+    pub fn generation_elapsed(&self) -> Option<std::time::Duration> {
+        self.generation_started_at.map(|t| t.elapsed())
+    }
+
+    /// Wall-clock duration since the active stage began.
+    pub fn stage_elapsed(&self) -> Option<std::time::Duration> {
+        self.stage_started_at.map(|t| t.elapsed())
     }
 
     fn clear_download(&mut self) {
@@ -3981,6 +4018,7 @@ impl App {
         self.generate.batch_remaining = self.generate.params.batch;
         self.generate.error_message = None;
         self.generate.progress.clear();
+        self.generate.progress.mark_generation_start();
         self.generate.preview_image = None;
         self.generate.image_state = None;
         self.generate.animation = None;
@@ -4021,6 +4059,10 @@ impl App {
                     self.generate.batch_remaining = self.generate.batch_remaining.saturating_sub(1);
                     if self.generate.batch_remaining == 0 {
                         self.generate.generating = false;
+                        // Stop the Overall heartbeat row now that the
+                        // pipeline has produced a result.
+                        self.generate.progress.generation_started_at = None;
+                        self.generate.progress.stage_started_at = None;
                     }
                     self.generate.last_seed = Some(response.seed_used);
                     self.generate.last_generation_time_ms = Some(response.generation_time_ms);
@@ -4255,6 +4297,8 @@ impl App {
                     self.generate.generating = false;
                     self.generate.batch_remaining = 0;
                     self.generate.error_message = Some(msg);
+                    self.generate.progress.generation_started_at = None;
+                    self.generate.progress.stage_started_at = None;
                 }
                 BackgroundEvent::GalleryScanComplete(entries) => {
                     self.gallery.thumbnail_states = vec![None; entries.len()];
@@ -4617,12 +4661,18 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
     match event {
         SseProgressEvent::StageStart { name } => {
             progress.current_stage = Some(name);
+            // Each StageStart counts as a new pipeline step; tracking the
+            // index gives the Timeline an at-a-glance "you are on step N"
+            // indicator without needing an estimated total.
+            progress.stage_index = progress.stage_index.saturating_add(1);
+            progress.stage_started_at = Some(std::time::Instant::now());
             // Reset transient bars when the stream moves into a new phase.
             progress.clear_download();
             progress.clear_weight();
         }
         SseProgressEvent::StageDone { name, elapsed_ms } => {
             progress.current_stage = None;
+            progress.stage_started_at = None;
             progress.log.push(ProgressLogEntry {
                 message: format!("{name} [{:.1}s]", elapsed_ms as f64 / 1000.0),
                 style: ProgressStyle::Done,
