@@ -438,7 +438,7 @@ onMounted(async () => {
     <Transition name="fade">
       <div
         v-if="selectMode"
-        class="fixed inset-x-0 bottom-[max(1.25rem,env(safe-area-inset-bottom))] z-30 flex justify-center px-4"
+        class="fixed inset-x-0 bottom-[calc(var(--mold-tray-h,0px)+max(1.25rem,env(safe-area-inset-bottom)))] z-30 flex justify-center px-4"
       >
         <div
           class="glass flex max-w-full flex-wrap items-center gap-2 rounded-full border border-white/10 bg-ink-900/80 px-3 py-2 text-[13px] text-ink-100 shadow-xl backdrop-blur"
@@ -513,7 +513,7 @@ onMounted(async () => {
         v-if="showBackToTop"
         type="button"
         aria-label="Scroll to top"
-        class="fixed bottom-[max(1.25rem,env(safe-area-inset-bottom))] right-4 z-20 inline-flex h-12 w-12 items-center justify-center rounded-full bg-brand-500 text-white shadow-[0_12px_30px_-10px_rgba(99,102,241,0.7)] backdrop-blur transition hover:bg-brand-400 active:scale-95 sm:right-6"
+        class="fixed bottom-[calc(var(--mold-tray-h,0px)+max(1.25rem,env(safe-area-inset-bottom)))] right-4 z-20 inline-flex h-12 w-12 items-center justify-center rounded-full bg-brand-500 text-white shadow-[0_12px_30px_-10px_rgba(99,102,241,0.7)] backdrop-blur transition hover:bg-brand-400 active:scale-95 sm:right-6"
         @click="scrollToTop"
       >
         <svg

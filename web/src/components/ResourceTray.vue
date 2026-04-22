@@ -37,6 +37,19 @@ function loadExpanded(): boolean {
 
 const expanded = ref(loadExpanded());
 
+// Tray height is published as `--mold-tray-h` on :root so floating UI
+// elsewhere (the gallery selection bar, back-to-top FAB, etc.) can sit
+// *above* the tray without duplicating layout measurements.
+const trayRoot = ref<HTMLElement | null>(null);
+let trayObserver: ResizeObserver | null = null;
+
+function setTrayHeightVar(px: number) {
+  document.documentElement.style.setProperty(
+    "--mold-tray-h",
+    `${Math.round(px)}px`,
+  );
+}
+
 function toggle() {
   expanded.value = !expanded.value;
   try {
@@ -78,12 +91,30 @@ function onKey(e: KeyboardEvent) {
   toggle();
 }
 
-onMounted(() => window.addEventListener("keydown", onKey));
-onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
+onMounted(() => {
+  window.addEventListener("keydown", onKey);
+  const el = trayRoot.value;
+  if (el) {
+    setTrayHeightVar(el.getBoundingClientRect().height);
+    trayObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setTrayHeightVar(entry.contentRect.height);
+      }
+    });
+    trayObserver.observe(el);
+  }
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onKey);
+  trayObserver?.disconnect();
+  trayObserver = null;
+  document.documentElement.style.removeProperty("--mold-tray-h");
+});
 </script>
 
 <template>
   <div
+    ref="trayRoot"
     class="pointer-events-none fixed inset-x-0 bottom-0 z-30 flex justify-center"
   >
     <div
