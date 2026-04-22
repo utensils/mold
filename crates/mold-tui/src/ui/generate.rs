@@ -34,7 +34,11 @@ const LEFT_COL_WIDTH: u16 = 38;
 /// Height of the Info sub-panel at the bottom of the left column.
 const INFO_HEIGHT: u16 = 5;
 /// Height of the bottom row (Recent + Timeline panels).
-const BOTTOM_ROW_HEIGHT: u16 = 5;
+///
+/// Must be at least `recent::MAX_ENTRIES + 2` so the Recent strip can draw a
+/// row per advertised entry plus the top/bottom border — see the
+/// `bottom_row_height_fits_every_recent_entry` regression test.
+const BOTTOM_ROW_HEIGHT: u16 = 6;
 /// Height of the Prompt textarea (including its border).
 const PROMPT_HEIGHT: u16 = 4;
 /// Height of the Negative prompt textarea when visible (including border).
@@ -298,3 +302,8 @@ fn render_error(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(line, area);
     }
 }
+
+/// Codex P3: compile-time guard for the Recent strip's row-per-entry
+/// budget. Invariant: `BOTTOM_ROW_HEIGHT >= recent::MAX_ENTRIES + 2`
+/// (two cells of border). Fails the build if either constant drifts.
+const _: () = assert!(BOTTOM_ROW_HEIGHT as usize >= crate::ui::recent::MAX_ENTRIES + 2);

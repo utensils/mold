@@ -10,8 +10,20 @@ const CELL_W: u16 = 24;
 const CELL_H: u16 = 14;
 
 /// Height of the bottom row (Selected + Prompt panels) in the Grid view.
-/// `Min(8)` in the grid means at least one tile row is always visible.
 const GRID_BOTTOM_HEIGHT: u16 = 8;
+
+/// Minimum total Gallery area height that still leaves room for at least one
+/// thumbnail *and* the Selected + Prompt inspector row. The grid panel frames
+/// a thumbnail in `CELL_H + 2` cells (cell + top/bottom border), so we need
+/// `GRID_BOTTOM_HEIGHT + CELL_H + 2` before the inspector is safe to show.
+const GRID_INSPECTOR_MIN_HEIGHT: u16 = GRID_BOTTOM_HEIGHT + CELL_H + 2;
+
+/// Whether the Grid view has enough vertical room to render the inspector row
+/// without starving the thumbnail grid. Extracted as a pure helper so the
+/// threshold is exercised by unit tests — see the `#[cfg(test)]` block below.
+fn show_grid_inspector(area_height: u16, has_entries: bool) -> bool {
+    has_entries && area_height >= GRID_INSPECTOR_MIN_HEIGHT
+}
 
 /// Compute a centered sub-rect for an image within the thumbnail area.
 ///
@@ -74,10 +86,14 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_grid(frame: &mut Frame, app: &mut App, area: Rect) {
     // Top: the thumbnail grid. Bottom: Selected metadata + Prompt, matching
     // the design system's gallery wireframe. If the area is too short to
-    // accommodate the bottom row we hide it and give everything to the grid.
-    let show_bottom = area.height >= GRID_BOTTOM_HEIGHT + 6 && !app.gallery.entries.is_empty();
+    // fit both the inspector *and* at least one thumbnail cell the inspector
+    // is suppressed — see `show_grid_inspector`/`GRID_INSPECTOR_MIN_HEIGHT`.
+    let show_bottom = show_grid_inspector(area.height, !app.gallery.entries.is_empty());
     let constraints = if show_bottom {
-        vec![Constraint::Min(8), Constraint::Length(GRID_BOTTOM_HEIGHT)]
+        vec![
+            Constraint::Min(CELL_H + 2),
+            Constraint::Length(GRID_BOTTOM_HEIGHT),
+        ]
     } else {
         vec![Constraint::Min(1)]
     };
@@ -412,7 +428,10 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{center_rect, centered_thumb_rect, render_grid_cell, CELL_H, CELL_W};
+    use super::{
+        center_rect, centered_thumb_rect, render_grid_cell, show_grid_inspector, CELL_H, CELL_W,
+        GRID_INSPECTOR_MIN_HEIGHT,
+    };
     use crate::app::{App, GalleryEntry};
     use image::{DynamicImage, Rgba, RgbaImage};
     use ratatui::layout::Rect;
@@ -534,6 +553,36 @@ mod tests {
 
         std::fs::remove_file(&thumb_path).ok();
     }
+
+    // ── Codex P2: inspector must not starve the thumbnail grid ───────
+
+    #[test]
+    fn show_grid_inspector_hidden_below_minimum_height() {
+        // Minimum is `GRID_BOTTOM_HEIGHT (8) + CELL_H (14) + 2 borders = 24`.
+        // At 14–23 rows the previous threshold (height >= 14) would show the
+        // inspector and leave zero room for thumbnails.
+        assert!(!show_grid_inspector(0, true));
+        assert!(!show_grid_inspector(14, true));
+        assert!(!show_grid_inspector(23, true));
+    }
+
+    #[test]
+    fn show_grid_inspector_visible_at_and_above_minimum_height() {
+        assert!(show_grid_inspector(GRID_INSPECTOR_MIN_HEIGHT, true));
+        assert!(show_grid_inspector(GRID_INSPECTOR_MIN_HEIGHT + 20, true));
+    }
+
+    #[test]
+    fn show_grid_inspector_hidden_when_gallery_is_empty() {
+        // With no entries there's nothing to inspect; skip the bottom row so
+        // the empty-state message fills the whole panel.
+        assert!(!show_grid_inspector(100, false));
+    }
+
+    // Compile-time guard: if someone bumps CELL_H or GRID_BOTTOM_HEIGHT
+    // without updating the threshold, the build breaks instead of the
+    // gallery quietly hiding thumbnails at runtime.
+    const _: () = assert!(GRID_INSPECTOR_MIN_HEIGHT >= CELL_H + 2);
 }
 
 fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {

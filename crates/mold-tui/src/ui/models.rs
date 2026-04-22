@@ -4,8 +4,16 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 use crate::app::App;
 use crate::ui::widgets::{kv_row_line, panel_block};
 
+/// Number of content lines rendered by [`render_details_panel`]:
+/// name + description + blank + 4 KV rows (Family/Size/Default/HF).
+const DETAILS_LINE_COUNT: u16 = 7;
+
 /// Height reserved for the Details + Actions row at the bottom of the view.
-const INSPECTOR_HEIGHT: u16 = 7;
+///
+/// Needs `DETAILS_LINE_COUNT + 2` so the panel's top/bottom borders don't
+/// clip the last two KV rows (Default + HF). A dedicated unit test guards
+/// the inequality so the constants can't drift apart silently.
+const INSPECTOR_HEIGHT: u16 = DETAILS_LINE_COUNT + 2;
 
 /// Render the Models view.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -242,3 +250,9 @@ fn render_model_table(
 
     frame.render_stateful_widget(table, area, &mut state);
 }
+
+/// Codex P3: compile-time guard that the inspector row is tall enough to
+/// fit every line `render_details_panel` emits *plus* the two-cell border.
+/// A mismatched bump to either constant fails the build instead of silently
+/// clipping the Default/HF rows at runtime.
+const _: () = assert!(INSPECTOR_HEIGHT >= DETAILS_LINE_COUNT + 2);

@@ -288,6 +288,10 @@ The DB is opt-out, additive (PNG/JPEG embedded `mold:parameters` chunks still ge
 
 **`/api/gallery/image/:filename` supports HTTP Range.** Required for `<video>` scrubbing on MP4 outputs. Helpers live in `routes.rs`: `parse_byte_range`, `serve_range`. Responses: 200 (full file, streamed, `Accept-Ranges: bytes`), 206 (partial, streamed, `Content-Range`), 416 (unsatisfiable, `Content-Range: bytes */<total>`). Single-range form only.
 
+## Development Workflow
+
+- **Use TDD (test-driven development).** For every bug fix and new feature, write a failing test that encodes the expected behaviour *before* changing the implementation. Red → Green → Refactor. Prefer unit tests that exercise the exported contract (key→action mapping, focus transitions, serialization round-trips, layout invariants) over end-to-end flows. For layout constants, add an assertion that the inner content area can fit the rendered row count — constants without a guarding test drift into bugs. It's fine to commit the test and the fix together on small changes; the discipline is writing the test first, not commit ceremony.
+
 ## Maintenance Notes
 
 - **Keep `CHANGELOG.md` updated** — Follow [Keep a Changelog](https://keepachangelog.com/) format. Add entries under `[Unreleased]` when implementing features, fixes, or breaking changes. Group under Added/Changed/Fixed/Removed headings.

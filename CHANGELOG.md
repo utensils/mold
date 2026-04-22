@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **TUI: five Codex-surfaced regressions in the phase 1–5 design redesign**, all addressed with TDD (failing test first):
+  - `Alt+5` and `Alt+N` are now routed to the action mapper while typing in the Prompt or Negative textarea; previously `App::handle_crossterm_event`'s bypass list only covered `Alt+1..4` + `Alt+←/→`, so the new "view Settings" and "toggle Negative" shortcuts silently got eaten by `TextArea::input`.
+  - Tab cycling and mouse hit-testing in the Generate view now consult a new `GenerateState::negative_visible()` helper (`supports_negative_prompt && !negative_collapsed`), so focus can no longer land on the hidden Negative pane when the user has collapsed it. Keystrokes used to flow into a textarea that wasn't drawn.
+  - Gallery Grid's inspector-row threshold uses a new `show_grid_inspector()` helper gated by `GRID_INSPECTOR_MIN_HEIGHT = GRID_BOTTOM_HEIGHT + CELL_H + 2 = 24`. Previously the 8-row inspector appeared at area heights ≥ 14, so heights 14–23 rendered the inspector and zero thumbnails.
+  - Models Details inspector row grew from 7 → 9 cells, matching the `DETAILS_LINE_COUNT + 2` border budget. The Default and HF KV rows were previously clipped on every terminal; a `const _: () = assert!(...)` guard fails the build if the constants drift apart again.
+  - Generate's bottom row grew from 5 → 6 cells so the Recent strip's advertised `MAX_ENTRIES = 4` actually fit with a 2-cell border; another `const _: () = assert!(...)` guards the `BOTTOM_ROW_HEIGHT >= MAX_ENTRIES + 2` invariant at compile time.
+
 ### Added
 
 - **TUI Negative prompt panel is now collapsible**: press `Alt+N` in the Generate view to collapse the Negative textarea into a one-row dim summary (`neg: <preview>   Alt+N expand`) that reclaims three rows of vertical space without losing the content. Pressing `Alt+N` again expands it back into the full three-row textarea. The collapsed state persists across restarts via a new `negative_collapsed` field on the TUI session file, and collapsing while focused on the Negative pane automatically shifts focus back to the main Prompt so the user isn't stuck typing into a hidden field. Models that don't support negative prompts still hide the row regardless of the flag.

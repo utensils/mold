@@ -15,7 +15,11 @@ use crate::app::App;
 use super::widgets::panel_block;
 
 /// Maximum number of recent entries shown in the strip.
-const MAX_ENTRIES: usize = 4;
+///
+/// Exposed with `pub(crate)` so `ui::generate` can assert at compile/test time
+/// that its `BOTTOM_ROW_HEIGHT` reserves one inner row per entry — otherwise
+/// the panel advertises `N recent` in the hint but clips the last rows.
+pub(crate) const MAX_ENTRIES: usize = 4;
 
 /// Render the Recent strip inside `area`.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {

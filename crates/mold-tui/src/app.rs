@@ -664,6 +664,16 @@ pub struct GenerateState {
     pub negative_collapsed: bool,
 }
 
+impl GenerateState {
+    /// Whether the Negative prompt textarea is currently rendered and
+    /// therefore focusable. This is the predicate every focus-routing or
+    /// hit-test site should consult — checking `supports_negative_prompt`
+    /// alone lets focus land on a row that isn't drawn.
+    pub fn negative_visible(&self) -> bool {
+        self.capabilities.supports_negative_prompt && !self.negative_collapsed
+    }
+}
+
 /// Which gallery view is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GalleryViewMode {
@@ -1763,9 +1773,16 @@ impl App {
                         | (KeyCode::Char('2'), KeyModifiers::ALT)
                         | (KeyCode::Char('3'), KeyModifiers::ALT)
                         | (KeyCode::Char('4'), KeyModifiers::ALT)
+                        | (KeyCode::Char('5'), KeyModifiers::ALT)
                         | (KeyCode::Left, KeyModifiers::ALT)
                         | (KeyCode::Right, KeyModifiers::ALT) => {
-                            // Fall through for view switching
+                            // Fall through for view switching (Alt+1..5).
+                        }
+                        (KeyCode::Char('n'), KeyModifiers::ALT)
+                        | (KeyCode::Char('N'), KeyModifiers::ALT) => {
+                            // Fall through so Alt+N reaches
+                            // `Action::ToggleNegativePrompt` even while the
+                            // Prompt or Negative textarea has focus.
                         }
                         _ => {
                             // Let the textarea consume the event
@@ -2078,7 +2095,7 @@ impl App {
                     if self.layout.prompt.contains(pos) {
                         self.generate.focus = GenerateFocus::Prompt;
                     } else if self.layout.negative_prompt.contains(pos)
-                        && self.generate.capabilities.supports_negative_prompt
+                        && self.generate.negative_visible()
                     {
                         self.generate.focus = GenerateFocus::NegativePrompt;
                     } else if self.layout.parameters.contains(pos) {
@@ -2271,16 +2288,14 @@ impl App {
                 };
             }
             Action::FocusNext if self.active_view == View::Generate => {
-                self.generate.focus = self
-                    .generate
-                    .focus
-                    .next(self.generate.capabilities.supports_negative_prompt);
+                // Use `negative_visible()` instead of `supports_negative_prompt`
+                // alone so Tab skips the Negative pane when the user has
+                // collapsed it. Otherwise focus can land on a hidden textarea
+                // and keystrokes get routed nowhere.
+                self.generate.focus = self.generate.focus.next(self.generate.negative_visible());
             }
             Action::FocusPrev if self.active_view == View::Generate => {
-                self.generate.focus = self
-                    .generate
-                    .focus
-                    .prev(self.generate.capabilities.supports_negative_prompt);
+                self.generate.focus = self.generate.focus.prev(self.generate.negative_visible());
             }
             Action::Up => match self.active_view {
                 View::Generate => {
@@ -5986,6 +6001,53 @@ mod tests {
         assert_eq!(app.settings.focus, SettingsFocus::Configuration);
     }
 
+    // ── Codex P2: Alt-key bypass from prompt textarea ─────────────
+
+    fn alt_key_event(code: crossterm::event::KeyCode) -> crossterm::event::Event {
+        use crossterm::event::{Event, KeyEvent, KeyModifiers};
+        Event::Key(KeyEvent::new(code, KeyModifiers::ALT))
+    }
+
+    #[tokio::test]
+    async fn alt_5_while_typing_prompt_switches_to_settings() {
+        use crossterm::event::KeyCode;
+        let mut app = make_settings_test_app();
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+        // While focused on the Prompt textarea, Alt+5 must reach the action
+        // mapper and switch the active view. Before the bypass fix this
+        // event would be consumed by `TextArea::input` and the view would
+        // stay on Generate.
+        app.handle_crossterm_event(alt_key_event(KeyCode::Char('5')));
+        assert_eq!(app.active_view, View::Settings);
+    }
+
+    #[tokio::test]
+    async fn alt_4_while_typing_prompt_switches_to_queue() {
+        use crossterm::event::KeyCode;
+        let mut app = make_settings_test_app();
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+        // Alt+4 was re-pointed to Queue in phase 4. Regression guard so the
+        // old Alt+4 → Settings mapping can't sneak back in.
+        app.handle_crossterm_event(alt_key_event(KeyCode::Char('4')));
+        assert_eq!(app.active_view, View::Queue);
+    }
+
+    #[tokio::test]
+    async fn alt_n_while_typing_prompt_toggles_negative_collapse() {
+        use crossterm::event::KeyCode;
+        let mut app = make_settings_test_app();
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+        assert!(!app.generate.negative_collapsed);
+        app.handle_crossterm_event(alt_key_event(KeyCode::Char('n')));
+        assert!(app.generate.negative_collapsed);
+        // Toggle back — the binding should be symmetric.
+        app.handle_crossterm_event(alt_key_event(KeyCode::Char('n')));
+        assert!(!app.generate.negative_collapsed);
+    }
+
     #[tokio::test]
     async fn toggle_negative_prompt_flips_collapsed_flag() {
         let mut app = make_settings_test_app();
@@ -5994,6 +6056,69 @@ mod tests {
         assert!(app.generate.negative_collapsed);
         app.dispatch_action(Action::ToggleNegativePrompt);
         assert!(!app.generate.negative_collapsed);
+    }
+
+    // ── Codex P2: focus must skip a collapsed Negative pane ──────
+
+    #[tokio::test]
+    async fn tab_from_prompt_skips_negative_when_collapsed() {
+        let mut app = make_settings_test_app();
+        // Model supports negative prompt, but the user has collapsed it.
+        app.generate.capabilities.supports_negative_prompt = true;
+        app.generate.negative_collapsed = true;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+
+        app.dispatch_action(Action::FocusNext);
+        // Before the fix: focus lands on NegativePrompt even though the
+        // textarea is not rendered, and keystrokes are routed into a
+        // hidden field.
+        assert_eq!(app.generate.focus, GenerateFocus::Parameters);
+    }
+
+    #[tokio::test]
+    async fn shift_tab_from_parameters_skips_negative_when_collapsed() {
+        let mut app = make_settings_test_app();
+        app.generate.capabilities.supports_negative_prompt = true;
+        app.generate.negative_collapsed = true;
+        app.generate.focus = GenerateFocus::Parameters;
+        app.active_view = View::Generate;
+
+        app.dispatch_action(Action::FocusPrev);
+        assert_eq!(app.generate.focus, GenerateFocus::Prompt);
+    }
+
+    #[tokio::test]
+    async fn tab_still_visits_negative_when_expanded() {
+        // Regression guard: the skip-when-collapsed logic must not change
+        // the happy-path Tab order when the negative pane is visible.
+        let mut app = make_settings_test_app();
+        app.generate.capabilities.supports_negative_prompt = true;
+        app.generate.negative_collapsed = false;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+
+        app.dispatch_action(Action::FocusNext);
+        assert_eq!(app.generate.focus, GenerateFocus::NegativePrompt);
+    }
+
+    #[tokio::test]
+    async fn mouse_click_on_collapsed_negative_row_does_not_focus_it() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = make_settings_test_app();
+        app.generate.capabilities.supports_negative_prompt = true;
+        app.generate.negative_collapsed = true;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+        // Pretend the collapsed negative row occupies cell (10, 5).
+        app.layout.negative_prompt = ratatui::layout::Rect::new(0, 5, 80, 1);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert_ne!(app.generate.focus, GenerateFocus::NegativePrompt);
     }
 
     #[tokio::test]
