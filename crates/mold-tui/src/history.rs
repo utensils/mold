@@ -359,4 +359,27 @@ mod tests {
         assert!(!history.push_entry(make_entry("hello"))); // duplicate
         assert!(history.push_entry(make_entry("world"))); // different
     }
+
+    #[test]
+    fn recent_yields_newest_first_up_to_max() {
+        // Queue view relies on `recent()` returning most-recent-first with a
+        // hard cap on the number of entries yielded.
+        let mut history = PromptHistory {
+            entries: vec![
+                make_entry("oldest"),
+                make_entry("middle"),
+                make_entry("newest"),
+            ],
+            cursor: None,
+            draft: None,
+        };
+        let prompts: Vec<&str> = history.recent(5).map(|e| e.prompt.as_str()).collect();
+        assert_eq!(prompts, vec!["newest", "middle", "oldest"]);
+
+        let capped: Vec<&str> = history.recent(1).map(|e| e.prompt.as_str()).collect();
+        assert_eq!(capped, vec!["newest"]);
+
+        history.entries.clear();
+        assert_eq!(history.recent(3).count(), 0);
+    }
 }

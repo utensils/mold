@@ -265,8 +265,30 @@ mod tests {
         assert_eq!(restored.width, Some(1024));
         assert_eq!(restored.batch, Some(2));
         assert_eq!(restored.theme.as_deref(), Some("mocha"));
+        assert_eq!(restored.negative_collapsed, Some(true));
         assert_eq!(restored.offload, Some(true));
         assert_eq!(restored.seed_mode, Some("random".to_string()));
+    }
+
+    #[test]
+    fn with_theme_and_with_negative_collapsed_are_chainable() {
+        use crate::ui::theme::ThemePreset;
+        let params = crate::app::GenerateParams::from_config(&mold_core::Config::default());
+        let session = TuiSession::from_params("p", "n", &params)
+            .with_theme(ThemePreset::Dracula)
+            .with_negative_collapsed(true);
+        assert_eq!(session.theme.as_deref(), Some("dracula"));
+        assert_eq!(session.negative_collapsed, Some(true));
+    }
+
+    #[test]
+    fn session_without_theme_or_negative_flag_still_loads() {
+        // Older session files won't include the new fields. `#[serde(default)]`
+        // means missing = None, not a parse error.
+        let json = r#"{"last_prompt": "legacy"}"#;
+        let session: TuiSession = serde_json::from_str(json).unwrap();
+        assert!(session.theme.is_none());
+        assert!(session.negative_collapsed.is_none());
     }
 
     #[test]

@@ -106,3 +106,64 @@ pub fn render_theme_swatches(
     let para = Paragraph::new(Line::from(spans));
     frame.render_widget(para, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn panel_block_focused_and_unfocused_render_without_panicking() {
+        let theme = Theme::mocha();
+        let area = Rect::new(0, 0, 20, 3);
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let block = panel_block(&theme, "Title", true, Some("hint"));
+                frame.render_widget(block, area);
+            })
+            .unwrap();
+        terminal
+            .draw(|frame| {
+                let block = panel_block(&theme, "Title", false, None);
+                frame.render_widget(block, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn kv_row_line_padding_left_aligns_label() {
+        let theme = Theme::mocha();
+        let line = kv_row_line(&theme, "k", "v", 8, false);
+        // Two spans: label + value. Label is left-padded to 8 chars so the
+        // value span starts at visual column 8.
+        let spans: Vec<&str> = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0], "k       ");
+        assert_eq!(spans[1], "v");
+    }
+
+    #[test]
+    fn kv_row_line_muted_does_not_change_label_width() {
+        let theme = Theme::mocha();
+        let plain = kv_row_line(&theme, "key", "value", 5, false);
+        let muted = kv_row_line(&theme, "key", "value", 5, true);
+        assert_eq!(plain.spans[0].content, muted.spans[0].content);
+    }
+
+    #[test]
+    fn render_theme_swatches_is_safe_with_zero_area() {
+        // Sanity check for the early-return guard on width==0 / height==0.
+        let theme = Theme::mocha();
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let empty = Rect::new(0, 0, 0, 0);
+                render_theme_swatches(frame, &theme, empty, ThemePreset::Latte, true);
+            })
+            .unwrap();
+    }
+}
