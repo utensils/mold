@@ -1722,6 +1722,20 @@ impl App {
 
     pub fn update_model(&mut self, model_name: &str) {
         let model_name = model_name.to_string();
+        let outgoing_model = self.generate.params.model.clone();
+        // No-op when switching to the same model — avoids clobbering
+        // current in-memory params with an older DB snapshot.
+        if outgoing_model == model_name {
+            return;
+        }
+
+        // Snapshot the outgoing model's current params into model_prefs
+        // so they're restored when the user comes back to this model.
+        // Keyed on the *outgoing* name — not the incoming one.
+        if !outgoing_model.is_empty() {
+            self.save_prefs_for_model(&outgoing_model);
+        }
+
         self.generate.params.model = model_name.clone();
 
         // Use server catalog defaults when connected to a remote server,
@@ -1773,6 +1787,114 @@ impl App {
             self.generate.params.inference_mode,
         );
         self.generate.param_index = 0;
+
+        // Apply saved per-model prefs last, so a user's explicit choices
+        // override the manifest/catalog defaults we just restored. Only
+        // generation params move — the prompt textareas stay as-is so a
+        // model flip mid-typing doesn't wipe what the user is writing.
+        self.apply_prefs_for_model(&model_name);
+    }
+
+    /// Persist the *currently-displayed* generation params under `model`.
+    /// Used by `update_model` before switching away, and by any future
+    /// explicit "save as default for this model" flow.
+    fn save_prefs_for_model(&self, model: &str) {
+        let db = match mold_db::open_default() {
+            Ok(Some(db)) => db,
+            _ => return,
+        };
+        let p = &self.generate.params;
+        let prefs = mold_db::ModelPrefs {
+            width: Some(p.width),
+            height: Some(p.height),
+            steps: Some(p.steps),
+            guidance: Some(p.guidance),
+            scheduler: p.scheduler.map(|s| format!("{s:?}").to_lowercase()),
+            seed_mode: Some(p.seed_mode.label().to_string()),
+            batch: Some(p.batch),
+            format: Some(format!("{:?}", p.format).to_lowercase()),
+            lora_path: p.lora_path.clone(),
+            lora_scale: Some(p.lora_scale),
+            expand: Some(p.expand),
+            offload: Some(p.offload),
+            strength: Some(p.strength),
+            control_scale: Some(p.control_scale),
+            frames: None,
+            fps: None,
+            last_prompt: None,
+            last_negative: None,
+        };
+        if let Err(e) = prefs.save(&db, model) {
+            tracing::warn!(error = %e, model, "save_prefs_for_model failed");
+        }
+    }
+
+    /// If the DB has a `model_prefs` row for `model`, overlay its saved
+    /// generation params onto `self.generate.params`. Skips prompt text —
+    /// those stay under the user's control.
+    fn apply_prefs_for_model(&mut self, model: &str) {
+        let db = match mold_db::open_default() {
+            Ok(Some(db)) => db,
+            _ => return,
+        };
+        let Some(prefs) = mold_db::ModelPrefs::load(&db, model).ok().flatten() else {
+            return;
+        };
+        let p = &mut self.generate.params;
+        if let Some(w) = prefs.width {
+            p.width = w;
+        }
+        if let Some(h) = prefs.height {
+            p.height = h;
+        }
+        if let Some(s) = prefs.steps {
+            p.steps = s;
+        }
+        if let Some(g) = prefs.guidance {
+            p.guidance = g;
+        }
+        if let Some(ref sched) = prefs.scheduler {
+            p.scheduler = match sched.as_str() {
+                "ddim" => Some(mold_core::Scheduler::Ddim),
+                "eulerancestral" => Some(mold_core::Scheduler::EulerAncestral),
+                "unipc" => Some(mold_core::Scheduler::UniPc),
+                _ => None,
+            };
+        }
+        if let Some(ref sm) = prefs.seed_mode {
+            p.seed_mode = match sm.as_str() {
+                "fixed" => SeedMode::Fixed,
+                "increment" => SeedMode::Increment,
+                _ => SeedMode::Random,
+            };
+        }
+        if let Some(b) = prefs.batch {
+            p.batch = b;
+        }
+        if let Some(ref f) = prefs.format {
+            p.format = match f.as_str() {
+                "jpeg" => mold_core::OutputFormat::Jpeg,
+                _ => mold_core::OutputFormat::Png,
+            };
+        }
+        if prefs.lora_path.is_some() {
+            p.lora_path = prefs.lora_path.clone();
+        }
+        if let Some(ls) = prefs.lora_scale {
+            p.lora_scale = ls;
+        }
+        if let Some(e) = prefs.expand {
+            p.expand = e;
+        }
+        if let Some(o) = prefs.offload {
+            p.offload = o;
+        }
+        if let Some(s) = prefs.strength {
+            p.strength = s;
+        }
+        if let Some(cs) = prefs.control_scale {
+            p.control_scale = cs;
+        }
     }
 
     /// Handle a raw crossterm event.
@@ -7941,46 +8063,53 @@ mod tests {
 
     #[tokio::test]
     async fn update_model_uses_server_catalog_when_connected() {
-        let mut app = make_settings_test_app();
-        app.server_url = Some("http://hal9000:7680".to_string());
-        app.models.catalog = vec![make_test_catalog_entry(
-            "flux-dev:q4",
-            28,
-            4.0,
-            768,
-            768,
-            "Server FLUX Dev Q4",
-        )];
+        // Isolated env — `update_model` now consults `model_prefs` in
+        // the metadata DB, so a test that doesn't scope MOLD_HOME could
+        // be poisoned by the developer's real `~/.mold/mold.db`.
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.server_url = Some("http://hal9000:7680".to_string());
+            app.models.catalog = vec![make_test_catalog_entry(
+                "flux-dev:q4",
+                28,
+                4.0,
+                768,
+                768,
+                "Server FLUX Dev Q4",
+            )];
 
-        app.update_model("flux-dev:q4");
+            app.update_model("flux-dev:q4");
 
-        assert_eq!(app.generate.params.steps, 28);
-        assert!((app.generate.params.guidance - 4.0).abs() < f64::EPSILON);
-        assert_eq!(app.generate.params.width, 768);
-        assert_eq!(app.generate.params.height, 768);
-        assert_eq!(app.generate.model_description, "Server FLUX Dev Q4");
+            assert_eq!(app.generate.params.steps, 28);
+            assert!((app.generate.params.guidance - 4.0).abs() < f64::EPSILON);
+            assert_eq!(app.generate.params.width, 768);
+            assert_eq!(app.generate.params.height, 768);
+            assert_eq!(app.generate.model_description, "Server FLUX Dev Q4");
+        });
     }
 
     #[tokio::test]
     async fn update_model_falls_back_to_local_when_model_not_in_catalog() {
-        let mut app = make_settings_test_app();
-        app.server_url = Some("http://hal9000:7680".to_string());
-        // Catalog has a different model with an absurd step count no real model uses
-        app.models.catalog = vec![make_test_catalog_entry(
-            "flux-schnell:q8",
-            199,
-            99.9,
-            256,
-            256,
-            "Schnell",
-        )];
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.server_url = Some("http://hal9000:7680".to_string());
+            // Catalog has a different model with an absurd step count no real model uses
+            app.models.catalog = vec![make_test_catalog_entry(
+                "flux-schnell:q8",
+                199,
+                99.9,
+                256,
+                256,
+                "Schnell",
+            )];
 
-        // Update to a model NOT in the catalog — should use local config
-        let model = app.config.resolved_default_model();
-        app.update_model(&model);
-        // Should not have used the catalog entry's absurd values
-        assert_ne!(app.generate.params.steps, 199);
-        assert_ne!(app.generate.params.width, 256);
+            // Update to a model NOT in the catalog — should use local config
+            let model = app.config.resolved_default_model();
+            app.update_model(&model);
+            // Should not have used the catalog entry's absurd values
+            assert_ne!(app.generate.params.steps, 199);
+            assert_ne!(app.generate.params.width, 256);
+        });
     }
 
     #[tokio::test]
@@ -8481,6 +8610,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_model_restores_per_model_saved_params() {
+        // Marquee behavior: FLUX remembers its own (width, steps, guidance);
+        // SDXL remembers its own. Switching away and back restores each
+        // model's saved settings, not fresh defaults.
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+
+            // Set up two models with distinct manifest-resolved config
+            // entries so resolved_model_config returns meaningful defaults.
+            app.config.models.insert(
+                "flux-dev:q4".to_string(),
+                mold_core::config::ModelConfig {
+                    default_steps: Some(20),
+                    default_guidance: Some(3.5),
+                    default_width: Some(1024),
+                    default_height: Some(1024),
+                    ..Default::default()
+                },
+            );
+            app.config.models.insert(
+                "sdxl:fp16".to_string(),
+                mold_core::config::ModelConfig {
+                    default_steps: Some(30),
+                    default_guidance: Some(7.5),
+                    default_width: Some(768),
+                    default_height: Some(768),
+                    ..Default::default()
+                },
+            );
+
+            // Start on FLUX and bump width to a non-default value.
+            app.update_model("flux-dev:q4");
+            app.generate.params.width = 1024;
+            app.generate.params.height = 1024;
+            app.generate.params.steps = 20;
+            app.generate.params.guidance = 3.5;
+
+            // Switch to SDXL — FLUX's current params must get snapshotted
+            // now, before we clobber them.
+            app.update_model("sdxl:fp16");
+            // SDXL should get SDXL's config defaults, not FLUX's values.
+            assert_eq!(app.generate.params.width, 768);
+            assert_eq!(app.generate.params.steps, 30);
+            assert_eq!(app.generate.params.guidance, 7.5);
+
+            // Tweak SDXL to a weird value so we can tell its snapshot apart.
+            app.generate.params.width = 512;
+            app.generate.params.steps = 15;
+
+            // Switch back to FLUX — must come back at the FLUX values, not
+            // the config defaults (which are also 1024x1024 here, so use
+            // steps=20 / guidance=3.5 as the real signal).
+            app.update_model("flux-dev:q4");
+            assert_eq!(app.generate.params.width, 1024);
+            assert_eq!(app.generate.params.steps, 20);
+            assert!((app.generate.params.guidance - 3.5).abs() < 1e-9);
+
+            // And one more flip: SDXL must restore 512x512 / steps=15.
+            app.update_model("sdxl:fp16");
+            assert_eq!(app.generate.params.width, 512);
+            assert_eq!(app.generate.params.steps, 15);
+        });
+    }
+
+    #[tokio::test]
+    async fn update_model_to_same_model_is_noop() {
+        // Defensive — same-model calls shouldn't overwrite live params with
+        // a stale DB snapshot.
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.config.models.insert(
+                "flux-dev:q4".to_string(),
+                mold_core::config::ModelConfig::default(),
+            );
+            app.update_model("flux-dev:q4");
+            app.generate.params.width = 777;
+            app.update_model("flux-dev:q4");
+            assert_eq!(app.generate.params.width, 777);
+        });
+    }
+
+    #[tokio::test]
     async fn theme_default_is_mocha_when_session_is_missing() {
         // The default theme must always be Mocha — Latte is the light
         // counterpart and should only appear when explicitly selected.
@@ -8559,13 +8770,15 @@ mod tests {
 
     #[tokio::test]
     async fn update_model_uses_local_config_when_no_server() {
-        let mut app = make_settings_test_app();
-        app.server_url = None;
-        let model = app.config.resolved_default_model();
-        app.update_model(&model);
-        // Should succeed without panic and use local config defaults
-        assert!(app.generate.params.steps > 0);
-        assert!(app.generate.params.width > 0);
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.server_url = None;
+            let model = app.config.resolved_default_model();
+            app.update_model(&model);
+            // Should succeed without panic and use local config defaults
+            assert!(app.generate.params.steps > 0);
+            assert!(app.generate.params.width > 0);
+        });
     }
 
     // ── apply_remote_model_defaults() ─────────────────────────
