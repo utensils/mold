@@ -79,10 +79,13 @@ capture() {
     local term_id
     term_id=$(load_state)
 
-    # Save current clipboard and ensure it's restored on all exit paths
-    local prev_clip
-    prev_clip=$(pbpaste 2>/dev/null || true)
-    trap 'if [ -n "$prev_clip" ]; then echo -n "$prev_clip" | pbcopy 2>/dev/null || true; fi' RETURN
+    # Save current clipboard and ensure it's restored on all exit paths.
+    # Use a named-export default so strict-mode `set -u` + the RETURN
+    # trap body don't abort the shell when the trap body runs during
+    # early exit (bash evaluates expansions inside trap strings lazily).
+    local prev_clip=""
+    prev_clip=$(pbpaste 2>/dev/null || echo "")
+    trap 'if [ -n "${prev_clip:-}" ]; then echo -n "$prev_clip" | pbcopy 2>/dev/null || true; fi' RETURN
 
     osascript -e "
         tell application \"Ghostty\"
@@ -384,9 +387,10 @@ cmd_view() {
         1|generate|Generate)  key="1"; landmark="┌ Parameters|┌ Prompt";;
         2|gallery|Gallery)    key="2"; landmark="┌ Gallery";;
         3|models|Models)      key="3"; landmark="┌ Installed|┌ Available";;
-        4|settings|Settings)  key="4"; landmark="┌ Settings";;
+        4|queue|Queue)        key="4"; landmark="┌ Queue";;
+        5|settings|Settings)  key="5"; landmark="┌ Settings";;
         *)
-            echo "ERROR: Unknown view '$target'. Use 1-4 or generate/gallery/models/settings." >&2
+            echo "ERROR: Unknown view '$target'. Use 1-5 or generate/gallery/models/queue/settings." >&2
             exit 1
             ;;
     esac

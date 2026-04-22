@@ -132,11 +132,13 @@ scripts/tui-uat.sh quit
 
 2. **First key after Nav mode**: The first character key after entering Generate nav mode may be consumed by a crossterm timing issue. The `view` command retries automatically.
 
-3. **Session persistence**: The TUI saves session state to `~/.mold/tui-session.json`. Remove this file before testing if you need a clean slate: `rm -f ~/.mold/tui-session.json`
+3. **Session persistence** (since #264): TUI state lives in the SQLite metadata DB at `~/.mold/mold.db` — `settings` table for global TUI prefs (theme, last_model, last_prompt, negative_collapsed), `model_prefs` table for per-model generation parameters (one row per resolved model tag), `prompt_history` table for the prev/next prompt stack. `~/.mold/tui-session.json` and `~/.mold/prompt-history.jsonl` are imported once on first launch and renamed to `.migrated`; they're no longer written. For a clean slate, isolate the DB with `MOLD_DB_PATH=$(mktemp -d)/mold.db scripts/tui-uat.sh launch …` (legacy: deleting `~/.mold/mold.db` also works but wipes the gallery DB too). `MOLD_DB_DISABLE=1` boots the TUI with in-memory-only defaults — useful for verifying the fail-safe fallback.
 
 4. **`MOLD_BIN`**: Override the binary path: `MOLD_BIN=./target/release/mold scripts/tui-uat.sh launch`
 
 5. **Clipboard**: The `capture` command temporarily uses the clipboard (via `write_screen_file:copy,plain`). It saves and restores the previous clipboard content.
+
+6. **Per-model prefs auto-save** (since #264): switching model via `Ctrl+M → pick → Enter` snapshots the outgoing model's generation params into `model_prefs` keyed on the resolved tag, then overlays the incoming model's saved row on top of manifest/catalog defaults. Prompts are *not* restored on switch — only generation params (width/height/steps/guidance/scheduler/seed_mode/batch/format/lora/expand/offload/strength/control_scale). To UAT: set FLUX to 512×512 steps=4, switch to SDXL, verify SDXL's own defaults appear; switch back to FLUX, verify 512×512 steps=4 returned.
 
 ## Example: Full Smoke Test
 
@@ -155,4 +157,76 @@ scripts/tui-uat.sh screenshot /tmp/models-view.png
 scripts/tui-uat.sh view settings
 scripts/tui-uat.sh assert "Settings"
 scripts/tui-uat.sh quit
+```
+
+## Example: SQLite-Backed Persistence UAT (#264)
+
+Validates that TUI state survives a quit/relaunch cycle via the metadata DB
+(supersedes the old JSON-file smoke test). Isolates `MOLD_DB_PATH` so the
+test doesn't touch the user's real gallery DB.
+
+```bash
+# Fresh DB for this session
+export MOLD_DB_PATH="$(mktemp -d)/mold.db"
+
+# Round 1: set theme + prompt, quit
+scripts/tui-uat.sh launch --local
+scripts/tui-uat.sh view settings
+# Navigate to Appearance, cycle to a non-default preset (e.g. Dracula)
+scripts/tui-uat.sh send k k k right right   # adjust if row-order differs
+scripts/tui-uat.sh screenshot /tmp/uat-theme-set.png
+scripts/tui-uat.sh view generate
+scripts/tui-uat.sh send i a " " t e s t " " p r o m p t escape
+scripts/tui-uat.sh screenshot /tmp/uat-prompt-typed.png
+scripts/tui-uat.sh send ctrl+c            # quit writes settings + model_prefs
+sleep 1
+
+# Round 2: relaunch, confirm theme + prompt survived
+scripts/tui-uat.sh launch --local
+scripts/tui-uat.sh screenshot /tmp/uat-after-relaunch.png
+scripts/tui-uat.sh assert "test prompt"
+scripts/tui-uat.sh quit
+
+# Clean up
+unset MOLD_DB_PATH
+```
+
+## Example: Per-Model Preferences UAT (#264)
+
+Confirms each model remembers its own generation parameters across switches.
+
+```bash
+export MOLD_DB_PATH="$(mktemp -d)/mold.db"
+
+scripts/tui-uat.sh launch --local
+# Set FLUX to non-default width — e.g. cycle width down from 1024
+scripts/tui-uat.sh view generate
+scripts/tui-uat.sh send tab                 # focus Parameters
+# navigate to Width, decrement a few times (-64 per press for typical step)
+scripts/tui-uat.sh send j minus minus minus minus
+scripts/tui-uat.sh screenshot /tmp/uat-flux-tuned.png
+
+# Switch to a different model via Ctrl+M
+scripts/tui-uat.sh send ctrl+m
+scripts/tui-uat.sh send j enter             # pick next model in list
+scripts/tui-uat.sh screenshot /tmp/uat-switched-to-sdxl.png
+
+# Switch back to the first model — width must be restored
+scripts/tui-uat.sh send ctrl+m
+scripts/tui-uat.sh send k enter
+scripts/tui-uat.sh screenshot /tmp/uat-switched-back.png
+# Manual: compare uat-flux-tuned.png vs uat-switched-back.png
+# The Width row should match
+
+scripts/tui-uat.sh quit
+unset MOLD_DB_PATH
+```
+
+## Example: DB-Disabled Fallback
+
+```bash
+MOLD_DB_DISABLE=1 scripts/tui-uat.sh launch --local
+scripts/tui-uat.sh view settings
+scripts/tui-uat.sh assert "Settings"        # still renders
+scripts/tui-uat.sh quit                      # no crash on shutdown save
 ```
