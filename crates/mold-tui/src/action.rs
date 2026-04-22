@@ -99,6 +99,10 @@ pub enum Action {
     /// Script: delete the current stage (shows confirmation if >1 stage).
     ScriptDelete,
     ScriptCycleTransition,
+    /// Script: save the current script to a TOML file.
+    ScriptSave,
+    /// Script: load a script from a TOML file.
+    ScriptLoad,
     /// Script: open the prompt editor modal.
     ScriptOpenPromptEditor,
     /// Script: open the frames editor modal.

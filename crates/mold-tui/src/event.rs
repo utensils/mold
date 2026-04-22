@@ -239,9 +239,14 @@ fn map_script_key(key: &KeyEvent, app: &App) -> Action {
             (KeyCode::Esc, _) => Action::ScriptModalCancel,
             // Ctrl-S submits in any modal
             (KeyCode::Char('s'), KeyModifiers::CONTROL) => Action::ScriptModalSubmit,
-            // In FramesEdit, plain Enter also submits
+            // In FramesEdit/SavePath/LoadPath, plain Enter submits
             (KeyCode::Enter, KeyModifiers::NONE)
-                if matches!(app.script.modal, ScriptModal::FramesEdit { .. }) =>
+                if matches!(
+                    app.script.modal,
+                    ScriptModal::FramesEdit { .. }
+                        | ScriptModal::SavePath { .. }
+                        | ScriptModal::LoadPath { .. }
+                ) =>
             {
                 Action::ScriptModalSubmit
             }
@@ -254,6 +259,8 @@ fn map_script_key(key: &KeyEvent, app: &App) -> Action {
     }
 
     match (key.code, key.modifiers) {
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => Action::ScriptSave,
+        (KeyCode::Char('o'), KeyModifiers::CONTROL) => Action::ScriptLoad,
         (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
             Action::ScriptMoveDown
         }

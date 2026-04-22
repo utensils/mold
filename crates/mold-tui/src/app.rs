@@ -2831,6 +2831,8 @@ impl App {
                 }
             }
             Action::ScriptCycleTransition => self.script.cycle_transition(),
+            Action::ScriptSave => self.script.open_save_dialog(),
+            Action::ScriptLoad => self.script.open_load_dialog(),
             Action::ScriptOpenPromptEditor => self.script.open_prompt_editor(),
             Action::ScriptOpenFramesEditor => self.script.open_frames_editor(),
             Action::ScriptModalSubmit => {
@@ -2838,6 +2840,8 @@ impl App {
                 match self.script.modal {
                     ScriptModal::PromptEdit { .. } => self.script.commit_prompt(),
                     ScriptModal::FramesEdit { .. } => self.script.commit_frames(),
+                    ScriptModal::SavePath { .. } => self.script.save_to_path(),
+                    ScriptModal::LoadPath { .. } => self.script.load_from_path(),
                     ScriptModal::Closed => {}
                 }
             }
@@ -2846,7 +2850,9 @@ impl App {
                 use crate::ui::script_composer::ScriptModal;
                 match &mut self.script.modal {
                     ScriptModal::PromptEdit { buffer } => buffer.push(c),
-                    ScriptModal::FramesEdit { buffer, error } => {
+                    ScriptModal::FramesEdit { buffer, error }
+                    | ScriptModal::SavePath { buffer, error }
+                    | ScriptModal::LoadPath { buffer, error } => {
                         buffer.push(c);
                         *error = None;
                     }
@@ -2859,7 +2865,9 @@ impl App {
                     ScriptModal::PromptEdit { buffer } => {
                         buffer.pop();
                     }
-                    ScriptModal::FramesEdit { buffer, error } => {
+                    ScriptModal::FramesEdit { buffer, error }
+                    | ScriptModal::SavePath { buffer, error }
+                    | ScriptModal::LoadPath { buffer, error } => {
                         buffer.pop();
                         *error = None;
                     }

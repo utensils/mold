@@ -17,6 +17,14 @@ pub enum ScriptModal {
         buffer: String,
         error: Option<String>,
     },
+    SavePath {
+        buffer: String,
+        error: Option<String>,
+    },
+    LoadPath {
+        buffer: String,
+        error: Option<String>,
+    },
 }
 
 impl ScriptModal {
@@ -192,6 +200,74 @@ impl ScriptComposerState {
                     self.modal = ScriptModal::FramesEdit {
                         buffer: buf,
                         error: Some("not a number".to_string()),
+                    };
+                }
+            }
+        }
+    }
+
+    pub fn open_save_dialog(&mut self) {
+        self.modal = ScriptModal::SavePath {
+            buffer: String::new(),
+            error: None,
+        };
+    }
+
+    pub fn open_load_dialog(&mut self) {
+        self.modal = ScriptModal::LoadPath {
+            buffer: String::new(),
+            error: None,
+        };
+    }
+
+    pub fn save_to_path(&mut self) {
+        if let ScriptModal::SavePath { buffer, .. } = &self.modal {
+            let path = std::path::PathBuf::from(buffer.trim());
+            match mold_core::chain_toml::write_script(&self.script) {
+                Ok(toml) => match std::fs::write(&path, &toml) {
+                    Ok(()) => {
+                        self.unsaved = false;
+                        self.modal = ScriptModal::Closed;
+                    }
+                    Err(e) => {
+                        self.modal = ScriptModal::SavePath {
+                            buffer: buffer.clone(),
+                            error: Some(format!("write failed: {e}")),
+                        };
+                    }
+                },
+                Err(e) => {
+                    self.modal = ScriptModal::SavePath {
+                        buffer: buffer.clone(),
+                        error: Some(format!("serialise failed: {e}")),
+                    };
+                }
+            }
+        }
+    }
+
+    pub fn load_from_path(&mut self) {
+        if let ScriptModal::LoadPath { buffer, .. } = &self.modal {
+            let path = std::path::PathBuf::from(buffer.trim());
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => match mold_core::chain_toml::read_script(&contents) {
+                    Ok(script) => {
+                        self.script = script;
+                        self.selected = 0;
+                        self.unsaved = false;
+                        self.modal = ScriptModal::Closed;
+                    }
+                    Err(e) => {
+                        self.modal = ScriptModal::LoadPath {
+                            buffer: buffer.clone(),
+                            error: Some(format!("parse failed: {e}")),
+                        };
+                    }
+                },
+                Err(e) => {
+                    self.modal = ScriptModal::LoadPath {
+                        buffer: buffer.clone(),
+                        error: Some(format!("read failed: {e}")),
                     };
                 }
             }
@@ -522,11 +598,41 @@ fn render_modal(
                 "[Enter] Save  [Esc] Cancel",
             )
         }
+        ScriptModal::SavePath { buffer, error } => {
+            let mut lines = vec![Line::from(buffer.as_str().to_string())];
+            if let Some(err) = error {
+                lines.push(Line::from(Span::styled(
+                    err.clone(),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            (
+                " Save Script ",
+                lines,
+                "[Enter] Confirm  [Esc] Cancel",
+            )
+        }
+        ScriptModal::LoadPath { buffer, error } => {
+            let mut lines = vec![Line::from(buffer.as_str().to_string())];
+            if let Some(err) = error {
+                lines.push(Line::from(Span::styled(
+                    err.clone(),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            (
+                " Load Script ",
+                lines,
+                "[Enter] Confirm  [Esc] Cancel",
+            )
+        }
     };
 
     let modal_height = match &state.modal {
         ScriptModal::PromptEdit { .. } => 8u16,
-        ScriptModal::FramesEdit { .. } => 6u16,
+        ScriptModal::FramesEdit { .. }
+        | ScriptModal::SavePath { .. }
+        | ScriptModal::LoadPath { .. } => 6u16,
         ScriptModal::Closed => return,
     };
 
@@ -887,5 +993,82 @@ mod tests {
             error: None,
         };
         assert!(frames.is_open());
+
+        let save = ScriptModal::SavePath {
+            buffer: String::new(),
+            error: None,
+        };
+        assert!(save.is_open());
+
+        let load = ScriptModal::LoadPath {
+            buffer: String::new(),
+            error: None,
+        };
+        assert!(load.is_open());
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut s = make_state(3);
+        s.script.stages[1].transition = TransitionMode::Cut;
+        s.script.stages[2].prompt = "final scene".into();
+
+        // Save
+        s.modal = ScriptModal::SavePath {
+            buffer: tmp.path().to_str().unwrap().to_string(),
+            error: None,
+        };
+        s.save_to_path();
+        assert!(matches!(s.modal, ScriptModal::Closed));
+        assert!(!s.unsaved);
+
+        // Load into a fresh state
+        let mut s2 = ScriptComposerState::default();
+        s2.modal = ScriptModal::LoadPath {
+            buffer: tmp.path().to_str().unwrap().to_string(),
+            error: None,
+        };
+        s2.load_from_path();
+        assert!(matches!(s2.modal, ScriptModal::Closed));
+        assert_eq!(s2.script.stages.len(), 3);
+        assert_eq!(s2.script.stages[1].transition, TransitionMode::Cut);
+        assert_eq!(s2.script.stages[2].prompt, "final scene");
+    }
+
+    #[test]
+    fn load_nonexistent_file_shows_error() {
+        let mut s = ScriptComposerState::default();
+        s.modal = ScriptModal::LoadPath {
+            buffer: "/nonexistent/path.toml".to_string(),
+            error: None,
+        };
+        s.load_from_path();
+        assert!(matches!(
+            s.modal,
+            ScriptModal::LoadPath {
+                error: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn load_invalid_toml_shows_error() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "not valid toml [[[").unwrap();
+        let mut s = ScriptComposerState::default();
+        s.modal = ScriptModal::LoadPath {
+            buffer: tmp.path().to_str().unwrap().to_string(),
+            error: None,
+        };
+        s.load_from_path();
+        assert!(matches!(
+            s.modal,
+            ScriptModal::LoadPath {
+                error: Some(_),
+                ..
+            }
+        ));
     }
 }
