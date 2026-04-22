@@ -67,6 +67,9 @@ pub enum Action {
     FilterModels,
     /// Show the help overlay.
     ShowHelp,
+    /// Toggle the collapsed state of the Negative prompt panel on the
+    /// Generate view.
+    ToggleNegativePrompt,
     /// Image crop/pan: move viewport.
     PanLeft,
     PanRight,

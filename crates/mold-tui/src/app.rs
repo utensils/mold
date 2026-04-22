@@ -657,6 +657,11 @@ pub struct GenerateState {
     pub last_generation_time_ms: Option<u64>,
     pub error_message: Option<String>,
     pub model_description: String,
+    /// When `true`, the Negative prompt textarea collapses to a single dim
+    /// summary row so it doesn't steal vertical space. Users toggle this with
+    /// `Alt+N`; models that don't support negative prompts ignore the flag
+    /// entirely and hide the row regardless.
+    pub negative_collapsed: bool,
 }
 
 /// Which gallery view is active.
@@ -1142,6 +1147,7 @@ impl App {
                 last_generation_time_ms: None,
                 error_message: None,
                 model_description,
+                negative_collapsed: session.negative_collapsed.unwrap_or(false),
             },
             gallery: GalleryState {
                 entries: Vec::new(),
@@ -1544,7 +1550,8 @@ impl App {
             .to_string();
         let session =
             crate::session::TuiSession::from_params(&prompt_text, &neg_text, &self.generate.params)
-                .with_theme(self.settings.theme_preset);
+                .with_theme(self.settings.theme_preset)
+                .with_negative_collapsed(self.generate.negative_collapsed);
         session.save();
     }
 
@@ -2357,6 +2364,17 @@ impl App {
             }
             Action::Generate if self.active_view == View::Generate && !self.generate.generating => {
                 self.start_generation();
+            }
+            Action::ToggleNegativePrompt => {
+                self.generate.negative_collapsed = !self.generate.negative_collapsed;
+                // If we're collapsing while focused on the Negative pane, slip
+                // focus back to the regular prompt so the user isn't stuck in
+                // a hidden textarea.
+                if self.generate.negative_collapsed
+                    && self.generate.focus == GenerateFocus::NegativePrompt
+                {
+                    self.generate.focus = GenerateFocus::Prompt;
+                }
             }
             Action::Confirm => match self.active_view {
                 View::Generate => {
@@ -5652,6 +5670,7 @@ mod tests {
                 last_generation_time_ms: None,
                 error_message: None,
                 model_description: String::new(),
+                negative_collapsed: false,
             },
             gallery: GalleryState {
                 entries: Vec::new(),
@@ -5965,6 +5984,27 @@ mod tests {
         app.settings.focus = SettingsFocus::Appearance;
         app.settings_navigate(1);
         assert_eq!(app.settings.focus, SettingsFocus::Configuration);
+    }
+
+    #[tokio::test]
+    async fn toggle_negative_prompt_flips_collapsed_flag() {
+        let mut app = make_settings_test_app();
+        assert!(!app.generate.negative_collapsed);
+        app.dispatch_action(Action::ToggleNegativePrompt);
+        assert!(app.generate.negative_collapsed);
+        app.dispatch_action(Action::ToggleNegativePrompt);
+        assert!(!app.generate.negative_collapsed);
+    }
+
+    #[tokio::test]
+    async fn toggle_negative_prompt_while_focused_moves_focus_to_prompt() {
+        let mut app = make_settings_test_app();
+        app.generate.focus = GenerateFocus::NegativePrompt;
+        app.dispatch_action(Action::ToggleNegativePrompt);
+        // Collapsing while focused on Negative should shift focus so the
+        // user isn't stuck typing into a hidden textarea.
+        assert!(app.generate.negative_collapsed);
+        assert_eq!(app.generate.focus, GenerateFocus::Prompt);
     }
 
     #[tokio::test]
@@ -6474,6 +6514,7 @@ mod tests {
             last_generation_time_ms: None,
             error_message: None,
             model_description: String::new(),
+            negative_collapsed: false,
         };
 
         // Simulate receiving first image — still 2 more to go
@@ -6530,6 +6571,7 @@ mod tests {
             last_generation_time_ms: None,
             error_message: None,
             model_description: String::new(),
+            negative_collapsed: false,
         };
 
         // Simulate error mid-batch
@@ -6567,6 +6609,7 @@ mod tests {
             last_generation_time_ms: None,
             error_message: None,
             model_description: String::new(),
+            negative_collapsed: false,
         };
 
         // Simulate setting batch to 4 and starting generation

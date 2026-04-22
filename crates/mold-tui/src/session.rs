@@ -45,6 +45,9 @@ pub struct TuiSession {
     /// Theme preset slug (e.g. "mocha", "latte"). Missing = Mocha.
     #[serde(default)]
     pub theme: Option<String>,
+    /// Whether the Negative prompt panel was collapsed at exit. Missing = false.
+    #[serde(default)]
+    pub negative_collapsed: Option<bool>,
 }
 
 fn session_path() -> Option<PathBuf> {
@@ -104,6 +107,7 @@ impl TuiSession {
             strength: Some(params.strength),
             control_scale: Some(params.control_scale),
             theme: None,
+            negative_collapsed: None,
         }
     }
 
@@ -111,6 +115,12 @@ impl TuiSession {
     /// to `from_params` without adding a positional argument.
     pub fn with_theme(mut self, preset: super::ui::theme::ThemePreset) -> Self {
         self.theme = Some(preset.slug().to_string());
+        self
+    }
+
+    /// Record whether the negative-prompt panel was collapsed at save time.
+    pub fn with_negative_collapsed(mut self, collapsed: bool) -> Self {
+        self.negative_collapsed = Some(collapsed);
         self
     }
 
@@ -246,6 +256,7 @@ mod tests {
             strength: Some(0.75),
             control_scale: Some(1.0),
             theme: Some("mocha".to_string()),
+            negative_collapsed: Some(true),
         };
         let json = serde_json::to_string(&session).unwrap();
         let restored: TuiSession = serde_json::from_str(&json).unwrap();
@@ -355,6 +366,7 @@ mod tests {
             strength: Some(0.3),
             control_scale: Some(1.5),
             theme: None,
+            negative_collapsed: None,
         };
 
         let mut params = GenerateParams::from_config(&mold_core::Config::default());

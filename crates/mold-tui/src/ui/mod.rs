@@ -276,7 +276,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 vec![("", status)]
             } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
                 vec![
-                    ("1-4", "Views"),
+                    ("1-5", "Views"),
                     ("Alt+\u{2190}\u{2192}", "Views"),
                     ("Enter", "Edit"),
                     ("?", "Help"),
@@ -293,11 +293,17 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     ("?", "Help"),
                 ]
             } else {
+                let neg_label = if app.generate.negative_collapsed {
+                    "Neg+"
+                } else {
+                    "Neg-"
+                };
                 vec![
                     ("Enter", "Generate"),
                     ("^G", "Generate"),
                     ("^M", "Model"),
                     ("^R", "Seed"),
+                    ("Alt+N", neg_label),
                     ("Tab", "Focus"),
                     ("Esc", "Nav"),
                 ]

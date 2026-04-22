@@ -36,6 +36,9 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
             KeyCode::Char('4') => return Action::SwitchView(View::Queue),
             KeyCode::Char('5') => return Action::SwitchView(View::Settings),
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                return Action::ToggleNegativePrompt;
+            }
             KeyCode::Left => return Action::ViewPrev,
             KeyCode::Right => return Action::ViewNext,
             _ => {}

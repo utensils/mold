@@ -39,6 +39,8 @@ const BOTTOM_ROW_HEIGHT: u16 = 5;
 const PROMPT_HEIGHT: u16 = 4;
 /// Height of the Negative prompt textarea when visible (including border).
 const NEGATIVE_HEIGHT: u16 = 3;
+/// Height of the collapsed Negative prompt summary (one dim row, no border).
+const NEGATIVE_COLLAPSED_HEIGHT: u16 = 1;
 
 /// Render the Generate view.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -58,6 +60,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 // ── Layout ──────────────────────────────────────────────────────────
 
 /// Resolved areas for each row in the Generate view.
+///
+/// `negative` is `Some` whenever the Negative prompt row has reserved space,
+/// whether full-height or collapsed. Whether it renders as a textarea or as
+/// the dim summary line is decided inside `render_negative`.
 struct GenerateLayout {
     prompt: Rect,
     negative: Option<Rect>,
@@ -67,13 +73,13 @@ struct GenerateLayout {
 }
 
 fn vertical_layout(app: &App, area: Rect) -> GenerateLayout {
-    let show_negative = app.generate.capabilities.supports_negative_prompt;
+    let neg_height = negative_row_height(app);
     let show_error = app.generate.error_message.is_some();
 
     let mut constraints: Vec<Constraint> = Vec::with_capacity(5);
     constraints.push(Constraint::Length(PROMPT_HEIGHT));
-    if show_negative {
-        constraints.push(Constraint::Length(NEGATIVE_HEIGHT));
+    if neg_height > 0 {
+        constraints.push(Constraint::Length(neg_height));
     }
     constraints.push(Constraint::Min(6));
     constraints.push(Constraint::Length(BOTTOM_ROW_HEIGHT));
@@ -89,7 +95,7 @@ fn vertical_layout(app: &App, area: Rect) -> GenerateLayout {
     let mut idx = 0;
     let prompt = rects[idx];
     idx += 1;
-    let negative = if show_negative {
+    let negative = if neg_height > 0 {
         let r = rects[idx];
         idx += 1;
         Some(r)
@@ -108,6 +114,21 @@ fn vertical_layout(app: &App, area: Rect) -> GenerateLayout {
         middle,
         bottom,
         error,
+    }
+}
+
+/// How many vertical cells the Negative row needs (including borders).
+///
+/// - 0: model doesn't support negative prompts — row is skipped entirely.
+/// - `NEGATIVE_COLLAPSED_HEIGHT`: supported but user has collapsed it.
+/// - `NEGATIVE_HEIGHT`: supported and expanded (full textarea).
+fn negative_row_height(app: &App) -> u16 {
+    if !app.generate.capabilities.supports_negative_prompt {
+        0
+    } else if app.generate.negative_collapsed {
+        NEGATIVE_COLLAPSED_HEIGHT
+    } else {
+        NEGATIVE_HEIGHT
     }
 }
 
@@ -166,14 +187,46 @@ fn render_prompt(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_negative(frame: &mut Frame, app: &mut App, area: Rect) {
     app.layout.negative_prompt = area;
-    render_text_area(
-        frame,
-        &app.theme,
-        &mut app.generate.negative_prompt,
-        "Negative",
-        area,
-        app.generate.focus == GenerateFocus::NegativePrompt,
-    );
+    if app.generate.negative_collapsed {
+        render_negative_collapsed(frame, app, area);
+    } else {
+        render_text_area(
+            frame,
+            &app.theme,
+            &mut app.generate.negative_prompt,
+            "Negative",
+            area,
+            app.generate.focus == GenerateFocus::NegativePrompt,
+        );
+    }
+}
+
+/// Dim one-row summary shown when the user has collapsed the Negative panel.
+///
+/// Mirrors the design system's inline `neg: …` treatment — the field is still
+/// visible, just quiet. Users press `Alt+N` to expand it again.
+fn render_negative_collapsed(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
+    let summary: String = app
+        .generate
+        .negative_prompt
+        .lines()
+        .iter()
+        .flat_map(|l| l.chars())
+        .take(80)
+        .collect();
+    let label = if summary.trim().is_empty() {
+        "neg: (empty)".to_string()
+    } else {
+        format!("neg: {summary}")
+    };
+    let line = Line::from(vec![
+        Span::styled(label, theme.dim()),
+        Span::raw("   "),
+        Span::styled("Alt+N", theme.status_key()),
+        Span::styled(" expand", theme.dim()),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_text_area<'a>(
