@@ -7,7 +7,13 @@ use crate::app::{App, GalleryEntry, GalleryViewMode};
 use crate::ui::widgets::{kv_row_line, panel_block};
 
 const CELL_W: u16 = 24;
-const CELL_H: u16 = 14;
+/// Height of a single gallery tile including its 2 border rows.
+///
+/// The cell used to reserve two rows for a filename label, which never fit
+/// on disk-era names and was redundant with the Selected panel below the
+/// grid. Removing the label lets the thumbnail fill the full inner area
+/// *and* fits one extra tile row on typical terminal heights.
+const CELL_H: u16 = 12;
 
 /// Height of the bottom row (Selected + Prompt panels) in the Grid view.
 const GRID_BOTTOM_HEIGHT: u16 = 8;
@@ -306,15 +312,10 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         return;
     }
 
-    // Thumbnail area (all but last 2 rows for filename)
-    let thumb_rows = cell_inner.height.saturating_sub(2);
-    let thumb_area = Rect::new(cell_inner.x, cell_inner.y, cell_inner.width, thumb_rows);
-    let label_area = Rect::new(
-        cell_inner.x,
-        cell_inner.y + thumb_rows,
-        cell_inner.width,
-        2.min(cell_inner.height),
-    );
+    // Thumbnail fills the full inner area now that per-cell filename
+    // labels have been removed — they never fit at CELL_W=24 and the
+    // Selected panel below the grid already shows the full filename.
+    let thumb_area = cell_inner;
 
     // Load thumbnail lazily if not yet loaded
     if idx < app.gallery.thumbnail_states.len() {
@@ -403,26 +404,8 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         }
     }
 
-    // Filename label below thumbnail
-    let filename = entry.filename();
-    let display_name = if filename.len() > cell_inner.width as usize {
-        format!("{}...", &filename[..cell_inner.width as usize - 3])
-    } else {
-        filename
-    };
-
-    let name_style = if selected {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.text_dim)
-    };
-
-    let label = Paragraph::new(display_name)
-        .style(name_style)
-        .alignment(Alignment::Center);
-    frame.render_widget(label, label_area);
+    // Intentionally no filename label — the Selected panel below the
+    // grid shows the full name for the currently-highlighted tile.
 }
 
 #[cfg(test)]
@@ -488,6 +471,60 @@ mod tests {
         let rect = center_rect(area, 10, 6);
 
         assert_eq!(rect, Rect::new(6, 2, 10, 6));
+    }
+
+    #[test]
+    fn gallery_grid_cell_does_not_render_filename_label() {
+        // Reported: thumbnail cells rendered a truncated filename below
+        // the image (`mold-flux-dev-q4-17…`). The label never fit, was
+        // redundant with the Selected panel below the grid, and ate two
+        // rows of thumbnail space per cell.
+        //
+        // TDD: render a single cell with a recognisable filename stem
+        // and assert no cell in the buffer contains even a prefix of
+        // that stem.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let mut picker = Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ProtocolType::Halfblocks);
+        let mut app = App::new(None, true, picker).unwrap();
+
+        let stem = "unique-cell-label-stem";
+        let entry_path = PathBuf::from(format!("{stem}.png"));
+        app.gallery.entries = vec![GalleryEntry {
+            path: entry_path,
+            metadata: test_metadata(64, 64),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+        }];
+        // No thumbnail loaded — we only care about the text rendering path.
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+
+        let backend = TestBackend::new(CELL_W, CELL_H);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_grid_cell(frame, &mut app, Rect::new(0, 0, CELL_W, CELL_H), 0, true);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered: String = buffer.content.iter().map(|c| c.symbol()).collect();
+        assert!(
+            !rendered.contains("unique-cell-label-stem"),
+            "gallery cell must not render the filename label; got: {rendered:?}"
+        );
+        // Also guard against truncated variants like `unique-cell…`.
+        assert!(
+            !rendered.contains("unique-cell"),
+            "gallery cell must not render even a truncated filename prefix; got: {rendered:?}"
+        );
     }
 
     #[test]
@@ -558,12 +595,13 @@ mod tests {
 
     #[test]
     fn show_grid_inspector_hidden_below_minimum_height() {
-        // Minimum is `GRID_BOTTOM_HEIGHT (8) + CELL_H (14) + 2 borders = 24`.
-        // At 14–23 rows the previous threshold (height >= 14) would show the
-        // inspector and leave zero room for thumbnails.
+        // Minimum is `GRID_BOTTOM_HEIGHT (8) + CELL_H + 2 borders`.
+        // At heights below that, showing the inspector would leave zero
+        // room for a thumbnail row.
+        let min = GRID_INSPECTOR_MIN_HEIGHT;
         assert!(!show_grid_inspector(0, true));
-        assert!(!show_grid_inspector(14, true));
-        assert!(!show_grid_inspector(23, true));
+        assert!(!show_grid_inspector(min.saturating_sub(1), true));
+        assert!(!show_grid_inspector(min.saturating_sub(10), true));
     }
 
     #[test]
