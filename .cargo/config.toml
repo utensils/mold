@@ -2,8 +2,13 @@
 build-dev = "build --profile dev-fast"
 run-dev = "run --profile dev-fast"
 
-[build]
-incremental = true
+# NOTE: `[build] incremental = true` was removed intentionally.
+# The Nix devshell sets `RUSTC_WRAPPER=sccache`, and `sccache` refuses to run
+# whenever cargo has incremental compilation enabled (config.toml or env var) —
+# it surfaces as `sccache rustc -vV` exiting with "incremental compilation is
+# prohibited". The project-wide `sccache` cache is the preferred caching
+# strategy; per-crate incremental builds can still be opted into locally with
+# `CARGO_INCREMENTAL=1` when `sccache` isn't active.
 
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
