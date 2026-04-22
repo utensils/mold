@@ -1,6 +1,7 @@
 pub mod build_info;
 pub mod catalog;
 pub mod chain;
+pub mod chain_toml;
 pub mod client;
 pub mod config;
 pub mod control;
