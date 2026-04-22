@@ -2421,7 +2421,18 @@ impl App {
                     }
                 }
                 View::Queue => {}
-                View::Settings => self.settings_confirm(),
+                View::Settings => {
+                    // Enter only edits a Configuration row. When the
+                    // Appearance swatch grid holds focus the preset is
+                    // already live-applied, so Enter has no work to do —
+                    // falling through to `settings_confirm()` would read
+                    // `row_index` from the Configuration list and open
+                    // the popup for whichever field happens to be
+                    // selected there.
+                    if self.settings.focus == SettingsFocus::Configuration {
+                        self.settings_confirm();
+                    }
+                }
             },
             Action::PullModel if self.active_view == View::Models => {
                 if let Some(model) = self.models.catalog.get(self.models.selected) {
@@ -5963,6 +5974,39 @@ mod tests {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::DefaultSteps, 1.0, 1.0, 200.0);
         assert_eq!(app.config.default_steps, 5);
+    }
+
+    // ── Enter on the Appearance pane must not trigger settings_confirm ──
+
+    #[tokio::test]
+    async fn enter_on_appearance_pane_does_not_open_model_dialog() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Settings;
+        app.settings.focus = SettingsFocus::Appearance;
+        // Before the fix: Confirm on Settings view unconditionally calls
+        // `settings_confirm()`, which follows row_index=1 (the first
+        // editable field — `Model`) and opens its text-entry popup, even
+        // though focus visibly belongs to the Appearance swatch row.
+        app.dispatch_action(Action::Confirm);
+        assert!(
+            app.popup.is_none(),
+            "Enter on the Appearance pane must stay on the swatch grid \
+             and must not open the Model popup"
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_on_configuration_still_opens_popup() {
+        // Regression guard for the happy path.
+        let mut app = make_settings_test_app();
+        app.active_view = View::Settings;
+        app.settings.focus = SettingsFocus::Configuration;
+        app.settings.row_index = 1; // Model (first editable field)
+        app.dispatch_action(Action::Confirm);
+        assert!(
+            app.popup.is_some(),
+            "Enter on a Configuration Text row must still open the popup"
+        );
     }
 
     #[tokio::test]

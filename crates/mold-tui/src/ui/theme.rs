@@ -2,14 +2,17 @@ use ratatui::style::{Color, Modifier, Style};
 
 /// A named colour palette preset.
 ///
-/// The TUI ships six presets. Mocha is the default and matches the design
-/// system tokens in `colors_and_type.css`. The other five provide light and
-/// alternate-dark options for users who prefer them.
+/// The TUI ships seven presets matching the mold design system's
+/// `ThemePicker` swatch list. Mocha is the default and maps directly to the
+/// tokens in `colors_and_type.css`. The remaining presets provide a light
+/// counterpart (Latte) and five alternate dark palettes for users who
+/// prefer a different accent hue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemePreset {
     #[default]
     Mocha,
     Latte,
+    Ristretto,
     Gruvbox,
     Tokyo,
     Nord,
@@ -18,9 +21,12 @@ pub enum ThemePreset {
 
 impl ThemePreset {
     /// All presets in display order (used by the Appearance swatch grid).
-    pub const ALL: [ThemePreset; 6] = [
+    /// Mirrors the seven-preset list in
+    /// `mold-design-system/ui_kits/mold-tui/Primitives.jsx`.
+    pub const ALL: [ThemePreset; 7] = [
         ThemePreset::Mocha,
         ThemePreset::Latte,
+        ThemePreset::Ristretto,
         ThemePreset::Gruvbox,
         ThemePreset::Tokyo,
         ThemePreset::Nord,
@@ -32,6 +38,7 @@ impl ThemePreset {
         match self {
             ThemePreset::Mocha => "Mocha",
             ThemePreset::Latte => "Latte",
+            ThemePreset::Ristretto => "Ristretto",
             ThemePreset::Gruvbox => "Gruvbox",
             ThemePreset::Tokyo => "Tokyo",
             ThemePreset::Nord => "Nord",
@@ -44,6 +51,7 @@ impl ThemePreset {
         match self {
             ThemePreset::Mocha => "mocha",
             ThemePreset::Latte => "latte",
+            ThemePreset::Ristretto => "ristretto",
             ThemePreset::Gruvbox => "gruvbox",
             ThemePreset::Tokyo => "tokyo",
             ThemePreset::Nord => "nord",
@@ -55,6 +63,7 @@ impl ThemePreset {
     pub fn from_slug(slug: &str) -> Self {
         match slug.trim().to_ascii_lowercase().as_str() {
             "latte" => ThemePreset::Latte,
+            "ristretto" => ThemePreset::Ristretto,
             "gruvbox" => ThemePreset::Gruvbox,
             "tokyo" | "tokyonight" | "tokyo-night" => ThemePreset::Tokyo,
             "nord" => ThemePreset::Nord,
@@ -73,6 +82,7 @@ impl ThemePreset {
         match self {
             ThemePreset::Mocha => Theme::mocha(),
             ThemePreset::Latte => Theme::latte(),
+            ThemePreset::Ristretto => Theme::ristretto(),
             ThemePreset::Gruvbox => Theme::gruvbox(),
             ThemePreset::Tokyo => Theme::tokyo(),
             ThemePreset::Nord => Theme::nord(),
@@ -175,6 +185,30 @@ impl Theme {
             tab_bg: Color::Rgb(230, 233, 239), // #e6e9ef
             tab_active: Color::Rgb(30, 102, 245),
             tab_inactive: Color::Rgb(108, 111, 133),
+        }
+    }
+
+    /// Ristretto — warm espresso-toned dark theme from Monokai Pro.
+    /// Accent is the signature `#fd6883` pink-red, matched to the swatch
+    /// defined in the mold design system.
+    pub fn ristretto() -> Self {
+        Self {
+            bg: Color::Rgb(44, 37, 37),               // #2c2525
+            surface: Color::Rgb(64, 56, 56),          // #403838
+            border: Color::Rgb(91, 83, 73),           // #5b5349
+            border_focus: Color::Rgb(253, 104, 131),  // #fd6883 (pink-red)
+            text: Color::Rgb(255, 241, 243),          // #fff1f3
+            text_dim: Color::Rgb(114, 105, 106),      // #72696a
+            accent: Color::Rgb(253, 104, 131),        // #fd6883
+            success: Color::Rgb(173, 218, 120),       // #adda78
+            warning: Color::Rgb(249, 204, 108),       // #f9cc6c
+            error: Color::Rgb(243, 141, 112),         // #f38d70 (orange — distinct from accent)
+            highlight: Color::Rgb(64, 56, 56),        // #403838
+            progress_fill: Color::Rgb(253, 104, 131), // #fd6883
+            progress_empty: Color::Rgb(64, 56, 56),
+            tab_bg: Color::Rgb(35, 29, 29), // slightly deeper than bg
+            tab_active: Color::Rgb(253, 104, 131),
+            tab_inactive: Color::Rgb(114, 105, 106),
         }
     }
 
@@ -405,5 +439,38 @@ mod tests {
     fn unknown_slug_falls_back_to_mocha() {
         assert_eq!(ThemePreset::from_slug("🐠"), ThemePreset::Mocha);
         assert_eq!(ThemePreset::from_slug(""), ThemePreset::Mocha);
+    }
+
+    #[test]
+    fn all_seven_design_system_themes_ship() {
+        // The design system (`ui_kits/mold-tui/Primitives.jsx:140`) lists
+        // seven theme presets: Mocha / Latte / Ristretto / Gruvbox /
+        // Tokyo / Nord / Dracula. Missing any of them is a gap in the
+        // Appearance picker.
+        let slugs: Vec<&str> = ThemePreset::ALL.iter().map(|p| p.slug()).collect();
+        for expected in [
+            "mocha",
+            "latte",
+            "ristretto",
+            "gruvbox",
+            "tokyo",
+            "nord",
+            "dracula",
+        ] {
+            assert!(
+                slugs.contains(&expected),
+                "theme `{expected}` is missing from ThemePreset::ALL",
+            );
+        }
+    }
+
+    #[test]
+    fn ristretto_swatch_matches_design_system() {
+        // The design-system swatch for Ristretto is `#fd6883` — an easy
+        // regression guard in case the accent hex drifts.
+        assert_eq!(
+            ThemePreset::Ristretto.swatch(),
+            Color::Rgb(0xfd, 0x68, 0x83),
+        );
     }
 }
