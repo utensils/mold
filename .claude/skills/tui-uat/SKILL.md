@@ -26,16 +26,34 @@ Or use the devshell helper: `build`
 All TUI interaction goes through `scripts/tui-uat.sh`:
 
 ```bash
-scripts/tui-uat.sh launch [--local] [--host URL]  # Start TUI in a Ghostty window
-scripts/tui-uat.sh capture                          # Print current screen (plain text)
-scripts/tui-uat.sh screenshot [output.png]          # Native Ghostty screenshot (PNG)
-scripts/tui-uat.sh view <1-4|name>                  # Navigate to a view reliably
-scripts/tui-uat.sh send <key> [key...]              # Send keystrokes
-scripts/tui-uat.sh wait-for <pattern> [timeout]     # Wait for text (default 5s)
-scripts/tui-uat.sh assert <pattern>                  # Assert text is on screen
-scripts/tui-uat.sh quit                              # Close UAT window
-scripts/tui-uat.sh status                            # Check if running
+# Lifecycle
+scripts/tui-uat.sh launch [--fresh] [--env K=V]* [--local] [--host URL]
+scripts/tui-uat.sh quit
+scripts/tui-uat.sh status
+scripts/tui-uat.sh env              # Print MOLD_HOME / MOLD_DB_PATH
+
+# Screen I/O
+scripts/tui-uat.sh capture          # Print current screen (plain text)
+scripts/tui-uat.sh screenshot [output.png]
+scripts/tui-uat.sh view <1-5|name>  # 1=Generate 2=Gallery 3=Models 4=Queue 5=Settings
+scripts/tui-uat.sh send <key>...
+scripts/tui-uat.sh wait-for <pattern> [timeout]
+scripts/tui-uat.sh assert <pattern>
+
+# DB / persistence helpers
+scripts/tui-uat.sh db [--write] [--force] <sql>    # sqlite3 against session DB
+scripts/tui-uat.sh db-get <key>                     # One value from settings table
+scripts/tui-uat.sh db-assert <key> <value>          # Pass/fail equality check
+scripts/tui-uat.sh db-dump                           # Pretty-print settings + model_prefs
+
+# Settings helpers
+scripts/tui-uat.sh settings-focus <appearance|configuration>
+scripts/tui-uat.sh theme-set <slug>  # mocha|latte|ristretto|gruvbox|tokyo|nord|dracula
 ```
+
+**`--fresh`** creates a tmp MOLD_HOME and injects it into the TUI's env — zero chance of clobbering the user's real `~/.mold/` state. The isolated directory persists across `quit` so you can relaunch with `--env MOLD_HOME=$(mktemp -d)/…` or reuse the path from `status` to validate persistence.
+
+**`db-*` commands** refuse to write to the user's real DB without `--force`. Use `--fresh` for any test that mutates state.
 
 ## How to Run a UAT Session
 
@@ -161,72 +179,82 @@ scripts/tui-uat.sh quit
 
 ## Example: SQLite-Backed Persistence UAT (#264)
 
-Validates that TUI state survives a quit/relaunch cycle via the metadata DB
-(supersedes the old JSON-file smoke test). Isolates `MOLD_DB_PATH` so the
-test doesn't touch the user's real gallery DB.
+Full quit/relaunch round-trip against an isolated DB. `--fresh` allocates a
+tmp MOLD_HOME; stash its path from `env` so the re-launch can reuse it.
 
 ```bash
-# Fresh DB for this session
-export MOLD_DB_PATH="$(mktemp -d)/mold.db"
-
-# Round 1: set theme + prompt, quit
-scripts/tui-uat.sh launch --local
-scripts/tui-uat.sh view settings
-# Navigate to Appearance, cycle to a non-default preset (e.g. Dracula)
-scripts/tui-uat.sh send k k k right right   # adjust if row-order differs
-scripts/tui-uat.sh screenshot /tmp/uat-theme-set.png
+# Round 1: fresh isolated env, set theme via helper, write a prompt
+scripts/tui-uat.sh launch --fresh --local
+eval "$(scripts/tui-uat.sh env)"              # exports MOLD_HOME + MOLD_DB_PATH
+scripts/tui-uat.sh theme-set dracula          # cycles + asserts
 scripts/tui-uat.sh view generate
-scripts/tui-uat.sh send i a " " t e s t " " p r o m p t escape
-scripts/tui-uat.sh screenshot /tmp/uat-prompt-typed.png
-scripts/tui-uat.sh send ctrl+c            # quit writes settings + model_prefs
-sleep 1
+scripts/tui-uat.sh send "a test prompt"       # single arg is sent as literal text
+scripts/tui-uat.sh send escape                # exit textarea focus
+scripts/tui-uat.sh send ctrl+c                # quit (writes settings + model_prefs)
 
-# Round 2: relaunch, confirm theme + prompt survived
-scripts/tui-uat.sh launch --local
-scripts/tui-uat.sh screenshot /tmp/uat-after-relaunch.png
-scripts/tui-uat.sh assert "test prompt"
+# Round 2: relaunch with the *same* MOLD_HOME → DB survives
+scripts/tui-uat.sh launch --env "MOLD_HOME=$MOLD_HOME" --local
+scripts/tui-uat.sh db-assert tui.theme dracula
+scripts/tui-uat.sh db-assert tui.last_prompt "a test prompt"
+scripts/tui-uat.sh screenshot /tmp/uat-persistence.png
 scripts/tui-uat.sh quit
-
-# Clean up
-unset MOLD_DB_PATH
+rm -rf "$MOLD_HOME"                            # tmp dir cleanup is manual
 ```
 
 ## Example: Per-Model Preferences UAT (#264)
 
-Confirms each model remembers its own generation parameters across switches.
+Confirms each model remembers its own generation parameters across
+switches. The DB is where the truth lives, so this UAT reads
+`model_prefs` directly instead of counting key presses in the UI.
 
 ```bash
-export MOLD_DB_PATH="$(mktemp -d)/mold.db"
+scripts/tui-uat.sh launch --fresh --local
+eval "$(scripts/tui-uat.sh env)"
 
-scripts/tui-uat.sh launch --local
-# Set FLUX to non-default width — e.g. cycle width down from 1024
+# Dial flux2-klein:q8 to an unusual width (it starts at 1024).
 scripts/tui-uat.sh view generate
-scripts/tui-uat.sh send tab                 # focus Parameters
-# navigate to Width, decrement a few times (-64 per press for typical step)
-scripts/tui-uat.sh send j minus minus minus minus
+scripts/tui-uat.sh send tab                    # focus Parameters
+scripts/tui-uat.sh send j                      # → Width row (row 2)
+scripts/tui-uat.sh send - - - - - - - -        # 8 × −64 = 512 lower
 scripts/tui-uat.sh screenshot /tmp/uat-flux-tuned.png
 
-# Switch to a different model via Ctrl+M
+# Switch to a different installed model via Ctrl+M.
 scripts/tui-uat.sh send ctrl+m
-scripts/tui-uat.sh send j enter             # pick next model in list
-scripts/tui-uat.sh screenshot /tmp/uat-switched-to-sdxl.png
+scripts/tui-uat.sh send j enter                # pick next model in list
+scripts/tui-uat.sh screenshot /tmp/uat-switched.png
 
-# Switch back to the first model — width must be restored
+# Back to flux2-klein — update_model should overlay the saved row.
 scripts/tui-uat.sh send ctrl+m
 scripts/tui-uat.sh send k enter
-scripts/tui-uat.sh screenshot /tmp/uat-switched-back.png
-# Manual: compare uat-flux-tuned.png vs uat-switched-back.png
-# The Width row should match
+# DB assertion: flux2-klein remembered the tuned width.
+scripts/tui-uat.sh db "SELECT model, width FROM model_prefs WHERE model LIKE 'flux2-klein%';"
 
 scripts/tui-uat.sh quit
-unset MOLD_DB_PATH
 ```
 
 ## Example: DB-Disabled Fallback
 
 ```bash
-MOLD_DB_DISABLE=1 scripts/tui-uat.sh launch --local
+scripts/tui-uat.sh launch --fresh --env MOLD_DB_DISABLE=1 --local
 scripts/tui-uat.sh view settings
-scripts/tui-uat.sh assert "Settings"        # still renders
-scripts/tui-uat.sh quit                      # no crash on shutdown save
+scripts/tui-uat.sh assert "Appearance"         # still renders
+scripts/tui-uat.sh quit                         # no crash on shutdown save
+```
+
+## Example: One-Shot Assertion Script
+
+Run all three fast checks in sequence — suitable for CI.
+
+```bash
+set -e
+scripts/tui-uat.sh launch --fresh --local
+scripts/tui-uat.sh view settings
+scripts/tui-uat.sh theme-set gruvbox
+scripts/tui-uat.sh db-assert tui.theme gruvbox
+scripts/tui-uat.sh view generate
+scripts/tui-uat.sh assert "flux2-klein"
+scripts/tui-uat.sh view gallery && scripts/tui-uat.sh assert "Gallery"
+scripts/tui-uat.sh view queue && scripts/tui-uat.sh assert "Queue"
+scripts/tui-uat.sh view models && scripts/tui-uat.sh assert "FAMILY"
+scripts/tui-uat.sh quit
 ```
