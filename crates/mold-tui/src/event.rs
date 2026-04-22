@@ -232,9 +232,17 @@ fn map_settings_key(key: &KeyEvent) -> Action {
 }
 
 fn map_script_key(key: &KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Esc => Action::SwitchView(View::Generate),
-        KeyCode::Char('q') => Action::Quit,
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
+            Action::ScriptMoveDown
+        }
+        (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, KeyModifiers::NONE) => {
+            Action::ScriptMoveUp
+        }
+        (KeyCode::Char('J'), KeyModifiers::SHIFT) => Action::ScriptReorderDown,
+        (KeyCode::Char('K'), KeyModifiers::SHIFT) => Action::ScriptReorderUp,
+        (KeyCode::Esc, _) => Action::SwitchView(View::Generate),
+        (KeyCode::Char('q'), KeyModifiers::NONE) => Action::Quit,
         _ => Action::None,
     }
 }

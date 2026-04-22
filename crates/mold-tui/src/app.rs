@@ -2811,6 +2811,10 @@ impl App {
                     });
                 }
             }
+            Action::ScriptMoveDown => self.script.move_down(),
+            Action::ScriptMoveUp => self.script.move_up(),
+            Action::ScriptReorderDown => self.script.reorder_down(),
+            Action::ScriptReorderUp => self.script.reorder_up(),
             _ => {}
         }
     }

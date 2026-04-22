@@ -28,6 +28,35 @@ impl ScriptComposerState {
     pub fn selected_stage_mut(&mut self) -> Option<&mut ChainStage> {
         self.script.stages.get_mut(self.selected)
     }
+
+    pub fn move_down(&mut self) {
+        if self.selected + 1 < self.script.stages.len() {
+            self.selected += 1;
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    pub fn reorder_down(&mut self) {
+        let n = self.script.stages.len();
+        if self.selected + 1 < n {
+            self.script.stages.swap(self.selected, self.selected + 1);
+            self.selected += 1;
+            self.unsaved = true;
+        }
+    }
+
+    pub fn reorder_up(&mut self) {
+        if self.selected > 0 {
+            self.script.stages.swap(self.selected - 1, self.selected);
+            self.selected -= 1;
+            self.unsaved = true;
+        }
+    }
 }
 
 impl Default for ScriptComposerState {
@@ -337,5 +366,93 @@ mod tests {
         });
         s.selected = 1;
         assert_eq!(s.selected_stage().unwrap().prompt, "second");
+    }
+
+    fn make_state(n: usize) -> ScriptComposerState {
+        let mut s = ScriptComposerState::default();
+        // default already has 1 stage, add n-1 more
+        for i in 1..n {
+            s.script.stages.push(ChainStage {
+                prompt: format!("stage {i}"),
+                frames: 97,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Smooth,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            });
+        }
+        s
+    }
+
+    #[test]
+    fn move_down_advances_selection() {
+        let mut s = make_state(3);
+        s.move_down();
+        assert_eq!(s.selected, 1);
+    }
+
+    #[test]
+    fn move_down_clamps_at_bottom() {
+        let mut s = make_state(3);
+        s.selected = 2;
+        s.move_down();
+        assert_eq!(s.selected, 2);
+    }
+
+    #[test]
+    fn move_up_retreats_selection() {
+        let mut s = make_state(3);
+        s.selected = 2;
+        s.move_up();
+        assert_eq!(s.selected, 1);
+    }
+
+    #[test]
+    fn move_up_clamps_at_top() {
+        let mut s = make_state(3);
+        s.move_up();
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn reorder_down_swaps_and_follows() {
+        let mut s = make_state(3);
+        // default stage prompt is empty, stage 1 prompt is "stage 1"
+        s.reorder_down();
+        assert_eq!(s.selected, 1);
+        assert_eq!(s.script.stages[1].prompt, ""); // original stage 0 moved to 1
+        assert_eq!(s.script.stages[0].prompt, "stage 1"); // original stage 1 moved to 0
+        assert!(s.unsaved);
+    }
+
+    #[test]
+    fn reorder_down_clamps_at_bottom() {
+        let mut s = make_state(2);
+        s.selected = 1;
+        s.reorder_down();
+        assert_eq!(s.selected, 1);
+    }
+
+    #[test]
+    fn reorder_up_swaps_and_follows() {
+        let mut s = make_state(3);
+        s.selected = 1;
+        let p1 = s.script.stages[1].prompt.clone();
+        s.reorder_up();
+        assert_eq!(s.selected, 0);
+        assert_eq!(s.script.stages[0].prompt, p1);
+        assert!(s.unsaved);
+    }
+
+    #[test]
+    fn reorder_up_clamps_at_top() {
+        let mut s = make_state(2);
+        s.reorder_up();
+        assert_eq!(s.selected, 0);
+        assert!(!s.unsaved);
     }
 }

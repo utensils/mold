@@ -84,6 +84,14 @@ pub enum Action {
     GridLeft,
     /// Gallery grid: move right one cell.
     GridRight,
+    /// Script: move selection down one stage.
+    ScriptMoveDown,
+    /// Script: move selection up one stage.
+    ScriptMoveUp,
+    /// Script: move selected stage down (reorder).
+    ScriptReorderDown,
+    /// Script: move selected stage up (reorder).
+    ScriptReorderUp,
     /// No action (key not mapped or consumed by text input).
     None,
 }
