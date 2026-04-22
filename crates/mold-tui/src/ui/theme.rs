@@ -1,9 +1,90 @@
 use ratatui::style::{Color, Modifier, Style};
 
-/// Color palette for the TUI.
+/// A named colour palette preset.
 ///
-/// Defaults to a dark theme inspired by Catppuccin Mocha.
-/// Future: load from `[tui.theme]` in config.toml.
+/// The TUI ships six presets. Mocha is the default and matches the design
+/// system tokens in `colors_and_type.css`. The other five provide light and
+/// alternate-dark options for users who prefer them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemePreset {
+    #[default]
+    Mocha,
+    Latte,
+    Gruvbox,
+    Tokyo,
+    Nord,
+    Dracula,
+}
+
+impl ThemePreset {
+    /// All presets in display order (used by the Appearance swatch grid).
+    pub const ALL: [ThemePreset; 6] = [
+        ThemePreset::Mocha,
+        ThemePreset::Latte,
+        ThemePreset::Gruvbox,
+        ThemePreset::Tokyo,
+        ThemePreset::Nord,
+        ThemePreset::Dracula,
+    ];
+
+    /// Short display label (title-case).
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemePreset::Mocha => "Mocha",
+            ThemePreset::Latte => "Latte",
+            ThemePreset::Gruvbox => "Gruvbox",
+            ThemePreset::Tokyo => "Tokyo",
+            ThemePreset::Nord => "Nord",
+            ThemePreset::Dracula => "Dracula",
+        }
+    }
+
+    /// Kebab-case slug, used for config / session persistence.
+    pub fn slug(self) -> &'static str {
+        match self {
+            ThemePreset::Mocha => "mocha",
+            ThemePreset::Latte => "latte",
+            ThemePreset::Gruvbox => "gruvbox",
+            ThemePreset::Tokyo => "tokyo",
+            ThemePreset::Nord => "nord",
+            ThemePreset::Dracula => "dracula",
+        }
+    }
+
+    /// Parse a slug back into a preset. Unknown slugs fall back to Mocha.
+    pub fn from_slug(slug: &str) -> Self {
+        match slug.trim().to_ascii_lowercase().as_str() {
+            "latte" => ThemePreset::Latte,
+            "gruvbox" => ThemePreset::Gruvbox,
+            "tokyo" | "tokyonight" | "tokyo-night" => ThemePreset::Tokyo,
+            "nord" => ThemePreset::Nord,
+            "dracula" => ThemePreset::Dracula,
+            _ => ThemePreset::Mocha,
+        }
+    }
+
+    /// Swatch colour shown in the Appearance grid — usually the accent hue.
+    pub fn swatch(self) -> Color {
+        self.build().accent
+    }
+
+    /// Build a concrete [`Theme`] for this preset.
+    pub fn build(self) -> Theme {
+        match self {
+            ThemePreset::Mocha => Theme::mocha(),
+            ThemePreset::Latte => Theme::latte(),
+            ThemePreset::Gruvbox => Theme::gruvbox(),
+            ThemePreset::Tokyo => Theme::tokyo(),
+            ThemePreset::Nord => Theme::nord(),
+            ThemePreset::Dracula => Theme::dracula(),
+        }
+    }
+}
+
+/// Colour palette for the TUI.
+///
+/// Each field is a semantic token — the role, not the hue. Presets populate
+/// these fields from well-known palettes (Catppuccin, Gruvbox, Nord, …).
 #[derive(Debug, Clone)]
 pub struct Theme {
     /// Main background.
@@ -18,7 +99,7 @@ pub struct Theme {
     pub text: Color,
     /// Dimmed / secondary text.
     pub text_dim: Color,
-    /// Accent color (selected items, active tabs).
+    /// Accent colour (selected items, active tabs).
     pub accent: Color,
     /// Success indicators (checkmarks, completed stages).
     pub success: Color,
@@ -42,13 +123,19 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::dark()
+        Self::mocha()
     }
 }
 
 impl Theme {
-    /// Dark theme — Catppuccin Mocha inspired.
+    /// Historical alias for [`Theme::mocha`]. Retained so external callers
+    /// that reference `Theme::dark()` keep compiling.
     pub fn dark() -> Self {
+        Self::mocha()
+    }
+
+    /// Catppuccin Mocha — the default dark theme and the design-system baseline.
+    pub fn mocha() -> Self {
         Self {
             bg: Color::Rgb(30, 30, 46),               // #1e1e2e
             surface: Color::Rgb(49, 50, 68),          // #313244
@@ -66,6 +153,116 @@ impl Theme {
             tab_bg: Color::Rgb(24, 24, 37),           // #181825
             tab_active: Color::Rgb(137, 180, 250),    // #89b4fa
             tab_inactive: Color::Rgb(127, 132, 156),  // #7f849c
+        }
+    }
+
+    /// Catppuccin Latte — a light counterpart to Mocha.
+    pub fn latte() -> Self {
+        Self {
+            bg: Color::Rgb(239, 241, 245),           // #eff1f5
+            surface: Color::Rgb(230, 233, 239),      // #e6e9ef
+            border: Color::Rgb(204, 208, 218),       // #ccd0da
+            border_focus: Color::Rgb(30, 102, 245),  // #1e66f5 (blue)
+            text: Color::Rgb(76, 79, 105),           // #4c4f69
+            text_dim: Color::Rgb(108, 111, 133),     // #6c6f85
+            accent: Color::Rgb(30, 102, 245),        // #1e66f5
+            success: Color::Rgb(64, 160, 43),        // #40a02b
+            warning: Color::Rgb(223, 142, 29),       // #df8e1d
+            error: Color::Rgb(210, 15, 57),          // #d20f39
+            highlight: Color::Rgb(220, 224, 232),    // #dce0e8
+            progress_fill: Color::Rgb(30, 102, 245), // #1e66f5
+            progress_empty: Color::Rgb(220, 224, 232),
+            tab_bg: Color::Rgb(230, 233, 239), // #e6e9ef
+            tab_active: Color::Rgb(30, 102, 245),
+            tab_inactive: Color::Rgb(108, 111, 133),
+        }
+    }
+
+    /// Gruvbox Dark (hard).
+    pub fn gruvbox() -> Self {
+        Self {
+            bg: Color::Rgb(29, 32, 33),              // #1d2021
+            surface: Color::Rgb(50, 48, 47),         // #32302f
+            border: Color::Rgb(80, 73, 69),          // #504945
+            border_focus: Color::Rgb(131, 165, 152), // #83a598 (aqua)
+            text: Color::Rgb(235, 219, 178),         // #ebdbb2
+            text_dim: Color::Rgb(168, 153, 132),     // #a89984
+            accent: Color::Rgb(131, 165, 152),       // #83a598
+            success: Color::Rgb(184, 187, 38),       // #b8bb26
+            warning: Color::Rgb(250, 189, 47),       // #fabd2f
+            error: Color::Rgb(251, 73, 52),          // #fb4934
+            highlight: Color::Rgb(60, 56, 54),       // #3c3836
+            progress_fill: Color::Rgb(131, 165, 152),
+            progress_empty: Color::Rgb(60, 56, 54),
+            tab_bg: Color::Rgb(40, 40, 40), // #282828
+            tab_active: Color::Rgb(131, 165, 152),
+            tab_inactive: Color::Rgb(168, 153, 132),
+        }
+    }
+
+    /// Tokyo Night (storm).
+    pub fn tokyo() -> Self {
+        Self {
+            bg: Color::Rgb(26, 27, 38),              // #1a1b26
+            surface: Color::Rgb(36, 40, 59),         // #24283b
+            border: Color::Rgb(59, 66, 97),          // #3b4261
+            border_focus: Color::Rgb(122, 162, 247), // #7aa2f7
+            text: Color::Rgb(192, 202, 245),         // #c0caf5
+            text_dim: Color::Rgb(130, 139, 184),     // #828bb8
+            accent: Color::Rgb(122, 162, 247),       // #7aa2f7
+            success: Color::Rgb(158, 206, 106),      // #9ece6a
+            warning: Color::Rgb(224, 175, 104),      // #e0af68
+            error: Color::Rgb(247, 118, 142),        // #f7768e
+            highlight: Color::Rgb(41, 46, 66),       // #292e42
+            progress_fill: Color::Rgb(122, 162, 247),
+            progress_empty: Color::Rgb(41, 46, 66),
+            tab_bg: Color::Rgb(22, 22, 30), // #16161e
+            tab_active: Color::Rgb(122, 162, 247),
+            tab_inactive: Color::Rgb(130, 139, 184),
+        }
+    }
+
+    /// Nord — cold, muted palette.
+    pub fn nord() -> Self {
+        Self {
+            bg: Color::Rgb(46, 52, 64),              // #2e3440
+            surface: Color::Rgb(59, 66, 82),         // #3b4252
+            border: Color::Rgb(67, 76, 94),          // #434c5e
+            border_focus: Color::Rgb(136, 192, 208), // #88c0d0
+            text: Color::Rgb(216, 222, 233),         // #d8dee9
+            text_dim: Color::Rgb(136, 143, 161),     // #888fa1
+            accent: Color::Rgb(136, 192, 208),       // #88c0d0
+            success: Color::Rgb(163, 190, 140),      // #a3be8c
+            warning: Color::Rgb(235, 203, 139),      // #ebcb8b
+            error: Color::Rgb(191, 97, 106),         // #bf616a
+            highlight: Color::Rgb(76, 86, 106),      // #4c566a
+            progress_fill: Color::Rgb(136, 192, 208),
+            progress_empty: Color::Rgb(59, 66, 82),
+            tab_bg: Color::Rgb(36, 41, 51), // slightly deeper than bg
+            tab_active: Color::Rgb(136, 192, 208),
+            tab_inactive: Color::Rgb(136, 143, 161),
+        }
+    }
+
+    /// Dracula — high-contrast purple/cyan.
+    pub fn dracula() -> Self {
+        Self {
+            bg: Color::Rgb(40, 42, 54),              // #282a36
+            surface: Color::Rgb(68, 71, 90),         // #44475a
+            border: Color::Rgb(98, 114, 164),        // #6272a4
+            border_focus: Color::Rgb(139, 233, 253), // #8be9fd (cyan)
+            text: Color::Rgb(248, 248, 242),         // #f8f8f2
+            text_dim: Color::Rgb(152, 160, 192),     // lighter version of comment
+            accent: Color::Rgb(189, 147, 249),       // #bd93f9 (purple)
+            success: Color::Rgb(80, 250, 123),       // #50fa7b
+            warning: Color::Rgb(241, 250, 140),      // #f1fa8c
+            error: Color::Rgb(255, 85, 85),          // #ff5555
+            highlight: Color::Rgb(68, 71, 90),       // #44475a
+            progress_fill: Color::Rgb(189, 147, 249),
+            progress_empty: Color::Rgb(68, 71, 90),
+            tab_bg: Color::Rgb(33, 34, 44), // deeper than surface
+            tab_active: Color::Rgb(189, 147, 249),
+            tab_inactive: Color::Rgb(152, 160, 192),
         }
     }
 
@@ -181,5 +378,32 @@ impl Theme {
     /// Popup background style.
     pub fn popup_bg(&self) -> Style {
         Style::default().bg(self.surface).fg(self.text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_presets_build() {
+        for preset in ThemePreset::ALL {
+            let theme = preset.build();
+            // Sanity: distinct bg and text so we never render invisible copy.
+            assert_ne!(theme.bg, theme.text, "{:?}", preset);
+        }
+    }
+
+    #[test]
+    fn slug_round_trips() {
+        for preset in ThemePreset::ALL {
+            assert_eq!(ThemePreset::from_slug(preset.slug()), preset);
+        }
+    }
+
+    #[test]
+    fn unknown_slug_falls_back_to_mocha() {
+        assert_eq!(ThemePreset::from_slug("🐠"), ThemePreset::Mocha);
+        assert_eq!(ThemePreset::from_slug(""), ThemePreset::Mocha);
     }
 }

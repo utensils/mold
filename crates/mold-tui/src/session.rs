@@ -42,6 +42,9 @@ pub struct TuiSession {
     pub strength: Option<f64>,
     #[serde(default)]
     pub control_scale: Option<f64>,
+    /// Theme preset slug (e.g. "mocha", "latte"). Missing = Mocha.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 fn session_path() -> Option<PathBuf> {
@@ -100,7 +103,15 @@ impl TuiSession {
             offload: Some(params.offload),
             strength: Some(params.strength),
             control_scale: Some(params.control_scale),
+            theme: None,
         }
+    }
+
+    /// Attach a theme slug for persistence. Chainable so call sites can append
+    /// to `from_params` without adding a positional argument.
+    pub fn with_theme(mut self, preset: super::ui::theme::ThemePreset) -> Self {
+        self.theme = Some(preset.slug().to_string());
+        self
     }
 
     /// Apply saved settings to params (keeps model as-is, caller handles model).
@@ -234,6 +245,7 @@ mod tests {
             offload: Some(true),
             strength: Some(0.75),
             control_scale: Some(1.0),
+            theme: Some("mocha".to_string()),
         };
         let json = serde_json::to_string(&session).unwrap();
         let restored: TuiSession = serde_json::from_str(&json).unwrap();
@@ -241,6 +253,7 @@ mod tests {
         assert_eq!(restored.last_model, "flux2-klein:q8");
         assert_eq!(restored.width, Some(1024));
         assert_eq!(restored.batch, Some(2));
+        assert_eq!(restored.theme.as_deref(), Some("mocha"));
         assert_eq!(restored.offload, Some(true));
         assert_eq!(restored.seed_mode, Some("random".to_string()));
     }
@@ -341,6 +354,7 @@ mod tests {
             offload: Some(false),
             strength: Some(0.3),
             control_scale: Some(1.5),
+            theme: None,
         };
 
         let mut params = GenerateParams::from_config(&mold_core::Config::default());

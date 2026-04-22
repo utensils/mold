@@ -7,6 +7,7 @@ pub mod popup;
 pub mod progress;
 pub mod settings;
 pub mod theme;
+pub mod widgets;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Gauge, Padding, Paragraph, Tabs};
@@ -334,14 +335,26 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             ("?", "Help"),
             ("q", "Quit"),
         ],
-        View::Settings => vec![
-            ("j/k", "Navigate"),
-            ("+/-", "Adjust"),
-            ("Enter", "Edit"),
-            ("Esc", "Back"),
-            ("?", "Help"),
-            ("q", "Quit"),
-        ],
+        View::Settings => {
+            if app.settings.focus == crate::app::SettingsFocus::Appearance {
+                vec![
+                    ("\u{2190}/\u{2192}", "Theme"),
+                    ("j", "Config"),
+                    ("Esc", "Back"),
+                    ("?", "Help"),
+                    ("q", "Quit"),
+                ]
+            } else {
+                vec![
+                    ("j/k", "Navigate"),
+                    ("+/-", "Adjust"),
+                    ("Enter", "Edit"),
+                    ("Esc", "Back"),
+                    ("?", "Help"),
+                    ("q", "Quit"),
+                ]
+            }
+        }
     };
 
     let mut spans = Vec::new();

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI Settings view now has an Appearance panel with a live theme picker**: the Settings tab is split into two panels — a compact `Appearance` swatch grid at the top and the existing editable field list, now framed as `Configuration`, below. Six presets ship (`mocha` default, `latte`, `gruvbox`, `tokyo`, `nord`, `dracula`) and selecting one live-applies the palette across the whole TUI. The active preset persists to the TUI session file so it survives restarts. Navigation is natural — Up from the top field hands focus to Appearance, Down from Appearance re-enters Configuration, and Left/Right cycles presets while Appearance is focused. A reusable `ui::widgets` module (`panel_block`, `kv_row_line`, `render_theme_swatches`) was extracted and will be used by the other design-system phases. Covered by new `ThemePreset` round-trip tests and settings-navigation tests.
 - **Fast local build profile and web bundle helper**: the workspace now defines a `dev-fast` Cargo profile (`thin` LTO, `codegen-units = 16`, incremental on, debuginfo retained) plus `scripts/ensure-web-dist.sh`, which only rebuilds `web/dist` when the SPA inputs changed. The Nix devshell's default `build`, `build-server`, `mold`, `serve`, and `generate` commands now use that profile and embed the real web gallery by default instead of falling back to the placeholder stub.
 
 ### Changed

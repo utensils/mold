@@ -811,6 +811,18 @@ impl SettingsRow {
     }
 }
 
+/// Which pane has keyboard focus within the Settings view.
+///
+/// The Settings view is split into the Appearance swatch picker at the top and
+/// the scrollable Configuration list below. Exactly one of them owns the
+/// keyboard at any time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsFocus {
+    Appearance,
+    #[default]
+    Configuration,
+}
+
 /// State for the Settings view.
 #[derive(Default)]
 pub struct SettingsState {
@@ -822,6 +834,10 @@ pub struct SettingsState {
     pub selected_model: Option<String>,
     /// Brief error message if a save fails.
     pub save_error: Option<String>,
+    /// Active theme preset (drives [`App::theme`]).
+    pub theme_preset: crate::ui::theme::ThemePreset,
+    /// Which pane (Appearance vs Configuration) holds focus.
+    pub focus: SettingsFocus,
     /// When true, `save_config()` skips writing to disk (used in tests).
     #[cfg(test)]
     pub skip_save: bool,
@@ -1149,16 +1165,27 @@ impl App {
             },
             settings: {
                 let first_model = config.models.keys().next().cloned();
+                let theme_preset = session
+                    .theme
+                    .as_deref()
+                    .map(crate::ui::theme::ThemePreset::from_slug)
+                    .unwrap_or_default();
                 SettingsState {
                     selected_model: first_model,
                     row_index: 1, // skip first section header
+                    theme_preset,
                     ..Default::default()
                 }
             },
             config,
             server_url,
             picker,
-            theme: Theme::default(),
+            theme: session
+                .theme
+                .as_deref()
+                .map(crate::ui::theme::ThemePreset::from_slug)
+                .unwrap_or_default()
+                .build(),
             popup: None,
             should_quit: false,
             bg_tx,
@@ -1516,8 +1543,16 @@ impl App {
             .trim()
             .to_string();
         let session =
-            crate::session::TuiSession::from_params(&prompt_text, &neg_text, &self.generate.params);
+            crate::session::TuiSession::from_params(&prompt_text, &neg_text, &self.generate.params)
+                .with_theme(self.settings.theme_preset);
         session.save();
+    }
+
+    /// Apply a theme preset — rebuilds [`App::theme`] and records the
+    /// selection so it persists to disk on the next `save_session()`.
+    pub fn apply_theme_preset(&mut self, preset: crate::ui::theme::ThemePreset) {
+        self.settings.theme_preset = preset;
+        self.theme = preset.build();
     }
 
     pub fn update_model(&mut self, model_name: &str) {
@@ -3532,17 +3567,31 @@ impl App {
     }
 
     /// Navigate up (delta=-1) or down (delta=1) in the settings list, skipping headers.
+    ///
+    /// When focus is on the Appearance pane, Up is a no-op and Down hands
+    /// focus to the Configuration list. When focus is on Configuration and
+    /// Up is pressed at the first field, focus returns to Appearance.
     fn settings_navigate(&mut self, delta: i32) {
+        if self.settings.focus == SettingsFocus::Appearance {
+            if delta > 0 {
+                self.settings.focus = SettingsFocus::Configuration;
+            }
+            return;
+        }
+
         let rows = self.build_settings_rows();
         if rows.is_empty() {
             return;
         }
-        let current = self.settings.row_index;
         let len = rows.len();
-        let mut next = current;
+        let mut next = self.settings.row_index;
         loop {
             let candidate = next as i32 + delta;
             if candidate < 0 || candidate >= len as i32 {
+                // Walked off the top of the list → hand focus back to Appearance.
+                if delta < 0 {
+                    self.settings.focus = SettingsFocus::Appearance;
+                }
                 break;
             }
             next = candidate as usize;
@@ -3553,8 +3602,26 @@ impl App {
         }
     }
 
+    /// Cycle the active theme preset by `delta` (wraps around).
+    fn settings_cycle_theme(&mut self, delta: i32) {
+        use crate::ui::theme::ThemePreset;
+        let current = self.settings.theme_preset;
+        let len = ThemePreset::ALL.len() as i32;
+        let current_idx = ThemePreset::ALL
+            .iter()
+            .position(|p| *p == current)
+            .unwrap_or(0) as i32;
+        let next_idx = ((current_idx + delta).rem_euclid(len)) as usize;
+        self.apply_theme_preset(ThemePreset::ALL[next_idx]);
+    }
+
     /// Adjust the current settings field by delta (+1 or -1).
     fn settings_increment(&mut self, delta: i32) {
+        if self.settings.focus == SettingsFocus::Appearance {
+            self.settings_cycle_theme(delta);
+            return;
+        }
+
         let rows = self.build_settings_rows();
         let row = match rows.get(self.settings.row_index) {
             Some(r) => r,
@@ -5850,6 +5917,53 @@ mod tests {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::DefaultSteps, 1.0, 1.0, 200.0);
         assert_eq!(app.config.default_steps, 5);
+    }
+
+    #[tokio::test]
+    async fn settings_cycle_theme_wraps_both_directions() {
+        use crate::ui::theme::ThemePreset;
+        let mut app = make_settings_test_app();
+        // Starts on the default (Mocha).
+        assert_eq!(app.settings.theme_preset, ThemePreset::Mocha);
+        // Forward cycles to Latte and also rebuilds `app.theme`.
+        app.settings_cycle_theme(1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::Latte);
+        // `app.theme` should now match the Latte palette.
+        assert_eq!(app.theme.bg, ThemePreset::Latte.build().bg);
+        // Backward from Mocha (index 0) wraps around to Dracula (last).
+        app.apply_theme_preset(ThemePreset::Mocha);
+        app.settings_cycle_theme(-1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::Dracula);
+    }
+
+    #[tokio::test]
+    async fn settings_navigate_up_from_top_focuses_appearance() {
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Configuration;
+        // Jump to the first settings field and press Up past the top.
+        app.settings.row_index = 1;
+        app.settings_navigate(-1);
+        app.settings_navigate(-1);
+        assert_eq!(app.settings.focus, SettingsFocus::Appearance);
+    }
+
+    #[tokio::test]
+    async fn settings_navigate_down_from_appearance_enters_configuration() {
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Appearance;
+        app.settings_navigate(1);
+        assert_eq!(app.settings.focus, SettingsFocus::Configuration);
+    }
+
+    #[tokio::test]
+    async fn settings_increment_on_appearance_cycles_theme() {
+        use crate::ui::theme::ThemePreset;
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Appearance;
+        let before = app.settings.theme_preset;
+        app.settings_increment(1);
+        assert_ne!(app.settings.theme_preset, before);
+        assert_eq!(app.settings.theme_preset, ThemePreset::Latte);
     }
 
     #[tokio::test]
