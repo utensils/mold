@@ -2830,10 +2830,7 @@ impl App {
             Action::ScriptDelete => {
                 if self.script.script.stages.len() > 1 {
                     self.popup = Some(Popup::Confirm {
-                        message: format!(
-                            "Delete stage {}?",
-                            self.script.selected + 1,
-                        ),
+                        message: format!("Delete stage {}?", self.script.selected + 1,),
                         on_confirm: ConfirmAction::DeleteScriptStage,
                     });
                 }
@@ -4953,9 +4950,7 @@ impl App {
                             stage_count,
                             estimated_total_frames,
                         } => {
-                            format!(
-                                "Chain: {stage_count} stages, ~{estimated_total_frames} frames"
-                            )
+                            format!("Chain: {stage_count} stages, ~{estimated_total_frames} frames")
                         }
                         ChainProgressEvent::StageStart { stage_idx } => {
                             format!(

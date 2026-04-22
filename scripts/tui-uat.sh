@@ -385,8 +385,9 @@ cmd_view() {
         2|gallery|Gallery)    key="2"; landmark="┌ Gallery";;
         3|models|Models)      key="3"; landmark="┌ Installed|┌ Available";;
         4|settings|Settings)  key="4"; landmark="┌ Settings";;
+        6|script|Script)      key="6"; landmark="┌ Stages|Stages";;
         *)
-            echo "ERROR: Unknown view '$target'. Use 1-4 or generate/gallery/models/settings." >&2
+            echo "ERROR: Unknown view '$target'. Use 1-4, 6 or generate/gallery/models/settings/script." >&2
             exit 1
             ;;
     esac
@@ -535,8 +536,69 @@ case "${1:-help}" in
     status)
         cmd_status
         ;;
+    scenario)
+        shift
+        case "${1:-}" in
+            script_mode)
+                echo "=== Scenario: script_mode ==="
+                echo "Prerequisites: launch the TUI first with '$0 launch'"
+                require_session
+                TERM_ID=$(load_state)
+
+                echo "Step 1: Navigate to Script view"
+                cmd_view script
+                sleep 0.5
+                cmd_assert "Stages"
+
+                echo "Step 2: Add two stages (a × 2)"
+                send_one_key "$TERM_ID" "a"
+                sleep 0.3
+                send_one_key "$TERM_ID" "a"
+                sleep 0.3
+                cmd_assert "3 stage"
+
+                echo "Step 3: Cycle transition on stage 2 to cut"
+                send_one_key "$TERM_ID" "k"
+                sleep 0.2
+                send_one_key "$TERM_ID" "t"
+                sleep 0.3
+                cmd_assert "cut"
+
+                echo "Step 4: Save to /tmp/mold-uat.toml"
+                send_one_key "$TERM_ID" "ctrl+s"
+                sleep 0.5
+                send_text "$TERM_ID" "/tmp/mold-uat.toml"
+                sleep 0.2
+                send_one_key "$TERM_ID" "enter"
+                sleep 0.5
+
+                if [ -f /tmp/mold-uat.toml ]; then
+                    echo "  File exists: /tmp/mold-uat.toml"
+                    if grep -q 'transition = "cut"' /tmp/mold-uat.toml; then
+                        echo "  Contains transition = \"cut\": PASS"
+                    else
+                        echo "  FAIL: missing transition = \"cut\"" >&2
+                        exit 1
+                    fi
+                else
+                    echo "  FAIL: /tmp/mold-uat.toml not created" >&2
+                    exit 1
+                fi
+
+                echo "Step 5: Return to Generate"
+                send_one_key "$TERM_ID" "escape"
+                sleep 0.3
+
+                echo "=== script_mode scenario PASSED ==="
+                ;;
+            *)
+                echo "Unknown scenario '${1:-}'. Available: script_mode" >&2
+                exit 1
+                ;;
+        esac
+        ;;
     help|*)
-        echo "Usage: $0 {launch|capture|screenshot|send|view|wait-for|assert|quit|status}"
+        echo "Usage: $0 {launch|capture|screenshot|send|view|wait-for|assert|quit|status|scenario}"
         echo ""
         echo "Commands:"
         echo "  launch [--local] [--host URL]  Start TUI in a Ghostty window"
@@ -549,7 +611,7 @@ case "${1:-help}" in
         echo "  quit                            Close UAT window"
         echo "  status                          Check if running"
         echo ""
-        echo "Views: 1=Generate, 2=Gallery, 3=Models, 4=Settings"
+        echo "Views: 1=Generate, 2=Gallery, 3=Models, 4=Settings, 6=Script"
         echo ""
         echo "Environment:"
         echo "  MOLD_BIN    Path to mold binary (default: ./target/debug/mold)"

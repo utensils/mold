@@ -1,6 +1,4 @@
-use mold_core::{
-    ChainScript, ChainScriptChain, ChainStage, OutputFormat, TransitionMode,
-};
+use mold_core::{ChainScript, ChainScriptChain, ChainStage, OutputFormat, TransitionMode};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table};
 
@@ -89,35 +87,41 @@ impl ScriptComposerState {
 
     pub fn add_stage_after(&mut self) {
         let insert_at = self.selected + 1;
-        self.script.stages.insert(insert_at, ChainStage {
-            prompt: String::new(),
-            frames: 97,
-            source_image: None,
-            negative_prompt: None,
-            seed_offset: None,
-            transition: TransitionMode::Smooth,
-            fade_frames: None,
-            model: None,
-            loras: vec![],
-            references: vec![],
-        });
+        self.script.stages.insert(
+            insert_at,
+            ChainStage {
+                prompt: String::new(),
+                frames: 97,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Smooth,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            },
+        );
         self.selected = insert_at;
         self.unsaved = true;
     }
 
     pub fn add_stage_before(&mut self) {
-        self.script.stages.insert(self.selected, ChainStage {
-            prompt: String::new(),
-            frames: 97,
-            source_image: None,
-            negative_prompt: None,
-            seed_offset: None,
-            transition: TransitionMode::Smooth,
-            fade_frames: None,
-            model: None,
-            loras: vec![],
-            references: vec![],
-        });
+        self.script.stages.insert(
+            self.selected,
+            ChainStage {
+                prompt: String::new(),
+                frames: 97,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Smooth,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            },
+        );
         // selection stays on the new stage (at the current index)
         self.unsaved = true;
     }
@@ -191,9 +195,7 @@ impl ScriptComposerState {
                 Ok(n) => {
                     self.modal = ScriptModal::FramesEdit {
                         buffer: buf,
-                        error: Some(format!(
-                            "{n} is not 8k+1 (valid: 9, 17, 25, \u{2026}, 97)"
-                        )),
+                        error: Some(format!("{n} is not 8k+1 (valid: 9, 17, 25, \u{2026}, 97)")),
                     };
                 }
                 Err(_) => {
@@ -362,12 +364,7 @@ fn transition_label(t: TransitionMode) -> &'static str {
     }
 }
 
-pub fn render(
-    frame: &mut Frame,
-    state: &ScriptComposerState,
-    area: Rect,
-    theme: &Theme,
-) {
+pub fn render(frame: &mut Frame, state: &ScriptComposerState, area: Rect, theme: &Theme) {
     let [stage_area, editor_area, footer_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -383,12 +380,7 @@ pub fn render(
     render_modal(frame, state, area, theme);
 }
 
-fn render_stage_list(
-    frame: &mut Frame,
-    state: &ScriptComposerState,
-    area: Rect,
-    theme: &Theme,
-) {
+fn render_stage_list(frame: &mut Frame, state: &ScriptComposerState, area: Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border_focused())
@@ -448,12 +440,7 @@ fn render_stage_list(
     frame.render_widget(table, inner);
 }
 
-fn render_editor(
-    frame: &mut Frame,
-    state: &ScriptComposerState,
-    area: Rect,
-    theme: &Theme,
-) {
+fn render_editor(frame: &mut Frame, state: &ScriptComposerState, area: Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border())
@@ -503,10 +490,7 @@ fn render_editor(
             ]),
             Line::from(vec![
                 Span::styled("  Frames:     ", Style::default().fg(theme.text_dim)),
-                Span::styled(
-                    format!("{}", stage.frames),
-                    Style::default().fg(theme.text),
-                ),
+                Span::styled(format!("{}", stage.frames), Style::default().fg(theme.text)),
             ]),
             Line::from(vec![
                 Span::styled("  Source:     ", Style::default().fg(theme.text_dim)),
@@ -535,12 +519,7 @@ fn render_editor(
     frame.render_widget(para, inner);
 }
 
-fn render_footer(
-    frame: &mut Frame,
-    state: &ScriptComposerState,
-    area: Rect,
-    theme: &Theme,
-) {
+fn render_footer(frame: &mut Frame, state: &ScriptComposerState, area: Rect, theme: &Theme) {
     let chain = &state.script.chain;
     let stage_count = state.script.stages.len();
     let total_frames: u32 = state.script.stages.iter().map(|s| s.frames).sum();
@@ -586,12 +565,7 @@ fn render_footer(
     frame.render_widget(para, inner);
 }
 
-fn render_modal(
-    frame: &mut Frame,
-    state: &ScriptComposerState,
-    area: Rect,
-    theme: &Theme,
-) {
+fn render_modal(frame: &mut Frame, state: &ScriptComposerState, area: Rect, theme: &Theme) {
     let (title, body_lines, hint) = match &state.modal {
         ScriptModal::Closed => return,
         ScriptModal::PromptEdit { buffer } => {
@@ -615,11 +589,7 @@ fn render_modal(
                     Style::default().fg(Color::Red),
                 )));
             }
-            (
-                " Edit Frames ",
-                lines,
-                "[Enter] Save  [Esc] Cancel",
-            )
+            (" Edit Frames ", lines, "[Enter] Save  [Esc] Cancel")
         }
         ScriptModal::SavePath { buffer, error } => {
             let mut lines = vec![Line::from(buffer.as_str().to_string())];
@@ -629,11 +599,7 @@ fn render_modal(
                     Style::default().fg(Color::Red),
                 )));
             }
-            (
-                " Save Script ",
-                lines,
-                "[Enter] Confirm  [Esc] Cancel",
-            )
+            (" Save Script ", lines, "[Enter] Confirm  [Esc] Cancel")
         }
         ScriptModal::LoadPath { buffer, error } => {
             let mut lines = vec![Line::from(buffer.as_str().to_string())];
@@ -643,11 +609,7 @@ fn render_modal(
                     Style::default().fg(Color::Red),
                 )));
             }
-            (
-                " Load Script ",
-                lines,
-                "[Enter] Confirm  [Esc] Cancel",
-            )
+            (" Load Script ", lines, "[Enter] Confirm  [Esc] Cancel")
         }
     };
 
@@ -684,12 +646,7 @@ fn render_modal(
     // Reserve last line for the hint
     let body_height = inner.height.saturating_sub(1);
     let body_area = Rect::new(inner.x, inner.y, inner.width, body_height);
-    let hint_area = Rect::new(
-        inner.x,
-        inner.y + body_height,
-        inner.width,
-        1,
-    );
+    let hint_area = Rect::new(inner.x, inner.y + body_height, inner.width, 1);
 
     let body = Paragraph::new(body_lines).style(Style::default().fg(theme.text));
     frame.render_widget(body, body_area);
@@ -1047,10 +1004,12 @@ mod tests {
         assert!(!s.unsaved);
 
         // Load into a fresh state
-        let mut s2 = ScriptComposerState::default();
-        s2.modal = ScriptModal::LoadPath {
-            buffer: tmp.path().to_str().unwrap().to_string(),
-            error: None,
+        let mut s2 = ScriptComposerState {
+            modal: ScriptModal::LoadPath {
+                buffer: tmp.path().to_str().unwrap().to_string(),
+                error: None,
+            },
+            ..ScriptComposerState::default()
         };
         s2.load_from_path();
         assert!(matches!(s2.modal, ScriptModal::Closed));
@@ -1061,18 +1020,17 @@ mod tests {
 
     #[test]
     fn load_nonexistent_file_shows_error() {
-        let mut s = ScriptComposerState::default();
-        s.modal = ScriptModal::LoadPath {
-            buffer: "/nonexistent/path.toml".to_string(),
-            error: None,
+        let mut s = ScriptComposerState {
+            modal: ScriptModal::LoadPath {
+                buffer: "/nonexistent/path.toml".to_string(),
+                error: None,
+            },
+            ..ScriptComposerState::default()
         };
         s.load_from_path();
         assert!(matches!(
             s.modal,
-            ScriptModal::LoadPath {
-                error: Some(_),
-                ..
-            }
+            ScriptModal::LoadPath { error: Some(_), .. }
         ));
     }
 
@@ -1080,18 +1038,17 @@ mod tests {
     fn load_invalid_toml_shows_error() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "not valid toml [[[").unwrap();
-        let mut s = ScriptComposerState::default();
-        s.modal = ScriptModal::LoadPath {
-            buffer: tmp.path().to_str().unwrap().to_string(),
-            error: None,
+        let mut s = ScriptComposerState {
+            modal: ScriptModal::LoadPath {
+                buffer: tmp.path().to_str().unwrap().to_string(),
+                error: None,
+            },
+            ..ScriptComposerState::default()
         };
         s.load_from_path();
         assert!(matches!(
             s.modal,
-            ScriptModal::LoadPath {
-                error: Some(_),
-                ..
-            }
+            ScriptModal::LoadPath { error: Some(_), .. }
         ));
     }
 }
