@@ -538,6 +538,39 @@ impl ChainRequest {
 
         Ok(self)
     }
+
+    /// Predicted stitched frame count *before* any top-level `total_frames`
+    /// trim. Used by UIs for the footer summary and by the server to size
+    /// the final buffer.
+    ///
+    /// Per-boundary rule:
+    /// - smooth: drop leading `motion_tail_frames` of the incoming clip
+    /// - cut: no trim
+    /// - fade: replace `2 * fade_len` frames (trailing of prior + leading of
+    ///   next) with `fade_len` blended frames → net `-fade_len`
+    pub fn estimated_total_frames(&self) -> u32 {
+        const DEFAULT_FADE_FRAMES: u32 = 8;
+        let mut total: u32 = 0;
+        for (idx, stage) in self.stages.iter().enumerate() {
+            if idx == 0 {
+                total += stage.frames;
+                continue;
+            }
+            match stage.transition {
+                TransitionMode::Smooth => {
+                    total += stage.frames.saturating_sub(self.motion_tail_frames);
+                }
+                TransitionMode::Cut => {
+                    total += stage.frames;
+                }
+                TransitionMode::Fade => {
+                    let fade_len = stage.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES);
+                    total += stage.frames.saturating_sub(fade_len);
+                }
+            }
+        }
+        total
+    }
 }
 
 /// Returns `true` iff `n` has the form `8k + 1` for some non-negative integer
@@ -1124,5 +1157,77 @@ mod tests {
         }];
         let err = req.normalise().unwrap_err().to_string();
         assert!(err.contains("reserved for sub-project B"), "got: {err}");
+    }
+
+    fn stage_list_request(stages: Vec<(TransitionMode, u32, Option<u32>)>) -> ChainRequest {
+        ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".into(),
+            stages: stages
+                .into_iter()
+                .map(|(t, f, fl)| ChainStage {
+                    prompt: "x".into(),
+                    frames: f,
+                    source_image: None,
+                    negative_prompt: None,
+                    seed_offset: None,
+                    transition: t,
+                    fade_frames: fl,
+                    model: None,
+                    loras: vec![],
+                    references: vec![],
+                })
+                .collect(),
+            motion_tail_frames: 25,
+            width: 1216,
+            height: 704,
+            fps: 24,
+            seed: None,
+            steps: 8,
+            guidance: 3.0,
+            strength: 1.0,
+            output_format: OutputFormat::Mp4,
+            placement: None,
+            prompt: None,
+            total_frames: None,
+            clip_frames: None,
+            source_image: None,
+        }
+    }
+
+    #[test]
+    fn estimated_total_all_smooth() {
+        // 3 × 97-frame smooth = 97 + (97-25) + (97-25) = 241
+        let req = stage_list_request(vec![
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Smooth, 97, None),
+        ]);
+        assert_eq!(req.estimated_total_frames(), 241);
+    }
+
+    #[test]
+    fn estimated_total_with_cut() {
+        // 97 + 97 (cut, no trim) + (97-25) (smooth after cut) = 266
+        let req = stage_list_request(vec![
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Cut, 97, None),
+            (TransitionMode::Smooth, 97, None),
+        ]);
+        assert_eq!(req.estimated_total_frames(), 266);
+    }
+
+    #[test]
+    fn estimated_total_with_fade() {
+        // 97 + 97 + (97 - fade 8) fade consumes from both sides, net -fade_len
+        // Actually: fade replaces the trailing fade_len of clip N + leading
+        // fade_len of clip N+1 with fade_len blended frames.
+        // Emission = sum - 2*fade_len + fade_len = sum - fade_len
+        // = 97+97+97 - 8 = 283
+        let req = stage_list_request(vec![
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Cut, 97, None),
+            (TransitionMode::Fade, 97, Some(8)),
+        ]);
+        assert_eq!(req.estimated_total_frames(), 283);
     }
 }
