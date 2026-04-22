@@ -10,15 +10,21 @@
 mod db;
 mod metadata_io;
 mod migrations;
+mod model_prefs;
 mod path;
+mod prompt_history;
 mod reconcile;
 mod record;
+pub mod settings;
 
 pub use db::MetadataDb;
 pub use migrations::SCHEMA_VERSION;
+pub use model_prefs::ModelPrefs;
 pub use path::{canonical_dir, canonical_dir_string};
+pub use prompt_history::{HistoryEntry, PromptHistory};
 pub use reconcile::ReconcileStats;
 pub use record::{GenerationRecord, RecordSource};
+pub use settings::{Settings, ValueType};
 
 use std::path::PathBuf;
 

@@ -95,6 +95,63 @@ CREATE INDEX IF NOT EXISTS idx_gen_filename   ON generations(filename);
 CREATE INDEX IF NOT EXISTS idx_gen_output_dir ON generations(output_dir);
 "#;
 
+/// v3 → add the global KV `settings` table. Used for TUI + user-preference
+/// state that previously lived in `tui-session.json` and the user-facing
+/// portions of `config.toml`.
+const V3_SETTINGS_TABLE: &str = r#"
+CREATE TABLE IF NOT EXISTS settings (
+    key           TEXT PRIMARY KEY,
+    value         TEXT NOT NULL,
+    value_type    TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+"#;
+
+/// v4 → add the per-model preferences table. One row per resolved model
+/// tag; every column is nullable because a fresh install has nothing to
+/// remember yet.
+const V4_MODEL_PREFS_TABLE: &str = r#"
+CREATE TABLE IF NOT EXISTS model_prefs (
+    model           TEXT PRIMARY KEY,
+    width           INTEGER,
+    height          INTEGER,
+    steps           INTEGER,
+    guidance        REAL,
+    scheduler       TEXT,
+    seed_mode       TEXT,
+    batch           INTEGER,
+    format          TEXT,
+    lora_path       TEXT,
+    lora_scale      REAL,
+    expand          INTEGER,
+    offload         INTEGER,
+    strength        REAL,
+    control_scale   REAL,
+    frames          INTEGER,
+    fps             INTEGER,
+    last_prompt     TEXT,
+    last_negative   TEXT,
+    updated_at_ms   INTEGER NOT NULL
+);
+"#;
+
+/// v5 → prompt history. Replaces `prompt-history.jsonl`; bounded-size via
+/// the caller-driven `trim_to()` API.
+const V5_PROMPT_HISTORY_TABLE: &str = r#"
+CREATE TABLE IF NOT EXISTS prompt_history (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt        TEXT NOT NULL,
+    negative      TEXT,
+    model         TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_hist_created
+    ON prompt_history(created_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_prompt_hist_model
+    ON prompt_history(model);
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -106,11 +163,23 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 2,
         kind: MigrationKind::Rust(canonicalize_existing_output_dirs),
     },
+    Migration {
+        version: 3,
+        kind: MigrationKind::Sql(V3_SETTINGS_TABLE),
+    },
+    Migration {
+        version: 4,
+        kind: MigrationKind::Sql(V4_MODEL_PREFS_TABLE),
+    },
+    Migration {
+        version: 5,
+        kind: MigrationKind::Sql(V5_PROMPT_HISTORY_TABLE),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -397,6 +466,172 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kept, canonical);
+    }
+
+    // ------------------------------------------------------------------
+    // v3 / v4 / v5 migration tests — added for feat/sqlite-settings.
+    // These assert the shape of the new tables before the migrations
+    // land, so a regression in any future refactor is caught early.
+    // ------------------------------------------------------------------
+
+    fn column_names(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info('{table}')"))
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![table],
+                |r| r.get(0),
+            )
+            .unwrap();
+        n == 1
+    }
+
+    fn index_exists(conn: &Connection, index: &str) -> bool {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                rusqlite::params![index],
+                |r| r.get(0),
+            )
+            .unwrap();
+        n == 1
+    }
+
+    #[test]
+    fn fresh_db_reaches_schema_version_5() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pending(&mut conn).unwrap();
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            5,
+            "SCHEMA_VERSION should be 5 after adding settings/model_prefs/prompt_history"
+        );
+        assert_eq!(SCHEMA_VERSION, 5);
+    }
+
+    #[test]
+    fn v3_creates_settings_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pending(&mut conn).unwrap();
+        assert!(table_exists(&conn, "settings"));
+        let cols = column_names(&conn, "settings");
+        for expected in &["key", "value", "value_type", "updated_at_ms"] {
+            assert!(
+                cols.iter().any(|c| c == *expected),
+                "settings table missing column {expected}; got {cols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn v4_creates_model_prefs_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pending(&mut conn).unwrap();
+        assert!(table_exists(&conn, "model_prefs"));
+        let cols = column_names(&conn, "model_prefs");
+        // Spot-check the invariants — every field we persist must exist.
+        for expected in &[
+            "model",
+            "width",
+            "height",
+            "steps",
+            "guidance",
+            "scheduler",
+            "seed_mode",
+            "batch",
+            "format",
+            "lora_path",
+            "lora_scale",
+            "expand",
+            "offload",
+            "strength",
+            "control_scale",
+            "frames",
+            "fps",
+            "last_prompt",
+            "last_negative",
+            "updated_at_ms",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == *expected),
+                "model_prefs missing column {expected}; got {cols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn v5_creates_prompt_history_table_with_indexes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pending(&mut conn).unwrap();
+        assert!(table_exists(&conn, "prompt_history"));
+        let cols = column_names(&conn, "prompt_history");
+        for expected in &["id", "prompt", "negative", "model", "created_at_ms"] {
+            assert!(
+                cols.iter().any(|c| c == *expected),
+                "prompt_history missing column {expected}; got {cols:?}"
+            );
+        }
+        assert!(
+            index_exists(&conn, "idx_prompt_hist_created"),
+            "missing created-desc index on prompt_history"
+        );
+        assert!(
+            index_exists(&conn, "idx_prompt_hist_model"),
+            "missing model index on prompt_history"
+        );
+    }
+
+    /// Upgrading a v2 DB with existing `generations` rows must not clobber
+    /// those rows. The whole point of additive migrations is that prod data
+    /// survives a version bump.
+    #[test]
+    fn upgrade_from_v2_preserves_generations_table() {
+        // Manually seed a v2 DB (v1 schema + v2 user_version).
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        tx.execute_batch("PRAGMA user_version = 2;").unwrap();
+        tx.commit().unwrap();
+
+        // Seed a representative row.
+        conn.execute(
+            "INSERT INTO generations (filename, output_dir, created_at_ms, format, model, prompt)
+             VALUES ('legacy.png', '/out', 1000, 'png', 'flux-dev:q4', 'a cat')",
+            [],
+        )
+        .unwrap();
+
+        // Apply the pending v3/v4/v5 migrations.
+        apply_pending(&mut conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 5);
+
+        // Original row intact.
+        let prompt: String = conn
+            .query_row(
+                "SELECT prompt FROM generations WHERE filename = 'legacy.png'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(prompt, "a cat");
+
+        // New tables exist and are empty.
+        assert!(table_exists(&conn, "settings"));
+        assert!(table_exists(&conn, "model_prefs"));
+        assert!(table_exists(&conn, "prompt_history"));
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     /// A migration whose SQL is malformed must not advance the version.
