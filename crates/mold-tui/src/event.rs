@@ -244,6 +244,7 @@ fn map_script_key(key: &KeyEvent) -> Action {
         (KeyCode::Char('a'), KeyModifiers::NONE) => Action::ScriptAddAfter,
         (KeyCode::Char('A'), KeyModifiers::SHIFT) => Action::ScriptAddBefore,
         (KeyCode::Char('d'), KeyModifiers::NONE) => Action::ScriptDelete,
+        (KeyCode::Char('t'), KeyModifiers::NONE) => Action::ScriptCycleTransition,
         (KeyCode::Esc, _) => Action::SwitchView(View::Generate),
         (KeyCode::Char('q'), KeyModifiers::NONE) => Action::Quit,
         _ => Action::None,

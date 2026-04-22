@@ -98,6 +98,7 @@ pub enum Action {
     ScriptAddBefore,
     /// Script: delete the current stage (shows confirmation if >1 stage).
     ScriptDelete,
+    ScriptCycleTransition,
     /// No action (key not mapped or consumed by text input).
     None,
 }

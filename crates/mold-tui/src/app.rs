@@ -2830,6 +2830,7 @@ impl App {
                     });
                 }
             }
+            Action::ScriptCycleTransition => self.script.cycle_transition(),
             _ => {}
         }
     }

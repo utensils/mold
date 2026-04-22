@@ -103,6 +103,20 @@ impl ScriptComposerState {
         }
         self.unsaved = true;
     }
+
+    pub fn cycle_transition(&mut self) {
+        if self.selected == 0 {
+            return;
+        }
+        if let Some(stage) = self.script.stages.get_mut(self.selected) {
+            stage.transition = match stage.transition {
+                TransitionMode::Smooth => TransitionMode::Cut,
+                TransitionMode::Cut => TransitionMode::Fade,
+                TransitionMode::Fade => TransitionMode::Smooth,
+            };
+            self.unsaved = true;
+        }
+    }
 }
 
 impl Default for ScriptComposerState {
@@ -547,6 +561,29 @@ mod tests {
         let mut s = make_state(1);
         s.delete_stage();
         assert_eq!(s.script.stages.len(), 1);
+        assert!(!s.unsaved);
+    }
+
+    #[test]
+    fn cycle_transition_smooth_cut_fade() {
+        let mut s = make_state(2);
+        s.selected = 1;
+        s.script.stages[1].transition = TransitionMode::Smooth;
+        s.cycle_transition();
+        assert_eq!(s.script.stages[1].transition, TransitionMode::Cut);
+        s.cycle_transition();
+        assert_eq!(s.script.stages[1].transition, TransitionMode::Fade);
+        s.cycle_transition();
+        assert_eq!(s.script.stages[1].transition, TransitionMode::Smooth);
+        assert!(s.unsaved);
+    }
+
+    #[test]
+    fn cycle_transition_noop_on_stage_0() {
+        let mut s = make_state(2);
+        s.selected = 0;
+        s.cycle_transition();
+        assert_eq!(s.script.stages[0].transition, TransitionMode::Smooth);
         assert!(!s.unsaved);
     }
 }
