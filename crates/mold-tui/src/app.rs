@@ -76,6 +76,14 @@ pub enum BackgroundEvent {
     /// message so the UI can surface it and re-sync the local list with
     /// whatever state remains on the server.
     GalleryDeleteFailed(String),
+    /// Chain progress update from server SSE.
+    ChainProgress(mold_core::ChainProgressEvent),
+    /// Chain generation completed — video bytes ready.
+    ChainComplete {
+        response: Box<mold_core::ChainResponse>,
+    },
+    /// Chain generation failed.
+    ChainError(String),
 }
 
 /// A single entry in the progress log.
@@ -2833,6 +2841,25 @@ impl App {
             Action::ScriptCycleTransition => self.script.cycle_transition(),
             Action::ScriptSave => self.script.open_save_dialog(),
             Action::ScriptLoad => self.script.open_load_dialog(),
+            Action::ScriptSubmit => {
+                if !self.generate.generating {
+                    let req = self.script.build_chain_request();
+                    self.generate.generating = true;
+                    self.generate.error_message = None;
+                    self.generate.progress.clear();
+                    self.generate.progress.mark_generation_start();
+                    self.generate.preview_image = None;
+                    self.generate.image_state = None;
+                    self.generate.animation = None;
+
+                    let tx = self.bg_tx.clone();
+                    let server_url = self.server_url.clone();
+
+                    self.tokio_handle.spawn(async move {
+                        crate::backend::run_chain_generation(server_url, req, tx).await;
+                    });
+                }
+            }
             Action::ScriptOpenPromptEditor => self.script.open_prompt_editor(),
             Action::ScriptOpenFramesEditor => self.script.open_frames_editor(),
             Action::ScriptModalSubmit => {
@@ -4918,6 +4945,68 @@ impl App {
                     {
                         self.models.selected = self.models.catalog.len() - 1;
                     }
+                }
+                BackgroundEvent::ChainProgress(event) => {
+                    use mold_core::ChainProgressEvent;
+                    let msg = match &event {
+                        ChainProgressEvent::ChainStart {
+                            stage_count,
+                            estimated_total_frames,
+                        } => {
+                            format!(
+                                "Chain: {stage_count} stages, ~{estimated_total_frames} frames"
+                            )
+                        }
+                        ChainProgressEvent::StageStart { stage_idx } => {
+                            format!(
+                                "Stage {}/{} started",
+                                stage_idx + 1,
+                                self.script.script.stages.len()
+                            )
+                        }
+                        ChainProgressEvent::DenoiseStep {
+                            stage_idx,
+                            step,
+                            total,
+                        } => {
+                            format!("Stage {} step {}/{}", stage_idx + 1, step, total)
+                        }
+                        ChainProgressEvent::StageDone {
+                            stage_idx,
+                            frames_emitted,
+                        } => {
+                            format!("Stage {} done ({} frames)", stage_idx + 1, frames_emitted)
+                        }
+                        ChainProgressEvent::Stitching { total_frames } => {
+                            format!("Stitching {total_frames} frames...")
+                        }
+                    };
+                    self.generate.progress.push_log(ProgressLogEntry {
+                        message: msg,
+                        style: ProgressStyle::Info,
+                    });
+                }
+                BackgroundEvent::ChainComplete { response } => {
+                    self.generate.generating = false;
+                    self.generate.progress.generation_started_at = None;
+                    self.generate.progress.stage_started_at = None;
+                    self.generate.progress.push_log(ProgressLogEntry {
+                        message: format!(
+                            "Chain complete: {} stages, GPU {}",
+                            response.stage_count,
+                            response
+                                .gpu
+                                .map(|g| g.to_string())
+                                .unwrap_or_else(|| "unknown".into()),
+                        ),
+                        style: ProgressStyle::Done,
+                    });
+                }
+                BackgroundEvent::ChainError(msg) => {
+                    self.generate.generating = false;
+                    self.generate.progress.generation_started_at = None;
+                    self.generate.progress.stage_started_at = None;
+                    self.generate.error_message = Some(msg);
                 }
                 BackgroundEvent::GalleryDeleteFailed(msg) => {
                     self.apply_delete_failure(&msg);

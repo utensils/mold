@@ -117,6 +117,8 @@ pub enum Action {
     ScriptModalSubmit,
     /// Script modal: cancel and close without saving.
     ScriptModalCancel,
+    /// Script: submit the current chain script for generation.
+    ScriptSubmit,
     /// No action (key not mapped or consumed by text input).
     None,
 }

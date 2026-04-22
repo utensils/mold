@@ -275,6 +275,7 @@ fn map_script_key(key: &KeyEvent, app: &App) -> Action {
         (KeyCode::Char('t'), KeyModifiers::NONE) => Action::ScriptCycleTransition,
         (KeyCode::Char('i'), KeyModifiers::NONE) => Action::ScriptOpenPromptEditor,
         (KeyCode::Char('f'), KeyModifiers::NONE) => Action::ScriptOpenFramesEditor,
+        (KeyCode::Enter, KeyModifiers::NONE) => Action::ScriptSubmit,
         (KeyCode::Esc, _) => Action::SwitchView(View::Generate),
         (KeyCode::Char('q'), KeyModifiers::NONE) => Action::Quit,
         _ => Action::None,

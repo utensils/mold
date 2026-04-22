@@ -277,6 +277,29 @@ impl ScriptComposerState {
     pub fn cancel_modal(&mut self) {
         self.modal = ScriptModal::Closed;
     }
+
+    /// Build a [`ChainRequest`] from the current script state, ready for
+    /// submission to the server's `/api/generate/chain/stream` endpoint.
+    pub fn build_chain_request(&self) -> mold_core::ChainRequest {
+        mold_core::ChainRequest {
+            model: self.script.chain.model.clone(),
+            stages: self.script.stages.clone(),
+            motion_tail_frames: self.script.chain.motion_tail_frames,
+            width: self.script.chain.width,
+            height: self.script.chain.height,
+            fps: self.script.chain.fps,
+            seed: self.script.chain.seed,
+            steps: self.script.chain.steps,
+            guidance: self.script.chain.guidance,
+            strength: self.script.chain.strength,
+            output_format: self.script.chain.output_format,
+            placement: None,
+            prompt: None,
+            total_frames: None,
+            clip_frames: None,
+            source_image: None,
+        }
+    }
 }
 
 impl Default for ScriptComposerState {
