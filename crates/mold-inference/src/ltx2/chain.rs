@@ -147,17 +147,17 @@ pub trait ChainStageRenderer {
     ) -> Result<StageOutcome>;
 }
 
-/// Output of an end-to-end chain run: accumulated RGB frames with motion-
-/// tail prefix already trimmed on continuations, the number of stages
-/// that ran, and the total elapsed render time.
+/// Output of an end-to-end chain run.
 ///
-/// The orchestrator does *not* trim to a target total frame count or
-/// encode the frames into an output video — those are the caller's job
-/// (server / CLI). Keeps the orchestrator single-purpose: produce a
-/// coherent frame stream from a stages list.
+/// The orchestrator no longer trims motion-tail prefixes at run time —
+/// that moved into [`super::stitch::StitchPlan::assemble`] so the stitch
+/// logic can also implement `Cut` (no trim) and `Fade` (post-stitch alpha
+/// blend) on the same per-boundary seam.
 #[derive(Debug)]
 pub struct ChainRunOutput {
-    pub frames: Vec<RgbImage>,
+    /// Per-stage frame vectors in stage order, each containing the full
+    /// un-trimmed pixel clip emitted by the renderer.
+    pub stage_frames: Vec<Vec<RgbImage>>,
     pub stage_count: u32,
     pub generation_time_ms: u64,
 }
@@ -205,8 +205,7 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
         }
 
         let base_seed = req.seed.unwrap_or(0);
-        let motion_tail_drop = req.motion_tail_frames as usize;
-        let mut accumulated_frames: Vec<RgbImage> = Vec::new();
+        let mut stage_frames: Vec<Vec<RgbImage>> = Vec::with_capacity(req.stages.len());
         let mut total_generation_ms: u64 = 0;
         let mut carry: Option<ChainTail> = None;
 
@@ -250,18 +249,8 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
                 )?,
             };
 
-            let mut frames = outcome.frames;
-            if idx > 0 && motion_tail_drop > 0 {
-                if motion_tail_drop >= frames.len() {
-                    bail!(
-                        "stage {stage_idx}: emitted {} frames but motion_tail_drop={motion_tail_drop} — tail would consume the whole clip",
-                        frames.len(),
-                    );
-                }
-                frames.drain(..motion_tail_drop);
-            }
-            let frames_emitted = frames.len() as u32;
-            accumulated_frames.extend(frames);
+            let frames_emitted = outcome.frames.len() as u32;
+            stage_frames.push(outcome.frames);
             total_generation_ms = total_generation_ms.saturating_add(outcome.generation_time_ms);
             carry = Some(outcome.tail);
 
@@ -274,13 +263,14 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
         }
 
         if let Some(cb) = chain_progress.as_mut() {
+            let total: u32 = stage_frames.iter().map(|s| s.len() as u32).sum();
             cb(ChainProgressEvent::Stitching {
-                total_frames: accumulated_frames.len() as u32,
+                total_frames: total,
             });
         }
 
         Ok(ChainRunOutput {
-            frames: accumulated_frames,
+            stage_frames,
             stage_count,
             generation_time_ms: total_generation_ms,
         })
@@ -624,9 +614,10 @@ mod tests {
         let mut renderer = FakeRenderer::new();
         let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
         let out = orch.run(&req, None).expect("chain runs");
-        // Stage 0 keeps all 97 frames; each continuation drops the
-        // leading 4 frames, so delivered = 97 + 2 * (97 - 4) = 97 + 186 = 283.
-        assert_eq!(out.frames.len(), 97 + 93 * 2);
+        // Each stage keeps its full un-trimmed frame count in the per-stage
+        // vector. Total across all stages = 97 * 3 = 291.
+        let total_frames: usize = out.stage_frames.iter().map(|s| s.len()).sum();
+        assert_eq!(total_frames, 97 * 3);
         assert_eq!(out.stage_count, 3);
         assert_eq!(renderer.calls.len(), 3);
         // Stage 0 has no carry; later stages do.
@@ -642,10 +633,11 @@ mod tests {
         let mut renderer = FakeRenderer::new();
         let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
         let out = orch.run(&req, None).expect("chain runs");
+        let total_frames: usize = out.stage_frames.iter().map(|s| s.len()).sum();
         assert_eq!(
-            out.frames.len(),
+            total_frames,
             97 * 2,
-            "zero motion tail must keep every frame on continuations",
+            "zero motion tail must keep every frame in each stage's vector",
         );
     }
 
@@ -831,5 +823,47 @@ mod tests {
             Some(100 ^ 0xDEADBEEFu64),
             "seed_offset must XOR into the stable base seed when a stage opts in to variation",
         );
+    }
+
+    #[test]
+    fn chain_run_output_preserves_per_stage_frames() {
+        let req = sample_chain_request(3, TransitionMode::Smooth);
+        let mut renderer = FakeRenderer::new();
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        let out = orch.run(&req, None).unwrap();
+        assert_eq!(out.stage_frames.len(), 3);
+        // Each stage holds its full un-trimmed frame count.
+        assert_eq!(out.stage_frames[0].len() as u32, req.stages[0].frames);
+        assert_eq!(out.stage_frames[1].len() as u32, req.stages[1].frames);
+        assert_eq!(out.stage_frames[2].len() as u32, req.stages[2].frames);
+    }
+
+    fn sample_chain_request(count: usize, transition: TransitionMode) -> ChainRequest {
+        // Use motion_tail_frames=0 so effective=clip_frames=97, which makes
+        // build_auto_expand_stages produce exactly `count` stages for
+        // total_frames = 97 * count (no ceil rounding complication).
+        let req = ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".into(),
+            stages: Vec::new(),
+            motion_tail_frames: 0,
+            width: 1216,
+            height: 704,
+            fps: 24,
+            seed: Some(0),
+            steps: 8,
+            guidance: 3.0,
+            strength: 1.0,
+            output_format: mold_core::OutputFormat::Mp4,
+            placement: None,
+            prompt: Some("x".into()),
+            total_frames: Some(97 * count as u32),
+            clip_frames: Some(97),
+            source_image: None,
+        };
+        let mut req = req.normalise().unwrap();
+        for s in req.stages.iter_mut().skip(1) {
+            s.transition = transition;
+        }
+        req
     }
 }

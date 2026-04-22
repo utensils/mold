@@ -366,7 +366,18 @@ async fn run_chain(
     let chain_output = outcome?;
     let stage_count = chain_output.stage_count;
     let generation_time_ms = chain_output.generation_time_ms;
-    let mut frames = chain_output.frames;
+
+    // Temporary — replaced with StitchPlan::assemble in Task 2.4/2.6.
+    // Naïve smooth-only concat + motion-tail trim on continuations.
+    let motion_tail = req.motion_tail_frames as usize;
+    let mut frames: Vec<image::RgbImage> = Vec::new();
+    for (idx, stage_clip) in chain_output.stage_frames.into_iter().enumerate() {
+        if idx == 0 {
+            frames.extend(stage_clip);
+        } else {
+            frames.extend(stage_clip.into_iter().skip(motion_tail));
+        }
+    }
     trim_to_total_frames(&mut frames, req.total_frames);
 
     if frames.is_empty() {
