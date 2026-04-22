@@ -18,6 +18,28 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MoldError, Result};
 use crate::types::{DevicePlacement, OutputFormat, VideoData};
 
+/// How the boundary between the previous stage and this stage is rendered.
+///
+/// - `Smooth`: the engine honors the motion-tail latent carryover from the
+///   prior clip (v1 default behaviour). Produces a visual morph when the
+///   prompt changes.
+/// - `Cut`: fresh latent, no carryover. If the stage has a `source_image`
+///   the engine uses it as the i2v seed; otherwise pure t2v.
+/// - `Fade`: same engine path as `Cut`, plus a post-stitch alpha blend of
+///   the last `fade_frames` of the prior clip with the first `fade_frames`
+///   of this clip.
+///
+/// Stage 0's transition is meaningless (nothing to transition from) and is
+/// coerced to `Smooth` during `ChainRequest::normalise`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionMode {
+    #[default]
+    Smooth,
+    Cut,
+    Fade,
+}
+
 /// A single rendered clip in a chain. Concatenated in order with motion-tail
 /// trimming on continuations (stages with `idx >= 1` drop the leading
 /// `motion_tail_frames` pixel frames of their output because those duplicate
@@ -724,5 +746,26 @@ mod tests {
                 "{expected_n} stages deliver {delivered} frames but {total} were requested",
             );
         }
+    }
+
+    #[test]
+    fn transition_mode_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(TransitionMode::Smooth).unwrap(),
+            serde_json::Value::String("smooth".into())
+        );
+        assert_eq!(
+            serde_json::to_value(TransitionMode::Cut).unwrap(),
+            serde_json::Value::String("cut".into())
+        );
+        assert_eq!(
+            serde_json::to_value(TransitionMode::Fade).unwrap(),
+            serde_json::Value::String("fade".into())
+        );
+    }
+
+    #[test]
+    fn transition_mode_defaults_to_smooth() {
+        assert_eq!(TransitionMode::default(), TransitionMode::Smooth);
     }
 }
