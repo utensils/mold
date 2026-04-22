@@ -10,11 +10,13 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    ActiveGenerationStatus, GpuInfo, GpuWorkerState, ModelInfoExtended, ResourceSnapshot,
-    ServerStatus, SseErrorEvent, SseProgressEvent,
+    types::GpuSelection, ActiveGenerationStatus, GpuInfo, GpuWorkerState, ModelInfoExtended,
+    ResourceSnapshot, ServerStatus, SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::convert::Infallible;
+use std::sync::atomic::Ordering;
 use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
@@ -133,7 +135,19 @@ use crate::queue::clean_error_message;
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(generate, generate_stream, expand_prompt, list_models, load_model, pull_model_endpoint, unload_model, server_status, health),
+    paths(
+        generate,
+        generate_stream,
+        expand_prompt,
+        list_models,
+        load_model,
+        pull_model_endpoint,
+        unload_model,
+        server_status,
+        health,
+        crate::routes_chain::generate_chain,
+        crate::routes_chain::generate_chain_stream,
+    ),
     components(schemas(
         mold_core::GenerateRequest,
         mold_core::GenerateResponse,
@@ -148,6 +162,11 @@ use crate::queue::clean_error_message;
         mold_core::SseProgressEvent,
         mold_core::SseCompleteEvent,
         mold_core::SseErrorEvent,
+        mold_core::ChainRequest,
+        mold_core::ChainResponse,
+        mold_core::ChainStage,
+        mold_core::ChainProgressEvent,
+        mold_core::SseChainCompleteEvent,
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,
@@ -171,6 +190,14 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/api/generate", post(generate))
         .route("/api/generate/stream", post(generate_stream))
+        .route(
+            "/api/generate/chain",
+            post(crate::routes_chain::generate_chain),
+        )
+        .route(
+            "/api/generate/chain/stream",
+            post(crate::routes_chain::generate_chain_stream),
+        )
         .route("/api/expand", post(expand_prompt))
         .route("/api/models", get(list_models))
         .route("/api/models/load", post(load_model))
@@ -275,8 +302,10 @@ async fn prepare_generation(
     // return `SubmitError::Full`, which is mapped to `ApiError::queue_full()`.
     apply_default_metadata_setting(state, request).await;
 
+    let preferred_gpu = validate_multi_gpu_placement(state, request.placement.as_ref())?;
+
     // Expand prompt if requested (before validation, so the expanded prompt gets validated)
-    maybe_expand_prompt(state, request).await?;
+    maybe_expand_prompt(state, request, preferred_gpu).await?;
 
     if let Err(e) = validate_generate_request(request) {
         return Err(ApiError::validation(e));
@@ -299,6 +328,61 @@ async fn prepare_generation(
     };
 
     Ok((output_dir, dim_warning))
+}
+
+fn active_gpu_selection(state: &AppState) -> GpuSelection {
+    let ordinals: Vec<usize> = state
+        .gpu_pool
+        .workers
+        .iter()
+        .map(|w| w.gpu.ordinal)
+        .collect();
+    if ordinals.is_empty() {
+        GpuSelection::All
+    } else {
+        GpuSelection::Specific(ordinals)
+    }
+}
+
+fn validate_multi_gpu_placement(
+    state: &AppState,
+    placement: Option<&mold_core::types::DevicePlacement>,
+) -> Result<Option<usize>, ApiError> {
+    state
+        .gpu_pool
+        .resolve_explicit_placement_gpu(placement)
+        .map_err(ApiError::validation)
+}
+
+fn select_aux_worker(
+    state: &AppState,
+) -> Result<std::sync::Arc<crate::gpu_pool::GpuWorker>, ApiError> {
+    let mut workers: Vec<_> = state
+        .gpu_pool
+        .workers
+        .iter()
+        .filter(|w| !w.is_degraded())
+        .cloned()
+        .collect();
+    workers.sort_by_key(|w| {
+        (
+            w.in_flight.load(Ordering::SeqCst),
+            Reverse(w.gpu.total_vram_bytes),
+        )
+    });
+    workers
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::internal("no GPU worker available for auxiliary workload"))
+}
+
+fn clear_global_upscaler_cache(state: &AppState) {
+    if let Ok(mut cache) = state.upscaler_cache.try_lock() {
+        if cache.is_some() {
+            *cache = None;
+            tracing::info!("upscaler cache cleared");
+        }
+    }
 }
 
 // ── /api/generate ─────────────────────────────────────────────────────────────
@@ -460,12 +544,14 @@ async fn apply_default_metadata_setting(state: &AppState, req: &mut mold_core::G
 async fn maybe_expand_prompt(
     state: &AppState,
     req: &mut mold_core::GenerateRequest,
+    preferred_gpu: Option<usize>,
 ) -> Result<(), ApiError> {
     if req.expand != Some(true) {
         return Ok(());
     }
 
     let config = state.config.read().await;
+    let config_snapshot = config.clone();
     let expand_settings = config.expand.clone().with_env_overrides();
 
     // Resolve model family for prompt style
@@ -487,7 +573,12 @@ async fn maybe_expand_prompt(
     // Drop config lock before blocking
     drop(config);
 
-    let expander = create_server_expander(&expand_settings)?;
+    let expander = create_server_expander(
+        &config_snapshot,
+        &expand_settings,
+        active_gpu_selection(state),
+        preferred_gpu,
+    )?;
     let result =
         tokio::task::spawn_blocking(move || expander.expand(&original_prompt, &expand_config))
             .await
@@ -504,7 +595,10 @@ async fn maybe_expand_prompt(
 
 /// Create the appropriate expander for server-side use.
 fn create_server_expander(
+    _config: &mold_core::Config,
     settings: &mold_core::ExpandSettings,
+    _gpu_selection: GpuSelection,
+    _preferred_gpu: Option<usize>,
 ) -> Result<Box<dyn mold_core::PromptExpander>, ApiError> {
     if let Some(api_expander) = settings.create_api_expander() {
         return Ok(Box::new(api_expander));
@@ -512,11 +606,14 @@ fn create_server_expander(
 
     #[cfg(feature = "expand")]
     {
-        let config = mold_core::Config::load_or_default();
         if let Some(local) =
-            mold_inference::expand::LocalExpander::from_config(&config, Some(&settings.model))
+            mold_inference::expand::LocalExpander::from_config(_config, Some(&settings.model))
         {
-            return Ok(Box::new(local));
+            return Ok(Box::new(
+                local
+                    .with_gpu_selection(_gpu_selection)
+                    .with_preferred_gpu(_preferred_gpu),
+            ));
         }
         return Err(ApiError::validation(
             "local expand model not found — run: mold pull qwen3-expand".to_string(),
@@ -561,9 +658,15 @@ async fn expand_prompt(
     let expand_settings = config.expand.clone().with_env_overrides();
     let expand_config = expand_settings.to_expand_config(&req.model_family, req.variations);
     let prompt = req.prompt.clone();
+    let config_snapshot = config.clone();
     drop(config);
 
-    let expander = create_server_expander(&expand_settings)?;
+    let expander = create_server_expander(
+        &config_snapshot,
+        &expand_settings,
+        active_gpu_selection(&state),
+        None,
+    )?;
     let result = tokio::task::spawn_blocking(move || expander.expand(&prompt, &expand_config))
         .await
         .map_err(|e| ApiError::internal(format!("expand task failed: {e}")))?
@@ -621,12 +724,40 @@ async fn upscale(
     let model_name_owned = model_name.clone();
     drop(config);
 
-    let upscaler_cache = state.upscaler_cache.clone();
-    let resp =
+    let resp = if state.gpu_pool.worker_count() > 0 {
+        let worker = select_aux_worker(&state)?;
+        worker.in_flight.fetch_add(1, Ordering::SeqCst);
+        let worker_clone = worker.clone();
+        let result =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
+                struct ThreadGpuGuard;
+                impl Drop for ThreadGpuGuard {
+                    fn drop(&mut self) {
+                        mold_inference::device::clear_thread_gpu_ordinal();
+                    }
+                }
+
+                mold_inference::device::init_thread_gpu_ordinal(worker_clone.gpu.ordinal);
+                let _thread_gpu = ThreadGpuGuard;
+                let _load_lock = worker_clone.model_load_lock.lock().unwrap();
+                let mut engine = mold_inference::create_upscale_engine(
+                    model_name_owned,
+                    weights_path,
+                    mold_inference::LoadStrategy::Eager,
+                    worker_clone.gpu.ordinal,
+                )?;
+                engine.upscale(&req)
+            })
+            .await
+            .map_err(|e| ApiError::internal(format!("upscale task panicked: {e}")));
+        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+        result?.map_err(|e| ApiError::internal(format!("upscale failed: {e}")))?
+    } else {
+        let upscaler_cache = state.upscaler_cache.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
             let mut cache = upscaler_cache.lock().unwrap_or_else(|e| e.into_inner());
 
-            // Reuse cached engine if same model
+            // Reuse cached engine if same model.
             let needs_new = cache
                 .as_ref()
                 .is_none_or(|e| e.model_name() != model_name_owned);
@@ -635,6 +766,7 @@ async fn upscale(
                     model_name_owned,
                     weights_path,
                     mold_inference::LoadStrategy::Eager,
+                    0,
                 )?;
                 *cache = Some(new_engine);
             }
@@ -643,7 +775,8 @@ async fn upscale(
         })
         .await
         .map_err(|e| ApiError::internal(format!("upscale task panicked: {e}")))?
-        .map_err(|e| ApiError::internal(format!("upscale failed: {e}")))?;
+        .map_err(|e| ApiError::internal(format!("upscale failed: {e}")))?
+    };
 
     Ok(Json(resp))
 }
@@ -783,70 +916,163 @@ async fn upscale_stream(
             return;
         };
 
-        let result = tokio::task::spawn_blocking(move || {
-            let mut cache = upscaler_cache.lock().unwrap();
+        let result = if state_clone.gpu_pool.worker_count() > 0 {
+            match select_aux_worker(&state_clone) {
+                Ok(worker) => {
+                    worker.in_flight.fetch_add(1, Ordering::SeqCst);
+                    let worker_clone = worker.clone();
+                    let tx_for_worker = tx.clone();
+                    let model_name_for_worker = model_name_owned.clone();
+                    let weights_path_for_worker = weights_path.clone();
+                    let req_for_worker = req.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        struct ThreadGpuGuard;
+                        impl Drop for ThreadGpuGuard {
+                            fn drop(&mut self) {
+                                mold_inference::device::clear_thread_gpu_ordinal();
+                            }
+                        }
 
-            let needs_new = cache
-                .as_ref()
-                .is_none_or(|e| e.model_name() != model_name_owned);
-            if needs_new {
-                let _ = tx.send(SseMessage::Progress(
-                    mold_core::SseProgressEvent::StageStart {
-                        name: "Loading upscaler model".to_string(),
-                    },
-                ));
-                match mold_inference::create_upscale_engine(
-                    model_name_owned,
-                    weights_path,
-                    mold_inference::LoadStrategy::Eager,
-                ) {
-                    Ok(new_engine) => {
-                        *cache = Some(new_engine);
-                    }
-                    Err(e) => {
-                        let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                            message: format!("failed to load upscaler: {e}"),
+                        mold_inference::device::init_thread_gpu_ordinal(worker_clone.gpu.ordinal);
+                        let _thread_gpu = ThreadGpuGuard;
+                        let _load_lock = worker_clone.model_load_lock.lock().unwrap();
+                        let _ = tx_for_worker.send(SseMessage::Progress(
+                            mold_core::SseProgressEvent::StageStart {
+                                name: format!(
+                                    "Loading upscaler model on GPU {}",
+                                    worker_clone.gpu.ordinal
+                                ),
+                            },
+                        ));
+                        let mut engine = match mold_inference::create_upscale_engine(
+                            model_name_for_worker,
+                            weights_path_for_worker,
+                            mold_inference::LoadStrategy::Eager,
+                            worker_clone.gpu.ordinal,
+                        ) {
+                            Ok(engine) => engine,
+                            Err(e) => {
+                                let _ = tx_for_worker.send(SseMessage::Error(
+                                    mold_core::SseErrorEvent {
+                                        message: format!("failed to load upscaler: {e}"),
+                                    },
+                                ));
+                                return;
+                            }
+                        };
+
+                        let tx_progress = tx_for_worker.clone();
+                        engine.set_on_progress(Box::new(move |event| {
+                            let sse_event: mold_core::SseProgressEvent = event.into();
+                            let _ = tx_progress.send(SseMessage::Progress(sse_event));
                         }));
-                        return;
-                    }
-                }
-            }
 
-            let engine = cache.as_mut().unwrap();
+                        match engine.upscale(&req_for_worker) {
+                            Ok(resp) => {
+                                let image_b64 = base64::engine::general_purpose::STANDARD
+                                    .encode(&resp.image.data);
+                                let _ = tx_for_worker.send(SseMessage::UpscaleComplete(
+                                    mold_core::SseUpscaleCompleteEvent {
+                                        image: image_b64,
+                                        format: resp.image.format,
+                                        model: resp.model,
+                                        scale_factor: resp.scale_factor,
+                                        original_width: resp.original_width,
+                                        original_height: resp.original_height,
+                                        upscale_time_ms: resp.upscale_time_ms,
+                                    },
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = tx_for_worker.send(SseMessage::Error(
+                                    mold_core::SseErrorEvent {
+                                        message: format!("upscale failed: {e}"),
+                                    },
+                                ));
+                            }
+                        }
 
-            // Install progress callback for tile-by-tile progress
-            let tx_progress = tx.clone();
-            engine.set_on_progress(Box::new(move |event| {
-                let sse_event: mold_core::SseProgressEvent = event.into();
-                let _ = tx_progress.send(SseMessage::Progress(sse_event));
-            }));
-
-            match engine.upscale(&req) {
-                Ok(resp) => {
-                    let image_b64 =
-                        base64::engine::general_purpose::STANDARD.encode(&resp.image.data);
-                    let _ = tx.send(SseMessage::UpscaleComplete(
-                        mold_core::SseUpscaleCompleteEvent {
-                            image: image_b64,
-                            format: resp.image.format,
-                            model: resp.model,
-                            scale_factor: resp.scale_factor,
-                            original_width: resp.original_width,
-                            original_height: resp.original_height,
-                            upscale_time_ms: resp.upscale_time_ms,
-                        },
-                    ));
+                        engine.clear_on_progress();
+                    })
+                    .await;
+                    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    result
                 }
                 Err(e) => {
                     let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                        message: format!("upscale failed: {e}"),
+                        message: e.error,
                     }));
+                    return;
                 }
             }
+        } else {
+            let model_name_for_cache = model_name_owned.clone();
+            let weights_path_for_cache = weights_path.clone();
+            let req_for_cache = req.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut cache = upscaler_cache.lock().unwrap();
 
-            engine.clear_on_progress();
-        })
-        .await;
+                let needs_new = cache
+                    .as_ref()
+                    .is_none_or(|e| e.model_name() != model_name_for_cache);
+                if needs_new {
+                    let _ = tx.send(SseMessage::Progress(
+                        mold_core::SseProgressEvent::StageStart {
+                            name: "Loading upscaler model".to_string(),
+                        },
+                    ));
+                    match mold_inference::create_upscale_engine(
+                        model_name_for_cache,
+                        weights_path_for_cache,
+                        mold_inference::LoadStrategy::Eager,
+                        0,
+                    ) {
+                        Ok(new_engine) => {
+                            *cache = Some(new_engine);
+                        }
+                        Err(e) => {
+                            let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
+                                message: format!("failed to load upscaler: {e}"),
+                            }));
+                            return;
+                        }
+                    }
+                }
+
+                let engine = cache.as_mut().unwrap();
+                let tx_progress = tx.clone();
+                engine.set_on_progress(Box::new(move |event| {
+                    let sse_event: mold_core::SseProgressEvent = event.into();
+                    let _ = tx_progress.send(SseMessage::Progress(sse_event));
+                }));
+
+                match engine.upscale(&req_for_cache) {
+                    Ok(resp) => {
+                        let image_b64 =
+                            base64::engine::general_purpose::STANDARD.encode(&resp.image.data);
+                        let _ = tx.send(SseMessage::UpscaleComplete(
+                            mold_core::SseUpscaleCompleteEvent {
+                                image: image_b64,
+                                format: resp.image.format,
+                                model: resp.model,
+                                scale_factor: resp.scale_factor,
+                                original_width: resp.original_width,
+                                original_height: resp.original_height,
+                                upscale_time_ms: resp.upscale_time_ms,
+                            },
+                        ));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
+                            message: format!("upscale failed: {e}"),
+                        }));
+                    }
+                }
+
+                engine.clear_on_progress();
+            })
+            .await
+        };
 
         if let Err(e) = result {
             tracing::error!("upscale task panicked: {e}");
@@ -1217,6 +1443,7 @@ async fn unload_model(
 ) -> Result<impl IntoResponse, ApiError> {
     let req = body.map(|b| b.0).unwrap_or_default();
     tracing::debug!(model = ?req.model, gpu = ?req.gpu, "unload request");
+    clear_global_upscaler_cache(&state);
 
     // Multi-GPU path: target specific GPU or model across the pool.
     if state.gpu_pool.worker_count() > 0 {
@@ -1309,11 +1536,8 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
             let gen = w.active_generation.read().ok()?;
             gen.as_ref().map(|g| ActiveGenerationStatus {
                 model: g.model.clone(),
-                // The per-worker ActiveGeneration doesn't carry the prompt hash,
-                // so expose the model-only summary. Callers that need the hash
-                // can subscribe to SSE progress events.
-                prompt_sha256: String::new(),
-                started_at_unix_ms: 0,
+                prompt_sha256: g.prompt_sha256.clone(),
+                started_at_unix_ms: g.started_at_unix_ms,
                 elapsed_ms: g.started_at.elapsed().as_millis() as u64,
             })
         })
@@ -2409,6 +2633,7 @@ async fn put_model_placement(
     axum::extract::Path(name): axum::extract::Path<String>,
     Json(placement): Json<mold_core::types::DevicePlacement>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_multi_gpu_placement(&state, Some(&placement))?;
     {
         let mut cfg = state.config.write().await;
         cfg.set_model_placement(&name, Some(placement.clone()));

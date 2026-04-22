@@ -8,9 +8,10 @@ use mold_core::{
     Config, ImageData, ModelPaths, OutputFormat, OutputMetadata, SseErrorEvent, SseProgressEvent,
 };
 use mold_inference::device;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Spawn the dedicated OS thread for a GPU worker.
 /// Returns the JoinHandle (caller should keep it alive).
@@ -21,6 +22,10 @@ pub fn spawn_gpu_thread(
     std::thread::Builder::new()
         .name(format!("gpu-worker-{}", worker.gpu.ordinal))
         .spawn(move || {
+            // Bind this thread to its GPU ordinal so `create_device` /
+            // `reclaim_gpu_memory` can debug-assert callers don't drift onto
+            // a sibling GPU's context. See device::init_thread_gpu_ordinal.
+            mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
             tracing::info!(
                 gpu = worker.gpu.ordinal,
                 name = %worker.gpu.name,
@@ -54,6 +59,12 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
     }
     let _slot = QueueSlot(job.queue.clone());
 
+    if job.result_tx.is_closed() {
+        tracing::debug!(gpu = ordinal, model = %model_name, "skipping dispatched job — client disconnected");
+        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+        return;
+    }
+
     tracing::info!(gpu = ordinal, model = %model_name, "dispatched job");
 
     // Acquire per-GPU load lock — ensures only one model load at a time per GPU.
@@ -80,8 +91,24 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         let mut gen = worker.active_generation.write().unwrap();
         *gen = Some(ActiveGeneration {
             model: model_name.clone(),
+            prompt_sha256: format!("{:x}", Sha256::digest(job.request.prompt.as_bytes())),
+            started_at_unix_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
             started_at: Instant::now(),
         });
+    }
+
+    if job.result_tx.is_closed() {
+        tracing::debug!(
+            gpu = ordinal,
+            model = %model_name,
+            "skipping generation after model readiness — client disconnected"
+        );
+        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+        clear_active_generation(worker);
+        return;
     }
 
     // Take-and-restore: remove engine from cache, release lock during inference.

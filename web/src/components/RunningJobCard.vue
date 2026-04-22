@@ -6,6 +6,7 @@ const props = defineProps<{ job: Job }>();
 const emit = defineEmits<{
   (e: "cancel", id: string): void;
   (e: "open", job: Job): void;
+  (e: "dismiss", id: string): void;
 }>();
 
 // Done jobs are clickable — they open the gallery detail drawer for the
@@ -95,7 +96,17 @@ const thumbSrc = computed(() => {
         v-if="job.state === 'running'"
         type="button"
         class="text-slate-400 hover:text-rose-300"
+        :aria-label="'Cancel job'"
         @click.stop="emit('cancel', job.id)"
+      >
+        ✕
+      </button>
+      <button
+        v-else
+        type="button"
+        class="text-slate-500 hover:text-slate-200"
+        :aria-label="'Dismiss card'"
+        @click.stop="emit('dismiss', job.id)"
       >
         ✕
       </button>

@@ -495,6 +495,7 @@ impl OffloadedQwenImageTransformer {
         cpu_vb: VarBuilder,
         cfg: &QwenImageConfig,
         gpu_device: &Device,
+        gpu_ordinal: usize,
         progress: &ProgressReporter,
     ) -> Result<Self> {
         progress.info("Loading transformer with dynamic GPU/CPU placement…");
@@ -521,7 +522,7 @@ impl OffloadedQwenImageTransformer {
 
         // Measure free VRAM after stem layers and decide how many blocks fit
         gpu_device.synchronize()?;
-        let free_vram = crate::device::free_vram_bytes(0).unwrap_or(0);
+        let free_vram = crate::device::free_vram_bytes(gpu_ordinal).unwrap_or(0);
         const VRAM_HEADROOM: u64 = 4_500_000_000; // 4.5GB for attention + activations + CUDA overhead
         let vram_budget = free_vram.saturating_sub(VRAM_HEADROOM);
 

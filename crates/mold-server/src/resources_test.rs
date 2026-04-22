@@ -15,6 +15,7 @@ fn fake_snapshot() -> ResourceSnapshot {
             vram_used: 0,
             vram_used_by_mold: Some(0),
             vram_used_by_other: Some(0),
+            gpu_utilization: None,
         }],
         system_ram: RamSnapshot {
             total: 64_000_000_000,
@@ -22,6 +23,7 @@ fn fake_snapshot() -> ResourceSnapshot {
             used_by_mold: 0,
             used_by_other: 0,
         },
+        cpu: None,
     }
 }
 

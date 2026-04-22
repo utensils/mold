@@ -22,7 +22,7 @@ discord = ["mold-discord"]
 expand = ["mold-inference/expand", "mold-server/expand", "mold-tui?/expand"]
 tui = ["dep:mold-tui"]
 webp = ["mold-inference/webp"]
-mp4 = ["mold-inference/mp4"]
+mp4 = ["mold-inference/mp4", "mold-server/mp4"]
 metrics = ["mold-server/metrics"]
 
 [dependencies]

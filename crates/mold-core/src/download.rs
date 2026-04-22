@@ -1448,7 +1448,7 @@ mod tests {
         buf.extend_from_slice(b"GGUF");
         // Pad a couple hundred bytes of synthetic header bytes, then include
         // every tensor name as a plain UTF-8 substring so the scanner finds it.
-        buf.extend(std::iter::repeat(0u8).take(256));
+        buf.extend(std::iter::repeat_n(0u8, 256));
         for name in tensor_names {
             buf.extend_from_slice(name.as_bytes());
             buf.push(0);

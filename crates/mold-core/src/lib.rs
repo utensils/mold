@@ -1,5 +1,6 @@
 pub mod build_info;
 pub mod catalog;
+pub mod chain;
 pub mod client;
 pub mod config;
 pub mod control;
@@ -18,6 +19,10 @@ mod config_test;
 mod test_support;
 
 pub use catalog::build_model_catalog;
+pub use chain::{
+    ChainProgressEvent, ChainRequest, ChainResponse, ChainStage, SseChainCompleteEvent,
+    MAX_CHAIN_STAGES,
+};
 pub use client::MoldClient;
 pub use config::{
     parse_device_ref_str, Config, DefaultModelResolution, DefaultModelSource, LoggingConfig,

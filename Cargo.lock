@@ -3104,6 +3104,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "candle-core-mold",
  "clap",
  "dirs 5.0.1",
  "futures",

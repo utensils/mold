@@ -1,6 +1,57 @@
 use crate::engine::LoadStrategy;
 use crate::progress::ProgressReporter;
 use mold_core::types::GpuSelection;
+use std::cell::Cell;
+
+// ── Thread-local GPU ordinal guard ─────────────────────────────────────────
+//
+// Each GPU worker thread is pinned to a single ordinal. We stash that ordinal
+// in a thread-local so cross-engine hotpaths (`create_device`, `reclaim_gpu_memory`)
+// can debug-assert the caller isn't drifting onto a sibling GPU's context —
+// the exact footgun that took the process down on killswitch when LTX-2 had
+// `reclaim_gpu_memory(0)` hardcoded and nuked GPU 0's context while SD3.5
+// was still denoising there.
+//
+// Threads without a bound ordinal (tokio blocking pool, tests) see `None`
+// and the assert is skipped.
+
+thread_local! {
+    static THREAD_GPU_ORDINAL: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Bind the current thread to a GPU ordinal. Call once from each GPU worker
+/// thread's entry point. Any subsequent `create_device` / `reclaim_gpu_memory`
+/// call on this thread must match `ordinal` (debug builds only).
+pub fn init_thread_gpu_ordinal(ordinal: usize) {
+    THREAD_GPU_ORDINAL.with(|c| c.set(Some(ordinal)));
+}
+
+/// Clear the thread's GPU binding. Not strictly needed in production (workers
+/// run for the process lifetime) but useful for tests that reuse threads.
+pub fn clear_thread_gpu_ordinal() {
+    THREAD_GPU_ORDINAL.with(|c| c.set(None));
+}
+
+/// Returns the currently-bound ordinal, if any.
+pub fn thread_gpu_ordinal() -> Option<usize> {
+    THREAD_GPU_ORDINAL.with(|c| c.get())
+}
+
+/// Panic in debug builds if `ordinal` doesn't match the thread's bound GPU.
+/// A mismatch means a call site is ignoring its engine's `gpu_ordinal` and
+/// reaching for another GPU's context — the SD3.5/LTX-2 crash pattern.
+#[inline]
+fn debug_assert_ordinal_matches_thread(ordinal: usize, context: &'static str) {
+    if cfg!(debug_assertions) {
+        if let Some(expected) = thread_gpu_ordinal() {
+            assert_eq!(
+                expected, ordinal,
+                "{context}: ordinal {ordinal} does not match this thread's \
+                 bound GPU {expected} — hardcoded ordinal regression?"
+            );
+        }
+    }
+}
 
 // ── GPU discovery ──────────────────────────────────────────────────────────
 
@@ -107,6 +158,7 @@ pub fn create_device(
         tracing::info!("CPU forced via MOLD_DEVICE=cpu");
         return Ok(Device::Cpu);
     }
+    debug_assert_ordinal_matches_thread(ordinal, "create_device");
     if candle_core::utils::cuda_is_available() {
         progress.info(&format!("Using CUDA device {ordinal}"));
         tracing::info!("Using CUDA device {ordinal}");
@@ -186,11 +238,35 @@ pub fn select_expand_device(
     threshold: u64,
     is_metal: bool,
 ) -> ExpandPlacement {
+    select_expand_device_with_preference(gpus, threshold, is_metal, None)
+}
+
+/// Same as [`select_expand_device`], but prefers `preferred_ordinal` when it
+/// is in the allowed GPU set and has enough free VRAM.
+pub fn select_expand_device_with_preference(
+    gpus: &[DiscoveredGpu],
+    threshold: u64,
+    is_metal: bool,
+    preferred_ordinal: Option<usize>,
+) -> ExpandPlacement {
     if is_metal {
+        if let Some(ordinal) = preferred_ordinal {
+            if let Some(g) = gpus.iter().find(|g| g.ordinal == ordinal) {
+                return ExpandPlacement::Gpu(g.ordinal);
+            }
+        }
         if let Some(g) = gpus.first() {
             return ExpandPlacement::Gpu(g.ordinal);
         }
         return ExpandPlacement::Cpu;
+    }
+    if let Some(ordinal) = preferred_ordinal {
+        if let Some(g) = gpus
+            .iter()
+            .find(|g| g.ordinal == ordinal && g.free_vram_bytes > threshold)
+        {
+            return ExpandPlacement::Gpu(g.ordinal);
+        }
     }
     for g in gpus {
         if g.free_vram_bytes > threshold {
@@ -235,12 +311,14 @@ where
 
 #[cfg(feature = "cuda")]
 fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    debug_assert_ordinal_matches_thread(ordinal, "resolve_device");
     candle_core::Device::new_cuda(ordinal)
         .map_err(|e| anyhow::anyhow!("failed to open CUDA device {ordinal}: {e}"))
 }
 
 #[cfg(all(not(feature = "cuda"), feature = "metal"))]
 fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    debug_assert_ordinal_matches_thread(ordinal, "resolve_device");
     candle_core::Device::new_metal(ordinal)
         .map_err(|e| anyhow::anyhow!("failed to open Metal device {ordinal}: {e}"))
 }
@@ -388,6 +466,8 @@ pub fn available_system_memory_bytes() -> Option<u64> {
 #[cfg(feature = "cuda")]
 pub fn reclaim_gpu_memory(ordinal: usize) {
     use candle_core::cuda_backend::cudarc::driver::{result, sys};
+
+    debug_assert_ordinal_matches_thread(ordinal, "reclaim_gpu_memory");
 
     // Synchronize to ensure all async GPU work completes before reset.
     let _ = result::ctx::synchronize();
@@ -1251,6 +1331,24 @@ mod tests {
         assert_eq!(
             select_expand_device(&gpus, 3 * GB, false),
             ExpandPlacement::Cpu,
+        );
+    }
+
+    #[test]
+    fn expand_prefers_requested_gpu_when_it_fits() {
+        let gpus = vec![gpu(0, 20), gpu(1, 20)];
+        assert_eq!(
+            select_expand_device_with_preference(&gpus, 3 * GB, false, Some(1)),
+            ExpandPlacement::Gpu(1),
+        );
+    }
+
+    #[test]
+    fn expand_preference_falls_back_when_requested_gpu_cannot_fit() {
+        let gpus = vec![gpu(0, 20), gpu(1, 1)];
+        assert_eq!(
+            select_expand_device_with_preference(&gpus, 3 * GB, false, Some(1)),
+            ExpandPlacement::Gpu(0),
         );
     }
 }

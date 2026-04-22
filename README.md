@@ -37,8 +37,10 @@ nix run github:utensils/mold#mold-sm120 -- run "a cat"        # Blackwell / RTX 
 ### From source
 
 ```bash
-cargo build --release -p mold-ai --features cuda    # Linux (NVIDIA)
-cargo build --release -p mold-ai --features metal   # macOS (Apple Silicon)
+./scripts/ensure-web-dist.sh && cargo build --profile dev-fast -p mold-ai --features cuda   # Linux (NVIDIA), fast local build
+./scripts/ensure-web-dist.sh && cargo build --profile dev-fast -p mold-ai --features metal  # macOS (Apple Silicon), fast local build
+cargo build --release -p mold-ai --features cuda                                          # Linux (NVIDIA), shipping build
+cargo build --release -p mold-ai --features metal                                         # macOS (Apple Silicon), shipping build
 ```
 
 Add `preview`, `expand`, `discord`, or `tui` to the features list as needed.

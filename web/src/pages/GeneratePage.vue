@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Composer from "../components/Composer.vue";
-import ResourceStrip from "../components/ResourceStrip.vue";
 import SettingsModal from "../components/SettingsModal.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
@@ -17,6 +16,7 @@ import {
 } from "../api";
 import { useGenerateForm } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
+import { decideChainRouting } from "../lib/chainRouting";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
   ExpandFormState,
@@ -100,6 +100,55 @@ async function refreshGallery() {
   }
 }
 
+// ── Auto-refresh ──────────────────────────────────────────────────────────
+// Gallery gets new entries whenever a job completes (via stream onComplete)
+// or whenever someone drops a file into MOLD_OUTPUT_DIR out-of-band (e.g.
+// `mold run --local` on the same host). Polling every 10 s catches the
+// second case without hammering the server. Models poll less often; new
+// entries show up when `mold pull` finishes or a new weight is dropped in.
+let galleryTimer: ReturnType<typeof setInterval> | null = null;
+let modelsTimer: ReturnType<typeof setInterval> | null = null;
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  galleryTimer = setInterval(() => {
+    if (!document.hidden) void refreshGallery();
+  }, 10_000);
+  modelsTimer = setInterval(() => {
+    if (!document.hidden) void refreshModels();
+  }, 15_000);
+}
+
+function stopAutoRefresh() {
+  if (galleryTimer) {
+    clearInterval(galleryTimer);
+    galleryTimer = null;
+  }
+  if (modelsTimer) {
+    clearInterval(modelsTimer);
+    modelsTimer = null;
+  }
+}
+
+// Faster model polling while the advanced/settings modal is open — the user
+// is likely waiting for a download to complete so they can pick the new
+// variant without hitting a manual refresh.
+let settingsModelsTimer: ReturnType<typeof setInterval> | null = null;
+watch(
+  () => showSettings.value,
+  (open) => {
+    if (settingsModelsTimer) {
+      clearInterval(settingsModelsTimer);
+      settingsModelsTimer = null;
+    }
+    if (open) {
+      settingsModelsTimer = setInterval(() => {
+        if (!document.hidden) void refreshModels();
+      }, 3_000);
+    }
+  },
+);
+
 const currentModel = computed(
   () => models.value.find((m) => m.name === form.state.value.model) ?? null,
 );
@@ -144,13 +193,30 @@ const topBarCounts = computed(() => ({
   filtered: galleryEntries.value.length,
 }));
 
+const chainDecision = computed(() =>
+  decideChainRouting(
+    form.state.value.frames,
+    currentModel.value?.family ?? null,
+    form.state.value.model,
+  ),
+);
+
 function onSubmit() {
   if (!form.state.value.model) {
     showSettings.value = true;
     return;
   }
+  const decision = chainDecision.value;
+  if (decision.kind === "reject") {
+    // Block submit on a well-defined routing rejection (non-chainable
+    // family over its per-clip budget). Keeping this as alert() matches
+    // the existing terse validation UX — a toast system would be a
+    // separate piece of work.
+    alert(decision.reason);
+    return;
+  }
   const req = form.toRequest();
-  stream.submit(req);
+  stream.submit(req, decision);
 }
 
 function onClearSource() {
@@ -216,6 +282,10 @@ function setMuted(v: boolean) {
   persistMuted(v);
 }
 
+const queueBusy = computed(() =>
+  stream.jobs.value.some((j) => j.state === "running"),
+);
+
 onMounted(async () => {
   await refreshModels();
   try {
@@ -232,11 +302,20 @@ onMounted(async () => {
     const first = models.value.find((m) => m.downloaded);
     if (first) form.applyModelDefaults(first);
   }
+  startAutoRefresh();
+});
+
+onBeforeUnmount(() => {
+  stopAutoRefresh();
+  if (settingsModelsTimer) {
+    clearInterval(settingsModelsTimer);
+    settingsModelsTimer = null;
+  }
 });
 </script>
 
 <template>
-  <div class="mx-auto max-w-[1800px] px-4 pb-32 pt-4 sm:px-6 sm:pt-6 lg:px-10">
+  <div class="mx-auto max-w-[1800px] px-4 pb-40 pt-4 sm:px-6 sm:pt-6 lg:px-10">
     <TopBar
       :filter="'all'"
       :search="''"
@@ -261,6 +340,7 @@ onMounted(async () => {
         :settings-dirty="settingsDirty"
         :family="currentModel?.family ?? ''"
         :placement-gpus="gpuListForPlacement"
+        :chain-decision="chainDecision"
         @submit="onSubmit"
         @open-settings="showSettings = true"
         @open-expand="showExpand = true"
@@ -268,13 +348,12 @@ onMounted(async () => {
         @clear-source="onClearSource"
       />
 
-      <!-- Agent B: always-visible VRAM + RAM telemetry -->
-      <ResourceStrip class="mt-3 hidden lg:block" variant="full" />
-
       <RunningStrip
         :jobs="stream.jobs.value"
         @cancel="stream.cancel"
         @open="openJob"
+        @dismiss="stream.remove"
+        @clear-finished="stream.clearDone"
       />
 
       <div class="mt-6">
@@ -299,6 +378,7 @@ onMounted(async () => {
       :prompt="form.state.value.prompt"
       :expand="form.state.value.expand"
       :current-model="currentModel"
+      :queue-busy="queueBusy"
       @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
       @apply-prompt="(v: string) => (form.state.value.prompt = v)"
       @close="showExpand = false"

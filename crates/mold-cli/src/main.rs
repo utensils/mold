@@ -377,6 +377,9 @@ Examples:
 
         /// Number of video frames to generate (video models only, e.g. ltx-video).
         /// Implies video output mode; output defaults to .gif format.
+        ///
+        /// For LTX-2 distilled, values above 97 automatically chain multiple
+        /// clips at render time (see `--clip-frames` / `--motion-tail`).
         #[arg(long, help_heading = "Video")]
         frames: Option<u32>,
 
@@ -384,6 +387,22 @@ Examples:
         /// Only used with --frames or video model families.
         #[arg(long, help_heading = "Video")]
         fps: Option<u32>,
+
+        /// Per-clip frame cap for chained video. When --frames exceeds this,
+        /// the CLI splits into multiple chained clips stitched at render time.
+        /// Defaults to the model's native cap (97 for LTX-2 distilled).
+        #[arg(long, value_name = "N", help_heading = "Video")]
+        clip_frames: Option<u32>,
+
+        /// Motion-tail overlap between chained clips in pixel frames. Each clip
+        /// after the first reuses this many trailing latents from the prior
+        /// clip, trimming the duplicated pixel frames at stitch time. 0 disables
+        /// latent carryover (simple concat). Default 17 — three LTX-2 latent
+        /// frames of carryover at the 8× causal temporal compression (causal-
+        /// first slot + two continuation slots, ≈0.7 s at 24 fps), enough hard-
+        /// pinned pixel context to keep scene identity coherent across clips.
+        #[arg(long, value_name = "N", default_value_t = 17, help_heading = "Video")]
+        motion_tail: u32,
 
         /// Enable synchronized audio for LTX-2 / LTX-2.3 generation.
         #[arg(long, help_heading = "Video", conflicts_with = "no_audio")]
@@ -1147,6 +1166,8 @@ async fn run() -> anyhow::Result<()> {
             batch,
             frames,
             fps,
+            clip_frames,
+            motion_tail,
             audio,
             no_audio,
             audio_file,
@@ -1205,6 +1226,8 @@ async fn run() -> anyhow::Result<()> {
                 batch,
                 frames,
                 fps,
+                clip_frames,
+                motion_tail,
                 audio,
                 no_audio,
                 audio_file,
@@ -2126,6 +2149,53 @@ mod tests {
             Commands::Run { frames, fps, .. } => {
                 assert_eq!(frames, None);
                 assert_eq!(fps, Some(15));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_chain_flags_parse() {
+        let cli = parse(&[
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "a cat",
+            "--frames",
+            "200",
+            "--clip-frames",
+            "97",
+            "--motion-tail",
+            "4",
+        ]);
+        match cli.command {
+            Commands::Run {
+                frames,
+                clip_frames,
+                motion_tail,
+                ..
+            } => {
+                assert_eq!(frames, Some(200));
+                assert_eq!(clip_frames, Some(97));
+                assert_eq!(motion_tail, 4);
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_motion_tail_defaults_to_seventeen() {
+        let cli = parse(&["run", "ltx-2-19b-distilled:fp8", "a cat", "--frames", "200"]);
+        match cli.command {
+            Commands::Run {
+                motion_tail,
+                clip_frames,
+                ..
+            } => {
+                assert_eq!(
+                    motion_tail, 17,
+                    "default motion tail must be 17 frames (three LTX-2 latent frames: causal + two continuation)"
+                );
+                assert_eq!(clip_frames, None);
             }
             _ => panic!("expected Run"),
         }

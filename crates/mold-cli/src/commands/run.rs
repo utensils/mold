@@ -436,6 +436,8 @@ pub async fn run(
     batch: u32,
     frames: Option<u32>,
     fps: Option<u32>,
+    clip_frames: Option<u32>,
+    motion_tail: u32,
     audio: bool,
     no_audio: bool,
     audio_file: Option<String>,
@@ -825,6 +827,8 @@ pub async fn run(
         generate::Ltx2Options {
             frames,
             fps,
+            clip_frames,
+            motion_tail,
             enable_audio: if audio {
                 Some(true)
             } else if no_audio {

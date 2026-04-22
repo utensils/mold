@@ -1003,6 +1003,7 @@ impl QwenImageEngine {
                         cpu_vb,
                         cfg,
                         device,
+                        self.base.gpu_ordinal,
                         &self.base.progress,
                     )?,
                 ))

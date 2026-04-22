@@ -159,12 +159,19 @@ async fn upscale_local(
     // Create engine and run upscaling in a blocking thread
     let model_name_owned = model_name.clone();
     let req_clone = req.clone();
+    let best_gpu_ordinal =
+        mold_inference::device::select_best_gpu(&mold_inference::device::discover_gpus())
+            .map(|g| g.ordinal)
+            .unwrap_or(0);
 
     let resp = tokio::task::spawn_blocking(move || -> Result<mold_core::UpscaleResponse> {
+        // Local upscale should target the GPU with the most free VRAM instead
+        // of hardcoding ordinal 0 on multi-GPU hosts.
         let mut engine = mold_inference::create_upscale_engine(
             model_name_owned,
             weights_path,
             mold_inference::LoadStrategy::Sequential,
+            best_gpu_ordinal,
         )?;
 
         // Set up progress callback for stderr

@@ -67,6 +67,177 @@ const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 
 /*
+ * Hide mode.
+ *
+ * When on, every gallery card renders a blurred shroud with a per-item
+ * "Reveal" button. Flipping the toggle off reveals everything globally.
+ * Persisted in localStorage so the privacy preference survives reloads —
+ * users working in public places don't want to re-enable it every session.
+ *
+ * The `revealed` set tracks per-item peeks so users can unwrap a single
+ * tile without disabling the global shroud. It's deliberately _not_
+ * persisted: revealing an item should not survive a reload.
+ */
+const HIDE_STORAGE_KEY = "mold.gallery.hide";
+function loadHide(): boolean {
+  try {
+    const v = localStorage.getItem(HIDE_STORAGE_KEY);
+    if (v === "true") return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+const hideMode = ref<boolean>(loadHide());
+const revealed = ref<Set<string>>(new Set());
+
+function setHideMode(next: boolean) {
+  hideMode.value = next;
+  // Flipping the toggle should clear per-item peeks in both directions:
+  // turning hide-mode off makes revealed items moot; turning it back on
+  // should re-hide anything the user peeked at earlier.
+  revealed.value = new Set();
+  try {
+    localStorage.setItem(HIDE_STORAGE_KEY, String(next));
+  } catch {
+    /* ignore */
+  }
+}
+
+function revealOne(item: GalleryImage) {
+  const next = new Set(revealed.value);
+  next.add(item.filename);
+  revealed.value = next;
+}
+
+/*
+ * Multi-select.
+ *
+ * `selectMode` flips the gallery into bulk-edit: clicks on cards toggle
+ * their selection instead of opening the detail drawer. `selection` holds
+ * filenames (stable id — survives re-fetches). `selectionAnchor` is the
+ * last single-clicked filename; shift-clicking another tile selects the
+ * inclusive range between them in filter order (Finder-style).
+ *
+ * Exiting select mode clears both the mode flag and the current selection
+ * so the next entry starts from a clean slate.
+ */
+const selectMode = ref(false);
+const selection = ref<Set<string>>(new Set());
+const selectionAnchor = ref<string | null>(null);
+
+function setSelectMode(next: boolean) {
+  selectMode.value = next;
+  if (!next) {
+    selection.value = new Set();
+    selectionAnchor.value = null;
+  }
+}
+
+function toggleSelect(payload: {
+  item: GalleryImage;
+  shift: boolean;
+  meta: boolean;
+}) {
+  const { item, shift, meta } = payload;
+  const name = item.filename;
+  if (shift && selectionAnchor.value) {
+    // Shift-click: select the contiguous range in the currently-filtered
+    // list between the anchor and the clicked item. Doesn't touch
+    // selections outside that range — matches macOS Finder behavior.
+    const list = filtered.value;
+    const a = list.findIndex((e) => e.filename === selectionAnchor.value);
+    const b = list.findIndex((e) => e.filename === name);
+    if (a === -1 || b === -1) {
+      // Anchor is no longer in the filtered list (filter changed). Fall
+      // back to single toggle.
+      toggleOne(name, meta);
+      return;
+    }
+    const [lo, hi] = a < b ? [a, b] : [b, a];
+    const next = new Set(selection.value);
+    for (let i = lo; i <= hi; i++) {
+      const f = list[i]?.filename;
+      if (f) next.add(f);
+    }
+    selection.value = next;
+    return;
+  }
+  toggleOne(name, meta);
+  selectionAnchor.value = name;
+}
+
+function toggleOne(name: string, _meta: boolean) {
+  const next = new Set(selection.value);
+  if (next.has(name)) next.delete(name);
+  else next.add(name);
+  selection.value = next;
+}
+
+function onDragSelect(payload: { filenames: string[] }) {
+  selection.value = new Set(payload.filenames);
+}
+
+function selectAllVisible() {
+  const next = new Set<string>();
+  for (const e of filtered.value) next.add(e.filename);
+  selection.value = next;
+}
+
+function clearSelection() {
+  selection.value = new Set();
+  selectionAnchor.value = null;
+}
+
+async function handleDeleteMany(names: string[]): Promise<number> {
+  // Fire deletes in parallel — the server is local and individual DELETEs
+  // are cheap. `Promise.allSettled` lets partial failures not take down
+  // the whole batch; we surface the error count to the user.
+  const results = await Promise.allSettled(
+    names.map((n) => deleteGalleryImage(n)),
+  );
+  const deleted = new Set<string>();
+  let failed = 0;
+  names.forEach((n, i) => {
+    if (results[i]?.status === "fulfilled") deleted.add(n);
+    else failed++;
+  });
+  entries.value = entries.value.filter((e) => !deleted.has(e.filename));
+  if (deleted.size > 0) {
+    const next = new Set(selection.value);
+    for (const n of deleted) next.delete(n);
+    selection.value = next;
+  }
+  if (failed > 0) {
+    errorMessage.value = `Deleted ${deleted.size} of ${names.length}. ${failed} failed.`;
+  }
+  return deleted.size;
+}
+
+async function deleteSelected() {
+  const names = Array.from(selection.value);
+  if (names.length === 0) return;
+  const msg =
+    names.length === 1
+      ? `Delete ${names[0]}? This can't be undone.`
+      : `Delete ${names.length} items? This can't be undone.`;
+  if (!window.confirm(msg)) return;
+  await handleDeleteMany(names);
+}
+
+async function deleteAllFiltered() {
+  const list = filtered.value;
+  if (list.length === 0) return;
+  const msg =
+    list.length === entries.value.length
+      ? `Delete ALL ${list.length} gallery items? This can't be undone.`
+      : `Delete all ${list.length} items in the current filter? This can't be undone.`;
+  if (!window.confirm(msg)) return;
+  const names = list.map((e) => e.filename);
+  await handleDeleteMany(names);
+}
+
+/*
  * Server-reported feature toggles. We fetch these once on mount so the UI
  * can hide affordances the operator hasn't opted in to — most notably the
  * gallery delete button, which requires MOLD_GALLERY_ALLOW_DELETE=1 on the
@@ -204,7 +375,7 @@ onMounted(async () => {
 
 <template>
   <div
-    class="relative mx-auto flex min-h-[100svh] max-w-[1800px] flex-col px-4 pb-32 sm:px-6 lg:px-10"
+    class="relative mx-auto flex min-h-[100svh] max-w-[1800px] flex-col px-4 pb-40 sm:px-6 lg:px-10"
   >
     <TopBar
       :filter="filter"
@@ -213,10 +384,16 @@ onMounted(async () => {
       :muted="muted"
       :counts="counts"
       :loading="loading"
+      :hide-mode="hideMode"
+      :select-mode="selectMode"
+      :selection-count="selection.size"
+      :can-delete="capabilities.gallery.can_delete"
       @update:filter="(f) => (filter = f)"
       @update:search="(s) => (search = s)"
       @update:view="setView"
       @update:muted="setMuted"
+      @update:hide-mode="setHideMode"
+      @update:select-mode="setSelectMode"
       @refresh="refresh"
     />
 
@@ -238,9 +415,95 @@ onMounted(async () => {
         :loading="loading"
         :view="view"
         :muted="muted"
+        :select-mode="selectMode"
+        :selection="selection"
+        :hide-mode="hideMode"
+        :revealed="revealed"
         @open="openItem"
+        @toggle-select="toggleSelect"
+        @reveal="revealOne"
+        @drag-select="onDragSelect"
       />
     </main>
+
+    <!--
+      Floating selection action bar.
+      Appears when the user enters select mode. Surfaces counts and the
+      four bulk actions: select-all-in-filter, clear, delete selected,
+      delete all (the "nuke this filter" escape hatch). Positioned above
+      the back-to-top FAB so both can coexist. We intentionally use
+      window.confirm() inside the delete handlers — consistent with the
+      detail drawer's single-item delete, and avoids shipping a modal.
+    -->
+    <Transition name="fade">
+      <div
+        v-if="selectMode"
+        class="fixed inset-x-0 bottom-[max(1.25rem,env(safe-area-inset-bottom))] z-30 flex justify-center px-4"
+      >
+        <div
+          class="glass flex max-w-full flex-wrap items-center gap-2 rounded-full border border-white/10 bg-ink-900/80 px-3 py-2 text-[13px] text-ink-100 shadow-xl backdrop-blur"
+          role="toolbar"
+          aria-label="Selection actions"
+        >
+          <span class="px-2 font-medium tabular-nums">
+            {{ selection.size }}
+            <span class="text-ink-400">/ {{ filtered.length }} selected</span>
+          </span>
+          <button
+            class="rounded-full border border-white/10 bg-white/5 px-3 py-1 font-medium transition hover:bg-white/10 disabled:opacity-60"
+            :disabled="filtered.length === 0"
+            @click="selectAllVisible"
+          >
+            Select all
+          </button>
+          <button
+            class="rounded-full border border-white/10 bg-white/5 px-3 py-1 font-medium transition hover:bg-white/10 disabled:opacity-60"
+            :disabled="selection.size === 0"
+            @click="clearSelection"
+          >
+            Clear
+          </button>
+          <button
+            class="rounded-full bg-rose-500/90 px-3 py-1 font-semibold text-white transition hover:bg-rose-500 disabled:opacity-50"
+            :disabled="selection.size === 0"
+            @click="deleteSelected"
+          >
+            Delete selected
+          </button>
+          <button
+            class="rounded-full border border-rose-400/40 bg-rose-500/20 px-3 py-1 font-semibold text-rose-100 transition hover:bg-rose-500/30 disabled:opacity-50"
+            :disabled="filtered.length === 0"
+            :title="
+              filtered.length === counts.total
+                ? 'Delete every item in the gallery'
+                : 'Delete every item that matches the current filter'
+            "
+            @click="deleteAllFiltered"
+          >
+            Delete all
+          </button>
+          <button
+            class="ml-1 inline-flex h-7 w-7 items-center justify-center rounded-full text-ink-300 transition hover:bg-white/10 hover:text-white"
+            aria-label="Exit select mode"
+            @click="setSelectMode(false)"
+          >
+            <svg
+              class="h-3.5 w-3.5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M6 6l12 12" />
+              <path d="M18 6 6 18" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </Transition>
 
     <!-- Back-to-top FAB. Appears once the user has scrolled more than one
          viewport down, replacing the on-desktop convenience of the sticky

@@ -216,6 +216,65 @@ export interface SseCompleteEvent {
   gpu?: number | null;
 }
 
+// ── Chained video generation (POST /api/generate/chain/stream) ────────────
+// Mirrors `mold_core::chain::{ChainRequest, ChainProgressEvent,
+// SseChainCompleteEvent}`. The SPA only uses the auto-expand form in v1
+// (single prompt across all stages), so `stages` is never populated here —
+// the server expands `prompt`/`total_frames`/`clip_frames` into canonical
+// stages on the wire.
+export interface ChainRequestWire {
+  model: string;
+  stages?: never; // SPA always auto-expands; server populates stages
+  motion_tail_frames?: number;
+  width: number;
+  height: number;
+  fps?: number;
+  seed?: number | null;
+  steps: number;
+  guidance: number;
+  strength?: number;
+  output_format?: OutputFormat;
+  placement?: DevicePlacement | null;
+  prompt?: string;
+  total_frames?: number;
+  clip_frames?: number;
+  source_image?: string | null;
+}
+
+export type ChainProgressEvent =
+  | {
+      type: "chain_start";
+      stage_count: number;
+      estimated_total_frames: number;
+    }
+  | { type: "stage_start"; stage_idx: number }
+  | {
+      type: "denoise_step";
+      stage_idx: number;
+      step: number;
+      total: number;
+    }
+  | { type: "stage_done"; stage_idx: number; frames_emitted: number }
+  | { type: "stitching"; total_frames: number };
+
+export interface SseChainCompleteEvent {
+  video: string; // base64
+  format: OutputFormat;
+  width: number;
+  height: number;
+  frames: number;
+  fps: number;
+  thumbnail?: string | null;
+  gif_preview?: string | null;
+  has_audio?: boolean;
+  duration_ms?: number | null;
+  audio_sample_rate?: number | null;
+  audio_channels?: number | null;
+  stage_count: number;
+  gpu?: number | null;
+  generation_time_ms?: number | null;
+}
+
 export interface ExpandRequestWire {
   prompt: string;
   model_family: string;
@@ -354,6 +413,8 @@ export interface GpuSnapshot {
   vram_used: number;
   vram_used_by_mold: number | null;
   vram_used_by_other: number | null;
+  /** 0-100. `null` on Metal and on the `nvidia-smi` fallback path. */
+  gpu_utilization?: number | null;
 }
 
 export interface RamSnapshot {
@@ -363,9 +424,17 @@ export interface RamSnapshot {
   used_by_other: number;
 }
 
+export interface CpuSnapshot {
+  cores: number;
+  /** 0-100 averaged across all cores. */
+  usage_percent: number;
+}
+
 export interface ResourceSnapshot {
   hostname: string;
   timestamp: number;
   gpus: GpuSnapshot[];
   system_ram: RamSnapshot;
+  /** `null` on the first sample (sysinfo needs a prior refresh to compute deltas). */
+  cpu?: CpuSnapshot | null;
 }

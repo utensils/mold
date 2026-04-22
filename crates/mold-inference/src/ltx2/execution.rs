@@ -268,7 +268,7 @@ mod tests {
     }
 
     fn engine(model_name: &str, paths: ModelPaths) -> Ltx2Engine {
-        Ltx2Engine::new(model_name.to_string(), paths, LoadStrategy::Sequential)
+        Ltx2Engine::new(model_name.to_string(), paths, LoadStrategy::Sequential, 0)
     }
 
     #[test]

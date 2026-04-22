@@ -1,3 +1,4 @@
+pub mod chain;
 pub mod clean;
 pub(crate) mod cleanup;
 pub mod config;

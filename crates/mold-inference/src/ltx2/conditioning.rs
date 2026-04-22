@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use image::RgbImage;
 use mold_core::{GenerateRequest, TimeRange};
 use std::fs;
 use std::ops::RangeInclusive;
@@ -11,9 +12,45 @@ pub(crate) struct StagedImage {
     pub(crate) strength: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Pre-decoded RGB frame window that the runtime re-encodes through the
+/// video VAE into conditioning tokens. Populated by the render-chain
+/// orchestrator with the trailing frames of the emitting stage; empty for
+/// every non-chain caller today.
+///
+/// Re-encoding on the receiving side (rather than narrowing the emitting
+/// stage's final latent tensor) is what keeps slot semantics correct: the
+/// first latent produced from `tail_rgb_frames` is a proper causal 1-pixel
+/// encoding and subsequent latents are proper 8-pixel continuation
+/// encodings at the receiving clip's own time axis, with no ambiguity
+/// about which latent slot corresponds to which pixel-frame range.
+#[derive(Debug, Clone)]
+pub(crate) struct StagedLatent {
+    /// Contiguous, in-capture-order RGB frames from the end of the emitting
+    /// stage. Must be non-empty; the receiving runtime VAE-encodes them
+    /// into `tail_latent_frame_count(tail_rgb_frames.len())` latent slots.
+    pub(crate) tail_rgb_frames: Vec<RgbImage>,
+    /// Starting pixel frame for this latent block. `0` routes the tokens
+    /// through `StageVideoConditioning::replacements`; non-zero values
+    /// build a `VideoTokenAppendCondition` like the keyframe image path.
+    pub(crate) frame: u32,
+    /// Replacement/append strength. `1.0` for chain motion-tail carryover
+    /// (hard-overwrite), matching the keyframe image strength convention.
+    pub(crate) strength: f32,
+}
+
+/// Conditioning inputs staged for a single run. Carries both disk-backed
+/// files (images, audio, reference video — existing single-clip flow) and
+/// in-memory RGB frame blocks (chain carryover — new, empty for non-chain
+/// callers).
+///
+/// Not `PartialEq` because `StagedLatent` wraps `image::RgbImage` which
+/// doesn't implement meaningful structural equality beyond raw byte
+/// comparison. Existing tests only compare individual fields so this is
+/// safe to drop.
+#[derive(Debug, Clone)]
 pub(crate) struct StagedConditioning {
     pub(crate) images: Vec<StagedImage>,
+    pub(crate) latents: Vec<StagedLatent>,
     pub(crate) audio_path: Option<String>,
     pub(crate) video_path: Option<String>,
 }
@@ -99,6 +136,7 @@ pub(crate) fn stage_conditioning(
 
     Ok(StagedConditioning {
         images,
+        latents: Vec::new(),
         audio_path,
         video_path,
     })
@@ -222,6 +260,29 @@ mod tests {
         assert!(mask[..8].iter().all(|value| *value == 0.0));
         assert!(mask[8..18].iter().all(|value| *value == 1.0));
         assert!(mask[18..].iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn stage_conditioning_leaves_latents_empty_for_non_chain_callers() {
+        // Single-clip callers build `StagedConditioning` via this function;
+        // the `latents` field (used by the render-chain orchestrator to inject
+        // pre-encoded motion-tail tokens) must stay empty so existing runs
+        // keep routing conditioning through the image path with VAE encode.
+        let work_dir = tempfile::tempdir().unwrap();
+        let mut req = req();
+        req.source_image = Some(fake_png_bytes());
+        req.keyframes = Some(vec![KeyframeCondition {
+            frame: 8,
+            image: fake_png_bytes(),
+        }]);
+        req.source_video = Some(fake_mp4_bytes());
+        req.audio_file = Some(fake_wav_bytes());
+
+        let staged = stage_conditioning(&req, work_dir.path()).unwrap();
+        assert!(
+            staged.latents.is_empty(),
+            "non-chain callers must leave latents empty",
+        );
     }
 
     #[test]

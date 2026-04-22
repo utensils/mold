@@ -8,6 +8,10 @@ const props = defineProps<{
   prompt: string;
   expand: ExpandFormState;
   currentModel: ModelInfoExtended | null;
+  /** Preview hits the LLM server-side; the queue is a single lane, so
+   * previewing while a generation is running would block the UI on the
+   * inference slot. Disable the button instead of silently queueing it. */
+  queueBusy?: boolean;
 }>();
 const emit = defineEmits<{
   (e: "update:expand", v: ExpandFormState): void;
@@ -128,11 +132,20 @@ function pick(text: string) {
           <button
             type="button"
             class="rounded-lg bg-brand-500 px-3 py-1.5 text-sm text-white disabled:opacity-50"
-            :disabled="previewing || !prompt.trim()"
+            :disabled="previewing || !prompt.trim() || queueBusy"
+            :title="
+              queueBusy
+                ? 'Another generation is in the queue — wait for it to finish before previewing.'
+                : undefined
+            "
+            data-test="expand-preview"
             @click="preview"
           >
             {{ previewing ? "Expanding…" : "Preview" }}
           </button>
+          <span v-if="queueBusy" class="text-xs text-slate-400">
+            Queue busy — preview disabled.
+          </span>
         </div>
 
         <div v-if="previewError" class="mt-2 text-sm text-rose-300">

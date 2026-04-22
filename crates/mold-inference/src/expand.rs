@@ -14,16 +14,19 @@ use mold_core::expand::{ExpandConfig, ExpandResult, PromptExpander};
 use mold_core::expand_prompts::{build_batch_messages, build_single_messages, format_chatml};
 
 use crate::device::{
-    discover_gpus, expand_vram_threshold, memory_status_string, preflight_memory_check,
-    select_expand_device, ExpandPlacement,
+    discover_gpus, expand_vram_threshold, filter_gpus, memory_status_string,
+    preflight_memory_check, select_expand_device_with_preference, ExpandPlacement,
 };
 use crate::progress::{ProgressCallback, ProgressReporter};
+use mold_core::types::GpuSelection;
 
 /// Local prompt expander using quantized Qwen3 GGUF.
 pub struct LocalExpander {
     model_path: PathBuf,
     tokenizer_path: PathBuf,
     progress: ProgressReporter,
+    gpu_selection: GpuSelection,
+    preferred_gpu: Option<usize>,
 }
 
 impl LocalExpander {
@@ -33,12 +36,26 @@ impl LocalExpander {
             model_path: model_path.into(),
             tokenizer_path: tokenizer_path.into(),
             progress: ProgressReporter::default(),
+            gpu_selection: GpuSelection::All,
+            preferred_gpu: None,
         }
     }
 
     /// Set a progress callback for reporting device selection, loading, and generation status.
     pub fn set_on_progress(&mut self, callback: ProgressCallback) {
         self.progress.set_callback(callback);
+    }
+
+    /// Restrict local expansion to the GPU ordinals selected by the caller.
+    pub fn with_gpu_selection(mut self, gpu_selection: GpuSelection) -> Self {
+        self.gpu_selection = gpu_selection;
+        self
+    }
+
+    /// Prefer this GPU ordinal when it is allowed and has enough free VRAM.
+    pub fn with_preferred_gpu(mut self, preferred_gpu: Option<usize>) -> Self {
+        self.preferred_gpu = preferred_gpu;
+        self
     }
 
     /// Try to create a local expander by finding the model files.
@@ -124,9 +141,11 @@ impl LocalExpander {
         // Cascade: main GPU → remaining GPUs (ordinal order) → CPU.
         // `discover_gpus()` returns an empty list on CPU-only builds, which
         // lands us directly on CPU.
-        let gpus = discover_gpus();
+        let discovered = discover_gpus();
+        let gpus = filter_gpus(&discovered, &self.gpu_selection);
         let is_metal = candle_core::utils::metal_is_available();
-        let placement = select_expand_device(&gpus, threshold, is_metal);
+        let placement =
+            select_expand_device_with_preference(&gpus, threshold, is_metal, self.preferred_gpu);
 
         let device = match placement {
             ExpandPlacement::Gpu(ordinal) => {

@@ -163,16 +163,18 @@ fn generate_request_without_placement_is_none() {
 #[test]
 fn model_config_serializes_placement_section() {
     use crate::config::{Config, ModelConfig};
-    let mut mc = ModelConfig::default();
-    mc.placement = Some(DevicePlacement {
-        text_encoders: DeviceRef::Cpu,
-        advanced: Some(AdvancedPlacement {
-            transformer: DeviceRef::gpu(0),
-            vae: DeviceRef::Cpu,
-            t5: Some(DeviceRef::Cpu),
-            ..Default::default()
+    let mc = ModelConfig {
+        placement: Some(DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: Some(AdvancedPlacement {
+                transformer: DeviceRef::gpu(0),
+                vae: DeviceRef::Cpu,
+                t5: Some(DeviceRef::Cpu),
+                ..Default::default()
+            }),
         }),
-    });
+        ..Default::default()
+    };
     let mut cfg = Config::default();
     cfg.models.insert("flux-dev:q4".to_string(), mc);
 

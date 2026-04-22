@@ -291,21 +291,104 @@ impl Ltx2VaeLatentStats {
 pub struct Ltx2RuntimeSession {
     device: Option<candle_core::Device>,
     prompt_encoder: Option<NativePromptEncoder>,
+    /// Cached output of the last successful `encode_prompt_pair_with_unconditional`
+    /// call. The prompt encoder is intentionally consumed during the first
+    /// `prepare()` so its VRAM can be freed for the transformer (see the
+    /// `take()` + drop pattern below); that leaves subsequent `prepare()`
+    /// calls on the same session with no encoder. For the render-chain
+    /// path every stage shares the same prompt tokens, so we cache the
+    /// encoding after the first encode and reuse it on follow-up stages —
+    /// no re-encode, no encoder re-load, no VRAM re-hit.
+    cached_prompt_encoding: Option<CachedPromptEncoding>,
+    /// Optional slot wired into `render_real_distilled_av` so
+    /// `Ltx2Engine::render_chain_stage` can snapshot the pre-VAE-decode
+    /// final latents and forward them to the next chain stage as a
+    /// [`super::chain::ChainTail`]. `None` outside chain flow.
+    pub(crate) tail_capture: Option<std::sync::Arc<std::sync::Mutex<Option<Tensor>>>>,
+    /// GPU ordinal inherited from `Ltx2Engine`. Used for the deferred CUDA
+    /// device creation in `prepare()` and for post-OOM context reset.
+    gpu_ordinal: usize,
+}
+
+/// Remembers the last `encode_prompt_pair_with_unconditional` call so
+/// successive `prepare()` calls with the same prompt can skip the encoder
+/// entirely — used by the render-chain path where stages share a prompt.
+struct CachedPromptEncoding {
+    token_pair: super::text::gemma::EncodedPromptPair,
+    encode_unconditional: bool,
+    encoding: NativePromptEncoding,
+    prompt_device_is_cuda: bool,
+    prepared_device: candle_core::Device,
 }
 
 impl Ltx2RuntimeSession {
-    pub fn new(device: candle_core::Device, prompt_encoder: NativePromptEncoder) -> Self {
+    pub fn new(
+        device: candle_core::Device,
+        prompt_encoder: NativePromptEncoder,
+        gpu_ordinal: usize,
+    ) -> Self {
         Self {
             device: Some(device),
             prompt_encoder: Some(prompt_encoder),
+            cached_prompt_encoding: None,
+            tail_capture: None,
+            gpu_ordinal,
         }
     }
 
-    pub fn new_deferred_cuda(prompt_encoder: NativePromptEncoder) -> Self {
+    pub fn new_deferred_cuda(prompt_encoder: NativePromptEncoder, gpu_ordinal: usize) -> Self {
         Self {
             device: None,
             prompt_encoder: Some(prompt_encoder),
+            cached_prompt_encoding: None,
+            tail_capture: None,
+            gpu_ordinal,
         }
+    }
+
+    /// Arm the pre-VAE-decode latent capture slot. The distilled render
+    /// path writes its `final_video_latents` into the returned slot when
+    /// this is set, letting a caller drain the raw latents after a render
+    /// completes. Kept after the v1.1 decoded-pixel-carryover switch in
+    /// case future work (e.g. quality-diagnostic tooling) wants access
+    /// to the pre-decode tensor; the production chain path no longer
+    /// arms it.
+    #[allow(dead_code)]
+    pub(crate) fn arm_tail_capture(&mut self) -> std::sync::Arc<std::sync::Mutex<Option<Tensor>>> {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.tail_capture = Some(std::sync::Arc::clone(&slot));
+        slot
+    }
+
+    /// Disarm the latent capture slot. See [`arm_tail_capture`].
+    #[allow(dead_code)]
+    pub(crate) fn clear_tail_capture(&mut self) {
+        self.tail_capture = None;
+    }
+
+    /// Whether this session can serve `plan` without a rebuild. Returns
+    /// `true` if the encoder is still available OR the cached encoding
+    /// matches the plan's prompt tokens. Callers use this to decide
+    /// whether to reuse a persisted runtime (fast path — keeps transformer
+    /// and VAE warm) or drop it and build a fresh one (the only way to
+    /// recover when the encoder has been consumed on a prior `prepare()`
+    /// and a different prompt arrives).
+    pub fn can_reuse_for(&self, plan: &Ltx2GeneratePlan) -> bool {
+        if self.prompt_encoder.is_some() {
+            return true;
+        }
+        let Ok(encode_unconditional) = prompt_requires_unconditional_context(plan) else {
+            return false;
+        };
+        // Alt-prompt debug mode requires the live encoder; cache alone
+        // isn't sufficient.
+        if ltx_debug_alt_prompt().is_some() {
+            return false;
+        }
+        self.cached_prompt_encoding.as_ref().is_some_and(|cached| {
+            cached.encode_unconditional == encode_unconditional
+                && cached.token_pair == plan.prompt_tokens
+        })
     }
 
     pub fn prepare(&mut self, plan: &Ltx2GeneratePlan) -> Result<NativePreparedRun> {
@@ -334,7 +417,31 @@ impl Ltx2RuntimeSession {
             stage1_shape.width = implicit_x2_shape.width;
             stage1_shape.height = implicit_x2_shape.height;
         }
-        let (prompt_device_is_cuda, prepared_device, prompt, debug_alt_prompt) = {
+        let encode_unconditional_prompt = prompt_requires_unconditional_context(plan)?;
+        let alt_prompt_env = ltx_debug_alt_prompt();
+        // Chain path fast-path: if a previous `prepare()` already encoded
+        // the exact same prompt+unconditional combo, reuse those embeddings
+        // instead of demanding the encoder back. Disabled when the
+        // `MOLD_LTX_DEBUG_ALT_PROMPT` debug hook is active because that branch
+        // still needs the live encoder.
+        let cache_hit = alt_prompt_env.is_none()
+            && self.cached_prompt_encoding.as_ref().is_some_and(|cached| {
+                cached.encode_unconditional == encode_unconditional_prompt
+                    && cached.token_pair == plan.prompt_tokens
+            });
+        let (prompt_device_is_cuda, prepared_device, prompt, debug_alt_prompt) = if cache_hit {
+            let cached = self
+                .cached_prompt_encoding
+                .as_ref()
+                .expect("cache_hit implies cached_prompt_encoding is Some");
+            log_timing("prepare.prompt_pair", Instant::now());
+            (
+                cached.prompt_device_is_cuda,
+                cached.prepared_device.clone(),
+                cached.encoding.clone(),
+                None,
+            )
+        } else {
             let mut prompt_encoder = self
                 .prompt_encoder
                 .take()
@@ -346,7 +453,6 @@ impl Ltx2RuntimeSession {
                 prompt_encoder.device().clone()
             };
             let prompt_encode_start = Instant::now();
-            let encode_unconditional_prompt = prompt_requires_unconditional_context(plan)?;
             let prompt = move_prompt_encoding_to_device(
                 prompt_encoder.encode_prompt_pair_with_unconditional(
                     &plan.prompt_tokens,
@@ -356,7 +462,7 @@ impl Ltx2RuntimeSession {
             )?;
             log_timing("prepare.prompt_pair", prompt_encode_start);
             let alt_prompt_start = Instant::now();
-            let debug_alt_prompt = match ltx_debug_alt_prompt() {
+            let debug_alt_prompt = match alt_prompt_env.clone() {
                 Some(alt_prompt) => {
                     let assets =
                         super::text::gemma::GemmaAssets::discover(Path::new(&plan.gemma_root))
@@ -387,6 +493,18 @@ impl Ltx2RuntimeSession {
                 }
             }
             log_timing("prepare.prompt_debug", prompt_debug_start);
+            // Cache the encoding for the next chain stage. Dropping the
+            // encoder here (end of the else branch) still happens — we're
+            // only holding on to the `NativePromptEncoding` output, not the
+            // encoder itself, so the VRAM-free property of the original
+            // take() pattern is preserved.
+            self.cached_prompt_encoding = Some(CachedPromptEncoding {
+                token_pair: plan.prompt_tokens.clone(),
+                encode_unconditional: encode_unconditional_prompt,
+                encoding: prompt.clone(),
+                prompt_device_is_cuda,
+                prepared_device: prepared_device.clone(),
+            });
             (
                 prompt_device_is_cuda,
                 prepared_device,
@@ -397,8 +515,8 @@ impl Ltx2RuntimeSession {
         let device_handoff_start = Instant::now();
         if prompt_device_is_cuda {
             if self.device.is_none() {
-                crate::device::reclaim_gpu_memory(0);
-                self.device = Some(new_native_cuda_device()?);
+                crate::device::reclaim_gpu_memory(self.gpu_ordinal);
+                self.device = Some(new_native_cuda_device(self.gpu_ordinal)?);
             } else if let Some(device) = self.device.as_ref() {
                 if device.is_cuda() {
                     device.synchronize()?;
@@ -597,7 +715,13 @@ impl Ltx2RuntimeSession {
             return Ok(None);
         }
         let render = match plan.pipeline {
-            PipelineKind::Distilled => render_real_distilled_av(plan, prepared, device, progress),
+            PipelineKind::Distilled => render_real_distilled_av(
+                plan,
+                prepared,
+                device,
+                progress,
+                self.tail_capture.as_ref(),
+            ),
             PipelineKind::OneStage => render_real_one_stage_av(plan, prepared, device, progress),
             PipelineKind::TwoStage
             | PipelineKind::TwoStageHq
@@ -841,8 +965,8 @@ fn overlay_alpha(overlay: &ConditioningOverlay, frame_idx: u32, total_frames: u3
 }
 
 #[cfg(feature = "cuda")]
-fn new_native_cuda_device() -> Result<candle_core::Device> {
-    let device = candle_core::Device::new_cuda(0)?;
+fn new_native_cuda_device(ordinal: usize) -> Result<candle_core::Device> {
+    let device = candle_core::Device::new_cuda(ordinal)?;
     let cuda = device.as_cuda_device()?;
     if cuda.is_event_tracking() {
         unsafe {
@@ -853,7 +977,7 @@ fn new_native_cuda_device() -> Result<candle_core::Device> {
 }
 
 #[cfg(not(feature = "cuda"))]
-fn new_native_cuda_device() -> Result<candle_core::Device> {
+fn new_native_cuda_device(_ordinal: usize) -> Result<candle_core::Device> {
     anyhow::bail!("CUDA backend is unavailable in this build")
 }
 
@@ -1219,17 +1343,36 @@ fn maybe_load_stage_video_conditioning(
     dtype: DType,
     include_reference_video: bool,
 ) -> Result<StageVideoConditioning> {
-    if plan.conditioning.images.is_empty() && !include_reference_video {
+    if plan.conditioning.images.is_empty()
+        && plan.conditioning.latents.is_empty()
+        && !include_reference_video
+    {
         return Ok(StageVideoConditioning::default());
     }
 
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
-    vae.use_tiling = false;
-    vae.use_framewise_decoding = false;
+    // The VAE is needed for staged images, reference video ingest, and —
+    // on chain continuations — re-encoding the emitting stage's trailing
+    // RGB frames into a proper-slot-semantics conditioning latent. Every
+    // StagedLatent now carries RGB frames, so any non-empty
+    // plan.conditioning.latents implies a VAE load.
+    let need_vae = !plan.conditioning.images.is_empty()
+        || include_reference_video
+        || !plan.conditioning.latents.is_empty();
+    let mut vae = if need_vae {
+        let mut loaded = load_ltx2_video_vae(plan, device, dtype)?;
+        loaded.use_tiling = false;
+        loaded.use_framewise_decoding = false;
+        Some(loaded)
+    } else {
+        None
+    };
 
     let patchifier = VideoLatentPatchifier::new(1);
     let mut conditioning = StageVideoConditioning::default();
     for image in &plan.conditioning.images {
+        let vae = vae.as_mut().expect(
+            "need_vae guarantees the VAE is loaded whenever plan.conditioning.images is non-empty",
+        );
         let bytes = std::fs::read(&image.path).with_context(|| {
             format!(
                 "failed to read staged LTX-2 conditioning image '{}'",
@@ -1271,7 +1414,52 @@ fn maybe_load_stage_video_conditioning(
                 )?);
         }
     }
+    // Chain carryover: every StagedLatent is a contiguous RGB window from
+    // the end of the emitting stage. Re-encoding on the receiving side
+    // (rather than slicing the emitting stage's final latent tensor) keeps
+    // slot semantics aligned with the receiving clip's time axis — slot 0
+    // is a proper causal 1-pixel encoding, slot 1+ are proper 8-pixel
+    // continuation encodings, with no ambiguity about which latent slot
+    // corresponds to which pixel-frame range.
+    for staged in &plan.conditioning.latents {
+        if staged.tail_rgb_frames.is_empty() {
+            anyhow::bail!(
+                "StagedLatent has an empty tail_rgb_frames; at least one frame is required"
+            );
+        }
+        let vae = vae.as_mut().expect(
+            "need_vae guarantees the VAE is loaded whenever plan.conditioning.latents is non-empty",
+        );
+        let video = video_tensor_from_frames(&staged.tail_rgb_frames, device, dtype)
+            .context("encode chain tail RGB frames into pixel tensor for carryover")?;
+        let latents = vae
+            .encode(&video)
+            .context("failed to encode chain tail RGB frames through the LTX-2 video VAE")?
+            .to_dtype(DType::F32)?;
+        let use_guiding_latent = matches!(plan.pipeline, PipelineKind::Keyframe);
+        if staged.frame == 0 && !use_guiding_latent {
+            let tokens = patchifier.patchify(&latents)?;
+            conditioning.replacements.push(VideoTokenReplacement {
+                start_token: 0,
+                tokens,
+                strength: staged.strength as f64,
+            });
+        } else {
+            conditioning
+                .appended
+                .push(append_condition_from_video_latents(
+                    &latents,
+                    pixel_shape,
+                    staged.frame,
+                    1,
+                    staged.strength as f64,
+                )?);
+        }
+    }
     if include_reference_video {
+        let vae = vae.as_mut().expect(
+            "need_vae guarantees the VAE is loaded whenever include_reference_video is true",
+        );
         let video_path = plan.conditioning.video_path.as_ref().with_context(|| {
             format!(
                 "native {:?} stage requested reference video conditioning without a staged source_video",
@@ -1379,6 +1567,36 @@ fn apply_video_token_replacements(
     Ok(patched)
 }
 
+/// Build the "clean reference" tensor used by the denoise mask blend at every
+/// step. For replacement-based conditioning (e.g. i2v source image) with
+/// `strength < 1.0`, `video_latents` already holds `noise*(1-s) + source*s` at
+/// the replacement positions. If we reuse that as the clean target, the
+/// denoise-mask blend pulls those tokens toward a noisy ghost of the image at
+/// every step — the first latent frame never converges to the pure source.
+///
+/// Re-applying the replacements with strength 1.0 overwrites those positions
+/// with the pure source tokens, leaving appended keyframe tokens (already
+/// full-strength in `apply_appended_video_conditioning`) and pure-noise
+/// regions untouched.
+fn clean_latents_for_conditioning(
+    video_latents: &Tensor,
+    conditioning: &StageVideoConditioning,
+) -> Result<Tensor> {
+    if conditioning.replacements.is_empty() {
+        return Ok(video_latents.clone());
+    }
+    let hard_replacements: Vec<VideoTokenReplacement> = conditioning
+        .replacements
+        .iter()
+        .map(|replacement| VideoTokenReplacement {
+            start_token: replacement.start_token,
+            tokens: replacement.tokens.clone(),
+            strength: 1.0,
+        })
+        .collect();
+    apply_video_token_replacements(video_latents, &hard_replacements)
+}
+
 fn apply_appended_video_conditioning(
     video_latents: &Tensor,
     video_positions: &Tensor,
@@ -1454,9 +1672,10 @@ fn reapply_stage_video_conditioning(
 
     let mut parts = vec![base];
     for condition in &conditioning.appended {
-        if condition.strength < 1.0 {
-            continue;
-        }
+        // Appended conditioning tokens must remain present for the whole
+        // denoise loop. Their strength is expressed via the denoise mask;
+        // dropping "soft" appended tokens here desynchronizes the token
+        // count from the cached clean latents and mask tensors.
         parts.push(
             condition
                 .tokens
@@ -1650,6 +1869,7 @@ fn render_real_distilled_av(
     prepared: &NativePreparedRun,
     device: &candle_core::Device,
     progress: Option<&ProgressCallback>,
+    tail_capture: Option<&std::sync::Arc<std::sync::Mutex<Option<Tensor>>>>,
 ) -> Result<NativeRenderedVideo> {
     let debug_enabled = ltx_debug_enabled();
     let prompt_inputs = prepare_render_prompt_inputs(
@@ -1934,6 +2154,16 @@ fn render_real_distilled_av(
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let decode_start = Instant::now();
+    // Chain-stage hook: capture the pre-decode F32 latents so
+    // `Ltx2Engine::render_chain_stage` can narrow the tail off for the next
+    // stage's conditioning. Cheap shallow clone (candle tensors are
+    // Arc-backed). A poisoned mutex is ignored here — the outer caller
+    // detects an empty slot and emits a clear error.
+    if let Some(slot) = tail_capture {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(latents.clone());
+        }
+    }
     let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
     if debug_enabled {
         log_tensor_stats("decoded_video", &video)?;
@@ -2699,7 +2929,7 @@ fn run_real_distilled_stage(
     )?;
     let clean_video_latents = match video_clean_latents {
         Some(latents) => video_patchifier.patchify(latents)?,
-        None => video_latents.clone(),
+        None => clean_latents_for_conditioning(&video_latents, video_conditioning)?,
     };
     let video_denoise_mask = match video_denoise_mask {
         Some(mask) => mask.to_device(&device)?.to_dtype(DType::F32)?,
@@ -4622,14 +4852,14 @@ mod tests {
 
     use super::{
         apply_stage_video_conditioning, apply_video_token_replacements,
-        build_video_conditioning_self_attention_mask, convert_velocity_to_x0,
-        convert_x0_to_velocity, decoded_video_to_frames, effective_native_guidance_scale,
-        emit_denoise_progress, guided_velocity_from_cfg, keyframe_only_conditioning,
-        ltx2_video_transformer_config, reapply_stage_video_conditioning,
-        should_inspect_step_velocity, source_image_only_conditioning,
-        strip_appended_video_conditioning, Ltx2RuntimeSession, StageVideoConditioning,
-        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
-        LTX2_VIDEO_LATENT_CHANNELS,
+        build_video_conditioning_self_attention_mask, clean_latents_for_conditioning,
+        convert_velocity_to_x0, convert_x0_to_velocity, decoded_video_to_frames,
+        effective_native_guidance_scale, emit_denoise_progress, guided_velocity_from_cfg,
+        keyframe_only_conditioning, ltx2_video_transformer_config,
+        reapply_stage_video_conditioning, should_inspect_step_velocity,
+        source_image_only_conditioning, strip_appended_video_conditioning, Ltx2RuntimeSession,
+        StageVideoConditioning, VideoTokenAppendCondition, VideoTokenReplacement,
+        LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoPixelShape;
@@ -4882,7 +5112,7 @@ mod tests {
             .unwrap(),
             PaddingSide::Left,
         );
-        Ltx2RuntimeSession::new(candle_core::Device::Cpu, prompt_encoder)
+        Ltx2RuntimeSession::new(candle_core::Device::Cpu, prompt_encoder, 0)
     }
 
     fn build_plan(
@@ -5387,6 +5617,11 @@ mod tests {
 
     #[test]
     fn runtime_session_prepare_consumes_prompt_encoder() {
+        // The encoder is still consumed on first prepare() — the encoder
+        // slot moves out to free VRAM for the transformer. But same-prompt
+        // follow-up calls now short-circuit through `cached_prompt_encoding`
+        // so chain stages that replicate the prompt can reuse the session
+        // instead of erroring on a consumed encoder.
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -5396,7 +5631,39 @@ mod tests {
         let mut session = runtime_session();
         session.prepare(&plan).unwrap();
 
-        assert!(session.prepare(&plan).is_err());
+        // Encoder slot is empty post-take.
+        assert!(session.prompt_encoder.is_none());
+        // But `can_reuse_for` reports true because the cached encoding
+        // matches the incoming plan's prompt tokens.
+        assert!(session.can_reuse_for(&plan));
+        // Same-prompt re-prepare succeeds from the cache.
+        session
+            .prepare(&plan)
+            .expect("same-prompt cache hit must succeed");
+    }
+
+    #[test]
+    fn runtime_session_prepare_rejects_encoder_reuse_with_different_prompt() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+
+        let mut session = runtime_session();
+        session.prepare(&plan).unwrap();
+
+        // Mutate the plan's prompt tokens so the cache key misses.
+        let mut plan_alt = plan.clone();
+        plan_alt.prompt_tokens.conditional.input_ids[0] =
+            plan_alt.prompt_tokens.conditional.input_ids[0].wrapping_add(1);
+
+        // can_reuse_for must report false for a fresh prompt because the
+        // encoder has already been consumed.
+        assert!(!session.can_reuse_for(&plan_alt));
+        // And prepare() with the new plan fails explicitly so the caller
+        // knows to drop the session and rebuild.
+        assert!(session.prepare(&plan_alt).is_err());
     }
 
     #[test]
@@ -5691,6 +5958,109 @@ mod tests {
             stripped.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             vec![7.0, 8.0, 1.0, 1.0]
         );
+    }
+
+    #[test]
+    fn reapply_stage_video_conditioning_keeps_soft_appended_tokens() {
+        let latents =
+            Tensor::from_vec(vec![0.0f32, 0.0, 1.0, 1.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let conditioning = StageVideoConditioning {
+            replacements: vec![],
+            appended: vec![VideoTokenAppendCondition {
+                tokens: Tensor::from_vec(vec![9.0f32, 10.0], (1, 1, 2), &Device::Cpu).unwrap(),
+                positions: Tensor::from_vec(vec![30.0f32, 40.0, 50.0], (1, 3, 1, 1), &Device::Cpu)
+                    .unwrap(),
+                strength: 0.4,
+            }],
+        };
+
+        let reapplied = reapply_stage_video_conditioning(&latents, 2, &conditioning).unwrap();
+        assert_eq!(reapplied.dims3().unwrap(), (1, 3, 2));
+        assert_eq!(
+            reapplied.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![0.0, 0.0, 1.0, 1.0, 9.0, 10.0]
+        );
+    }
+
+    #[test]
+    fn clean_latents_replace_soft_blended_positions_with_pure_source() {
+        // Simulate the state after `apply_stage_video_conditioning` with
+        // strength 0.75: at the replacement positions, `video_latents` already
+        // holds `noise*0.25 + source*0.75`. The denoise-mask blend uses
+        // `clean_latents` as the target it pulls those positions toward at
+        // every step — so the clean target must be pure source, not the
+        // pre-blended mix.
+        let noise = [0.0f32, 0.0, 1.0, 1.0, 2.0, 2.0];
+        let source = [10.0f32, 10.0];
+        let strength = 0.75f32;
+        let blended_first = [
+            noise[0] * (1.0 - strength) + source[0] * strength,
+            noise[1] * (1.0 - strength) + source[1] * strength,
+        ];
+        let soft_blended = Tensor::from_vec(
+            vec![
+                blended_first[0],
+                blended_first[1],
+                noise[2],
+                noise[3],
+                noise[4],
+                noise[5],
+            ],
+            (1, 3, 2),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let conditioning = StageVideoConditioning {
+            replacements: vec![VideoTokenReplacement {
+                start_token: 0,
+                tokens: Tensor::from_vec(source.to_vec(), (1, 1, 2), &Device::Cpu).unwrap(),
+                strength: strength as f64,
+            }],
+            appended: vec![],
+        };
+
+        let clean = clean_latents_for_conditioning(&soft_blended, &conditioning).unwrap();
+        let values = clean.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+        assert_eq!(
+            values,
+            vec![source[0], source[1], noise[2], noise[3], noise[4], noise[5]],
+            "soft-blended replacement positions must be overwritten with the pure \
+             source tokens; other positions must be preserved unchanged"
+        );
+    }
+
+    #[test]
+    fn clean_latents_passthrough_when_no_replacements() {
+        let latents =
+            Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let conditioning = StageVideoConditioning::default();
+
+        let clean = clean_latents_for_conditioning(&latents, &conditioning).unwrap();
+        assert_eq!(
+            clean.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![0.0, 1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn staged_latent_patchifies_to_same_token_shape_as_image_at_single_latent_frame() {
+        // A 4-pixel-frame motion tail at 1216×704 output lands on a latent
+        // block of shape [1, 128, 1, 22, 38]. The render-chain orchestrator
+        // produces this block from the prior stage's denoise result; the
+        // image-conditioning path produces the same shape after VAE encode.
+        // Both must patchify to [1, T*H*W, C] = [1, 1*22*38, 128] tokens so
+        // the downstream replacement pass sees them identically regardless
+        // of which path produced them.
+        let latents = Tensor::zeros(
+            (1, LTX2_VIDEO_LATENT_CHANNELS, 1, 22, 38),
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let patchifier = super::VideoLatentPatchifier::new(1);
+        let tokens = patchifier.patchify(&latents).expect("patchify");
+        assert_eq!(tokens.dims(), &[1, 22 * 38, LTX2_VIDEO_LATENT_CHANNELS]);
     }
 
     #[test]

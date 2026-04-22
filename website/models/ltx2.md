@@ -96,6 +96,87 @@ mold run ltx-2.3-22b-distilled:fp8 \
   --format mp4
 ```
 
+## Chained video output
+
+The LTX-2 distilled pipeline maxes out at 97 pixel frames per clip (13 latent
+frames after the VAE's 8× temporal compression — `8 × 12 + 1 = 97` satisfies the
+`8k+1` frame-grid constraint). For anything longer, mold renders a _chain_: the
+request is split into N sub-clips, each generated back-to-back, and stitched
+into a single MP4 at the end. mold keeps the last few frames of clip _N_'s
+final latents in memory and threads them directly into clip _N+1_'s
+conditioning, skipping a VAE encode/decode round-trip so the continuation
+stays visually coherent.
+
+`mold run` routes automatically: when `--frames` is `≤ 97` you stay on the
+single-clip path; above 97 the request is rewritten into a chain and dispatched
+to the new `/api/generate/chain/stream` endpoint. Chaining is supported for
+LTX-2 19B and 22B distilled today. Other model families reject
+`--frames > 97` with an actionable error rather than silently over-producing.
+
+```console
+$ mold run ltx-2-19b-distilled:fp8 "a cat walking through autumn leaves" \
+    --image cat.png --frames 400
+
+→ Chain mode: 400 frames → 5 stages × 97 frames (tail 4)
+Chain [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 385/385 frames (stages 5)
+  Stage 1  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 8/8 steps
+  Stage 2  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 8/8 steps
+  Stage 3  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 8/8 steps
+  Stage 4  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 8/8 steps
+  Stage 5  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 8/8 steps
+✓ Saved: mold-ltx-2-19b-distilled-<ts>.mp4 (400 frames, 1216x704, 24 fps)
+✓ Done — ltx-2-19b-distilled:fp8 in 226.8s (400 frames, seed: 42)
+```
+
+### Motion-tail carryover
+
+`--motion-tail N` (default 4) controls how many trailing pixel frames of each
+clip are reused as latent-space conditioning for the next. Instead of decoding
+the prior clip's last frame back to RGB and re-encoding it through the VAE as
+a new `source_image`, mold narrows the final denoise tensor along its time
+axis and patchifies those latent tokens directly into the next stage's
+`StageVideoConditioning` — so the handoff never leaves latent space. At stitch
+time, every stage after the first drops its leading `N` output frames because
+those are the overlap region shared with the prior clip.
+
+- `--motion-tail 0` — hard concatenation, no overlap. Visible seams are common
+  at clip boundaries; useful when you _want_ discrete shots.
+- `--motion-tail 4` — the default. One latent frame of carryover at `fps=24`
+  gives the transformer enough temporal context to continue motion, object
+  identity, and lighting across the seam without wasting new frames.
+- Higher values buy more seam-smoothing at the cost of fewer fresh pixel
+  frames per clip. Must stay strictly below `--clip-frames`.
+
+### Flags
+
+| Flag              | Default          | Description                                                                          |
+| ----------------- | ---------------- | ------------------------------------------------------------------------------------ |
+| `--frames N`      | model default    | Total stitched length. Above the per-clip cap (97 for LTX-2 distilled), auto-chains. |
+| `--clip-frames N` | model cap (`97`) | Per-clip length. Must be `8k+1`; values above the cap are clamped with a warning.    |
+| `--motion-tail N` | `4`              | Pixel-frame overlap between clips. `0` disables carryover.                           |
+
+When the final clip over-produces (stage math rarely lands exactly on
+`total_frames`), mold trims from the tail so the user-anchored starting image
+at the head stays intact.
+
+### v1 constraints
+
+- **LTX-2 19B and 22B distilled only.** Other LTX-2 / LTX-Video variants and
+  every image-family model reject `--frames` above their single-clip budget.
+- **Single GPU per chain.** Every stage runs on the GPU the engine was loaded
+  onto — multi-GPU stage fan-out is a v2 movie-maker feature.
+- **Fail-closed.** If any stage errors, the whole chain returns `502` and
+  nothing is written to the gallery. There is no partial-resume in v1.
+- **Single prompt per chain from the CLI.** The server already accepts
+  per-stage prompts (see [`POST /api/generate/chain`](/api/#api-generate-chain)),
+  but `mold run` replicates one prompt across every stage for now.
+
+The rest of the LTX-2 surface — `--image`, `--audio-file`, `--lora`,
+`--camera-control`, `--spatial-upscale`, `--temporal-upscale`, and so on —
+applies to chain renders the same way it applies to single-clip renders. An
+`--image` supplied on the CLI lands on `stages[0]` and is carried forward by
+the motion-tail latents from there.
+
 ## Example Clips
 
 Here are a few longer LTX-2 examples rendered with mold. The docs page embeds

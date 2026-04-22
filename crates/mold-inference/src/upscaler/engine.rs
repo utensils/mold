@@ -75,16 +75,26 @@ pub struct UpscalerEngine {
     loaded: Option<LoadedState>,
     progress: ProgressReporter,
     load_strategy: LoadStrategy,
+    /// GPU ordinal this engine is pinned to. Same multi-GPU footgun as
+    /// `Ltx2Engine::gpu_ordinal` — hardcoding `0` would corrupt a sibling
+    /// GPU's CUDA context on unload.
+    gpu_ordinal: usize,
 }
 
 impl UpscalerEngine {
-    pub fn new(name: String, weights_path: PathBuf, load_strategy: LoadStrategy) -> Self {
+    pub fn new(
+        name: String,
+        weights_path: PathBuf,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+    ) -> Self {
         Self {
             name,
             weights_path,
             loaded: None,
             progress: ProgressReporter::default(),
             load_strategy,
+            gpu_ordinal,
         }
     }
 
@@ -240,7 +250,7 @@ impl UpscaleEngine for UpscalerEngine {
         let load_start = Instant::now();
         self.progress.stage_start("Loading upscaler model");
 
-        let device = create_device(0, &self.progress)?;
+        let device = create_device(self.gpu_ordinal, &self.progress)?;
 
         // Determine dtype: prefer F16 on GPU, F32 on CPU
         let dtype = if matches!(device, Device::Cpu) {
@@ -317,7 +327,7 @@ impl UpscaleEngine for UpscalerEngine {
     fn unload(&mut self) {
         if self.loaded.is_some() {
             self.loaded = None;
-            crate::reclaim_gpu_memory(0);
+            crate::reclaim_gpu_memory(self.gpu_ordinal);
             tracing::info!("Upscaler model unloaded: {}", self.name);
         }
     }
@@ -340,6 +350,7 @@ pub fn create_upscale_engine(
     model_name: String,
     weights_path: PathBuf,
     load_strategy: LoadStrategy,
+    gpu_ordinal: usize,
 ) -> Result<Box<dyn UpscaleEngine>> {
     if !weights_path.exists() {
         bail!("upscaler weights not found: {}", weights_path.display());
@@ -348,5 +359,6 @@ pub fn create_upscale_engine(
         model_name,
         weights_path,
         load_strategy,
+        gpu_ordinal,
     )))
 }

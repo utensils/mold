@@ -11,7 +11,8 @@ use std::time::Instant;
 
 use super::assets;
 use super::backend::Ltx2Backend;
-use super::conditioning;
+use super::chain::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
+use super::conditioning::{self, StagedLatent};
 use super::execution;
 use super::lora;
 use super::media::{self, ProbeMetadata};
@@ -24,6 +25,14 @@ use crate::engine::{gpu_dtype, rand_seed, InferenceEngine, LoadStrategy};
 use crate::ltx_video::video_enc;
 use crate::progress::ProgressCallback;
 
+/// Soft-conditioning strength for the cross-stage identity anchor on chain
+/// continuations. The denoise mask at the anchor token becomes
+/// `1 - strength = 0.6`, so the denoiser blends ~60% generated / ~40%
+/// reference on every step — a gentle pull toward the source image rather
+/// than a hard pin (hard-pinning a single pixel frame past the motion tail
+/// would make continuations feel like cuts back to the starting shot).
+const CHAIN_SOFT_ANCHOR_STRENGTH: f32 = 0.4;
+
 pub struct Ltx2Engine {
     model_name: String,
     paths: ModelPaths,
@@ -31,6 +40,11 @@ pub struct Ltx2Engine {
     native_runtime: Option<Ltx2RuntimeSession>,
     on_progress: Option<ProgressCallback>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// GPU ordinal this engine is pinned to. Every `Device::new_cuda` and
+    /// `reclaim_gpu_memory` call must use this ordinal — hardcoding `0` here
+    /// is what took down the process on killswitch when LTX-2 ran alongside
+    /// SD3.5 on a multi-GPU host.
+    gpu_ordinal: usize,
 }
 
 impl Ltx2Engine {
@@ -51,7 +65,12 @@ impl Ltx2Engine {
         }
     }
 
-    pub fn new(model_name: String, paths: ModelPaths, _load_strategy: LoadStrategy) -> Self {
+    pub fn new(
+        model_name: String,
+        paths: ModelPaths,
+        _load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+    ) -> Self {
         Self {
             model_name,
             paths,
@@ -59,6 +78,7 @@ impl Ltx2Engine {
             native_runtime: None,
             on_progress: None,
             pending_placement: None,
+            gpu_ordinal,
         }
     }
 
@@ -75,6 +95,7 @@ impl Ltx2Engine {
             native_runtime: Some(runtime),
             on_progress: None,
             pending_placement: None,
+            gpu_ordinal: 0,
         }
     }
 
@@ -217,7 +238,7 @@ impl Ltx2Engine {
         match backend {
             Ltx2Backend::Cuda => {
                 self.info("CUDA detected, using native LTX-2 GPU path");
-                let device = Device::new_cuda(0)?;
+                let device = Device::new_cuda(self.gpu_ordinal)?;
                 configure_native_ltx2_cuda_device(&device)?;
                 Ok(device)
             }
@@ -258,9 +279,16 @@ impl Ltx2Engine {
         )?;
         Self::log_timing("pipeline.create_runtime.load_prompt_encoder", load_start);
         if prompt_device.is_cuda() {
-            Ok(Ltx2RuntimeSession::new_deferred_cuda(prompt_encoder))
+            Ok(Ltx2RuntimeSession::new_deferred_cuda(
+                prompt_encoder,
+                self.gpu_ordinal,
+            ))
         } else {
-            Ok(Ltx2RuntimeSession::new(device, prompt_encoder))
+            Ok(Ltx2RuntimeSession::new(
+                device,
+                prompt_encoder,
+                self.gpu_ordinal,
+            ))
         }
     }
 
@@ -291,7 +319,7 @@ impl Ltx2Engine {
                 self.info(
                     "Native LTX-2 prompt path ran out of CUDA memory; retrying with CPU fallback",
                 );
-                crate::device::reclaim_gpu_memory(0);
+                crate::device::reclaim_gpu_memory(self.gpu_ordinal);
                 self.load_runtime_session_on_device(plan, Device::Cpu)
             }
             Err(err) => Err(err),
@@ -436,9 +464,16 @@ impl Ltx2Engine {
             plan.prompt_tokens.unconditional.valid_len()
         ));
         let create_runtime_start = Instant::now();
+        // Reuse a persisted runtime only if it can serve this plan. An LTX-2
+        // session consumes its prompt encoder on first `prepare()` (see
+        // runtime.rs `prepare()` — the take+drop frees VRAM for the
+        // transformer); a stale session left behind by a prior chain run
+        // survives intact for same-prompt continuations via the session-
+        // level encoding cache, but we must rebuild from scratch when the
+        // prompt changes so `prepare()` doesn't error on a consumed encoder.
         let mut runtime = match self.native_runtime.take() {
-            Some(runtime) => runtime,
-            None => self.create_runtime_session(&plan)?,
+            Some(runtime) if runtime.can_reuse_for(&plan) => runtime,
+            _ => self.create_runtime_session(&plan)?,
         };
         Self::log_timing("pipeline.create_runtime", create_runtime_start);
 
@@ -522,6 +557,160 @@ impl Ltx2Engine {
             gpu: None,
         })
     }
+
+    /// Render a single chain stage, optionally conditioning on a carryover
+    /// tail from the prior stage.
+    ///
+    /// `motion_tail_pixel_frames` is the number of pixel frames to narrow
+    /// off the emitted latents for the *next* stage's carryover. `0`
+    /// returns an error (nonsensical — use the regular single-clip path
+    /// if no tail is wanted).
+    ///
+    /// Scope: distilled LTX-2 pipeline only. Other pipeline families
+    /// return an error up-front so the chain orchestrator fails fast.
+    pub(crate) fn render_chain_stage(
+        &mut self,
+        req: &GenerateRequest,
+        carry: Option<&ChainTail>,
+        motion_tail_pixel_frames: u32,
+    ) -> Result<StageOutcome> {
+        if motion_tail_pixel_frames == 0 {
+            bail!("render_chain_stage: motion_tail_pixel_frames must be > 0");
+        }
+        if !self.loaded {
+            self.load()?;
+        }
+        let start = Instant::now();
+        self.emit("Preparing native LTX-2 chain stage");
+
+        let pipeline = self.select_pipeline(req)?;
+        if !matches!(pipeline, PipelineKind::Distilled) {
+            bail!(
+                "render-chain v1 only supports the distilled LTX-2 pipeline, got {:?}",
+                pipeline,
+            );
+        }
+
+        let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
+        let native_output = work_dir.path().join("ltx2-native-output.mp4");
+        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+
+        // Inject carryover RGB frames as a StagedLatent at frame 0. The
+        // runtime VAE-encodes them fresh on the receiving side so every
+        // resulting latent slot has correct causal/continuation semantics
+        // in this clip's own time axis (see conditioning.rs StagedLatent
+        // docstring + runtime.rs maybe_load_stage_video_conditioning).
+        //
+        // When the chain request carries a starting image (i2v flow), the
+        // orchestrator passes it through on every stage. Stage 0 uses it
+        // as the frame-0 i2v replacement — great. On continuations the
+        // motion-tail pin owns frame 0, so we re-route any frame-0 staged
+        // image to a non-zero frame with reduced "soft anchor" strength:
+        // the image becomes a durable identity reference appended to the
+        // token sequence (via the `VideoTokenAppendCondition` path in
+        // `maybe_load_stage_video_conditioning`), giving the free-region
+        // denoise a persistent cross-attention anchor for subject / scene
+        // appearance without freezing any tokens. Without this anchor,
+        // identity drift compounds stage-over-stage because each clip's
+        // only long-range reference is its own drifted last-frame carry.
+        if let Some(tail) = carry {
+            if tail.tail_rgb_frames.is_empty() {
+                bail!(
+                    "render_chain_stage: carry.tail_rgb_frames is empty; caller must provide at least one frame"
+                );
+            }
+
+            // Re-route any frame-0 staged image into the soft-anchor
+            // append slot. The anchor frame is the first pixel past the
+            // motion-tail pin, so the reference token's RoPE sits exactly
+            // where new content starts — cross-attention propagates
+            // identity into the free region most directly from there.
+            // `CHAIN_SOFT_ANCHOR_STRENGTH = 0.4` gives the denoise mask a
+            // value of `1 - 0.4 = 0.6` at the anchor token, so the
+            // denoiser blends ~60% generated / ~40% reference every step.
+            let anchor_frame = motion_tail_pixel_frames;
+            for image in plan.conditioning.images.iter_mut() {
+                if image.frame == 0 {
+                    image.frame = anchor_frame;
+                    image.strength = CHAIN_SOFT_ANCHOR_STRENGTH;
+                }
+            }
+
+            plan.conditioning.latents.push(StagedLatent {
+                tail_rgb_frames: tail.tail_rgb_frames.clone(),
+                frame: 0,
+                strength: 1.0,
+            });
+        }
+
+        // Reuse an existing runtime session if we have one AND it can
+        // serve this plan. Between stages of a same-prompt chain the
+        // session-level encoding cache handles the consumed-encoder
+        // invariant; if the prompt shifts (or a stale session leaked in
+        // from a prior run) we drop the runtime and rebuild so
+        // `prepare()` doesn't error on a missing encoder.
+        let mut runtime = match self.native_runtime.take() {
+            Some(runtime) if runtime.can_reuse_for(&plan) => runtime,
+            _ => self.create_runtime_session(&plan)?,
+        };
+
+        self.emit("Executing native LTX-2 chain stage runtime");
+        let prepared = match runtime.prepare(&plan) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                self.native_runtime = Some(runtime);
+                return Err(err);
+            }
+        };
+        let render_result =
+            runtime.render_native_video(&plan, &prepared, self.on_progress.as_ref());
+        self.native_runtime = Some(runtime);
+        let rendered = render_result?;
+
+        let frames = rendered.frames;
+        let tail_pixel_frames = motion_tail_pixel_frames as usize;
+        if frames.len() < tail_pixel_frames {
+            bail!(
+                "distilled render returned {} pixel frames but the chain caller requested a {}-frame tail; \
+                 this is a pipeline wiring bug",
+                frames.len(),
+                motion_tail_pixel_frames,
+            );
+        }
+        let tail_start = frames.len() - tail_pixel_frames;
+        let tail_rgb_frames = frames[tail_start..].to_vec();
+
+        let generation_time_ms = start.elapsed().as_millis() as u64;
+        Self::log_timing("pipeline.render_chain_stage", start);
+
+        Ok(StageOutcome {
+            frames,
+            tail: ChainTail {
+                frames: motion_tail_pixel_frames,
+                tail_rgb_frames,
+            },
+            generation_time_ms,
+        })
+    }
+}
+
+impl ChainStageRenderer for Ltx2Engine {
+    fn render_stage(
+        &mut self,
+        stage_req: &GenerateRequest,
+        carry: Option<&ChainTail>,
+        motion_tail_pixel_frames: u32,
+        _stage_progress: Option<&mut dyn FnMut(StageProgressEvent)>,
+    ) -> Result<StageOutcome> {
+        // `_stage_progress` is intentionally unused in v1: per-stage
+        // denoise events flow through `self.on_progress` already. Phase 2's
+        // server route will install an on_progress callback that forwards
+        // those events onto the chain SSE stream with `stage_idx` tagged
+        // in. If the orchestrator later needs denoise-step events routed
+        // through its own channel, we can plumb `stage_progress` into a
+        // temporary ProgressCallback wrapper here.
+        self.render_chain_stage(stage_req, carry, motion_tail_pixel_frames)
+    }
 }
 
 impl InferenceEngine for Ltx2Engine {
@@ -575,6 +764,10 @@ impl InferenceEngine for Ltx2Engine {
 
     fn model_paths(&self) -> Option<&ModelPaths> {
         Some(&self.paths)
+    }
+
+    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::ltx2::ChainStageRenderer> {
+        Some(self)
     }
 }
 
@@ -855,7 +1048,7 @@ mod tests {
             .unwrap(),
             PaddingSide::Left,
         );
-        Ltx2RuntimeSession::new(Device::Cpu, prompt_encoder)
+        Ltx2RuntimeSession::new(Device::Cpu, prompt_encoder, 0)
     }
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
@@ -905,6 +1098,7 @@ mod tests {
             "ltx-2.3-22b-distilled:fp8".to_string(),
             dummy_paths(),
             LoadStrategy::Sequential,
+            0,
         );
         let req = GenerateRequest {
             prompt: "test".to_string(),
@@ -966,6 +1160,7 @@ mod tests {
             "ltx-2-19b-distilled:fp8".to_string(),
             dummy_paths(),
             LoadStrategy::Sequential,
+            0,
         );
         assert_eq!(engine.request_quantization(), Some("fp8-cast".to_string()));
     }
@@ -985,6 +1180,7 @@ mod tests {
             "ltx-2-19b-distilled:fp8".to_string(),
             dummy_paths_with_gemma_root(gemma_dir.path()),
             LoadStrategy::Sequential,
+            0,
         );
         let req = GenerateRequest {
             prompt: "test".to_string(),
@@ -1052,6 +1248,7 @@ mod tests {
             "ltx-2-19b-distilled:fp8".to_string(),
             paths,
             LoadStrategy::Sequential,
+            0,
         );
 
         engine.load().unwrap();
@@ -1086,5 +1283,48 @@ mod tests {
         assert_eq!(video.fps, 12);
         assert!(!video.has_audio);
         assert!(engine.native_runtime.is_none());
+    }
+
+    #[test]
+    fn render_chain_stage_rejects_non_distilled_pipeline() {
+        // A model name without "distilled" in it selects `PipelineKind::TwoStage`
+        // via `select_pipeline`, which must be rejected up-front by the chain
+        // entry point before any runtime work happens.
+        let mut engine = Ltx2Engine::with_runtime_session(
+            "ltx-2-19b:fp8".to_string(),
+            dummy_paths(),
+            runtime_session(),
+        );
+        engine.loaded = true;
+        let req = request(OutputFormat::Mp4, Some(false));
+        let err = engine
+            .render_chain_stage(&req, None, 4)
+            .expect_err("must fail on non-distilled pipeline");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("distilled"),
+            "error must name the pipeline constraint, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn render_chain_stage_rejects_zero_motion_tail() {
+        // Zero-frame motion tail is nonsensical — it would narrow nothing off
+        // for the next stage. Fast-fail before any allocation.
+        let mut engine = Ltx2Engine::with_runtime_session(
+            "ltx-2-19b-distilled:fp8".to_string(),
+            dummy_paths(),
+            runtime_session(),
+        );
+        engine.loaded = true;
+        let req = request(OutputFormat::Mp4, Some(false));
+        let err = engine
+            .render_chain_stage(&req, None, 0)
+            .expect_err("must fail on zero motion tail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("motion_tail_pixel_frames"),
+            "error must name the motion_tail constraint, got: {msg}",
+        );
     }
 }
