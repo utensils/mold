@@ -3,10 +3,15 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui_image::picker::ProtocolType;
 use ratatui_image::{Image, Resize, StatefulImage};
 
-use crate::app::{App, GalleryViewMode};
+use crate::app::{App, GalleryEntry, GalleryViewMode};
+use crate::ui::widgets::{kv_row_line, panel_block};
 
 const CELL_W: u16 = 24;
 const CELL_H: u16 = 14;
+
+/// Height of the bottom row (Selected + Prompt panels) in the Grid view.
+/// `Min(8)` in the grid means at least one tile row is always visible.
+const GRID_BOTTOM_HEIGHT: u16 = 8;
 
 /// Compute a centered sub-rect for an image within the thumbnail area.
 ///
@@ -67,14 +72,35 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_grid(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Top: the thumbnail grid. Bottom: Selected metadata + Prompt, matching
+    // the design system's gallery wireframe. If the area is too short to
+    // accommodate the bottom row we hide it and give everything to the grid.
+    let show_bottom = area.height >= GRID_BOTTOM_HEIGHT + 6 && !app.gallery.entries.is_empty();
+    let constraints = if show_bottom {
+        vec![Constraint::Min(8), Constraint::Length(GRID_BOTTOM_HEIGHT)]
+    } else {
+        vec![Constraint::Min(1)]
+    };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    render_grid_panel(frame, app, rows[0]);
+    if show_bottom {
+        render_grid_bottom_row(frame, app, rows[1]);
+    }
+}
+
+fn render_grid_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = &app.theme;
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.border_focused())
-        .title(" Gallery ")
-        .title_style(theme.title_focused())
-        .style(Style::default().bg(theme.bg));
+    let hint = if app.gallery.entries.is_empty() {
+        None
+    } else {
+        Some(format!("{} images", app.gallery.entries.len()))
+    };
+    let block = panel_block(theme, "Gallery", true, hint.as_deref());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -134,6 +160,111 @@ fn render_grid(frame: &mut Frame, app: &mut App, area: Rect) {
 
             render_grid_cell(frame, app, cell_area, idx, is_selected);
         }
+    }
+}
+
+/// Render the Selected + Prompt panels beneath the gallery grid.
+///
+/// The row is 8 cells tall (6 content + 2 borders). Selected holds file
+/// metadata as KV rows; Prompt shows the positive prompt plus a single dim
+/// `neg: …` line for the negative prompt when present.
+fn render_grid_bottom_row(frame: &mut Frame, app: &App, area: Rect) {
+    let [selected_area, prompt_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .areas(area);
+
+    let entry = app.gallery.entries.get(app.gallery.selected);
+    render_selected_panel(frame, &app.theme, entry, selected_area);
+    render_prompt_panel(frame, &app.theme, entry, prompt_area);
+}
+
+fn render_selected_panel(
+    frame: &mut Frame,
+    theme: &crate::ui::theme::Theme,
+    entry: Option<&GalleryEntry>,
+    area: Rect,
+) {
+    let block = panel_block(theme, "Selected", false, None);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let Some(entry) = entry else {
+        let empty = Paragraph::new("No image selected").style(theme.dim());
+        frame.render_widget(empty, inner);
+        return;
+    };
+
+    let filename = entry.filename();
+    let dim = format!("{}×{}", entry.metadata.width, entry.metadata.height);
+    let seed = entry.metadata.seed.to_string();
+    let steps = entry.metadata.steps.to_string();
+
+    let lines = vec![
+        kv_row_line(theme, "File", &filename, 7, false),
+        kv_row_line(theme, "Model", &entry.metadata.model, 7, false),
+        kv_row_line(theme, "Dim", &dim, 7, false),
+        kv_row_line(theme, "Steps", &steps, 7, false),
+        kv_row_line(theme, "Seed", &seed, 7, true),
+    ];
+    let para = Paragraph::new(lines);
+    frame.render_widget(para, inner);
+}
+
+fn render_prompt_panel(
+    frame: &mut Frame,
+    theme: &crate::ui::theme::Theme,
+    entry: Option<&GalleryEntry>,
+    area: Rect,
+) {
+    let block = panel_block(theme, "Prompt", false, None);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let Some(entry) = entry else {
+        let empty = Paragraph::new("No image selected").style(theme.dim());
+        frame.render_widget(empty, inner);
+        return;
+    };
+
+    let has_neg = entry.metadata.negative_prompt.is_some();
+    let prompt_rows = if has_neg {
+        inner.height.saturating_sub(1).max(1)
+    } else {
+        inner.height
+    };
+
+    let prompt = Paragraph::new(entry.metadata.prompt.clone())
+        .style(Style::default().fg(theme.text))
+        .wrap(Wrap { trim: true });
+    let prompt_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: prompt_rows,
+    };
+    frame.render_widget(prompt, prompt_area);
+
+    if let (Some(neg), true) = (
+        entry.metadata.negative_prompt.as_deref(),
+        inner.height > prompt_rows,
+    ) {
+        let neg_line = Paragraph::new(format!("neg: {neg}")).style(theme.dim());
+        let neg_area = Rect {
+            x: inner.x,
+            y: inner.y + prompt_rows,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(neg_line, neg_area);
     }
 }
 
@@ -426,13 +557,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     // ── Metadata panel ────────────────────────────────────
-    let meta_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.border_focused())
-        .title(" Details ")
-        .title_style(theme.title_focused())
-        .style(Style::default().bg(theme.bg));
-
+    let meta_block = panel_block(theme, "Details", true, None);
     let meta_inner = meta_block.inner(layout[0]);
     frame.render_widget(meta_block, layout[0]);
 
@@ -565,13 +690,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(details, meta_inner);
 
     // ── Image preview ─────────────────────────────────────
-    let preview_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.border())
-        .title(" Preview ")
-        .title_style(theme.title())
-        .style(Style::default().bg(theme.bg));
-
+    let preview_block = panel_block(theme, "Preview", false, None);
     let preview_inner = preview_block.inner(layout[1]);
     frame.render_widget(preview_block, layout[1]);
 
