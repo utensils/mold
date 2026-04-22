@@ -18,15 +18,19 @@ All options are passed as environment variables:
 
 ```bash
 # Install to a custom path
-MOLD_INSTALL_DIR=/usr/local/bin curl -fsSL ... | sh
+curl -fsSL ... | MOLD_INSTALL_DIR=/usr/local/bin sh
 
 # Pin to a specific release tag (default: latest)
-MOLD_VERSION=v0.9.0 curl -fsSL ... | sh
+curl -fsSL ... | MOLD_VERSION=v0.9.0 sh
 
 # Force a GPU architecture (default: auto-detect on Linux)
-MOLD_CUDA_ARCH=sm120 curl -fsSL ... | sh   # Blackwell (RTX 50-series)
-MOLD_CUDA_ARCH=sm89  curl -fsSL ... | sh   # Ada (RTX 40-series)
+curl -fsSL ... | MOLD_CUDA_ARCH=sm120 sh   # Blackwell (RTX 50-series)
+curl -fsSL ... | MOLD_CUDA_ARCH=sm89  sh   # Ada (RTX 40-series)
 ```
+
+> **Note:** the env var has to be on the `sh` side of the pipe — with
+> `VAR=value curl ... | sh`, the variable only applies to `curl` and the
+> installer itself still sees the default.
 
 `MOLD_VERSION` accepts any tag that exists on the
 [releases page](https://github.com/utensils/mold/releases) — for example
@@ -115,8 +119,10 @@ the following assets:
 | Linux x86_64 (Ada, RTX 4090 / 40-series)       | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz`  |
 | Linux x86_64 (Blackwell, RTX 5090 / 50-series) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
 
-To install an older tag, set `MOLD_VERSION=<tag>` before running the
-installer, e.g. `MOLD_VERSION=v0.8.0 curl -fsSL ... | sh`.
+To install an older tag, put `MOLD_VERSION=<tag>` on the `sh` side of the
+pipe, e.g. `curl -fsSL ... | MOLD_VERSION=v0.8.0 sh`. Placing it on the
+`curl` side (`VAR=value curl ... | sh`) exports the variable to `curl` only;
+the installer still sees the default and installs the latest release.
 
 ## Shell Completions
 

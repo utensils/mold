@@ -20,8 +20,15 @@ use crate::ui::theme::Theme;
 pub enum BackgroundEvent {
     /// Progress update from generation or model pull.
     Progress(SseProgressEvent),
-    /// Generation completed successfully.
-    GenerationComplete(Box<GenerateResponse>),
+    /// Generation completed successfully. `from_local` is true for any
+    /// response produced by the in-process inference engine — including
+    /// Auto-mode fallbacks after the remote server goes unreachable —
+    /// so the completion handler can still write the file locally even
+    /// when `server_url` remains set.
+    GenerationComplete {
+        response: Box<GenerateResponse>,
+        from_local: bool,
+    },
     /// Generation or background task failed.
     Error(String),
     /// Gallery scan completed.
@@ -1355,6 +1362,26 @@ impl App {
     pub fn should_save_output_locally(&self) -> bool {
         if self.config.is_output_disabled() {
             return false;
+        }
+        !self.should_poll_remote()
+    }
+
+    /// Per-response variant of [`should_save_output_locally`]: in Auto
+    /// mode the backend transparently falls back to local inference when
+    /// the connected server becomes unreachable, but `server_url` is left
+    /// set so `should_save_output_locally()` — which only looks at the
+    /// mode and connection — classifies the completion as remote and
+    /// drops the file. The completion event carries `from_local`, set by
+    /// the backend on every local-path emission; when it's true we must
+    /// write the file locally even if the TUI still thinks it is
+    /// remote-connected. `is_output_disabled` still wins because the
+    /// user explicitly opted out of saving anywhere.
+    pub fn should_persist_response_locally(&self, from_local: bool) -> bool {
+        if self.config.is_output_disabled() {
+            return false;
+        }
+        if from_local {
+            return true;
         }
         !self.should_poll_remote()
     }
@@ -4192,7 +4219,10 @@ impl App {
         while let Ok(event) = self.bg_rx.try_recv() {
             match event {
                 BackgroundEvent::Progress(sse) => self.handle_progress(sse),
-                BackgroundEvent::GenerationComplete(response) => {
+                BackgroundEvent::GenerationComplete {
+                    response,
+                    from_local,
+                } => {
                     self.generate.batch_remaining = self.generate.batch_remaining.saturating_sub(1);
                     if self.generate.batch_remaining == 0 {
                         self.generate.generating = false;
@@ -4219,7 +4249,10 @@ impl App {
                     // to its own output dir, and a TUI-side write would
                     // duplicate it (with a different timestamp suffix) and
                     // surface as two tiles on the next gallery scan.
-                    let output_dir = if self.should_save_output_locally() {
+                    // The `from_local` override handles Auto-mode fallbacks
+                    // — we still want to save those locally even though
+                    // `server_url` is set.
+                    let output_dir = if self.should_persist_response_locally(from_local) {
                         let dir = self.config.effective_output_dir();
                         let _ = std::fs::create_dir_all(&dir);
                         Some(dir)
@@ -4382,7 +4415,14 @@ impl App {
                     // instead — the server's own save will surface on the
                     // next poll. In local mode this branch is skipped and
                     // the `insert(0)` below runs as before.
-                    if saved_path.as_os_str().is_empty() && self.should_poll_remote() {
+                    // Only kick off a server rescan when this response
+                    // actually came from the server. An Auto-mode local
+                    // fallback would still pass `should_poll_remote()`
+                    // (server_url is set) but there is nothing new on
+                    // the server to scan — and the scan would wipe the
+                    // local gallery entry we just inserted.
+                    if saved_path.as_os_str().is_empty() && self.should_poll_remote() && !from_local
+                    {
                         self.gallery.scanning = true;
                         self.spawn_gallery_scan();
                     }
@@ -7042,7 +7082,10 @@ mod tests {
             gpu: None,
         };
         app.bg_tx
-            .send(BackgroundEvent::GenerationComplete(Box::new(response)))
+            .send(BackgroundEvent::GenerationComplete {
+                response: Box::new(response),
+                from_local: false,
+            })
             .unwrap();
 
         // Process the event through the real handler
@@ -7883,6 +7926,46 @@ mod tests {
         app.server_url = Some("http://remote.example:7680".to_string());
         app.generate.params.inference_mode = InferenceMode::Local;
         assert!(app.should_save_output_locally());
+    }
+
+    #[tokio::test]
+    async fn should_persist_response_locally_true_for_auto_mode_local_fallback() {
+        // Codex finding: in Auto mode, the backend silently falls back to
+        // local inference when the connected server becomes unreachable.
+        // `server_url` stays set, so `should_save_output_locally()` would
+        // return false and the locally-generated image would be dropped.
+        // The per-response predicate must honour the `from_local` flag
+        // the backend attaches to the completion event.
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://remote.example:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Auto;
+
+        assert!(
+            !app.should_save_output_locally(),
+            "precondition: in Auto+connected mode the generic predicate treats this as remote"
+        );
+        assert!(
+            app.should_persist_response_locally(true),
+            "Auto-mode fallback response must still be saved locally"
+        );
+        assert!(
+            !app.should_persist_response_locally(false),
+            "genuine remote success must still skip the local write to avoid duplicates"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_persist_response_locally_respects_output_disabled() {
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+        app.generate.params.inference_mode = InferenceMode::Local;
+        app.config.output_dir = Some(String::new()); // empty string = disabled
+        assert!(app.config.is_output_disabled());
+
+        assert!(
+            !app.should_persist_response_locally(true),
+            "output disabled wins over from_local — user explicitly opted out of saving"
+        );
     }
 
     /// Gallery-delete test helper: create a real file on disk inside a

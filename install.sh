@@ -50,7 +50,7 @@ resolve_latest_tag() {
     if [ -z "${RESOLVED_TAG}" ]; then
         echo "Error: could not resolve the latest mold release from ${LATEST_URL}" >&2
         echo "  Set MOLD_VERSION=<tag> to install a specific version," >&2
-        echo "  e.g. MOLD_VERSION=v0.9.0 curl ... | sh" >&2
+        echo "  e.g. curl ... | MOLD_VERSION=v0.9.0 sh" >&2
         exit 1
     fi
     echo "${RESOLVED_TAG}"
