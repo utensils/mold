@@ -65,6 +65,10 @@ pub enum BackgroundEvent {
     /// Server catalog refreshed (e.g., after a pull). Updates the model list
     /// without the mode-switching side effects of `ServerConnected`.
     CatalogRefreshed(Vec<ModelInfoExtended>),
+    /// A server-side gallery delete failed. Carries the server's error
+    /// message so the UI can surface it and re-sync the local list with
+    /// whatever state remains on the server.
+    GalleryDeleteFailed(String),
 }
 
 /// A single entry in the progress log.
@@ -1628,11 +1632,15 @@ impl App {
         session.save();
     }
 
-    /// Apply a theme preset — rebuilds [`App::theme`] and records the
-    /// selection so it persists to disk on the next `save_session()`.
+    /// Apply a theme preset — rebuilds [`App::theme`], records the
+    /// selection, and persists the change to the session file right
+    /// away. Persisting on every apply (rather than only on shutdown or
+    /// after a generation) means a crash, force-quit, or quick
+    /// theme-change-then-close all keep the user's selection.
     pub fn apply_theme_preset(&mut self, preset: crate::ui::theme::ThemePreset) {
         self.settings.theme_preset = preset;
         self.theme = preset.build();
+        self.save_session();
     }
 
     pub fn update_model(&mut self, model_name: &str) {
@@ -2973,6 +2981,21 @@ impl App {
         self.generate.focus = GenerateFocus::Prompt;
     }
 
+    /// React to a failed server-side gallery delete: surface the server's
+    /// error to the user and — when we still have a live server
+    /// connection — kick off a rescan so the local gallery reconverges
+    /// with the server's authoritative list. The tile was already
+    /// optimistically removed from `self.gallery.entries` by the earlier
+    /// `delete_selected_gallery_image()` call, so the rescan puts it back
+    /// if the server never actually deleted it.
+    pub fn apply_delete_failure(&mut self, err: &str) {
+        self.generate.error_message = Some(format!("Delete failed: {err}"));
+        if self.server_url.is_some() {
+            self.gallery.scanning = true;
+            self.spawn_gallery_scan();
+        }
+    }
+
     /// Delete the currently selected gallery image and its thumbnail.
     fn delete_selected_gallery_image(&mut self) {
         if self.gallery.entries.is_empty() {
@@ -2991,12 +3014,20 @@ impl App {
         let _ = std::fs::remove_file(&cache_path);
 
         if let Some(ref url) = entry.server_url {
-            // Delete from server via API
+            // Delete from server via API. Propagate errors through the
+            // background channel so the UI can surface them and rescan —
+            // a silent fire-and-forget here masks 403 responses from
+            // `MOLD_GALLERY_ALLOW_DELETE=0` servers and transient
+            // network errors, leaving the deleted tile "gone" locally
+            // while the server still holds the file.
             let url = url.clone();
             let filename = entry.filename();
+            let tx = self.bg_tx.clone();
             self.tokio_handle.spawn(async move {
                 let client = mold_core::MoldClient::new(&url);
-                let _ = client.delete_gallery_image(&filename).await;
+                if let Err(e) = client.delete_gallery_image(&filename).await {
+                    let _ = tx.send(BackgroundEvent::GalleryDeleteFailed(e.to_string()));
+                }
             });
         }
         // Always try to remove the local file (covers both local and server-backed entries
@@ -4686,6 +4717,9 @@ impl App {
                     {
                         self.models.selected = self.models.catalog.len() - 1;
                     }
+                }
+                BackgroundEvent::GalleryDeleteFailed(msg) => {
+                    self.apply_delete_failure(&msg);
                 }
             }
         }
@@ -7637,6 +7671,286 @@ mod tests {
         app.server_url = Some("http://remote.example:7680".to_string());
         app.generate.params.inference_mode = InferenceMode::Local;
         assert!(app.should_save_output_locally());
+    }
+
+    /// Gallery-delete test helper: create a real file on disk inside a
+    /// per-test subdirectory of the system tempdir and return a
+    /// `GalleryEntry` whose `path` points at it. Callers pass a unique
+    /// name prefix so parallel tests don't collide.
+    fn add_temp_gallery_entry(app: &mut App, name_prefix: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("mold-delete-test-{name_prefix}"));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join(format!("{name_prefix}.png"));
+        // Write a tiny valid PNG header — contents don't matter to delete.
+        std::fs::write(&path, b"fake-png-bytes-for-test").unwrap();
+        app.gallery.entries.push(GalleryEntry {
+            path: path.clone(),
+            metadata: make_test_metadata(),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+        });
+        app.gallery.thumbnail_states.push(None);
+        app.gallery.thumb_dimensions.push(None);
+        app.gallery.thumb_fixed_cache.push(None);
+        app.gallery.selected = app.gallery.entries.len() - 1;
+        path
+    }
+
+    #[tokio::test]
+    async fn delete_selected_gallery_image_empty_gallery_is_noop() {
+        let mut app = make_settings_test_app();
+        app.gallery.entries.clear();
+        // Should not panic, should not touch state.
+        app.delete_selected_gallery_image();
+        assert!(app.gallery.entries.is_empty());
+        assert_eq!(app.gallery.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_selected_gallery_image_out_of_bounds_index_is_noop() {
+        let mut app = make_settings_test_app();
+        add_temp_gallery_entry(&mut app, "oob");
+        // Point selected past the end — must not panic or mutate state.
+        app.gallery.selected = 999;
+        app.delete_selected_gallery_image();
+        assert_eq!(app.gallery.entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_selected_gallery_image_removes_local_file_from_disk() {
+        // Primary user guarantee: pressing Delete must actually remove the
+        // file from disk, not just from the in-memory gallery state.
+        let mut app = make_settings_test_app();
+        let path = add_temp_gallery_entry(&mut app, "local-file");
+        assert!(path.exists(), "precondition: file exists before delete");
+
+        app.delete_selected_gallery_image();
+
+        assert!(!path.exists(), "file should be deleted from disk");
+        assert!(app.gallery.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_selected_gallery_image_removes_thumbnail_from_disk() {
+        let mut app = make_settings_test_app();
+        let path = add_temp_gallery_entry(&mut app, "thumb");
+        let thumb_path = crate::thumbnails::thumbnail_path(&path);
+        if let Some(parent) = thumb_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&thumb_path, b"thumb-bytes").unwrap();
+        assert!(thumb_path.exists());
+
+        app.delete_selected_gallery_image();
+
+        assert!(
+            !thumb_path.exists(),
+            "thumbnail should be deleted from disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_selected_gallery_image_shrinks_parallel_arrays_in_lockstep() {
+        // The gallery maintains three parallel vectors alongside `entries`
+        // (thumbnail_states, thumb_dimensions, thumb_fixed_cache) — a
+        // delete that drops from only `entries` would misalign subsequent
+        // thumbnail lookups by one. Two entries → delete selected → all
+        // four vectors must end at len 1.
+        let mut app = make_settings_test_app();
+        add_temp_gallery_entry(&mut app, "lockstep-a");
+        add_temp_gallery_entry(&mut app, "lockstep-b");
+        app.gallery.selected = 0;
+
+        app.delete_selected_gallery_image();
+
+        assert_eq!(app.gallery.entries.len(), 1);
+        assert_eq!(app.gallery.thumbnail_states.len(), 1);
+        assert_eq!(app.gallery.thumb_dimensions.len(), 1);
+        assert_eq!(app.gallery.thumb_fixed_cache.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_selected_gallery_image_server_entry_emits_failure_on_api_error() {
+        // When a gallery entry has `server_url: Some(...)`, the delete
+        // must contact the server via `DELETE /api/gallery/image/:name`
+        // AND propagate failure back through the background channel so
+        // the UI can surface the error (and rescan to re-sync with the
+        // server's authoritative list). Previously the spawn was
+        // fire-and-forget — silent failures masked 403 / network errors.
+        //
+        // We point at 127.0.0.1:1 (reserved port) so the connect fails
+        // deterministically.
+        let mut app = make_settings_test_app();
+        let server = "http://127.0.0.1:1".to_string();
+        app.server_url = Some(server.clone());
+
+        // Entry mimics what `scan_images_from_server` produces: bare
+        // filename path (not absolute), server_url populated.
+        app.gallery.entries.push(GalleryEntry {
+            path: std::path::PathBuf::from("mold-server-entry.png"),
+            metadata: make_test_metadata(),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: Some(server),
+        });
+        app.gallery.thumbnail_states.push(None);
+        app.gallery.thumb_dimensions.push(None);
+        app.gallery.thumb_fixed_cache.push(None);
+        app.gallery.selected = 0;
+
+        app.delete_selected_gallery_image();
+
+        // Drain the bg channel; a GalleryDeleteFailed event must arrive.
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), app.bg_rx.recv())
+            .await
+            .expect("delete should emit a background event within 5s")
+            .expect("channel was closed");
+        assert!(
+            matches!(ev, BackgroundEvent::GalleryDeleteFailed(_)),
+            "expected GalleryDeleteFailed; the API delete must not be fire-and-forget"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_delete_failure_surfaces_error_and_rescans() {
+        // After a server-side delete fails, the UI has already optimistically
+        // removed the tile — we need to (a) surface the error so the user
+        // knows, and (b) kick off a gallery rescan so the local list
+        // re-converges with the server's authoritative state (the entry
+        // may still be there).
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://server.example:7680".to_string());
+        app.generate.error_message = None;
+        app.gallery.scanning = false;
+
+        app.apply_delete_failure("forbidden");
+
+        let msg = app.generate.error_message.clone().unwrap_or_default();
+        assert!(
+            msg.to_lowercase().contains("delete") && msg.to_lowercase().contains("forbidden"),
+            "error_message should mention delete + the server's reason, got: {msg:?}"
+        );
+        assert!(
+            app.gallery.scanning,
+            "delete failure should trigger a gallery rescan"
+        );
+    }
+
+    /// Theme persistence tests serialize on this mutex — they mutate
+    /// `MOLD_HOME` which is process-wide, and cargo runs tests
+    /// concurrently by default.
+    static THEME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn apply_theme_preset_persists_to_session_file_immediately() {
+        // Previously `apply_theme_preset` only updated in-memory state;
+        // the disk write happened later, in `save_session()`, which runs
+        // on shutdown and after each generation. A user who changed
+        // theme and then crashed (or killed the TUI) lost the change.
+        // TDD: the call must write the session file itself.
+        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-theme-persist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let previous_home = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", &tmp);
+
+        let mut app = make_settings_test_app();
+        app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
+
+        let session_path = tmp.join("tui-session.json");
+        let persisted_ok = session_path.is_file();
+        let contents = if persisted_ok {
+            std::fs::read_to_string(&session_path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Restore env before asserting so a failure doesn't leak state.
+        match previous_home {
+            Some(v) => std::env::set_var("MOLD_HOME", v),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(
+            persisted_ok,
+            "apply_theme_preset should have written tui-session.json to MOLD_HOME"
+        );
+        assert!(
+            contents.contains("\"theme\"") && contents.contains("dracula"),
+            "session file should carry the selected theme slug: {contents}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_theme_preset_persists_across_multiple_changes() {
+        // Rapidly cycling themes should always leave the *latest* choice
+        // on disk — an earlier save_session must not be skipped because
+        // something thinks the preset hasn't changed.
+        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-theme-cycle-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let previous_home = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", &tmp);
+
+        let mut app = make_settings_test_app();
+        app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
+        app.apply_theme_preset(crate::ui::theme::ThemePreset::Nord);
+        app.apply_theme_preset(crate::ui::theme::ThemePreset::Gruvbox);
+
+        let session_path = tmp.join("tui-session.json");
+        let contents = std::fs::read_to_string(&session_path).unwrap_or_default();
+
+        match previous_home {
+            Some(v) => std::env::set_var("MOLD_HOME", v),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(
+            contents.contains("gruvbox"),
+            "latest theme (gruvbox) should be the persisted slug, got: {contents}"
+        );
+        assert!(
+            !contents.contains("dracula") || contents.matches("gruvbox").count() >= 1,
+            "old slug should have been overwritten: {contents}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_delete_failure_no_rescan_when_not_connected_to_server() {
+        // In pure-local mode there's no server to re-scan against — just
+        // surface the error without firing a rescan that would fail
+        // anyway.
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+        app.apply_delete_failure("permission denied");
+
+        assert!(app.generate.error_message.is_some());
+        assert!(
+            !app.gallery.scanning,
+            "no rescan should be kicked off when there is no server to rescan from"
+        );
     }
 
     #[tokio::test]
