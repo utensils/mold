@@ -879,6 +879,7 @@ pub async fn run_from_sugar(
         })
         .collect();
 
+    // LTX-2 19B/22B distilled defaults: 1216×704, 24 fps, 8 steps, 3.0 guidance.
     let req = ChainRequest {
         model: model.clone(),
         stages,
