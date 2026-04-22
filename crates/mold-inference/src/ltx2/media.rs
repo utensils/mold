@@ -699,6 +699,53 @@ fn contact_sheet_image(frames: &[RgbImage]) -> Result<RgbImage> {
     Ok(sheet)
 }
 
+/// Cross-fade the last `fade_len` frames of clip N with the first
+/// `fade_len` frames of clip N+1. Returns a new `Vec<RgbImage>` of length
+/// `fade_len` with pixel-wise linear interpolation:
+///
+/// ```text
+/// out[i] = (1 - alpha) * tail[tail.len() - fade_len + i]
+///        +      alpha  * head[i]
+/// where alpha = i / fade_len
+/// ```
+///
+/// Panics if `tail.len() < fade_len` or `head.len() < fade_len`.
+pub fn fade_boundary(
+    tail: &[image::RgbImage],
+    head: &[image::RgbImage],
+    fade_len: u32,
+) -> Vec<image::RgbImage> {
+    let n = fade_len as usize;
+    assert!(
+        tail.len() >= n && head.len() >= n,
+        "tail and head must have length >= fade_len"
+    );
+    let tail_slice = &tail[tail.len() - n..];
+    let head_slice = &head[..n];
+    let (w, h) = tail_slice[0].dimensions();
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let alpha = i as f32 / fade_len as f32;
+        let inv = 1.0 - alpha;
+        let mut blended = image::RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let a = tail_slice[i].get_pixel(x, y).0;
+                let b = head_slice[i].get_pixel(x, y).0;
+                let mixed = [
+                    (a[0] as f32 * inv + b[0] as f32 * alpha) as u8,
+                    (a[1] as f32 * inv + b[1] as f32 * alpha) as u8,
+                    (a[2] as f32 * inv + b[2] as f32 * alpha) as u8,
+                ];
+                blended.put_pixel(x, y, image::Rgb(mixed));
+            }
+        }
+        out.push(blended);
+    }
+    out
+}
+
 #[cfg(all(test, feature = "mp4"))]
 mod tests {
     use super::*;
@@ -918,5 +965,56 @@ mod tests {
         );
         assert_eq!(&wav[36..40], b"data");
         assert_eq!(u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]), 16);
+    }
+}
+
+#[cfg(test)]
+mod fade_tests {
+    use super::*;
+    use image::RgbImage;
+
+    fn solid(w: u32, h: u32, rgb: [u8; 3]) -> RgbImage {
+        let mut img = RgbImage::new(w, h);
+        for px in img.pixels_mut() {
+            *px = image::Rgb(rgb);
+        }
+        img
+    }
+
+    #[test]
+    fn fade_length_matches_requested_fade_len() {
+        let tail = vec![solid(4, 4, [255, 0, 0]); 8];
+        let head = vec![solid(4, 4, [0, 255, 0]); 8];
+        let blended = fade_boundary(&tail, &head, 8);
+        assert_eq!(blended.len(), 8);
+    }
+
+    #[test]
+    fn fade_first_frame_matches_tail() {
+        let tail = vec![solid(2, 2, [200, 0, 0]); 4];
+        let head = vec![solid(2, 2, [0, 200, 0]); 4];
+        let blended = fade_boundary(&tail, &head, 4);
+        // alpha[0] = 0/4 = 0 → pure tail
+        let p = blended[0].get_pixel(0, 0);
+        assert_eq!(p.0, [200, 0, 0]);
+    }
+
+    #[test]
+    fn fade_last_frame_is_close_to_head() {
+        let tail = vec![solid(2, 2, [200, 0, 0]); 4];
+        let head = vec![solid(2, 2, [0, 200, 0]); 4];
+        let blended = fade_boundary(&tail, &head, 4);
+        // alpha[3] = 3/4 = 0.75 → 0.25*tail + 0.75*head = [50, 150, 0]
+        let p = blended[3].get_pixel(0, 0);
+        assert!((p.0[0] as i32 - 50).abs() <= 2, "R was {}", p.0[0]);
+        assert!((p.0[1] as i32 - 150).abs() <= 2, "G was {}", p.0[1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "tail and head must have length >= fade_len")]
+    fn fade_shorter_than_fade_len_panics() {
+        let tail = vec![solid(1, 1, [0, 0, 0]); 2];
+        let head = vec![solid(1, 1, [0, 0, 0]); 2];
+        let _ = fade_boundary(&tail, &head, 4);
     }
 }
