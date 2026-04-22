@@ -724,6 +724,28 @@ async fn render_chain_progress(mut rx: tokio::sync::mpsc::UnboundedReceiver<Chai
     parent.finish_and_clear();
 }
 
+/// Placeholder — Task 3.2 fills this in. Kept as a `todo!()` for this
+/// commit so main.rs compiles against the expected signature.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_from_script(
+    _path: &std::path::Path,
+    _host: Option<String>,
+    _output: Option<String>,
+    _local: bool,
+    _dry_run: bool,
+    _no_metadata: bool,
+    _preview: bool,
+    _gpus: Option<String>,
+    _t5_variant: Option<String>,
+    _qwen3_variant: Option<String>,
+    _qwen2_variant: Option<String>,
+    _qwen2_text_encoder_mode: Option<String>,
+    _eager: bool,
+    _offload: bool,
+) -> anyhow::Result<()> {
+    anyhow::bail!("--script support is not yet implemented (Task 3.2)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

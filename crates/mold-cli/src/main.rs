@@ -461,6 +461,17 @@ Examples:
         #[arg(long, help_heading = "Server")]
         local: bool,
 
+        /// Path to a `mold.chain.v1` TOML script. When set, every other
+        /// generation flag is ignored except `--output`, `--local`, `--host`,
+        /// and `--dry-run`.
+        #[arg(long, value_name = "PATH", help_heading = "Server")]
+        script: Option<std::path::PathBuf>,
+
+        /// Parse and normalise the script without submitting. Prints the
+        /// canonical stage list and estimated total frames to stdout.
+        #[arg(long, help_heading = "Server")]
+        dry_run: bool,
+
         /// Comma-separated GPU ordinals to use for local generation (default: all)
         #[arg(long, env = "MOLD_GPUS", help_heading = "Advanced")]
         gpus: Option<String>,
@@ -1183,6 +1194,8 @@ async fn run() -> anyhow::Result<()> {
             no_metadata,
             preview,
             local,
+            script,
+            dry_run,
             gpus,
             t5_variant,
             qwen3_variant,
@@ -1214,6 +1227,26 @@ async fn run() -> anyhow::Result<()> {
             expand_model,
             upscale: _upscale, // TODO: wire into generate pipeline for post-generation upscaling
         } => {
+            if let Some(ref path) = script {
+                return commands::chain::run_from_script(
+                    path,
+                    host.clone(),
+                    output.clone(),
+                    local,
+                    dry_run,
+                    no_metadata,
+                    preview,
+                    gpus.clone(),
+                    t5_variant.clone(),
+                    qwen3_variant.clone(),
+                    qwen2_variant.clone(),
+                    qwen2_text_encoder_mode.clone(),
+                    eager,
+                    offload,
+                )
+                .await
+                .map(|_| ());
+            }
             commands::run::run(
                 model_or_prompt,
                 prompt_rest,
