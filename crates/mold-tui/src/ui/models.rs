@@ -1,19 +1,31 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 
 use crate::app::App;
+use crate::ui::widgets::{kv_row_line, panel_block};
+
+/// Number of content lines rendered by [`render_details_panel`]:
+/// name + description + blank + 4 KV rows (Family/Size/Default/HF).
+const DETAILS_LINE_COUNT: u16 = 7;
+
+/// Height reserved for the Details + Actions row at the bottom of the view.
+///
+/// Needs `DETAILS_LINE_COUNT + 2` so the panel's top/bottom borders don't
+/// clip the last two KV rows (Default + HF). A dedicated unit test guards
+/// the inequality so the constants can't drift apart silently.
+const INSPECTOR_HEIGHT: u16 = DETAILS_LINE_COUNT + 2;
 
 /// Render the Models view.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = &app.theme;
 
-    // Split into: installed table, available table, details
+    // Layout: two table panes on top, inspector row (Details + Actions) below.
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(40),
-            Constraint::Percentage(40),
-            Constraint::Length(4),
+            Constraint::Min(6),
+            Constraint::Min(6),
+            Constraint::Length(INSPECTOR_HEIGHT),
         ])
         .split(area);
 
@@ -24,55 +36,121 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .enumerate()
         .partition(|(_, m)| m.downloaded);
 
-    // Store area for mouse (use the full content area for click targeting)
     app.layout.models_table = area;
 
-    // ── Installed models ───────────────────────────────────
     render_model_table(
         frame,
         theme,
-        " Installed ",
+        "Installed",
         &installed,
         app.models.selected,
         layout[0],
         true,
     );
 
-    // ── Available models ───────────────────────────────────
     let avail_offset = installed.len();
     render_model_table(
         frame,
         theme,
-        " Available ",
+        "Available",
         &available,
         app.models.selected.wrapping_sub(avail_offset),
         layout[1],
         app.models.selected >= avail_offset,
     );
 
-    // ── Details ────────────────────────────────────────────
-    let details_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.border())
-        .title(" Details ")
-        .title_style(theme.title())
-        .style(Style::default().bg(theme.bg));
+    render_inspector_row(frame, app, layout[2]);
+}
 
-    if let Some(model) = app.models.catalog.get(app.models.selected) {
-        let line1 = format!("{} \u{2014} {}", model.name, model.defaults.description);
-        let line2 = format!(
-            "Family: {} \u{00b7} Size: {:.1}G \u{00b7} HF: {}",
-            model.family, model.size_gb, model.hf_repo,
-        );
-        let details = Paragraph::new(vec![
-            Line::from(Span::styled(line1, Style::default().fg(theme.text))),
-            Line::from(Span::styled(line2, theme.dim())),
-        ])
-        .block(details_block);
-        frame.render_widget(details, layout[2]);
-    } else {
-        frame.render_widget(Paragraph::new("").block(details_block), layout[2]);
+/// Render the Details + Actions row shown beneath the Models tables.
+fn render_inspector_row(frame: &mut Frame, app: &App, area: Rect) {
+    let [details_area, actions_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .areas(area);
+
+    render_details_panel(frame, app, details_area);
+    render_actions_panel(frame, app, actions_area);
+}
+
+fn render_details_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
+    let block = panel_block(theme, "Details", false, None);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
     }
+
+    let Some(model) = app.models.catalog.get(app.models.selected) else {
+        let empty = Paragraph::new("no matches").style(theme.dim());
+        frame.render_widget(empty, inner);
+        return;
+    };
+
+    let defaults = format!(
+        "{} steps · CFG {:.1}",
+        model.defaults.default_steps, model.defaults.default_guidance,
+    );
+    let size = format!("{:.1}G", model.size_gb);
+    let family = model.family.to_uppercase();
+
+    let lines = vec![
+        Line::from(Span::styled(
+            model.name.clone(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            model.defaults.description.clone(),
+            theme.dim(),
+        )),
+        Line::from(""),
+        kv_row_line(theme, "Family", &family, 8, false),
+        kv_row_line(theme, "Size", &size, 8, false),
+        kv_row_line(theme, "Default", &defaults, 8, false),
+        kv_row_line(theme, "HF", &model.hf_repo, 8, true),
+    ];
+    let para = Paragraph::new(lines);
+    frame.render_widget(para, inner);
+}
+
+/// Key reference for the Models view. Matches the design system's
+/// "Actions" pane — a static shortcut legend, not a clickable menu.
+fn render_actions_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
+    let block = panel_block(theme, "Actions", false, None);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let actions: &[(&str, &str, &str)] = &[
+        ("p", "Pull", "download / update"),
+        ("Enter", "Load", "load into GPU"),
+        ("u", "Unload", "free GPU memory"),
+        ("r", "Remove", "delete local weights"),
+        ("/", "Filter", "search by name"),
+    ];
+
+    let lines: Vec<Line> = actions
+        .iter()
+        .map(|(key, label, hint)| {
+            Line::from(vec![
+                Span::styled(format!("{:<6}", key), theme.status_key()),
+                Span::styled(" ", theme.param_label()),
+                Span::styled(format!("{:<8}", label), theme.param_value()),
+                Span::styled(*hint, theme.dim()),
+            ])
+        })
+        .collect();
+
+    let para = Paragraph::new(lines);
+    frame.render_widget(para, inner);
 }
 
 fn render_model_table(
@@ -84,12 +162,7 @@ fn render_model_table(
     area: Rect,
     is_active_section: bool,
 ) {
-    let border_style = if is_active_section {
-        theme.border_focused()
-    } else {
-        theme.border()
-    };
-
+    let hint = format!("{} models", models.len());
     let header = Row::new(vec![
         Cell::from("NAME").style(
             Style::default()
@@ -166,18 +239,7 @@ fn render_model_table(
         ],
     )
     .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .title(title)
-            .title_style(if is_active_section {
-                theme.title_focused()
-            } else {
-                theme.title()
-            })
-            .style(Style::default().bg(theme.bg)),
-    )
+    .block(panel_block(theme, title, is_active_section, Some(&hint)))
     .row_highlight_style(theme.list_selected())
     .highlight_symbol("> ");
 
@@ -188,3 +250,9 @@ fn render_model_table(
 
     frame.render_stateful_widget(table, area, &mut state);
 }
+
+/// Codex P3: compile-time guard that the inspector row is tall enough to
+/// fit every line `render_details_panel` emits *plus* the two-cell border.
+/// A mismatched bump to either constant fails the build instead of silently
+/// clipping the Default/HF rows at runtime.
+const _: () = assert!(INSPECTOR_HEIGHT >= DETAILS_LINE_COUNT + 2);

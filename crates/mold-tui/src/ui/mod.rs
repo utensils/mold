@@ -5,8 +5,11 @@ pub mod models;
 pub mod param_form;
 pub mod popup;
 pub mod progress;
+pub mod queue;
+pub mod recent;
 pub mod settings;
 pub mod theme;
+pub mod widgets;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Gauge, Padding, Paragraph, Tabs};
@@ -49,6 +52,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
         }
         View::Models => models::render(frame, app, layout[1]),
+        View::Queue => queue::render(frame, app, layout[1]),
         View::Settings => settings::render(frame, app, layout[1]),
     }
 
@@ -269,10 +273,10 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     "Generating..."
                 };
-                vec![("", status)]
+                generating_shortcuts(status, app.generate.focus)
             } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
                 vec![
-                    ("1-4", "Views"),
+                    ("1-5", "Views"),
                     ("Alt+\u{2190}\u{2192}", "Views"),
                     ("Enter", "Edit"),
                     ("?", "Help"),
@@ -289,11 +293,17 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                     ("?", "Help"),
                 ]
             } else {
+                let neg_label = if app.generate.negative_collapsed {
+                    "Neg+"
+                } else {
+                    "Neg-"
+                };
                 vec![
                     ("Enter", "Generate"),
                     ("^G", "Generate"),
                     ("^M", "Model"),
                     ("^R", "Seed"),
+                    ("Alt+N", neg_label),
                     ("Tab", "Focus"),
                     ("Esc", "Nav"),
                 ]
@@ -326,7 +336,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         View::Models => vec![
-            ("1-4", "Views"),
+            ("1-5", "Views"),
             ("Enter", "Select"),
             ("p", "Pull"),
             ("u", "Unload"),
@@ -334,14 +344,32 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             ("?", "Help"),
             ("q", "Quit"),
         ],
-        View::Settings => vec![
-            ("j/k", "Navigate"),
-            ("+/-", "Adjust"),
-            ("Enter", "Edit"),
+        View::Queue => vec![
+            ("1-5", "Views"),
             ("Esc", "Back"),
             ("?", "Help"),
             ("q", "Quit"),
         ],
+        View::Settings => {
+            if app.settings.focus == crate::app::SettingsFocus::Appearance {
+                vec![
+                    ("\u{2190}/\u{2192}", "Theme"),
+                    ("j", "Config"),
+                    ("Esc", "Back"),
+                    ("?", "Help"),
+                    ("q", "Quit"),
+                ]
+            } else {
+                vec![
+                    ("j/k", "Navigate"),
+                    ("+/-", "Adjust"),
+                    ("Enter", "Edit"),
+                    ("Esc", "Back"),
+                    ("?", "Help"),
+                    ("q", "Quit"),
+                ]
+            }
+        }
     };
 
     let mut spans = Vec::new();
@@ -358,4 +386,65 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let bar = Paragraph::new(Line::from(spans)).style(theme.status_bar());
     frame.render_widget(bar, area);
+}
+
+/// Build the status-bar shortcut list for the in-flight generation state.
+///
+/// When focus is still in the Prompt or Negative textarea (the typical
+/// post-submit state), plain `q` is routed to `TextArea::input` rather
+/// than the quit action — it just types `q` into the prompt. Advertising
+/// `q Quit` in that state is misleading, so the hint is dropped. Users
+/// can still bail out via `Esc` (unfocus) or `Ctrl+C` (hard quit), both
+/// of which work from any focus.
+pub(crate) fn generating_shortcuts(
+    status: &str,
+    focus: crate::app::GenerateFocus,
+) -> Vec<(&str, &str)> {
+    let mut v = vec![("", status), ("Alt+1-5", "Views"), ("Esc", "Unfocus")];
+    if !matches!(
+        focus,
+        crate::app::GenerateFocus::Prompt | crate::app::GenerateFocus::NegativePrompt
+    ) {
+        v.push(("q", "Quit"));
+    }
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::GenerateFocus;
+
+    #[test]
+    fn generating_shortcuts_hides_q_quit_in_prompt_focus() {
+        // Codex P3 reproducer: `q` while the prompt textarea holds focus
+        // just types a literal `q` because the textarea bypass list
+        // doesn't include it. Advertising "q Quit" in that state is a
+        // lie — the hint must be suppressed.
+        for focus in [GenerateFocus::Prompt, GenerateFocus::NegativePrompt] {
+            let entries = generating_shortcuts("Generating...", focus);
+            assert!(
+                !entries.iter().any(|(k, _)| *k == "q"),
+                "q Quit must not be advertised while focus={:?}",
+                focus
+            );
+            assert!(
+                entries.iter().any(|(k, _)| *k == "Esc"),
+                "Esc Unfocus must stay visible so users can escape into navigation"
+            );
+        }
+    }
+
+    #[test]
+    fn generating_shortcuts_shows_q_quit_in_navigation_focus() {
+        // In Navigation / Parameters focus `q` bypasses the textarea and
+        // actually quits — the hint is honest in these states.
+        for focus in [GenerateFocus::Navigation, GenerateFocus::Parameters] {
+            let entries = generating_shortcuts("Generating...", focus);
+            assert!(
+                entries.iter().any(|(k, d)| *k == "q" && *d == "Quit"),
+                "q Quit must be advertised in focus={focus:?} because q does quit there"
+            );
+        }
+    }
 }

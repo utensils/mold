@@ -147,19 +147,20 @@
 
           devProfile = "dev-fast";
 
-          # Fast local iteration defaults: GPU backend + preview + prompt expansion.
-          devFeatures =
-            if gpuFeature != "" then
-              "${gpuFeature},preview,expand"
-            else
-              "preview,expand";
-
           # Full shipping feature set used for release builds and feature coverage.
           releaseFeatures =
             if gpuFeature != "" then
               "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics"
             else
               "preview,discord,expand,tui,webp,mp4,metrics";
+
+          # Devshell defaults compile the full shipping feature set so that
+          # `mold tui`, `mold discord`, WebP/MP4 output, Prometheus metrics,
+          # and local prompt expansion are all available from the interactive
+          # `mold`, `serve`, and `generate` commands without the user having
+          # to know which features to flip. CI and `nix build` use the same
+          # list via `releaseFeatures`, so there's a single feature matrix.
+          devFeatures = releaseFeatures;
 
           cargoArtifacts = craneLib.buildDepsOnly (
             commonArgs
@@ -334,10 +335,13 @@
                 name = "MOLD_LTX_DEBUG";
                 value = "1";
               }
-              {
-                name = "CARGO_INCREMENTAL";
-                value = "1";
-              }
+              # `sccache` (below) refuses to run whenever `CARGO_INCREMENTAL`
+              # is set in the environment — it rejects *any* value, so we can't
+              # paper over the issue with `CARGO_INCREMENTAL=0`. The devshell
+              # therefore deliberately leaves the variable unset and relies on
+              # the project-wide `sccache` cache instead of per-crate
+              # incremental builds. Direct `cargo` users outside the devshell
+              # still get cargo's default incremental behavior.
               {
                 name = "RUSTC_WRAPPER";
                 value = "sccache";

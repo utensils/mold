@@ -22,7 +22,17 @@ That's it. Mold auto-downloads the model on first run and saves the image to you
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 ```
 
-This downloads the latest pre-built binary to `~/.local/bin/mold`. On Linux, the installer auto-detects your NVIDIA GPU and picks the right binary (RTX 40-series or RTX 50-series). macOS builds include Metal support.
+This downloads the **latest tagged release** from
+[releases/latest](https://github.com/utensils/mold/releases/latest) and
+installs it to `~/.local/bin/mold`. On Linux, the installer auto-detects your
+NVIDIA GPU and picks the right binary (RTX 40-series or RTX 50-series). macOS
+builds include Metal support.
+
+Pin a specific version with `MOLD_VERSION`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_VERSION=v0.9.0 sh
+```
 
 <details>
 <summary>Other install methods</summary>

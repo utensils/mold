@@ -20,8 +20,15 @@ use crate::ui::theme::Theme;
 pub enum BackgroundEvent {
     /// Progress update from generation or model pull.
     Progress(SseProgressEvent),
-    /// Generation completed successfully.
-    GenerationComplete(Box<GenerateResponse>),
+    /// Generation completed successfully. `from_local` is true for any
+    /// response produced by the in-process inference engine — including
+    /// Auto-mode fallbacks after the remote server goes unreachable —
+    /// so the completion handler can still write the file locally even
+    /// when `server_url` remains set.
+    GenerationComplete {
+        response: Box<GenerateResponse>,
+        from_local: bool,
+    },
     /// Generation or background task failed.
     Error(String),
     /// Gallery scan completed.
@@ -65,6 +72,10 @@ pub enum BackgroundEvent {
     /// Server catalog refreshed (e.g., after a pull). Updates the model list
     /// without the mode-switching side effects of `ServerConnected`.
     CatalogRefreshed(Vec<ModelInfoExtended>),
+    /// A server-side gallery delete failed. Carries the server's error
+    /// message so the UI can surface it and re-sync the local list with
+    /// whatever state remains on the server.
+    GalleryDeleteFailed(String),
 }
 
 /// A single entry in the progress log.
@@ -81,6 +92,12 @@ pub enum ProgressStyle {
     Warning,
     Error,
 }
+
+/// Cap the Timeline log to avoid unbounded growth during long runs (e.g.
+/// multi-hour video generations push hundreds of weight-load / download /
+/// denoise entries). The Timeline panel only ever shows the tail, so older
+/// rows are invisible — dropping them is a pure memory win.
+pub(crate) const MAX_LOG_ENTRIES: usize = 500;
 
 /// Current progress state during generation.
 #[derive(Debug, Default)]
@@ -105,6 +122,19 @@ pub struct ProgressState {
     pub download_total_files: usize,
     pub downloading: bool,
     download_samples: VecDeque<(u64, u64)>,
+    /// Wall-clock start of the current generation. Set by
+    /// [`ProgressState::mark_generation_start`] when the user triggers a
+    /// run and cleared when generation finishes. Drives the always-visible
+    /// "Overall" row in the Timeline panel.
+    pub generation_started_at: Option<std::time::Instant>,
+    /// Wall-clock start of the currently-active pipeline stage.
+    /// Set on each `StageStart` event, cleared on the matching `StageDone`
+    /// (or when generation finishes). Drives the per-stage elapsed suffix
+    /// appended to the spinner row.
+    pub stage_started_at: Option<std::time::Instant>,
+    /// One-based index of the currently-active pipeline stage — useful when
+    /// we want to show "step N" without knowing the total up front.
+    pub stage_index: usize,
 }
 
 impl ProgressState {
@@ -129,6 +159,41 @@ impl ProgressState {
         self.download_total_files = 0;
         self.downloading = false;
         self.download_samples.clear();
+        self.generation_started_at = None;
+        self.stage_started_at = None;
+        self.stage_index = 0;
+    }
+
+    /// Mark the start of a new generation — called from `start_generation`
+    /// right after the rest of the progress state is cleared. Stamping the
+    /// start here keeps the "Overall" Timeline row accurate even before any
+    /// SSE events arrive from the server.
+    pub fn mark_generation_start(&mut self) {
+        self.generation_started_at = Some(std::time::Instant::now());
+        self.stage_started_at = None;
+        self.stage_index = 0;
+    }
+
+    /// Wall-clock duration since [`mark_generation_start`], or `None` if a
+    /// generation isn't in flight.
+    pub fn generation_elapsed(&self) -> Option<std::time::Duration> {
+        self.generation_started_at.map(|t| t.elapsed())
+    }
+
+    /// Wall-clock duration since the active stage began.
+    pub fn stage_elapsed(&self) -> Option<std::time::Duration> {
+        self.stage_started_at.map(|t| t.elapsed())
+    }
+
+    /// Append a log entry, trimming the oldest rows when the buffer would
+    /// exceed [`MAX_LOG_ENTRIES`]. Use this in place of `progress.log.push(…)`
+    /// at every event-driven append site so the buffer stays bounded.
+    pub fn push_log(&mut self, entry: ProgressLogEntry) {
+        self.log.push(entry);
+        if self.log.len() > MAX_LOG_ENTRIES {
+            let overflow = self.log.len() - MAX_LOG_ENTRIES;
+            self.log.drain(..overflow);
+        }
     }
 
     fn clear_download(&mut self) {
@@ -657,6 +722,21 @@ pub struct GenerateState {
     pub last_generation_time_ms: Option<u64>,
     pub error_message: Option<String>,
     pub model_description: String,
+    /// When `true`, the Negative prompt textarea collapses to a single dim
+    /// summary row so it doesn't steal vertical space. Users toggle this with
+    /// `Alt+N`; models that don't support negative prompts ignore the flag
+    /// entirely and hide the row regardless.
+    pub negative_collapsed: bool,
+}
+
+impl GenerateState {
+    /// Whether the Negative prompt textarea is currently rendered and
+    /// therefore focusable. This is the predicate every focus-routing or
+    /// hit-test site should consult — checking `supports_negative_prompt`
+    /// alone lets focus land on a row that isn't drawn.
+    pub fn negative_visible(&self) -> bool {
+        self.capabilities.supports_negative_prompt && !self.negative_collapsed
+    }
 }
 
 /// Which gallery view is active.
@@ -811,6 +891,18 @@ impl SettingsRow {
     }
 }
 
+/// Which pane has keyboard focus within the Settings view.
+///
+/// The Settings view is split into the Appearance swatch picker at the top and
+/// the scrollable Configuration list below. Exactly one of them owns the
+/// keyboard at any time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsFocus {
+    Appearance,
+    #[default]
+    Configuration,
+}
+
 /// State for the Settings view.
 #[derive(Default)]
 pub struct SettingsState {
@@ -822,6 +914,10 @@ pub struct SettingsState {
     pub selected_model: Option<String>,
     /// Brief error message if a save fails.
     pub save_error: Option<String>,
+    /// Active theme preset (drives [`App::theme`]).
+    pub theme_preset: crate::ui::theme::ThemePreset,
+    /// Which pane (Appearance vs Configuration) holds focus.
+    pub focus: SettingsFocus,
     /// When true, `save_config()` skips writing to disk (used in tests).
     #[cfg(test)]
     pub skip_save: bool,
@@ -934,12 +1030,62 @@ fn check_server_health(url: &str) -> bool {
 /// Spawn a background `mold serve` process.
 fn start_background_server(port: u16) -> Option<std::process::Child> {
     let exe = std::env::current_exe().ok()?;
-    std::process::Command::new(exe)
-        .args(["serve", "--port", &port.to_string(), "--log-file"])
+    let mut cmd = std::process::Command::new(exe);
+    configure_background_server_command(&mut cmd, port);
+    cmd.spawn().ok()
+}
+
+/// Pure hit-test for the tab bar. Given an absolute column and the tab
+/// bar's left edge, return the tab the click lands on, or `None` when the
+/// click is past the last rendered tab (e.g. on the right-aligned
+/// version/host indicator or blank space). The math mirrors
+/// `ui::render_tab_bar`: one column of horizontal padding on the left,
+/// then each tab is drawn as `" N Label "` (label length + 4 columns),
+/// with a single-column divider between adjacent tabs.
+pub(crate) fn tab_at_column(col: u16, tab_bar_x: u16) -> Option<View> {
+    // Mirrors what ratatui's `Tabs` widget actually renders. Each tab is:
+    //   pad_left(" ") + title(" N Label ") + pad_right(" ")
+    // followed by a one-column divider between tabs (no divider after
+    // the last). `padding_left`/`padding_right` default to " " — that's
+    // the piece the old hit-test missed, which silently mapped clicks on
+    // "Queue" to Settings because the stride was 2 cols short per tab.
+    //
+    // The block itself has no left border but does have `horizontal(1)`
+    // padding, so the first tab starts one column in from `tab_bar_x`.
+    let content_start = tab_bar_x.saturating_add(1);
+    if col < content_start {
+        return Some(View::ALL[0]);
+    }
+    let x = (col - content_start) as usize;
+
+    let mut offset = 0usize;
+    let last = View::ALL.len() - 1;
+    for (i, view) in View::ALL.iter().enumerate() {
+        // pad_left(1) + " N Label "(label + 4) + pad_right(1) = label + 6
+        let tab_width = view.label().len() + 6;
+        // Fold the post-tab divider column into this tab's click zone so
+        // there's no dead pixel between tabs. The last tab has no
+        // trailing divider.
+        let zone_width = if i == last { tab_width } else { tab_width + 1 };
+        if x < offset + zone_width {
+            return Some(*view);
+        }
+        offset += zone_width;
+    }
+    None
+}
+
+/// Configure the background `mold serve` command — pure helper so tests
+/// can inspect the args and env without actually spawning a process. The
+/// TUI owns this server lifecycle (starts it, talks to it over the loopback,
+/// stops it on quit), so it must opt into destructive endpoints like
+/// `DELETE /api/gallery/image/:filename` — otherwise the user's `d` in the
+/// Gallery returns 403 and the tile re-appears on the next scan.
+pub(crate) fn configure_background_server_command(cmd: &mut std::process::Command, port: u16) {
+    cmd.args(["serve", "--port", &port.to_string(), "--log-file"])
+        .env("MOLD_GALLERY_ALLOW_DELETE", "1")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()
+        .stderr(std::process::Stdio::null());
 }
 
 /// Wait for a server to become healthy, polling every 250ms.
@@ -1106,6 +1252,12 @@ impl App {
         // Load prompt history
         let history = crate::history::PromptHistory::load();
 
+        let initial_preset = session
+            .theme
+            .as_deref()
+            .map(crate::ui::theme::ThemePreset::from_slug)
+            .unwrap_or_default();
+
         let app = Ok(Self {
             active_view: View::Generate,
             generate: GenerateState {
@@ -1126,6 +1278,7 @@ impl App {
                 last_generation_time_ms: None,
                 error_message: None,
                 model_description,
+                negative_collapsed: session.negative_collapsed.unwrap_or(false),
             },
             gallery: GalleryState {
                 entries: Vec::new(),
@@ -1152,13 +1305,14 @@ impl App {
                 SettingsState {
                     selected_model: first_model,
                     row_index: 1, // skip first section header
+                    theme_preset: initial_preset,
                     ..Default::default()
                 }
             },
             config,
             server_url,
             picker,
-            theme: Theme::default(),
+            theme: initial_preset.build(),
             popup: None,
             should_quit: false,
             bg_tx,
@@ -1204,6 +1358,39 @@ impl App {
     /// True when connected to a server AND not forced into local mode.
     pub fn should_poll_remote(&self) -> bool {
         self.server_url.is_some() && self.generate.params.inference_mode != InferenceMode::Local
+    }
+
+    /// Whether a completed generation should be written to the local output
+    /// dir by the TUI. False when the server (running on the same or a
+    /// different machine) has already saved the file to its own output dir
+    /// — otherwise the TUI writes a second copy with a slightly-different
+    /// timestamp suffix, and the next gallery scan surfaces both as
+    /// duplicate tiles. Also false when output is explicitly disabled.
+    pub fn should_save_output_locally(&self) -> bool {
+        if self.config.is_output_disabled() {
+            return false;
+        }
+        !self.should_poll_remote()
+    }
+
+    /// Per-response variant of [`should_save_output_locally`]: in Auto
+    /// mode the backend transparently falls back to local inference when
+    /// the connected server becomes unreachable, but `server_url` is left
+    /// set so `should_save_output_locally()` — which only looks at the
+    /// mode and connection — classifies the completion as remote and
+    /// drops the file. The completion event carries `from_local`, set by
+    /// the backend on every local-path emission; when it's true we must
+    /// write the file locally even if the TUI still thinks it is
+    /// remote-connected. `is_output_disabled` still wins because the
+    /// user explicitly opted out of saving anywhere.
+    pub fn should_persist_response_locally(&self, from_local: bool) -> bool {
+        if self.config.is_output_disabled() {
+            return false;
+        }
+        if from_local {
+            return true;
+        }
+        !self.should_poll_remote()
     }
 
     /// Sync resource info source after mode changes.
@@ -1516,8 +1703,21 @@ impl App {
             .trim()
             .to_string();
         let session =
-            crate::session::TuiSession::from_params(&prompt_text, &neg_text, &self.generate.params);
+            crate::session::TuiSession::from_params(&prompt_text, &neg_text, &self.generate.params)
+                .with_theme(self.settings.theme_preset)
+                .with_negative_collapsed(self.generate.negative_collapsed);
         session.save();
+    }
+
+    /// Apply a theme preset — rebuilds [`App::theme`], records the
+    /// selection, and persists the change to the session file right
+    /// away. Persisting on every apply (rather than only on shutdown or
+    /// after a generation) means a crash, force-quit, or quick
+    /// theme-change-then-close all keep the user's selection.
+    pub fn apply_theme_preset(&mut self, preset: crate::ui::theme::ThemePreset) {
+        self.settings.theme_preset = preset;
+        self.theme = preset.build();
+        self.save_session();
     }
 
     pub fn update_model(&mut self, model_name: &str) {
@@ -1721,9 +1921,16 @@ impl App {
                         | (KeyCode::Char('2'), KeyModifiers::ALT)
                         | (KeyCode::Char('3'), KeyModifiers::ALT)
                         | (KeyCode::Char('4'), KeyModifiers::ALT)
+                        | (KeyCode::Char('5'), KeyModifiers::ALT)
                         | (KeyCode::Left, KeyModifiers::ALT)
                         | (KeyCode::Right, KeyModifiers::ALT) => {
-                            // Fall through for view switching
+                            // Fall through for view switching (Alt+1..5).
+                        }
+                        (KeyCode::Char('n'), KeyModifiers::ALT)
+                        | (KeyCode::Char('N'), KeyModifiers::ALT) => {
+                            // Fall through so Alt+N reaches
+                            // `Action::ToggleNegativePrompt` even while the
+                            // Prompt or Negative textarea has focus.
                         }
                         _ => {
                             // Let the textarea consume the event
@@ -1860,7 +2067,7 @@ impl App {
                             self.generate.params.host = Some(url.clone());
                             self.connecting = true;
                             // Show connecting status
-                            self.generate.progress.log.push(ProgressLogEntry {
+                            self.generate.progress.push_log(ProgressLogEntry {
                                 message: format!("Connecting to {url}..."),
                                 style: ProgressStyle::Info,
                             });
@@ -2011,22 +2218,16 @@ impl App {
                     return;
                 }
 
-                // Tab bar clicks — switch views
+                // Tab bar clicks — switch views.
+                // Clicks on empty space to the right of the last rendered
+                // tab (e.g. the version/host indicator) must be a no-op,
+                // not a stealth jump to Settings.
                 if self.layout.tab_bar.contains((col, row).into()) {
-                    // Determine which tab was clicked based on cumulative label widths.
-                    // Tab labels: " {i} {label} " with 1-char divider, plus block padding.
-                    let x = col.saturating_sub(self.layout.tab_bar.x + 2) as usize; // +2 for border + padding
-                    let mut offset = 0;
-                    for view in &View::ALL {
-                        let tab_width = view.label().len() + 4; // " N Label " = label + " N  "
-                        if x < offset + tab_width {
-                            self.active_view = *view;
-                            return;
-                        }
-                        offset += tab_width + 1; // +1 for divider
+                    if let Some(view) = tab_at_column(col, self.layout.tab_bar.x) {
+                        self.active_view = view;
+                        return;
                     }
-                    // Click past all tabs — select last view
-                    self.active_view = View::Settings;
+                    // Click past all tabs — leave the active view alone.
                     return;
                 }
 
@@ -2036,7 +2237,7 @@ impl App {
                     if self.layout.prompt.contains(pos) {
                         self.generate.focus = GenerateFocus::Prompt;
                     } else if self.layout.negative_prompt.contains(pos)
-                        && self.generate.capabilities.supports_negative_prompt
+                        && self.generate.negative_visible()
                     {
                         self.generate.focus = GenerateFocus::NegativePrompt;
                     } else if self.layout.parameters.contains(pos) {
@@ -2060,9 +2261,13 @@ impl App {
                 {
                     let pos: ratatui::layout::Position = (col, row).into();
                     if self.layout.gallery_grid.contains(pos) {
-                        // Compute which grid cell was clicked
-                        let cell_w = 24u16;
-                        let cell_h = 14u16;
+                        // Source cell dimensions from the renderer so the
+                        // hit-test can't drift from the rendered grid —
+                        // the previous hard-coded `cell_h = 14` was the
+                        // "finicky clicks" bug after CELL_H was shrunk
+                        // to 12 when filename labels were removed.
+                        let cell_w = crate::ui::gallery::CELL_W;
+                        let cell_h = crate::ui::gallery::CELL_H;
                         let cols = self.gallery.grid_cols.max(1);
                         let rel_x = col.saturating_sub(self.layout.gallery_grid.x);
                         let rel_y = row.saturating_sub(self.layout.gallery_grid.y);
@@ -2214,7 +2419,8 @@ impl App {
                 self.active_view = match self.active_view {
                     View::Generate => View::Gallery,
                     View::Gallery => View::Models,
-                    View::Models => View::Settings,
+                    View::Models => View::Queue,
+                    View::Queue => View::Settings,
                     View::Settings => View::Generate,
                 };
             }
@@ -2223,20 +2429,19 @@ impl App {
                     View::Generate => View::Settings,
                     View::Gallery => View::Generate,
                     View::Models => View::Gallery,
-                    View::Settings => View::Models,
+                    View::Queue => View::Models,
+                    View::Settings => View::Queue,
                 };
             }
             Action::FocusNext if self.active_view == View::Generate => {
-                self.generate.focus = self
-                    .generate
-                    .focus
-                    .next(self.generate.capabilities.supports_negative_prompt);
+                // Use `negative_visible()` instead of `supports_negative_prompt`
+                // alone so Tab skips the Negative pane when the user has
+                // collapsed it. Otherwise focus can land on a hidden textarea
+                // and keystrokes get routed nowhere.
+                self.generate.focus = self.generate.focus.next(self.generate.negative_visible());
             }
             Action::FocusPrev if self.active_view == View::Generate => {
-                self.generate.focus = self
-                    .generate
-                    .focus
-                    .prev(self.generate.capabilities.supports_negative_prompt);
+                self.generate.focus = self.generate.focus.prev(self.generate.negative_visible());
             }
             Action::Up => match self.active_view {
                 View::Generate => {
@@ -2267,6 +2472,7 @@ impl App {
                         self.models.selected -= 1;
                     }
                 }
+                View::Queue => {}
                 View::Settings => self.settings_navigate(-1),
             },
             Action::Down => match self.active_view {
@@ -2300,6 +2506,7 @@ impl App {
                         self.models.selected += 1;
                     }
                 }
+                View::Queue => {}
                 View::Settings => self.settings_navigate(1),
             },
             Action::Increment => {
@@ -2318,6 +2525,17 @@ impl App {
             }
             Action::Generate if self.active_view == View::Generate && !self.generate.generating => {
                 self.start_generation();
+            }
+            Action::ToggleNegativePrompt => {
+                self.generate.negative_collapsed = !self.generate.negative_collapsed;
+                // If we're collapsing while focused on the Negative pane, slip
+                // focus back to the regular prompt so the user isn't stuck in
+                // a hidden textarea.
+                if self.generate.negative_collapsed
+                    && self.generate.focus == GenerateFocus::NegativePrompt
+                {
+                    self.generate.focus = GenerateFocus::Prompt;
+                }
             }
             Action::Confirm => match self.active_view {
                 View::Generate => {
@@ -2348,7 +2566,19 @@ impl App {
                         self.generate.focus = GenerateFocus::Prompt;
                     }
                 }
-                View::Settings => self.settings_confirm(),
+                View::Queue => {}
+                View::Settings => {
+                    // Enter only edits a Configuration row. When the
+                    // Appearance swatch grid holds focus the preset is
+                    // already live-applied, so Enter has no work to do —
+                    // falling through to `settings_confirm()` would read
+                    // `row_index` from the Configuration list and open
+                    // the popup for whichever field happens to be
+                    // selected there.
+                    if self.settings.focus == SettingsFocus::Configuration {
+                        self.settings_confirm();
+                    }
+                }
             },
             Action::PullModel if self.active_view == View::Models => {
                 if let Some(model) = self.models.catalog.get(self.models.selected) {
@@ -2444,7 +2674,7 @@ impl App {
                     self.upscale_in_progress = false;
                     self.upscale_tile_progress = None;
                     self.upscale_progress.clear();
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: "Upscale cancelled".into(),
                         style: ProgressStyle::Warning,
                     });
@@ -2826,6 +3056,56 @@ impl App {
         self.generate.focus = GenerateFocus::Prompt;
     }
 
+    /// Replace the gallery with a fresh scan result, preserving the user's
+    /// current selection by filename where possible. When the previously-
+    /// selected entry is still in the new list, `selected` points at its
+    /// new index; otherwise we clamp the old index against the new length
+    /// (falling back to 0 only when the list is empty). This keeps the
+    /// viewport stable across deletes, reconnects, and any other rescan
+    /// trigger — no more "back to the first image" on every refresh.
+    pub fn apply_gallery_scan(&mut self, entries: Vec<GalleryEntry>) {
+        let previous_selected = self.gallery.selected;
+        let previous_filename = self
+            .gallery
+            .entries
+            .get(previous_selected)
+            .map(|e| e.filename());
+
+        self.gallery.thumbnail_states = vec![None; entries.len()];
+        self.gallery.thumb_dimensions = vec![None; entries.len()];
+        self.gallery.thumb_fixed_cache = vec![None; entries.len()];
+        self.gallery.entries = entries;
+        self.gallery.scanning = false;
+
+        self.gallery.selected = if self.gallery.entries.is_empty() {
+            0
+        } else if let Some(idx) = previous_filename.as_deref().and_then(|name| {
+            self.gallery
+                .entries
+                .iter()
+                .position(|e| e.filename() == name)
+        }) {
+            idx
+        } else {
+            previous_selected.min(self.gallery.entries.len() - 1)
+        };
+    }
+
+    /// React to a failed server-side gallery delete: surface the server's
+    /// error to the user and — when we still have a live server
+    /// connection — kick off a rescan so the local gallery reconverges
+    /// with the server's authoritative list. The tile was already
+    /// optimistically removed from `self.gallery.entries` by the earlier
+    /// `delete_selected_gallery_image()` call, so the rescan puts it back
+    /// if the server never actually deleted it.
+    pub fn apply_delete_failure(&mut self, err: &str) {
+        self.generate.error_message = Some(format!("Delete failed: {err}"));
+        if self.server_url.is_some() {
+            self.gallery.scanning = true;
+            self.spawn_gallery_scan();
+        }
+    }
+
     /// Delete the currently selected gallery image and its thumbnail.
     fn delete_selected_gallery_image(&mut self) {
         if self.gallery.entries.is_empty() {
@@ -2844,12 +3124,20 @@ impl App {
         let _ = std::fs::remove_file(&cache_path);
 
         if let Some(ref url) = entry.server_url {
-            // Delete from server via API
+            // Delete from server via API. Propagate errors through the
+            // background channel so the UI can surface them and rescan —
+            // a silent fire-and-forget here masks 403 responses from
+            // `MOLD_GALLERY_ALLOW_DELETE=0` servers and transient
+            // network errors, leaving the deleted tile "gone" locally
+            // while the server still holds the file.
             let url = url.clone();
             let filename = entry.filename();
+            let tx = self.bg_tx.clone();
             self.tokio_handle.spawn(async move {
                 let client = mold_core::MoldClient::new(&url);
-                let _ = client.delete_gallery_image(&filename).await;
+                if let Err(e) = client.delete_gallery_image(&filename).await {
+                    let _ = tx.send(BackgroundEvent::GalleryDeleteFailed(e.to_string()));
+                }
             });
         }
         // Always try to remove the local file (covers both local and server-backed entries
@@ -2870,22 +3158,26 @@ impl App {
             self.gallery.thumb_fixed_cache.remove(idx);
         }
 
-        // Adjust selection
+        // Drop the deleted image's preview state first — load_gallery_preview
+        // below will repopulate these for the new selection. Doing it in the
+        // other order (load → wipe) is the bug that left Detail view blank
+        // after a delete: we'd read the new image off disk and then
+        // immediately throw it away.
+        self.gallery.preview_image = None;
+        self.gallery.image_state = None;
+        self.gallery.animation = None;
+
+        // Adjust selection — keep the user on the next neighbour, or clamp
+        // to the new last entry when they were already at the end.
         if !self.gallery.entries.is_empty() {
             self.gallery.selected = idx.min(self.gallery.entries.len() - 1);
+            if self.gallery.view_mode == GalleryViewMode::Detail {
+                self.load_gallery_preview();
+            }
         } else {
             self.gallery.selected = 0;
             self.gallery.view_mode = GalleryViewMode::Grid;
         }
-
-        // Reload preview if in detail mode
-        if self.gallery.view_mode == GalleryViewMode::Detail {
-            self.load_gallery_preview();
-        }
-
-        self.gallery.preview_image = None;
-        self.gallery.image_state = None;
-        self.gallery.animation = None;
     }
 
     /// Open the selected gallery image in the system viewer.
@@ -3532,17 +3824,31 @@ impl App {
     }
 
     /// Navigate up (delta=-1) or down (delta=1) in the settings list, skipping headers.
+    ///
+    /// When focus is on the Appearance pane, Up is a no-op and Down hands
+    /// focus to the Configuration list. When focus is on Configuration and
+    /// Up is pressed at the first field, focus returns to Appearance.
     fn settings_navigate(&mut self, delta: i32) {
+        if self.settings.focus == SettingsFocus::Appearance {
+            if delta > 0 {
+                self.settings.focus = SettingsFocus::Configuration;
+            }
+            return;
+        }
+
         let rows = self.build_settings_rows();
         if rows.is_empty() {
             return;
         }
-        let current = self.settings.row_index;
         let len = rows.len();
-        let mut next = current;
+        let mut next = self.settings.row_index;
         loop {
             let candidate = next as i32 + delta;
             if candidate < 0 || candidate >= len as i32 {
+                // Walked off the top of the list → hand focus back to Appearance.
+                if delta < 0 {
+                    self.settings.focus = SettingsFocus::Appearance;
+                }
                 break;
             }
             next = candidate as usize;
@@ -3553,8 +3859,26 @@ impl App {
         }
     }
 
+    /// Cycle the active theme preset by `delta` (wraps around).
+    fn settings_cycle_theme(&mut self, delta: i32) {
+        use crate::ui::theme::ThemePreset;
+        let current = self.settings.theme_preset;
+        let len = ThemePreset::ALL.len() as i32;
+        let current_idx = ThemePreset::ALL
+            .iter()
+            .position(|p| *p == current)
+            .unwrap_or(0) as i32;
+        let next_idx = ((current_idx + delta).rem_euclid(len)) as usize;
+        self.apply_theme_preset(ThemePreset::ALL[next_idx]);
+    }
+
     /// Adjust the current settings field by delta (+1 or -1).
     fn settings_increment(&mut self, delta: i32) {
+        if self.settings.focus == SettingsFocus::Appearance {
+            self.settings_cycle_theme(delta);
+            return;
+        }
+
         let rows = self.build_settings_rows();
         let row = match rows.get(self.settings.row_index) {
             Some(r) => r,
@@ -3865,6 +4189,7 @@ impl App {
         self.generate.batch_remaining = self.generate.params.batch;
         self.generate.error_message = None;
         self.generate.progress.clear();
+        self.generate.progress.mark_generation_start();
         self.generate.preview_image = None;
         self.generate.image_state = None;
         self.generate.animation = None;
@@ -3901,10 +4226,17 @@ impl App {
         while let Ok(event) = self.bg_rx.try_recv() {
             match event {
                 BackgroundEvent::Progress(sse) => self.handle_progress(sse),
-                BackgroundEvent::GenerationComplete(response) => {
+                BackgroundEvent::GenerationComplete {
+                    response,
+                    from_local,
+                } => {
                     self.generate.batch_remaining = self.generate.batch_remaining.saturating_sub(1);
                     if self.generate.batch_remaining == 0 {
                         self.generate.generating = false;
+                        // Stop the Overall heartbeat row now that the
+                        // pipeline has produced a result.
+                        self.generate.progress.generation_started_at = None;
+                        self.generate.progress.stage_started_at = None;
                     }
                     self.generate.last_seed = Some(response.seed_used);
                     self.generate.last_generation_time_ms = Some(response.generation_time_ms);
@@ -3918,13 +4250,21 @@ impl App {
                     self.generate.params.seed =
                         self.generate.params.seed_mode.advance(response.seed_used);
 
-                    // Resolve output directory (None when explicitly disabled)
-                    let output_dir = if self.config.is_output_disabled() {
-                        None
-                    } else {
+                    // Resolve output directory. Returns None when output is
+                    // explicitly disabled *or* when the TUI is connected to
+                    // a remote server — the server already saved the file
+                    // to its own output dir, and a TUI-side write would
+                    // duplicate it (with a different timestamp suffix) and
+                    // surface as two tiles on the next gallery scan.
+                    // The `from_local` override handles Auto-mode fallbacks
+                    // — we still want to save those locally even though
+                    // `server_url` is set.
+                    let output_dir = if self.should_persist_response_locally(from_local) {
                         let dir = self.config.effective_output_dir();
                         let _ = std::fs::create_dir_all(&dir);
                         Some(dir)
+                    } else {
+                        None
                     };
 
                     // Save images to disk and display preview
@@ -4028,7 +4368,7 @@ impl App {
                         .map(|f| f.to_string_lossy().to_string())
                         .unwrap_or_default();
 
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: if saved_name.is_empty() {
                             format!(
                                 "Done in {:.1}s (seed: {})",
@@ -4076,7 +4416,27 @@ impl App {
                     } else {
                         (self.generate.params.width, self.generate.params.height)
                     };
-                    if !response.images.is_empty() || response.video.is_some() {
+                    // In remote-server mode we don't write a local copy, so
+                    // `saved_path` is empty and there's nothing for the
+                    // gallery to point at. Kick off a gallery rescan
+                    // instead — the server's own save will surface on the
+                    // next poll. In local mode this branch is skipped and
+                    // the `insert(0)` below runs as before.
+                    // Only kick off a server rescan when this response
+                    // actually came from the server. An Auto-mode local
+                    // fallback would still pass `should_poll_remote()`
+                    // (server_url is set) but there is nothing new on
+                    // the server to scan — and the scan would wipe the
+                    // local gallery entry we just inserted.
+                    if saved_path.as_os_str().is_empty() && self.should_poll_remote() && !from_local
+                    {
+                        self.gallery.scanning = true;
+                        self.spawn_gallery_scan();
+                    }
+
+                    if (!response.images.is_empty() || response.video.is_some())
+                        && !saved_path.as_os_str().is_empty()
+                    {
                         let meta = mold_core::OutputMetadata {
                             prompt: prompt_text,
                             negative_prompt: if neg_text.is_empty() {
@@ -4139,14 +4499,11 @@ impl App {
                     self.generate.generating = false;
                     self.generate.batch_remaining = 0;
                     self.generate.error_message = Some(msg);
+                    self.generate.progress.generation_started_at = None;
+                    self.generate.progress.stage_started_at = None;
                 }
                 BackgroundEvent::GalleryScanComplete(entries) => {
-                    self.gallery.thumbnail_states = vec![None; entries.len()];
-                    self.gallery.thumb_dimensions = vec![None; entries.len()];
-                    self.gallery.thumb_fixed_cache = vec![None; entries.len()];
-                    self.gallery.entries = entries;
-                    self.gallery.scanning = false;
-                    self.gallery.selected = 0;
+                    self.apply_gallery_scan(entries);
 
                     // Spawn background thumbnail generation
                     let entries_info: Vec<(std::path::PathBuf, Option<String>)> = self
@@ -4265,7 +4622,7 @@ impl App {
                     );
                     // Apply model defaults from server catalog
                     self.apply_remote_model_defaults(&models);
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Connected to {url}"),
                         style: ProgressStyle::Done,
                     });
@@ -4277,7 +4634,7 @@ impl App {
                 }
                 BackgroundEvent::ServerUnreachable(msg) => {
                     self.connecting = false;
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Server unreachable: {msg}"),
                         style: ProgressStyle::Error,
                     });
@@ -4288,7 +4645,7 @@ impl App {
                     self.resource_info.refresh_local();
                 }
                 BackgroundEvent::PullComplete(model) => {
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Pull complete: {model}"),
                         style: ProgressStyle::Done,
                     });
@@ -4311,7 +4668,7 @@ impl App {
                     }
                 }
                 BackgroundEvent::ModelRemoveComplete(model) => {
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Removed model: {model}"),
                         style: ProgressStyle::Done,
                     });
@@ -4326,7 +4683,7 @@ impl App {
                     }
                 }
                 BackgroundEvent::ModelRemoveFailed(msg) => {
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Remove failed: {msg}"),
                         style: ProgressStyle::Error,
                     });
@@ -4379,7 +4736,7 @@ impl App {
                         path
                     } else {
                         // No output dir — nowhere to save
-                        self.generate.progress.log.push(ProgressLogEntry {
+                        self.generate.progress.push_log(ProgressLogEntry {
                             message: format!(
                                 "Upscaled {original_width}x{original_height} -> {upscaled_w}x{upscaled_h} ({scale_factor}x, {:.1}s) — output dir disabled",
                                 upscale_time_ms as f64 / 1000.0
@@ -4389,7 +4746,7 @@ impl App {
                         return;
                     };
 
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!(
                             "Upscaled {original_width}x{original_height} -> {upscaled_w}x{upscaled_h} ({scale_factor}x, {:.1}s)",
                             upscale_time_ms as f64 / 1000.0
@@ -4483,6 +4840,9 @@ impl App {
                         self.models.selected = self.models.catalog.len() - 1;
                     }
                 }
+                BackgroundEvent::GalleryDeleteFailed(msg) => {
+                    self.apply_delete_failure(&msg);
+                }
             }
         }
     }
@@ -4501,13 +4861,19 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
     match event {
         SseProgressEvent::StageStart { name } => {
             progress.current_stage = Some(name);
+            // Each StageStart counts as a new pipeline step; tracking the
+            // index gives the Timeline an at-a-glance "you are on step N"
+            // indicator without needing an estimated total.
+            progress.stage_index = progress.stage_index.saturating_add(1);
+            progress.stage_started_at = Some(std::time::Instant::now());
             // Reset transient bars when the stream moves into a new phase.
             progress.clear_download();
             progress.clear_weight();
         }
         SseProgressEvent::StageDone { name, elapsed_ms } => {
             progress.current_stage = None;
-            progress.log.push(ProgressLogEntry {
+            progress.stage_started_at = None;
+            progress.push_log(ProgressLogEntry {
                 message: format!("{name} [{:.1}s]", elapsed_ms as f64 / 1000.0),
                 style: ProgressStyle::Done,
             });
@@ -4523,19 +4889,19 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
                 // Verification messages: show as spinner AND log entry
                 progress.downloading = true;
                 progress.current_stage = Some(message.clone());
-                progress.log.push(ProgressLogEntry {
+                progress.push_log(ProgressLogEntry {
                     message,
                     style: ProgressStyle::Info,
                 });
             } else {
-                progress.log.push(ProgressLogEntry {
+                progress.push_log(ProgressLogEntry {
                     message,
                     style: ProgressStyle::Info,
                 });
             }
         }
         SseProgressEvent::CacheHit { resource } => {
-            progress.log.push(ProgressLogEntry {
+            progress.push_log(ProgressLogEntry {
                 message: format!("{resource} [cache hit]"),
                 style: ProgressStyle::Done,
             });
@@ -4593,7 +4959,7 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             batch_bytes_total,
             batch_elapsed_ms,
         } => {
-            progress.log.push(ProgressLogEntry {
+            progress.push_log(ProgressLogEntry {
                 message: format!("[{}/{}] {filename}", file_index + 1, total_files),
                 style: ProgressStyle::Done,
             });
@@ -4620,7 +4986,7 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
         }
         SseProgressEvent::PullComplete { model } => {
             progress.clear_download();
-            progress.log.push(ProgressLogEntry {
+            progress.push_log(ProgressLogEntry {
                 message: format!("Pull complete: {model}"),
                 style: ProgressStyle::Done,
             });
@@ -4786,7 +5152,7 @@ mod tests {
             download_total_files: 5,
             ..Default::default()
         };
-        state.log.push(ProgressLogEntry {
+        state.push_log(ProgressLogEntry {
             message: "test".to_string(),
             style: ProgressStyle::Done,
         });
@@ -5580,6 +5946,7 @@ mod tests {
                 last_generation_time_ms: None,
                 error_message: None,
                 model_description: String::new(),
+                negative_collapsed: false,
             },
             gallery: GalleryState {
                 entries: Vec::new(),
@@ -5693,11 +6060,18 @@ mod tests {
     }
 
     #[test]
-    fn view_settings_label_and_index() {
+    fn view_labels_and_indices() {
+        assert_eq!(View::Generate.label(), "Generate");
+        assert_eq!(View::Gallery.label(), "Gallery");
+        assert_eq!(View::Models.label(), "Models");
+        assert_eq!(View::Queue.label(), "Queue");
         assert_eq!(View::Settings.label(), "Settings");
-        assert_eq!(View::Settings.index(), 3);
-        assert_eq!(View::ALL.len(), 4);
-        assert_eq!(View::ALL[3], View::Settings);
+        // Queue sits at index 3 between Models and Settings.
+        assert_eq!(View::Queue.index(), 3);
+        assert_eq!(View::Settings.index(), 4);
+        assert_eq!(View::ALL.len(), 5);
+        assert_eq!(View::ALL[3], View::Queue);
+        assert_eq!(View::ALL[4], View::Settings);
     }
 
     // ── Settings E2E: display values ──────────────────────
@@ -5850,6 +6224,504 @@ mod tests {
         let mut app = make_settings_test_app();
         app.settings_adjust_number(SettingsKey::DefaultSteps, 1.0, 1.0, 200.0);
         assert_eq!(app.config.default_steps, 5);
+    }
+
+    // ── User story: change themes while a generation is running ───
+    // Reported: "as a user I should be able to change themes while the
+    // app is generating an image". Three regression tests covering the
+    // full keyboard path: escape the prompt → switch view → cycle theme.
+
+    #[tokio::test]
+    async fn alt_5_while_generating_from_prompt_focus_switches_to_settings() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Generate;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.generate.generating = true;
+        app.generate.progress.mark_generation_start();
+
+        // `Alt+5` must escape the prompt textarea and switch views,
+        // even with a generation in flight — otherwise users have to
+        // wait for the run to finish before they can reach Settings.
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('5'),
+            KeyModifiers::ALT,
+        )));
+        assert_eq!(app.active_view, View::Settings);
+        assert!(app.generate.generating, "generation must not be aborted");
+    }
+
+    #[tokio::test]
+    async fn theme_cycle_applies_immediately_while_generating() {
+        use crate::ui::theme::ThemePreset;
+        let mut app = make_settings_test_app();
+        app.active_view = View::Settings;
+        app.settings.focus = SettingsFocus::Appearance;
+        // In-flight generation on the Settings tab.
+        app.generate.generating = true;
+        app.generate.progress.mark_generation_start();
+
+        let before = app.settings.theme_preset;
+        assert_eq!(before, ThemePreset::Mocha);
+
+        // Right arrow on Appearance cycles the preset. The new palette
+        // must apply to `app.theme` immediately so the next render
+        // paints the running Timeline bars in the chosen theme —
+        // generating must not veto the palette change.
+        app.dispatch_action(Action::Increment);
+
+        assert_ne!(app.settings.theme_preset, before);
+        assert_eq!(app.theme.bg, app.settings.theme_preset.build().bg);
+        assert!(app.generate.generating, "generation must keep running");
+    }
+
+    #[tokio::test]
+    async fn esc_then_5_reaches_settings_while_generating() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Generate;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.generate.generating = true;
+        app.generate.progress.mark_generation_start();
+
+        // The discoverable path: Esc unfocuses the textarea, then `5`
+        // switches to Settings. Both must keep working while a
+        // generation is active.
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(app.generate.focus, GenerateFocus::Navigation);
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('5'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.active_view, View::Settings);
+    }
+
+    // ── Enter on the Appearance pane must not trigger settings_confirm ──
+
+    #[tokio::test]
+    async fn enter_on_appearance_pane_does_not_open_model_dialog() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Settings;
+        app.settings.focus = SettingsFocus::Appearance;
+        // Before the fix: Confirm on Settings view unconditionally calls
+        // `settings_confirm()`, which follows row_index=1 (the first
+        // editable field — `Model`) and opens its text-entry popup, even
+        // though focus visibly belongs to the Appearance swatch row.
+        app.dispatch_action(Action::Confirm);
+        assert!(
+            app.popup.is_none(),
+            "Enter on the Appearance pane must stay on the swatch grid \
+             and must not open the Model popup"
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_on_configuration_still_opens_popup() {
+        // Regression guard for the happy path.
+        let mut app = make_settings_test_app();
+        app.active_view = View::Settings;
+        app.settings.focus = SettingsFocus::Configuration;
+        app.settings.row_index = 1; // Model (first editable field)
+        app.dispatch_action(Action::Confirm);
+        assert!(
+            app.popup.is_some(),
+            "Enter on a Configuration Text row must still open the popup"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_cycle_theme_wraps_both_directions() {
+        use crate::ui::theme::ThemePreset;
+        let mut app = make_settings_test_app();
+        // Starts on the default (Mocha).
+        assert_eq!(app.settings.theme_preset, ThemePreset::Mocha);
+        // Forward cycles to Latte and also rebuilds `app.theme`.
+        app.settings_cycle_theme(1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::Latte);
+        // `app.theme` should now match the Latte palette.
+        assert_eq!(app.theme.bg, ThemePreset::Latte.build().bg);
+        // Backward from Mocha (index 0) wraps around to Dracula (last).
+        app.apply_theme_preset(ThemePreset::Mocha);
+        app.settings_cycle_theme(-1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::Dracula);
+    }
+
+    #[tokio::test]
+    async fn settings_navigate_up_from_top_focuses_appearance() {
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Configuration;
+        // Jump to the first settings field and press Up past the top.
+        app.settings.row_index = 1;
+        app.settings_navigate(-1);
+        app.settings_navigate(-1);
+        assert_eq!(app.settings.focus, SettingsFocus::Appearance);
+    }
+
+    #[tokio::test]
+    async fn settings_navigate_down_from_appearance_enters_configuration() {
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Appearance;
+        app.settings_navigate(1);
+        assert_eq!(app.settings.focus, SettingsFocus::Configuration);
+    }
+
+    // ── Codex P2: Alt-key bypass from prompt textarea ─────────────
+
+    fn alt_key_event(code: crossterm::event::KeyCode) -> crossterm::event::Event {
+        use crossterm::event::{Event, KeyEvent, KeyModifiers};
+        Event::Key(KeyEvent::new(code, KeyModifiers::ALT))
+    }
+
+    #[tokio::test]
+    async fn alt_5_while_typing_prompt_switches_to_settings() {
+        use crossterm::event::KeyCode;
+        let mut app = make_settings_test_app();
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+        // While focused on the Prompt textarea, Alt+5 must reach the action
+        // mapper and switch the active view. Before the bypass fix this
+        // event would be consumed by `TextArea::input` and the view would
+        // stay on Generate.
+        app.handle_crossterm_event(alt_key_event(KeyCode::Char('5')));
+        assert_eq!(app.active_view, View::Settings);
+    }
+
+    #[tokio::test]
+    async fn alt_4_while_typing_prompt_switches_to_queue() {
+        use crossterm::event::KeyCode;
+        let mut app = make_settings_test_app();
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+        // Alt+4 was re-pointed to Queue in phase 4. Regression guard so the
+        // old Alt+4 → Settings mapping can't sneak back in.
+        app.handle_crossterm_event(alt_key_event(KeyCode::Char('4')));
+        assert_eq!(app.active_view, View::Queue);
+    }
+
+    #[tokio::test]
+    async fn alt_n_while_typing_prompt_toggles_negative_collapse() {
+        use crossterm::event::KeyCode;
+        let mut app = make_settings_test_app();
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+        assert!(!app.generate.negative_collapsed);
+        app.handle_crossterm_event(alt_key_event(KeyCode::Char('n')));
+        assert!(app.generate.negative_collapsed);
+        // Toggle back — the binding should be symmetric.
+        app.handle_crossterm_event(alt_key_event(KeyCode::Char('n')));
+        assert!(!app.generate.negative_collapsed);
+    }
+
+    #[tokio::test]
+    async fn toggle_negative_prompt_flips_collapsed_flag() {
+        let mut app = make_settings_test_app();
+        assert!(!app.generate.negative_collapsed);
+        app.dispatch_action(Action::ToggleNegativePrompt);
+        assert!(app.generate.negative_collapsed);
+        app.dispatch_action(Action::ToggleNegativePrompt);
+        assert!(!app.generate.negative_collapsed);
+    }
+
+    // ── Codex P2: focus must skip a collapsed Negative pane ──────
+
+    #[tokio::test]
+    async fn tab_from_prompt_skips_negative_when_collapsed() {
+        let mut app = make_settings_test_app();
+        // Model supports negative prompt, but the user has collapsed it.
+        app.generate.capabilities.supports_negative_prompt = true;
+        app.generate.negative_collapsed = true;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+
+        app.dispatch_action(Action::FocusNext);
+        // Before the fix: focus lands on NegativePrompt even though the
+        // textarea is not rendered, and keystrokes are routed into a
+        // hidden field.
+        assert_eq!(app.generate.focus, GenerateFocus::Parameters);
+    }
+
+    #[tokio::test]
+    async fn shift_tab_from_parameters_skips_negative_when_collapsed() {
+        let mut app = make_settings_test_app();
+        app.generate.capabilities.supports_negative_prompt = true;
+        app.generate.negative_collapsed = true;
+        app.generate.focus = GenerateFocus::Parameters;
+        app.active_view = View::Generate;
+
+        app.dispatch_action(Action::FocusPrev);
+        assert_eq!(app.generate.focus, GenerateFocus::Prompt);
+    }
+
+    #[tokio::test]
+    async fn tab_still_visits_negative_when_expanded() {
+        // Regression guard: the skip-when-collapsed logic must not change
+        // the happy-path Tab order when the negative pane is visible.
+        let mut app = make_settings_test_app();
+        app.generate.capabilities.supports_negative_prompt = true;
+        app.generate.negative_collapsed = false;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+
+        app.dispatch_action(Action::FocusNext);
+        assert_eq!(app.generate.focus, GenerateFocus::NegativePrompt);
+    }
+
+    #[tokio::test]
+    async fn mouse_click_on_gallery_tile_row_2_selects_correct_tile() {
+        // Regression for "click boxes are finicky in general": the mouse
+        // handler was using `cell_h = 14u16` after the grid was shrunk
+        // to `CELL_H = 12` in ui::gallery. Each row of tiles drifted the
+        // hit-test by 2 rows — clicking on row 2 would select the row-1
+        // tile (or nothing).
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Gallery;
+        app.gallery.view_mode = GalleryViewMode::Grid;
+        // 3 columns, 3 rows worth of tiles = 9 entries.
+        for i in 0..9 {
+            app.gallery.entries.push(GalleryEntry {
+                path: std::path::PathBuf::from(format!("tile-{i}.png")),
+                metadata: make_test_metadata(),
+                generation_time_ms: None,
+                timestamp: 0,
+                server_url: None,
+            });
+            app.gallery.thumbnail_states.push(None);
+            app.gallery.thumb_dimensions.push(None);
+            app.gallery.thumb_fixed_cache.push(None);
+        }
+        app.gallery.grid_cols = 3;
+        app.gallery.grid_scroll = 0;
+        // Gallery grid inner area in a representative layout.
+        app.layout.gallery_grid = ratatui::layout::Rect::new(0, 3, 72, 40);
+
+        // Click dead-center of the tile at grid (col=1, row=2).
+        // With CELL_W=24 and CELL_H=12, that tile occupies
+        // cols 24..=47 and rows (3 + 24)..=(3 + 35). Midpoint col ≈ 36,
+        // row ≈ 30. With the old `cell_h=14` the click would have been
+        // interpreted as row 1 (tile index 4) instead of row 2 (index 7).
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 36,
+            row: 30,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+
+        let expected_index = 2 * 3 + 1; // row 2 * 3 cols + col 1
+        assert_eq!(
+            app.gallery.selected, expected_index,
+            "click on tile (col=1, row=2) at (col=36,row=30) should select index {expected_index} — \
+             mouse hit-test must track the real CELL_H, not the stale 14"
+        );
+    }
+
+    #[tokio::test]
+    async fn mouse_click_on_each_tab_switches_to_that_view() {
+        // Click every tab at its start/middle/end columns and assert the
+        // active_view lands on the expected tab. Regression reproducer
+        // for "clicking on Queue with mouse doesn't always work" — the
+        // existing hit-test math did +2 (border + padding) even though
+        // the block has no left border. Anchoring at each real column
+        // exposes the off-by-one that matters on real-world tab widths.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        // Tab bar is 3 rows tall; tabs render on row 1 (under the title
+        // row, above the bottom border). 80-col terminal.
+        let tab_bar = ratatui::layout::Rect::new(0, 0, 80, 3);
+
+        // Actual rendered layout (verified via TestBackend probe) —
+        // ratatui's Tabs widget adds its own pad_left(" ") and
+        // pad_right(" ") *around* each title, on top of the " N Label "
+        // content we pass in. Stride per tab = label.len() + 6 (pad +
+        // title + pad), plus a 1-col divider between tabs.
+        //
+        //   col 0        → block horizontal padding
+        //   col 1        → Generate pad_left
+        //   col 2..=13   → " 1 Generate " title (12 chars, "1" at col 3)
+        //   col 14       → Generate pad_right
+        //   col 15       → divider
+        //   col 16       → Gallery pad_left
+        //   col 17..=27  → " 2 Gallery " title (11 chars, "2" at col 18)
+        //   col 28       → Gallery pad_right
+        //   col 29       → divider
+        //   col 30       → Models pad_left
+        //   col 31..=40  → " 3 Models " title (10 chars, "3" at col 32)
+        //   col 41       → Models pad_right
+        //   col 42       → divider
+        //   col 43       → Queue pad_left
+        //   col 44..=52  → " 4 Queue " title (9 chars, "4" at col 45)
+        //   col 53       → Queue pad_right
+        //   col 54       → divider
+        //   col 55       → Settings pad_left
+        //   col 56..=67  → " 5 Settings " title (12 chars, "5" at col 57)
+        //   col 68       → Settings pad_right
+        //
+        // Trailing dividers fold into the preceding tab's click zone so
+        // there's no dead pixel. Cols 0..=15 → Generate, 16..=29 → Gallery,
+        // 30..=42 → Models, 43..=54 → Queue, 55..=68 → Settings.
+        let cases: &[(u16, View, &str)] = &[
+            (0, View::Generate, "block padding"),
+            (3, View::Generate, "Generate '1'"),
+            (9, View::Generate, "Generate 'a'"),
+            (15, View::Generate, "Generate trailing divider"),
+            (16, View::Gallery, "Gallery pad_left"),
+            (18, View::Gallery, "Gallery '2'"),
+            (24, View::Gallery, "Gallery 'r'"),
+            (29, View::Gallery, "Gallery trailing divider"),
+            (30, View::Models, "Models pad_left"),
+            (32, View::Models, "Models '3'"),
+            (38, View::Models, "Models 'e'"),
+            (42, View::Models, "Models trailing divider"),
+            (43, View::Queue, "Queue pad_left (was 'finicky')"),
+            (45, View::Queue, "Queue '4'"),
+            (48, View::Queue, "Queue 'e' (body of label)"),
+            (52, View::Queue, "Queue end of title"),
+            (54, View::Queue, "Queue trailing divider"),
+            (55, View::Settings, "Settings pad_left"),
+            (57, View::Settings, "Settings '5'"),
+            (62, View::Settings, "Settings 'n'"),
+            (68, View::Settings, "Settings pad_right"),
+        ];
+
+        for (col, expected, name) in cases {
+            let mut app = make_settings_test_app();
+            app.layout.tab_bar = tab_bar;
+            app.active_view = View::Generate; // deterministic starting view
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: *col,
+                row: 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+            assert_eq!(
+                app.active_view, *expected,
+                "clicking col {col} ({name}) should land on {expected:?}, got {:?}",
+                app.active_view
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mouse_click_past_last_tab_does_not_select_settings() {
+        // The old behaviour mapped any click past the last rendered tab
+        // (e.g. on the right-aligned version text or empty space) to
+        // View::Settings. That made the tab bar feel "finicky" — clicks
+        // on the host/version indicator silently switched views.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = make_settings_test_app();
+        app.layout.tab_bar = ratatui::layout::Rect::new(0, 0, 80, 3);
+        app.active_view = View::Generate;
+
+        // Col 75 is well past Settings (which ends at col 68) — it sits
+        // under the right-aligned "mold 0.9.0" version indicator.
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 75,
+            row: 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+
+        assert_eq!(
+            app.active_view,
+            View::Generate,
+            "clicks past the last rendered tab must be a no-op, not a stealth jump to Settings"
+        );
+    }
+
+    #[tokio::test]
+    async fn mouse_hit_test_matches_real_tab_bar_rendering() {
+        // End-to-end guard: render the real UI, scan each column of the
+        // tab bar row looking for the digit "1".."5", and assert that a
+        // click on that column lands on the matching view. If anything
+        // (padding, divider, label order) changes upstream, this test
+        // surfaces the drift before users report a flaky tab bar.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = make_settings_test_app();
+        app.active_view = View::Generate;
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let tab_bar = app.layout.tab_bar;
+        assert!(tab_bar.height >= 2, "tab bar should have room to render");
+        let tab_row = tab_bar.y + 1; // row 0 = title/indicator, row 1 = tabs
+
+        // Find the column of each digit "1".."5" in the rendered row.
+        // The Tabs widget prefixes each label with " N " — those digits
+        // anchor the hit-test and are the visually obvious click target.
+        let buf = terminal.backend().buffer();
+        let digit_to_view: &[(&str, View)] = &[
+            ("1", View::Generate),
+            ("2", View::Gallery),
+            ("3", View::Models),
+            ("4", View::Queue),
+            ("5", View::Settings),
+        ];
+        for (digit, expected) in digit_to_view {
+            let col = (0..tab_bar.width)
+                .find(|&x| buf[(tab_bar.x + x, tab_row)].symbol() == *digit)
+                .unwrap_or_else(|| panic!("digit {digit} not found in rendered tab bar"));
+            let click_col = tab_bar.x + col;
+
+            let mut click_app = make_settings_test_app();
+            click_app.layout.tab_bar = tab_bar;
+            click_app.active_view = View::Generate;
+            click_app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: click_col,
+                row: tab_row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+            assert_eq!(
+                click_app.active_view, *expected,
+                "clicking on digit '{digit}' at col {click_col} should land on {expected:?}, got {:?}",
+                click_app.active_view
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mouse_click_on_collapsed_negative_row_does_not_focus_it() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = make_settings_test_app();
+        app.generate.capabilities.supports_negative_prompt = true;
+        app.generate.negative_collapsed = true;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Generate;
+        // Pretend the collapsed negative row occupies cell (10, 5).
+        app.layout.negative_prompt = ratatui::layout::Rect::new(0, 5, 80, 1);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert_ne!(app.generate.focus, GenerateFocus::NegativePrompt);
+    }
+
+    #[tokio::test]
+    async fn toggle_negative_prompt_while_focused_moves_focus_to_prompt() {
+        let mut app = make_settings_test_app();
+        app.generate.focus = GenerateFocus::NegativePrompt;
+        app.dispatch_action(Action::ToggleNegativePrompt);
+        // Collapsing while focused on Negative should shift focus so the
+        // user isn't stuck typing into a hidden textarea.
+        assert!(app.generate.negative_collapsed);
+        assert_eq!(app.generate.focus, GenerateFocus::Prompt);
+    }
+
+    #[tokio::test]
+    async fn settings_increment_on_appearance_cycles_theme() {
+        use crate::ui::theme::ThemePreset;
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Appearance;
+        let before = app.settings.theme_preset;
+        app.settings_increment(1);
+        assert_ne!(app.settings.theme_preset, before);
+        assert_eq!(app.settings.theme_preset, ThemePreset::Latte);
     }
 
     #[tokio::test]
@@ -6297,7 +7169,10 @@ mod tests {
             gpu: None,
         };
         app.bg_tx
-            .send(BackgroundEvent::GenerationComplete(Box::new(response)))
+            .send(BackgroundEvent::GenerationComplete {
+                response: Box::new(response),
+                from_local: false,
+            })
             .unwrap();
 
         // Process the event through the real handler
@@ -6348,6 +7223,7 @@ mod tests {
             last_generation_time_ms: None,
             error_message: None,
             model_description: String::new(),
+            negative_collapsed: false,
         };
 
         // Simulate receiving first image — still 2 more to go
@@ -6404,6 +7280,7 @@ mod tests {
             last_generation_time_ms: None,
             error_message: None,
             model_description: String::new(),
+            negative_collapsed: false,
         };
 
         // Simulate error mid-batch
@@ -6441,6 +7318,7 @@ mod tests {
             last_generation_time_ms: None,
             error_message: None,
             model_description: String::new(),
+            negative_collapsed: false,
         };
 
         // Simulate setting batch to 4 and starting generation
@@ -7103,6 +7981,683 @@ mod tests {
         // Should not have used the catalog entry's absurd values
         assert_ne!(app.generate.params.steps, 199);
         assert_ne!(app.generate.params.width, 256);
+    }
+
+    #[tokio::test]
+    async fn should_save_output_locally_false_when_connected_to_remote_server() {
+        // When the TUI is connected to a server in non-Local mode, the
+        // server has already saved the output to its own `~/.mold/output/`.
+        // A TUI-side write creates a second file with a later timestamp
+        // suffix, which surfaces as a duplicate tile on the next gallery
+        // rescan (bug reproducer for feat/tui-updates). The predicate must
+        // return false so the generation-complete handler skips the write.
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://remote.example:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Remote;
+        assert!(!app.should_save_output_locally());
+    }
+
+    #[tokio::test]
+    async fn should_save_output_locally_true_when_no_server() {
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+        app.generate.params.inference_mode = InferenceMode::Local;
+        assert!(app.should_save_output_locally());
+    }
+
+    #[tokio::test]
+    async fn should_save_output_locally_true_when_forced_local_even_with_server_url() {
+        // User pressed `mold run --local` or toggled the Local mode in the
+        // UI. The server exists but we're not using it — TUI owns the save.
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://remote.example:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Local;
+        assert!(app.should_save_output_locally());
+    }
+
+    #[tokio::test]
+    async fn should_persist_response_locally_true_for_auto_mode_local_fallback() {
+        // Codex finding: in Auto mode, the backend silently falls back to
+        // local inference when the connected server becomes unreachable.
+        // `server_url` stays set, so `should_save_output_locally()` would
+        // return false and the locally-generated image would be dropped.
+        // The per-response predicate must honour the `from_local` flag
+        // the backend attaches to the completion event.
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://remote.example:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Auto;
+
+        assert!(
+            !app.should_save_output_locally(),
+            "precondition: in Auto+connected mode the generic predicate treats this as remote"
+        );
+        assert!(
+            app.should_persist_response_locally(true),
+            "Auto-mode fallback response must still be saved locally"
+        );
+        assert!(
+            !app.should_persist_response_locally(false),
+            "genuine remote success must still skip the local write to avoid duplicates"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_persist_response_locally_respects_output_disabled() {
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+        app.generate.params.inference_mode = InferenceMode::Local;
+        app.config.output_dir = Some(String::new()); // empty string = disabled
+        assert!(app.config.is_output_disabled());
+
+        assert!(
+            !app.should_persist_response_locally(true),
+            "output disabled wins over from_local — user explicitly opted out of saving"
+        );
+    }
+
+    /// Gallery-delete test helper: create a real file on disk inside a
+    /// per-test subdirectory of the system tempdir and return a
+    /// `GalleryEntry` whose `path` points at it. Callers pass a unique
+    /// name prefix so parallel tests don't collide.
+    fn add_temp_gallery_entry(app: &mut App, name_prefix: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("mold-delete-test-{name_prefix}"));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join(format!("{name_prefix}.png"));
+        // Write a tiny valid PNG header — contents don't matter to delete.
+        std::fs::write(&path, b"fake-png-bytes-for-test").unwrap();
+        app.gallery.entries.push(GalleryEntry {
+            path: path.clone(),
+            metadata: make_test_metadata(),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+        });
+        app.gallery.thumbnail_states.push(None);
+        app.gallery.thumb_dimensions.push(None);
+        app.gallery.thumb_fixed_cache.push(None);
+        app.gallery.selected = app.gallery.entries.len() - 1;
+        path
+    }
+
+    #[tokio::test]
+    async fn delete_selected_gallery_image_empty_gallery_is_noop() {
+        let mut app = make_settings_test_app();
+        app.gallery.entries.clear();
+        // Should not panic, should not touch state.
+        app.delete_selected_gallery_image();
+        assert!(app.gallery.entries.is_empty());
+        assert_eq!(app.gallery.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_selected_gallery_image_out_of_bounds_index_is_noop() {
+        let mut app = make_settings_test_app();
+        add_temp_gallery_entry(&mut app, "oob");
+        // Point selected past the end — must not panic or mutate state.
+        app.gallery.selected = 999;
+        app.delete_selected_gallery_image();
+        assert_eq!(app.gallery.entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_selected_gallery_image_removes_local_file_from_disk() {
+        // Primary user guarantee: pressing Delete must actually remove the
+        // file from disk, not just from the in-memory gallery state.
+        let mut app = make_settings_test_app();
+        let path = add_temp_gallery_entry(&mut app, "local-file");
+        assert!(path.exists(), "precondition: file exists before delete");
+
+        app.delete_selected_gallery_image();
+
+        assert!(!path.exists(), "file should be deleted from disk");
+        assert!(app.gallery.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_selected_gallery_image_removes_thumbnail_from_disk() {
+        let mut app = make_settings_test_app();
+        let path = add_temp_gallery_entry(&mut app, "thumb");
+        let thumb_path = crate::thumbnails::thumbnail_path(&path);
+        if let Some(parent) = thumb_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&thumb_path, b"thumb-bytes").unwrap();
+        assert!(thumb_path.exists());
+
+        app.delete_selected_gallery_image();
+
+        assert!(
+            !thumb_path.exists(),
+            "thumbnail should be deleted from disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_in_detail_view_advances_to_next_image_with_preview_loaded() {
+        // When a user deletes from Detail (full-screen) view, they expect
+        // to land on the next image with the preview pane showing it —
+        // not on a blank screen with the deleted file's filename.
+        // Prior bug: delete_selected_gallery_image cleared preview_image
+        // *after* calling load_gallery_preview, wiping the just-loaded
+        // image. Reproducer below decodes a real PNG into the preview
+        // and asserts it survives.
+        use image::ImageEncoder;
+
+        // Build two real PNGs on disk so load_gallery_preview can decode
+        // the surviving entry's image.
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-detail-delete-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        fn write_real_png(path: &std::path::Path, color: [u8; 3]) {
+            let pixels: Vec<u8> = (0..16 * 16).flat_map(|_| color.iter().copied()).collect();
+            let f = std::fs::File::create(path).unwrap();
+            let encoder = image::codecs::png::PngEncoder::new(f);
+            encoder
+                .write_image(&pixels, 16, 16, image::ExtendedColorType::Rgb8)
+                .unwrap();
+        }
+
+        let a_path = tmp.join("a.png");
+        let b_path = tmp.join("b.png");
+        write_real_png(&a_path, [255, 0, 0]);
+        write_real_png(&b_path, [0, 255, 0]);
+
+        let mut app = make_settings_test_app();
+        for path in [&a_path, &b_path] {
+            app.gallery.entries.push(GalleryEntry {
+                path: path.clone(),
+                metadata: make_test_metadata(),
+                generation_time_ms: None,
+                timestamp: 0,
+                server_url: None,
+            });
+            app.gallery.thumbnail_states.push(None);
+            app.gallery.thumb_dimensions.push(None);
+            app.gallery.thumb_fixed_cache.push(None);
+        }
+        app.gallery.selected = 0;
+        app.gallery.view_mode = GalleryViewMode::Detail;
+
+        app.delete_selected_gallery_image();
+
+        assert_eq!(
+            app.gallery.entries.len(),
+            1,
+            "one entry should remain after delete"
+        );
+        assert_eq!(
+            app.gallery.view_mode,
+            GalleryViewMode::Detail,
+            "Detail view should persist when there is still an image to show"
+        );
+        assert!(
+            app.gallery.preview_image.is_some(),
+            "preview_image must be loaded for the new selection — \
+             previously the code cleared it right after load_gallery_preview"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn delete_last_entry_in_detail_view_returns_to_grid() {
+        // Deleting the only image in Detail view should drop back to the
+        // Grid (where the empty-state banner lives) — not leave the user
+        // staring at an empty Detail pane.
+        let mut app = make_settings_test_app();
+        let _path = add_temp_gallery_entry(&mut app, "lone-entry");
+        app.gallery.view_mode = GalleryViewMode::Detail;
+
+        app.delete_selected_gallery_image();
+
+        assert!(app.gallery.entries.is_empty());
+        assert_eq!(app.gallery.view_mode, GalleryViewMode::Grid);
+        assert!(app.gallery.preview_image.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_selected_gallery_image_shrinks_parallel_arrays_in_lockstep() {
+        // The gallery maintains three parallel vectors alongside `entries`
+        // (thumbnail_states, thumb_dimensions, thumb_fixed_cache) — a
+        // delete that drops from only `entries` would misalign subsequent
+        // thumbnail lookups by one. Two entries → delete selected → all
+        // four vectors must end at len 1.
+        let mut app = make_settings_test_app();
+        add_temp_gallery_entry(&mut app, "lockstep-a");
+        add_temp_gallery_entry(&mut app, "lockstep-b");
+        app.gallery.selected = 0;
+
+        app.delete_selected_gallery_image();
+
+        assert_eq!(app.gallery.entries.len(), 1);
+        assert_eq!(app.gallery.thumbnail_states.len(), 1);
+        assert_eq!(app.gallery.thumb_dimensions.len(), 1);
+        assert_eq!(app.gallery.thumb_fixed_cache.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_selected_gallery_image_server_entry_emits_failure_on_api_error() {
+        // When a gallery entry has `server_url: Some(...)`, the delete
+        // must contact the server via `DELETE /api/gallery/image/:name`
+        // AND propagate failure back through the background channel so
+        // the UI can surface the error (and rescan to re-sync with the
+        // server's authoritative list). Previously the spawn was
+        // fire-and-forget — silent failures masked 403 / network errors.
+        //
+        // We point at 127.0.0.1:1 (reserved port) so the connect fails
+        // deterministically.
+        let mut app = make_settings_test_app();
+        let server = "http://127.0.0.1:1".to_string();
+        app.server_url = Some(server.clone());
+
+        // Entry mimics what `scan_images_from_server` produces: bare
+        // filename path (not absolute), server_url populated.
+        app.gallery.entries.push(GalleryEntry {
+            path: std::path::PathBuf::from("mold-server-entry.png"),
+            metadata: make_test_metadata(),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: Some(server),
+        });
+        app.gallery.thumbnail_states.push(None);
+        app.gallery.thumb_dimensions.push(None);
+        app.gallery.thumb_fixed_cache.push(None);
+        app.gallery.selected = 0;
+
+        app.delete_selected_gallery_image();
+
+        // Drain the bg channel; a GalleryDeleteFailed event must arrive.
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), app.bg_rx.recv())
+            .await
+            .expect("delete should emit a background event within 5s")
+            .expect("channel was closed");
+        assert!(
+            matches!(ev, BackgroundEvent::GalleryDeleteFailed(_)),
+            "expected GalleryDeleteFailed; the API delete must not be fire-and-forget"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_delete_failure_surfaces_error_and_rescans() {
+        // After a server-side delete fails, the UI has already optimistically
+        // removed the tile — we need to (a) surface the error so the user
+        // knows, and (b) kick off a gallery rescan so the local list
+        // re-converges with the server's authoritative state (the entry
+        // may still be there).
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://server.example:7680".to_string());
+        app.generate.error_message = None;
+        app.gallery.scanning = false;
+
+        app.apply_delete_failure("forbidden");
+
+        let msg = app.generate.error_message.clone().unwrap_or_default();
+        assert!(
+            msg.to_lowercase().contains("delete") && msg.to_lowercase().contains("forbidden"),
+            "error_message should mention delete + the server's reason, got: {msg:?}"
+        );
+        assert!(
+            app.gallery.scanning,
+            "delete failure should trigger a gallery rescan"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_gallery_scan_preserves_selection_by_filename() {
+        // Rescans (e.g. after delete failure or reconnect) must not jump the
+        // user back to the first image — if the currently-selected entry
+        // still exists in the fresh list, its new index wins. Prior
+        // behaviour: `selected = 0` unconditionally.
+        let mut app = make_settings_test_app();
+        app.gallery.entries = vec![
+            make_test_entry_with_name("a.png"),
+            make_test_entry_with_name("b.png"),
+            make_test_entry_with_name("c.png"),
+        ];
+        app.gallery.thumbnail_states = vec![None; 3];
+        app.gallery.thumb_dimensions = vec![None; 3];
+        app.gallery.thumb_fixed_cache = vec![None; 3];
+        app.gallery.selected = 1; // b.png
+
+        // Fresh scan returns the same filenames in a different order.
+        let new_entries = vec![
+            make_test_entry_with_name("a.png"),
+            make_test_entry_with_name("c.png"),
+            make_test_entry_with_name("b.png"), // b moved to index 2
+        ];
+        app.apply_gallery_scan(new_entries);
+
+        assert_eq!(
+            app.gallery.selected, 2,
+            "selected should follow b.png to its new index, not reset to 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_gallery_scan_clamps_when_previous_filename_is_gone() {
+        // The entry we had selected no longer exists (e.g. a successful
+        // delete followed by a rescan). Fall back to clamping the old
+        // index so the viewport barely shifts — not back to 0.
+        let mut app = make_settings_test_app();
+        app.gallery.entries = vec![
+            make_test_entry_with_name("a.png"),
+            make_test_entry_with_name("b.png"),
+            make_test_entry_with_name("c.png"),
+        ];
+        app.gallery.thumbnail_states = vec![None; 3];
+        app.gallery.thumb_dimensions = vec![None; 3];
+        app.gallery.thumb_fixed_cache = vec![None; 3];
+        app.gallery.selected = 1; // b.png
+
+        // Fresh scan returned without b.png — it was really deleted.
+        let new_entries = vec![
+            make_test_entry_with_name("a.png"),
+            make_test_entry_with_name("c.png"),
+        ];
+        app.apply_gallery_scan(new_entries);
+
+        // Old index 1 clamped to new len-1 = 1, which is c.png — neighbour
+        // selection, not a jump back to a.png.
+        assert_eq!(app.gallery.selected, 1);
+    }
+
+    #[tokio::test]
+    async fn apply_gallery_scan_empty_list_resets_selected() {
+        let mut app = make_settings_test_app();
+        app.gallery.entries = vec![make_test_entry_with_name("a.png")];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.selected = 0;
+
+        app.apply_gallery_scan(Vec::new());
+
+        assert_eq!(app.gallery.selected, 0);
+        assert!(app.gallery.entries.is_empty());
+    }
+
+    fn make_test_entry_with_name(filename: &str) -> GalleryEntry {
+        GalleryEntry {
+            path: std::path::PathBuf::from(filename),
+            metadata: make_test_metadata(),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+        }
+    }
+
+    #[test]
+    fn background_server_command_enables_gallery_delete() {
+        // The TUI-spawned `mold serve` owns the same `~/.mold/output` the
+        // TUI deletes from — if the server default (`MOLD_GALLERY_ALLOW_DELETE=0`)
+        // applies, every DELETE API call returns 403, the recent
+        // `GalleryDeleteFailed` plumbing surfaces the error, and the
+        // follow-up rescan brings the tile back. Setting the env var when
+        // configuring the spawn lets the loopback server honour the delete.
+        let mut cmd = std::process::Command::new("mold");
+        super::configure_background_server_command(&mut cmd, 7680);
+
+        let env_entry = cmd
+            .get_envs()
+            .find(|(k, _)| k.to_string_lossy() == "MOLD_GALLERY_ALLOW_DELETE")
+            .map(|(_, v)| v.map(|os| os.to_string_lossy().into_owned()))
+            .expect(
+                "MOLD_GALLERY_ALLOW_DELETE must be configured on the background server command",
+            );
+
+        assert_eq!(
+            env_entry.as_deref(),
+            Some("1"),
+            "MOLD_GALLERY_ALLOW_DELETE must be '1' so loopback deletes succeed"
+        );
+
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.contains(&"serve".to_string()) && args.contains(&"7680".to_string()),
+            "serve subcommand and port must still be passed: {args:?}"
+        );
+    }
+
+    /// Theme persistence tests serialize on this mutex — they mutate
+    /// `MOLD_HOME` which is process-wide, and cargo runs tests
+    /// concurrently by default.
+    static THEME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn apply_theme_preset_persists_to_session_file_immediately() {
+        // Previously `apply_theme_preset` only updated in-memory state;
+        // the disk write happened later, in `save_session()`, which runs
+        // on shutdown and after each generation. A user who changed
+        // theme and then crashed (or killed the TUI) lost the change.
+        // TDD: the call must write the session file itself.
+        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-theme-persist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let previous_home = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", &tmp);
+
+        let mut app = make_settings_test_app();
+        app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
+
+        let session_path = tmp.join("tui-session.json");
+        let persisted_ok = session_path.is_file();
+        let contents = if persisted_ok {
+            std::fs::read_to_string(&session_path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Restore env before asserting so a failure doesn't leak state.
+        match previous_home {
+            Some(v) => std::env::set_var("MOLD_HOME", v),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(
+            persisted_ok,
+            "apply_theme_preset should have written tui-session.json to MOLD_HOME"
+        );
+        assert!(
+            contents.contains("\"theme\"") && contents.contains("dracula"),
+            "session file should carry the selected theme slug: {contents}"
+        );
+    }
+
+    #[tokio::test]
+    async fn theme_save_then_load_round_trip_preserves_preset() {
+        // Full belt-and-braces guard for theme persistence: write a
+        // session via the same path the app uses (apply_theme_preset →
+        // save_session), then read the file back via TuiSession::load
+        // and confirm the slug parses to the same preset.
+        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-theme-roundtrip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let previous_home = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", &tmp);
+
+        for preset in [
+            crate::ui::theme::ThemePreset::Mocha,
+            crate::ui::theme::ThemePreset::Latte,
+            crate::ui::theme::ThemePreset::Ristretto,
+            crate::ui::theme::ThemePreset::Gruvbox,
+            crate::ui::theme::ThemePreset::Tokyo,
+            crate::ui::theme::ThemePreset::Nord,
+            crate::ui::theme::ThemePreset::Dracula,
+        ] {
+            let mut app = make_settings_test_app();
+            app.apply_theme_preset(preset);
+
+            let loaded = crate::session::TuiSession::load();
+            let parsed = loaded
+                .theme
+                .as_deref()
+                .map(crate::ui::theme::ThemePreset::from_slug)
+                .unwrap_or_default();
+            // Restore env *before* asserting so a failure on one preset
+            // doesn't leak MOLD_HOME to other tests.
+            assert_eq!(
+                parsed, preset,
+                "preset {preset:?} did not round-trip via TuiSession::load (got {parsed:?})"
+            );
+        }
+
+        match previous_home {
+            Some(v) => std::env::set_var("MOLD_HOME", v),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn theme_default_is_mocha_when_session_file_is_missing() {
+        // The default theme must always be Mocha — Latte is the light
+        // counterpart and should only appear when explicitly selected.
+        // Guard against a regression where `ThemePreset::default()` or
+        // the from_slug fallback gets swapped.
+        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-theme-default-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let previous_home = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", &tmp);
+
+        let loaded = crate::session::TuiSession::load();
+        let resolved = loaded
+            .theme
+            .as_deref()
+            .map(crate::ui::theme::ThemePreset::from_slug)
+            .unwrap_or_default();
+
+        match previous_home {
+            Some(v) => std::env::set_var("MOLD_HOME", v),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(
+            resolved,
+            crate::ui::theme::ThemePreset::Mocha,
+            "missing session file must resolve to Mocha, never Latte"
+        );
+        assert!(
+            loaded.theme.is_none(),
+            "no theme key should be present in a fresh session"
+        );
+    }
+
+    #[tokio::test]
+    async fn theme_default_is_mocha_when_slug_is_unknown_or_empty() {
+        // An old session file or a hand-edited config could carry a
+        // garbage slug — it must fall back to Mocha, not Latte.
+        assert_eq!(
+            crate::ui::theme::ThemePreset::from_slug(""),
+            crate::ui::theme::ThemePreset::Mocha
+        );
+        assert_eq!(
+            crate::ui::theme::ThemePreset::from_slug("not-a-real-theme"),
+            crate::ui::theme::ThemePreset::Mocha
+        );
+        assert_eq!(
+            crate::ui::theme::ThemePreset::default(),
+            crate::ui::theme::ThemePreset::Mocha
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_theme_preset_persists_across_multiple_changes() {
+        // Rapidly cycling themes should always leave the *latest* choice
+        // on disk — an earlier save_session must not be skipped because
+        // something thinks the preset hasn't changed.
+        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-theme-cycle-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let previous_home = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", &tmp);
+
+        let mut app = make_settings_test_app();
+        app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
+        app.apply_theme_preset(crate::ui::theme::ThemePreset::Nord);
+        app.apply_theme_preset(crate::ui::theme::ThemePreset::Gruvbox);
+
+        let session_path = tmp.join("tui-session.json");
+        let contents = std::fs::read_to_string(&session_path).unwrap_or_default();
+
+        match previous_home {
+            Some(v) => std::env::set_var("MOLD_HOME", v),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(
+            contents.contains("gruvbox"),
+            "latest theme (gruvbox) should be the persisted slug, got: {contents}"
+        );
+        assert!(
+            !contents.contains("dracula") || contents.matches("gruvbox").count() >= 1,
+            "old slug should have been overwritten: {contents}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_delete_failure_no_rescan_when_not_connected_to_server() {
+        // In pure-local mode there's no server to re-scan against — just
+        // surface the error without firing a rescan that would fail
+        // anyway.
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+        app.apply_delete_failure("permission denied");
+
+        assert!(app.generate.error_message.is_some());
+        assert!(
+            !app.gallery.scanning,
+            "no rescan should be kicked off when there is no server to rescan from"
+        );
     }
 
     #[tokio::test]

@@ -157,6 +157,14 @@ impl PromptHistory {
         self.entries.len()
     }
 
+    /// Iterate history entries, most-recent first.
+    ///
+    /// Used by the Queue view to render the "recent" section without needing
+    /// to expose the underlying `Vec`.
+    pub fn recent(&self, max: usize) -> impl Iterator<Item = &HistoryEntry> {
+        self.entries.iter().rev().take(max)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -350,5 +358,28 @@ mod tests {
         assert!(history.push_entry(make_entry("hello")));
         assert!(!history.push_entry(make_entry("hello"))); // duplicate
         assert!(history.push_entry(make_entry("world"))); // different
+    }
+
+    #[test]
+    fn recent_yields_newest_first_up_to_max() {
+        // Queue view relies on `recent()` returning most-recent-first with a
+        // hard cap on the number of entries yielded.
+        let mut history = PromptHistory {
+            entries: vec![
+                make_entry("oldest"),
+                make_entry("middle"),
+                make_entry("newest"),
+            ],
+            cursor: None,
+            draft: None,
+        };
+        let prompts: Vec<&str> = history.recent(5).map(|e| e.prompt.as_str()).collect();
+        assert_eq!(prompts, vec!["newest", "middle", "oldest"]);
+
+        let capped: Vec<&str> = history.recent(1).map(|e| e.prompt.as_str()).collect();
+        assert_eq!(capped, vec!["newest"]);
+
+        history.entries.clear();
+        assert_eq!(history.recent(3).count(), 0);
     }
 }

@@ -216,7 +216,10 @@ async fn try_server_generate(
 
     match try_server_generate_once(client, req, progress_tx).await {
         Ok(response) => {
-            let _ = tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
+            let _ = tx.send(BackgroundEvent::GenerationComplete {
+                response: Box::new(response),
+                from_local: false,
+            });
             ServerResult::Done
         }
         Err(e) => match classify_generate_error(&e) {
@@ -256,7 +259,10 @@ async fn try_server_generate(
 
                 match try_server_generate_once(client, req, retry_tx).await {
                     Ok(response) => {
-                        let _ = tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
+                        let _ = tx.send(BackgroundEvent::GenerationComplete {
+                            response: Box::new(response),
+                            from_local: false,
+                        });
                         ServerResult::Done
                     }
                     Err(retry_err) => match classify_generate_error(&retry_err) {
@@ -357,7 +363,15 @@ async fn run_local_generation(
 
     match result {
         Ok(Ok(response)) => {
-            let _ = tx.send(BackgroundEvent::GenerationComplete(Box::new(response)));
+            // Local path — covers the forced `InferenceMode::Local` case
+            // AND the Auto-mode fallback after a remote server becomes
+            // unreachable. Marking `from_local: true` lets the TUI save
+            // the file locally instead of deferring to a server that
+            // never produced it.
+            let _ = tx.send(BackgroundEvent::GenerationComplete {
+                response: Box::new(response),
+                from_local: true,
+            });
         }
         Ok(Err(e)) => {
             let _ = tx.send(BackgroundEvent::Error(format!("Generation failed: {e}")));

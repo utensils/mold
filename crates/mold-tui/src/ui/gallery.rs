@@ -3,10 +3,37 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui_image::picker::ProtocolType;
 use ratatui_image::{Image, Resize, StatefulImage};
 
-use crate::app::{App, GalleryViewMode};
+use crate::app::{App, GalleryEntry, GalleryViewMode};
+use crate::ui::widgets::{kv_row_line, panel_block};
 
-const CELL_W: u16 = 24;
-const CELL_H: u16 = 14;
+/// Width of a single gallery tile.
+pub(crate) const CELL_W: u16 = 24;
+/// Height of a single gallery tile including its 2 border rows.
+///
+/// The cell used to reserve two rows for a filename label, which never fit
+/// on disk-era names and was redundant with the Selected panel below the
+/// grid. Removing the label lets the thumbnail fill the full inner area
+/// *and* fits one extra tile row on typical terminal heights.
+///
+/// Shared with the mouse hit-test in `app::handle_mouse` so click
+/// detection can never drift from the rendered cell size.
+pub(crate) const CELL_H: u16 = 12;
+
+/// Height of the bottom row (Selected + Prompt panels) in the Grid view.
+const GRID_BOTTOM_HEIGHT: u16 = 8;
+
+/// Minimum total Gallery area height that still leaves room for at least one
+/// thumbnail *and* the Selected + Prompt inspector row. The grid panel frames
+/// a thumbnail in `CELL_H + 2` cells (cell + top/bottom border), so we need
+/// `GRID_BOTTOM_HEIGHT + CELL_H + 2` before the inspector is safe to show.
+const GRID_INSPECTOR_MIN_HEIGHT: u16 = GRID_BOTTOM_HEIGHT + CELL_H + 2;
+
+/// Whether the Grid view has enough vertical room to render the inspector row
+/// without starving the thumbnail grid. Extracted as a pure helper so the
+/// threshold is exercised by unit tests — see the `#[cfg(test)]` block below.
+fn show_grid_inspector(area_height: u16, has_entries: bool) -> bool {
+    has_entries && area_height >= GRID_INSPECTOR_MIN_HEIGHT
+}
 
 /// Compute a centered sub-rect for an image within the thumbnail area.
 ///
@@ -67,14 +94,39 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_grid(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Top: the thumbnail grid. Bottom: Selected metadata + Prompt, matching
+    // the design system's gallery wireframe. If the area is too short to
+    // fit both the inspector *and* at least one thumbnail cell the inspector
+    // is suppressed — see `show_grid_inspector`/`GRID_INSPECTOR_MIN_HEIGHT`.
+    let show_bottom = show_grid_inspector(area.height, !app.gallery.entries.is_empty());
+    let constraints = if show_bottom {
+        vec![
+            Constraint::Min(CELL_H + 2),
+            Constraint::Length(GRID_BOTTOM_HEIGHT),
+        ]
+    } else {
+        vec![Constraint::Min(1)]
+    };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    render_grid_panel(frame, app, rows[0]);
+    if show_bottom {
+        render_grid_bottom_row(frame, app, rows[1]);
+    }
+}
+
+fn render_grid_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = &app.theme;
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.border_focused())
-        .title(" Gallery ")
-        .title_style(theme.title_focused())
-        .style(Style::default().bg(theme.bg));
+    let hint = if app.gallery.entries.is_empty() {
+        None
+    } else {
+        Some(format!("{} images", app.gallery.entries.len()))
+    };
+    let block = panel_block(theme, "Gallery", true, hint.as_deref());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -137,6 +189,111 @@ fn render_grid(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// Render the Selected + Prompt panels beneath the gallery grid.
+///
+/// The row is 8 cells tall (6 content + 2 borders). Selected holds file
+/// metadata as KV rows; Prompt shows the positive prompt plus a single dim
+/// `neg: …` line for the negative prompt when present.
+fn render_grid_bottom_row(frame: &mut Frame, app: &App, area: Rect) {
+    let [selected_area, prompt_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .areas(area);
+
+    let entry = app.gallery.entries.get(app.gallery.selected);
+    render_selected_panel(frame, &app.theme, entry, selected_area);
+    render_prompt_panel(frame, &app.theme, entry, prompt_area);
+}
+
+fn render_selected_panel(
+    frame: &mut Frame,
+    theme: &crate::ui::theme::Theme,
+    entry: Option<&GalleryEntry>,
+    area: Rect,
+) {
+    let block = panel_block(theme, "Selected", false, None);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let Some(entry) = entry else {
+        let empty = Paragraph::new("No image selected").style(theme.dim());
+        frame.render_widget(empty, inner);
+        return;
+    };
+
+    let filename = entry.filename();
+    let dim = format!("{}×{}", entry.metadata.width, entry.metadata.height);
+    let seed = entry.metadata.seed.to_string();
+    let steps = entry.metadata.steps.to_string();
+
+    let lines = vec![
+        kv_row_line(theme, "File", &filename, 7, false),
+        kv_row_line(theme, "Model", &entry.metadata.model, 7, false),
+        kv_row_line(theme, "Dim", &dim, 7, false),
+        kv_row_line(theme, "Steps", &steps, 7, false),
+        kv_row_line(theme, "Seed", &seed, 7, true),
+    ];
+    let para = Paragraph::new(lines);
+    frame.render_widget(para, inner);
+}
+
+fn render_prompt_panel(
+    frame: &mut Frame,
+    theme: &crate::ui::theme::Theme,
+    entry: Option<&GalleryEntry>,
+    area: Rect,
+) {
+    let block = panel_block(theme, "Prompt", false, None);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let Some(entry) = entry else {
+        let empty = Paragraph::new("No image selected").style(theme.dim());
+        frame.render_widget(empty, inner);
+        return;
+    };
+
+    let has_neg = entry.metadata.negative_prompt.is_some();
+    let prompt_rows = if has_neg {
+        inner.height.saturating_sub(1).max(1)
+    } else {
+        inner.height
+    };
+
+    let prompt = Paragraph::new(entry.metadata.prompt.clone())
+        .style(Style::default().fg(theme.text))
+        .wrap(Wrap { trim: true });
+    let prompt_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: prompt_rows,
+    };
+    frame.render_widget(prompt, prompt_area);
+
+    if let (Some(neg), true) = (
+        entry.metadata.negative_prompt.as_deref(),
+        inner.height > prompt_rows,
+    ) {
+        let neg_line = Paragraph::new(format!("neg: {neg}")).style(theme.dim());
+        let neg_area = Rect {
+            x: inner.x,
+            y: inner.y + prompt_rows,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(neg_line, neg_area);
+    }
+}
+
 fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, selected: bool) {
     let theme = &app.theme;
     let entry = &app.gallery.entries[idx];
@@ -159,15 +316,10 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         return;
     }
 
-    // Thumbnail area (all but last 2 rows for filename)
-    let thumb_rows = cell_inner.height.saturating_sub(2);
-    let thumb_area = Rect::new(cell_inner.x, cell_inner.y, cell_inner.width, thumb_rows);
-    let label_area = Rect::new(
-        cell_inner.x,
-        cell_inner.y + thumb_rows,
-        cell_inner.width,
-        2.min(cell_inner.height),
-    );
+    // Thumbnail fills the full inner area now that per-cell filename
+    // labels have been removed — they never fit at CELL_W=24 and the
+    // Selected panel below the grid already shows the full filename.
+    let thumb_area = cell_inner;
 
     // Load thumbnail lazily if not yet loaded
     if idx < app.gallery.thumbnail_states.len() {
@@ -256,32 +408,17 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
         }
     }
 
-    // Filename label below thumbnail
-    let filename = entry.filename();
-    let display_name = if filename.len() > cell_inner.width as usize {
-        format!("{}...", &filename[..cell_inner.width as usize - 3])
-    } else {
-        filename
-    };
-
-    let name_style = if selected {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.text_dim)
-    };
-
-    let label = Paragraph::new(display_name)
-        .style(name_style)
-        .alignment(Alignment::Center);
-    frame.render_widget(label, label_area);
+    // Intentionally no filename label — the Selected panel below the
+    // grid shows the full name for the currently-highlighted tile.
 }
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{center_rect, centered_thumb_rect, render_grid_cell, CELL_H, CELL_W};
+    use super::{
+        center_rect, centered_thumb_rect, render_grid_cell, show_grid_inspector, CELL_H, CELL_W,
+        GRID_INSPECTOR_MIN_HEIGHT,
+    };
     use crate::app::{App, GalleryEntry};
     use image::{DynamicImage, Rgba, RgbaImage};
     use ratatui::layout::Rect;
@@ -338,6 +475,60 @@ mod tests {
         let rect = center_rect(area, 10, 6);
 
         assert_eq!(rect, Rect::new(6, 2, 10, 6));
+    }
+
+    #[test]
+    fn gallery_grid_cell_does_not_render_filename_label() {
+        // Reported: thumbnail cells rendered a truncated filename below
+        // the image (`mold-flux-dev-q4-17…`). The label never fit, was
+        // redundant with the Selected panel below the grid, and ate two
+        // rows of thumbnail space per cell.
+        //
+        // TDD: render a single cell with a recognisable filename stem
+        // and assert no cell in the buffer contains even a prefix of
+        // that stem.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let mut picker = Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ProtocolType::Halfblocks);
+        let mut app = App::new(None, true, picker).unwrap();
+
+        let stem = "unique-cell-label-stem";
+        let entry_path = PathBuf::from(format!("{stem}.png"));
+        app.gallery.entries = vec![GalleryEntry {
+            path: entry_path,
+            metadata: test_metadata(64, 64),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+        }];
+        // No thumbnail loaded — we only care about the text rendering path.
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+
+        let backend = TestBackend::new(CELL_W, CELL_H);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_grid_cell(frame, &mut app, Rect::new(0, 0, CELL_W, CELL_H), 0, true);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered: String = buffer.content.iter().map(|c| c.symbol()).collect();
+        assert!(
+            !rendered.contains("unique-cell-label-stem"),
+            "gallery cell must not render the filename label; got: {rendered:?}"
+        );
+        // Also guard against truncated variants like `unique-cell…`.
+        assert!(
+            !rendered.contains("unique-cell"),
+            "gallery cell must not render even a truncated filename prefix; got: {rendered:?}"
+        );
     }
 
     #[test]
@@ -403,6 +594,37 @@ mod tests {
 
         std::fs::remove_file(&thumb_path).ok();
     }
+
+    // ── Codex P2: inspector must not starve the thumbnail grid ───────
+
+    #[test]
+    fn show_grid_inspector_hidden_below_minimum_height() {
+        // Minimum is `GRID_BOTTOM_HEIGHT (8) + CELL_H + 2 borders`.
+        // At heights below that, showing the inspector would leave zero
+        // room for a thumbnail row.
+        let min = GRID_INSPECTOR_MIN_HEIGHT;
+        assert!(!show_grid_inspector(0, true));
+        assert!(!show_grid_inspector(min.saturating_sub(1), true));
+        assert!(!show_grid_inspector(min.saturating_sub(10), true));
+    }
+
+    #[test]
+    fn show_grid_inspector_visible_at_and_above_minimum_height() {
+        assert!(show_grid_inspector(GRID_INSPECTOR_MIN_HEIGHT, true));
+        assert!(show_grid_inspector(GRID_INSPECTOR_MIN_HEIGHT + 20, true));
+    }
+
+    #[test]
+    fn show_grid_inspector_hidden_when_gallery_is_empty() {
+        // With no entries there's nothing to inspect; skip the bottom row so
+        // the empty-state message fills the whole panel.
+        assert!(!show_grid_inspector(100, false));
+    }
+
+    // Compile-time guard: if someone bumps CELL_H or GRID_BOTTOM_HEIGHT
+    // without updating the threshold, the build breaks instead of the
+    // gallery quietly hiding thumbnails at runtime.
+    const _: () = assert!(GRID_INSPECTOR_MIN_HEIGHT >= CELL_H + 2);
 }
 
 fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -426,13 +648,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     // ── Metadata panel ────────────────────────────────────
-    let meta_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.border_focused())
-        .title(" Details ")
-        .title_style(theme.title_focused())
-        .style(Style::default().bg(theme.bg));
-
+    let meta_block = panel_block(theme, "Details", true, None);
     let meta_inner = meta_block.inner(layout[0]);
     frame.render_widget(meta_block, layout[0]);
 
@@ -565,13 +781,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(details, meta_inner);
 
     // ── Image preview ─────────────────────────────────────
-    let preview_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.border())
-        .title(" Preview ")
-        .title_style(theme.title())
-        .style(Style::default().bg(theme.bg));
-
+    let preview_block = panel_block(theme, "Preview", false, None);
     let preview_inner = preview_block.inner(layout[1]);
     frame.render_widget(preview_block, layout[1]);
 
