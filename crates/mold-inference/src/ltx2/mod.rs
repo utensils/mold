@@ -12,6 +12,7 @@ mod plan;
 mod preset;
 mod runtime;
 mod sampler;
+pub mod stitch;
 mod text;
 
 pub use chain::{
