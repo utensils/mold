@@ -461,6 +461,17 @@ Examples:
         #[arg(long, help_heading = "Server")]
         local: bool,
 
+        /// Prompt(s). Repeat for a multi-stage uniform chain with smooth
+        /// transitions. For heterogeneous stages, use --script.
+        #[arg(long, help_heading = "Image")]
+        prompt: Vec<String>,
+
+        /// Per-clip frame cap for multi-prompt sugar. Clamped to the model's
+        /// per-clip cap. Only used when --prompt is repeated. Defaults to 97
+        /// (the LTX-2 19B/22B distilled cap).
+        #[arg(long, value_name = "N", help_heading = "Video")]
+        frames_per_clip: Option<u32>,
+
         /// Path to a `mold.chain.v1` TOML script. When set, every other
         /// generation flag is ignored except `--output`, `--local`, `--host`,
         /// and `--dry-run`.
@@ -1194,6 +1205,8 @@ async fn run() -> anyhow::Result<()> {
             no_metadata,
             preview,
             local,
+            prompt,
+            frames_per_clip,
             script,
             dry_run,
             gpus,
@@ -1246,6 +1259,34 @@ async fn run() -> anyhow::Result<()> {
                 )
                 .await;
             }
+            if prompt.len() > 1 {
+                return commands::chain::run_from_sugar(
+                    model_or_prompt.clone(),
+                    prompt.clone(),
+                    frames_per_clip,
+                    motion_tail,
+                    dry_run,
+                    host.clone(),
+                    output.clone(),
+                    local,
+                    no_metadata,
+                    preview,
+                    gpus.clone(),
+                    t5_variant.clone(),
+                    qwen3_variant.clone(),
+                    qwen2_variant.clone(),
+                    qwen2_text_encoder_mode.clone(),
+                    eager,
+                    offload,
+                )
+                .await;
+            }
+            // Fold single --prompt into prompt_rest when there's no positional prompt.
+            let prompt_rest = if prompt.len() == 1 && prompt_rest.is_empty() {
+                prompt.into_iter().collect()
+            } else {
+                prompt_rest
+            };
             commands::run::run(
                 model_or_prompt,
                 prompt_rest,

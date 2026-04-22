@@ -553,3 +553,28 @@ frames = 49
         .stdout(predicate::str::contains("first scene"))
         .stdout(predicate::str::contains("second scene"));
 }
+
+// ── mold run --prompt sugar ────────────────────────────────────────────────
+
+#[test]
+fn repeated_prompt_flag_yields_chain() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args([
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "--prompt",
+            "first scene",
+            "--prompt",
+            "second scene",
+            "--prompt",
+            "third scene",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("3 stages"))
+        .stdout(predicate::str::contains("first scene"))
+        .stdout(predicate::str::contains("second scene"))
+        .stdout(predicate::str::contains("third scene"));
+}

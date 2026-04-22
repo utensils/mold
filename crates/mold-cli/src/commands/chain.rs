@@ -802,6 +802,127 @@ pub(crate) fn build_request_from_script(
     })
 }
 
+/// Multi-prompt sugar: build a uniform multi-stage chain from a `Vec<String>`
+/// of `--prompt` values. All stages share the same frame count, dimensions,
+/// FPS, and use `TransitionMode::Smooth`. Model resolution matches the normal
+/// `run::run` path via the config default or explicit model positional arg.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_from_sugar(
+    model_or_prompt: Option<String>,
+    prompts: Vec<String>,
+    frames_per_clip: Option<u32>,
+    motion_tail: u32,
+    dry_run: bool,
+    host: Option<String>,
+    output: Option<String>,
+    local: bool,
+    no_metadata: bool,
+    preview: bool,
+    gpus: Option<String>,
+    t5_variant: Option<String>,
+    qwen3_variant: Option<String>,
+    qwen2_variant: Option<String>,
+    qwen2_text_encoder_mode: Option<String>,
+    eager: bool,
+    offload: bool,
+) -> anyhow::Result<()> {
+    use mold_core::chain::{ChainStage, TransitionMode};
+    use mold_core::manifest::{is_known_model, resolve_model_name};
+
+    let config = mold_core::Config::load_or_default();
+
+    // Resolve the model: positional must be a known model name; otherwise
+    // fall back to the config default. All prompts come from --prompt in sugar
+    // mode — a positional that is NOT a model name is rejected with a clear error.
+    let model_raw = match model_or_prompt.as_deref() {
+        Some(m) if is_known_model(m, &config) => m.to_string(),
+        Some(m) => {
+            anyhow::bail!(
+                "unknown model '{m}'; when using repeated --prompt, the first positional arg \
+                 must be a known model (or omit it to use the config default)"
+            );
+        }
+        None => config.resolved_default_model(),
+    };
+    let model = resolve_model_name(&model_raw);
+
+    // Cap clip_frames to LTX2_DISTILLED_CLIP_CAP if the user didn't override.
+    let clip_frames = frames_per_clip
+        .unwrap_or(LTX2_DISTILLED_CLIP_CAP)
+        .min(LTX2_DISTILLED_CLIP_CAP);
+    if let Some(requested) = frames_per_clip {
+        if requested > LTX2_DISTILLED_CLIP_CAP {
+            crate::output::status!(
+                "{} --frames-per-clip {} exceeds LTX-2 cap {}, clamping to {}",
+                theme::prefix_warning(),
+                requested,
+                LTX2_DISTILLED_CLIP_CAP,
+                LTX2_DISTILLED_CLIP_CAP,
+            );
+        }
+    }
+
+    // Build the canonical ChainRequest from the list of prompts.
+    let stages: Vec<ChainStage> = prompts
+        .iter()
+        .map(|p| ChainStage {
+            prompt: p.clone(),
+            frames: clip_frames,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
+        })
+        .collect();
+
+    let req = ChainRequest {
+        model: model.clone(),
+        stages,
+        motion_tail_frames: motion_tail,
+        width: 1216,
+        height: 704,
+        fps: 24,
+        seed: None,
+        steps: 8,
+        guidance: 3.0,
+        strength: 1.0,
+        output_format: OutputFormat::Mp4,
+        placement: None,
+        prompt: None,
+        total_frames: None,
+        clip_frames: None,
+        source_image: None,
+    }
+    .normalise()?;
+
+    if dry_run {
+        print_dry_run_summary(&req);
+        return Ok(());
+    }
+
+    let inputs = chain_inputs_from_request(&req);
+    run_chain(
+        inputs,
+        host,
+        output,
+        no_metadata,
+        preview,
+        local,
+        gpus,
+        t5_variant,
+        qwen3_variant,
+        qwen2_variant,
+        qwen2_text_encoder_mode,
+        eager,
+        offload,
+    )
+    .await
+}
+
 /// Re-build a `ChainInputs` bundle from a normalised `ChainRequest` so the
 /// existing `run_chain` helper can dispatch to the server or the local
 /// orchestrator. Assumes `req.stages` is non-empty (guaranteed by
