@@ -236,10 +236,6 @@ impl DownloadQueue {
     }
 }
 
-#[cfg(test)]
-#[path = "downloads_test.rs"]
-mod tests;
-
 // ── PullDriver trait + real & test implementations ──────────────────────────
 
 /// Trait that hides the HuggingFace pull behind something the tests can fake.
@@ -729,3 +725,7 @@ fn now_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "downloads_test.rs"]
+mod tests;

@@ -1,3 +1,8 @@
+// Tests use `std::sync::Mutex<()>` to serialize process-global env-var
+// mutations; holding the guard across `.await` is intentional under the
+// current-thread tokio test runtime.
+#![allow(clippy::await_holding_lock)]
+
 #[cfg(test)]
 mod tests {
     use axum::{

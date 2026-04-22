@@ -4,6 +4,11 @@
 //! These tests never touch HuggingFace — they inject a fake `PullDriver` so
 //! the queue logic can be exercised in isolation.
 
+// The tests use `std::sync::Mutex<()>` to serialize process-global env-var
+// mutations; holding the guard across `.await` is intentional under the
+// current-thread tokio test runtime.
+#![allow(clippy::await_holding_lock)]
+
 use crate::downloads::DownloadQueue;
 
 #[tokio::test]
