@@ -1,4 +1,6 @@
-use crate::chain::{ChainProgressEvent, ChainRequest, ChainResponse, SseChainCompleteEvent};
+use crate::chain::{
+    ChainProgressEvent, ChainRequest, ChainResponse, ChainScript, SseChainCompleteEvent,
+};
 use crate::error::MoldError;
 use crate::types::{
     ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse, ImageData,
@@ -427,10 +429,13 @@ impl MoldClient {
                             audio_sample_rate: complete.audio_sample_rate,
                             audio_channels: complete.audio_channels,
                         };
+                        // TODO(chain-v2 1.13): extract real script from SSE complete event.
                         return Ok(Some(ChainResponse {
                             video,
                             stage_count: complete.stage_count,
                             gpu: complete.gpu,
+                            script: ChainScript::placeholder_for_sse_transition(),
+                            vram_estimate: None,
                         }));
                     }
                     "error" => {

@@ -213,6 +213,87 @@ pub struct ChainRequest {
     pub source_image: Option<Vec<u8>>,
 }
 
+/// Canonical TOML-shaped projection of a normalised [`ChainRequest`].
+///
+/// Echoed back in [`ChainResponse::script`] so clients can save the exact
+/// form that was rendered without re-serialising the request body (which
+/// carries auto-expand sugar and other transport-only fields).
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainScript {
+    pub schema: String, // always "mold.chain.v1"
+    pub chain: ChainScriptChain,
+    #[serde(rename = "stage")]
+    pub stages: Vec<ChainStage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainScriptChain {
+    pub model: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    pub steps: u32,
+    pub guidance: f64,
+    pub strength: f64,
+    pub motion_tail_frames: u32,
+    pub output_format: OutputFormat,
+}
+
+impl From<&ChainRequest> for ChainScript {
+    fn from(req: &ChainRequest) -> Self {
+        ChainScript {
+            schema: "mold.chain.v1".into(),
+            chain: ChainScriptChain {
+                model: req.model.clone(),
+                width: req.width,
+                height: req.height,
+                fps: req.fps,
+                seed: req.seed,
+                steps: req.steps,
+                guidance: req.guidance,
+                strength: req.strength,
+                motion_tail_frames: req.motion_tail_frames,
+                output_format: req.output_format,
+            },
+            stages: req.stages.clone(),
+        }
+    }
+}
+
+impl ChainScript {
+    /// Transient placeholder while the streaming path is wired to carry the
+    /// script through the SSE `complete` event (Task 1.13). After 1.13 the
+    /// client extracts `script` from the event payload directly.
+    pub fn placeholder_for_sse_transition() -> Self {
+        ChainScript {
+            schema: "mold.chain.v1".into(),
+            chain: ChainScriptChain {
+                model: String::new(),
+                width: 0,
+                height: 0,
+                fps: 0,
+                seed: None,
+                steps: 0,
+                guidance: 0.0,
+                strength: 0.0,
+                motion_tail_frames: 0,
+                output_format: OutputFormat::Mp4,
+            },
+            stages: Vec::new(),
+        }
+    }
+}
+
+/// VRAM feasibility estimate — populated by sub-project D. `None` in this
+/// release.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct VramEstimate {
+    pub worst_case_bytes: u64,
+    pub fits: bool,
+}
+
 /// Response from a chained generation request. The `video` is the stitched
 /// output; individual per-stage clips are not returned.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -225,6 +306,15 @@ pub struct ChainResponse {
     /// GPU ordinal that handled the chain (multi-GPU servers only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<usize>,
+
+    // NEW ──────────────────────────────────────────────────────────────
+    /// Canonical TOML-shaped echo of the rendered script. Clients can save
+    /// this directly as a `.toml` file.
+    pub script: ChainScript,
+
+    /// Reserved for sub-project D; `None` in this release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_estimate: Option<VramEstimate>,
 }
 
 /// SSE completion event for a successful chain run. Streamed as the final
@@ -868,6 +958,44 @@ mod tests {
         assert!(stage.model.is_none());
         assert!(stage.loras.is_empty());
         assert!(stage.references.is_empty());
+    }
+
+    #[test]
+    fn chain_script_projects_from_request() {
+        let req = ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".into(),
+            stages: vec![ChainStage {
+                prompt: "a".into(),
+                frames: 97,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Smooth,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            }],
+            motion_tail_frames: 25,
+            width: 1216,
+            height: 704,
+            fps: 24,
+            seed: Some(42),
+            steps: 8,
+            guidance: 3.0,
+            strength: 1.0,
+            output_format: OutputFormat::Mp4,
+            placement: None,
+            prompt: None,
+            total_frames: None,
+            clip_frames: None,
+            source_image: None,
+        };
+        let script = ChainScript::from(&req);
+        assert_eq!(script.chain.model, "ltx-2-19b-distilled:fp8");
+        assert_eq!(script.chain.seed, Some(42));
+        assert_eq!(script.stages.len(), 1);
+        assert_eq!(script.stages[0].prompt, "a");
     }
 
     #[test]

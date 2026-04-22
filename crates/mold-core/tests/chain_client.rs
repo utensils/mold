@@ -62,7 +62,22 @@ fn minimal_chain_response_json() -> serde_json::Value {
             "fps": 24,
             "thumbnail": []
         },
-        "stage_count": 1
+        "stage_count": 1,
+        "script": {
+            "schema": "mold.chain.v1",
+            "chain": {
+                "model": "ltx-2-19b-distilled:fp8",
+                "width": 1216,
+                "height": 704,
+                "fps": 24,
+                "steps": 8,
+                "guidance": 3.0,
+                "strength": 1.0,
+                "motion_tail_frames": 4,
+                "output_format": "mp4"
+            },
+            "stage": []
+        }
     })
 }
 

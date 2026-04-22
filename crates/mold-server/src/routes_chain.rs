@@ -22,7 +22,9 @@ use axum::{
     Json,
 };
 use base64::Engine as _;
-use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainResponse, SseChainCompleteEvent};
+use mold_core::chain::{
+    ChainProgressEvent, ChainRequest, ChainResponse, ChainScript, SseChainCompleteEvent,
+};
 use mold_core::{OutputFormat, OutputMetadata, VideoData};
 use tokio_stream::StreamExt as _;
 
@@ -418,6 +420,8 @@ async fn run_chain(
         video,
         stage_count,
         gpu: None,
+        script: ChainScript::from(&req),
+        vram_estimate: None,
     };
     Ok((response, generation_time_ms))
 }
