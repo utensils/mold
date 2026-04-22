@@ -498,6 +498,37 @@ impl ChainRequest {
             }
         }
 
+        // Reserved-field rejection (sub-projects B/C).
+        for (idx, stage) in self.stages.iter().enumerate() {
+            if stage.model.is_some() {
+                return Err(MoldError::Validation(format!(
+                    "stages[{idx}].model is reserved for sub-project C and not yet supported"
+                )));
+            }
+            if !stage.loras.is_empty() {
+                return Err(MoldError::Validation(format!(
+                    "stages[{idx}].loras is reserved for sub-project B and not yet supported"
+                )));
+            }
+            if !stage.references.is_empty() {
+                return Err(MoldError::Validation(format!(
+                    "stages[{idx}].references is reserved for sub-project B and not yet supported"
+                )));
+            }
+        }
+
+        // Stage 0's transition is meaningless (nothing to transition from).
+        // Coerce to Smooth with a warn so scripts survive reorders.
+        if let Some(first) = self.stages.first_mut() {
+            if first.transition != TransitionMode::Smooth {
+                tracing::warn!(
+                    coerced_from = ?first.transition,
+                    "stage 0 transition is meaningless; coercing to Smooth"
+                );
+                first.transition = TransitionMode::Smooth;
+            }
+        }
+
         // Canonicalise: clear auto-expand fields so downstream code only
         // ever reads from `stages`.
         self.prompt = None;
@@ -1017,5 +1048,81 @@ mod tests {
         assert_eq!(back.frames, 49);
         assert_eq!(back.transition, TransitionMode::Cut);
         assert_eq!(back.fade_frames, Some(12));
+    }
+
+    #[test]
+    fn normalise_coerces_stage_0_transition_to_smooth() {
+        let mut req = auto_expand_request("a", 97, 97, 25, None);
+        req.stages = vec![
+            ChainStage {
+                prompt: "scene 0".into(),
+                frames: 97,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Cut, // should coerce
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            },
+            ChainStage {
+                prompt: "scene 1".into(),
+                frames: 97,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Cut, // preserved
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            },
+        ];
+        let normalised = req.normalise().unwrap();
+        assert_eq!(normalised.stages[0].transition, TransitionMode::Smooth);
+        assert_eq!(normalised.stages[1].transition, TransitionMode::Cut);
+    }
+
+    #[test]
+    fn normalise_rejects_reserved_model_field() {
+        let mut req = auto_expand_request("a", 97, 97, 25, None);
+        req.stages = vec![ChainStage {
+            prompt: "x".into(),
+            frames: 97,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: Some("flux-dev:q4".into()),
+            loras: vec![],
+            references: vec![],
+        }];
+        let err = req.normalise().unwrap_err().to_string();
+        assert!(err.contains("reserved for sub-project C"), "got: {err}");
+    }
+
+    #[test]
+    fn normalise_rejects_reserved_loras_field() {
+        let mut req = auto_expand_request("a", 97, 97, 25, None);
+        req.stages = vec![ChainStage {
+            prompt: "x".into(),
+            frames: 97,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![LoraSpec {
+                path: "x.safetensors".into(),
+                scale: 1.0,
+                name: None,
+            }],
+            references: vec![],
+        }];
+        let err = req.normalise().unwrap_err().to_string();
+        assert!(err.contains("reserved for sub-project B"), "got: {err}");
     }
 }
