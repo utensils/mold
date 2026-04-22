@@ -6,10 +6,44 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+use mold_core::config::Config;
 use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
-use mold_db::{GenerationRecord, MetadataDb, RecordSource};
+use mold_db::{config_sync, GenerationRecord, MetadataDb, RecordSource};
 
 static DB: OnceLock<Option<MetadataDb>> = OnceLock::new();
+static MIGRATION_DONE: OnceLock<()> = OnceLock::new();
+
+/// Install the `Config::load_or_default()` post-load hook so every freshly
+/// loaded config is overlaid with DB-backed user preferences, and run the
+/// one-shot `config.toml → DB` import on first call. Safe to call
+/// multiple times — both the hook registration and the migration are
+/// guarded by `OnceLock`.
+///
+/// Call this once from `main()` before the CLI dispatch so every
+/// subsequent `Config::load_or_default()` returns the authoritative
+/// merged view.
+pub fn install_config_db_hooks() {
+    mold_core::config::install_post_load_hook(post_load_hook);
+}
+
+fn post_load_hook(cfg: &mut Config) {
+    let Some(db) = handle() else {
+        return;
+    };
+    // First call: run the idempotent one-shot import. The sentinel in
+    // the DB is the source of truth; the OnceLock is just a per-process
+    // fast path so we don't hit the DB for the sentinel on every load.
+    if MIGRATION_DONE.set(()).is_ok() {
+        if let Err(e) = config_sync::migrate_config_toml_to_db(db, cfg) {
+            tracing::warn!("config → DB migration skipped: {e:#}");
+        }
+    }
+    // Overlay DB values onto `cfg`. Env-var overrides for expand are
+    // applied by consumers (existing `with_env_overrides()` call sites).
+    if let Err(e) = config_sync::hydrate_config_from_db(db, cfg) {
+        tracing::warn!("config DB hydration skipped: {e:#}");
+    }
+}
 
 /// Borrow the lazily-opened metadata DB. Open errors are logged once and
 /// then suppressed — the CLI must keep working without persistence.

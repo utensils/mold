@@ -9,6 +9,24 @@ use crate::types::Scheduler;
 
 static RUNTIME_MODELS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
+/// Hook installed by callers (typically `mold-cli` at startup) that wants
+/// to overlay DB-backed user preferences onto every freshly-loaded
+/// `Config`. `mold-core` itself must not depend on `mold-db`, so the hook
+/// is just an opaque function pointer registered once per process.
+///
+/// Runs after TOML parsing + legacy v0→v1 migration and before the
+/// returned value is handed to the caller. Errors should be swallowed
+/// inside the hook (the DB layer logs); failing here must never break
+/// `load_or_default()`.
+pub type ConfigPostLoadHook = fn(&mut Config);
+static POST_LOAD_HOOK: OnceLock<ConfigPostLoadHook> = OnceLock::new();
+
+/// Register a post-load hook. First caller wins; subsequent calls are a
+/// no-op so tests can't clobber each other.
+pub fn install_post_load_hook(hook: ConfigPostLoadHook) {
+    let _ = POST_LOAD_HOOK.set(hook);
+}
+
 /// Which fallback step resolved the default model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefaultModelSource {
@@ -553,6 +571,11 @@ impl Config {
             if let Err(e) = cfg.save() {
                 eprintln!("warning: failed to save migrated config: {e}");
             }
+        }
+
+        // Post-load hook (DB-backed user-pref overlay, if installed).
+        if let Some(hook) = POST_LOAD_HOOK.get() {
+            hook(&mut cfg);
         }
 
         cfg

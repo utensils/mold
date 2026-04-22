@@ -1,18 +1,44 @@
 # Configuration
 
-mold looks for `config.toml` inside the base mold directory (`~/.mold/` by
-default, or override with `MOLD_HOME`).
+mold keeps configuration in two places by design:
+
+- **`config.toml`** — the hand-editable _bootstrap_ file in `~/.mold/` (or
+  `$MOLD_HOME`). Owns paths, ports, credentials, and the model-path
+  entries that `mold pull` writes.
+- **`mold.db` (SQLite)** — owns user preferences: the `[expand]` section,
+  global generation defaults (`default_width`, `default_height`,
+  `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`,
+  `default_negative_prompt`), the `last-model` sidecar, and per-model
+  generation defaults (`default_steps`, `default_guidance`,
+  `default_width`, `default_height`, `scheduler`, `negative_prompt`,
+  `lora`, `lora_scale`). These fields moved to the DB in
+  [#265](https://github.com/utensils/mold/issues/265) so GUI writes and
+  hand-curated TOML no longer fight over the same file.
+
+Environment variables still override both surfaces at read time.
+Upgrading from an earlier release runs a one-shot import of the
+preference slices of `config.toml` into the DB on first launch — your
+existing values carry over.
 
 ## Managing Config from the CLI
 
-Use `mold config` to view and edit settings without manually editing TOML:
+`mold config` routes writes to the right surface based on the key
+prefix:
 
 ```bash
-mold config list                    # Show all settings
+mold config list                    # Show all settings (both surfaces)
 mold config get server_port         # Get a value
-mold config set server_port 8080    # Set a value
-mold config edit                    # Open in $EDITOR
+mold config set server_port 8080    # Bootstrap key → writes config.toml
+mold config set expand.enabled true # User preference → writes mold.db
+mold config set default_width 1024  # Generation default → writes mold.db
+mold config where expand.enabled    # Print which surface owns this key
+mold config edit                    # Open config.toml in $EDITOR
 ```
+
+`mold config set` prints the resolved surface in the output line (for
+example `Set expand.enabled = true [db]`) so you can tell at a glance
+where the write landed. `mold config where <key>` also reports any
+active `MOLD_*` env var that overrides the stored value at runtime.
 
 See the [CLI Reference](/guide/cli-reference#mold-config) for the full list of
 keys and options.

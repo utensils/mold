@@ -219,25 +219,31 @@ mold default flux-dev:q4  # set default
 
 ## `mold config`
 
-View and edit configuration settings using dot-notation keys.
+View and edit configuration settings using dot-notation keys. Settings
+are split between `config.toml` (paths, ports, credentials) and the
+SQLite settings DB at `$MOLD_HOME/mold.db` (user preferences — see
+[Configuration](/guide/configuration) for the split). `mold config`
+routes writes to the right surface based on the key prefix.
 
 ```bash
 mold config list [--json]
 mold config get <KEY> [--raw]
 mold config set <KEY> <VALUE>
+mold config where <KEY>
 mold config path
 mold config edit
 ```
 
 ### Subcommands
 
-| Subcommand | Description                                                                 |
-| ---------- | --------------------------------------------------------------------------- |
-| `list`     | Show all settings grouped by section. `--json` for machine-readable output. |
-| `get`      | Get a single value. `--raw` outputs bare value for scripting.               |
-| `set`      | Set a value and persist to config.toml. Validates type and range.           |
-| `path`     | Show the config file path.                                                  |
-| `edit`     | Open config file in `$EDITOR` (falls back to `$VISUAL`, then `vi`).         |
+| Subcommand | Description                                                                          |
+| ---------- | ------------------------------------------------------------------------------------ |
+| `list`     | Show all settings grouped by section. `--json` for machine-readable output.          |
+| `get`      | Get a single value. `--raw` outputs bare value for scripting.                        |
+| `set`      | Set a value and persist to the right surface (TOML or DB). Validates type and range. |
+| `where`    | Show which surface (`file` or `db`) owns the key, and report any env-var override.   |
+| `path`     | Show the `config.toml` path.                                                         |
+| `edit`     | Open `config.toml` in `$EDITOR` (falls back to `$VISUAL`, then `vi`).                |
 
 ### Key Names
 
@@ -267,9 +273,13 @@ mold config set logging.level debug
 # Clear optional fields
 mold config set output_dir none
 
-# Per-model defaults
+# Per-model defaults (generation fields → DB; path fields stay in TOML)
 mold config set models.flux-dev:q4.default_steps 30
 mold config set models.sd15:fp16.scheduler euler-ancestral
+
+# Which surface owns a key?
+mold config where expand.enabled   # → db
+mold config where server_port      # → file
 
 # JSON output for tooling
 mold config list --json | jq '.server_port'
@@ -277,7 +287,9 @@ mold config list --json | jq '.server_port'
 
 Boolean values accept `true`/`false`, `on`/`off`, or `1`/`0`. Use `none` to
 clear optional string fields. Environment variable overrides are flagged in
-`list` output and warned about when using `set`.
+`list` output and warned about when using `set`. The `set` output also
+labels the surface that actually took the write (for example
+`Set expand.enabled = true [db]`).
 
 ## `mold tui`
 

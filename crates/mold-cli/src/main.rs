@@ -103,6 +103,12 @@ enum ConfigAction {
     Path,
     /// Open config file in $EDITOR
     Edit,
+    /// Show which surface (file, db, env) owns a given key
+    Where {
+        /// Config key to inspect
+        #[arg(add = ArgValueCandidates::new(commands::config::complete_config_key))]
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1113,6 +1119,13 @@ async fn run() -> anyhow::Result<()> {
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
 
+    // Install the DB-backed `Config` overlay hook: first load runs the
+    // one-shot config.toml → DB migration, every subsequent load picks
+    // up authoritative user-preference values from the DB. Safe to run
+    // before logging init because the hook no-ops when the DB is
+    // disabled or unavailable.
+    metadata_db::install_config_db_hooks();
+
     // Initialize tracing. `mold serve` uses the logging module for optional
     // file output; all other commands use stderr-only with warn level.
     let _log_guard = match &cli.command {
@@ -1365,6 +1378,7 @@ async fn run() -> anyhow::Result<()> {
             ConfigAction::Set { key, value } => commands::config::run_set(&key, &value)?,
             ConfigAction::Path => commands::config::run_path()?,
             ConfigAction::Edit => commands::config::run_edit()?,
+            ConfigAction::Where { key } => commands::config::run_where(&key)?,
         },
         Commands::Runpod { action } => match action {
             RunpodAction::Doctor => commands::runpod::run_doctor().await?,

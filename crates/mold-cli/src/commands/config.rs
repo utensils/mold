@@ -659,6 +659,82 @@ fn unknown_key_error(key: &str) -> anyhow::Error {
     )
 }
 
+// ── Surface classification (DB vs TOML) ─────────────────────────────
+
+/// Where a given config key is persisted after issue #265.
+///
+/// Reads always go through `Config::load_or_default()` which overlays DB
+/// values on top of TOML, so callers of `get` don't care. Writes do —
+/// `Db` keys must round-trip through `mold-db` instead of rewriting
+/// `config.toml`, and `where` prints this so operators can tell which
+/// surface owns a given key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Surface {
+    /// Persisted in `config.toml` (paths, bootstrap, credentials).
+    File,
+    /// Persisted in the SQLite `settings` / `model_prefs` tables.
+    Db,
+}
+
+impl Surface {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Surface::File => "file",
+            Surface::Db => "db",
+        }
+    }
+}
+
+/// Classify a key into its storage surface. Unknown keys return `File`
+/// as a conservative default (matches pre-issue-#265 behavior).
+pub(crate) fn surface_for_key(key: &str) -> Surface {
+    // Prefix-based: user-preference slices that moved to DB.
+    if key.starts_with("tui.")
+        || key.starts_with("expand.")
+        || key.starts_with("generate.")
+        || key.starts_with("model_prefs.")
+    {
+        return Surface::Db;
+    }
+    // Global generation defaults that live on Config but now persist in
+    // the DB. Keep the old flat names for backwards-compatible CLI UX.
+    matches!(
+        key,
+        "default_width"
+            | "default_height"
+            | "default_steps"
+            | "embed_metadata"
+            | "default_negative_prompt"
+            | "t5_variant"
+            | "qwen3_variant"
+    )
+    .then_some(Surface::Db)
+    .unwrap_or(Surface::File)
+}
+
+/// For `models.<name>.<field>` keys: user-preference fields (generation
+/// defaults, LoRA) live in the DB `model_prefs` table; path fields stay
+/// in TOML. Returns `None` for non-`models.*` keys.
+fn model_field_surface(key: &str) -> Option<Surface> {
+    let rest = key.strip_prefix("models.")?;
+    let field = rest.rsplit('.').next()?;
+    let db_fields = [
+        "default_steps",
+        "default_guidance",
+        "default_width",
+        "default_height",
+        "scheduler",
+        "negative_prompt",
+        "lora",
+        "lora_scale",
+    ];
+    Some(if db_fields.contains(&field) {
+        Surface::Db
+    } else {
+        Surface::File
+    })
+}
+
 // ── Command implementations ─────────────────────────────────────────
 
 pub fn run_list(json: bool) -> Result<()> {
@@ -784,17 +860,21 @@ pub fn run_set(key: &str, value: &str) -> Result<()> {
         return Err(AlreadyReported.into());
     }
 
-    config.save()?;
+    // Route persistence by surface: user-preference slices (expand.*,
+    // generation defaults, per-model user prefs) go to the DB after
+    // issue #265. Path/bootstrap/credential keys still land in the TOML.
+    let persisted_surface = persist_value(&config, key)?;
 
     let display_value = get_value(&config, key)
         .map(|v| v.display())
         .unwrap_or_else(|_| value.to_string());
 
     println!(
-        "{} Set {} = {}",
+        "{} Set {} = {} [{}]",
         theme::icon_done(),
         key.bold(),
-        display_value
+        display_value,
+        persisted_surface.as_str().dimmed(),
     );
 
     // Warn about env override
@@ -804,6 +884,120 @@ pub fn run_set(key: &str, value: &str) -> Result<()> {
             theme::prefix_warning(),
             var.bold(),
             env_val,
+        );
+    }
+
+    Ok(())
+}
+
+/// Persist the post-mutation `config` for this key. Returns the surface
+/// that actually took the write.
+fn persist_value(config: &Config, key: &str) -> Result<Surface> {
+    // Per-model fields split by field name.
+    if key.starts_with("models.") {
+        if let Some(Surface::Db) = model_field_surface(key) {
+            persist_model_field_to_db(config, key)?;
+            return Ok(Surface::Db);
+        }
+        // Path fields still live in TOML.
+        config.save()?;
+        return Ok(Surface::File);
+    }
+
+    match surface_for_key(key) {
+        Surface::Db => {
+            persist_key_to_db(config, key)?;
+            Ok(Surface::Db)
+        }
+        Surface::File => {
+            config.save()?;
+            Ok(Surface::File)
+        }
+    }
+}
+
+fn persist_key_to_db(config: &Config, key: &str) -> Result<()> {
+    let Some(db) = crate::metadata_db::handle() else {
+        bail!(
+            "settings DB is unavailable; key '{key}' requires MOLD_DB_DISABLE=0 \
+             and a writable MOLD_HOME/mold.db"
+        );
+    };
+    // expand.* is written as a whole blob so env-var precedence and
+    // families stay coherent with the load path.
+    if key.starts_with("expand.") {
+        mold_db::config_sync::save_expand_to_db(db, &config.expand)?;
+        return Ok(());
+    }
+    // All the global generation defaults ride one writer — cheap and
+    // keeps the two halves of a `--width --height` pair consistent.
+    mold_db::config_sync::save_generate_globals_to_db(db, config)?;
+    Ok(())
+}
+
+fn persist_model_field_to_db(config: &Config, key: &str) -> Result<()> {
+    let Some(db) = crate::metadata_db::handle() else {
+        bail!(
+            "settings DB is unavailable; key '{key}' requires MOLD_DB_DISABLE=0 \
+             and a writable MOLD_HOME/mold.db"
+        );
+    };
+    let (model_name, _, _) = parse_model_key(key)?;
+    let mc = config
+        .models
+        .get(model_name)
+        .ok_or_else(|| anyhow!("no model '{model_name}' in config after set"))?;
+    // Resolve to canonical so `flux-dev` and `flux-dev:q4` share a row.
+    let canonical = mold_core::manifest::resolve_model_name(model_name);
+    // Load-merge-save so we don't clobber fields owned by the TUI
+    // (seed_mode, batch, last_prompt, etc.) when only a CFG default
+    // changed. Assignments are unconditional so that `mold config set
+    // models.<name>.<field> none` clears the DB row instead of leaving
+    // a stale value to be rehydrated on next load.
+    let mut prefs = mold_db::ModelPrefs::load(db, &canonical)?.unwrap_or_default();
+    prefs.width = mc.default_width;
+    prefs.height = mc.default_height;
+    prefs.steps = mc.default_steps;
+    prefs.guidance = mc.default_guidance;
+    prefs.scheduler = mc.scheduler.map(|s| s.to_string());
+    prefs.lora_path = mc.lora.clone();
+    prefs.lora_scale = mc.lora_scale;
+    prefs.last_negative = mc.negative_prompt.clone();
+    prefs.save(db, &canonical)?;
+    Ok(())
+}
+
+/// `mold config where <key>` — print which surface owns the key so users
+/// can disambiguate without reading source. Answers: "did my `mold config
+/// set expand.enabled true` go to config.toml, mold.db, or is an env var
+/// overriding it at runtime?"
+pub fn run_where(key: &str) -> Result<()> {
+    // Validate that this is a known key.
+    if find_static_key(key).is_none() && !key.starts_with("models.") {
+        eprintln!("{} {}", theme::icon_fail(), unknown_key_error(key));
+        return Err(AlreadyReported.into());
+    }
+
+    let surface = if key.starts_with("models.") {
+        if let Err(e) = parse_model_key(key) {
+            eprintln!("{} {e}", theme::icon_fail());
+            return Err(AlreadyReported.into());
+        }
+        model_field_surface(key).unwrap_or(Surface::File)
+    } else {
+        surface_for_key(key)
+    };
+
+    println!("{} {} = {}", theme::icon_ok(), key.bold(), surface.as_str());
+
+    // Callout for env-var override at runtime — even DB/TOML values lose
+    // to these, so it matters for disambiguation.
+    if let Some((var, env_val)) = env_override_for(key) {
+        println!(
+            "  {} env {} = {} overrides at runtime",
+            theme::icon_bullet(),
+            var.dimmed(),
+            env_val.dimmed()
         );
     }
 
@@ -1414,6 +1608,66 @@ mod tests {
         assert_eq!(ConfigValue::None.raw(), "");
     }
 
+    // ── Surface classification tests ────────────────────
+
+    #[test]
+    fn surface_for_tui_and_expand_and_generate_is_db() {
+        assert_eq!(surface_for_key("tui.theme"), Surface::Db);
+        assert_eq!(surface_for_key("expand.enabled"), Surface::Db);
+        assert_eq!(surface_for_key("expand.backend"), Surface::Db);
+        assert_eq!(surface_for_key("generate.default_width"), Surface::Db);
+        assert_eq!(
+            surface_for_key("model_prefs.flux-dev:q4.width"),
+            Surface::Db
+        );
+    }
+
+    #[test]
+    fn surface_for_flat_generation_globals_is_db() {
+        assert_eq!(surface_for_key("default_width"), Surface::Db);
+        assert_eq!(surface_for_key("default_height"), Surface::Db);
+        assert_eq!(surface_for_key("default_steps"), Surface::Db);
+        assert_eq!(surface_for_key("embed_metadata"), Surface::Db);
+        assert_eq!(surface_for_key("default_negative_prompt"), Surface::Db);
+        assert_eq!(surface_for_key("t5_variant"), Surface::Db);
+        assert_eq!(surface_for_key("qwen3_variant"), Surface::Db);
+    }
+
+    #[test]
+    fn surface_for_bootstrap_keys_is_file() {
+        assert_eq!(surface_for_key("default_model"), Surface::File);
+        assert_eq!(surface_for_key("models_dir"), Surface::File);
+        assert_eq!(surface_for_key("output_dir"), Surface::File);
+        assert_eq!(surface_for_key("server_port"), Surface::File);
+        assert_eq!(surface_for_key("logging.level"), Surface::File);
+        assert_eq!(surface_for_key("runpod.api_key"), Surface::File);
+    }
+
+    #[test]
+    fn model_field_surface_splits_db_vs_path() {
+        // User preference fields → DB.
+        for field in [
+            "default_steps",
+            "default_guidance",
+            "default_width",
+            "default_height",
+            "scheduler",
+            "negative_prompt",
+            "lora",
+            "lora_scale",
+        ] {
+            let key = format!("models.flux-dev:q4.{field}");
+            assert_eq!(model_field_surface(&key), Some(Surface::Db), "key={key}");
+        }
+        // Path fields stay in TOML.
+        assert_eq!(
+            model_field_surface("models.flux-dev:q4.transformer"),
+            Some(Surface::File)
+        );
+        // Non-model keys return None.
+        assert_eq!(model_field_surface("expand.enabled"), None);
+    }
+
     #[test]
     fn config_value_json_types() {
         assert_eq!(ConfigValue::Bool(true).to_json(), serde_json::json!(true));
@@ -1426,6 +1680,46 @@ mod tests {
     }
 
     // ── Integration tests ───────────────────────────────
+
+    /// Codex P2 regression: clearing a per-model negative prompt via
+    /// `mold config set models.<name>.negative_prompt none` must null
+    /// out the stored `last_negative` row, not leave it untouched.
+    /// Exercises the unconditional assignment in
+    /// `persist_model_field_to_db`.
+    #[test]
+    fn model_config_sync_clear_nulls_last_negative() {
+        // Pre-seed prefs with a negative prompt, then simulate the
+        // "user cleared it via CLI" path by mutating the in-memory
+        // ModelConfig and re-snapshotting.
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        mold_db::ModelPrefs {
+            last_negative: Some("stale".into()),
+            width: Some(1024),
+            ..Default::default()
+        }
+        .save(&db, "flux-dev:q4")
+        .unwrap();
+
+        // Mimic persist_model_field_to_db's load-merge-save with a
+        // cleared negative_prompt on ModelConfig.
+        let mc = mold_core::config::ModelConfig {
+            negative_prompt: None,
+            default_width: Some(1024),
+            ..Default::default()
+        };
+        let mut prefs = mold_db::ModelPrefs::load(&db, "flux-dev:q4")
+            .unwrap()
+            .unwrap_or_default();
+        prefs.width = mc.default_width;
+        prefs.last_negative = mc.negative_prompt.clone();
+        prefs.save(&db, "flux-dev:q4").unwrap();
+
+        let loaded = mold_db::ModelPrefs::load(&db, "flux-dev:q4")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.last_negative, None, "clear must null the row");
+        assert_eq!(loaded.width, Some(1024), "unrelated fields preserved");
+    }
 
     #[test]
     fn set_persists_to_disk() {

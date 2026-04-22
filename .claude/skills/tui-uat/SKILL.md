@@ -28,7 +28,8 @@ All TUI interaction goes through `scripts/tui-uat.sh`:
 ```bash
 # Lifecycle
 scripts/tui-uat.sh launch [--fresh] [--env K=V]* [--local] [--host URL]
-scripts/tui-uat.sh quit
+scripts/tui-uat.sh quit             # Close the tracked session's Ghostty window
+scripts/tui-uat.sh cleanup          # Reap any orphan mold-TUI Ghostty window (state-file-free)
 scripts/tui-uat.sh status
 scripts/tui-uat.sh env              # Print MOLD_HOME / MOLD_DB_PATH
 
@@ -60,6 +61,15 @@ scripts/tui-uat.sh db-model-assert <model> <col> <v> # Pass/fail on a single `mo
 **`db-*` commands** refuse to write to the user's real DB without `--force`. Use `--fresh` for any test that mutates state.
 
 ## How to Run a UAT Session
+
+> **Always trap cleanup.** Wrap every UAT flow so the Ghostty window is
+> closed even if an assertion fails or the script is interrupted.
+> `cleanup` is safe to call repeatedly and will reap orphan windows
+> whose state file was lost:
+>
+> ```bash
+> trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
+> ```
 
 ### 1. Launch
 
@@ -165,6 +175,7 @@ scripts/tui-uat.sh quit
 ## Example: Full Smoke Test
 
 ```bash
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
 scripts/tui-uat.sh launch --local
 scripts/tui-uat.sh view generate
 scripts/tui-uat.sh assert "Parameters"
@@ -187,6 +198,7 @@ Full quit/relaunch round-trip against an isolated DB. `--fresh` allocates a
 tmp MOLD_HOME; stash its path from `env` so the re-launch can reuse it.
 
 ```bash
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true; [ -n "${MOLD_HOME:-}" ] && rm -rf "$MOLD_HOME"' EXIT INT TERM
 # Round 1: fresh isolated env, set theme via helper, write a prompt
 scripts/tui-uat.sh launch --fresh --local
 eval "$(scripts/tui-uat.sh env)"              # exports MOLD_HOME + MOLD_DB_PATH
@@ -215,6 +227,7 @@ strength, control_scale.
 
 ```bash
 ISO=$(mktemp -d /tmp/mold-uat.XXXXXX)
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true; rm -rf "$ISO"' EXIT INT TERM
 scripts/tui-uat.sh launch --env "MOLD_HOME=$ISO" --local
 sleep 2
 
@@ -283,6 +296,7 @@ rm -rf "$ISO"
 ## Example: DB-Disabled Fallback
 
 ```bash
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
 scripts/tui-uat.sh launch --fresh --env MOLD_DB_DISABLE=1 --local
 scripts/tui-uat.sh view settings
 scripts/tui-uat.sh assert "Appearance"         # still renders
@@ -295,6 +309,7 @@ Run all three fast checks in sequence — suitable for CI.
 
 ```bash
 set -e
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
 scripts/tui-uat.sh launch --fresh --local
 scripts/tui-uat.sh view settings
 scripts/tui-uat.sh theme-set gruvbox

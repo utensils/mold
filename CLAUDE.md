@@ -239,7 +239,23 @@ All vars prefixed `MOLD_`. Key ones: `MOLD_HOST` (server URL, default `http://lo
 
 ## Config File
 
-Location: `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy — used if `~/.mold/` exists). Structure defined in `crates/mold-core/src/config.rs`. Key sections: top-level defaults (`default_model`, `models_dir`, `server_port`, `default_width/height`, `default_negative_prompt`), per-model `[models."name:tag"]` with paths + generation defaults + optional `lora`/`lora_scale`, `[expand]` for prompt expansion settings with per-family overrides, `[logging]` for level/file/rotation. `mold pull` auto-writes model config entries. `mold config` subcommands read/write these values.
+Location: `~/.config/mold/config.toml` (XDG) or `~/.mold/config.toml` (legacy — used if `~/.mold/` exists). Structure defined in `crates/mold-core/src/config.rs`.
+
+**After issue #265**, the surface is split between two stores with a single logical `Config` view:
+
+| Surface | Owns | Keys |
+|---|---|---|
+| `config.toml` (bootstrap) | paths, ports, credentials | `default_model`, `models_dir`, `output_dir`, `server_port`, `gpus`, `queue_size`, `[logging]`, `[runpod]`, per-model `transformer`/`vae`/encoder/tokenizer paths |
+| `mold.db` `settings` table | user preferences | `expand.*`, `generate.*`, `tui.*`, legacy `last-model` sidecar |
+| `mold.db` `model_prefs` table | per-model generation defaults | `default_steps`, `default_guidance`, `default_width`, `default_height`, `scheduler`, `negative_prompt`, `lora`, `lora_scale` |
+| `MOLD_*` env vars | runtime override | all of the above at read time (highest precedence) |
+
+`mold-cli`'s `main()` installs a `Config::install_post_load_hook()` that runs an idempotent one-shot `config.toml → DB` import on first boot (gated by `config.migrated_from_toml` in `settings`) and overlays DB values onto every subsequent `Config::load_or_default()`. Consumers keep reading `cfg.expand.*` / `cfg.default_width` / `cfg.models[…]` unchanged — the hook is invisible. `mold-db::config_sync` exposes the typed load/save helpers (`save_expand_to_db`, `save_generate_globals_to_db`, `migrate_config_toml_to_db`, `hydrate_config_from_db`). `mold pull` auto-writes model path entries to TOML. `mold config` subcommands route by key prefix:
+
+- `mold config set expand.enabled true` → writes the DB (new).
+- `mold config set models_dir /mnt/...` → writes `config.toml` (unchanged).
+- `mold config where <key>` → prints `file` or `db` and reports any env-var override.
+- `mold config list` still shows both surfaces under section headers.
 
 ## Model System
 
