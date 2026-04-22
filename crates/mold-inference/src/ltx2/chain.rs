@@ -111,6 +111,45 @@ pub fn extract_tail_latents(final_latents: &Tensor, pixel_frames: u32) -> Result
         .with_context(|| format!("narrow last {tail} latent frames off time axis"))
 }
 
+/// Typed error returned by [`Ltx2ChainOrchestrator::run`].
+#[derive(Debug)]
+pub enum ChainOrchestratorError {
+    /// Request failed pre-flight validation (empty stages, bad motion_tail).
+    Invalid(anyhow::Error),
+    /// A stage render call returned `Err` mid-chain.
+    StageFailed {
+        stage_idx: u32,
+        elapsed_stages: u32,
+        elapsed_ms: u64,
+        inner: anyhow::Error,
+    },
+}
+
+impl std::fmt::Display for ChainOrchestratorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(e) => write!(f, "chain validation error: {e:#}"),
+            Self::StageFailed {
+                stage_idx,
+                elapsed_stages,
+                inner,
+                ..
+            } => write!(
+                f,
+                "chain stage {stage_idx} failed after {elapsed_stages} completed stage(s): {inner:#}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ChainOrchestratorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Invalid(e) | Self::StageFailed { inner: e, .. } => Some(e.as_ref()),
+        }
+    }
+}
+
 // ── Orchestrator: loops stages, drops motion-tail prefix, accumulates frames
 
 /// Per-stage progress events the orchestrator observes from the renderer.
@@ -189,11 +228,13 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
         &mut self,
         req: &ChainRequest,
         mut chain_progress: Option<&mut dyn FnMut(ChainProgressEvent)>,
-    ) -> Result<ChainRunOutput> {
+    ) -> std::result::Result<ChainRunOutput, ChainOrchestratorError> {
         if req.stages.is_empty() {
-            bail!("Ltx2ChainOrchestrator::run: chain request has no stages");
+            return Err(ChainOrchestratorError::Invalid(anyhow::anyhow!(
+                "Ltx2ChainOrchestrator::run: chain request has no stages"
+            )));
         }
-        validate_motion_tail(req)?;
+        validate_motion_tail(req).map_err(ChainOrchestratorError::Invalid)?;
 
         let stage_count = req.stages.len() as u32;
         let estimated_total_frames = estimate_stitched_frames(req);
@@ -233,7 +274,7 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
             // closure holds a mutable reborrow of the outer callback for
             // just the duration of this call — `render_stage` is
             // synchronous so the reborrow ends before the next iteration.
-            let outcome = match chain_progress.as_deref_mut() {
+            let render_result = match chain_progress.as_deref_mut() {
                 Some(chain_cb) => {
                     let mut wrapping = |event: StageProgressEvent| match event {
                         StageProgressEvent::DenoiseStep { step, total } => {
@@ -249,15 +290,21 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
                         effective_carry,
                         req.motion_tail_frames,
                         Some(&mut wrapping),
-                    )?
+                    )
                 }
                 None => self.renderer.render_stage(
                     &stage_req,
                     effective_carry,
                     req.motion_tail_frames,
                     None,
-                )?,
+                ),
             };
+            let outcome = render_result.map_err(|inner| ChainOrchestratorError::StageFailed {
+                stage_idx,
+                elapsed_stages: idx as u32,
+                elapsed_ms: total_generation_ms,
+                inner,
+            })?;
 
             let frames_emitted = outcome.frames.len() as u32;
             stage_frames.push(outcome.frames);
@@ -657,10 +704,15 @@ mod tests {
         let mut renderer = FakeRenderer::new();
         let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
         let err = orch.run(&req, None).expect_err("empty stages must fail");
-        assert!(
-            format!("{err}").contains("has no stages"),
-            "error must name the missing stages, got: {err}",
-        );
+        match err {
+            ChainOrchestratorError::Invalid(inner) => {
+                assert!(
+                    format!("{inner}").contains("has no stages"),
+                    "error must name the missing stages, got: {inner}",
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
         assert!(renderer.calls.is_empty());
     }
 
@@ -677,10 +729,20 @@ mod tests {
         let err = orch
             .run(&req, None)
             .expect_err("mid-chain failure must bubble up");
-        assert!(
-            format!("{err}").contains("simulated GPU OOM"),
-            "error must carry the renderer's message, got: {err}",
-        );
+        match err {
+            ChainOrchestratorError::StageFailed {
+                stage_idx: 1,
+                elapsed_stages: 1,
+                inner,
+                ..
+            } => {
+                assert!(
+                    format!("{inner}").contains("simulated GPU OOM"),
+                    "inner error must carry the renderer's message, got: {inner}",
+                );
+            }
+            other => panic!("expected StageFailed at stage 1, got {other:?}"),
+        }
         // Stage 0 ran (recorded), stage 1 failed (recorded before bail),
         // stage 2 never ran.
         assert_eq!(renderer.calls.len(), 2);
@@ -809,10 +871,15 @@ mod tests {
         let mut renderer = FakeRenderer::new();
         let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
         let err = orch.run(&req, None).expect_err("must fail");
-        assert!(
-            format!("{err}").contains("motion_tail_frames"),
-            "error must name motion_tail_frames, got: {err}",
-        );
+        match err {
+            ChainOrchestratorError::Invalid(inner) => {
+                assert!(
+                    format!("{inner}").contains("motion_tail_frames"),
+                    "error must name motion_tail_frames, got: {inner}",
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
         // Renderer never gets called because validation runs up-front.
         assert!(renderer.calls.is_empty());
     }

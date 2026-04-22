@@ -282,8 +282,10 @@ enum ChainRunError {
     UnsupportedModel(String),
     /// Engine missing from cache after `ensure_model_ready` (500).
     CacheMiss(String),
-    /// Orchestrator returned an error mid-chain (502).
+    /// Orchestrator returned an error mid-chain from an invalid request (502).
     Inference(String),
+    /// Orchestrator returned a typed stage failure mid-chain (502 with body).
+    StageFailed(mold_core::chain::ChainFailure),
     /// Output encoding failure (500).
     Encode(String),
     /// `StitchPlan::assemble` failed (500).
@@ -300,6 +302,16 @@ impl From<ChainRunError> for ApiError {
             ChainRunError::Inference(msg) => {
                 ApiError::internal_with_status(msg, axum::http::StatusCode::BAD_GATEWAY)
             }
+            // The SSE error channel is string-only (`ChainSseMessage::Error(String)`),
+            // so the structured fields (`failed_stage_idx`, `elapsed_stages`,
+            // `elapsed_ms`) are deliberately collapsed to `stage_error` here.
+            // Clients that need the typed shape use the non-streaming
+            // `/api/generate/chain` handler which returns a `ChainFailure`
+            // body at status 502.
+            ChainRunError::StageFailed(failure) => ApiError::internal_with_status(
+                failure.stage_error,
+                axum::http::StatusCode::BAD_GATEWAY,
+            ),
             ChainRunError::Encode(msg) => ApiError::internal(msg),
             ChainRunError::StitchFailed(msg) => ApiError::internal(msg),
             ChainRunError::Internal(msg) => ApiError::internal(msg),
@@ -363,7 +375,26 @@ async fn run_chain(
                     } else {
                         orch.run(&req_for_task, None)
                     };
-                    result.map_err(|e| ChainRunError::Inference(format!("{e:#}")))
+                    result.map_err(|e| {
+                        use mold_inference::ltx2::ChainOrchestratorError;
+                        match e {
+                            ChainOrchestratorError::StageFailed {
+                                stage_idx,
+                                elapsed_stages,
+                                elapsed_ms,
+                                inner,
+                            } => ChainRunError::StageFailed(mold_core::chain::ChainFailure {
+                                error: "stage render failed".into(),
+                                failed_stage_idx: stage_idx,
+                                elapsed_stages,
+                                elapsed_ms,
+                                stage_error: format!("{inner:#}"),
+                            }),
+                            ChainOrchestratorError::Invalid(inner) => {
+                                ChainRunError::Inference(format!("{inner:#}"))
+                            }
+                        }
+                    })
                 }
                 None => Err(ChainRunError::UnsupportedModel(format!(
                     "model '{}' does not support chained video generation",
@@ -467,16 +498,20 @@ async fn run_chain(
         (status = 200, description = "Stitched chain video", body = mold_core::ChainResponse),
         (status = 422, description = "Invalid request or unsupported model"),
         (status = 500, description = "Chain render failed"),
-        (status = 502, description = "Chain render failed mid-stage"),
+        (status = 502, description = "Chain render failed mid-stage", body = mold_core::ChainFailure),
     )
 )]
 pub async fn generate_chain(
     State(state): State<AppState>,
     Json(req): Json<ChainRequest>,
-) -> Result<Json<ChainResponse>, ApiError> {
-    let req = req
-        .normalise()
-        .map_err(|e| ApiError::validation(e.to_string()))?;
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let req = match req.normalise() {
+        Ok(r) => r,
+        Err(e) => return ApiError::validation(e.to_string()).into_response(),
+    };
 
     tracing::info!(
         model = %req.model,
@@ -487,8 +522,13 @@ pub async fn generate_chain(
         "generate/chain request"
     );
 
-    let (response, _elapsed_ms) = run_chain(&state, req, None).await?;
-    Ok(Json(response))
+    match run_chain(&state, req, None).await {
+        Ok((response, _elapsed_ms)) => Json(response).into_response(),
+        Err(ChainRunError::StageFailed(failure)) => {
+            (StatusCode::BAD_GATEWAY, Json(failure)).into_response()
+        }
+        Err(other) => ApiError::from(other).into_response(),
+    }
 }
 
 /// `POST /api/generate/chain/stream` — SSE-streamed chain generation. Emits
@@ -772,14 +812,51 @@ mod tests {
             .await
             .expect_err("mid-chain failure must bubble up");
         match err {
-            ChainRunError::Inference(msg) => {
+            ChainRunError::StageFailed(failure) => {
+                assert_eq!(
+                    failure.failed_stage_idx, 1,
+                    "failed_stage_idx must be 1, got {}",
+                    failure.failed_stage_idx
+                );
                 assert!(
-                    msg.contains("simulated chain failure"),
-                    "inference error must carry renderer message, got: {msg}"
+                    failure.stage_error.contains("simulated chain failure"),
+                    "stage_error must carry renderer message, got: {}",
+                    failure.stage_error
                 );
             }
-            other => panic!("expected Inference error, got {other:?}"),
+            other => panic!("expected StageFailed error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn generate_chain_handler_returns_502_with_chain_failure_body() {
+        use axum::body::to_bytes;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let engine = ChainMockEngine::failing_at(1);
+        let state = state_with_chain_engine(engine);
+        let req = chain_req_for_mock("ltx-2-19b-distilled:mock", 3);
+
+        let resp = generate_chain(State(state), Json(req)).await;
+        let (parts, body) = resp.into_response().into_parts();
+
+        assert_eq!(parts.status, StatusCode::BAD_GATEWAY, "must be 502");
+
+        let bytes = to_bytes(body, usize::MAX).await.unwrap();
+        let failure: mold_core::chain::ChainFailure =
+            serde_json::from_slice(&bytes).expect("body must be ChainFailure JSON");
+
+        assert_eq!(
+            failure.failed_stage_idx, 1,
+            "failed_stage_idx must be 1, got {}",
+            failure.failed_stage_idx
+        );
+        assert!(
+            failure.stage_error.contains("simulated chain failure"),
+            "stage_error must carry renderer message, got: {}",
+            failure.stage_error
+        );
     }
 
     #[tokio::test]

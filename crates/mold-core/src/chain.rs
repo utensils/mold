@@ -380,6 +380,28 @@ pub enum ChainProgressEvent {
     Stitching { total_frames: u32 },
 }
 
+/// Structured error payload returned in the 502 response body when a chain
+/// stage fails mid-run. Allows UIs to show actionable retry hints (e.g.,
+/// "stage 2 of 5 failed — retry from here").
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainFailure {
+    /// Human-readable summary of where the failure landed.
+    #[schema(example = "stage render failed")]
+    pub error: String,
+    /// Zero-based index of the stage whose render returned Err.
+    #[schema(example = 2)]
+    pub failed_stage_idx: u32,
+    /// Number of stages that completed successfully before the failure.
+    #[schema(example = 2)]
+    pub elapsed_stages: u32,
+    /// Cumulative generation time across the completed stages, in ms.
+    #[schema(example = 12_340)]
+    pub elapsed_ms: u64,
+    /// Inner error message from the orchestrator (`format!("{e:#}")`).
+    #[schema(example = "simulated GPU OOM on stage 2")]
+    pub stage_error: String,
+}
+
 fn default_motion_tail_frames() -> u32 {
     4
 }

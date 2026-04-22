@@ -16,7 +16,7 @@ pub mod stitch;
 mod text;
 
 pub use chain::{
-    extract_tail_latents, tail_latent_frame_count, ChainRunOutput, ChainStageRenderer, ChainTail,
-    Ltx2ChainOrchestrator, StageOutcome, StageProgressEvent,
+    extract_tail_latents, tail_latent_frame_count, ChainOrchestratorError, ChainRunOutput,
+    ChainStageRenderer, ChainTail, Ltx2ChainOrchestrator, StageOutcome, StageProgressEvent,
 };
 pub use pipeline::Ltx2Engine;
