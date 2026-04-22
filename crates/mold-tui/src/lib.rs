@@ -10,6 +10,8 @@ mod gallery_scan;
 mod history;
 mod model_info;
 mod session;
+#[cfg(test)]
+pub(crate) mod test_env;
 mod thumbnails;
 mod ui;
 
