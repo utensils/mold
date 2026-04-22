@@ -12,7 +12,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::app::App;
 
-use super::widgets::panel_block;
+use super::widgets::{panel_block, truncate_with_ellipsis};
 
 /// Maximum number of recent entries shown in the strip.
 ///
@@ -72,7 +72,7 @@ fn build_line<'a>(
     width: usize,
 ) -> Line<'a> {
     let name = entry.filename();
-    let model = entry.metadata.model.clone();
+    let model = entry.metadata.model.as_str();
     let diff = diff_label(index);
 
     // Reserve space: dot(2) + diff(8 max) + gaps(4) → minimum 14 chars of chrome.
@@ -81,8 +81,8 @@ fn build_line<'a>(
     let name_width = body_width.saturating_mul(3) / 5; // roughly 60% for filename
     let model_width = body_width.saturating_sub(name_width);
 
-    let name_cell = truncate(&name, name_width);
-    let model_cell = truncate(&model, model_width);
+    let name_cell = truncate_with_ellipsis(&name, name_width);
+    let model_cell = truncate_with_ellipsis(model, model_width);
 
     let mut spans = Vec::with_capacity(6);
     spans.push(Span::styled("● ", Style::default().fg(theme.accent)));
@@ -110,36 +110,9 @@ fn diff_label(index: usize) -> &'static str {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let cut = max.saturating_sub(1).max(1);
-    let head: String = s.chars().take(cut).collect();
-    format!("{head}…")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn truncate_shorter_than_max_is_unchanged() {
-        assert_eq!(truncate("abc", 10), "abc");
-    }
-
-    #[test]
-    fn truncate_longer_than_max_ends_with_ellipsis() {
-        assert_eq!(truncate("abcdefgh", 4), "abc…");
-    }
-
-    #[test]
-    fn truncate_zero_is_empty() {
-        assert_eq!(truncate("abc", 0), "");
-    }
 
     #[test]
     fn diff_labels_cover_first_four() {

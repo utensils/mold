@@ -22,7 +22,7 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use crate::app::App;
 
-use super::widgets::panel_block;
+use super::widgets::{panel_block, truncate_with_ellipsis};
 
 /// Visual state of a Queue row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,11 +215,7 @@ fn prompt_preview(prompt: &str) -> String {
     if first_line.is_empty() {
         return "(empty)".to_string();
     }
-    if first_line.chars().count() <= MAX {
-        return first_line.to_string();
-    }
-    let head: String = first_line.chars().take(MAX.saturating_sub(1)).collect();
-    format!("{head}…")
+    truncate_with_ellipsis(first_line, MAX)
 }
 
 /// Short status for a running job — renders the current denoise step if known.

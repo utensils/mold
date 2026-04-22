@@ -82,6 +82,12 @@ pub enum ProgressStyle {
     Error,
 }
 
+/// Cap the Timeline log to avoid unbounded growth during long runs (e.g.
+/// multi-hour video generations push hundreds of weight-load / download /
+/// denoise entries). The Timeline panel only ever shows the tail, so older
+/// rows are invisible — dropping them is a pure memory win.
+pub(crate) const MAX_LOG_ENTRIES: usize = 500;
+
 /// Current progress state during generation.
 #[derive(Debug, Default)]
 pub struct ProgressState {
@@ -166,6 +172,17 @@ impl ProgressState {
     /// Wall-clock duration since the active stage began.
     pub fn stage_elapsed(&self) -> Option<std::time::Duration> {
         self.stage_started_at.map(|t| t.elapsed())
+    }
+
+    /// Append a log entry, trimming the oldest rows when the buffer would
+    /// exceed [`MAX_LOG_ENTRIES`]. Use this in place of `progress.log.push(…)`
+    /// at every event-driven append site so the buffer stays bounded.
+    pub fn push_log(&mut self, entry: ProgressLogEntry) {
+        self.log.push(entry);
+        if self.log.len() > MAX_LOG_ENTRIES {
+            let overflow = self.log.len() - MAX_LOG_ENTRIES;
+            self.log.drain(..overflow);
+        }
     }
 
     fn clear_download(&mut self) {
@@ -1174,6 +1191,12 @@ impl App {
         // Load prompt history
         let history = crate::history::PromptHistory::load();
 
+        let initial_preset = session
+            .theme
+            .as_deref()
+            .map(crate::ui::theme::ThemePreset::from_slug)
+            .unwrap_or_default();
+
         let app = Ok(Self {
             active_view: View::Generate,
             generate: GenerateState {
@@ -1218,27 +1241,17 @@ impl App {
             },
             settings: {
                 let first_model = config.models.keys().next().cloned();
-                let theme_preset = session
-                    .theme
-                    .as_deref()
-                    .map(crate::ui::theme::ThemePreset::from_slug)
-                    .unwrap_or_default();
                 SettingsState {
                     selected_model: first_model,
                     row_index: 1, // skip first section header
-                    theme_preset,
+                    theme_preset: initial_preset,
                     ..Default::default()
                 }
             },
             config,
             server_url,
             picker,
-            theme: session
-                .theme
-                .as_deref()
-                .map(crate::ui::theme::ThemePreset::from_slug)
-                .unwrap_or_default()
-                .build(),
+            theme: initial_preset.build(),
             popup: None,
             should_quit: false,
             bg_tx,
@@ -1284,6 +1297,19 @@ impl App {
     /// True when connected to a server AND not forced into local mode.
     pub fn should_poll_remote(&self) -> bool {
         self.server_url.is_some() && self.generate.params.inference_mode != InferenceMode::Local
+    }
+
+    /// Whether a completed generation should be written to the local output
+    /// dir by the TUI. False when the server (running on the same or a
+    /// different machine) has already saved the file to its own output dir
+    /// — otherwise the TUI writes a second copy with a slightly-different
+    /// timestamp suffix, and the next gallery scan surfaces both as
+    /// duplicate tiles. Also false when output is explicitly disabled.
+    pub fn should_save_output_locally(&self) -> bool {
+        if self.config.is_output_disabled() {
+            return false;
+        }
+        !self.should_poll_remote()
     }
 
     /// Sync resource info source after mode changes.
@@ -1956,7 +1982,7 @@ impl App {
                             self.generate.params.host = Some(url.clone());
                             self.connecting = true;
                             // Show connecting status
-                            self.generate.progress.log.push(ProgressLogEntry {
+                            self.generate.progress.push_log(ProgressLogEntry {
                                 message: format!("Connecting to {url}..."),
                                 style: ProgressStyle::Info,
                             });
@@ -2565,7 +2591,7 @@ impl App {
                     self.upscale_in_progress = false;
                     self.upscale_tile_progress = None;
                     self.upscale_progress.clear();
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: "Upscale cancelled".into(),
                         style: ProgressStyle::Warning,
                     });
@@ -4076,13 +4102,18 @@ impl App {
                     self.generate.params.seed =
                         self.generate.params.seed_mode.advance(response.seed_used);
 
-                    // Resolve output directory (None when explicitly disabled)
-                    let output_dir = if self.config.is_output_disabled() {
-                        None
-                    } else {
+                    // Resolve output directory. Returns None when output is
+                    // explicitly disabled *or* when the TUI is connected to
+                    // a remote server — the server already saved the file
+                    // to its own output dir, and a TUI-side write would
+                    // duplicate it (with a different timestamp suffix) and
+                    // surface as two tiles on the next gallery scan.
+                    let output_dir = if self.should_save_output_locally() {
                         let dir = self.config.effective_output_dir();
                         let _ = std::fs::create_dir_all(&dir);
                         Some(dir)
+                    } else {
+                        None
                     };
 
                     // Save images to disk and display preview
@@ -4186,7 +4217,7 @@ impl App {
                         .map(|f| f.to_string_lossy().to_string())
                         .unwrap_or_default();
 
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: if saved_name.is_empty() {
                             format!(
                                 "Done in {:.1}s (seed: {})",
@@ -4234,7 +4265,20 @@ impl App {
                     } else {
                         (self.generate.params.width, self.generate.params.height)
                     };
-                    if !response.images.is_empty() || response.video.is_some() {
+                    // In remote-server mode we don't write a local copy, so
+                    // `saved_path` is empty and there's nothing for the
+                    // gallery to point at. Kick off a gallery rescan
+                    // instead — the server's own save will surface on the
+                    // next poll. In local mode this branch is skipped and
+                    // the `insert(0)` below runs as before.
+                    if saved_path.as_os_str().is_empty() && self.should_poll_remote() {
+                        self.gallery.scanning = true;
+                        self.spawn_gallery_scan();
+                    }
+
+                    if (!response.images.is_empty() || response.video.is_some())
+                        && !saved_path.as_os_str().is_empty()
+                    {
                         let meta = mold_core::OutputMetadata {
                             prompt: prompt_text,
                             negative_prompt: if neg_text.is_empty() {
@@ -4425,7 +4469,7 @@ impl App {
                     );
                     // Apply model defaults from server catalog
                     self.apply_remote_model_defaults(&models);
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Connected to {url}"),
                         style: ProgressStyle::Done,
                     });
@@ -4437,7 +4481,7 @@ impl App {
                 }
                 BackgroundEvent::ServerUnreachable(msg) => {
                     self.connecting = false;
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Server unreachable: {msg}"),
                         style: ProgressStyle::Error,
                     });
@@ -4448,7 +4492,7 @@ impl App {
                     self.resource_info.refresh_local();
                 }
                 BackgroundEvent::PullComplete(model) => {
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Pull complete: {model}"),
                         style: ProgressStyle::Done,
                     });
@@ -4471,7 +4515,7 @@ impl App {
                     }
                 }
                 BackgroundEvent::ModelRemoveComplete(model) => {
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Removed model: {model}"),
                         style: ProgressStyle::Done,
                     });
@@ -4486,7 +4530,7 @@ impl App {
                     }
                 }
                 BackgroundEvent::ModelRemoveFailed(msg) => {
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!("Remove failed: {msg}"),
                         style: ProgressStyle::Error,
                     });
@@ -4539,7 +4583,7 @@ impl App {
                         path
                     } else {
                         // No output dir — nowhere to save
-                        self.generate.progress.log.push(ProgressLogEntry {
+                        self.generate.progress.push_log(ProgressLogEntry {
                             message: format!(
                                 "Upscaled {original_width}x{original_height} -> {upscaled_w}x{upscaled_h} ({scale_factor}x, {:.1}s) — output dir disabled",
                                 upscale_time_ms as f64 / 1000.0
@@ -4549,7 +4593,7 @@ impl App {
                         return;
                     };
 
-                    self.generate.progress.log.push(ProgressLogEntry {
+                    self.generate.progress.push_log(ProgressLogEntry {
                         message: format!(
                             "Upscaled {original_width}x{original_height} -> {upscaled_w}x{upscaled_h} ({scale_factor}x, {:.1}s)",
                             upscale_time_ms as f64 / 1000.0
@@ -4673,7 +4717,7 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
         SseProgressEvent::StageDone { name, elapsed_ms } => {
             progress.current_stage = None;
             progress.stage_started_at = None;
-            progress.log.push(ProgressLogEntry {
+            progress.push_log(ProgressLogEntry {
                 message: format!("{name} [{:.1}s]", elapsed_ms as f64 / 1000.0),
                 style: ProgressStyle::Done,
             });
@@ -4689,19 +4733,19 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
                 // Verification messages: show as spinner AND log entry
                 progress.downloading = true;
                 progress.current_stage = Some(message.clone());
-                progress.log.push(ProgressLogEntry {
+                progress.push_log(ProgressLogEntry {
                     message,
                     style: ProgressStyle::Info,
                 });
             } else {
-                progress.log.push(ProgressLogEntry {
+                progress.push_log(ProgressLogEntry {
                     message,
                     style: ProgressStyle::Info,
                 });
             }
         }
         SseProgressEvent::CacheHit { resource } => {
-            progress.log.push(ProgressLogEntry {
+            progress.push_log(ProgressLogEntry {
                 message: format!("{resource} [cache hit]"),
                 style: ProgressStyle::Done,
             });
@@ -4759,7 +4803,7 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             batch_bytes_total,
             batch_elapsed_ms,
         } => {
-            progress.log.push(ProgressLogEntry {
+            progress.push_log(ProgressLogEntry {
                 message: format!("[{}/{}] {filename}", file_index + 1, total_files),
                 style: ProgressStyle::Done,
             });
@@ -4786,7 +4830,7 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
         }
         SseProgressEvent::PullComplete { model } => {
             progress.clear_download();
-            progress.log.push(ProgressLogEntry {
+            progress.push_log(ProgressLogEntry {
                 message: format!("Pull complete: {model}"),
                 style: ProgressStyle::Done,
             });
@@ -4952,7 +4996,7 @@ mod tests {
             download_total_files: 5,
             ..Default::default()
         };
-        state.log.push(ProgressLogEntry {
+        state.push_log(ProgressLogEntry {
             message: "test".to_string(),
             style: ProgressStyle::Done,
         });
@@ -7561,6 +7605,38 @@ mod tests {
         // Should not have used the catalog entry's absurd values
         assert_ne!(app.generate.params.steps, 199);
         assert_ne!(app.generate.params.width, 256);
+    }
+
+    #[tokio::test]
+    async fn should_save_output_locally_false_when_connected_to_remote_server() {
+        // When the TUI is connected to a server in non-Local mode, the
+        // server has already saved the output to its own `~/.mold/output/`.
+        // A TUI-side write creates a second file with a later timestamp
+        // suffix, which surfaces as a duplicate tile on the next gallery
+        // rescan (bug reproducer for feat/tui-updates). The predicate must
+        // return false so the generation-complete handler skips the write.
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://remote.example:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Remote;
+        assert!(!app.should_save_output_locally());
+    }
+
+    #[tokio::test]
+    async fn should_save_output_locally_true_when_no_server() {
+        let mut app = make_settings_test_app();
+        app.server_url = None;
+        app.generate.params.inference_mode = InferenceMode::Local;
+        assert!(app.should_save_output_locally());
+    }
+
+    #[tokio::test]
+    async fn should_save_output_locally_true_when_forced_local_even_with_server_url() {
+        // User pressed `mold run --local` or toggled the Local mode in the
+        // UI. The server exists but we're not using it — TUI owns the save.
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://remote.example:7680".to_string());
+        app.generate.params.inference_mode = InferenceMode::Local;
+        assert!(app.should_save_output_locally());
     }
 
     #[tokio::test]

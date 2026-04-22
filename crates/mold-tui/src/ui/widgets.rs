@@ -64,6 +64,21 @@ pub fn kv_row_line<'a>(
     ])
 }
 
+/// Truncate `s` to at most `max` characters, appending `…` when the string
+/// was cut. Counts Unicode scalars (via `.chars()`), not bytes, so it is safe
+/// on multi-byte characters. Returns an empty string when `max == 0`.
+pub fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut = max.saturating_sub(1).max(1);
+    let head: String = s.chars().take(cut).collect();
+    format!("{head}…")
+}
+
 /// Draw the theme swatch grid used by the Appearance panel.
 ///
 /// Each swatch is rendered as `●<space>Label` plus a trailing `✓` on the
@@ -151,6 +166,21 @@ mod tests {
         let plain = kv_row_line(&theme, "key", "value", 5, false);
         let muted = kv_row_line(&theme, "key", "value", 5, true);
         assert_eq!(plain.spans[0].content, muted.spans[0].content);
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_shorter_than_max_is_unchanged() {
+        assert_eq!(truncate_with_ellipsis("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_longer_than_max_ends_with_ellipsis() {
+        assert_eq!(truncate_with_ellipsis("abcdefgh", 4), "abc…");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_zero_is_empty() {
+        assert_eq!(truncate_with_ellipsis("abc", 0), "");
     }
 
     #[test]
