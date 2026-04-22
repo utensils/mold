@@ -273,7 +273,16 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     "Generating..."
                 };
-                vec![("", status)]
+                // Keep the navigation shortcuts visible while a run is in
+                // flight — the user must be able to switch views, cycle
+                // themes in Settings, and quit without waiting for the
+                // pipeline to finish.
+                vec![
+                    ("", status),
+                    ("Alt+1-5", "Views"),
+                    ("Esc", "Unfocus"),
+                    ("q", "Quit"),
+                ]
             } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
                 vec![
                     ("1-5", "Views"),

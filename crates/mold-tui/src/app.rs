@@ -6026,6 +6026,76 @@ mod tests {
         assert_eq!(app.config.default_steps, 5);
     }
 
+    // ── User story: change themes while a generation is running ───
+    // Reported: "as a user I should be able to change themes while the
+    // app is generating an image". Three regression tests covering the
+    // full keyboard path: escape the prompt → switch view → cycle theme.
+
+    #[tokio::test]
+    async fn alt_5_while_generating_from_prompt_focus_switches_to_settings() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Generate;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.generate.generating = true;
+        app.generate.progress.mark_generation_start();
+
+        // `Alt+5` must escape the prompt textarea and switch views,
+        // even with a generation in flight — otherwise users have to
+        // wait for the run to finish before they can reach Settings.
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('5'),
+            KeyModifiers::ALT,
+        )));
+        assert_eq!(app.active_view, View::Settings);
+        assert!(app.generate.generating, "generation must not be aborted");
+    }
+
+    #[tokio::test]
+    async fn theme_cycle_applies_immediately_while_generating() {
+        use crate::ui::theme::ThemePreset;
+        let mut app = make_settings_test_app();
+        app.active_view = View::Settings;
+        app.settings.focus = SettingsFocus::Appearance;
+        // In-flight generation on the Settings tab.
+        app.generate.generating = true;
+        app.generate.progress.mark_generation_start();
+
+        let before = app.settings.theme_preset;
+        assert_eq!(before, ThemePreset::Mocha);
+
+        // Right arrow on Appearance cycles the preset. The new palette
+        // must apply to `app.theme` immediately so the next render
+        // paints the running Timeline bars in the chosen theme —
+        // generating must not veto the palette change.
+        app.dispatch_action(Action::Increment);
+
+        assert_ne!(app.settings.theme_preset, before);
+        assert_eq!(app.theme.bg, app.settings.theme_preset.build().bg);
+        assert!(app.generate.generating, "generation must keep running");
+    }
+
+    #[tokio::test]
+    async fn esc_then_5_reaches_settings_while_generating() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Generate;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.generate.generating = true;
+        app.generate.progress.mark_generation_start();
+
+        // The discoverable path: Esc unfocuses the textarea, then `5`
+        // switches to Settings. Both must keep working while a
+        // generation is active.
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(app.generate.focus, GenerateFocus::Navigation);
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('5'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.active_view, View::Settings);
+    }
+
     // ── Enter on the Appearance pane must not trigger settings_confirm ──
 
     #[tokio::test]
