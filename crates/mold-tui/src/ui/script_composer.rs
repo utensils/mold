@@ -2,14 +2,34 @@ use mold_core::{
     ChainScript, ChainScriptChain, ChainStage, OutputFormat, TransitionMode,
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table};
 
 use crate::ui::theme::Theme;
+
+#[derive(Default)]
+pub enum ScriptModal {
+    #[default]
+    Closed,
+    PromptEdit {
+        buffer: String,
+    },
+    FramesEdit {
+        buffer: String,
+        error: Option<String>,
+    },
+}
+
+impl ScriptModal {
+    pub fn is_open(&self) -> bool {
+        !matches!(self, ScriptModal::Closed)
+    }
+}
 
 pub struct ScriptComposerState {
     pub script: ChainScript,
     pub selected: usize,
     pub unsaved: bool,
+    pub modal: ScriptModal,
 }
 
 impl ScriptComposerState {
@@ -18,6 +38,7 @@ impl ScriptComposerState {
             script,
             selected: 0,
             unsaved: false,
+            modal: ScriptModal::Closed,
         }
     }
 
@@ -117,37 +138,105 @@ impl ScriptComposerState {
             self.unsaved = true;
         }
     }
+
+    pub fn open_prompt_editor(&mut self) {
+        let buf = self
+            .selected_stage()
+            .map(|s| s.prompt.clone())
+            .unwrap_or_default();
+        self.modal = ScriptModal::PromptEdit { buffer: buf };
+    }
+
+    pub fn commit_prompt(&mut self) {
+        if let ScriptModal::PromptEdit { buffer } = &self.modal {
+            let value = buffer.clone();
+            if let Some(stage) = self.selected_stage_mut() {
+                stage.prompt = value;
+                self.unsaved = true;
+            }
+        }
+        self.modal = ScriptModal::Closed;
+    }
+
+    pub fn open_frames_editor(&mut self) {
+        let buf = self
+            .selected_stage()
+            .map(|s| s.frames.to_string())
+            .unwrap_or_default();
+        self.modal = ScriptModal::FramesEdit {
+            buffer: buf,
+            error: None,
+        };
+    }
+
+    pub fn commit_frames(&mut self) {
+        if let ScriptModal::FramesEdit { buffer, .. } = &self.modal {
+            let buf = buffer.clone();
+            match buf.parse::<u32>() {
+                Ok(n) if n >= 9 && n % 8 == 1 => {
+                    if let Some(stage) = self.selected_stage_mut() {
+                        stage.frames = n;
+                        self.unsaved = true;
+                    }
+                    self.modal = ScriptModal::Closed;
+                }
+                Ok(n) => {
+                    self.modal = ScriptModal::FramesEdit {
+                        buffer: buf,
+                        error: Some(format!(
+                            "{n} is not 8k+1 (valid: 9, 17, 25, \u{2026}, 97)"
+                        )),
+                    };
+                }
+                Err(_) => {
+                    self.modal = ScriptModal::FramesEdit {
+                        buffer: buf,
+                        error: Some("not a number".to_string()),
+                    };
+                }
+            }
+        }
+    }
+
+    pub fn cancel_modal(&mut self) {
+        self.modal = ScriptModal::Closed;
+    }
 }
 
 impl Default for ScriptComposerState {
     fn default() -> Self {
-        Self::new(ChainScript {
-            schema: "mold.chain.v1".into(),
-            chain: ChainScriptChain {
-                model: "ltx-2-19b-distilled:fp8".into(),
-                width: 1216,
-                height: 704,
-                fps: 24,
-                seed: None,
-                steps: 8,
-                guidance: 3.0,
-                strength: 1.0,
-                motion_tail_frames: 25,
-                output_format: OutputFormat::Mp4,
+        Self {
+            script: ChainScript {
+                schema: "mold.chain.v1".into(),
+                chain: ChainScriptChain {
+                    model: "ltx-2-19b-distilled:fp8".into(),
+                    width: 1216,
+                    height: 704,
+                    fps: 24,
+                    seed: None,
+                    steps: 8,
+                    guidance: 3.0,
+                    strength: 1.0,
+                    motion_tail_frames: 25,
+                    output_format: OutputFormat::Mp4,
+                },
+                stages: vec![ChainStage {
+                    prompt: String::new(),
+                    frames: 97,
+                    source_image: None,
+                    negative_prompt: None,
+                    seed_offset: None,
+                    transition: TransitionMode::Smooth,
+                    fade_frames: None,
+                    model: None,
+                    loras: vec![],
+                    references: vec![],
+                }],
             },
-            stages: vec![ChainStage {
-                prompt: String::new(),
-                frames: 97,
-                source_image: None,
-                negative_prompt: None,
-                seed_offset: None,
-                transition: TransitionMode::Smooth,
-                fade_frames: None,
-                model: None,
-                loras: vec![],
-                references: vec![],
-            }],
-        })
+            selected: 0,
+            unsaved: false,
+            modal: ScriptModal::Closed,
+        }
     }
 }
 
@@ -192,6 +281,7 @@ pub fn render(
     render_stage_list(frame, state, stage_area, theme);
     render_editor(frame, state, editor_area, theme);
     render_footer(frame, state, footer_area, theme);
+    render_modal(frame, state, area, theme);
 }
 
 fn render_stage_list(
@@ -397,6 +487,91 @@ fn render_footer(
     frame.render_widget(para, inner);
 }
 
+fn render_modal(
+    frame: &mut Frame,
+    state: &ScriptComposerState,
+    area: Rect,
+    theme: &Theme,
+) {
+    let (title, body_lines, hint) = match &state.modal {
+        ScriptModal::Closed => return,
+        ScriptModal::PromptEdit { buffer } => {
+            let display = if buffer.is_empty() {
+                "(empty)".to_string()
+            } else {
+                buffer.clone()
+            };
+            let lines: Vec<Line> = display.lines().map(|l| Line::from(l.to_string())).collect();
+            (
+                " Edit Prompt ",
+                lines,
+                "[Ctrl-S] Save  [Esc] Cancel  [Enter] Newline",
+            )
+        }
+        ScriptModal::FramesEdit { buffer, error } => {
+            let mut lines = vec![Line::from(buffer.as_str().to_string())];
+            if let Some(err) = error {
+                lines.push(Line::from(Span::styled(
+                    err.clone(),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            (
+                " Edit Frames ",
+                lines,
+                "[Enter] Save  [Esc] Cancel",
+            )
+        }
+    };
+
+    let modal_height = match &state.modal {
+        ScriptModal::PromptEdit { .. } => 8u16,
+        ScriptModal::FramesEdit { .. } => 6u16,
+        ScriptModal::Closed => return,
+    };
+
+    let w = (area.width * 60 / 100).clamp(30, 80).min(area.width);
+    let h = modal_height.min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup_area = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border_focused())
+        .title(title)
+        .title_style(theme.title_focused())
+        .style(Style::default().bg(theme.bg));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    // Reserve last line for the hint
+    let body_height = inner.height.saturating_sub(1);
+    let body_area = Rect::new(inner.x, inner.y, inner.width, body_height);
+    let hint_area = Rect::new(
+        inner.x,
+        inner.y + body_height,
+        inner.width,
+        1,
+    );
+
+    let body = Paragraph::new(body_lines).style(Style::default().fg(theme.text));
+    frame.render_widget(body, body_area);
+
+    let hint_line = Paragraph::new(Line::from(Span::styled(
+        hint,
+        Style::default().fg(theme.text_dim),
+    )));
+    frame.render_widget(hint_line, hint_area);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +760,132 @@ mod tests {
         s.cycle_transition();
         assert_eq!(s.script.stages[0].transition, TransitionMode::Smooth);
         assert!(!s.unsaved);
+    }
+
+    #[test]
+    fn commit_frames_rejects_non_8k1() {
+        let mut s = make_state(2);
+        s.modal = ScriptModal::FramesEdit {
+            buffer: "100".into(),
+            error: None,
+        };
+        s.commit_frames();
+        assert!(matches!(
+            s.modal,
+            ScriptModal::FramesEdit { error: Some(_), .. }
+        ));
+    }
+
+    #[test]
+    fn commit_frames_accepts_8k1() {
+        let mut s = make_state(2);
+        s.modal = ScriptModal::FramesEdit {
+            buffer: "49".into(),
+            error: None,
+        };
+        s.commit_frames();
+        assert_eq!(s.selected_stage().unwrap().frames, 49);
+        assert!(matches!(s.modal, ScriptModal::Closed));
+        assert!(s.unsaved);
+    }
+
+    #[test]
+    fn commit_frames_rejects_below_9() {
+        let mut s = make_state(2);
+        s.modal = ScriptModal::FramesEdit {
+            buffer: "1".into(),
+            error: None,
+        };
+        s.commit_frames();
+        assert!(matches!(
+            s.modal,
+            ScriptModal::FramesEdit { error: Some(_), .. }
+        ));
+    }
+
+    #[test]
+    fn commit_frames_rejects_non_number() {
+        let mut s = make_state(2);
+        s.modal = ScriptModal::FramesEdit {
+            buffer: "abc".into(),
+            error: None,
+        };
+        s.commit_frames();
+        assert!(matches!(
+            s.modal,
+            ScriptModal::FramesEdit {
+                error: Some(ref e),
+                ..
+            } if e == "not a number"
+        ));
+    }
+
+    #[test]
+    fn commit_prompt_saves_buffer() {
+        let mut s = make_state(2);
+        s.modal = ScriptModal::PromptEdit {
+            buffer: "hello world".into(),
+        };
+        s.commit_prompt();
+        assert_eq!(s.selected_stage().unwrap().prompt, "hello world");
+        assert!(matches!(s.modal, ScriptModal::Closed));
+        assert!(s.unsaved);
+    }
+
+    #[test]
+    fn cancel_modal_closes_without_saving() {
+        let mut s = make_state(2);
+        let original = s.selected_stage().unwrap().frames;
+        s.modal = ScriptModal::FramesEdit {
+            buffer: "49".into(),
+            error: None,
+        };
+        s.cancel_modal();
+        assert!(matches!(s.modal, ScriptModal::Closed));
+        assert_eq!(s.selected_stage().unwrap().frames, original);
+        assert!(!s.unsaved);
+    }
+
+    #[test]
+    fn open_prompt_editor_loads_current_prompt() {
+        let mut s = make_state(2);
+        s.script.stages[0].prompt = "existing prompt".into();
+        s.open_prompt_editor();
+        match &s.modal {
+            ScriptModal::PromptEdit { buffer } => {
+                assert_eq!(buffer, "existing prompt");
+            }
+            _ => panic!("expected PromptEdit modal"),
+        }
+    }
+
+    #[test]
+    fn open_frames_editor_loads_current_frames() {
+        let mut s = make_state(2);
+        s.open_frames_editor();
+        match &s.modal {
+            ScriptModal::FramesEdit { buffer, error } => {
+                assert_eq!(buffer, "97");
+                assert!(error.is_none());
+            }
+            _ => panic!("expected FramesEdit modal"),
+        }
+    }
+
+    #[test]
+    fn modal_is_open_reports_correctly() {
+        let closed = ScriptModal::Closed;
+        assert!(!closed.is_open());
+
+        let prompt = ScriptModal::PromptEdit {
+            buffer: String::new(),
+        };
+        assert!(prompt.is_open());
+
+        let frames = ScriptModal::FramesEdit {
+            buffer: String::new(),
+            error: None,
+        };
+        assert!(frames.is_open());
     }
 }

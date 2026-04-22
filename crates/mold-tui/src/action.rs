@@ -99,6 +99,20 @@ pub enum Action {
     /// Script: delete the current stage (shows confirmation if >1 stage).
     ScriptDelete,
     ScriptCycleTransition,
+    /// Script: open the prompt editor modal.
+    ScriptOpenPromptEditor,
+    /// Script: open the frames editor modal.
+    ScriptOpenFramesEditor,
+    /// Script modal: insert a character.
+    ScriptModalChar(char),
+    /// Script modal: delete the last character.
+    ScriptModalBackspace,
+    /// Script modal: insert a newline (prompt editor).
+    ScriptModalNewline,
+    /// Script modal: submit the current value.
+    ScriptModalSubmit,
+    /// Script modal: cancel and close without saving.
+    ScriptModalCancel,
     /// No action (key not mapped or consumed by text input).
     None,
 }

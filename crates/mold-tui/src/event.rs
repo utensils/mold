@@ -53,7 +53,7 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
         View::Models => map_models_key(key),
         View::Queue => map_queue_key(key),
         View::Settings => map_settings_key(key),
-        View::Script => map_script_key(key),
+        View::Script => map_script_key(key, app),
     }
 }
 
@@ -231,7 +231,28 @@ fn map_settings_key(key: &KeyEvent) -> Action {
     }
 }
 
-fn map_script_key(key: &KeyEvent) -> Action {
+fn map_script_key(key: &KeyEvent, app: &App) -> Action {
+    use crate::ui::script_composer::ScriptModal;
+
+    if app.script.modal.is_open() {
+        return match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => Action::ScriptModalCancel,
+            // Ctrl-S submits in any modal
+            (KeyCode::Char('s'), KeyModifiers::CONTROL) => Action::ScriptModalSubmit,
+            // In FramesEdit, plain Enter also submits
+            (KeyCode::Enter, KeyModifiers::NONE)
+                if matches!(app.script.modal, ScriptModal::FramesEdit { .. }) =>
+            {
+                Action::ScriptModalSubmit
+            }
+            // In PromptEdit, plain Enter adds a newline
+            (KeyCode::Enter, KeyModifiers::NONE) => Action::ScriptModalNewline,
+            (KeyCode::Backspace, _) => Action::ScriptModalBackspace,
+            (KeyCode::Char(c), _) => Action::ScriptModalChar(c),
+            _ => Action::None,
+        };
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
             Action::ScriptMoveDown
@@ -245,6 +266,8 @@ fn map_script_key(key: &KeyEvent) -> Action {
         (KeyCode::Char('A'), KeyModifiers::SHIFT) => Action::ScriptAddBefore,
         (KeyCode::Char('d'), KeyModifiers::NONE) => Action::ScriptDelete,
         (KeyCode::Char('t'), KeyModifiers::NONE) => Action::ScriptCycleTransition,
+        (KeyCode::Char('i'), KeyModifiers::NONE) => Action::ScriptOpenPromptEditor,
+        (KeyCode::Char('f'), KeyModifiers::NONE) => Action::ScriptOpenFramesEditor,
         (KeyCode::Esc, _) => Action::SwitchView(View::Generate),
         (KeyCode::Char('q'), KeyModifiers::NONE) => Action::Quit,
         _ => Action::None,

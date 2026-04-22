@@ -2831,6 +2831,47 @@ impl App {
                 }
             }
             Action::ScriptCycleTransition => self.script.cycle_transition(),
+            Action::ScriptOpenPromptEditor => self.script.open_prompt_editor(),
+            Action::ScriptOpenFramesEditor => self.script.open_frames_editor(),
+            Action::ScriptModalSubmit => {
+                use crate::ui::script_composer::ScriptModal;
+                match self.script.modal {
+                    ScriptModal::PromptEdit { .. } => self.script.commit_prompt(),
+                    ScriptModal::FramesEdit { .. } => self.script.commit_frames(),
+                    ScriptModal::Closed => {}
+                }
+            }
+            Action::ScriptModalCancel => self.script.cancel_modal(),
+            Action::ScriptModalChar(c) => {
+                use crate::ui::script_composer::ScriptModal;
+                match &mut self.script.modal {
+                    ScriptModal::PromptEdit { buffer } => buffer.push(c),
+                    ScriptModal::FramesEdit { buffer, error } => {
+                        buffer.push(c);
+                        *error = None;
+                    }
+                    ScriptModal::Closed => {}
+                }
+            }
+            Action::ScriptModalBackspace => {
+                use crate::ui::script_composer::ScriptModal;
+                match &mut self.script.modal {
+                    ScriptModal::PromptEdit { buffer } => {
+                        buffer.pop();
+                    }
+                    ScriptModal::FramesEdit { buffer, error } => {
+                        buffer.pop();
+                        *error = None;
+                    }
+                    ScriptModal::Closed => {}
+                }
+            }
+            Action::ScriptModalNewline => {
+                use crate::ui::script_composer::ScriptModal;
+                if let ScriptModal::PromptEdit { buffer } = &mut self.script.modal {
+                    buffer.push('\n');
+                }
+            }
             _ => {}
         }
     }
