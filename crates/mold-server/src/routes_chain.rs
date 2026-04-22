@@ -169,6 +169,30 @@ fn trim_to_total_frames(frames: &mut Vec<image::RgbImage>, total_frames: Option<
     }
 }
 
+/// Assemble per-stage frame clips into a single output buffer using
+/// [`mold_inference::ltx2::stitch::StitchPlan`], honouring per-boundary
+/// transition rules (Smooth / Cut / Fade).
+pub(crate) fn stitch_chain_output(
+    chain_output: mold_inference::ltx2::chain::ChainRunOutput,
+    req: &mold_core::chain::ChainRequest,
+) -> Result<Vec<image::RgbImage>, mold_inference::ltx2::stitch::StitchError> {
+    use mold_inference::ltx2::stitch::StitchPlan;
+    let boundaries: Vec<_> = req.stages.iter().skip(1).map(|s| s.transition).collect();
+    let fade_lens: Vec<_> = req
+        .stages
+        .iter()
+        .skip(1)
+        .map(|s| s.fade_frames.unwrap_or(8))
+        .collect();
+    let plan = StitchPlan {
+        clips: chain_output.stage_frames,
+        boundaries,
+        fade_lens,
+        motion_tail_frames: req.motion_tail_frames,
+    };
+    plan.assemble()
+}
+
 /// Produce a PNG thumbnail for the chain output — best-effort, returns
 /// an empty `Vec` on failure so the save/response paths still succeed.
 fn chain_thumbnail(frames: &[image::RgbImage]) -> Vec<u8> {
@@ -260,8 +284,10 @@ enum ChainRunError {
     CacheMiss(String),
     /// Orchestrator returned an error mid-chain (502).
     Inference(String),
-    /// Output encoding / stitch failure (500).
+    /// Output encoding failure (500).
     Encode(String),
+    /// `StitchPlan::assemble` failed (500).
+    StitchFailed(String),
     /// Task panic or join error (500).
     Internal(String),
 }
@@ -275,6 +301,7 @@ impl From<ChainRunError> for ApiError {
                 ApiError::internal_with_status(msg, axum::http::StatusCode::BAD_GATEWAY)
             }
             ChainRunError::Encode(msg) => ApiError::internal(msg),
+            ChainRunError::StitchFailed(msg) => ApiError::internal(msg),
             ChainRunError::Internal(msg) => ApiError::internal(msg),
         }
     }
@@ -367,17 +394,8 @@ async fn run_chain(
     let stage_count = chain_output.stage_count;
     let generation_time_ms = chain_output.generation_time_ms;
 
-    // Temporary — replaced with StitchPlan::assemble in Task 2.4/2.6.
-    // Naïve smooth-only concat + motion-tail trim on continuations.
-    let motion_tail = req.motion_tail_frames as usize;
-    let mut frames: Vec<image::RgbImage> = Vec::new();
-    for (idx, stage_clip) in chain_output.stage_frames.into_iter().enumerate() {
-        if idx == 0 {
-            frames.extend(stage_clip);
-        } else {
-            frames.extend(stage_clip.into_iter().skip(motion_tail));
-        }
-    }
+    let mut frames = stitch_chain_output(chain_output, &req)
+        .map_err(|e| ChainRunError::StitchFailed(e.to_string()))?;
     trim_to_total_frames(&mut frames, req.total_frames);
 
     if frames.is_empty() {
