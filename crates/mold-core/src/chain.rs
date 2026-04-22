@@ -40,6 +40,27 @@ pub enum TransitionMode {
     Fade,
 }
 
+/// Per-stage LoRA adapter spec. **Reserved for sub-project B** — populating
+/// this in a request before B lands causes `ChainRequest::normalise` to
+/// return 422. Defined now so scripts that round-trip through v1 clients
+/// don't drop fields silently.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LoraSpec {
+    pub path: String,
+    pub scale: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Per-stage named reference character/style. **Reserved for sub-project
+/// B** — populating this causes `ChainRequest::normalise` to return 422.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct NamedRef {
+    pub name: String,
+    #[serde(with = "crate::types::base64_bytes")]
+    pub image: Vec<u8>,
+}
+
 /// A single rendered clip in a chain. Concatenated in order with motion-tail
 /// trimming on continuations (stages with `idx >= 1` drop the leading
 /// `motion_tail_frames` pixel frames of their output because those duplicate
@@ -767,5 +788,31 @@ mod tests {
     #[test]
     fn transition_mode_defaults_to_smooth() {
         assert_eq!(TransitionMode::default(), TransitionMode::Smooth);
+    }
+
+    #[test]
+    fn lora_spec_serializes_minimal() {
+        let spec = LoraSpec {
+            path: "./style.safetensors".into(),
+            scale: 0.8,
+            name: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""path":"./style.safetensors""#));
+        assert!(json.contains(r#""scale":0.8"#));
+        // name omitted
+        assert!(!json.contains(r#""name""#));
+    }
+
+    #[test]
+    fn named_ref_serializes_minimal() {
+        let r = NamedRef {
+            name: "hero".into(),
+            image: vec![0x89, 0x50],
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        // base64-encoded image via the existing base64 helper
+        assert!(json.contains(r#""name":"hero""#));
+        assert!(json.contains(r#""image":"#));
     }
 }

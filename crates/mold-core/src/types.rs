@@ -35,6 +35,25 @@ pub(crate) mod base64_opt {
     }
 }
 
+/// Serde helpers for `Vec<u8>` as base64 in JSON (required, non-optional field).
+///
+/// Used by [`crate::chain::NamedRef`] and any other type that carries raw
+/// bytes as a required wire field.
+pub(crate) mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[allow(clippy::ptr_arg)]
+    pub fn serialize<S: Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        STANDARD.decode(s).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Serde helpers for `Option<Vec<Vec<u8>>>` as base64 strings in JSON.
 mod base64_vec_opt {
     use base64::Engine as _;
