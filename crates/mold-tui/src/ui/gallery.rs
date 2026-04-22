@@ -6,14 +6,18 @@ use ratatui_image::{Image, Resize, StatefulImage};
 use crate::app::{App, GalleryEntry, GalleryViewMode};
 use crate::ui::widgets::{kv_row_line, panel_block};
 
-const CELL_W: u16 = 24;
+/// Width of a single gallery tile.
+pub(crate) const CELL_W: u16 = 24;
 /// Height of a single gallery tile including its 2 border rows.
 ///
 /// The cell used to reserve two rows for a filename label, which never fit
 /// on disk-era names and was redundant with the Selected panel below the
 /// grid. Removing the label lets the thumbnail fill the full inner area
 /// *and* fits one extra tile row on typical terminal heights.
-const CELL_H: u16 = 12;
+///
+/// Shared with the mouse hit-test in `app::handle_mouse` so click
+/// detection can never drift from the rendered cell size.
+pub(crate) const CELL_H: u16 = 12;
 
 /// Height of the bottom row (Selected + Prompt panels) in the Grid view.
 const GRID_BOTTOM_HEIGHT: u16 = 8;

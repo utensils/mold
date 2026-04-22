@@ -1028,6 +1028,39 @@ fn start_background_server(port: u16) -> Option<std::process::Child> {
     cmd.spawn().ok()
 }
 
+/// Pure hit-test for the tab bar. Given an absolute column and the tab
+/// bar's left edge, return the tab the click lands on, or `None` when the
+/// click is past the last rendered tab (e.g. on the right-aligned
+/// version/host indicator or blank space). The math mirrors
+/// `ui::render_tab_bar`: one column of horizontal padding on the left,
+/// then each tab is drawn as `" N Label "` (label length + 4 columns),
+/// with a single-column divider between adjacent tabs.
+pub(crate) fn tab_at_column(col: u16, tab_bar_x: u16) -> Option<View> {
+    // The block has only `Borders::BOTTOM`, so there's no left border —
+    // just the horizontal-1 padding. Content therefore starts one column
+    // in from `tab_bar_x`. The existing hit-test subtracted 2 which
+    // happened to work through saturating underflow but made the logic
+    // hard to reason about; keep the arithmetic honest here.
+    let content_start = tab_bar_x.saturating_add(1);
+    if col < content_start {
+        // Click in the left padding counts as the first tab, matching
+        // what the user's eye sees (the 1-column gutter looks like part
+        // of Tab 1).
+        return Some(View::ALL[0]);
+    }
+    let x = (col - content_start) as usize;
+
+    let mut offset = 0usize;
+    for view in &View::ALL {
+        let tab_width = view.label().len() + 4; // " N Label "
+        if x < offset + tab_width {
+            return Some(*view);
+        }
+        offset += tab_width + 1; // +1 for the divider
+    }
+    None
+}
+
 /// Configure the background `mold serve` command — pure helper so tests
 /// can inspect the args and env without actually spawning a process. The
 /// TUI owns this server lifecycle (starts it, talks to it over the loopback,
@@ -2151,22 +2184,16 @@ impl App {
                     return;
                 }
 
-                // Tab bar clicks — switch views
+                // Tab bar clicks — switch views.
+                // Clicks on empty space to the right of the last rendered
+                // tab (e.g. the version/host indicator) must be a no-op,
+                // not a stealth jump to Settings.
                 if self.layout.tab_bar.contains((col, row).into()) {
-                    // Determine which tab was clicked based on cumulative label widths.
-                    // Tab labels: " {i} {label} " with 1-char divider, plus block padding.
-                    let x = col.saturating_sub(self.layout.tab_bar.x + 2) as usize; // +2 for border + padding
-                    let mut offset = 0;
-                    for view in &View::ALL {
-                        let tab_width = view.label().len() + 4; // " N Label " = label + " N  "
-                        if x < offset + tab_width {
-                            self.active_view = *view;
-                            return;
-                        }
-                        offset += tab_width + 1; // +1 for divider
+                    if let Some(view) = tab_at_column(col, self.layout.tab_bar.x) {
+                        self.active_view = view;
+                        return;
                     }
-                    // Click past all tabs — select last view
-                    self.active_view = View::Settings;
+                    // Click past all tabs — leave the active view alone.
                     return;
                 }
 
@@ -2200,9 +2227,13 @@ impl App {
                 {
                     let pos: ratatui::layout::Position = (col, row).into();
                     if self.layout.gallery_grid.contains(pos) {
-                        // Compute which grid cell was clicked
-                        let cell_w = 24u16;
-                        let cell_h = 14u16;
+                        // Source cell dimensions from the renderer so the
+                        // hit-test can't drift from the rendered grid —
+                        // the previous hard-coded `cell_h = 14` was the
+                        // "finicky clicks" bug after CELL_H was shrunk
+                        // to 12 when filename labels were removed.
+                        let cell_w = crate::ui::gallery::CELL_W;
+                        let cell_h = crate::ui::gallery::CELL_H;
                         let cols = self.gallery.grid_cols.max(1);
                         let rel_x = col.saturating_sub(self.layout.gallery_grid.x);
                         let rel_y = row.saturating_sub(self.layout.gallery_grid.y);
@@ -6386,6 +6417,143 @@ mod tests {
 
         app.dispatch_action(Action::FocusNext);
         assert_eq!(app.generate.focus, GenerateFocus::NegativePrompt);
+    }
+
+    #[tokio::test]
+    async fn mouse_click_on_gallery_tile_row_2_selects_correct_tile() {
+        // Regression for "click boxes are finicky in general": the mouse
+        // handler was using `cell_h = 14u16` after the grid was shrunk
+        // to `CELL_H = 12` in ui::gallery. Each row of tiles drifted the
+        // hit-test by 2 rows — clicking on row 2 would select the row-1
+        // tile (or nothing).
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Gallery;
+        app.gallery.view_mode = GalleryViewMode::Grid;
+        // 3 columns, 3 rows worth of tiles = 9 entries.
+        for i in 0..9 {
+            app.gallery.entries.push(GalleryEntry {
+                path: std::path::PathBuf::from(format!("tile-{i}.png")),
+                metadata: make_test_metadata(),
+                generation_time_ms: None,
+                timestamp: 0,
+                server_url: None,
+            });
+            app.gallery.thumbnail_states.push(None);
+            app.gallery.thumb_dimensions.push(None);
+            app.gallery.thumb_fixed_cache.push(None);
+        }
+        app.gallery.grid_cols = 3;
+        app.gallery.grid_scroll = 0;
+        // Gallery grid inner area in a representative layout.
+        app.layout.gallery_grid = ratatui::layout::Rect::new(0, 3, 72, 40);
+
+        // Click dead-center of the tile at grid (col=1, row=2).
+        // With CELL_W=24 and CELL_H=12, that tile occupies
+        // cols 24..=47 and rows (3 + 24)..=(3 + 35). Midpoint col ≈ 36,
+        // row ≈ 30. With the old `cell_h=14` the click would have been
+        // interpreted as row 1 (tile index 4) instead of row 2 (index 7).
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 36,
+            row: 30,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+
+        let expected_index = 2 * 3 + 1; // row 2 * 3 cols + col 1
+        assert_eq!(
+            app.gallery.selected, expected_index,
+            "click on tile (col=1, row=2) at (col=36,row=30) should select index {expected_index} — \
+             mouse hit-test must track the real CELL_H, not the stale 14"
+        );
+    }
+
+    #[tokio::test]
+    async fn mouse_click_on_each_tab_switches_to_that_view() {
+        // Click every tab at its start/middle/end columns and assert the
+        // active_view lands on the expected tab. Regression reproducer
+        // for "clicking on Queue with mouse doesn't always work" — the
+        // existing hit-test math did +2 (border + padding) even though
+        // the block has no left border. Anchoring at each real column
+        // exposes the off-by-one that matters on real-world tab widths.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        // Tab bar is 3 rows tall; tabs render on row 1 (under the title
+        // row, above the bottom border). 80-col terminal.
+        let tab_bar = ratatui::layout::Rect::new(0, 0, 80, 3);
+
+        // Rendered layout with horizontal-1 padding:
+        //   col 0        → padding
+        //   col 1..=12   → " 1 Generate " (12 chars)
+        //   col 13       → divider
+        //   col 14..=24  → " 2 Gallery " (11 chars)
+        //   col 25       → divider
+        //   col 26..=35  → " 3 Models " (10 chars)
+        //   col 36       → divider
+        //   col 37..=45  → " 4 Queue " (9 chars)
+        //   col 46       → divider
+        //   col 47..=58  → " 5 Settings " (12 chars)
+        let cases: &[(u16, View, &str)] = &[
+            (1, View::Generate, "Generate start"),
+            (7, View::Generate, "Generate middle"),
+            (12, View::Generate, "Generate end"),
+            (14, View::Gallery, "Gallery start"),
+            (19, View::Gallery, "Gallery middle"),
+            (24, View::Gallery, "Gallery end"),
+            (26, View::Models, "Models start"),
+            (30, View::Models, "Models middle"),
+            (35, View::Models, "Models end"),
+            (37, View::Queue, "Queue start (the reported flaky position)"),
+            (41, View::Queue, "Queue middle"),
+            (45, View::Queue, "Queue end"),
+            (47, View::Settings, "Settings start"),
+            (52, View::Settings, "Settings middle"),
+            (58, View::Settings, "Settings end"),
+        ];
+
+        for (col, expected, name) in cases {
+            let mut app = make_settings_test_app();
+            app.layout.tab_bar = tab_bar;
+            app.active_view = View::Generate; // deterministic starting view
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: *col,
+                row: 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+            assert_eq!(
+                app.active_view, *expected,
+                "clicking col {col} ({name}) should land on {expected:?}, got {:?}",
+                app.active_view
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mouse_click_past_last_tab_does_not_select_settings() {
+        // The old behaviour mapped any click past the last rendered tab
+        // (e.g. on the right-aligned version text or empty space) to
+        // View::Settings. That made the tab bar feel "finicky" — clicks
+        // on the host/version indicator silently switched views.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = make_settings_test_app();
+        app.layout.tab_bar = ratatui::layout::Rect::new(0, 0, 80, 3);
+        app.active_view = View::Generate;
+
+        // Col 70 is well past Tab 5 (cols 47..=58) — it sits under the
+        // right-aligned "mold 0.9.0" version indicator.
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 70,
+            row: 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+
+        assert_eq!(
+            app.active_view,
+            View::Generate,
+            "clicks past the last rendered tab must be a no-op, not a stealth jump to Settings"
+        );
     }
 
     #[tokio::test]
