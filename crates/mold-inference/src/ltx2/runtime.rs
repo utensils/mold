@@ -1430,7 +1430,40 @@ fn maybe_load_stage_video_conditioning(
         let vae = vae.as_mut().expect(
             "need_vae guarantees the VAE is loaded whenever plan.conditioning.latents is non-empty",
         );
-        let video = video_tensor_from_frames(&staged.tail_rgb_frames, device, dtype)
+        // Tail frames from the prior chain stage arrive at the user's
+        // *output* resolution, but on LTX-2 distilled `prepare()` implicitly
+        // halves the transformer's stage-1 shape (see
+        // `pipeline_uses_two_stage_spatial_refinement` — the distilled
+        // pipeline bakes in an X2 spatial refinement, runs the denoiser at
+        // half linear resolution, then spatially upsamples the rendered RGB
+        // before returning it). VAE-encoding tail frames at the full output
+        // size against this half-resolution receiving shape produces
+        // 4× too many tokens and trips `apply_video_token_replacements`
+        // with `conditioning replacement exceeds video token count`. Resize
+        // every tail frame to the receiving clip's `pixel_shape` first so
+        // the encoded token grid matches the main video token grid — the
+        // receiving stage then upsamples the generated output back to full
+        // size the same way stage 0 did, so the user never sees the
+        // halved working resolution.
+        let target_width = pixel_shape.width as u32;
+        let target_height = pixel_shape.height as u32;
+        let resized_tail: Vec<RgbImage> = staged
+            .tail_rgb_frames
+            .iter()
+            .map(|frame| {
+                if frame.width() == target_width && frame.height() == target_height {
+                    frame.clone()
+                } else {
+                    imageops::resize(
+                        frame,
+                        target_width,
+                        target_height,
+                        imageops::FilterType::Lanczos3,
+                    )
+                }
+            })
+            .collect();
+        let video = video_tensor_from_frames(&resized_tail, device, dtype)
             .context("encode chain tail RGB frames into pixel tensor for carryover")?;
         let latents = vae
             .encode(&video)
