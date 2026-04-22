@@ -3093,22 +3093,26 @@ impl App {
             self.gallery.thumb_fixed_cache.remove(idx);
         }
 
-        // Adjust selection
+        // Drop the deleted image's preview state first — load_gallery_preview
+        // below will repopulate these for the new selection. Doing it in the
+        // other order (load → wipe) is the bug that left Detail view blank
+        // after a delete: we'd read the new image off disk and then
+        // immediately throw it away.
+        self.gallery.preview_image = None;
+        self.gallery.image_state = None;
+        self.gallery.animation = None;
+
+        // Adjust selection — keep the user on the next neighbour, or clamp
+        // to the new last entry when they were already at the end.
         if !self.gallery.entries.is_empty() {
             self.gallery.selected = idx.min(self.gallery.entries.len() - 1);
+            if self.gallery.view_mode == GalleryViewMode::Detail {
+                self.load_gallery_preview();
+            }
         } else {
             self.gallery.selected = 0;
             self.gallery.view_mode = GalleryViewMode::Grid;
         }
-
-        // Reload preview if in detail mode
-        if self.gallery.view_mode == GalleryViewMode::Detail {
-            self.load_gallery_preview();
-        }
-
-        self.gallery.preview_image = None;
-        self.gallery.image_state = None;
-        self.gallery.animation = None;
     }
 
     /// Open the selected gallery image in the system viewer.
@@ -7792,6 +7796,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_in_detail_view_advances_to_next_image_with_preview_loaded() {
+        // When a user deletes from Detail (full-screen) view, they expect
+        // to land on the next image with the preview pane showing it —
+        // not on a blank screen with the deleted file's filename.
+        // Prior bug: delete_selected_gallery_image cleared preview_image
+        // *after* calling load_gallery_preview, wiping the just-loaded
+        // image. Reproducer below decodes a real PNG into the preview
+        // and asserts it survives.
+        use image::ImageEncoder;
+
+        // Build two real PNGs on disk so load_gallery_preview can decode
+        // the surviving entry's image.
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-detail-delete-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        fn write_real_png(path: &std::path::Path, color: [u8; 3]) {
+            let pixels: Vec<u8> = (0..16 * 16).flat_map(|_| color.iter().copied()).collect();
+            let f = std::fs::File::create(path).unwrap();
+            let encoder = image::codecs::png::PngEncoder::new(f);
+            encoder
+                .write_image(&pixels, 16, 16, image::ExtendedColorType::Rgb8)
+                .unwrap();
+        }
+
+        let a_path = tmp.join("a.png");
+        let b_path = tmp.join("b.png");
+        write_real_png(&a_path, [255, 0, 0]);
+        write_real_png(&b_path, [0, 255, 0]);
+
+        let mut app = make_settings_test_app();
+        for path in [&a_path, &b_path] {
+            app.gallery.entries.push(GalleryEntry {
+                path: path.clone(),
+                metadata: make_test_metadata(),
+                generation_time_ms: None,
+                timestamp: 0,
+                server_url: None,
+            });
+            app.gallery.thumbnail_states.push(None);
+            app.gallery.thumb_dimensions.push(None);
+            app.gallery.thumb_fixed_cache.push(None);
+        }
+        app.gallery.selected = 0;
+        app.gallery.view_mode = GalleryViewMode::Detail;
+
+        app.delete_selected_gallery_image();
+
+        assert_eq!(
+            app.gallery.entries.len(),
+            1,
+            "one entry should remain after delete"
+        );
+        assert_eq!(
+            app.gallery.view_mode,
+            GalleryViewMode::Detail,
+            "Detail view should persist when there is still an image to show"
+        );
+        assert!(
+            app.gallery.preview_image.is_some(),
+            "preview_image must be loaded for the new selection — \
+             previously the code cleared it right after load_gallery_preview"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn delete_last_entry_in_detail_view_returns_to_grid() {
+        // Deleting the only image in Detail view should drop back to the
+        // Grid (where the empty-state banner lives) — not leave the user
+        // staring at an empty Detail pane.
+        let mut app = make_settings_test_app();
+        let _path = add_temp_gallery_entry(&mut app, "lone-entry");
+        app.gallery.view_mode = GalleryViewMode::Detail;
+
+        app.delete_selected_gallery_image();
+
+        assert!(app.gallery.entries.is_empty());
+        assert_eq!(app.gallery.view_mode, GalleryViewMode::Grid);
+        assert!(app.gallery.preview_image.is_none());
+    }
+
+    #[tokio::test]
     async fn delete_selected_gallery_image_shrinks_parallel_arrays_in_lockstep() {
         // The gallery maintains three parallel vectors alongside `entries`
         // (thumbnail_states, thumb_dimensions, thumb_fixed_cache) — a
@@ -8049,6 +8144,121 @@ mod tests {
         assert!(
             contents.contains("\"theme\"") && contents.contains("dracula"),
             "session file should carry the selected theme slug: {contents}"
+        );
+    }
+
+    #[tokio::test]
+    async fn theme_save_then_load_round_trip_preserves_preset() {
+        // Full belt-and-braces guard for theme persistence: write a
+        // session via the same path the app uses (apply_theme_preset →
+        // save_session), then read the file back via TuiSession::load
+        // and confirm the slug parses to the same preset.
+        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-theme-roundtrip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let previous_home = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", &tmp);
+
+        for preset in [
+            crate::ui::theme::ThemePreset::Mocha,
+            crate::ui::theme::ThemePreset::Latte,
+            crate::ui::theme::ThemePreset::Ristretto,
+            crate::ui::theme::ThemePreset::Gruvbox,
+            crate::ui::theme::ThemePreset::Tokyo,
+            crate::ui::theme::ThemePreset::Nord,
+            crate::ui::theme::ThemePreset::Dracula,
+        ] {
+            let mut app = make_settings_test_app();
+            app.apply_theme_preset(preset);
+
+            let loaded = crate::session::TuiSession::load();
+            let parsed = loaded
+                .theme
+                .as_deref()
+                .map(crate::ui::theme::ThemePreset::from_slug)
+                .unwrap_or_default();
+            // Restore env *before* asserting so a failure on one preset
+            // doesn't leak MOLD_HOME to other tests.
+            assert_eq!(
+                parsed, preset,
+                "preset {preset:?} did not round-trip via TuiSession::load (got {parsed:?})"
+            );
+        }
+
+        match previous_home {
+            Some(v) => std::env::set_var("MOLD_HOME", v),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn theme_default_is_mocha_when_session_file_is_missing() {
+        // The default theme must always be Mocha — Latte is the light
+        // counterpart and should only appear when explicitly selected.
+        // Guard against a regression where `ThemePreset::default()` or
+        // the from_slug fallback gets swapped.
+        let _guard = THEME_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-theme-default-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let previous_home = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", &tmp);
+
+        let loaded = crate::session::TuiSession::load();
+        let resolved = loaded
+            .theme
+            .as_deref()
+            .map(crate::ui::theme::ThemePreset::from_slug)
+            .unwrap_or_default();
+
+        match previous_home {
+            Some(v) => std::env::set_var("MOLD_HOME", v),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(
+            resolved,
+            crate::ui::theme::ThemePreset::Mocha,
+            "missing session file must resolve to Mocha, never Latte"
+        );
+        assert!(
+            loaded.theme.is_none(),
+            "no theme key should be present in a fresh session"
+        );
+    }
+
+    #[tokio::test]
+    async fn theme_default_is_mocha_when_slug_is_unknown_or_empty() {
+        // An old session file or a hand-edited config could carry a
+        // garbage slug — it must fall back to Mocha, not Latte.
+        assert_eq!(
+            crate::ui::theme::ThemePreset::from_slug(""),
+            crate::ui::theme::ThemePreset::Mocha
+        );
+        assert_eq!(
+            crate::ui::theme::ThemePreset::from_slug("not-a-real-theme"),
+            crate::ui::theme::ThemePreset::Mocha
+        );
+        assert_eq!(
+            crate::ui::theme::ThemePreset::default(),
+            crate::ui::theme::ThemePreset::Mocha
         );
     }
 
