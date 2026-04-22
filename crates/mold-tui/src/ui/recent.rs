@@ -63,7 +63,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 /// Build a single row: `● <filename>  <model>  <diff>`.
 ///
 /// We compute widths so the model column right-aligns with a small gap to the
-/// diff label. Truncation uses `.` characters to keep the layout stable on
+/// diff label. Truncation uses the `…` ellipsis to keep the layout stable on
 /// narrow terminals.
 fn build_line<'a>(
     theme: &crate::ui::theme::Theme,

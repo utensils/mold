@@ -66,7 +66,9 @@ pub fn kv_row_line<'a>(
 
 /// Truncate `s` to at most `max` characters, appending `…` when the string
 /// was cut. Counts Unicode scalars (via `.chars()`), not bytes, so it is safe
-/// on multi-byte characters. Returns an empty string when `max == 0`.
+/// on multi-byte characters. Returns an empty string when `max == 0`, and a
+/// bare `…` when `max == 1` and truncation is needed — so the returned char
+/// count never exceeds `max`.
 pub fn truncate_with_ellipsis(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -74,7 +76,10 @@ pub fn truncate_with_ellipsis(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
-    let cut = max.saturating_sub(1).max(1);
+    if max == 1 {
+        return "…".to_string();
+    }
+    let cut = max - 1;
     let head: String = s.chars().take(cut).collect();
     format!("{head}…")
 }
@@ -82,7 +87,10 @@ pub fn truncate_with_ellipsis(s: &str, max: usize) -> String {
 /// Draw the theme swatch grid used by the Appearance panel.
 ///
 /// Each swatch is rendered as `●<space>Label` plus a trailing `✓` on the
-/// current selection. The grid flows horizontally and wraps at `area.width`.
+/// current selection. The row renders on a single `Line` with no wrap —
+/// terminals narrower than the combined label width clip the overflow. The
+/// Appearance panel is always drawn wide enough for seven swatches on any
+/// realistic TUI width, so wrapping isn't needed.
 pub fn render_theme_swatches(
     frame: &mut Frame,
     theme: &Theme,
@@ -181,6 +189,18 @@ mod tests {
     #[test]
     fn truncate_with_ellipsis_zero_is_empty() {
         assert_eq!(truncate_with_ellipsis("abc", 0), "");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_max_one_returns_bare_ellipsis() {
+        // Regression: the previous impl did `cut = max(saturating_sub(1), 1)`
+        // so `max=1` produced a 2-char string like "a…", violating the
+        // "at most `max` characters" contract and visually overflowing
+        // 1-column layouts.
+        assert_eq!(truncate_with_ellipsis("abc", 1), "…");
+        assert_eq!(truncate_with_ellipsis("abc", 1).chars().count(), 1);
+        // Strings shorter than `max` are still passed through unchanged.
+        assert_eq!(truncate_with_ellipsis("a", 1), "a");
     }
 
     #[test]

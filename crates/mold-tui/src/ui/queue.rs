@@ -117,7 +117,11 @@ fn render_table(frame: &mut Frame, app: &App, jobs: &[JobRow], area: Rect) {
         ],
     )
     .header(header)
-    .block(panel_block(theme, "", false, None).style(Style::default().bg(theme.bg)))
+    // The outer "Queue" panel_block already draws the frame. Using another
+    // bordered block here would draw a second set of borders inside and
+    // shrink the visible column area — render the table plain, tinted to
+    // the panel background so the highlight row blends cleanly.
+    .style(Style::default().bg(theme.bg))
     .row_highlight_style(theme.list_selected());
 
     // Render inside `inner` (not `area`) so the outer frame stays visible.
@@ -182,9 +186,22 @@ fn build_rows(app: &App) -> Vec<JobRow> {
     let mut rows: Vec<JobRow> = Vec::new();
 
     if app.generate.generating {
+        // `prompt_preview` only consumes the first non-empty line, so
+        // scan straight from the TextArea buffer instead of joining
+        // every line into a throwaway allocation. The render path runs
+        // on every frame (~60fps) — no reason to copy the full prompt
+        // just to look at the head.
+        let first_line = app
+            .generate
+            .prompt
+            .lines()
+            .iter()
+            .map(|s| s.trim())
+            .find(|s| !s.is_empty())
+            .unwrap_or("");
         rows.push(JobRow {
             state: JobState::Running,
-            prompt: prompt_preview(app.generate.prompt.lines().join("\n").trim()),
+            prompt: prompt_preview(first_line),
             model: app.generate.params.model.clone(),
             time: running_time_label(
                 app.generate.progress.denoise_step,
