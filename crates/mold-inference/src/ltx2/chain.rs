@@ -15,7 +15,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use candle_core::Tensor;
 use image::RgbImage;
-use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage};
+use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
 use mold_core::{GenerateRequest, OutputFormat};
 
 use crate::ltx2::model::shapes::SpatioTemporalScaleFactors;
@@ -218,6 +218,16 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
             let stage_seed = derive_stage_seed(base_seed, idx, stage);
             let stage_req = build_stage_generate_request(stage, req, stage_seed, idx);
 
+            // Cut and Fade transitions produce a visual reset: the prior
+            // stage's motion-tail latent is NOT threaded into this stage.
+            // Smooth is the only transition that passes carry through.
+            // Carry is still captured unconditionally at the end of the loop
+            // so a later Smooth stage can pick it up.
+            let effective_carry = match stage.transition {
+                TransitionMode::Smooth => carry.as_ref(),
+                TransitionMode::Cut | TransitionMode::Fade => None,
+            };
+
             // Wrap the chain progress subscriber so per-stage denoise
             // events land on it with `stage_idx` tagged in. The wrapping
             // closure holds a mutable reborrow of the outer callback for
@@ -236,14 +246,14 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
                     };
                     self.renderer.render_stage(
                         &stage_req,
-                        carry.as_ref(),
+                        effective_carry,
                         req.motion_tail_frames,
                         Some(&mut wrapping),
                     )?
                 }
                 None => self.renderer.render_stage(
                     &stage_req,
-                    carry.as_ref(),
+                    effective_carry,
                     req.motion_tail_frames,
                     None,
                 )?,
@@ -836,6 +846,28 @@ mod tests {
         assert_eq!(out.stage_frames[0].len() as u32, req.stages[0].frames);
         assert_eq!(out.stage_frames[1].len() as u32, req.stages[1].frames);
         assert_eq!(out.stage_frames[2].len() as u32, req.stages[2].frames);
+    }
+
+    #[test]
+    fn orchestrator_passes_none_carry_for_cut_transition() {
+        let mut renderer = FakeRenderer::new();
+        let req = sample_chain_request(3, TransitionMode::Cut);
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        orch.run(&req, None).unwrap();
+        // Stage 0 always has None; stages 1/2 should also have None because
+        // their transition is Cut.
+        let has_carry: Vec<bool> = renderer.calls.iter().map(|c| c.has_carry).collect();
+        assert_eq!(has_carry, vec![false, false, false]);
+    }
+
+    #[test]
+    fn orchestrator_passes_some_carry_for_smooth_transition() {
+        let mut renderer = FakeRenderer::new();
+        let req = sample_chain_request(3, TransitionMode::Smooth);
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        orch.run(&req, None).unwrap();
+        let has_carry: Vec<bool> = renderer.calls.iter().map(|c| c.has_carry).collect();
+        assert_eq!(has_carry, vec![false, true, true]);
     }
 
     fn sample_chain_request(count: usize, transition: TransitionMode) -> ChainRequest {
