@@ -292,6 +292,12 @@ enum ChainRunError {
     StitchFailed(String),
     /// Task panic or join error (500).
     Internal(String),
+    /// No GPU worker available to service this chain (503).
+    #[allow(dead_code)] // Constructed by run_chain_pooled in Task 5.
+    NoWorker(String),
+    /// `spawn_blocking` task failed to join (500).
+    #[allow(dead_code)] // Constructed by run_chain_pooled in Task 5.
+    Join(String),
 }
 
 impl From<ChainRunError> for ApiError {
@@ -315,6 +321,10 @@ impl From<ChainRunError> for ApiError {
             ChainRunError::Encode(msg) => ApiError::internal(msg),
             ChainRunError::StitchFailed(msg) => ApiError::internal(msg),
             ChainRunError::Internal(msg) => ApiError::internal(msg),
+            ChainRunError::NoWorker(msg) => {
+                ApiError::internal_with_status(msg, axum::http::StatusCode::SERVICE_UNAVAILABLE)
+            }
+            ChainRunError::Join(msg) => ApiError::internal(msg),
         }
     }
 }
