@@ -94,6 +94,7 @@ function setComposerMode(v: ComposerMode) {
 }
 
 const expandStageIndex = ref<number | null>(null);
+const composerRef = ref<InstanceType<typeof Composer> | null>(null);
 
 // Drawer state (mirrors GalleryPage).
 const selected = ref<GalleryImage | null>(null);
@@ -273,8 +274,11 @@ function onSubmitScript(script: ChainScriptToml) {
   stream.submit(req as never, decision);
 }
 
-function onExpandStage(stageIndex: number) {
+const expandStagePrompt = ref("");
+
+function onExpandStage(stageIndex: number, prompt: string) {
   expandStageIndex.value = stageIndex;
+  expandStagePrompt.value = prompt;
   showExpand.value = true;
 }
 
@@ -391,6 +395,7 @@ onBeforeUnmount(() => {
 
     <div class="mt-4 sm:mt-6">
       <Composer
+        ref="composerRef"
         v-model="form.state.value"
         :mode="composerMode"
         :queue-depth="status?.queue_depth ?? null"
@@ -406,7 +411,7 @@ onBeforeUnmount(() => {
         @update:mode="setComposerMode"
         @open-settings="showSettings = true"
         @open-expand="showExpand = true"
-        @open-expand-stage="onExpandStage"
+        @open-expand-stage="(idx: number, p: string) => onExpandStage(idx, p)"
         @open-image-picker="showPicker = true"
         @clear-source="onClearSource"
       />
@@ -438,13 +443,26 @@ onBeforeUnmount(() => {
     />
     <ExpandModal
       :open="showExpand"
-      :prompt="form.state.value.prompt"
+      :prompt="
+        expandStageIndex !== null ? expandStagePrompt : form.state.value.prompt
+      "
       :expand="form.state.value.expand"
       :current-model="currentModel"
       :queue-busy="queueBusy"
       @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
-      @apply-prompt="(v: string) => (form.state.value.prompt = v)"
-      @close="showExpand = false"
+      @apply-prompt="
+        (v: string) => {
+          if (expandStageIndex !== null) {
+            composerRef?.scriptComposerRef?.setStagePrompt(expandStageIndex, v);
+          } else {
+            form.state.value.prompt = v;
+          }
+        }
+      "
+      @close="
+        showExpand = false;
+        expandStageIndex = null;
+      "
     />
     <ImagePickerModal
       :open="showPicker"

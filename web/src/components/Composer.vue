@@ -39,7 +39,7 @@ const emit = defineEmits<{
   (e: "submit-script", script: ChainScriptToml): void;
   (e: "open-settings"): void;
   (e: "open-expand"): void;
-  (e: "open-expand-stage", stageIndex: number): void;
+  (e: "open-expand-stage", stageIndex: number, prompt: string): void;
   (e: "open-image-picker"): void;
   (e: "clear-source"): void;
 }>();
@@ -97,6 +97,10 @@ function updateOutputFormat(v: string) {
     outputFormat: v as OutputFormat,
   });
 }
+
+const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
+
+defineExpose({ scriptComposerRef });
 </script>
 
 <template>
@@ -124,12 +128,15 @@ function updateOutputFormat(v: string) {
 
     <ScriptComposer
       v-if="mode === 'script'"
+      ref="scriptComposerRef"
       :model="modelValue.model"
       :width="modelValue.width"
       :height="modelValue.height"
       :fps="modelValue.fps ?? 24"
       @submit="emit('submit-script', $event)"
-      @expand="emit('open-expand-stage', $event)"
+      @expand="
+        (idx: number, prompt: string) => emit('open-expand-stage', idx, prompt)
+      "
     />
 
     <template v-else>

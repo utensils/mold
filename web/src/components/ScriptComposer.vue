@@ -18,7 +18,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "submit", script: ChainScriptToml): void;
-  (e: "expand", stageIndex: number): void;
+  (e: "expand", stageIndex: number, prompt: string): void;
 }>();
 
 const DRAFT_KEY = "mold.chain.draft.v2";
@@ -174,6 +174,18 @@ const canAddStage = computed(() => script.value.stage.length < maxStages.value);
 function submit() {
   emit("submit", script.value);
 }
+
+function getStagePrompt(i: number): string {
+  return script.value.stage[i]?.prompt ?? "";
+}
+
+function setStagePrompt(i: number, v: string) {
+  if (script.value.stage[i]) {
+    script.value.stage[i].prompt = v;
+  }
+}
+
+defineExpose({ getStagePrompt, setStagePrompt });
 </script>
 
 <template>
@@ -222,7 +234,7 @@ function submit() {
       @move-up="moveUp(i)"
       @move-down="moveDown(i)"
       @duplicate="duplicate(i)"
-      @expand="emit('expand', i)"
+      @expand="emit('expand', i, stage.prompt)"
     />
 
     <div
