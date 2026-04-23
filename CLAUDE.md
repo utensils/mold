@@ -208,6 +208,7 @@ Axum HTTP server wrapping the inference engine. Used as a library by `mold-cli` 
 | `GET` | `/api/openapi.json` | OpenAPI spec |
 | `GET` | `/api/docs` | Interactive API docs (Scalar) |
 | `GET` | `/metrics` | Prometheus metrics (feature-gated) |
+| `GET` | `/api/capabilities/chain-limits` | Per-model chain frame caps and supported transitions |
 
 State managed via `AppState` with `tokio::sync::Mutex<ModelCache>` (LRU cache, max 3 models). `ModelResidency` tracks each engine as `Gpu`, `Parked` (weights dropped but tokenizers/caches retained for fast reload), or `Unloaded`. At most one engine is GPU-resident at a time. `AppState` also holds a `shared_pool: Arc<Mutex<SharedPool>>` for cross-engine tokenizer caching and `upscaler_cache: Arc<std::sync::Mutex<Option<Box<dyn UpscaleEngine>>>>` for reusing loaded upscaler models across requests.
 
@@ -225,13 +226,23 @@ Token: `MOLD_DISCORD_TOKEN` (preferred) or `DISCORD_TOKEN` (fallback).
 
 ## CLI Quick Reference
 
-Core commands: `mold run`, `mold serve`, `mold pull`, `mold list`, `mold ps`, `mold tui`, `mold upscale`, `mold expand`, `mold config`, `mold update`, `mold runpod`. Run `mold --help` or `mold <command> --help` for full flag details. `mold runpod run "<prompt>"` creates a RunPod pod, generates, and saves to `./mold-outputs/` in one command — see `website/deployment/runpod-cli.md`.
+Core commands: `mold run`, `mold serve`, `mold pull`, `mold list`, `mold ps`, `mold tui`, `mold chain`, `mold upscale`, `mold expand`, `mold config`, `mold update`, `mold runpod`. Run `mold --help` or `mold <command> --help` for full flag details. `mold runpod run "<prompt>"` creates a RunPod pod, generates, and saves to `./mold-outputs/` in one command — see `website/deployment/runpod-cli.md`.
 
 **Key behaviors:**
 - `mold run [MODEL] [PROMPT]` — first positional arg is MODEL if it matches a known name, otherwise it's prompt
 - **Pipe-friendly**: `echo "a cat" | mold run flux2-klein | viu -` — stdin for prompt, stdout for image bytes when not a TTY. `--output -` forces stdout. `--image -` reads source image from stdin.
 - **Inference modes**: remote (default → `MOLD_HOST`), local fallback (auto if server unreachable), `--local` (forced local GPU)
 - **VRAM management**: `--offload` streams blocks CPU↔GPU (~24GB→2-4GB, slower), `--eager` keeps everything loaded, `--t5-variant`/`--qwen3-variant`/`--qwen2-variant` control encoder quantization
+
+### Multi-prompt chain authoring
+
+- `mold run --script shot.toml` — canonical TOML chain (schema `mold.chain.v1`), per-stage `prompt`/`frames`/`transition`
+- `mold run --script shot.toml --dry-run` — print normalised stages + total frames, exit
+- `mold chain validate shot.toml` — parse + normalise without submitting
+- Sugar: `mold run <model> --prompt "..." --prompt "..." --frames-per-clip 97` (uniform smooth only)
+- Transitions: `smooth` (default, motion-tail morph), `cut` (fresh latent), `fade` (cut + RGB crossfade)
+- Web composer: `/generate` has a `Single` | `Script` mode toggle
+- TUI: `s` from hub opens Script mode
 
 ## Environment Variables
 
