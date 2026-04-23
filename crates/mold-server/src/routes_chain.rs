@@ -882,13 +882,17 @@ pub async fn generate_chain_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu_pool::GpuJob;
     use anyhow::Result;
     use image::{Rgb, RgbImage};
     use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
     use mold_core::{GenerateRequest, GenerateResponse};
+    use mold_inference::device::DiscoveredGpu;
     use mold_inference::ltx2::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
+    use mold_inference::shared_pool::SharedPool;
     use mold_inference::InferenceEngine;
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, RwLock};
 
     /// Mock engine that delegates to a simple chain renderer producing
     /// deterministic solid-color frames + a zero-valued latent tail. The
@@ -1190,6 +1194,57 @@ mod tests {
         assert_eq!(
             resp.video.frames, 10,
             "total_frames must trim the stitched output length"
+        );
+    }
+
+    fn minimal_worker_for_guard_test() -> Arc<GpuWorker> {
+        let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuJob>(2);
+        Arc::new(GpuWorker {
+            gpu: DiscoveredGpu {
+                ordinal: 0,
+                name: "fake".to_string(),
+                total_vram_bytes: 24_000_000_000,
+                free_vram_bytes: 24_000_000_000,
+            },
+            model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(3))),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        })
+    }
+
+    /// Guards must clear worker state even when the protected scope unwinds.
+    /// Without the Drop impls firing on panic, `in_flight` would remain
+    /// incremented forever and `active_generation` would remain set — biasing
+    /// the dispatcher's `select_worker` away from this worker permanently.
+    #[test]
+    fn guards_clear_state_on_panic() {
+        let worker = minimal_worker_for_guard_test();
+        let req = chain_req_for_mock("fake-model", 1);
+
+        let worker_for_catch = worker.clone();
+        let result = std::panic::catch_unwind(move || {
+            let _in_flight = InFlightGuard::increment(worker_for_catch.clone());
+            let _active = ActiveGenerationGuard::set(worker_for_catch.clone(), &req)
+                .expect("set active_generation");
+            assert_eq!(worker_for_catch.in_flight.load(Ordering::SeqCst), 1);
+            assert!(worker_for_catch.active_generation.read().unwrap().is_some());
+            panic!("simulated orchestrator failure");
+        });
+
+        assert!(result.is_err(), "panic must propagate");
+        assert_eq!(
+            worker.in_flight.load(Ordering::SeqCst),
+            0,
+            "InFlightGuard must decrement on panic"
+        );
+        assert!(
+            worker.active_generation.read().unwrap().is_none(),
+            "ActiveGenerationGuard must clear on panic"
         );
     }
 }
