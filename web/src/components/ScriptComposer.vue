@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import { VueDraggable } from "vue-draggable-plus";
 import StageCard from "./StageCard.vue";
 import {
   readChainScript,
@@ -221,21 +222,23 @@ defineExpose({ getStagePrompt, setStagePrompt });
       </div>
     </div>
 
-    <StageCard
-      v-for="(stage, i) in script.stage"
-      :key="i"
-      :index="i"
-      :is-first="i === 0"
-      :stage="stage"
-      :frames-per-clip-cap="framesPerClipCap"
-      :fade-frames-max="fadeFramesMax"
-      @update:stage="updateStage(i, $event)"
-      @delete="deleteStage(i)"
-      @move-up="moveUp(i)"
-      @move-down="moveDown(i)"
-      @duplicate="duplicate(i)"
-      @expand="emit('expand', i, stage.prompt)"
-    />
+    <VueDraggable v-model="script.stage" handle=".drag-handle">
+      <StageCard
+        v-for="(stage, i) in script.stage"
+        :key="i"
+        :index="i"
+        :is-first="i === 0"
+        :stage="stage"
+        :frames-per-clip-cap="framesPerClipCap"
+        :fade-frames-max="fadeFramesMax"
+        @update:stage="updateStage(i, $event)"
+        @delete="deleteStage(i)"
+        @move-up="moveUp(i)"
+        @move-down="moveDown(i)"
+        @duplicate="duplicate(i)"
+        @expand="emit('expand', i, stage.prompt)"
+      />
+    </VueDraggable>
 
     <div
       class="flex items-center justify-between text-xs"
