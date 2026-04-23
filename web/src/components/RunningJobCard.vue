@@ -2,12 +2,33 @@
 import { computed } from "vue";
 import type { Job } from "../composables/useGenerateStream";
 
-const props = defineProps<{ job: Job }>();
+// Hide-mode renders the thumbnail behind a blurred shroud until the user
+// reveals it. `revealed` is a per-card boolean; the parent tracks the
+// global peek set and looks up by job.id.
+const props = withDefaults(
+  defineProps<{
+    job: Job;
+    hideMode?: boolean;
+    revealed?: boolean;
+  }>(),
+  {
+    hideMode: false,
+    revealed: false,
+  },
+);
 const emit = defineEmits<{
   (e: "cancel", id: string): void;
   (e: "open", job: Job): void;
   (e: "dismiss", id: string): void;
+  (e: "reveal", id: string): void;
 }>();
+
+const isHidden = computed(() => props.hideMode && !props.revealed);
+
+function onReveal(evt: Event) {
+  evt.stopPropagation();
+  emit("reveal", props.job.id);
+}
 
 // Done jobs are clickable — they open the gallery detail drawer for the
 // saved file. The parent does the Job→GalleryImage lookup since the SSE
@@ -17,6 +38,9 @@ const clickable = computed(
 );
 
 function onClick() {
+  // Shrouded cards should not leak the finished image through the detail
+  // drawer — the user must reveal first.
+  if (isHidden.value) return;
   if (clickable.value) emit("open", props.job);
 }
 
@@ -75,6 +99,39 @@ const thumbSrc = computed(() => {
         class="absolute inset-0 flex items-center justify-center bg-rose-500/70 p-2 text-center text-xs text-white"
       >
         {{ job.error }}
+      </div>
+      <!-- Hide shroud. Matches the gallery card: heavy blur + dim, with
+           a Reveal button that peeks this job without flipping the global
+           toggle. Stop-propagates so the parent's open handler doesn't fire. -->
+      <div
+        v-if="isHidden"
+        class="absolute inset-0 z-[5] flex flex-col items-center justify-center gap-2 bg-slate-950/70 text-slate-100 backdrop-blur-2xl"
+      >
+        <svg
+          class="h-5 w-5 text-slate-300"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path
+            d="M10.6 5.1A10 10 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.3 4.2"
+          />
+          <path d="M6.7 6.7A17 17 0 0 0 2 12s4 7 10 7a9.7 9.7 0 0 0 5.3-1.7" />
+          <path d="m3 3 18 18" />
+          <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+        </svg>
+        <button
+          type="button"
+          class="rounded-full bg-white/10 px-3 py-1 text-[12px] font-medium text-slate-100 transition hover:bg-white/20"
+          @click="onReveal"
+          @keydown.stop
+        >
+          Reveal
+        </button>
       </div>
     </div>
     <div class="text-xs text-slate-300">{{ job.progress.stage }}</div>

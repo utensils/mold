@@ -6,6 +6,7 @@ import { mediaKind } from "../types";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
 import TopBar from "../components/TopBar.vue";
+import { useHideMode } from "../composables/useHideMode";
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
@@ -66,48 +67,13 @@ function setMuted(next: boolean) {
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 
-/*
- * Hide mode.
- *
- * When on, every gallery card renders a blurred shroud with a per-item
- * "Reveal" button. Flipping the toggle off reveals everything globally.
- * Persisted in localStorage so the privacy preference survives reloads —
- * users working in public places don't want to re-enable it every session.
- *
- * The `revealed` set tracks per-item peeks so users can unwrap a single
- * tile without disabling the global shroud. It's deliberately _not_
- * persisted: revealing an item should not survive a reload.
- */
-const HIDE_STORAGE_KEY = "mold.gallery.hide";
-function loadHide(): boolean {
-  try {
-    const v = localStorage.getItem(HIDE_STORAGE_KEY);
-    if (v === "true") return true;
-  } catch {
-    /* ignore */
-  }
-  return false;
-}
-const hideMode = ref<boolean>(loadHide());
-const revealed = ref<Set<string>>(new Set());
-
-function setHideMode(next: boolean) {
-  hideMode.value = next;
-  // Flipping the toggle should clear per-item peeks in both directions:
-  // turning hide-mode off makes revealed items moot; turning it back on
-  // should re-hide anything the user peeked at earlier.
-  revealed.value = new Set();
-  try {
-    localStorage.setItem(HIDE_STORAGE_KEY, String(next));
-  } catch {
-    /* ignore */
-  }
-}
+// Hide mode is a single global privacy knob shared with Generate; see
+// `useHideMode` for button semantics (toggle hides everything when any
+// tile is visible, reveals all only when the shroud is fully applied).
+const hide = useHideMode();
 
 function revealOne(item: GalleryImage) {
-  const next = new Set(revealed.value);
-  next.add(item.filename);
-  revealed.value = next;
+  hide.revealOne(item.filename);
 }
 
 /*
@@ -384,7 +350,7 @@ onMounted(async () => {
       :muted="muted"
       :counts="counts"
       :loading="loading"
-      :hide-mode="hideMode"
+      :hide-mode="!hide.anyVisible.value"
       :select-mode="selectMode"
       :selection-count="selection.size"
       :can-delete="capabilities.gallery.can_delete"
@@ -392,7 +358,7 @@ onMounted(async () => {
       @update:search="(s) => (search = s)"
       @update:view="setView"
       @update:muted="setMuted"
-      @update:hide-mode="setHideMode"
+      @update:hide-mode="hide.toggle"
       @update:select-mode="setSelectMode"
       @refresh="refresh"
     />
@@ -417,8 +383,8 @@ onMounted(async () => {
         :muted="muted"
         :select-mode="selectMode"
         :selection="selection"
-        :hide-mode="hideMode"
-        :revealed="revealed"
+        :hide-mode="hide.hideMode.value"
+        :revealed="hide.revealed.value"
         @open="openItem"
         @toggle-select="toggleSelect"
         @reveal="revealOne"

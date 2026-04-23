@@ -16,6 +16,7 @@ import {
 } from "../api";
 import { useGenerateForm } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
+import { useHideMode } from "../composables/useHideMode";
 import { decideChainRouting } from "../lib/chainRouting";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
@@ -63,6 +64,8 @@ function persistMuted(v: boolean) {
 
 const form = useGenerateForm();
 const { status } = useStatusPoll();
+// Shared privacy toggle with Gallery — see useHideMode for button semantics.
+const hide = useHideMode();
 const models = ref<ModelInfoExtended[]>([]);
 const galleryEntries = ref<GalleryImage[]>([]);
 const view = ref<ViewMode>(loadViewMode());
@@ -386,10 +389,12 @@ onBeforeUnmount(() => {
       :muted="muted"
       :counts="topBarCounts"
       :loading="false"
+      :hide-mode="!hide.anyVisible.value"
       @update:filter="() => {}"
       @update:search="() => {}"
       @update:view="setView"
       @update:muted="setMuted"
+      @update:hide-mode="hide.toggle"
       @refresh="refreshGallery"
     />
 
@@ -418,10 +423,13 @@ onBeforeUnmount(() => {
 
       <RunningStrip
         :jobs="stream.jobs.value"
+        :hide-mode="hide.hideMode.value"
+        :revealed="hide.revealed.value"
         @cancel="stream.cancel"
         @open="openJob"
         @dismiss="stream.remove"
         @clear-finished="stream.clearDone"
+        @reveal="(id: string) => hide.revealOne(id)"
       />
 
       <div class="mt-6">
@@ -430,7 +438,10 @@ onBeforeUnmount(() => {
           :loading="false"
           :view="view"
           :muted="muted"
+          :hide-mode="hide.hideMode.value"
+          :revealed="hide.revealed.value"
           @open="openItem"
+          @reveal="(item: GalleryImage) => hide.revealOne(item.filename)"
         />
       </div>
     </div>

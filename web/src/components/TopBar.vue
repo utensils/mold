@@ -486,13 +486,59 @@ function clearSearch() {
       </button>
     </div>
 
-    <!-- Agent B: narrow-viewport resource chip. Renders only on /generate
-         below `lg` so desktop uses the full ResourceStrip inside the page. -->
+    <!-- Generate-route extras: hide toggle mirrors the Gallery button so
+         preview images below the composer (and running-job tiles) can be
+         shrouded without a trip to the Gallery tab. The narrow-viewport
+         resource chip lives here too — desktop uses the full ResourceStrip
+         inside the page. -->
     <div
       v-if="route.name === 'generate'"
-      class="flex shrink-0 items-center lg:hidden"
+      class="flex shrink-0 items-center gap-2"
     >
-      <ResourceStrip variant="chip" />
+      <button
+        class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/5 text-ink-200 transition hover:text-white"
+        :class="hideMode ? 'bg-brand-500 text-white' : 'bg-white/5'"
+        :aria-pressed="hideMode"
+        :aria-label="hideMode ? 'Reveal previews' : 'Hide previews'"
+        :title="hideMode ? 'Reveal previews' : 'Hide previews'"
+        @click="emit('update:hide-mode', !hideMode)"
+      >
+        <svg
+          v-if="!hideMode"
+          class="h-4 w-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+        <svg
+          v-else
+          class="h-4 w-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path
+            d="M10.6 5.1A10 10 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.3 4.2"
+          />
+          <path d="M6.7 6.7A17 17 0 0 0 2 12s4 7 10 7a9.7 9.7 0 0 0 5.3-1.7" />
+          <path d="m3 3 18 18" />
+          <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+        </svg>
+      </button>
+      <div class="lg:hidden">
+        <ResourceStrip variant="chip" />
+      </div>
     </div>
   </header>
 </template>
