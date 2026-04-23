@@ -2953,35 +2953,31 @@ impl App {
             Action::ScriptReorderUp => self.script.reorder_up(),
             Action::ScriptAddAfter => self.script.add_stage_after(),
             Action::ScriptAddBefore => self.script.add_stage_before(),
-            Action::ScriptDelete => {
-                if self.script.script.stages.len() > 1 {
-                    self.popup = Some(Popup::Confirm {
-                        message: format!("Delete stage {}?", self.script.selected + 1,),
-                        on_confirm: ConfirmAction::DeleteScriptStage,
-                    });
-                }
+            Action::ScriptDelete if self.script.script.stages.len() > 1 => {
+                self.popup = Some(Popup::Confirm {
+                    message: format!("Delete stage {}?", self.script.selected + 1,),
+                    on_confirm: ConfirmAction::DeleteScriptStage,
+                });
             }
             Action::ScriptCycleTransition => self.script.cycle_transition(),
             Action::ScriptSave => self.script.open_save_dialog(),
             Action::ScriptLoad => self.script.open_load_dialog(),
-            Action::ScriptSubmit => {
-                if !self.generate.generating {
-                    let req = self.script.build_chain_request();
-                    self.generate.generating = true;
-                    self.generate.error_message = None;
-                    self.generate.progress.clear();
-                    self.generate.progress.mark_generation_start();
-                    self.generate.preview_image = None;
-                    self.generate.image_state = None;
-                    self.generate.animation = None;
+            Action::ScriptSubmit if !self.generate.generating => {
+                let req = self.script.build_chain_request();
+                self.generate.generating = true;
+                self.generate.error_message = None;
+                self.generate.progress.clear();
+                self.generate.progress.mark_generation_start();
+                self.generate.preview_image = None;
+                self.generate.image_state = None;
+                self.generate.animation = None;
 
-                    let tx = self.bg_tx.clone();
-                    let server_url = self.server_url.clone();
+                let tx = self.bg_tx.clone();
+                let server_url = self.server_url.clone();
 
-                    self.tokio_handle.spawn(async move {
-                        crate::backend::run_chain_generation(server_url, req, tx).await;
-                    });
-                }
+                self.tokio_handle.spawn(async move {
+                    crate::backend::run_chain_generation(server_url, req, tx).await;
+                });
             }
             Action::ScriptOpenPromptEditor => self.script.open_prompt_editor(),
             Action::ScriptOpenFramesEditor => self.script.open_frames_editor(),
