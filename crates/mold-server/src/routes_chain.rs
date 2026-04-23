@@ -329,10 +329,44 @@ impl From<ChainRunError> for ApiError {
     }
 }
 
+/// Dispatch a chain request to the pooled or legacy handler based on
+/// whether the server discovered any GPU workers at startup.
+///
+/// In multi-worker mode (production CUDA / Metal), the pooled path
+/// uses `gpu_worker::run_chain_blocking` to acquire the target GPU's
+/// per-worker `model_load_lock` — preventing the SEGV race that arose
+/// when the legacy path's `reclaim_gpu_memory(0)` collided with a
+/// single-clip worker's reset on the same context.
+///
+/// No-worker mode (CPU-only dev boxes, CI) falls through to the legacy
+/// path, which still uses `state.chain_lock` + `state.model_cache`.
+async fn run_chain(
+    state: &AppState,
+    req: ChainRequest,
+    progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
+) -> Result<(ChainResponse, u64), ChainRunError> {
+    if state.gpu_pool.worker_count() > 0 {
+        run_chain_pooled(state, req, progress_cb).await
+    } else {
+        run_chain_legacy(state, req, progress_cb).await
+    }
+}
+
+/// Multi-worker chain path (stub — filled in by Task 5).
+async fn run_chain_pooled(
+    _state: &AppState,
+    _req: ChainRequest,
+    _progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
+) -> Result<(ChainResponse, u64), ChainRunError> {
+    Err(ChainRunError::Internal(
+        "run_chain_pooled not yet implemented (Task 5)".to_string(),
+    ))
+}
+
 /// Drive the chain to completion. Shared between the non-streaming and SSE
 /// paths — the only caller-provided variable is `progress_cb`, which is
 /// `None` for the plain JSON endpoint and `Some` for the SSE endpoint.
-async fn run_chain(
+async fn run_chain_legacy(
     state: &AppState,
     req: ChainRequest,
     progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
