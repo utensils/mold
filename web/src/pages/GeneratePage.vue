@@ -20,6 +20,7 @@ import { useHideMode } from "../composables/useHideMode";
 import { decideChainRouting } from "../lib/chainRouting";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
+  ChainRequestWire,
   ChainStageWire,
   ExpandFormState,
   GalleryImage,
@@ -255,7 +256,7 @@ function onSubmitScript(script: ChainScriptToml) {
     negative_prompt: s.negative_prompt,
     seed_offset: s.seed_offset,
   }));
-  const req = {
+  const req: ChainRequestWire = {
     model: script.chain.model,
     stages,
     motion_tail_frames: script.chain.motion_tail_frames,
@@ -274,7 +275,7 @@ function onSubmitScript(script: ChainScriptToml) {
     motionTail: script.chain.motion_tail_frames,
     stageCount: stages.length,
   };
-  stream.submit(req as never, decision);
+  stream.submit(req, decision);
 }
 
 const expandStagePrompt = ref("");

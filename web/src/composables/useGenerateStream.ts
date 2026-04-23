@@ -23,7 +23,10 @@ export interface JobProgress {
 
 export interface Job {
   id: string;
-  request: GenerateRequestWire;
+  /** Either a single-clip `GenerateRequestWire` or a canonical
+   * `ChainRequestWire` (Script mode on GeneratePage submits the latter
+   * directly). Only `model` is read from this, so the union is safe. */
+  request: GenerateRequestWire | ChainRequestWire;
   startedAt: number;
   controller: AbortController;
   progress: JobProgress;
@@ -147,7 +150,7 @@ function chainStageLabel(
  * gallery match will miss but the refresh-on-complete still surfaces the
  * new item. */
 function chainCompleteToSingle(
-  req: GenerateRequestWire,
+  req: GenerateRequestWire | ChainRequestWire,
   evt: SseChainCompleteEvent,
 ): SseCompleteEvent {
   return {
@@ -195,9 +198,37 @@ function buildChainRequest(
   };
 }
 
+/** Returns `true` when `req` is already a canonical `ChainRequestWire` with
+ * at least one stage authored — i.e. Script-mode submissions that should be
+ * sent verbatim instead of re-projected through `buildChainRequest`. */
+export function isPrebuiltChainRequest(
+  req: GenerateRequestWire | ChainRequestWire,
+): req is ChainRequestWire {
+  const stages = (req as ChainRequestWire).stages;
+  return Array.isArray(stages) && stages.length > 0;
+}
+
+/** Decide which wire body to send for a chain submission. Script-mode
+ * callers pass a `ChainRequestWire` with populated `stages` — that goes
+ * through untouched. Single-prompt callers pass a `GenerateRequestWire`
+ * whose `frames` crossed the per-clip cap; those get projected into the
+ * auto-expand form.
+ *
+ * Exported so unit tests can cover the branching without mocking SSE. */
+export function resolveChainRequest(
+  req: GenerateRequestWire | ChainRequestWire,
+  decision: Extract<ChainRoutingDecision, { kind: "chain" }>,
+): ChainRequestWire {
+  if (isPrebuiltChainRequest(req)) return req;
+  return buildChainRequest(req, decision);
+}
+
 export interface UseGenerateStream {
   jobs: Ref<Job[]>;
-  submit: (req: GenerateRequestWire, decision?: ChainRoutingDecision) => string;
+  submit: (
+    req: GenerateRequestWire | ChainRequestWire,
+    decision?: ChainRoutingDecision,
+  ) => string;
   cancel: (id: string) => void;
   clearDone: () => void;
   /** Remove a specific job from the list (used to dismiss persisted cards). */
@@ -211,7 +242,7 @@ const STORAGE_KEY = "mold.generate.jobs";
  * loads from a future schema bump. */
 interface PersistedJob {
   id: string;
-  request: GenerateRequestWire;
+  request: GenerateRequestWire | ChainRequestWire;
   startedAt: number;
   progress: JobProgress;
   result: SseCompleteEvent | null;
@@ -292,7 +323,7 @@ export function useGenerateStream(
   );
 
   function submit(
-    req: GenerateRequestWire,
+    req: GenerateRequestWire | ChainRequestWire,
     decision: ChainRoutingDecision = { kind: "single" },
   ): string {
     const id = crypto.randomUUID();
@@ -342,7 +373,7 @@ export function useGenerateStream(
     };
 
     if (decision.kind === "chain") {
-      const chainReq = buildChainRequest(req, decision);
+      const chainReq = resolveChainRequest(req, decision);
       generateChainStream(
         chainReq,
         {
@@ -358,6 +389,14 @@ export function useGenerateStream(
         },
         controller.signal,
       );
+    } else if (isPrebuiltChainRequest(req)) {
+      // Caller bug: a stages-based ChainRequestWire was submitted with a
+      // non-chain routing decision. The single-clip endpoint would reject
+      // the unknown `stages` field, so bail early with a clear message
+      // instead of producing an opaque 422/500.
+      job.error =
+        "internal: ChainRequestWire submitted with non-chain routing decision";
+      job.state = "error";
     } else {
       generateStream(
         req,

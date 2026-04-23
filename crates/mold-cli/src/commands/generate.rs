@@ -341,8 +341,11 @@ pub async fn run(
                     &scheduler,
                     expand,
                 );
+                // Expand the single-prompt inputs into a canonical
+                // ChainRequest and normalise before handing off to run_chain.
+                let chain_req = inputs.to_chain_request().normalise()?;
                 return super::chain::run_chain(
-                    inputs,
+                    chain_req,
                     host,
                     output,
                     no_metadata,
