@@ -409,6 +409,109 @@ fn clear_active_generation(worker: &GpuWorker) {
     *gen = None;
 }
 
+/// Return type for [`run_chain_blocking`]. The outer `Result` carries
+/// helper-prep errors (ensure_model_ready + cache take); the inner `Result`
+/// is whatever the caller's closure returned. Closure errors pass through
+/// unchanged so the caller can distinguish orchestrator-specific failures
+/// (StageFailed, Invalid) from prep failures (ensure/cache).
+pub type ChainPrep<T, E> = Result<Result<T, E>, anyhow::Error>;
+
+/// Run a blocking chain operation on a specific GPU worker.
+///
+/// Acquires `worker.model_load_lock` for the full duration, binds the current
+/// thread to `worker.gpu.ordinal` (so `reclaim_gpu_memory` debug asserts are
+/// satisfied), ensures the model is loaded on GPU, takes the engine out of
+/// the worker's cache, passes it to `with_engine`, and restores the engine
+/// unconditionally on both success and closure failure.
+///
+/// Safe to call from inside `tokio::task::spawn_blocking`. The calling thread
+/// can be any thread — the `ThreadGpuGuard` clears the thread-local on return.
+///
+/// # Errors
+///
+/// Returns `Err(anyhow::Error)` from the outer Result if:
+/// - `ensure_model_ready_sync` fails (bad config, disk IO, load error).
+/// - The engine vanishes from the cache between ensure and take (cache race).
+///
+/// Returns `Ok(Err(E))` if the closure itself returned an error — caller
+/// preserves the closure's typed error for precise HTTP status mapping.
+pub fn run_chain_blocking<T, E>(
+    worker: &GpuWorker,
+    model_name: &str,
+    config: &mold_core::Config,
+    with_engine: impl FnOnce(&mut dyn mold_inference::InferenceEngine) -> Result<T, E>,
+) -> ChainPrep<T, E> {
+    // Bind the thread to this worker's ordinal for the duration of the call.
+    // `reclaim_gpu_memory` inside ensure_model_ready_sync debug-asserts this
+    // matches its ordinal argument; without it, a stray caller on an unbound
+    // thread would panic in debug builds.
+    struct ThreadGpuGuard;
+    impl Drop for ThreadGpuGuard {
+        fn drop(&mut self) {
+            mold_inference::device::clear_thread_gpu_ordinal();
+        }
+    }
+    mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
+    let _thread_gpu = ThreadGpuGuard;
+
+    // Acquire the per-worker load lock. Held for the entire chain duration —
+    // single-clip generations on this worker queue behind us on the same lock.
+    let _load_lock = worker
+        .model_load_lock
+        .lock()
+        .map_err(|e| anyhow::anyhow!("worker.model_load_lock poisoned: {e}"))?;
+
+    // Ensure the model is GPU-resident on this worker. Handles load-from-disk,
+    // parked-reload, and the reclaim-on-swap path using worker.gpu.ordinal.
+    ensure_model_ready_sync(worker, model_name, config)?;
+
+    // Take the engine out of the worker's cache so the closure can mutate it.
+    let cached = {
+        let mut cache = worker
+            .model_cache
+            .lock()
+            .map_err(|e| anyhow::anyhow!("worker.model_cache poisoned: {e}"))?;
+        cache.take(model_name).ok_or_else(|| {
+            anyhow::anyhow!("cache race: engine '{model_name}' vanished after ensure_model_ready")
+        })?
+    };
+
+    // Run the closure. Capture panics so we can still restore the engine
+    // before propagating — otherwise a panic leaks the engine out of the cache.
+    //
+    // `AssertUnwindSafe` suppresses the compiler's UnwindSafe check because
+    // `&mut dyn InferenceEngine` (across Box + trait object) isn't unwind-safe
+    // by default. This is acceptable here: we only promise to prevent the
+    // CUDA primary-context reset SEGV race, not to guarantee engine internal
+    // state is pristine after a mid-generation panic. A panicked engine will
+    // surface as a bad generation result to the next caller — not a crash.
+    // `catch_unwind` + `resume_unwind` exists solely so the engine is
+    // restored to the cache before the panic propagates up.
+    let mut cached = cached;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_engine(cached.engine.as_mut())
+    }));
+
+    // Restore unconditionally — the comment above promises this, so we must
+    // honour it even if the cache mutex is poisoned. Taking the inner guard
+    // from a poisoned lock is safe here: restoring an engine reference into
+    // a HashMap entry cannot worsen an already-corrupt state, and silently
+    // dropping the engine (the alternative) would leak it out of the cache
+    // and leave every future request for this model looking at a stale hole.
+    {
+        let mut cache = worker
+            .model_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.restore(cached);
+    }
+
+    match result {
+        Ok(inner) => Ok(inner),
+        Err(panic_payload) => std::panic::resume_unwind(panic_payload),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
