@@ -389,7 +389,29 @@ async fn run_chain_local(
         };
         let chain_output = orch.run(&req_clone, Some(&mut chain_cb))?;
 
-        let mut frames = chain_output.frames;
+        use mold_inference::ltx2::stitch::StitchPlan;
+        let boundaries: Vec<_> = req_clone
+            .stages
+            .iter()
+            .skip(1)
+            .map(|s| s.transition)
+            .collect();
+        let fade_lens: Vec<_> = req_clone
+            .stages
+            .iter()
+            .skip(1)
+            .map(|s| s.fade_frames.unwrap_or(8))
+            .collect();
+        let plan = StitchPlan {
+            clips: chain_output.stage_frames,
+            boundaries,
+            fade_lens,
+            motion_tail_frames: req_clone.motion_tail_frames,
+        };
+        let mut frames = plan
+            .assemble()
+            .map_err(|e| anyhow::anyhow!("stitch failed: {e}"))?;
+
         if let Some(target) = total_frames_opt {
             let target = target as usize;
             if frames.len() > target {
