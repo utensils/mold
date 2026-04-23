@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
 import StageCard from "./StageCard.vue";
+import ImagePickerModal from "./ImagePickerModal.vue";
 import {
   readChainScript,
   writeChainScript,
@@ -9,6 +10,7 @@ import {
   type ChainStageToml,
 } from "../lib/chainToml";
 import { fetchChainLimits, type ChainLimits } from "../api";
+import type { SourceImageState } from "../types";
 
 const props = defineProps<{
   model: string;
@@ -50,6 +52,11 @@ const script = ref<ChainScriptToml>(newScript());
 const limits = ref<ChainLimits | null>(null);
 const importFileInput = ref<HTMLInputElement | null>(null);
 
+// Stage index whose image picker is open, or null if the modal is closed.
+// Script mode uses a single modal instance shared across stages instead of
+// rendering one per stage — keeps DOM light and matches the Single-mode UX.
+const pickerStageIndex = ref<number | null>(null);
+
 onMounted(async () => {
   const draft = localStorage.getItem(DRAFT_KEY);
   if (draft) {
@@ -62,9 +69,27 @@ onMounted(async () => {
   limits.value = await fetchChainLimits(props.model).catch(() => null);
 });
 
-watch(script, (s) => localStorage.setItem(DRAFT_KEY, JSON.stringify(s)), {
-  deep: true,
-});
+// Strip base64 image bytes before persisting to localStorage. A single 2K×2K
+// PNG base64s to ~5 MB which blows the 5–10 MB quota after a few stages.
+// Keep the filename so the user sees which image was attached after reload.
+function persistableDraft(s: ChainScriptToml): ChainScriptToml {
+  return {
+    ...s,
+    stage: s.stage.map(({ source_image_b64: _omit, ...rest }) => rest),
+  };
+}
+
+watch(
+  script,
+  (s) => {
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(persistableDraft(s)));
+    } catch {
+      /* quota exceeded — drop the draft silently */
+    }
+  },
+  { deep: true },
+);
 
 watch(
   () => props.model,
@@ -96,6 +121,33 @@ function moveDown(i: number) {
 }
 function duplicate(i: number) {
   script.value.stage.splice(i + 1, 0, { ...script.value.stage[i] });
+}
+
+function openPicker(i: number) {
+  pickerStageIndex.value = i;
+}
+function closePicker() {
+  pickerStageIndex.value = null;
+}
+function onPickImage(v: SourceImageState) {
+  const i = pickerStageIndex.value;
+  if (i === null) return;
+  const current = script.value.stage[i];
+  if (!current) return;
+  script.value.stage[i] = {
+    ...current,
+    source_image: v.filename,
+    source_image_b64: v.base64,
+  };
+  pickerStageIndex.value = null;
+}
+function clearImage(i: number) {
+  const current = script.value.stage[i];
+  if (!current) return;
+  const next: ChainStageToml = { ...current };
+  delete next.source_image;
+  delete next.source_image_b64;
+  script.value.stage[i] = next;
 }
 
 const totalFrames = computed(() => {
@@ -237,6 +289,8 @@ defineExpose({ getStagePrompt, setStagePrompt });
         @move-down="moveDown(i)"
         @duplicate="duplicate(i)"
         @expand="emit('expand', i, stage.prompt)"
+        @pick-image="openPicker(i)"
+        @clear-image="clearImage(i)"
       />
     </VueDraggable>
 
@@ -271,5 +325,11 @@ defineExpose({ getStagePrompt, setStagePrompt });
     >
       Generate
     </button>
+
+    <ImagePickerModal
+      :open="pickerStageIndex !== null"
+      @pick="onPickImage"
+      @close="closePicker"
+    />
   </div>
 </template>

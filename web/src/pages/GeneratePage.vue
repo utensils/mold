@@ -255,6 +255,7 @@ function onSubmitScript(script: ChainScriptToml) {
     fade_frames: s.fade_frames,
     negative_prompt: s.negative_prompt,
     seed_offset: s.seed_offset,
+    source_image: s.source_image_b64 ?? null,
   }));
   const req: ChainRequestWire = {
     model: script.chain.model,

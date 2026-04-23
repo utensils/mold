@@ -241,7 +241,8 @@ Core commands: `mold run`, `mold serve`, `mold pull`, `mold list`, `mold ps`, `m
 - `mold chain validate shot.toml` — parse + normalise without submitting
 - Sugar: `mold run <model> --prompt "..." --prompt "..." --frames-per-clip 97` (uniform smooth only)
 - Transitions: `smooth` (default, motion-tail morph), `cut` (fresh latent), `fade` (cut + RGB crossfade)
-- Web composer: `/generate` has a `Single` | `Script` mode toggle
+- Per-stage starting images: each `[[stage]]` accepts `source_image_path = "./hero.png"` (resolved relative to the script file, read + base64-encoded at load time) or `source_image_b64 = "<base64>"` (inline bytes). Equivalent to the canonical `source_image` field; setting more than one on the same stage is a validation error. Resolved by `mold_core::chain_toml::read_script_resolving_paths`, which both `mold chain validate` and `mold run --script` use.
+- Web composer: `/generate` has a `Single` | `Script` mode toggle; each stage card has its own 🖼️ attach/clear affordance. Drafts persist to localStorage with base64 bytes stripped (filenames only) to stay under the 5-10 MB quota.
 - TUI: `s` from hub opens Script mode
 
 ## Environment Variables

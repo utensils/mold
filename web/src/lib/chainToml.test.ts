@@ -78,4 +78,36 @@ describe("chainToml", () => {
     const result = readChainScript(noSchema);
     expect(result.schema).toBe("mold.chain.v1");
   });
+
+  it("round-trips per-stage source images", () => {
+    // Regression: Script mode submits dropped `source_image_b64` in
+    // GeneratePage.onSubmitScript, which broke per-stage starting images
+    // added in the composer. The TOML projection must carry both the
+    // inline bytes and the display filename through a round trip so
+    // drafts and exports survive reload.
+    const b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQAAAAA="; // 1x1 PNG
+    const withImages: ChainScriptToml = {
+      ...minimal,
+      stage: [
+        {
+          prompt: "opener",
+          frames: 97,
+          source_image: "hero.png",
+          source_image_b64: b64,
+        },
+        {
+          prompt: "payoff",
+          frames: 49,
+          transition: "cut",
+          source_image: "reveal.png",
+          source_image_b64: b64,
+        },
+      ],
+    };
+    const back = readChainScript(writeChainScript(withImages));
+    expect(back.stage[0].source_image).toBe("hero.png");
+    expect(back.stage[0].source_image_b64).toBe(b64);
+    expect(back.stage[1].source_image).toBe("reveal.png");
+    expect(back.stage[1].source_image_b64).toBe(b64);
+  });
 });

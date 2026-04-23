@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-stage starting images in Script mode (web + CLI).** Every stage in a chain script can now carry its own optional starting image — stage 0 uses it as the i2v seed at frame 0, and continuation stages use it as a soft identity anchor through LTX-2's append path so scene/character identity stays coherent past the motion-tail window. **Web:** `StageCard.vue` grew a 12×12 image chip (or a dashed 🖼️ placeholder when empty) plus an inline "Attach image / Replace image" action; `ScriptComposer.vue` owns a single shared `ImagePickerModal` instance indexed by the stage whose picker is open and strips `source_image_b64` (5+ MB per 2K×2K PNG) from the localStorage draft to stay under the quota. `GeneratePage.onSubmitScript` now maps `stage.source_image_b64 → ChainStageWire.source_image` — the line that was silently dropping per-stage images even though the wire format and the LTX-2 runtime have supported them since multi-prompt v2. **CLI:** `mold_core::chain_toml::read_script_resolving_paths` now actually resolves paths (it was a documented stub): accepts two new TOML-only per-stage fields, `source_image_path = "./hero.png"` (path resolved relative to the script file's directory, read + base64-encoded at load time) and `source_image_b64 = "<base64>"` (inline bytes, equivalent to the canonical `source_image` field but easier to hand-edit). Setting more than one of `source_image` / `source_image_path` / `source_image_b64` on the same stage returns a stage-indexed validation error instead of silently picking one. `mold chain validate` and `mold run --script` both flow through the same resolver. Six new rust tests cover absolute/relative path resolution, per-stage independence, b64 pass-through, conflict rejection, and missing-file errors; five new web tests cover the StageCard attach/clear/thumbnail flow and the TOML round-trip.
+
 ### Changed
 
 - `ChainResponse` now carries a canonical `script: ChainScript` echo and a `vram_estimate: Option<VramEstimate>` slot (unpopulated in this release).
