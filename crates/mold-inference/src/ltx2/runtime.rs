@@ -1430,7 +1430,21 @@ fn maybe_load_stage_video_conditioning(
         let vae = vae.as_mut().expect(
             "need_vae guarantees the VAE is loaded whenever plan.conditioning.latents is non-empty",
         );
-        let video = video_tensor_from_frames(&staged.tail_rgb_frames, device, dtype)
+        // Tail frames arrive at the emitting stage's final decoded resolution
+        // (chain.width × chain.height). The distilled pipeline's stage 1 runs
+        // at a reduced resolution via `derive_stage1_render_shape`'s implicit
+        // X2 downsample, so `pixel_shape` here can be half the tail's pixel
+        // dims. VAE-encoding at the tail's native size would produce latents
+        // at the wrong spatial grid for stage 1 — the replacement's token
+        // count would mismatch (typically exceed) the stage 1 total. Resize
+        // to `pixel_shape` first so stage 1 and stage 2 each see tokens on
+        // their own grid. No-op when dims already match (stage 2 case).
+        let resized_frames = resize_tail_frames_to_pixel_shape(
+            &staged.tail_rgb_frames,
+            pixel_shape.width as u32,
+            pixel_shape.height as u32,
+        );
+        let video = video_tensor_from_frames(&resized_frames, device, dtype)
             .context("encode chain tail RGB frames into pixel tensor for carryover")?;
         let latents = vae
             .encode(&video)
@@ -3569,6 +3583,37 @@ fn maybe_render_native_audio_track(
     waveform_to_audio_track(&waveform, output_sample_rate)
 }
 
+/// Resize `tail_rgb_frames` to the current stage's `pixel_shape` so the
+/// VAE encodes them onto the grid stage 1 or stage 2 expects. Stage 1 of
+/// the distilled pipeline runs at an implicitly X2-downsampled resolution
+/// (see `derive_stage1_render_shape`), while the chain carryover tail is
+/// always captured at the emitting stage's final decoded resolution. Without
+/// this resize the staged-latent replacement path produces a token count on
+/// a full-res grid that overflows stage 1's half-res grid.
+///
+/// No-op when the source dimensions already match the target (stage 2 case).
+fn resize_tail_frames_to_pixel_shape(
+    tail_rgb_frames: &[RgbImage],
+    target_width: u32,
+    target_height: u32,
+) -> Vec<RgbImage> {
+    tail_rgb_frames
+        .iter()
+        .map(|frame| {
+            if frame.width() == target_width && frame.height() == target_height {
+                frame.clone()
+            } else {
+                imageops::resize(
+                    frame,
+                    target_width,
+                    target_height,
+                    imageops::FilterType::Lanczos3,
+                )
+            }
+        })
+        .collect()
+}
+
 fn video_tensor_from_frames(
     frames: &[RgbImage],
     device: &candle_core::Device,
@@ -4856,10 +4901,11 @@ mod tests {
         convert_velocity_to_x0, convert_x0_to_velocity, decoded_video_to_frames,
         effective_native_guidance_scale, emit_denoise_progress, guided_velocity_from_cfg,
         keyframe_only_conditioning, ltx2_video_transformer_config,
-        reapply_stage_video_conditioning, should_inspect_step_velocity,
-        source_image_only_conditioning, strip_appended_video_conditioning, Ltx2RuntimeSession,
-        StageVideoConditioning, VideoTokenAppendCondition, VideoTokenReplacement,
-        LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
+        reapply_stage_video_conditioning, resize_tail_frames_to_pixel_shape,
+        should_inspect_step_velocity, source_image_only_conditioning,
+        strip_appended_video_conditioning, Ltx2RuntimeSession, StageVideoConditioning,
+        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
+        LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoPixelShape;
@@ -5873,6 +5919,50 @@ mod tests {
             timestep.to_vec2::<f32>().unwrap(),
             vec![vec![0.0, 0.2, 0.8]]
         );
+    }
+
+    #[test]
+    fn resize_tail_frames_to_pixel_shape_downscales_for_stage1_half_res_grid() {
+        use image::RgbImage;
+
+        // Simulate a chain carryover: the emitting stage decoded 4 pixel
+        // frames at full output resolution (1024×1024) and the receiving
+        // stage's distilled pipeline will run stage 1 at the implicit X2
+        // downsampled resolution (512×512). Without the resize, VAE-
+        // encoding these tail frames at 1024×1024 produces a 32×32 spatial
+        // grid per latent frame — which exceeds stage 1's 16×16 grid and
+        // triggers the "conditioning replacement exceeds video token
+        // count" bail in `apply_video_token_replacements`.
+        let full_res_tail: Vec<RgbImage> =
+            (0..4).map(|_| RgbImage::new(1024, 1024)).collect();
+
+        let resized = resize_tail_frames_to_pixel_shape(&full_res_tail, 512, 512);
+        assert_eq!(resized.len(), 4);
+        for frame in &resized {
+            assert_eq!(frame.width(), 512);
+            assert_eq!(frame.height(), 512);
+        }
+    }
+
+    #[test]
+    fn resize_tail_frames_to_pixel_shape_is_noop_when_dims_match() {
+        use image::RgbImage;
+
+        // Stage 2 of the distilled pipeline passes the full-resolution
+        // pixel_shape; the tail frames are already at that resolution, so
+        // the resize must be a cheap clone — no filtering artifacts from
+        // resampling a frame onto itself.
+        let frame = RgbImage::from_pixel(1024, 1024, image::Rgb([200, 50, 120]));
+        let tail = vec![frame.clone(), frame.clone()];
+
+        let resized = resize_tail_frames_to_pixel_shape(&tail, 1024, 1024);
+        assert_eq!(resized.len(), 2);
+        for (original, passed_through) in tail.iter().zip(resized.iter()) {
+            assert_eq!(passed_through.width(), 1024);
+            assert_eq!(passed_through.height(), 1024);
+            // Pixel-exact equality proves no resampling happened.
+            assert_eq!(passed_through.as_raw(), original.as_raw());
+        }
     }
 
     #[test]
