@@ -184,7 +184,38 @@ mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control do
 
 **Current constraints:** `x2` spatial upscaling is wired across the family, `x1.5` spatial upscaling is wired for `ltx-2.3-*`, and `x2` temporal upscaling is wired in the native runtime. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. The family runs through the native Rust stack in `mold-inference`, with CUDA as the supported backend for real local generation, CPU as a correctness-only fallback, and Metal unsupported. On 24 GB Ada GPUs such as the RTX 4090, the validated path stays on the compatible `fp8-cast` mode rather than Hopper-only `fp8-scaled-mm`. The native CUDA matrix is validated across 19B/22B text+audio-video, image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`). When requests go through `mold serve`, the built-in body limit is `64 MiB`, which is enough for common inline source-video and source-audio workflows.
 
-### Model Selection Guide
+## Multi-prompt Chain (v2)
+
+Direct any-length video scene-by-scene with a TOML script or sugar flags.
+
+```bash
+# Canonical TOML script (schema: mold.chain.v1)
+mold run --script shot.toml
+mold run --script shot.toml --dry-run    # Print stage summary, don't submit
+
+# Validate only
+mold chain validate shot.toml
+
+# Sugar: repeated --prompt (uniform smooth chains only)
+mold run ltx-2-19b-distilled:fp8 \
+  --prompt "a cat walks into the autumn forest" \
+  --prompt "the forest opens to a clearing" \
+  --frames-per-clip 97
+```
+
+### Transitions
+
+- `smooth` *(default)*: motion-tail carryover, visual morph between scenes
+- `cut`: fresh latent, no carryover; optional `source_image` for i2v seed
+- `fade`: cut + post-stitch alpha blend of `fade_frames` (default 8)
+
+### API
+
+- Chain endpoint: `POST /api/generate/chain[/stream]`
+- Capabilities: `GET /api/capabilities/chain-limits?model=<name>`
+- Max stages: 16. LTX-2 distilled cap: 97 frames/clip.
+
+## Model Selection Guide
 
 Pick the right model for the task:
 
