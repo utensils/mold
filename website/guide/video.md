@@ -38,11 +38,11 @@ Per-stage transitions or per-stage frames require `--script`.
 
 ### Transitions
 
-| Mode | Behavior |
-|------|----------|
-| `smooth` *(default)* | Motion-tail carryover — prompt change produces a visual morph between scenes. |
-| `cut` | Fresh latent, no carryover. If the stage has `source_image`, it's used as an image-to-video seed. |
-| `fade` | Cut + post-stitch alpha blend of `fade_frames` (default 8) on each side of the boundary. |
+| Mode                 | Behavior                                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------- |
+| `smooth` _(default)_ | Motion-tail carryover — prompt change produces a visual morph between scenes.                     |
+| `cut`                | Fresh latent, no carryover. If the stage has `source_image`, it's used as an image-to-video seed. |
+| `fade`               | Cut + post-stitch alpha blend of `fade_frames` (default 8) on each side of the boundary.          |
 
 ### Example `shot.toml`
 
@@ -89,18 +89,18 @@ The web UI at `/generate` has a **Script** mode toggle. Switch to Script mode fo
 
 Press `s` from the main TUI hub to open Script mode. Key bindings:
 
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Navigate stage list |
-| `a` / `A` | Add stage after current / at end |
-| `d` | Delete current stage (confirm) |
-| `J` / `K` | Move stage down / up |
-| `t` | Cycle transition (smooth → cut → fade) |
-| `i` | Edit prompt |
-| `f` | Edit frames |
-| `Enter` | Submit chain |
-| `Ctrl-S` | Save as TOML |
-| `Ctrl-O` | Load TOML |
+| Key       | Action                                 |
+| --------- | -------------------------------------- |
+| `j` / `k` | Navigate stage list                    |
+| `a` / `A` | Add stage after current / at end       |
+| `d`       | Delete current stage (confirm)         |
+| `J` / `K` | Move stage down / up                   |
+| `t`       | Cycle transition (smooth → cut → fade) |
+| `i`       | Edit prompt                            |
+| `f`       | Edit frames                            |
+| `Enter`   | Submit chain                           |
+| `Ctrl-S`  | Save as TOML                           |
+| `Ctrl-O`  | Load TOML                              |
 
 ### Capabilities endpoint
 

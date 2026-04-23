@@ -5933,8 +5933,7 @@ mod tests {
         // grid per latent frame — which exceeds stage 1's 16×16 grid and
         // triggers the "conditioning replacement exceeds video token
         // count" bail in `apply_video_token_replacements`.
-        let full_res_tail: Vec<RgbImage> =
-            (0..4).map(|_| RgbImage::new(1024, 1024)).collect();
+        let full_res_tail: Vec<RgbImage> = (0..4).map(|_| RgbImage::new(1024, 1024)).collect();
 
         let resized = resize_tail_frames_to_pixel_shape(&full_res_tail, 512, 512);
         assert_eq!(resized.len(), 4);
