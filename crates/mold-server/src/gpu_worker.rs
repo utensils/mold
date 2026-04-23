@@ -408,3 +408,130 @@ fn clear_active_generation(worker: &GpuWorker) {
     let mut gen = worker.active_generation.write().unwrap();
     *gen = None;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_cache::ModelCache;
+    use mold_core::{Config, GenerateRequest, GenerateResponse};
+    use mold_inference::device::DiscoveredGpu;
+    use mold_inference::shared_pool::SharedPool;
+    use mold_inference::InferenceEngine;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, RwLock};
+    use std::time::Duration;
+
+    /// Weight-free engine that sleeps in `load()` to widen the critical-section
+    /// window during concurrency tests.
+    struct FakeSlowEngine {
+        name: String,
+        loaded: bool,
+        load_sleep: Duration,
+    }
+
+    impl FakeSlowEngine {
+        fn boxed(name: &str, load_sleep: Duration) -> Box<dyn InferenceEngine> {
+            Box::new(Self {
+                name: name.to_string(),
+                loaded: false,
+                load_sleep,
+            })
+        }
+    }
+
+    impl InferenceEngine for FakeSlowEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            unreachable!("FakeSlowEngine is not used for generation in tests")
+        }
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+        fn is_loaded(&self) -> bool {
+            self.loaded
+        }
+        fn load(&mut self) -> anyhow::Result<()> {
+            std::thread::sleep(self.load_sleep);
+            self.loaded = true;
+            Ok(())
+        }
+        fn unload(&mut self) {
+            self.loaded = false;
+        }
+    }
+
+    fn single_worker_pool_with_parked(model: &str, load_sleep: Duration) -> Arc<GpuWorker> {
+        let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuJob>(2);
+        let mut cache = ModelCache::new(3);
+        // Seed as Unloaded so `ensure_model_ready_sync` hits its reload path
+        // and calls `engine.load()` — that's where the sleep widens the window.
+        cache.insert(FakeSlowEngine::boxed(model, load_sleep), 0);
+        Arc::new(GpuWorker {
+            gpu: DiscoveredGpu {
+                ordinal: 0,
+                name: "fake-gpu-0".to_string(),
+                total_vram_bytes: 24_000_000_000,
+                free_vram_bytes: 24_000_000_000,
+            },
+            model_cache: Arc::new(Mutex::new(cache)),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        })
+    }
+
+    /// Two concurrent callers into `run_chain_blocking` on the same worker
+    /// must serialize — `MAX_CONCURRENT` must never exceed 1.
+    ///
+    /// Fails to compile until `run_chain_blocking` is implemented in Task 2.
+    #[test]
+    fn run_chain_blocking_serializes_same_worker() {
+        let worker = single_worker_pool_with_parked("fake-model", Duration::from_millis(30));
+        let config = Config::default();
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+        let instrumented = |active: Arc<AtomicUsize>, max_concurrent: Arc<AtomicUsize>| {
+            move |_engine: &mut dyn InferenceEngine| -> anyhow::Result<()> {
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_concurrent.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(50));
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            }
+        };
+
+        let worker_a = worker.clone();
+        let config_a = config.clone();
+        let a = active.clone();
+        let m = max_concurrent.clone();
+        let t_a = std::thread::spawn(move || {
+            run_chain_blocking(&worker_a, "fake-model", &config_a, instrumented(a, m))
+                .expect("prep ok")
+                .expect("closure ok");
+        });
+
+        let worker_b = worker.clone();
+        let config_b = config.clone();
+        let a = active.clone();
+        let m = max_concurrent.clone();
+        let t_b = std::thread::spawn(move || {
+            run_chain_blocking(&worker_b, "fake-model", &config_b, instrumented(a, m))
+                .expect("prep ok")
+                .expect("closure ok");
+        });
+
+        t_a.join().unwrap();
+        t_b.join().unwrap();
+
+        assert_eq!(
+            max_concurrent.load(Ordering::SeqCst),
+            1,
+            "two concurrent run_chain_blocking calls must serialize on worker.model_load_lock"
+        );
+    }
+}
