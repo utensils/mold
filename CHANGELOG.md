@@ -9,8 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ChainResponse` now carries a canonical `script: ChainScript` echo and a `vram_estimate: Option<VramEstimate>` slot (unpopulated in this release).
+- Mid-chain failures return a structured 502 with `failed_stage_idx`, `elapsed_stages`, `elapsed_ms`.
 - **`install.sh` now installs the latest tagged release by default and reports the resolved version.** Previously `MOLD_VERSION=latest` (the default) built the download URL as `releases/download/latest/<asset>`, which GitHub does not honour as a tag — the only asset alias is `releases/latest/download/<asset>` (note the different path order), so the script only worked when a concrete tag happened to have been cached or when `MOLD_VERSION` was explicitly set. The script now follows the `releases/latest` redirect via `curl -I`, parses the resolved `…/releases/tag/<tag>` URL, and prints both the installing and installed version lines with the concrete tag (`Installing mold v0.9.0 for Darwin/arm64…`). Setting `MOLD_VERSION=<tag>` still pins to that tag, and the error path for an unresolvable redirect suggests setting `MOLD_VERSION` explicitly. README, `website/guide/installation.md`, `website/index.md`, and `website/guide/index.md` all carry the updated guidance and the new `MOLD_VERSION` example.
 - **TUI: Gallery grid drops the per-cell filename label and shrinks `CELL_H` from 14 → 12 rows, so thumbnails fill the full inner area and more tiles fit per screen.** The filename was truncated to `mold-flux-dev-q4-17…` on every real output anyway, and the Selected panel below the grid already shows the full filename for the highlighted tile — the label was pure visual noise. With the label rows removed each tile's inner area becomes a 22×10 thumbnail box instead of 22×8, and because the overall cell shrinks by 2 rows a typical 36-row gallery area now fits 3 tile rows where it used to fit 2. The existing `gallery_grid_kitty_thumbnails_encode_to_full_thumb_box` regression test continues to pass (same `s=176,v=160` payload since the thumbnail area lands on the same 22×10 grid by construction). A new regression test (`gallery_grid_cell_does_not_render_filename_label`) drives a `TestBackend` render and asserts the buffer contains no filename prefix, so a future refactor can't accidentally put the label back.
+
+### Reserved
+
+- `ChainStage.model`, `ChainStage.loras`, `ChainStage.references` accepted by TOML parsers but rejected with 422 by the server — reserved for sub-projects B and C.
 
 ### Fixed
 
@@ -44,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multi-prompt chain authoring (sub-project A): per-stage `prompt` / `frames` / `transition` (`smooth` / `cut` / `fade`).
+- `mold run --script shot.toml` canonical TOML script form; repeated `--prompt` sugar for uniform trivial chains.
+- `mold chain validate <path>` subcommand.
+- Web `/generate` composer `Single` | `Script` mode toggle with card-list editor, drag-reorder, per-stage expand, TOML import/export.
+- TUI Script mode (`s` from hub) with stage list + editor, keybindings `j`/`k`/`J`/`K`/`a`/`A`/`d`/`t`/`i`/`f`/`Enter`/`Ctrl-S`/`Ctrl-O`.
+- Engine support for `cut` (fresh latent, optional i2v) and `fade` (post-stitch RGB crossfade).
+- `GET /api/capabilities/chain-limits?model=<name>` endpoint announcing per-model frame caps and supported transitions.
 - **TUI Negative prompt panel is now collapsible**: press `Alt+N` in the Generate view to collapse the Negative textarea into a one-row dim summary (`neg: <preview>   Alt+N expand`) that reclaims three rows of vertical space without losing the content. Pressing `Alt+N` again expands it back into the full three-row textarea. The collapsed state persists across restarts via a new `negative_collapsed` field on the TUI session file, and collapsing while focused on the Negative pane automatically shifts focus back to the main Prompt so the user isn't stuck typing into a hidden field. Models that don't support negative prompts still hide the row regardless of the flag.
 - **TUI adds a Queue tab (fifth tab) showing the active run and recent history**: a new `View::Queue` sits between Models and Settings, rendering a table with the currently-running generation (if any) followed by the last eight prompt-history entries. Columns are state icon, state label (`running`/`done`), prompt preview (truncated to 80 chars with an ellipsis), model id, and relative time (`now`/`12m`/`3h`). A compact `Overview` panel underneath the table nudges users back to Generate or Gallery depending on whether a job is running. All view-switch bindings across the TUI now accept `1..=5`/`Alt+1..5`; the status bar reflects the new range. `View::ALL` grew from 4 → 5 entries; `view_labels_and_indices` exercises the new positions. Covered by five new `ui::queue` unit tests for the preview truncation and time-label helpers.
 - **TUI Gallery grid now shows a Selected + Prompt inspector beneath the tiles**: when there's room (≥14 rows of content), the Grid view splits into the thumbnail grid on top and a shared 8-cell bottom row with `Selected` (file/model/dim/steps/seed KV rows) on the left and `Prompt` (full positive prompt plus a dim `neg: …` line) on the right. The row collapses out automatically on short terminals so the grid is never squeezed below a single tile row. The Detail view now uses the shared `panel_block` chrome for its Details and Preview panels, bringing border/title styling in line with the rest of the TUI.
