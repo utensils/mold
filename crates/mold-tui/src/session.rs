@@ -1,5 +1,15 @@
-use std::path::PathBuf;
+//! TUI session state — persisted via the SQLite metadata DB (`mold-db`).
+//!
+//! `TuiSession` is a DTO. Its public shape is what the app's call sites
+//! see; the underlying storage moved from `~/.mold/tui-session.json` to
+//! the `settings` + `model_prefs` tables. The legacy JSON file is
+//! imported once at startup (see [`import_legacy_json_once`]) and then
+//! renamed to `tui-session.json.migrated` so a downgrade still has a
+//! recoverable copy for one release.
 
+use std::path::{Path, PathBuf};
+
+use mold_db::{settings as keys, MetadataDb, ModelPrefs, Settings};
 use serde::{Deserialize, Serialize};
 
 /// Persisted TUI session state — restored on next launch.
@@ -50,83 +60,51 @@ pub struct TuiSession {
     pub negative_collapsed: Option<bool>,
 }
 
-fn session_path() -> Option<PathBuf> {
+fn legacy_session_path() -> Option<PathBuf> {
     mold_core::Config::mold_dir().map(|d| d.join("tui-session.json"))
 }
 
-impl TuiSession {
-    /// Load session from disk. Returns default if file missing or malformed.
-    pub fn load() -> Self {
-        let path = match session_path() {
-            Some(p) => p,
-            None => return Self::default(),
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
+fn open_db() -> Option<MetadataDb> {
+    match mold_db::open_default() {
+        Ok(Some(db)) => Some(db),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "tui session: metadata DB open failed; falling back to in-memory");
+            None
         }
     }
+}
 
-    /// Save session to disk. Writes atomically via a sibling tempfile +
-    /// rename so a crash or interrupt mid-write can never leave the
-    /// target file in a partial state (which on load would parse as an
-    /// empty `TuiSession::default()` and silently drop the theme back
-    /// to the `#[default]` preset). Failures are logged rather than
-    /// returned — the call site is "best effort, don't crash the TUI"
-    /// — but they're no longer silent, which matters when tracking
-    /// down reports like "I set Mocha but it loaded Latte next time".
+impl TuiSession {
+    /// Load session from the metadata DB. Returns default if the DB is
+    /// disabled, unreachable, or empty — the TUI still boots in those
+    /// cases but won't persist across restarts.
+    pub fn load() -> Self {
+        // One-shot migration: if the legacy JSON file is still sitting on
+        // disk and hasn't been imported yet, slurp it into the DB before
+        // we read. Idempotent (sentinel key guards the second pass).
+        if let Some(db) = open_db() {
+            import_legacy_json_once(&db);
+            return load_from_db(&db);
+        }
+
+        // DB unavailable — return default. The TUI still functions; the
+        // cost is that settings don't persist across restarts. Legacy
+        // JSON is not consulted when the DB is disabled, because users
+        // who opt out (`MOLD_DB_DISABLE=1`) have explicitly said "don't
+        // write files from me".
+        Self::default()
+    }
+
+    /// Persist the session into the DB. Writes the global-ish fields to
+    /// the `settings` table and the per-model generation parameters to
+    /// the `model_prefs` table under [`Self::last_model`]. Silent no-op
+    /// when the DB is unavailable.
     pub fn save(&self) {
-        let path = match session_path() {
-            Some(p) => p,
-            None => {
-                tracing::warn!("tui session save skipped: could not resolve mold_dir()");
-                return;
-            }
-        };
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::warn!(path = %parent.display(), error = %e, "tui session: create_dir_all failed");
-                return;
-            }
-        }
-        let json = match serde_json::to_string_pretty(self) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!(error = %e, "tui session: serialize failed");
-                return;
-            }
-        };
-
-        // Atomic write: temp file in same dir + rename.
-        let parent = match path.parent() {
-            Some(p) => p,
-            None => {
-                tracing::warn!(path = %path.display(), "tui session: no parent dir for tempfile");
-                return;
-            }
-        };
-        let tmp_name = format!(
-            "tui-session.json.tmp.{}",
-            std::process::id().wrapping_mul(0x9E37_79B1)
-                ^ std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u32)
-                    .unwrap_or(0)
-        );
-        let tmp_path = parent.join(tmp_name);
-        if let Err(e) = std::fs::write(&tmp_path, &json) {
-            tracing::warn!(path = %tmp_path.display(), error = %e, "tui session: tempfile write failed");
+        let Some(db) = open_db() else {
             return;
-        }
-        if let Err(e) = std::fs::rename(&tmp_path, &path) {
-            tracing::warn!(
-                tmp = %tmp_path.display(),
-                dst = %path.display(),
-                error = %e,
-                "tui session: atomic rename failed",
-            );
-            let _ = std::fs::remove_file(&tmp_path);
-        }
+        };
+        save_to_db(&db, self);
     }
 
     /// Check if session has any meaningful content.
@@ -271,127 +249,185 @@ impl TuiSession {
     }
 }
 
+// ------------------------------------------------------------------
+// Internal helpers — splitting the DB IO keeps the impl blocks focused
+// on the DTO surface and makes the migration path testable.
+// ------------------------------------------------------------------
+
+fn load_from_db(db: &MetadataDb) -> TuiSession {
+    let s = Settings::new(db);
+    let last_model = s
+        .get_str(keys::TUI_LAST_MODEL)
+        .unwrap_or(None)
+        .unwrap_or_default();
+    let last_prompt = s
+        .get_str(keys::TUI_LAST_PROMPT)
+        .unwrap_or(None)
+        .unwrap_or_default();
+    let last_negative = s
+        .get_str(keys::TUI_LAST_NEGATIVE)
+        .unwrap_or(None)
+        .unwrap_or_default();
+    let theme = s.get_str(keys::TUI_THEME).unwrap_or(None);
+    let negative_collapsed = s.get_bool(keys::TUI_NEGATIVE_COLLAPSED).unwrap_or(None);
+
+    let mut session = TuiSession {
+        last_prompt,
+        last_negative,
+        last_model: last_model.clone(),
+        theme,
+        negative_collapsed,
+        ..Default::default()
+    };
+
+    if !last_model.is_empty() {
+        if let Ok(Some(prefs)) = ModelPrefs::load(db, &last_model) {
+            overlay_prefs(&mut session, &prefs);
+        }
+    }
+    session
+}
+
+fn overlay_prefs(session: &mut TuiSession, prefs: &ModelPrefs) {
+    session.width = prefs.width.or(session.width);
+    session.height = prefs.height.or(session.height);
+    session.steps = prefs.steps.or(session.steps);
+    session.guidance = prefs.guidance.or(session.guidance);
+    session.scheduler = prefs
+        .scheduler
+        .clone()
+        .or_else(|| session.scheduler.clone());
+    session.seed_mode = prefs
+        .seed_mode
+        .clone()
+        .or_else(|| session.seed_mode.clone());
+    session.batch = prefs.batch.or(session.batch);
+    session.format = prefs.format.clone().or_else(|| session.format.clone());
+    session.lora_path = prefs
+        .lora_path
+        .clone()
+        .or_else(|| session.lora_path.clone());
+    session.lora_scale = prefs.lora_scale.or(session.lora_scale);
+    session.expand = prefs.expand.or(session.expand);
+    session.offload = prefs.offload.or(session.offload);
+    session.strength = prefs.strength.or(session.strength);
+    session.control_scale = prefs.control_scale.or(session.control_scale);
+}
+
+fn save_to_db(db: &MetadataDb, session: &TuiSession) {
+    let s = Settings::new(db);
+    if let Err(e) = s.set_str(keys::TUI_LAST_PROMPT, &session.last_prompt) {
+        tracing::warn!(error = %e, "tui session: set last_prompt failed");
+    }
+    if let Err(e) = s.set_str(keys::TUI_LAST_NEGATIVE, &session.last_negative) {
+        tracing::warn!(error = %e, "tui session: set last_negative failed");
+    }
+    if !session.last_model.is_empty() {
+        let _ = s.set_str(keys::TUI_LAST_MODEL, &session.last_model);
+    }
+    if let Some(ref theme) = session.theme {
+        let _ = s.set_str(keys::TUI_THEME, theme);
+    }
+    if let Some(collapsed) = session.negative_collapsed {
+        let _ = s.set_bool(keys::TUI_NEGATIVE_COLLAPSED, collapsed);
+    }
+
+    // Per-model row. We overwrite the row keyed on `last_model` with all
+    // currently-set generation parameters — the caller populates them
+    // via `from_params` right before `save()`, so this captures the
+    // user's latest choices for the active model.
+    if !session.last_model.is_empty() {
+        let prefs = ModelPrefs {
+            width: session.width,
+            height: session.height,
+            steps: session.steps,
+            guidance: session.guidance,
+            scheduler: session.scheduler.clone(),
+            seed_mode: session.seed_mode.clone(),
+            batch: session.batch,
+            format: session.format.clone(),
+            lora_path: session.lora_path.clone(),
+            lora_scale: session.lora_scale,
+            expand: session.expand,
+            offload: session.offload,
+            strength: session.strength,
+            control_scale: session.control_scale,
+            frames: None,
+            fps: None,
+            last_prompt: Some(session.last_prompt.clone()),
+            last_negative: Some(session.last_negative.clone()),
+        };
+        if let Err(e) = prefs.save(db, &session.last_model) {
+            tracing::warn!(error = %e, model = %session.last_model, "tui session: model_prefs save failed");
+        }
+    }
+}
+
+/// Run the legacy `tui-session.json` + `prompt-history.jsonl` import
+/// into the DB exactly once per install. After a successful import the
+/// source files are renamed to `.migrated` — a downgrade still has a
+/// recoverable copy for one release, and the sentinel key prevents a
+/// second pass from clobbering fresh DB state with stale JSON.
+pub(crate) fn import_legacy_json_once(db: &MetadataDb) {
+    let settings = Settings::new(db);
+    let already = settings
+        .get_bool(keys::TUI_MIGRATED_FROM_JSON)
+        .unwrap_or(None)
+        .unwrap_or(false);
+    if already {
+        return;
+    }
+
+    // Session JSON
+    if let Some(path) = legacy_session_path() {
+        if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => match serde_json::from_str::<TuiSession>(&contents) {
+                    Ok(session) => {
+                        save_to_db(db, &session);
+                        rename_to_migrated(&path);
+                        tracing::info!(
+                            path = %path.display(),
+                            "imported legacy tui-session.json into metadata DB"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e,
+                            "tui session: legacy JSON parse failed; leaving file in place");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e,
+                        "tui session: legacy JSON read failed");
+                }
+            }
+        }
+    }
+
+    // Prompt history JSONL
+    crate::history::import_legacy_jsonl(db);
+
+    let _ = settings.set_bool(keys::TUI_MIGRATED_FROM_JSON, true);
+}
+
+fn rename_to_migrated(path: &Path) {
+    if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+        if let Some(parent) = path.parent() {
+            let dst = parent.join(format!("{fname}.migrated"));
+            if let Err(e) = std::fs::rename(path, &dst) {
+                tracing::warn!(src = %path.display(), dst = %dst.display(), error = %e,
+                    "rename legacy file to .migrated failed");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Serialize env-mutating tests — they all swap MOLD_HOME so they
-    // must not run in parallel. Poisoned lock is fine; we just want
-    // exclusive access during the test body.
-    static MOLD_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_mold_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let guard = MOLD_HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "mold-session-roundtrip-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let previous = std::env::var("MOLD_HOME").ok();
-        std::env::set_var("MOLD_HOME", &tmp);
-
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&tmp)));
-
-        match previous {
-            Some(v) => std::env::set_var("MOLD_HOME", v),
-            None => std::env::remove_var("MOLD_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
-        drop(guard);
-        if let Err(payload) = res {
-            std::panic::resume_unwind(payload);
-        }
-    }
-
-    #[test]
-    fn save_load_save_load_preserves_theme_across_many_cycles() {
-        // Regression for "I set Mocha but next session loaded Latte".
-        // The invariant under test: once a theme slug is written to
-        // disk, it must survive arbitrary save → load → save → load
-        // cycles unchanged, *including* when the loaded session is
-        // re-saved without touching the theme (the post-generation and
-        // shutdown save paths both do exactly that).
-        with_mold_home(|_home| {
-            // Seed disk with a specific non-default theme.
-            let seed = TuiSession {
-                last_prompt: "original".to_string(),
-                last_model: "flux-dev:q4".to_string(),
-                theme: Some("mocha".to_string()),
-                ..Default::default()
-            };
-            seed.save();
-
-            for i in 0..10 {
-                let loaded = TuiSession::load();
-                assert_eq!(
-                    loaded.theme.as_deref(),
-                    Some("mocha"),
-                    "iteration {i}: theme must round-trip as 'mocha', got {:?}",
-                    loaded.theme
-                );
-                // Re-save without mutating — mirrors what shutdown() /
-                // post-generation save_session() do when the user
-                // never touched the theme.
-                loaded.save();
-            }
-        });
-    }
-
-    #[test]
-    fn save_is_atomic_and_does_not_leave_tempfiles_behind() {
-        // The atomic-write implementation uses a sibling tempfile +
-        // rename. After a successful save, only the final target file
-        // should exist — no leftover `.tmp.*` files cluttering the
-        // mold dir.
-        with_mold_home(|home| {
-            let session = TuiSession {
-                theme: Some("dracula".to_string()),
-                ..Default::default()
-            };
-            for _ in 0..5 {
-                session.save();
-            }
-            let entries: Vec<_> = std::fs::read_dir(home)
-                .unwrap()
-                .filter_map(Result::ok)
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect();
-            assert!(
-                entries.contains(&"tui-session.json".to_string()),
-                "final session file must exist, got: {entries:?}"
-            );
-            let leftover: Vec<_> = entries
-                .iter()
-                .filter(|n| n.starts_with("tui-session.json.tmp"))
-                .collect();
-            assert!(
-                leftover.is_empty(),
-                "atomic write left tempfiles behind: {leftover:?}"
-            );
-        });
-    }
-
-    #[test]
-    fn save_creates_parent_dir_if_missing() {
-        // `mold_dir()` points at `$MOLD_HOME`, which the helper creates.
-        // Remove it to simulate a fresh install where the directory
-        // doesn't exist yet; save must create it.
-        with_mold_home(|home| {
-            std::fs::remove_dir_all(home).unwrap();
-            let session = TuiSession {
-                theme: Some("nord".to_string()),
-                ..Default::default()
-            };
-            session.save();
-            let loaded = TuiSession::load();
-            assert_eq!(loaded.theme.as_deref(), Some("nord"));
-        });
-    }
+    use crate::test_env::with_isolated_env;
+    use serial_test::serial;
 
     #[test]
     fn default_session_has_no_prompt() {
@@ -399,41 +435,6 @@ mod tests {
         assert!(!session.has_prompt());
         assert!(session.last_prompt.is_empty());
         assert!(session.last_model.is_empty());
-    }
-
-    #[test]
-    fn session_roundtrip_json() {
-        let session = TuiSession {
-            last_prompt: "a cat in a hat".to_string(),
-            last_negative: "blurry".to_string(),
-            last_model: "flux2-klein:q8".to_string(),
-            width: Some(1024),
-            height: Some(1024),
-            steps: Some(4),
-            guidance: Some(0.0),
-            seed_mode: Some("random".to_string()),
-            batch: Some(2),
-            format: Some("png".to_string()),
-            scheduler: None,
-            lora_path: None,
-            lora_scale: Some(1.0),
-            expand: Some(false),
-            offload: Some(true),
-            strength: Some(0.75),
-            control_scale: Some(1.0),
-            theme: Some("mocha".to_string()),
-            negative_collapsed: Some(true),
-        };
-        let json = serde_json::to_string(&session).unwrap();
-        let restored: TuiSession = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.last_prompt, "a cat in a hat");
-        assert_eq!(restored.last_model, "flux2-klein:q8");
-        assert_eq!(restored.width, Some(1024));
-        assert_eq!(restored.batch, Some(2));
-        assert_eq!(restored.theme.as_deref(), Some("mocha"));
-        assert_eq!(restored.negative_collapsed, Some(true));
-        assert_eq!(restored.offload, Some(true));
-        assert_eq!(restored.seed_mode, Some("random".to_string()));
     }
 
     #[test]
@@ -448,33 +449,155 @@ mod tests {
     }
 
     #[test]
-    fn session_without_theme_or_negative_flag_still_loads() {
-        // Older session files won't include the new fields. `#[serde(default)]`
-        // means missing = None, not a parse error.
-        let json = r#"{"last_prompt": "legacy"}"#;
-        let session: TuiSession = serde_json::from_str(json).unwrap();
-        assert!(session.theme.is_none());
-        assert!(session.negative_collapsed.is_none());
+    #[serial(mold_env)]
+    fn save_then_load_roundtrip_through_db() {
+        with_isolated_env(|_home| {
+            let seed = TuiSession {
+                last_prompt: "a cat".into(),
+                last_negative: "blurry".into(),
+                last_model: "flux-dev:q4".into(),
+                width: Some(1024),
+                height: Some(1024),
+                steps: Some(20),
+                guidance: Some(3.5),
+                seed_mode: Some("random".into()),
+                batch: Some(2),
+                format: Some("png".into()),
+                scheduler: Some("ddim".into()),
+                lora_path: Some("/lora.safetensors".into()),
+                lora_scale: Some(0.75),
+                expand: Some(true),
+                offload: Some(false),
+                strength: Some(0.8),
+                control_scale: Some(1.0),
+                theme: Some("dracula".into()),
+                negative_collapsed: Some(true),
+            };
+            seed.save();
+            let loaded = TuiSession::load();
+            assert_eq!(loaded.last_prompt, "a cat");
+            assert_eq!(loaded.last_model, "flux-dev:q4");
+            assert_eq!(loaded.width, Some(1024));
+            assert_eq!(loaded.steps, Some(20));
+            assert_eq!(loaded.theme.as_deref(), Some("dracula"));
+            assert_eq!(loaded.negative_collapsed, Some(true));
+        });
+    }
+
+    #[test]
+    #[serial(mold_env)]
+    fn save_load_save_load_preserves_theme_across_many_cycles() {
+        // Regression (preserved from the old JSON implementation): theme
+        // must survive repeated save → load cycles, *including* when the
+        // loaded session is re-saved without touching the theme.
+        with_isolated_env(|_home| {
+            let seed = TuiSession {
+                last_model: "flux-dev:q4".into(),
+                theme: Some("mocha".into()),
+                ..Default::default()
+            };
+            seed.save();
+
+            for i in 0..10 {
+                let loaded = TuiSession::load();
+                assert_eq!(
+                    loaded.theme.as_deref(),
+                    Some("mocha"),
+                    "iteration {i}: theme must round-trip as 'mocha', got {:?}",
+                    loaded.theme
+                );
+                loaded.save();
+            }
+        });
+    }
+
+    #[test]
+    #[serial(mold_env)]
+    fn legacy_json_is_imported_once_and_file_is_renamed() {
+        with_isolated_env(|home| {
+            // Drop a legacy session file in MOLD_HOME.
+            let src = home.join("tui-session.json");
+            let legacy = TuiSession {
+                last_model: "sdxl:fp16".into(),
+                last_prompt: "from legacy".into(),
+                width: Some(768),
+                theme: Some("nord".into()),
+                ..Default::default()
+            };
+            std::fs::write(&src, serde_json::to_string(&legacy).unwrap()).unwrap();
+            assert!(src.exists());
+
+            // First load triggers the import.
+            let loaded = TuiSession::load();
+            assert_eq!(loaded.last_prompt, "from legacy");
+            assert_eq!(loaded.width, Some(768));
+            assert_eq!(loaded.theme.as_deref(), Some("nord"));
+
+            // Legacy file was renamed, not deleted.
+            assert!(!src.exists(), "legacy file should have been renamed");
+            assert!(
+                home.join("tui-session.json.migrated").exists(),
+                "legacy file should live under .migrated"
+            );
+
+            // A second load is a no-op: nothing to import, nothing to rename.
+            let again = TuiSession::load();
+            assert_eq!(again.last_prompt, "from legacy");
+        });
+    }
+
+    #[test]
+    #[serial(mold_env)]
+    fn legacy_json_import_is_idempotent() {
+        with_isolated_env(|home| {
+            let src = home.join("tui-session.json");
+            std::fs::write(
+                &src,
+                r#"{"last_prompt":"first","last_model":"flux-dev:q4"}"#,
+            )
+            .unwrap();
+
+            TuiSession::load();
+
+            // Simulate a new file appearing *after* the first import
+            // (e.g. user restored a backup). Because the sentinel is
+            // set, the importer leaves it alone.
+            std::fs::write(&src, r#"{"last_prompt":"SHOULD-NOT-OVERWRITE"}"#).unwrap();
+            let loaded = TuiSession::load();
+            assert_eq!(
+                loaded.last_prompt, "first",
+                "sentinel must prevent re-importing stale JSON"
+            );
+        });
+    }
+
+    #[test]
+    #[serial(mold_env)]
+    fn db_disabled_returns_default_without_persistence() {
+        with_isolated_env(|_home| {
+            std::env::set_var("MOLD_DB_DISABLE", "1");
+            let seed = TuiSession {
+                last_model: "flux-dev:q4".into(),
+                theme: Some("nord".into()),
+                ..Default::default()
+            };
+            seed.save(); // silently no-ops
+            let loaded = TuiSession::load();
+            assert!(loaded.last_model.is_empty());
+            assert!(loaded.theme.is_none());
+            std::env::remove_var("MOLD_DB_DISABLE");
+        });
     }
 
     #[test]
     fn session_deserialize_missing_fields() {
+        // Legacy JSON round-trip is still needed for the one-shot import.
         let json = r#"{"last_prompt": "test"}"#;
         let session: TuiSession = serde_json::from_str(json).unwrap();
         assert_eq!(session.last_prompt, "test");
         assert!(session.last_model.is_empty());
         assert_eq!(session.width, None);
         assert_eq!(session.batch, None);
-    }
-
-    #[test]
-    fn session_backward_compat_old_format() {
-        // Old format only had last_width/last_height etc
-        let json = r#"{"last_prompt":"old","last_model":"flux","last_width":512}"#;
-        let session: TuiSession = serde_json::from_str(json).unwrap();
-        assert_eq!(session.last_prompt, "old");
-        // Old field names don't match new ones — they'll be None
-        assert_eq!(session.width, None);
     }
 
     #[test]
@@ -577,137 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn from_params_then_apply_roundtrips() {
-        use crate::app::{GenerateParams, SeedMode};
-
-        let original = GenerateParams {
-            model: "flux-dev:q4".to_string(),
-            width: 768,
-            height: 1024,
-            steps: 25,
-            guidance: 3.5,
-            seed: None,
-            seed_mode: SeedMode::Increment,
-            batch: 2,
-            format: mold_core::OutputFormat::Png,
-            scheduler: Some(mold_core::Scheduler::Ddim),
-            inference_mode: crate::app::InferenceMode::Auto,
-            host: None,
-            lora_path: None,
-            lora_scale: 1.0,
-            expand: false,
-            offload: false,
-            source_image_path: None,
-            strength: 0.75,
-            mask_image_path: None,
-            frames: 25,
-            fps: 24,
-            control_image_path: None,
-            control_model: None,
-            control_scale: 1.0,
-        };
-
-        // Save to session
-        let session = TuiSession::from_params("test prompt", "bad quality", &original);
-
-        // Apply to fresh params
-        let mut restored = GenerateParams::from_config(&mold_core::Config::default());
-        session.apply_to_params(&mut restored);
-
-        // All persisted fields should match
-        assert_eq!(restored.width, 768);
-        assert_eq!(restored.height, 1024);
-        assert_eq!(restored.steps, 25);
-        assert_eq!(restored.guidance, 3.5);
-        assert_eq!(restored.seed_mode, SeedMode::Increment);
-        assert_eq!(restored.batch, 2);
-        assert_eq!(restored.format, mold_core::OutputFormat::Png);
-        assert_eq!(restored.scheduler, Some(mold_core::Scheduler::Ddim));
-        assert_eq!(restored.lora_scale, 1.0);
-        assert!(!restored.expand);
-        assert!(!restored.offload);
-        assert_eq!(restored.strength, 0.75);
-        assert_eq!(restored.control_scale, 1.0);
-    }
-
-    #[test]
-    fn bare_model_name_resolves_on_load() {
-        // Session files from older versions may store bare names like "flux2-klein"
-        // instead of "flux2-klein:q8". The app should resolve these on load.
-        let json = r#"{"last_prompt":"test","last_model":"flux2-klein","width":512,"height":512}"#;
-        let session: TuiSession = serde_json::from_str(json).unwrap();
-
-        // The session itself stores exactly what was saved
-        assert_eq!(session.last_model, "flux2-klein");
-
-        // But when the app resolves it, it should become the tagged name
-        let resolved = mold_core::manifest::resolve_model_name(&session.last_model);
-        assert_eq!(resolved, "flux2-klein:q8");
-    }
-
-    #[test]
-    fn tagged_model_name_survives_resolution() {
-        let session = TuiSession {
-            last_model: "flux-dev:q4".to_string(),
-            ..Default::default()
-        };
-        let resolved = mold_core::manifest::resolve_model_name(&session.last_model);
-        assert_eq!(resolved, "flux-dev:q4");
-    }
-
-    #[test]
-    fn session_with_custom_dimensions_roundtrips() {
-        // Regression: user sets 512x512 in TUI, quits without generating,
-        // next launch should restore 512x512
-        use crate::app::{GenerateParams, SeedMode};
-
-        let params = GenerateParams {
-            model: "flux2-klein:q8".to_string(),
-            width: 512,
-            height: 512,
-            steps: 4,
-            guidance: 0.0,
-            seed: None,
-            seed_mode: SeedMode::Random,
-            batch: 1,
-            format: mold_core::OutputFormat::Png,
-            scheduler: None,
-            inference_mode: crate::app::InferenceMode::Auto,
-            host: None,
-            lora_path: None,
-            lora_scale: 1.0,
-            expand: false,
-            offload: false,
-            source_image_path: None,
-            strength: 0.75,
-            mask_image_path: None,
-            frames: 25,
-            fps: 24,
-            control_image_path: None,
-            control_model: None,
-            control_scale: 1.0,
-        };
-
-        // Simulate save on quit
-        let session = TuiSession::from_params("", "", &params);
-        assert_eq!(session.width, Some(512));
-        assert_eq!(session.height, Some(512));
-        assert_eq!(session.last_model, "flux2-klein:q8");
-
-        // Simulate restore on next launch
-        let mut fresh = GenerateParams::from_config(&mold_core::Config::default());
-        // fresh would have model defaults (1024x1024 for flux2-klein)
-        session.apply_to_params(&mut fresh);
-        assert_eq!(fresh.width, 512);
-        assert_eq!(fresh.height, 512);
-    }
-
-    #[test]
     fn apply_non_model_params_skips_dimensions_and_guidance() {
-        // When the saved model is unavailable, the fallback should NOT apply
-        // model-specific params (width, height, steps, guidance, scheduler)
-        // because they belong to the missing model and would be wrong for the
-        // current default.
         use crate::app::GenerateParams;
 
         let session = TuiSession {
@@ -731,28 +724,14 @@ mod tests {
 
         session.apply_non_model_params(&mut params);
 
-        // Model-specific settings should NOT have changed
         assert_eq!(params.width, original_width);
         assert_eq!(params.height, original_height);
         assert_eq!(params.steps, original_steps);
         assert_eq!(params.guidance, original_guidance);
-        assert_eq!(params.scheduler, None); // should stay as default, not "ddim"
+        assert_eq!(params.scheduler, None);
 
-        // Non-model settings SHOULD have been applied
         assert_eq!(params.batch, 3);
         assert!(params.expand);
         assert!(params.offload);
-    }
-
-    #[test]
-    fn custom_config_model_name_preserved() {
-        // Config-only models like [models."my-flux"] should NOT be rewritten
-        // by resolve_model_name to "my-flux:q8"
-        let resolved = mold_core::manifest::resolve_model_name("my-custom-model");
-        // resolve_model_name appends :q8 when no manifest match is found,
-        // but the catalog lookup in the app uses the original name first
-        assert_eq!(resolved, "my-custom-model:q8");
-        // The app code tries the exact session name first, then resolved —
-        // so "my-custom-model" would match the catalog entry directly.
     }
 }

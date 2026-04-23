@@ -137,7 +137,11 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial(mold_env)]
     fn thumbnail_path_is_deterministic() {
+        // Reads MOLD_HOME via `thumbnail_path` → `thumbnail_dir` →
+        // `Config::mold_dir`, so it must serialize with tests that
+        // mutate that env var.
         let p = Path::new("/tmp/test-image.png");
         let a = thumbnail_path(p);
         let b = thumbnail_path(p);
@@ -145,6 +149,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(mold_env)]
     fn thumbnail_path_differs_for_different_inputs() {
         let a = thumbnail_path(Path::new("/tmp/a.png"));
         let b = thumbnail_path(Path::new("/tmp/b.png"));
@@ -152,6 +157,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(mold_env)]
     fn thumbnail_dir_under_mold_dir() {
         let dir = thumbnail_dir();
         let dir_str = dir.to_string_lossy();
@@ -172,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(mold_env)]
     fn generate_thumbnail_creates_smaller_file() {
         // Create a test image in a temp directory
         let tmp = std::env::temp_dir().join("mold-thumb-test");

@@ -1,27 +1,25 @@
-//! Process-wide handle to the metadata SQLite DB used by the CLI's local
-//! generation path. Lazily opened on first use and cached for the life of
-//! the process. Returns `None` when `MOLD_DB_DISABLE` is set or `MOLD_HOME`
-//! cannot be resolved — callers should treat that as "skip persistence".
+//! Thin CLI wrapper around the process-wide metadata DB handle that now
+//! lives in `mold-db`. Keeps the `record_local_save` helper the CLI uses
+//! on its local generation path; everything else delegates.
 
 use std::path::Path;
-use std::sync::OnceLock;
 
 use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
 use mold_db::{GenerationRecord, MetadataDb, RecordSource};
 
-static DB: OnceLock<Option<MetadataDb>> = OnceLock::new();
+/// Install the `Config::load_or_default()` post-load hook so every freshly
+/// loaded config is overlaid with DB-backed user preferences, and run the
+/// one-shot `config.toml → DB` import on first call. Delegates to
+/// `mold_db` so `mold-server` and `mold-discord` standalone binaries can
+/// call the same entry point.
+pub fn install_config_db_hooks() {
+    mold_db::config_sync::install_config_post_load_hook();
+}
 
-/// Borrow the lazily-opened metadata DB. Open errors are logged once and
+/// Borrow the process-wide metadata DB. Open errors are logged once and
 /// then suppressed — the CLI must keep working without persistence.
 pub fn handle() -> Option<&'static MetadataDb> {
-    DB.get_or_init(|| match mold_db::open_default() {
-        Ok(opt) => opt,
-        Err(e) => {
-            tracing::warn!("metadata DB unavailable: {e:#}");
-            None
-        }
-    })
-    .as_ref()
+    mold_db::global_db()
 }
 
 /// Compile-time backend label for rows written from the CLI's local path.

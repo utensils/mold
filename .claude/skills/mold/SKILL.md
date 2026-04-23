@@ -404,22 +404,29 @@ mold rm flux-dev:q4 --force  # Remove without confirmation
 
 ## Configuration Management
 
-View and edit `config.toml` settings from the CLI using dot-notation keys:
+View and edit settings from the CLI using dot-notation keys. Settings are split between `config.toml` (paths, ports, credentials) and `mold.db` (user preferences — `expand.*`, generation defaults, per-model generation overrides). `mold config` routes by key prefix transparently.
 
 ```bash
 mold config list                          # Show all settings grouped by section
 mold config list --json                   # Machine-readable output
 mold config get server_port               # Get a single value
 mold config get server_port --raw         # Raw value for scripting
-mold config set server_port 8080          # Set and persist a value
-mold config set expand.enabled true       # Nested key (dot-notation)
+mold config set server_port 8080          # Bootstrap key → written to config.toml
+mold config set expand.enabled true       # User-preference → written to mold.db
+mold config set default_width 1024        # Generation default → written to mold.db
 mold config set output_dir none           # Clear an optional field
-mold config set models.flux-dev:q4.default_steps 30  # Per-model setting
+mold config set models.flux-dev:q4.default_steps 30   # Per-model generation default → model_prefs (DB)
+mold config where expand.enabled          # Print "db" or "file" so operators know the surface
+mold config reset expand.enabled          # Drop the DB row; next read falls back to config.toml/env/default
+mold config reset --all --yes             # Drop every DB row under the active profile
+mold config --profile portrait set default_steps 30   # Scope a command to an explicit profile (v6)
 mold config path                          # Show config file location
-mold config edit                          # Open in $EDITOR
+mold config edit                          # Open config.toml in $EDITOR
 ```
 
-Keys use dot-notation matching the TOML structure. Boolean values accept `true`/`false`, `on`/`off`, or `1`/`0`. Use `none` to clear optional fields. Values are validated (port range, enum options, numeric bounds) before saving. Environment variable overrides are shown when active.
+Keys use dot-notation matching the TOML / DB layout. Boolean values accept `true`/`false`, `on`/`off`, or `1`/`0`. Use `none` to clear optional fields. Values are validated (port range, enum options, numeric bounds) before saving. Environment variable overrides are shown when active. `mold config list` output tags each row with its surface (`[db]` / `[file]` / `[env]`), and `mold config set` tags the surface it wrote to (e.g. `Set expand.enabled = true [db]`).
+
+On first launch after upgrading from a pre-#265 release, mold imports the `[expand]`/generation-defaults slices of `config.toml` into the DB (gated by `config.migrated_from_toml`), renames the original `config.toml` to `config.toml.migrated` as a one-release downgrade safety net, and rewrites `config.toml` as a stripped **bootstrap-only** file (paths, ports, credentials, per-model file paths — nothing the DB now owns). Multi-profile scoping landed in schema v6: set `MOLD_PROFILE=dev` or pass `--profile dev` to any `mold config` subcommand.
 
 ## Self-Update
 

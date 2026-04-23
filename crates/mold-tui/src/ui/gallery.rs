@@ -478,6 +478,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(mold_env)]
     fn gallery_grid_cell_does_not_render_filename_label() {
         // Reported: thumbnail cells rendered a truncated filename below
         // the image (`mold-flux-dev-q4-17…`). The label never fit, was
@@ -532,6 +533,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(mold_env)]
     fn gallery_grid_kitty_thumbnails_encode_to_full_thumb_box() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

@@ -17,7 +17,9 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use mold_core::chain::{ChainProgressEvent, ChainRequest};
-use mold_core::{Config, MoldClient, OutputFormat, VideoData};
+#[cfg(any(feature = "cuda", feature = "metal"))]
+use mold_core::Config;
+use mold_core::{MoldClient, OutputFormat, VideoData};
 
 use crate::control::CliContext;
 use crate::output::{is_piped, status};
@@ -257,7 +259,7 @@ pub async fn run_chain(
         base_seed,
     )?;
 
-    Config::write_last_model(&req.model);
+    mold_db::settings::record_last_model(&req.model);
     Ok(())
 }
 

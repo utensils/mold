@@ -809,8 +809,13 @@ is_schnell = false
 
     // ── last-model state file ─────────────────────────────────────────────
 
+    /// Sidecar round-trip via the public reader. `Config::write_last_model`
+    /// was removed in #265 — writes now go through
+    /// `mold_db::settings::record_last_model` — but the sidecar reader
+    /// must still work for pre-migration boot and for builds without a
+    /// mold-db hook (e.g. `mold-core` unit tests).
     #[test]
-    fn write_and_read_last_model_roundtrip() {
+    fn sidecar_write_and_read_last_model_roundtrip() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "mold-last-model-test-{}",
@@ -819,9 +824,10 @@ is_schnell = false
                 .unwrap()
                 .as_nanos()
         ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("last-model"), "flux-dev:q4").unwrap();
         std::env::set_var("MOLD_HOME", &dir);
 
-        Config::write_last_model("flux-dev:q4");
         let result = Config::read_last_model();
 
         std::env::remove_var("MOLD_HOME");

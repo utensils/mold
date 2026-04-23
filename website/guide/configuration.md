@@ -1,18 +1,71 @@
 # Configuration
 
-mold looks for `config.toml` inside the base mold directory (`~/.mold/` by
-default, or override with `MOLD_HOME`).
+mold keeps configuration in two places by design:
+
+- **`config.toml`** — the hand-editable _bootstrap_ file in `~/.mold/` (or
+  `$MOLD_HOME`). Owns paths, ports, credentials, and the model-path
+  entries that `mold pull` writes.
+- **`mold.db` (SQLite)** — owns user preferences: the `[expand]` section,
+  global generation defaults (`default_width`, `default_height`,
+  `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`,
+  `default_negative_prompt`), the `last-model` sidecar, and per-model
+  generation defaults (`default_steps`, `default_guidance`,
+  `default_width`, `default_height`, `scheduler`, `negative_prompt`,
+  `lora`, `lora_scale`). These fields moved to the DB in
+  [#265](https://github.com/utensils/mold/issues/265) so GUI writes and
+  hand-curated TOML no longer fight over the same file.
+
+Environment variables still override both surfaces at read time.
+Upgrading from an earlier release runs a one-shot import of the
+preference slices of `config.toml` into the DB on first launch — your
+existing values carry over.
 
 ## Managing Config from the CLI
 
-Use `mold config` to view and edit settings without manually editing TOML:
+`mold config` routes writes to the right surface based on the key
+prefix:
 
 ```bash
-mold config list                    # Show all settings
-mold config get server_port         # Get a value
-mold config set server_port 8080    # Set a value
-mold config edit                    # Open in $EDITOR
+mold config list                       # All settings tagged [db] / [file] / [env]
+mold config list --json                # JSON form: { "value": …, "surface": … } per key
+mold config get server_port            # Get a value
+mold config set server_port 8080       # Bootstrap key → writes config.toml
+mold config set expand.enabled true    # User preference → writes mold.db
+mold config set default_width 1024     # Generation default → writes mold.db
+mold config where expand.enabled       # Print which surface owns this key
+mold config reset expand.enabled       # Drop the DB row; next read falls back to TOML/env/default
+mold config reset --all --yes          # Drop every DB row under the active profile
+mold config --profile portrait list    # Scope a command to an explicit profile (v6)
+mold config edit                       # Open config.toml in $EDITOR
 ```
+
+`mold config list` tags every row with its surface so you can see at a
+glance which store owns each key — `[db]` for `mold.db`, `[file]` for
+`config.toml`, `[env]` when a `MOLD_*` env var is currently overriding.
+`mold config set` prints the same tag in its output (for example
+`Set expand.enabled = true [db]`). `mold config where <key>` also
+reports any env override that beats both stores at runtime.
+
+`mold config reset <key>` drops the DB row so the next read falls back
+to the TOML/env/compiled default — useful for "undo the wrong setting"
+without hand-editing `mold.db`. TOML-only keys are rejected with a
+pointer at `mold config set` since those live in the hand-edited file.
+`mold config reset --all` purges every DB row under the active profile
+(prompts for confirmation unless `--yes` is passed).
+
+### Multi-profile (schema v6)
+
+`settings` and `model_prefs` rows are keyed on `(profile, key)` /
+`(profile, model)` — one DB can host multiple independent preference
+sets (`default`, `dev`, `portrait`, …). Active profile resolves in
+priority order:
+
+1. `MOLD_PROFILE` env var,
+2. the `profile.active` setting row under the `default` profile,
+3. `"default"`.
+
+Every `mold config` subcommand accepts `--profile <name>` to scope for
+a single invocation without touching the env or the meta setting.
 
 See the [CLI Reference](/guide/cli-reference#mold-config) for the full list of
 keys and options.

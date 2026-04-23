@@ -26,18 +26,50 @@ Or use the devshell helper: `build`
 All TUI interaction goes through `scripts/tui-uat.sh`:
 
 ```bash
-scripts/tui-uat.sh launch [--local] [--host URL]  # Start TUI in a Ghostty window
-scripts/tui-uat.sh capture                          # Print current screen (plain text)
-scripts/tui-uat.sh screenshot [output.png]          # Native Ghostty screenshot (PNG)
-scripts/tui-uat.sh view <1-4|name>                  # Navigate to a view reliably
-scripts/tui-uat.sh send <key> [key...]              # Send keystrokes
-scripts/tui-uat.sh wait-for <pattern> [timeout]     # Wait for text (default 5s)
-scripts/tui-uat.sh assert <pattern>                  # Assert text is on screen
-scripts/tui-uat.sh quit                              # Close UAT window
-scripts/tui-uat.sh status                            # Check if running
+# Lifecycle
+scripts/tui-uat.sh launch [--fresh] [--env K=V]* [--local] [--host URL]
+scripts/tui-uat.sh quit             # Close the tracked session's Ghostty window
+scripts/tui-uat.sh cleanup          # Reap any orphan mold-TUI Ghostty window (state-file-free)
+scripts/tui-uat.sh status
+scripts/tui-uat.sh env              # Print MOLD_HOME / MOLD_DB_PATH
+
+# Screen I/O
+scripts/tui-uat.sh capture          # Print current screen (plain text)
+scripts/tui-uat.sh screenshot [output.png]
+scripts/tui-uat.sh view <1-5|name>  # 1=Generate 2=Gallery 3=Models 4=Queue 5=Settings
+scripts/tui-uat.sh send <key>...
+scripts/tui-uat.sh wait-for <pattern> [timeout]
+scripts/tui-uat.sh assert <pattern>
+
+# DB / persistence helpers
+scripts/tui-uat.sh db [--write] [--force] <sql>    # sqlite3 against session DB
+scripts/tui-uat.sh db-get <key>                     # One value from settings table
+scripts/tui-uat.sh db-assert <key> <value>          # Pass/fail equality check
+scripts/tui-uat.sh db-dump                           # Pretty-print settings + model_prefs
+
+# Settings helpers
+scripts/tui-uat.sh settings-focus <appearance|configuration>
+scripts/tui-uat.sh theme-set <slug>  # mocha|latte|ristretto|gruvbox|tokyo|nord|dracula
+
+# Model + per-model prefs helpers
+scripts/tui-uat.sh model <name>                      # Full picker dance — Parameters → Model → type filter → Enter. Pass the exact `model:tag` to avoid matching the wrong variant.
+scripts/tui-uat.sh db-model-assert <model> <col> <v> # Pass/fail on a single `model_prefs` column
 ```
 
+**`--fresh`** creates a tmp MOLD_HOME and injects it into the TUI's env — zero chance of clobbering the user's real `~/.mold/` state. The isolated directory persists across `quit` so you can relaunch with `--env MOLD_HOME=$(mktemp -d)/…` or reuse the path from `status` to validate persistence.
+
+**`db-*` commands** refuse to write to the user's real DB without `--force`. Use `--fresh` for any test that mutates state.
+
 ## How to Run a UAT Session
+
+> **Always trap cleanup.** Wrap every UAT flow so the Ghostty window is
+> closed even if an assertion fails or the script is interrupted.
+> `cleanup` is safe to call repeatedly and will reap orphan windows
+> whose state file was lost:
+>
+> ```bash
+> trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
+> ```
 
 ### 1. Launch
 
@@ -132,15 +164,18 @@ scripts/tui-uat.sh quit
 
 2. **First key after Nav mode**: The first character key after entering Generate nav mode may be consumed by a crossterm timing issue. The `view` command retries automatically.
 
-3. **Session persistence**: The TUI saves session state to `~/.mold/tui-session.json`. Remove this file before testing if you need a clean slate: `rm -f ~/.mold/tui-session.json`
+3. **Session persistence** (since #264): TUI state lives in the SQLite metadata DB at `~/.mold/mold.db` — `settings` table for global TUI prefs (theme, last_model, last_prompt, negative_collapsed), `model_prefs` table for per-model generation parameters (one row per resolved model tag), `prompt_history` table for the prev/next prompt stack. `~/.mold/tui-session.json` and `~/.mold/prompt-history.jsonl` are imported once on first launch and renamed to `.migrated`; they're no longer written. For a clean slate, isolate the DB with `MOLD_DB_PATH=$(mktemp -d)/mold.db scripts/tui-uat.sh launch …` (legacy: deleting `~/.mold/mold.db` also works but wipes the gallery DB too). `MOLD_DB_DISABLE=1` boots the TUI with in-memory-only defaults — useful for verifying the fail-safe fallback.
 
 4. **`MOLD_BIN`**: Override the binary path: `MOLD_BIN=./target/release/mold scripts/tui-uat.sh launch`
 
 5. **Clipboard**: The `capture` command temporarily uses the clipboard (via `write_screen_file:copy,plain`). It saves and restores the previous clipboard content.
 
+6. **Per-model prefs auto-save** (since #264): switching model via `Ctrl+M → pick → Enter` snapshots the outgoing model's generation params into `model_prefs` keyed on the resolved tag, then overlays the incoming model's saved row on top of manifest/catalog defaults. Prompts are *not* restored on switch — only generation params (width/height/steps/guidance/scheduler/seed_mode/batch/format/lora/expand/offload/strength/control_scale). To UAT: set FLUX to 512×512 steps=4, switch to SDXL, verify SDXL's own defaults appear; switch back to FLUX, verify 512×512 steps=4 returned.
+
 ## Example: Full Smoke Test
 
 ```bash
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
 scripts/tui-uat.sh launch --local
 scripts/tui-uat.sh view generate
 scripts/tui-uat.sh assert "Parameters"
@@ -154,5 +189,135 @@ scripts/tui-uat.sh assert "flux2-klein"
 scripts/tui-uat.sh screenshot /tmp/models-view.png
 scripts/tui-uat.sh view settings
 scripts/tui-uat.sh assert "Settings"
+scripts/tui-uat.sh quit
+```
+
+## Example: SQLite-Backed Persistence UAT (#264)
+
+Full quit/relaunch round-trip against an isolated DB. `--fresh` allocates a
+tmp MOLD_HOME; stash its path from `env` so the re-launch can reuse it.
+
+```bash
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true; [ -n "${MOLD_HOME:-}" ] && rm -rf "$MOLD_HOME"' EXIT INT TERM
+# Round 1: fresh isolated env, set theme via helper, write a prompt
+scripts/tui-uat.sh launch --fresh --local
+eval "$(scripts/tui-uat.sh env)"              # exports MOLD_HOME + MOLD_DB_PATH
+scripts/tui-uat.sh theme-set dracula          # cycles + asserts
+scripts/tui-uat.sh view generate
+scripts/tui-uat.sh send "a test prompt"       # single arg is sent as literal text
+scripts/tui-uat.sh send escape                # exit textarea focus
+scripts/tui-uat.sh send ctrl+c                # quit (writes settings + model_prefs)
+
+# Round 2: relaunch with the *same* MOLD_HOME → DB survives
+scripts/tui-uat.sh launch --env "MOLD_HOME=$MOLD_HOME" --local
+scripts/tui-uat.sh db-assert tui.theme dracula
+scripts/tui-uat.sh db-assert tui.last_prompt "a test prompt"
+scripts/tui-uat.sh screenshot /tmp/uat-persistence.png
+scripts/tui-uat.sh quit
+rm -rf "$MOLD_HOME"                            # tmp dir cleanup is manual
+```
+
+## Example: Per-Model Preferences UAT (#264) — full param coverage
+
+The cleanest strategy is DB-seed-then-verify-UI, plus a `model` switch
+that exercises `update_model`'s snapshot/restore path. Every field in
+`model_prefs` gets checked: width, height, steps, guidance, scheduler,
+seed_mode, batch, format, lora_path, lora_scale, expand, offload,
+strength, control_scale.
+
+```bash
+ISO=$(mktemp -d /tmp/mold-uat.XXXXXX)
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true; rm -rf "$ISO"' EXIT INT TERM
+scripts/tui-uat.sh launch --env "MOLD_HOME=$ISO" --local
+sleep 2
+
+# Seed two models with DISTINCT values across every preserved field.
+scripts/tui-uat.sh db --write "
+INSERT OR REPLACE INTO model_prefs
+  (model, width, height, steps, guidance, scheduler, seed_mode, batch, format,
+   lora_path, lora_scale, expand, offload, strength, control_scale, updated_at_ms)
+VALUES
+  ('flux2-klein:q8', 832, 1152, 7, 2.5, 'ddim',            'fixed',     3, 'jpeg',
+   '/a.safetensors', 0.75, 1, 1, 0.8, 1.5, 1000),
+  ('flux-dev:q4',    1024, 768, 30, 4.0, 'eulerancestral', 'increment', 2, 'png',
+   '/b.safetensors', 0.50, 0, 0, 0.6, 1.0, 1000);
+INSERT OR REPLACE INTO settings (key, value, value_type, updated_at_ms)
+VALUES ('tui.last_model', 'flux2-klein:q8', 'string', 1000);
+"
+scripts/tui-uat.sh quit
+scripts/tui-uat.sh launch --env "MOLD_HOME=$ISO" --local
+sleep 3
+
+# Starts on flux2-klein:q8, which should load its seeded values.
+scripts/tui-uat.sh assert "832"
+scripts/tui-uat.sh assert "1152"
+scripts/tui-uat.sh assert "Steps     7"
+scripts/tui-uat.sh assert "Guidance  2.5"
+
+# Switch to flux-dev:q4 via the real popup flow.
+scripts/tui-uat.sh model 'flux-dev:q4'
+sleep 0.5
+scripts/tui-uat.sh assert "1024"
+scripts/tui-uat.sh assert "Steps     30"
+scripts/tui-uat.sh assert "Guidance  4.0"
+
+# Switch back — flux2-klein's saved row must overlay manifest defaults.
+scripts/tui-uat.sh model 'flux2-klein:q8'
+sleep 0.5
+scripts/tui-uat.sh assert "832"
+scripts/tui-uat.sh assert "Steps     7"
+
+# Direct DB assertions for the fields that don't always render in the UI
+# (scheduler, lora, strength, control_scale are conditionally visible).
+for col in width height steps guidance scheduler seed_mode batch format \
+           lora_scale expand offload strength control_scale; do
+    scripts/tui-uat.sh db-model-assert flux2-klein:q8 "$col" \
+      "$(sqlite3 "$ISO/mold.db" "SELECT $col FROM model_prefs WHERE model='flux2-klein:q8';")"
+    scripts/tui-uat.sh db-model-assert flux-dev:q4 "$col" \
+      "$(sqlite3 "$ISO/mold.db" "SELECT $col FROM model_prefs WHERE model='flux-dev:q4';")"
+done
+
+scripts/tui-uat.sh quit
+rm -rf "$ISO"
+```
+
+### Why DB seeding + UI verification (instead of UI-driven everything)
+
+- **Step-size fragility**: each param has its own increment granularity
+  (width/height ± 64, steps ± 1, guidance ± 0.1, etc.). Hardcoding
+  press counts in a script is brittle across model families.
+- **Conditional fields**: scheduler, strength, control_scale, and the
+  LoRA params only render under specific capabilities/modes. Relying
+  on UI navigation to reach them tangles the test with feature gating
+  — the DB is the single source of truth.
+- **Execution speed**: a seed + relaunch round-trip is ~3 s; the
+  equivalent key-sequence UI drive is ~15 s and 10× more flaky.
+
+## Example: DB-Disabled Fallback
+
+```bash
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
+scripts/tui-uat.sh launch --fresh --env MOLD_DB_DISABLE=1 --local
+scripts/tui-uat.sh view settings
+scripts/tui-uat.sh assert "Appearance"         # still renders
+scripts/tui-uat.sh quit                         # no crash on shutdown save
+```
+
+## Example: One-Shot Assertion Script
+
+Run all three fast checks in sequence — suitable for CI.
+
+```bash
+set -e
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
+scripts/tui-uat.sh launch --fresh --local
+scripts/tui-uat.sh view settings
+scripts/tui-uat.sh theme-set gruvbox
+scripts/tui-uat.sh db-assert tui.theme gruvbox
+scripts/tui-uat.sh view generate
+scripts/tui-uat.sh assert "flux2-klein"
+scripts/tui-uat.sh view gallery && scripts/tui-uat.sh assert "Gallery"
+scripts/tui-uat.sh view queue && scripts/tui-uat.sh assert "Queue"
+scripts/tui-uat.sh view models && scripts/tui-uat.sh assert "FAMILY"
 scripts/tui-uat.sh quit
 ```
