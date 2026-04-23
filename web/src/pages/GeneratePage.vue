@@ -19,12 +19,15 @@ import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { decideChainRouting } from "../lib/chainRouting";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
+  ChainStageWire,
   ExpandFormState,
   GalleryImage,
   ModelInfoExtended,
   ServerCapabilities,
   SourceImageState,
 } from "../types";
+import type { ChainScriptToml } from "../lib/chainToml";
+import type { ComposerMode } from "../components/Composer.vue";
 
 type ViewMode = "feed" | "grid";
 
@@ -71,6 +74,26 @@ const capabilities = ref<ServerCapabilities>({
 const showSettings = ref(false);
 const showExpand = ref(false);
 const showPicker = ref(false);
+
+function loadComposerMode(): ComposerMode {
+  try {
+    const v = localStorage.getItem("mold.composer.mode");
+    return v === "script" ? "script" : "single";
+  } catch {
+    return "single";
+  }
+}
+const composerMode = ref<ComposerMode>(loadComposerMode());
+function setComposerMode(v: ComposerMode) {
+  composerMode.value = v;
+  try {
+    localStorage.setItem("mold.composer.mode", v);
+  } catch {
+    /* ignore */
+  }
+}
+
+const expandStageIndex = ref<number | null>(null);
 
 // Drawer state (mirrors GalleryPage).
 const selected = ref<GalleryImage | null>(null);
@@ -219,6 +242,42 @@ function onSubmit() {
   stream.submit(req, decision);
 }
 
+function onSubmitScript(script: ChainScriptToml) {
+  const stages: ChainStageWire[] = script.stage.map((s) => ({
+    prompt: s.prompt,
+    frames: s.frames,
+    transition: s.transition,
+    fade_frames: s.fade_frames,
+    negative_prompt: s.negative_prompt,
+    seed_offset: s.seed_offset,
+  }));
+  const req = {
+    model: script.chain.model,
+    stages,
+    motion_tail_frames: script.chain.motion_tail_frames,
+    width: script.chain.width,
+    height: script.chain.height,
+    fps: script.chain.fps,
+    seed: script.chain.seed ?? null,
+    steps: script.chain.steps,
+    guidance: script.chain.guidance,
+    strength: script.chain.strength,
+    output_format: script.chain.output_format,
+  };
+  const decision = {
+    kind: "chain" as const,
+    clipFrames: stages[0]?.frames ?? 97,
+    motionTail: script.chain.motion_tail_frames,
+    stageCount: stages.length,
+  };
+  stream.submit(req as never, decision);
+}
+
+function onExpandStage(stageIndex: number) {
+  expandStageIndex.value = stageIndex;
+  showExpand.value = true;
+}
+
 function onClearSource() {
   form.state.value.sourceImage = null;
 }
@@ -333,6 +392,7 @@ onBeforeUnmount(() => {
     <div class="mt-4 sm:mt-6">
       <Composer
         v-model="form.state.value"
+        :mode="composerMode"
         :queue-depth="status?.queue_depth ?? null"
         :queue-capacity="status?.queue_capacity ?? null"
         :gpus="gpus"
@@ -342,8 +402,11 @@ onBeforeUnmount(() => {
         :placement-gpus="gpuListForPlacement"
         :chain-decision="chainDecision"
         @submit="onSubmit"
+        @submit-script="onSubmitScript"
+        @update:mode="setComposerMode"
         @open-settings="showSettings = true"
         @open-expand="showExpand = true"
+        @open-expand-stage="onExpandStage"
         @open-image-picker="showPicker = true"
         @clear-source="onClearSource"
       />
