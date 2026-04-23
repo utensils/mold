@@ -217,14 +217,21 @@ export interface SseCompleteEvent {
 }
 
 // ── Chained video generation (POST /api/generate/chain/stream) ────────────
-// Mirrors `mold_core::chain::{ChainRequest, ChainProgressEvent,
-// SseChainCompleteEvent}`. The SPA only uses the auto-expand form in v1
-// (single prompt across all stages), so `stages` is never populated here —
-// the server expands `prompt`/`total_frames`/`clip_frames` into canonical
-// stages on the wire.
+// Mirrors `mold_core::chain::{ChainRequest, ChainStage,
+// ChainProgressEvent, SseChainCompleteEvent}`.
+export interface ChainStageWire {
+  prompt: string;
+  frames: number;
+  source_image?: string | null;
+  negative_prompt?: string | null;
+  seed_offset?: number | null;
+  transition?: "smooth" | "cut" | "fade";
+  fade_frames?: number | null;
+}
+
 export interface ChainRequestWire {
   model: string;
-  stages?: never; // SPA always auto-expands; server populates stages
+  stages?: ChainStageWire[];
   motion_tail_frames?: number;
   width: number;
   height: number;
