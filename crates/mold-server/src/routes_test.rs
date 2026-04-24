@@ -2184,13 +2184,7 @@ mod tests {
         let db_handle_for_assert = state.metadata_db.clone();
         let app = app_with_state(state);
 
-        // Delete is opt-in via env var. The handler reads it on each request
-        // so we must keep the env set while the request is in flight — and
-        // hold the env_lock to serialize against any other test that pokes
-        // process env. The function-level
-        // `#[allow(clippy::await_holding_lock)]` covers the await below.
-        let _lock = env_lock().lock().unwrap();
-        std::env::set_var("MOLD_GALLERY_ALLOW_DELETE", "1");
+        // Delete is always enabled — no env var gating.
         let resp = app
             .oneshot(
                 Request::builder()
@@ -2201,8 +2195,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("MOLD_GALLERY_ALLOW_DELETE");
-        drop(_lock);
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert!(!target.exists(), "file should be removed from disk");
         let db_after = db_handle_for_assert.as_ref().as_ref().unwrap();

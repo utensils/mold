@@ -35,21 +35,14 @@ export async function deleteGalleryImage(filename: string): Promise<void> {
       method: "DELETE",
     },
   );
-  if (res.status === 403) {
-    throw new Error(
-      "Delete is disabled on this server (set MOLD_GALLERY_ALLOW_DELETE=1 on the host).",
-    );
-  }
   if (!res.ok && res.status !== 204) {
     throw new Error(`DELETE failed: ${res.status} ${res.statusText}`);
   }
 }
 
 /**
- * Fetch server capabilities. The SPA uses these to decide which UI
- * affordances to surface — e.g. hiding the delete button when the operator
- * hasn't opted in. Returns safe defaults if the server is too old to know
- * about the endpoint.
+ * Fetch server capabilities. Delete is always enabled on current builds;
+ * the capability struct is kept so older clients still see a stable shape.
  */
 export async function fetchCapabilities(): Promise<ServerCapabilities> {
   try {
@@ -62,7 +55,7 @@ export async function fetchCapabilities(): Promise<ServerCapabilities> {
 }
 
 function defaultCapabilities(): ServerCapabilities {
-  return { gallery: { can_delete: false } };
+  return { gallery: { can_delete: true } };
 }
 
 export interface ChainLimits {

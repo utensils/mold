@@ -100,12 +100,28 @@ function updateOutputFormat(v: string) {
 
 const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
 
+// The composer exposes a single "🖼️" image button above the mode toggle so
+// users can attach a source image from either mode without hunting for a
+// different control. In Single mode this opens the global picker (wires
+// into form.sourceImage). In Script mode, the per-stage pickers are still
+// the primary affordance, but users expect a persistent toolbar entry —
+// we route the click to the first stage's picker so it has a sensible
+// target and the user doesn't have to scroll to find stage 1's attach
+// button.
+function onImageButton() {
+  if (props.mode === "script") {
+    scriptComposerRef.value?.openStagePicker(0);
+    return;
+  }
+  emit("open-image-picker");
+}
+
 defineExpose({ scriptComposerRef });
 </script>
 
 <template>
   <div class="glass flex flex-col gap-2 rounded-3xl p-4">
-    <div class="mb-1 flex items-center gap-1">
+    <div class="mb-1 flex items-center gap-2">
       <div class="inline-flex rounded-full bg-slate-900/60 p-0.5">
         <button
           type="button"
@@ -122,6 +138,41 @@ defineExpose({ scriptComposerRef });
           @click="emit('update:mode', 'script')"
         >
           Script
+        </button>
+      </div>
+
+      <!-- Global icon toolbar. Always rendered so users find the image
+           picker and settings in the same place regardless of mode. The
+           per-stage prompt enhancer (✨) and per-stage image pickers in
+           Script mode remain the primary affordances inside each stage;
+           these toolbar buttons exist so users can act on the first
+           stage without scrolling, and so Single/Script feel symmetric. -->
+      <div class="ml-auto flex gap-1">
+        <button
+          type="button"
+          class="icon-btn"
+          aria-label="Attach source image"
+          :title="
+            mode === 'script'
+              ? 'Attach source image to the first stage'
+              : 'Attach source image'
+          "
+          @click="onImageButton"
+        >
+          🖼️
+        </button>
+        <button
+          type="button"
+          class="icon-btn relative"
+          aria-label="Settings"
+          title="Settings"
+          @click="emit('open-settings')"
+        >
+          ⚙
+          <span
+            v-if="settingsDirty"
+            class="absolute right-1 top-1 h-2 w-2 rounded-full bg-brand-400"
+          ></span>
         </button>
       </div>
     </div>
@@ -191,31 +242,11 @@ defineExpose({ scriptComposerRef });
           <button
             type="button"
             class="icon-btn"
-            aria-label="Attach source image"
-            @click="emit('open-image-picker')"
-          >
-            🖼️
-          </button>
-          <button
-            type="button"
-            class="icon-btn"
             :class="{ 'text-brand-400': expandActive }"
             aria-label="Prompt expansion"
             @click="emit('open-expand')"
           >
             ✨
-          </button>
-          <button
-            type="button"
-            class="icon-btn relative"
-            aria-label="Settings"
-            @click="emit('open-settings')"
-          >
-            ⚙
-            <span
-              v-if="settingsDirty"
-              class="absolute right-1 top-1 h-2 w-2 rounded-full bg-brand-400"
-            ></span>
           </button>
         </div>
       </div>
