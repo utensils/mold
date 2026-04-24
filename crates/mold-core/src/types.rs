@@ -2361,15 +2361,12 @@ fn is_false(b: &bool) -> bool {
 
 /// Server-reported capabilities the SPA uses to decide which UI affordances
 /// to surface. Additive — clients that deserialize older responses simply
-/// see `None` for fields they don't know about. Opt-in destructive
-/// operations (like gallery delete) default to `false` so a client that
-/// forgets to check gets the safe behavior.
+/// see `None` for fields they don't know about.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GalleryCapabilities {
     /// Whether `DELETE /api/gallery/image/:filename` is allowed by the
-    /// server configuration. Operators opt in via
-    /// `MOLD_GALLERY_ALLOW_DELETE=1` (combined with the existing API-key
-    /// middleware when the server is exposed beyond localhost).
+    /// server. Always `true` on current builds; kept as a capability field
+    /// so older clients that still check it continue to work.
     pub can_delete: bool,
 }
 
