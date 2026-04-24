@@ -18,6 +18,49 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MoldError, Result};
 use crate::types::{DevicePlacement, OutputFormat, VideoData};
 
+/// How the boundary between the previous stage and this stage is rendered.
+///
+/// - `Smooth`: the engine honors the motion-tail latent carryover from the
+///   prior clip (v1 default behaviour). Produces a visual morph when the
+///   prompt changes.
+/// - `Cut`: fresh latent, no carryover. If the stage has a `source_image`
+///   the engine uses it as the i2v seed; otherwise pure t2v.
+/// - `Fade`: same engine path as `Cut`, plus a post-stitch alpha blend of
+///   the last `fade_frames` of the prior clip with the first `fade_frames`
+///   of this clip.
+///
+/// Stage 0's transition is meaningless (nothing to transition from) and is
+/// coerced to `Smooth` during `ChainRequest::normalise`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionMode {
+    #[default]
+    Smooth,
+    Cut,
+    Fade,
+}
+
+/// Per-stage LoRA adapter spec. **Reserved for sub-project B** — populating
+/// this in a request before B lands causes `ChainRequest::normalise` to
+/// return 422. Defined now so scripts that round-trip through v1 clients
+/// don't drop fields silently.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LoraSpec {
+    pub path: String,
+    pub scale: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Per-stage named reference character/style. **Reserved for sub-project
+/// B** — populating this causes `ChainRequest::normalise` to return 422.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct NamedRef {
+    pub name: String,
+    #[serde(with = "crate::types::base64_bytes")]
+    pub image: Vec<u8>,
+}
+
 /// A single rendered clip in a chain. Concatenated in order with motion-tail
 /// trimming on continuations (stages with `idx >= 1` drop the leading
 /// `motion_tail_frames` pixel frames of their output because those duplicate
@@ -58,6 +101,32 @@ pub struct ChainStage {
     /// different seed".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed_offset: Option<u64>,
+
+    // NEW in multi-prompt v2 ───────────────────────────────────────────
+    /// Boundary style between the previous stage and this stage.
+    /// Stage 0's value is coerced to `Smooth` in `normalise`.
+    #[serde(default)]
+    pub transition: TransitionMode,
+
+    /// Length in pixel frames of the crossfade when `transition == Fade`.
+    /// `None` means use the server-announced default (8 frames). Capped
+    /// at `fade_frames_max` from `/api/capabilities/chain-limits`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade_frames: Option<u32>,
+
+    // RESERVED for B/C — populated values are rejected by normalise ───
+    /// **Reserved for sub-project C.** Populating this in a request
+    /// produces 422 in this release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// **Reserved for sub-project B.** Non-empty values produce 422.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<LoraSpec>,
+
+    /// **Reserved for sub-project B.** Non-empty values produce 422.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<NamedRef>,
 }
 
 /// Chained generation request. Server accepts either the canonical form
@@ -144,6 +213,63 @@ pub struct ChainRequest {
     pub source_image: Option<Vec<u8>>,
 }
 
+/// Canonical TOML-shaped projection of a normalised [`ChainRequest`].
+///
+/// Echoed back in [`ChainResponse::script`] so clients can save the exact
+/// form that was rendered without re-serialising the request body (which
+/// carries auto-expand sugar and other transport-only fields).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainScript {
+    pub schema: String, // always "mold.chain.v1"
+    pub chain: ChainScriptChain,
+    #[serde(rename = "stage")]
+    pub stages: Vec<ChainStage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainScriptChain {
+    pub model: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    pub steps: u32,
+    pub guidance: f64,
+    pub strength: f64,
+    pub motion_tail_frames: u32,
+    pub output_format: OutputFormat,
+}
+
+impl From<&ChainRequest> for ChainScript {
+    fn from(req: &ChainRequest) -> Self {
+        ChainScript {
+            schema: "mold.chain.v1".into(),
+            chain: ChainScriptChain {
+                model: req.model.clone(),
+                width: req.width,
+                height: req.height,
+                fps: req.fps,
+                seed: req.seed,
+                steps: req.steps,
+                guidance: req.guidance,
+                strength: req.strength,
+                motion_tail_frames: req.motion_tail_frames,
+                output_format: req.output_format,
+            },
+            stages: req.stages.clone(),
+        }
+    }
+}
+
+/// VRAM feasibility estimate — populated by sub-project D. `None` in this
+/// release.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct VramEstimate {
+    pub worst_case_bytes: u64,
+    pub fits: bool,
+}
+
 /// Response from a chained generation request. The `video` is the stitched
 /// output; individual per-stage clips are not returned.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -156,6 +282,15 @@ pub struct ChainResponse {
     /// GPU ordinal that handled the chain (multi-GPU servers only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<usize>,
+
+    // NEW ──────────────────────────────────────────────────────────────
+    /// Canonical TOML-shaped echo of the rendered script. Clients can save
+    /// this directly as a `.toml` file.
+    pub script: ChainScript,
+
+    /// Reserved for sub-project D; `None` in this release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_estimate: Option<VramEstimate>,
 }
 
 /// SSE completion event for a successful chain run. Streamed as the final
@@ -201,6 +336,14 @@ pub struct SseChainCompleteEvent {
     /// Wall-clock elapsed time across all stages + stitching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_time_ms: Option<u64>,
+    /// Canonical echo of the normalised chain request, so streaming clients
+    /// can save/reload the rendered script without re-serialising the
+    /// transport-only fields in the submitted request body.
+    #[serde(default)]
+    pub script: ChainScript,
+    /// Reserved for sub-project D; `None` in this release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_estimate: Option<VramEstimate>,
 }
 
 /// Chain-specific SSE progress event. Streamed as `data:` JSON frames from
@@ -235,6 +378,28 @@ pub enum ChainProgressEvent {
     StageDone { stage_idx: u32, frames_emitted: u32 },
     /// All stages complete; stitching/encoding the final MP4.
     Stitching { total_frames: u32 },
+}
+
+/// Structured error payload returned in the 502 response body when a chain
+/// stage fails mid-run. Allows UIs to show actionable retry hints (e.g.,
+/// "stage 2 of 5 failed — retry from here").
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainFailure {
+    /// Human-readable summary of where the failure landed.
+    #[schema(example = "stage render failed")]
+    pub error: String,
+    /// Zero-based index of the stage whose render returned Err.
+    #[schema(example = 2)]
+    pub failed_stage_idx: u32,
+    /// Number of stages that completed successfully before the failure.
+    #[schema(example = 2)]
+    pub elapsed_stages: u32,
+    /// Cumulative generation time across the completed stages, in ms.
+    #[schema(example = 12_340)]
+    pub elapsed_ms: u64,
+    /// Inner error message from the orchestrator (`format!("{e:#}")`).
+    #[schema(example = "simulated GPU OOM on stage 2")]
+    pub stage_error: String,
 }
 
 fn default_motion_tail_frames() -> u32 {
@@ -339,6 +504,37 @@ impl ChainRequest {
             }
         }
 
+        // Reserved-field rejection (sub-projects B/C).
+        for (idx, stage) in self.stages.iter().enumerate() {
+            if stage.model.is_some() {
+                return Err(MoldError::Validation(format!(
+                    "stages[{idx}].model is reserved for sub-project C and not yet supported"
+                )));
+            }
+            if !stage.loras.is_empty() {
+                return Err(MoldError::Validation(format!(
+                    "stages[{idx}].loras is reserved for sub-project B and not yet supported"
+                )));
+            }
+            if !stage.references.is_empty() {
+                return Err(MoldError::Validation(format!(
+                    "stages[{idx}].references is reserved for sub-project B and not yet supported"
+                )));
+            }
+        }
+
+        // Stage 0's transition is meaningless (nothing to transition from).
+        // Coerce to Smooth with a warn so scripts survive reorders.
+        if let Some(first) = self.stages.first_mut() {
+            if first.transition != TransitionMode::Smooth {
+                tracing::warn!(
+                    coerced_from = ?first.transition,
+                    "stage 0 transition is meaningless; coercing to Smooth"
+                );
+                first.transition = TransitionMode::Smooth;
+            }
+        }
+
         // Canonicalise: clear auto-expand fields so downstream code only
         // ever reads from `stages`.
         self.prompt = None;
@@ -347,6 +543,39 @@ impl ChainRequest {
         self.source_image = None;
 
         Ok(self)
+    }
+
+    /// Predicted stitched frame count *before* any top-level `total_frames`
+    /// trim. Used by UIs for the footer summary and by the server to size
+    /// the final buffer.
+    ///
+    /// Per-boundary rule:
+    /// - smooth: drop leading `motion_tail_frames` of the incoming clip
+    /// - cut: no trim
+    /// - fade: replace `2 * fade_len` frames (trailing of prior + leading of
+    ///   next) with `fade_len` blended frames → net `-fade_len`
+    pub fn estimated_total_frames(&self) -> u32 {
+        const DEFAULT_FADE_FRAMES: u32 = 8;
+        let mut total: u32 = 0;
+        for (idx, stage) in self.stages.iter().enumerate() {
+            if idx == 0 {
+                total += stage.frames;
+                continue;
+            }
+            match stage.transition {
+                TransitionMode::Smooth => {
+                    total += stage.frames.saturating_sub(self.motion_tail_frames);
+                }
+                TransitionMode::Cut => {
+                    total += stage.frames;
+                }
+                TransitionMode::Fade => {
+                    let fade_len = stage.fade_frames.unwrap_or(DEFAULT_FADE_FRAMES);
+                    total += stage.frames.saturating_sub(fade_len);
+                }
+            }
+        }
+        total
     }
 }
 
@@ -415,6 +644,11 @@ fn build_auto_expand_stages(
             source_image: source_image.clone(),
             negative_prompt: None,
             seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
         });
     }
     Ok(stages)
@@ -482,6 +716,11 @@ mod tests {
             source_image: None,
             negative_prompt: None,
             seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
         }
     }
 
@@ -724,5 +963,277 @@ mod tests {
                 "{expected_n} stages deliver {delivered} frames but {total} were requested",
             );
         }
+    }
+
+    #[test]
+    fn transition_mode_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(TransitionMode::Smooth).unwrap(),
+            serde_json::Value::String("smooth".into())
+        );
+        assert_eq!(
+            serde_json::to_value(TransitionMode::Cut).unwrap(),
+            serde_json::Value::String("cut".into())
+        );
+        assert_eq!(
+            serde_json::to_value(TransitionMode::Fade).unwrap(),
+            serde_json::Value::String("fade".into())
+        );
+    }
+
+    #[test]
+    fn transition_mode_defaults_to_smooth() {
+        assert_eq!(TransitionMode::default(), TransitionMode::Smooth);
+    }
+
+    #[test]
+    fn lora_spec_serializes_minimal() {
+        let spec = LoraSpec {
+            path: "./style.safetensors".into(),
+            scale: 0.8,
+            name: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""path":"./style.safetensors""#));
+        assert!(json.contains(r#""scale":0.8"#));
+        // name omitted
+        assert!(!json.contains(r#""name""#));
+    }
+
+    #[test]
+    fn named_ref_serializes_minimal() {
+        let r = NamedRef {
+            name: "hero".into(),
+            image: vec![0x89, 0x50],
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        // base64-encoded image via the existing base64 helper
+        assert!(json.contains(r#""name":"hero""#));
+        assert!(json.contains(r#""image":"#));
+    }
+
+    #[test]
+    fn chain_stage_defaults_are_backcompat() {
+        // Parsing a v1-shaped stage (no new fields) yields the same structure
+        // with defaults applied.
+        let json = r#"{
+            "prompt": "a cat",
+            "frames": 97
+        }"#;
+        let stage: ChainStage = serde_json::from_str(json).unwrap();
+        assert_eq!(stage.prompt, "a cat");
+        assert_eq!(stage.frames, 97);
+        assert_eq!(stage.transition, TransitionMode::Smooth);
+        assert_eq!(stage.fade_frames, None);
+        assert!(stage.model.is_none());
+        assert!(stage.loras.is_empty());
+        assert!(stage.references.is_empty());
+    }
+
+    #[test]
+    fn chain_script_projects_from_request() {
+        let req = ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".into(),
+            stages: vec![ChainStage {
+                prompt: "a".into(),
+                frames: 97,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Smooth,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            }],
+            motion_tail_frames: 25,
+            width: 1216,
+            height: 704,
+            fps: 24,
+            seed: Some(42),
+            steps: 8,
+            guidance: 3.0,
+            strength: 1.0,
+            output_format: OutputFormat::Mp4,
+            placement: None,
+            prompt: None,
+            total_frames: None,
+            clip_frames: None,
+            source_image: None,
+        };
+        let script = ChainScript::from(&req);
+        assert_eq!(script.chain.model, "ltx-2-19b-distilled:fp8");
+        assert_eq!(script.chain.seed, Some(42));
+        assert_eq!(script.stages.len(), 1);
+        assert_eq!(script.stages[0].prompt, "a");
+    }
+
+    #[test]
+    fn chain_stage_roundtrips_all_fields() {
+        let stage = ChainStage {
+            prompt: "scene".into(),
+            frames: 49,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Cut,
+            fade_frames: Some(12),
+            model: None,
+            loras: vec![],
+            references: vec![],
+        };
+        let json = serde_json::to_string(&stage).unwrap();
+        let back: ChainStage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.frames, 49);
+        assert_eq!(back.transition, TransitionMode::Cut);
+        assert_eq!(back.fade_frames, Some(12));
+    }
+
+    #[test]
+    fn normalise_coerces_stage_0_transition_to_smooth() {
+        let mut req = auto_expand_request("a", 97, 97, 25, None);
+        req.stages = vec![
+            ChainStage {
+                prompt: "scene 0".into(),
+                frames: 97,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Cut, // should coerce
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            },
+            ChainStage {
+                prompt: "scene 1".into(),
+                frames: 97,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Cut, // preserved
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            },
+        ];
+        let normalised = req.normalise().unwrap();
+        assert_eq!(normalised.stages[0].transition, TransitionMode::Smooth);
+        assert_eq!(normalised.stages[1].transition, TransitionMode::Cut);
+    }
+
+    #[test]
+    fn normalise_rejects_reserved_model_field() {
+        let mut req = auto_expand_request("a", 97, 97, 25, None);
+        req.stages = vec![ChainStage {
+            prompt: "x".into(),
+            frames: 97,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: Some("flux-dev:q4".into()),
+            loras: vec![],
+            references: vec![],
+        }];
+        let err = req.normalise().unwrap_err().to_string();
+        assert!(err.contains("reserved for sub-project C"), "got: {err}");
+    }
+
+    #[test]
+    fn normalise_rejects_reserved_loras_field() {
+        let mut req = auto_expand_request("a", 97, 97, 25, None);
+        req.stages = vec![ChainStage {
+            prompt: "x".into(),
+            frames: 97,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![LoraSpec {
+                path: "x.safetensors".into(),
+                scale: 1.0,
+                name: None,
+            }],
+            references: vec![],
+        }];
+        let err = req.normalise().unwrap_err().to_string();
+        assert!(err.contains("reserved for sub-project B"), "got: {err}");
+    }
+
+    fn stage_list_request(stages: Vec<(TransitionMode, u32, Option<u32>)>) -> ChainRequest {
+        ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".into(),
+            stages: stages
+                .into_iter()
+                .map(|(t, f, fl)| ChainStage {
+                    prompt: "x".into(),
+                    frames: f,
+                    source_image: None,
+                    negative_prompt: None,
+                    seed_offset: None,
+                    transition: t,
+                    fade_frames: fl,
+                    model: None,
+                    loras: vec![],
+                    references: vec![],
+                })
+                .collect(),
+            motion_tail_frames: 25,
+            width: 1216,
+            height: 704,
+            fps: 24,
+            seed: None,
+            steps: 8,
+            guidance: 3.0,
+            strength: 1.0,
+            output_format: OutputFormat::Mp4,
+            placement: None,
+            prompt: None,
+            total_frames: None,
+            clip_frames: None,
+            source_image: None,
+        }
+    }
+
+    #[test]
+    fn estimated_total_all_smooth() {
+        // 3 × 97-frame smooth = 97 + (97-25) + (97-25) = 241
+        let req = stage_list_request(vec![
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Smooth, 97, None),
+        ]);
+        assert_eq!(req.estimated_total_frames(), 241);
+    }
+
+    #[test]
+    fn estimated_total_with_cut() {
+        // 97 + 97 (cut, no trim) + (97-25) (smooth after cut) = 266
+        let req = stage_list_request(vec![
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Cut, 97, None),
+            (TransitionMode::Smooth, 97, None),
+        ]);
+        assert_eq!(req.estimated_total_frames(), 266);
+    }
+
+    #[test]
+    fn estimated_total_with_fade() {
+        // 97 + 97 + (97 - fade 8) fade consumes from both sides, net -fade_len
+        // Actually: fade replaces the trailing fade_len of clip N + leading
+        // fade_len of clip N+1 with fade_len blended frames.
+        // Emission = sum - 2*fade_len + fade_len = sum - fade_len
+        // = 97+97+97 - 8 = 283
+        let req = stage_list_request(vec![
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Cut, 97, None),
+            (TransitionMode::Fade, 97, Some(8)),
+        ]);
+        assert_eq!(req.estimated_total_frames(), 283);
     }
 }

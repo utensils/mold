@@ -7,7 +7,9 @@
 //! the server side lands in Phase 2.
 
 use base64::Engine as _;
-use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, SseChainCompleteEvent};
+use mold_core::chain::{
+    ChainProgressEvent, ChainRequest, ChainScript, ChainStage, SseChainCompleteEvent,
+};
 use mold_core::error::MoldError;
 use mold_core::types::OutputFormat;
 use mold_core::MoldClient;
@@ -28,6 +30,11 @@ fn sample_request() -> ChainRequest {
             source_image: None,
             negative_prompt: None,
             seed_offset: None,
+            transition: mold_core::chain::TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
         }],
         motion_tail_frames: 4,
         width: 1216,
@@ -57,7 +64,22 @@ fn minimal_chain_response_json() -> serde_json::Value {
             "fps": 24,
             "thumbnail": []
         },
-        "stage_count": 1
+        "stage_count": 1,
+        "script": {
+            "schema": "mold.chain.v1",
+            "chain": {
+                "model": "ltx-2-19b-distilled:fp8",
+                "width": 1216,
+                "height": 704,
+                "fps": 24,
+                "steps": 8,
+                "guidance": 3.0,
+                "strength": 1.0,
+                "motion_tail_frames": 4,
+                "output_format": "mp4"
+            },
+            "stage": []
+        }
     })
 }
 
@@ -176,6 +198,7 @@ async fn generate_chain_stream_parses_progress_and_complete_events() {
     let b64 = base64::engine::general_purpose::STANDARD;
     let video_bytes = b"FAKE_MP4_BYTES";
     let thumb_bytes = b"THUMB";
+    let script = ChainScript::default();
     let complete = SseChainCompleteEvent {
         video: b64.encode(video_bytes),
         format: OutputFormat::Mp4,
@@ -192,6 +215,8 @@ async fn generate_chain_stream_parses_progress_and_complete_events() {
         stage_count: 1,
         gpu: Some(0),
         generation_time_ms: Some(45_000),
+        script: script.clone(),
+        vram_estimate: None,
     };
     let progress = ChainProgressEvent::DenoiseStep {
         stage_idx: 0,
@@ -229,6 +254,8 @@ async fn generate_chain_stream_parses_progress_and_complete_events() {
     assert_eq!(resp.video.data, video_bytes);
     assert_eq!(resp.video.thumbnail, thumb_bytes);
     assert_eq!(resp.gpu, Some(0));
+    assert_eq!(resp.script.schema, script.schema);
+    assert!(resp.vram_estimate.is_none());
     let ev = rx.recv().await.expect("progress event should be forwarded");
     assert_eq!(ev, progress);
 }

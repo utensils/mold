@@ -242,6 +242,11 @@ pub(crate) async fn ensure_model_ready(
                     to = %model_name,
                     "unloaded active model to reload cached model"
                 );
+                // Legacy no-worker path only: hardcoded ordinal 0 is safe here
+                // because `state.model_load_lock` (taken above) is the only
+                // lock protecting GPU 0's primary context on this path — the
+                // GpuPool path uses `worker.model_load_lock` and
+                // `reclaim_gpu_memory(worker.gpu.ordinal)` via `gpu_worker`.
                 mold_inference::reclaim_gpu_memory(0);
             }
 
@@ -381,6 +386,11 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
             }
             update_snapshot(state, &cache).await;
             drop(cache);
+            // Legacy no-worker path only: hardcoded ordinal 0 is safe here
+            // because `state.model_load_lock` (taken above) is the only
+            // lock protecting GPU 0's primary context on this path — the
+            // GpuPool path uses `worker.model_load_lock` and
+            // `reclaim_gpu_memory(worker.gpu.ordinal)` via `gpu_worker`.
             mold_inference::reclaim_gpu_memory(0);
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
@@ -423,6 +433,11 @@ async fn create_and_load_engine(
         result.is_some()
     };
     if had_active {
+        // Legacy no-worker path only: hardcoded ordinal 0 is safe here
+        // because `state.model_load_lock` (taken above) is the only
+        // lock protecting GPU 0's primary context on this path — the
+        // GpuPool path uses `worker.model_load_lock` and
+        // `reclaim_gpu_memory(worker.gpu.ordinal)` via `gpu_worker`.
         mold_inference::reclaim_gpu_memory(0);
     }
 

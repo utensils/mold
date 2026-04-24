@@ -7,6 +7,7 @@ pub mod popup;
 pub mod progress;
 pub mod queue;
 pub mod recent;
+pub mod script_composer;
 pub mod settings;
 pub mod theme;
 pub mod widgets;
@@ -54,6 +55,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::Models => models::render(frame, app, layout[1]),
         View::Queue => queue::render(frame, app, layout[1]),
         View::Settings => settings::render(frame, app, layout[1]),
+        View::Script => script_composer::render(frame, &app.script, layout[1], &app.theme),
     }
 
     // ── Status bar ──────────────────────────────────────────────
@@ -276,7 +278,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 generating_shortcuts(status, app.generate.focus)
             } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
                 vec![
-                    ("1-5", "Views"),
+                    ("1-6", "Views"),
                     ("Alt+\u{2190}\u{2192}", "Views"),
                     ("Enter", "Edit"),
                     ("?", "Help"),
@@ -336,7 +338,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         View::Models => vec![
-            ("1-5", "Views"),
+            ("1-6", "Views"),
             ("Enter", "Select"),
             ("p", "Pull"),
             ("u", "Unload"),
@@ -345,7 +347,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             ("q", "Quit"),
         ],
         View::Queue => vec![
-            ("1-5", "Views"),
+            ("1-6", "Views"),
             ("Esc", "Back"),
             ("?", "Help"),
             ("q", "Quit"),
@@ -370,6 +372,14 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 ]
             }
         }
+        View::Script => vec![
+            ("j/k", "Navigate"),
+            ("a/d", "Add/Del"),
+            ("t", "Transition"),
+            ("i", "Prompt"),
+            ("f", "Frames"),
+            ("Esc", "Back"),
+        ],
     };
 
     let mut spans = Vec::new();
@@ -400,7 +410,7 @@ pub(crate) fn generating_shortcuts(
     status: &str,
     focus: crate::app::GenerateFocus,
 ) -> Vec<(&str, &str)> {
-    let mut v = vec![("", status), ("Alt+1-5", "Views"), ("Esc", "Unfocus")];
+    let mut v = vec![("", status), ("Alt+1-6", "Views"), ("Esc", "Unfocus")];
     if !matches!(
         focus,
         crate::app::GenerateFocus::Prompt | crate::app::GenerateFocus::NegativePrompt

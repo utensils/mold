@@ -15,7 +15,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use candle_core::Tensor;
 use image::RgbImage;
-use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage};
+use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
 use mold_core::{GenerateRequest, OutputFormat};
 
 use crate::ltx2::model::shapes::SpatioTemporalScaleFactors;
@@ -111,6 +111,45 @@ pub fn extract_tail_latents(final_latents: &Tensor, pixel_frames: u32) -> Result
         .with_context(|| format!("narrow last {tail} latent frames off time axis"))
 }
 
+/// Typed error returned by [`Ltx2ChainOrchestrator::run`].
+#[derive(Debug)]
+pub enum ChainOrchestratorError {
+    /// Request failed pre-flight validation (empty stages, bad motion_tail).
+    Invalid(anyhow::Error),
+    /// A stage render call returned `Err` mid-chain.
+    StageFailed {
+        stage_idx: u32,
+        elapsed_stages: u32,
+        elapsed_ms: u64,
+        inner: anyhow::Error,
+    },
+}
+
+impl std::fmt::Display for ChainOrchestratorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(e) => write!(f, "chain validation error: {e:#}"),
+            Self::StageFailed {
+                stage_idx,
+                elapsed_stages,
+                inner,
+                ..
+            } => write!(
+                f,
+                "chain stage {stage_idx} failed after {elapsed_stages} completed stage(s): {inner:#}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ChainOrchestratorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Invalid(e) | Self::StageFailed { inner: e, .. } => Some(e.as_ref()),
+        }
+    }
+}
+
 // ── Orchestrator: loops stages, drops motion-tail prefix, accumulates frames
 
 /// Per-stage progress events the orchestrator observes from the renderer.
@@ -147,17 +186,17 @@ pub trait ChainStageRenderer {
     ) -> Result<StageOutcome>;
 }
 
-/// Output of an end-to-end chain run: accumulated RGB frames with motion-
-/// tail prefix already trimmed on continuations, the number of stages
-/// that ran, and the total elapsed render time.
+/// Output of an end-to-end chain run.
 ///
-/// The orchestrator does *not* trim to a target total frame count or
-/// encode the frames into an output video — those are the caller's job
-/// (server / CLI). Keeps the orchestrator single-purpose: produce a
-/// coherent frame stream from a stages list.
+/// The orchestrator no longer trims motion-tail prefixes at run time —
+/// that moved into [`super::stitch::StitchPlan::assemble`] so the stitch
+/// logic can also implement `Cut` (no trim) and `Fade` (post-stitch alpha
+/// blend) on the same per-boundary seam.
 #[derive(Debug)]
 pub struct ChainRunOutput {
-    pub frames: Vec<RgbImage>,
+    /// Per-stage frame vectors in stage order, each containing the full
+    /// un-trimmed pixel clip emitted by the renderer.
+    pub stage_frames: Vec<Vec<RgbImage>>,
     pub stage_count: u32,
     pub generation_time_ms: u64,
 }
@@ -189,11 +228,13 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
         &mut self,
         req: &ChainRequest,
         mut chain_progress: Option<&mut dyn FnMut(ChainProgressEvent)>,
-    ) -> Result<ChainRunOutput> {
+    ) -> std::result::Result<ChainRunOutput, ChainOrchestratorError> {
         if req.stages.is_empty() {
-            bail!("Ltx2ChainOrchestrator::run: chain request has no stages");
+            return Err(ChainOrchestratorError::Invalid(anyhow::anyhow!(
+                "Ltx2ChainOrchestrator::run: chain request has no stages"
+            )));
         }
-        validate_motion_tail(req)?;
+        validate_motion_tail(req).map_err(ChainOrchestratorError::Invalid)?;
 
         let stage_count = req.stages.len() as u32;
         let estimated_total_frames = estimate_stitched_frames(req);
@@ -205,8 +246,7 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
         }
 
         let base_seed = req.seed.unwrap_or(0);
-        let motion_tail_drop = req.motion_tail_frames as usize;
-        let mut accumulated_frames: Vec<RgbImage> = Vec::new();
+        let mut stage_frames: Vec<Vec<RgbImage>> = Vec::with_capacity(req.stages.len());
         let mut total_generation_ms: u64 = 0;
         let mut carry: Option<ChainTail> = None;
 
@@ -219,12 +259,22 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
             let stage_seed = derive_stage_seed(base_seed, idx, stage);
             let stage_req = build_stage_generate_request(stage, req, stage_seed, idx);
 
+            // Cut and Fade transitions produce a visual reset: the prior
+            // stage's motion-tail latent is NOT threaded into this stage.
+            // Smooth is the only transition that passes carry through.
+            // Carry is still captured unconditionally at the end of the loop
+            // so a later Smooth stage can pick it up.
+            let effective_carry = match stage.transition {
+                TransitionMode::Smooth => carry.as_ref(),
+                TransitionMode::Cut | TransitionMode::Fade => None,
+            };
+
             // Wrap the chain progress subscriber so per-stage denoise
             // events land on it with `stage_idx` tagged in. The wrapping
             // closure holds a mutable reborrow of the outer callback for
             // just the duration of this call — `render_stage` is
             // synchronous so the reborrow ends before the next iteration.
-            let outcome = match chain_progress.as_deref_mut() {
+            let render_result = match chain_progress.as_deref_mut() {
                 Some(chain_cb) => {
                     let mut wrapping = |event: StageProgressEvent| match event {
                         StageProgressEvent::DenoiseStep { step, total } => {
@@ -237,31 +287,27 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
                     };
                     self.renderer.render_stage(
                         &stage_req,
-                        carry.as_ref(),
+                        effective_carry,
                         req.motion_tail_frames,
                         Some(&mut wrapping),
-                    )?
+                    )
                 }
                 None => self.renderer.render_stage(
                     &stage_req,
-                    carry.as_ref(),
+                    effective_carry,
                     req.motion_tail_frames,
                     None,
-                )?,
+                ),
             };
+            let outcome = render_result.map_err(|inner| ChainOrchestratorError::StageFailed {
+                stage_idx,
+                elapsed_stages: idx as u32,
+                elapsed_ms: total_generation_ms,
+                inner,
+            })?;
 
-            let mut frames = outcome.frames;
-            if idx > 0 && motion_tail_drop > 0 {
-                if motion_tail_drop >= frames.len() {
-                    bail!(
-                        "stage {stage_idx}: emitted {} frames but motion_tail_drop={motion_tail_drop} — tail would consume the whole clip",
-                        frames.len(),
-                    );
-                }
-                frames.drain(..motion_tail_drop);
-            }
-            let frames_emitted = frames.len() as u32;
-            accumulated_frames.extend(frames);
+            let frames_emitted = outcome.frames.len() as u32;
+            stage_frames.push(outcome.frames);
             total_generation_ms = total_generation_ms.saturating_add(outcome.generation_time_ms);
             carry = Some(outcome.tail);
 
@@ -274,13 +320,14 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
         }
 
         if let Some(cb) = chain_progress.as_mut() {
+            let total: u32 = stage_frames.iter().map(|s| s.len() as u32).sum();
             cb(ChainProgressEvent::Stitching {
-                total_frames: accumulated_frames.len() as u32,
+                total_frames: total,
             });
         }
 
         Ok(ChainRunOutput {
-            frames: accumulated_frames,
+            stage_frames,
             stage_count,
             generation_time_ms: total_generation_ms,
         })
@@ -489,7 +536,7 @@ mod tests {
     // ── Orchestrator tests (fake renderer, weight-free) ───────────────
 
     use image::Rgb;
-    use mold_core::chain::ChainStage;
+    use mold_core::chain::{ChainStage, TransitionMode};
 
     /// Deterministic fake renderer for orchestrator tests. Records every
     /// call so assertions can inspect the per-stage request shape, emits
@@ -588,6 +635,11 @@ mod tests {
             source_image: None,
             negative_prompt: None,
             seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
         }
     }
 
@@ -613,15 +665,16 @@ mod tests {
     }
 
     #[test]
-    fn chain_runs_all_stages_and_drops_tail_prefix_from_continuations() {
+    fn chain_orchestrator_emits_full_per_stage_clips() {
         let stages = vec![stage("a", 97), stage("a", 97), stage("a", 97)];
         let req = chain_req(stages, 4);
         let mut renderer = FakeRenderer::new();
         let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
         let out = orch.run(&req, None).expect("chain runs");
-        // Stage 0 keeps all 97 frames; each continuation drops the
-        // leading 4 frames, so delivered = 97 + 2 * (97 - 4) = 97 + 186 = 283.
-        assert_eq!(out.frames.len(), 97 + 93 * 2);
+        // Each stage keeps its full un-trimmed frame count in the per-stage
+        // vector. Total across all stages = 97 * 3 = 291.
+        let total_frames: usize = out.stage_frames.iter().map(|s| s.len()).sum();
+        assert_eq!(total_frames, 97 * 3);
         assert_eq!(out.stage_count, 3);
         assert_eq!(renderer.calls.len(), 3);
         // Stage 0 has no carry; later stages do.
@@ -637,10 +690,11 @@ mod tests {
         let mut renderer = FakeRenderer::new();
         let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
         let out = orch.run(&req, None).expect("chain runs");
+        let total_frames: usize = out.stage_frames.iter().map(|s| s.len()).sum();
         assert_eq!(
-            out.frames.len(),
+            total_frames,
             97 * 2,
-            "zero motion tail must keep every frame on continuations",
+            "zero motion tail must keep every frame in each stage's vector",
         );
     }
 
@@ -650,10 +704,15 @@ mod tests {
         let mut renderer = FakeRenderer::new();
         let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
         let err = orch.run(&req, None).expect_err("empty stages must fail");
-        assert!(
-            format!("{err}").contains("has no stages"),
-            "error must name the missing stages, got: {err}",
-        );
+        match err {
+            ChainOrchestratorError::Invalid(inner) => {
+                assert!(
+                    format!("{inner}").contains("has no stages"),
+                    "error must name the missing stages, got: {inner}",
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
         assert!(renderer.calls.is_empty());
     }
 
@@ -670,10 +729,20 @@ mod tests {
         let err = orch
             .run(&req, None)
             .expect_err("mid-chain failure must bubble up");
-        assert!(
-            format!("{err}").contains("simulated GPU OOM"),
-            "error must carry the renderer's message, got: {err}",
-        );
+        match err {
+            ChainOrchestratorError::StageFailed {
+                stage_idx: 1,
+                elapsed_stages: 1,
+                inner,
+                ..
+            } => {
+                assert!(
+                    format!("{inner}").contains("simulated GPU OOM"),
+                    "inner error must carry the renderer's message, got: {inner}",
+                );
+            }
+            other => panic!("expected StageFailed at stage 1, got {other:?}"),
+        }
         // Stage 0 ran (recorded), stage 1 failed (recorded before bail),
         // stage 2 never ran.
         assert_eq!(renderer.calls.len(), 2);
@@ -802,10 +871,15 @@ mod tests {
         let mut renderer = FakeRenderer::new();
         let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
         let err = orch.run(&req, None).expect_err("must fail");
-        assert!(
-            format!("{err}").contains("motion_tail_frames"),
-            "error must name motion_tail_frames, got: {err}",
-        );
+        match err {
+            ChainOrchestratorError::Invalid(inner) => {
+                assert!(
+                    format!("{inner}").contains("motion_tail_frames"),
+                    "error must name motion_tail_frames, got: {inner}",
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
         // Renderer never gets called because validation runs up-front.
         assert!(renderer.calls.is_empty());
     }
@@ -826,5 +900,107 @@ mod tests {
             Some(100 ^ 0xDEADBEEFu64),
             "seed_offset must XOR into the stable base seed when a stage opts in to variation",
         );
+    }
+
+    #[test]
+    fn chain_run_output_preserves_per_stage_frames() {
+        let req = sample_chain_request(3, TransitionMode::Smooth);
+        let mut renderer = FakeRenderer::new();
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        let out = orch.run(&req, None).unwrap();
+        assert_eq!(out.stage_frames.len(), 3);
+        // Each stage holds its full un-trimmed frame count.
+        assert_eq!(out.stage_frames[0].len() as u32, req.stages[0].frames);
+        assert_eq!(out.stage_frames[1].len() as u32, req.stages[1].frames);
+        assert_eq!(out.stage_frames[2].len() as u32, req.stages[2].frames);
+    }
+
+    #[test]
+    fn orchestrator_passes_none_carry_for_cut_transition() {
+        let mut renderer = FakeRenderer::new();
+        let req = sample_chain_request(3, TransitionMode::Cut);
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        orch.run(&req, None).unwrap();
+        // Stage 0 always has None; stages 1/2 should also have None because
+        // their transition is Cut.
+        let has_carry: Vec<bool> = renderer.calls.iter().map(|c| c.has_carry).collect();
+        assert_eq!(has_carry, vec![false, false, false]);
+    }
+
+    #[test]
+    fn orchestrator_passes_some_carry_for_smooth_transition() {
+        let mut renderer = FakeRenderer::new();
+        let req = sample_chain_request(3, TransitionMode::Smooth);
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        orch.run(&req, None).unwrap();
+        let has_carry: Vec<bool> = renderer.calls.iter().map(|c| c.has_carry).collect();
+        assert_eq!(has_carry, vec![false, true, true]);
+    }
+
+    #[test]
+    fn mixed_transitions_end_to_end() {
+        let mut renderer = FakeRenderer::new();
+        let mut req = sample_chain_request(4, TransitionMode::Smooth);
+        // sample_chain_request uses motion_tail_frames=0; override so the
+        // Smooth boundary trim math has something to trim.
+        req.motion_tail_frames = 25;
+        req.stages[1].transition = TransitionMode::Smooth;
+        req.stages[2].transition = TransitionMode::Cut;
+        req.stages[3].transition = TransitionMode::Fade;
+        req.stages[3].fade_frames = Some(8);
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        let out = orch.run(&req, None).unwrap();
+
+        // Expected frame count after StitchPlan::assemble:
+        //   stage 0 kept whole (97)
+        //   + stage 1 Smooth (drop motion_tail 25) = 97 - 25 = 72
+        //   + stage 2 Cut (keep whole) = 97
+        //   + stage 3 Fade (consume 2*fade_len into fade_len, net -fade_len=8)
+        //     = 97 - 8 = 89
+        //   total = 97 + 72 + 97 + 89 = 355
+        let boundaries: Vec<_> = req.stages.iter().skip(1).map(|s| s.transition).collect();
+        let fade_lens: Vec<_> = req
+            .stages
+            .iter()
+            .skip(1)
+            .map(|s| s.fade_frames.unwrap_or(8))
+            .collect();
+        let plan = crate::ltx2::stitch::StitchPlan {
+            clips: out.stage_frames,
+            boundaries,
+            fade_lens,
+            motion_tail_frames: req.motion_tail_frames,
+        };
+        let frames = plan.assemble().unwrap();
+        assert_eq!(frames.len(), 355);
+    }
+
+    fn sample_chain_request(count: usize, transition: TransitionMode) -> ChainRequest {
+        // Use motion_tail_frames=0 so effective=clip_frames=97, which makes
+        // build_auto_expand_stages produce exactly `count` stages for
+        // total_frames = 97 * count (no ceil rounding complication).
+        let req = ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".into(),
+            stages: Vec::new(),
+            motion_tail_frames: 0,
+            width: 1216,
+            height: 704,
+            fps: 24,
+            seed: Some(0),
+            steps: 8,
+            guidance: 3.0,
+            strength: 1.0,
+            output_format: mold_core::OutputFormat::Mp4,
+            placement: None,
+            prompt: Some("x".into()),
+            total_frames: Some(97 * count as u32),
+            clip_frames: Some(97),
+            source_image: None,
+        };
+        let mut req = req.normalise().unwrap();
+        for s in req.stages.iter_mut().skip(1) {
+            s.transition = transition;
+        }
+        req
     }
 }

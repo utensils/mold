@@ -16,15 +16,20 @@ import {
 } from "../api";
 import { useGenerateForm } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
+import { useHideMode } from "../composables/useHideMode";
 import { decideChainRouting } from "../lib/chainRouting";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
+  ChainRequestWire,
+  ChainStageWire,
   ExpandFormState,
   GalleryImage,
   ModelInfoExtended,
   ServerCapabilities,
   SourceImageState,
 } from "../types";
+import type { ChainScriptToml } from "../lib/chainToml";
+import type { ComposerMode } from "../components/Composer.vue";
 
 type ViewMode = "feed" | "grid";
 
@@ -60,6 +65,8 @@ function persistMuted(v: boolean) {
 
 const form = useGenerateForm();
 const { status } = useStatusPoll();
+// Shared privacy toggle with Gallery — see useHideMode for button semantics.
+const hide = useHideMode();
 const models = ref<ModelInfoExtended[]>([]);
 const galleryEntries = ref<GalleryImage[]>([]);
 const view = ref<ViewMode>(loadViewMode());
@@ -71,6 +78,27 @@ const capabilities = ref<ServerCapabilities>({
 const showSettings = ref(false);
 const showExpand = ref(false);
 const showPicker = ref(false);
+
+function loadComposerMode(): ComposerMode {
+  try {
+    const v = localStorage.getItem("mold.composer.mode");
+    return v === "script" ? "script" : "single";
+  } catch {
+    return "single";
+  }
+}
+const composerMode = ref<ComposerMode>(loadComposerMode());
+function setComposerMode(v: ComposerMode) {
+  composerMode.value = v;
+  try {
+    localStorage.setItem("mold.composer.mode", v);
+  } catch {
+    /* ignore */
+  }
+}
+
+const expandStageIndex = ref<number | null>(null);
+const composerRef = ref<InstanceType<typeof Composer> | null>(null);
 
 // Drawer state (mirrors GalleryPage).
 const selected = ref<GalleryImage | null>(null);
@@ -219,6 +247,46 @@ function onSubmit() {
   stream.submit(req, decision);
 }
 
+function onSubmitScript(script: ChainScriptToml) {
+  const stages: ChainStageWire[] = script.stage.map((s) => ({
+    prompt: s.prompt,
+    frames: s.frames,
+    transition: s.transition,
+    fade_frames: s.fade_frames,
+    negative_prompt: s.negative_prompt,
+    seed_offset: s.seed_offset,
+    source_image: s.source_image_b64 ?? null,
+  }));
+  const req: ChainRequestWire = {
+    model: script.chain.model,
+    stages,
+    motion_tail_frames: script.chain.motion_tail_frames,
+    width: script.chain.width,
+    height: script.chain.height,
+    fps: script.chain.fps,
+    seed: script.chain.seed ?? null,
+    steps: script.chain.steps,
+    guidance: script.chain.guidance,
+    strength: script.chain.strength,
+    output_format: script.chain.output_format,
+  };
+  const decision = {
+    kind: "chain" as const,
+    clipFrames: stages[0]?.frames ?? 97,
+    motionTail: script.chain.motion_tail_frames,
+    stageCount: stages.length,
+  };
+  stream.submit(req, decision);
+}
+
+const expandStagePrompt = ref("");
+
+function onExpandStage(stageIndex: number, prompt: string) {
+  expandStageIndex.value = stageIndex;
+  expandStagePrompt.value = prompt;
+  showExpand.value = true;
+}
+
 function onClearSource() {
   form.state.value.sourceImage = null;
 }
@@ -323,16 +391,20 @@ onBeforeUnmount(() => {
       :muted="muted"
       :counts="topBarCounts"
       :loading="false"
+      :hide-mode="!hide.anyVisible.value"
       @update:filter="() => {}"
       @update:search="() => {}"
       @update:view="setView"
       @update:muted="setMuted"
+      @update:hide-mode="hide.toggle"
       @refresh="refreshGallery"
     />
 
     <div class="mt-4 sm:mt-6">
       <Composer
+        ref="composerRef"
         v-model="form.state.value"
+        :mode="composerMode"
         :queue-depth="status?.queue_depth ?? null"
         :queue-capacity="status?.queue_capacity ?? null"
         :gpus="gpus"
@@ -342,18 +414,24 @@ onBeforeUnmount(() => {
         :placement-gpus="gpuListForPlacement"
         :chain-decision="chainDecision"
         @submit="onSubmit"
+        @submit-script="onSubmitScript"
+        @update:mode="setComposerMode"
         @open-settings="showSettings = true"
         @open-expand="showExpand = true"
+        @open-expand-stage="(idx: number, p: string) => onExpandStage(idx, p)"
         @open-image-picker="showPicker = true"
         @clear-source="onClearSource"
       />
 
       <RunningStrip
         :jobs="stream.jobs.value"
+        :hide-mode="hide.hideMode.value"
+        :revealed="hide.revealed.value"
         @cancel="stream.cancel"
         @open="openJob"
         @dismiss="stream.remove"
         @clear-finished="stream.clearDone"
+        @reveal="(id: string) => hide.revealOne(id)"
       />
 
       <div class="mt-6">
@@ -362,7 +440,10 @@ onBeforeUnmount(() => {
           :loading="false"
           :view="view"
           :muted="muted"
+          :hide-mode="hide.hideMode.value"
+          :revealed="hide.revealed.value"
           @open="openItem"
+          @reveal="(item: GalleryImage) => hide.revealOne(item.filename)"
         />
       </div>
     </div>
@@ -375,13 +456,26 @@ onBeforeUnmount(() => {
     />
     <ExpandModal
       :open="showExpand"
-      :prompt="form.state.value.prompt"
+      :prompt="
+        expandStageIndex !== null ? expandStagePrompt : form.state.value.prompt
+      "
       :expand="form.state.value.expand"
       :current-model="currentModel"
       :queue-busy="queueBusy"
       @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
-      @apply-prompt="(v: string) => (form.state.value.prompt = v)"
-      @close="showExpand = false"
+      @apply-prompt="
+        (v: string) => {
+          if (expandStageIndex !== null) {
+            composerRef?.scriptComposerRef?.setStagePrompt(expandStageIndex, v);
+          } else {
+            form.state.value.prompt = v;
+          }
+        }
+      "
+      @close="
+        showExpand = false;
+        expandStageIndex = null;
+      "
     />
     <ImagePickerModal
       :open="showPicker"

@@ -431,6 +431,8 @@ impl MoldClient {
                             video,
                             stage_count: complete.stage_count,
                             gpu: complete.gpu,
+                            script: complete.script,
+                            vram_estimate: complete.vram_estimate,
                         }));
                     }
                     "error" => {

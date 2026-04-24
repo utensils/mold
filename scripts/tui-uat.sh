@@ -504,8 +504,9 @@ cmd_view() {
         3|models|Models)      key="3"; landmark="┌ Installed|┌ Available";;
         4|queue|Queue)        key="4"; landmark="┌ Queue";;
         5|settings|Settings)  key="5"; landmark="┌ Appearance|┌ Configuration";;
+        6|script|Script)      key="6"; landmark="┌ Stages|Stages";;
         *)
-            echo "ERROR: Unknown view '$target'. Use 1-5 or generate/gallery/models/queue/settings." >&2
+            echo "ERROR: Unknown view '$target'. Use 1-6 or generate/gallery/models/queue/settings/script." >&2
             exit 1
             ;;
     esac
@@ -1048,6 +1049,67 @@ case "${1:-help}" in
     status)
         cmd_status
         ;;
+    scenario)
+        shift
+        case "${1:-}" in
+            script_mode)
+                echo "=== Scenario: script_mode ==="
+                echo "Prerequisites: launch the TUI first with '$0 launch'"
+                require_session
+                TERM_ID=$(load_state)
+
+                echo "Step 1: Navigate to Script view"
+                cmd_view script
+                sleep 0.5
+                cmd_assert "Stages"
+
+                echo "Step 2: Add two stages (a × 2)"
+                send_one_key "$TERM_ID" "a"
+                sleep 0.3
+                send_one_key "$TERM_ID" "a"
+                sleep 0.3
+                cmd_assert "3 stage"
+
+                echo "Step 3: Cycle transition on stage 2 to cut"
+                send_one_key "$TERM_ID" "k"
+                sleep 0.2
+                send_one_key "$TERM_ID" "t"
+                sleep 0.3
+                cmd_assert "cut"
+
+                echo "Step 4: Save to /tmp/mold-uat.toml"
+                send_one_key "$TERM_ID" "ctrl+s"
+                sleep 0.5
+                send_text "$TERM_ID" "/tmp/mold-uat.toml"
+                sleep 0.2
+                send_one_key "$TERM_ID" "enter"
+                sleep 0.5
+
+                if [ -f /tmp/mold-uat.toml ]; then
+                    echo "  File exists: /tmp/mold-uat.toml"
+                    if grep -q 'transition = "cut"' /tmp/mold-uat.toml; then
+                        echo "  Contains transition = \"cut\": PASS"
+                    else
+                        echo "  FAIL: missing transition = \"cut\"" >&2
+                        exit 1
+                    fi
+                else
+                    echo "  FAIL: /tmp/mold-uat.toml not created" >&2
+                    exit 1
+                fi
+
+                echo "Step 5: Return to Generate"
+                send_one_key "$TERM_ID" "escape"
+                sleep 0.3
+
+                echo "=== script_mode scenario PASSED ==="
+                ;;
+            *)
+                echo "Unknown scenario '${1:-}'. Available: script_mode" >&2
+                exit 1
+                ;;
+        esac
+        ;;
     env)
         cmd_env
         ;;
@@ -1104,9 +1166,9 @@ Screen I/O:
   capture                         Print current screen (plain text)
   screenshot [output.png]         Native Ghostty screenshot (PNG)
   send <key>...                   Send keystrokes (see KEYS below)
-  view <1-5|name>                 Navigate to view (1=Generate,
+  view <1-6|name>                 Navigate to view (1=Generate,
                                   2=Gallery, 3=Models, 4=Queue,
-                                  5=Settings)
+                                  5=Settings, 6=Script)
   wait-for <pattern> [timeout]    Wait up to N seconds for text
   assert <pattern>                Fail if text missing from screen
 
@@ -1126,6 +1188,10 @@ Settings helpers:
   theme-set <slug>                Cycle to a named theme — one of
                                   mocha, latte, ristretto, gruvbox,
                                   tokyo, nord, dracula
+
+Scripted scenarios:
+  scenario script_mode            Exercise Script-view stage editing
+                                  and TOML save round-trip.
 
 KEYS
   Special:  enter, escape, tab, space, up, down, left, right,

@@ -84,6 +84,41 @@ pub enum Action {
     GridLeft,
     /// Gallery grid: move right one cell.
     GridRight,
+    /// Script: move selection down one stage.
+    ScriptMoveDown,
+    /// Script: move selection up one stage.
+    ScriptMoveUp,
+    /// Script: move selected stage down (reorder).
+    ScriptReorderDown,
+    /// Script: move selected stage up (reorder).
+    ScriptReorderUp,
+    /// Script: add a new stage after the current selection.
+    ScriptAddAfter,
+    /// Script: add a new stage before the current selection.
+    ScriptAddBefore,
+    /// Script: delete the current stage (shows confirmation if >1 stage).
+    ScriptDelete,
+    ScriptCycleTransition,
+    /// Script: save the current script to a TOML file.
+    ScriptSave,
+    /// Script: load a script from a TOML file.
+    ScriptLoad,
+    /// Script: open the prompt editor modal.
+    ScriptOpenPromptEditor,
+    /// Script: open the frames editor modal.
+    ScriptOpenFramesEditor,
+    /// Script modal: insert a character.
+    ScriptModalChar(char),
+    /// Script modal: delete the last character.
+    ScriptModalBackspace,
+    /// Script modal: insert a newline (prompt editor).
+    ScriptModalNewline,
+    /// Script modal: submit the current value.
+    ScriptModalSubmit,
+    /// Script modal: cancel and close without saving.
+    ScriptModalCancel,
+    /// Script: submit the current chain script for generation.
+    ScriptSubmit,
     /// No action (key not mapped or consumed by text input).
     None,
 }
@@ -100,6 +135,7 @@ pub enum View {
     Models,
     Queue,
     Settings,
+    Script,
 }
 
 impl View {
@@ -110,6 +146,7 @@ impl View {
             View::Models => "Models",
             View::Queue => "Queue",
             View::Settings => "Settings",
+            View::Script => "Script",
         }
     }
 
@@ -120,14 +157,16 @@ impl View {
             View::Models => 2,
             View::Queue => 3,
             View::Settings => 4,
+            View::Script => 5,
         }
     }
 
-    pub const ALL: [View; 5] = [
+    pub const ALL: [View; 6] = [
         View::Generate,
         View::Gallery,
         View::Models,
         View::Queue,
         View::Settings,
+        View::Script,
     ];
 }

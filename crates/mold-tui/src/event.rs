@@ -36,6 +36,7 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
             KeyCode::Char('4') => return Action::SwitchView(View::Queue),
             KeyCode::Char('5') => return Action::SwitchView(View::Settings),
+            KeyCode::Char('6') => return Action::SwitchView(View::Script),
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 return Action::ToggleNegativePrompt;
             }
@@ -52,6 +53,7 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
         View::Models => map_models_key(key),
         View::Queue => map_queue_key(key),
         View::Settings => map_settings_key(key),
+        View::Script => map_script_key(key, app),
     }
 }
 
@@ -95,6 +97,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('3') => Action::SwitchView(View::Models),
             KeyCode::Char('4') => Action::SwitchView(View::Queue),
             KeyCode::Char('5') => Action::SwitchView(View::Settings),
+            KeyCode::Char('6') | KeyCode::Char('s') => Action::SwitchView(View::Script),
             KeyCode::Char('/') => Action::SearchHistory,
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Enter | KeyCode::Char('i') | KeyCode::Down => Action::FocusNext,
@@ -125,6 +128,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
             KeyCode::Char('4') => return Action::SwitchView(View::Queue),
             KeyCode::Char('5') => return Action::SwitchView(View::Settings),
+            KeyCode::Char('6') => return Action::SwitchView(View::Script),
             _ => {}
         }
     }
@@ -153,6 +157,7 @@ fn map_gallery_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('3') => Action::SwitchView(View::Models),
             KeyCode::Char('4') => Action::SwitchView(View::Queue),
             KeyCode::Char('5') => Action::SwitchView(View::Settings),
+            KeyCode::Char('6') => Action::SwitchView(View::Script),
             _ => Action::None,
         },
         GalleryViewMode::Detail => match key.code {
@@ -186,6 +191,7 @@ fn map_models_key(key: &KeyEvent) -> Action {
         KeyCode::Char('3') => Action::SwitchView(View::Models),
         KeyCode::Char('4') => Action::SwitchView(View::Queue),
         KeyCode::Char('5') => Action::SwitchView(View::Settings),
+        KeyCode::Char('6') => Action::SwitchView(View::Script),
         _ => Action::None,
     }
 }
@@ -201,6 +207,7 @@ fn map_queue_key(key: &KeyEvent) -> Action {
         KeyCode::Char('3') => Action::SwitchView(View::Models),
         KeyCode::Char('4') => Action::SwitchView(View::Queue),
         KeyCode::Char('5') => Action::SwitchView(View::Settings),
+        KeyCode::Char('6') => Action::SwitchView(View::Script),
         _ => Action::None,
     }
 }
@@ -219,6 +226,58 @@ fn map_settings_key(key: &KeyEvent) -> Action {
         KeyCode::Char('3') => Action::SwitchView(View::Models),
         KeyCode::Char('4') => Action::SwitchView(View::Queue),
         KeyCode::Char('5') => Action::SwitchView(View::Settings),
+        KeyCode::Char('6') => Action::SwitchView(View::Script),
+        _ => Action::None,
+    }
+}
+
+fn map_script_key(key: &KeyEvent, app: &App) -> Action {
+    use crate::ui::script_composer::ScriptModal;
+
+    if app.script.modal.is_open() {
+        return match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => Action::ScriptModalCancel,
+            // Ctrl-S submits in any modal
+            (KeyCode::Char('s'), KeyModifiers::CONTROL) => Action::ScriptModalSubmit,
+            // In FramesEdit/SavePath/LoadPath, plain Enter submits
+            (KeyCode::Enter, KeyModifiers::NONE)
+                if matches!(
+                    app.script.modal,
+                    ScriptModal::FramesEdit { .. }
+                        | ScriptModal::SavePath { .. }
+                        | ScriptModal::LoadPath { .. }
+                ) =>
+            {
+                Action::ScriptModalSubmit
+            }
+            // In PromptEdit, plain Enter adds a newline
+            (KeyCode::Enter, KeyModifiers::NONE) => Action::ScriptModalNewline,
+            (KeyCode::Backspace, _) => Action::ScriptModalBackspace,
+            (KeyCode::Char(c), _) => Action::ScriptModalChar(c),
+            _ => Action::None,
+        };
+    }
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => Action::ScriptSave,
+        (KeyCode::Char('o'), KeyModifiers::CONTROL) => Action::ScriptLoad,
+        (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
+            Action::ScriptMoveDown
+        }
+        (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, KeyModifiers::NONE) => {
+            Action::ScriptMoveUp
+        }
+        (KeyCode::Char('J'), KeyModifiers::SHIFT) => Action::ScriptReorderDown,
+        (KeyCode::Char('K'), KeyModifiers::SHIFT) => Action::ScriptReorderUp,
+        (KeyCode::Char('a'), KeyModifiers::NONE) => Action::ScriptAddAfter,
+        (KeyCode::Char('A'), KeyModifiers::SHIFT) => Action::ScriptAddBefore,
+        (KeyCode::Char('d'), KeyModifiers::NONE) => Action::ScriptDelete,
+        (KeyCode::Char('t'), KeyModifiers::NONE) => Action::ScriptCycleTransition,
+        (KeyCode::Char('i'), KeyModifiers::NONE) => Action::ScriptOpenPromptEditor,
+        (KeyCode::Char('f'), KeyModifiers::NONE) => Action::ScriptOpenFramesEditor,
+        (KeyCode::Enter, KeyModifiers::NONE) => Action::ScriptSubmit,
+        (KeyCode::Esc, _) => Action::SwitchView(View::Generate),
+        (KeyCode::Char('q'), KeyModifiers::NONE) => Action::Quit,
         _ => Action::None,
     }
 }

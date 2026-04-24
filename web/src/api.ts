@@ -65,6 +65,17 @@ function defaultCapabilities(): ServerCapabilities {
   return { gallery: { can_delete: false } };
 }
 
+export interface ChainLimits {
+  model: string;
+  frames_per_clip_cap: number;
+  frames_per_clip_recommended: number;
+  max_stages: number;
+  max_total_frames: number;
+  fade_frames_max: number;
+  transition_modes: string[];
+  quantization_family: string;
+}
+
 export function imageUrl(filename: string): string {
   return `${base}/api/gallery/image/${encodeURIComponent(filename)}`;
 }
@@ -85,6 +96,22 @@ export async function fetchStatus(signal?: AbortSignal): Promise<ServerStatus> {
   const res = await fetch(`${base}/api/status`, { signal });
   if (!res.ok) throw new Error(`GET /api/status failed: ${res.status}`);
   return (await res.json()) as ServerStatus;
+}
+
+const chainLimitsCache = new Map<string, { value: ChainLimits; at: number }>();
+const CHAIN_LIMITS_TTL_MS = 30_000;
+
+export async function fetchChainLimits(model: string): Promise<ChainLimits> {
+  const now = Date.now();
+  const cached = chainLimitsCache.get(model);
+  if (cached && now - cached.at < CHAIN_LIMITS_TTL_MS) return cached.value;
+  const res = await fetch(
+    `${base}/api/capabilities/chain-limits?model=${encodeURIComponent(model)}`,
+  );
+  if (!res.ok) throw new Error(`chain-limits fetch failed: ${res.status}`);
+  const value: ChainLimits = await res.json();
+  chainLimitsCache.set(model, { value, at: now });
+  return value;
 }
 
 export async function expandPrompt(

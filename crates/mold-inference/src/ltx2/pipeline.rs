@@ -614,6 +614,12 @@ impl Ltx2Engine {
         // identity drift compounds stage-over-stage because each clip's
         // only long-range reference is its own drifted last-frame carry.
         if let Some(tail) = carry {
+            if req.source_image.is_some() {
+                tracing::warn!(
+                    "smooth continuation received source_image; it will be repurposed as a soft \
+                     identity anchor. Use transition: cut|fade to seed the stage with a fresh i2v."
+                );
+            }
             if tail.tail_rgb_frames.is_empty() {
                 bail!(
                     "render_chain_stage: carry.tail_rgb_frames is empty; caller must provide at least one frame"

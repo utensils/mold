@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use mold_core::{
-    classify_generate_error, download::DownloadProgressEvent, GenerateRequest, GenerateResponse,
-    GenerateServerAction, LoraWeight, MoldClient, SseProgressEvent,
+    classify_generate_error, download::DownloadProgressEvent, ChainRequest, GenerateRequest,
+    GenerateResponse, GenerateServerAction, LoraWeight, MoldClient, SseProgressEvent,
 };
 use tokio::sync::mpsc;
 
@@ -78,6 +78,49 @@ pub async fn run_generation(
             }
         }
     }
+}
+
+/// Run a chain generation request via the server's `/api/generate/chain/stream`
+/// endpoint. Chain generation is server-only — there is no local fallback.
+pub async fn run_chain_generation(
+    server_url: Option<String>,
+    req: ChainRequest,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    let Some(url) = server_url else {
+        let _ = tx.send(BackgroundEvent::ChainError(
+            "chain generation requires a running mold server".into(),
+        ));
+        return;
+    };
+
+    let client = MoldClient::new(&url);
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+
+    let bg_tx = tx.clone();
+    let forward_handle = tokio::spawn(async move {
+        while let Some(event) = progress_rx.recv().await {
+            let _ = bg_tx.send(BackgroundEvent::ChainProgress(event));
+        }
+    });
+
+    match client.generate_chain_stream(&req, progress_tx).await {
+        Ok(Some(response)) => {
+            let _ = tx.send(BackgroundEvent::ChainComplete {
+                response: Box::new(response),
+            });
+        }
+        Ok(None) => {
+            let _ = tx.send(BackgroundEvent::ChainError(
+                "server does not support chain generation (404)".into(),
+            ));
+        }
+        Err(e) => {
+            let _ = tx.send(BackgroundEvent::ChainError(format!("{e}")));
+        }
+    }
+
+    forward_handle.abort();
 }
 
 /// Run a single local generation and send the result via `tx`.

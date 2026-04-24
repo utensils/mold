@@ -6,12 +6,17 @@ import type {
   OutputFormat,
 } from "../types";
 import PlacementPanel from "./PlacementPanel.vue";
+import ScriptComposer from "./ScriptComposer.vue";
 import { outputFormatsForFamily } from "../composables/useGenerateForm";
 
 import type { ChainRoutingDecision } from "../lib/chainRouting";
+import type { ChainScriptToml } from "../lib/chainToml";
+
+export type ComposerMode = "single" | "script";
 
 const props = defineProps<{
   modelValue: GenerateFormState;
+  mode: ComposerMode;
   queueDepth: number | null;
   queueCapacity: number | null;
   gpus: { ordinal: number; state: string }[] | null;
@@ -29,9 +34,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "update:modelValue", v: GenerateFormState): void;
+  (e: "update:mode", v: ComposerMode): void;
   (e: "submit"): void;
+  (e: "submit-script", script: ChainScriptToml): void;
   (e: "open-settings"): void;
   (e: "open-expand"): void;
+  (e: "open-expand-stage", stageIndex: number, prompt: string): void;
   (e: "open-image-picker"): void;
   (e: "clear-source"): void;
 }>();
@@ -89,119 +97,159 @@ function updateOutputFormat(v: string) {
     outputFormat: v as OutputFormat,
   });
 }
+
+const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
+
+defineExpose({ scriptComposerRef });
 </script>
 
 <template>
   <div class="glass flex flex-col gap-2 rounded-3xl p-4">
-    <div class="flex items-start gap-3">
-      <!-- source image chip -->
-      <div
-        v-if="modelValue.sourceImage"
-        class="relative flex-shrink-0 overflow-hidden rounded-xl"
-      >
-        <img
-          :src="`data:image/png;base64,${modelValue.sourceImage.base64}`"
-          class="h-12 w-12 object-cover"
-          alt="Source"
-        />
+    <div class="mb-1 flex items-center gap-1">
+      <div class="inline-flex rounded-full bg-slate-900/60 p-0.5">
         <button
           type="button"
-          class="absolute -right-1 -top-1 h-5 w-5 rounded-full bg-slate-900/90 text-xs text-slate-100"
-          aria-label="Remove source image"
-          @click="emit('clear-source')"
+          :class="mode === 'single' ? 'bg-brand-500/60' : ''"
+          class="rounded-full px-3 py-1 text-xs text-slate-200"
+          @click="emit('update:mode', 'single')"
         >
-          ✕
-        </button>
-      </div>
-
-      <textarea
-        ref="textarea"
-        :value="modelValue.prompt"
-        placeholder="Describe what to generate — Enter to submit, Shift+Enter for a newline"
-        class="min-h-[2.5rem] flex-1 resize-none bg-transparent text-base text-slate-100 placeholder:text-slate-500 focus:outline-none"
-        @input="updatePrompt(($event.target as HTMLTextAreaElement).value)"
-        @keydown="onKeydown"
-      />
-
-      <div class="flex flex-shrink-0 flex-col gap-1 sm:flex-row">
-        <label class="sr-only" for="composer-output-format"
-          >Output format</label
-        >
-        <select
-          id="composer-output-format"
-          data-test="composer-output-format"
-          :value="modelValue.outputFormat"
-          class="h-9 rounded-full bg-slate-900/60 px-3 text-sm text-slate-100 focus:outline-none"
-          :title="`Output format — default: ${outputFormats[0]}`"
-          @change="
-            updateOutputFormat(($event.target as HTMLSelectElement).value)
-          "
-        >
-          <option v-for="f in outputFormats" :key="f" :value="f">
-            {{ f }}
-          </option>
-        </select>
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="Attach source image"
-          @click="emit('open-image-picker')"
-        >
-          🖼️
+          Single
         </button>
         <button
           type="button"
-          class="icon-btn"
-          :class="{ 'text-brand-400': expandActive }"
-          aria-label="Prompt expansion"
-          @click="emit('open-expand')"
+          :class="mode === 'script' ? 'bg-brand-500/60' : ''"
+          class="rounded-full px-3 py-1 text-xs text-slate-200"
+          @click="emit('update:mode', 'script')"
         >
-          ✨
-        </button>
-        <button
-          type="button"
-          class="icon-btn relative"
-          aria-label="Settings"
-          @click="emit('open-settings')"
-        >
-          ⚙
-          <span
-            v-if="settingsDirty"
-            class="absolute right-1 top-1 h-2 w-2 rounded-full bg-brand-400"
-          ></span>
+          Script
         </button>
       </div>
     </div>
 
-    <div v-if="statusLine" class="px-1 text-xs text-slate-500">
-      {{ statusLine }}
-    </div>
-
-    <div
-      v-if="chainDecision.kind === 'chain'"
-      class="rounded-lg bg-brand-900/40 px-3 py-1.5 text-xs text-brand-200"
-    >
-      Will render as
-      <span class="font-semibold">{{ chainDecision.stageCount }}</span>
-      chained clips of {{ chainDecision.clipFrames }} frames (motion-tail
-      {{ chainDecision.motionTail }}) — expect this to take substantially longer
-      than a single clip.
-    </div>
-    <div
-      v-else-if="chainDecision.kind === 'reject'"
-      class="rounded-lg bg-red-900/40 px-3 py-1.5 text-xs text-red-200"
-    >
-      {{ chainDecision.reason }}
-    </div>
-
-    <!-- Agent C (model-ui-overhaul §3): device placement -->
-    <PlacementPanel
-      :model-value="modelValue.placement"
-      :family="family"
+    <ScriptComposer
+      v-if="mode === 'script'"
+      ref="scriptComposerRef"
       :model="modelValue.model"
-      :gpus="placementGpus"
-      @update:model-value="updatePlacement"
+      :width="modelValue.width"
+      :height="modelValue.height"
+      :fps="modelValue.fps ?? 24"
+      @submit="emit('submit-script', $event)"
+      @expand="
+        (idx: number, prompt: string) => emit('open-expand-stage', idx, prompt)
+      "
     />
+
+    <template v-else>
+      <div class="flex items-start gap-3">
+        <!-- source image chip -->
+        <div
+          v-if="modelValue.sourceImage"
+          class="relative flex-shrink-0 overflow-hidden rounded-xl"
+        >
+          <img
+            :src="`data:image/png;base64,${modelValue.sourceImage.base64}`"
+            class="h-12 w-12 object-cover"
+            alt="Source"
+          />
+          <button
+            type="button"
+            class="absolute -right-1 -top-1 h-5 w-5 rounded-full bg-slate-900/90 text-xs text-slate-100"
+            aria-label="Remove source image"
+            @click="emit('clear-source')"
+          >
+            ✕
+          </button>
+        </div>
+
+        <textarea
+          ref="textarea"
+          :value="modelValue.prompt"
+          placeholder="Describe what to generate — Enter to submit, Shift+Enter for a newline"
+          class="min-h-[2.5rem] flex-1 resize-none bg-transparent text-base text-slate-100 placeholder:text-slate-500 focus:outline-none"
+          @input="updatePrompt(($event.target as HTMLTextAreaElement).value)"
+          @keydown="onKeydown"
+        />
+
+        <div class="flex flex-shrink-0 flex-col gap-1 sm:flex-row">
+          <label class="sr-only" for="composer-output-format"
+            >Output format</label
+          >
+          <select
+            id="composer-output-format"
+            data-test="composer-output-format"
+            :value="modelValue.outputFormat"
+            class="h-9 rounded-full bg-slate-900/60 px-3 text-sm text-slate-100 focus:outline-none"
+            :title="`Output format — default: ${outputFormats[0]}`"
+            @change="
+              updateOutputFormat(($event.target as HTMLSelectElement).value)
+            "
+          >
+            <option v-for="f in outputFormats" :key="f" :value="f">
+              {{ f }}
+            </option>
+          </select>
+          <button
+            type="button"
+            class="icon-btn"
+            aria-label="Attach source image"
+            @click="emit('open-image-picker')"
+          >
+            🖼️
+          </button>
+          <button
+            type="button"
+            class="icon-btn"
+            :class="{ 'text-brand-400': expandActive }"
+            aria-label="Prompt expansion"
+            @click="emit('open-expand')"
+          >
+            ✨
+          </button>
+          <button
+            type="button"
+            class="icon-btn relative"
+            aria-label="Settings"
+            @click="emit('open-settings')"
+          >
+            ⚙
+            <span
+              v-if="settingsDirty"
+              class="absolute right-1 top-1 h-2 w-2 rounded-full bg-brand-400"
+            ></span>
+          </button>
+        </div>
+      </div>
+
+      <div v-if="statusLine" class="px-1 text-xs text-slate-500">
+        {{ statusLine }}
+      </div>
+
+      <div
+        v-if="chainDecision.kind === 'chain'"
+        class="rounded-lg bg-brand-900/40 px-3 py-1.5 text-xs text-brand-200"
+      >
+        Will render as
+        <span class="font-semibold">{{ chainDecision.stageCount }}</span>
+        chained clips of {{ chainDecision.clipFrames }} frames (motion-tail
+        {{ chainDecision.motionTail }}) — expect this to take substantially
+        longer than a single clip.
+      </div>
+      <div
+        v-else-if="chainDecision.kind === 'reject'"
+        class="rounded-lg bg-red-900/40 px-3 py-1.5 text-xs text-red-200"
+      >
+        {{ chainDecision.reason }}
+      </div>
+
+      <!-- Agent C (model-ui-overhaul §3): device placement -->
+      <PlacementPanel
+        :model-value="modelValue.placement"
+        :family="family"
+        :model="modelValue.model"
+        :gpus="placementGpus"
+        @update:model-value="updatePlacement"
+      />
+    </template>
   </div>
 </template>
 

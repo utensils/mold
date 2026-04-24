@@ -514,3 +514,179 @@ fn update_check_runs_without_panic() {
         "expected 'Current version' in stderr: {stderr}"
     );
 }
+
+// ── mold run --script --dry-run ───────────────────────────────────────────
+
+#[test]
+fn dry_run_prints_stage_summary() {
+    let script = r#"
+schema = "mold.chain.v1"
+
+[chain]
+model = "ltx-2-19b-distilled:fp8"
+width = 1216
+height = 704
+fps = 24
+steps = 8
+guidance = 3.0
+strength = 1.0
+motion_tail_frames = 25
+output_format = "mp4"
+
+[[stage]]
+prompt = "first scene"
+frames = 97
+
+[[stage]]
+prompt = "second scene"
+frames = 49
+"#;
+    let env = TestEnv::new();
+    let path = env.home.join("chain.toml");
+    std::fs::write(&path, script).unwrap();
+
+    env.cmd()
+        .args(["run", "--script", path.to_str().unwrap(), "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 stages"))
+        .stdout(predicate::str::contains("first scene"))
+        .stdout(predicate::str::contains("second scene"));
+}
+
+// ── mold run --prompt sugar ────────────────────────────────────────────────
+
+#[test]
+fn repeated_prompt_flag_yields_chain() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args([
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "--prompt",
+            "first scene",
+            "--prompt",
+            "second scene",
+            "--prompt",
+            "third scene",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("3 stages"))
+        .stdout(predicate::str::contains("first scene"))
+        .stdout(predicate::str::contains("second scene"))
+        .stdout(predicate::str::contains("third scene"));
+}
+
+// ── mold chain validate ──────────────────────────────────────────────────
+
+#[test]
+fn chain_validate_reports_ok_for_valid_script() {
+    let script = r#"
+schema = "mold.chain.v1"
+
+[chain]
+model = "ltx-2-19b-distilled:fp8"
+width = 1216
+height = 704
+fps = 24
+steps = 8
+guidance = 3.0
+strength = 1.0
+motion_tail_frames = 25
+output_format = "mp4"
+
+[[stage]]
+prompt = "only stage"
+frames = 97
+"#;
+    let env = TestEnv::new();
+    let path = env.home.join("chain.toml");
+    std::fs::write(&path, script).unwrap();
+
+    env.cmd()
+        .args(["chain", "validate", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("OK"))
+        .stdout(predicate::str::contains("1 stages"));
+}
+
+#[test]
+fn chain_validate_errors_on_bad_schema() {
+    let script = r#"
+schema = "mold.chain.v99"
+
+[chain]
+model = "ltx-2-19b-distilled:fp8"
+width = 1216
+height = 704
+fps = 24
+steps = 8
+guidance = 3.0
+strength = 1.0
+motion_tail_frames = 4
+output_format = "mp4"
+
+[[stage]]
+prompt = "stage"
+frames = 97
+"#;
+    let env = TestEnv::new();
+    let path = env.home.join("bad_schema.toml");
+    std::fs::write(&path, script).unwrap();
+
+    env.cmd()
+        .args(["chain", "validate", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("schema"));
+}
+
+// ── mold run --prompt flag conflicts ──────────────────────────────────────
+
+#[test]
+fn positional_plus_prompt_flag_errors() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args([
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "my positional prompt",
+            "--prompt",
+            "also a flag prompt",
+            "--dry-run",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot combine"));
+}
+
+#[test]
+fn positional_alone_still_works() {
+    // Sanity: the rejection must NOT trip when only positional is given.
+    let env = TestEnv::new();
+    env.cmd()
+        .args(["run", "a positional-only prompt", "--dry-run"])
+        .assert()
+        // May fail downstream for unrelated reasons (unknown model, etc.)
+        // but the stderr must NOT contain "cannot combine".
+        .stderr(predicate::str::contains("cannot combine").not());
+}
+
+#[test]
+fn prompt_flag_alone_still_works() {
+    // Sanity: --prompt alone must not trip the rejection.
+    let env = TestEnv::new();
+    env.cmd()
+        .args([
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "--prompt",
+            "lonely flag prompt",
+            "--dry-run",
+        ])
+        .assert()
+        .stderr(predicate::str::contains("cannot combine").not());
+}

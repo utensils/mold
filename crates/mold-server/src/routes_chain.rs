@@ -15,6 +15,9 @@
 //! model cannot race.
 
 use std::convert::Infallible;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::State,
@@ -22,15 +25,21 @@ use axum::{
     Json,
 };
 use base64::Engine as _;
-use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainResponse, SseChainCompleteEvent};
+use mold_core::chain::{
+    ChainProgressEvent, ChainRequest, ChainResponse, ChainScript, SseChainCompleteEvent,
+};
 use mold_core::{OutputFormat, OutputMetadata, VideoData};
+use sha2::{Digest, Sha256};
 use tokio_stream::StreamExt as _;
 
+use crate::gpu_pool::{ActiveGeneration, GpuWorker};
+use crate::gpu_worker;
 use crate::model_cache::CachedEngine;
 use crate::model_manager;
 use crate::queue::save_video_to_dir;
 use crate::routes::ApiError;
 use crate::state::AppState;
+use mold_inference::ltx2::{ChainOrchestratorError, Ltx2ChainOrchestrator};
 
 /// Internal wire event used by the chain SSE stream before per-event
 /// serialization. Separate from [`crate::state::SseMessage`] because chain
@@ -39,7 +48,7 @@ use crate::state::AppState;
 /// single-stage `SseProgressEvent`.
 pub(crate) enum ChainSseMessage {
     Progress(ChainProgressEvent),
-    Complete(SseChainCompleteEvent),
+    Complete(Box<SseChainCompleteEvent>),
     Error(String),
 }
 
@@ -167,6 +176,30 @@ fn trim_to_total_frames(frames: &mut Vec<image::RgbImage>, total_frames: Option<
     }
 }
 
+/// Assemble per-stage frame clips into a single output buffer using
+/// [`mold_inference::ltx2::stitch::StitchPlan`], honouring per-boundary
+/// transition rules (Smooth / Cut / Fade).
+pub(crate) fn stitch_chain_output(
+    chain_output: mold_inference::ltx2::chain::ChainRunOutput,
+    req: &mold_core::chain::ChainRequest,
+) -> Result<Vec<image::RgbImage>, mold_inference::ltx2::stitch::StitchError> {
+    use mold_inference::ltx2::stitch::StitchPlan;
+    let boundaries: Vec<_> = req.stages.iter().skip(1).map(|s| s.transition).collect();
+    let fade_lens: Vec<_> = req
+        .stages
+        .iter()
+        .skip(1)
+        .map(|s| s.fade_frames.unwrap_or(8))
+        .collect();
+    let plan = StitchPlan {
+        clips: chain_output.stage_frames,
+        boundaries,
+        fade_lens,
+        motion_tail_frames: req.motion_tail_frames,
+    };
+    plan.assemble()
+}
+
 /// Produce a PNG thumbnail for the chain output — best-effort, returns
 /// an empty `Vec` on failure so the save/response paths still succeed.
 fn chain_thumbnail(frames: &[image::RgbImage]) -> Vec<u8> {
@@ -243,6 +276,8 @@ fn build_sse_chain_complete_event(
         stage_count: resp.stage_count,
         gpu: resp.gpu,
         generation_time_ms: Some(generation_time_ms),
+        script: resp.script.clone(),
+        vram_estimate: resp.vram_estimate.clone(),
     }
 }
 
@@ -254,12 +289,20 @@ enum ChainRunError {
     UnsupportedModel(String),
     /// Engine missing from cache after `ensure_model_ready` (500).
     CacheMiss(String),
-    /// Orchestrator returned an error mid-chain (502).
+    /// Orchestrator returned an error mid-chain from an invalid request (502).
     Inference(String),
-    /// Output encoding / stitch failure (500).
+    /// Orchestrator returned a typed stage failure mid-chain (502 with body).
+    StageFailed(mold_core::chain::ChainFailure),
+    /// Output encoding failure (500).
     Encode(String),
+    /// `StitchPlan::assemble` failed (500).
+    StitchFailed(String),
     /// Task panic or join error (500).
     Internal(String),
+    /// No GPU worker available to service this chain (503).
+    NoWorker(String),
+    /// `spawn_blocking` task failed to join (500).
+    Join(String),
 }
 
 impl From<ChainRunError> for ApiError {
@@ -270,8 +313,289 @@ impl From<ChainRunError> for ApiError {
             ChainRunError::Inference(msg) => {
                 ApiError::internal_with_status(msg, axum::http::StatusCode::BAD_GATEWAY)
             }
+            // The SSE error channel is string-only (`ChainSseMessage::Error(String)`),
+            // so the structured fields (`failed_stage_idx`, `elapsed_stages`,
+            // `elapsed_ms`) are deliberately collapsed to `stage_error` here.
+            // Clients that need the typed shape use the non-streaming
+            // `/api/generate/chain` handler which returns a `ChainFailure`
+            // body at status 502.
+            ChainRunError::StageFailed(failure) => ApiError::internal_with_status(
+                failure.stage_error,
+                axum::http::StatusCode::BAD_GATEWAY,
+            ),
             ChainRunError::Encode(msg) => ApiError::internal(msg),
+            ChainRunError::StitchFailed(msg) => ApiError::internal(msg),
             ChainRunError::Internal(msg) => ApiError::internal(msg),
+            ChainRunError::NoWorker(msg) => {
+                ApiError::internal_with_status(msg, axum::http::StatusCode::SERVICE_UNAVAILABLE)
+            }
+            ChainRunError::Join(msg) => ApiError::internal(msg),
+        }
+    }
+}
+
+/// Dispatch a chain request to the pooled or legacy handler based on
+/// whether the server discovered any GPU workers at startup.
+///
+/// In multi-worker mode (production CUDA / Metal), the pooled path
+/// uses `gpu_worker::run_chain_blocking` to acquire the target GPU's
+/// per-worker `model_load_lock` — preventing the SEGV race that arose
+/// when the legacy path's `reclaim_gpu_memory(0)` collided with a
+/// single-clip worker's reset on the same context.
+///
+/// No-worker mode (CPU-only dev boxes, CI) falls through to the legacy
+/// path, which still uses `state.chain_lock` + `state.model_cache`.
+async fn run_chain(
+    state: &AppState,
+    req: ChainRequest,
+    progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
+) -> Result<(ChainResponse, u64), ChainRunError> {
+    if state.gpu_pool.worker_count() > 0 {
+        run_chain_pooled(state, req, progress_cb).await
+    } else {
+        run_chain_legacy(state, req, progress_cb).await
+    }
+}
+
+async fn run_chain_pooled(
+    state: &AppState,
+    req: ChainRequest,
+    progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
+) -> Result<(ChainResponse, u64), ChainRunError> {
+    // ── Worker selection ────────────────────────────────────────────
+    let worker = select_worker_for_chain(state, &req)?;
+
+    // ── Announce busy state so the dispatcher biases away ──────────
+    // RAII guards: drop unconditionally on the way out (success or error)
+    // so select_worker's "Tier 1 idle" / "Tier 2 busy" logic sees this
+    // worker correctly after the chain ends.
+    let _in_flight_guard = InFlightGuard::increment(worker.clone());
+    let _active_gen_guard = ActiveGenerationGuard::set(worker.clone(), &req)
+        .map_err(|e| ChainRunError::Internal(e.to_string()))?;
+
+    // ── Run the chain inside spawn_blocking ─────────────────────────
+    let config_snapshot = state.config.read().await.clone();
+    let worker_task = worker.clone();
+    let req_task = req.clone();
+    let progress_cb_task = progress_cb;
+
+    let join_result = tokio::task::spawn_blocking(move || -> ChainPooledOutcome {
+        let model_name = req_task.model.clone();
+        let mut progress_cb = progress_cb_task;
+        gpu_worker::run_chain_blocking(
+            &worker_task,
+            &model_name,
+            &config_snapshot,
+            move |engine| -> Result<mold_inference::ltx2::ChainRunOutput, ClosureError> {
+                let renderer = engine.as_chain_renderer().ok_or_else(|| {
+                    ClosureError::Unsupported(format!(
+                        "model '{}' does not support chained video generation",
+                        req_task.model
+                    ))
+                })?;
+                let mut orch = Ltx2ChainOrchestrator::new(renderer);
+                let run_result = if let Some(cb) = progress_cb.as_deref_mut() {
+                    orch.run(&req_task, Some(cb))
+                } else {
+                    orch.run(&req_task, None)
+                };
+                run_result.map_err(ClosureError::Orchestrator)
+            },
+        )
+    })
+    .await;
+
+    // ── Unwrap the three layers (join, helper-prep, closure) ────────
+    let chain_output = match join_result {
+        Err(join_err) => {
+            return Err(ChainRunError::Join(format!(
+                "chain task failed: {join_err}"
+            )));
+        }
+        Ok(Err(prep_err)) => {
+            return Err(ChainRunError::CacheMiss(format!("{prep_err:#}")));
+        }
+        Ok(Ok(Err(ClosureError::Unsupported(msg)))) => {
+            return Err(ChainRunError::UnsupportedModel(msg));
+        }
+        Ok(Ok(Err(ClosureError::Orchestrator(orch_err)))) => {
+            return Err(match orch_err {
+                ChainOrchestratorError::StageFailed {
+                    stage_idx,
+                    elapsed_stages,
+                    elapsed_ms,
+                    inner,
+                } => ChainRunError::StageFailed(mold_core::chain::ChainFailure {
+                    error: "stage render failed".into(),
+                    failed_stage_idx: stage_idx,
+                    elapsed_stages,
+                    elapsed_ms,
+                    stage_error: format!("{inner:#}"),
+                }),
+                ChainOrchestratorError::Invalid(inner) => {
+                    ChainRunError::Inference(format!("{inner:#}"))
+                }
+            });
+        }
+        Ok(Ok(Ok(outcome))) => outcome,
+    };
+
+    // ── Stitch / encode / save / return ────────────────────────────
+    // This block MIRRORS run_chain_legacy's tail (lines 468-532 of this
+    // file prior to Task 4's split). Keep them in sync if either changes.
+    let stage_count = chain_output.stage_count;
+    let generation_time_ms = chain_output.generation_time_ms;
+
+    let mut frames = stitch_chain_output(chain_output, &req)
+        .map_err(|e| ChainRunError::StitchFailed(e.to_string()))?;
+    trim_to_total_frames(&mut frames, req.total_frames);
+
+    if frames.is_empty() {
+        return Err(ChainRunError::Encode(
+            "chain run emitted zero frames after trim".to_string(),
+        ));
+    }
+
+    let (bytes, output_format, gif_preview) =
+        encode_chain_output(&frames, req.fps, req.output_format)
+            .map_err(|e| ChainRunError::Encode(format!("encode chain output: {e:#}")))?;
+    let thumbnail = chain_thumbnail(&frames);
+    let frame_count = frames.len() as u32;
+
+    let output_dir = {
+        let config = state.config.read().await;
+        if config.is_output_disabled() {
+            None
+        } else {
+            Some(config.effective_output_dir())
+        }
+    };
+    if let Some(dir) = output_dir {
+        let metadata = chain_output_metadata(&req, frame_count);
+        let bytes_clone = bytes.clone();
+        let gif_clone = gif_preview.clone();
+        let model = req.model.clone();
+        let db = state.metadata_db.clone();
+        tokio::task::spawn_blocking(move || {
+            save_video_to_dir(
+                &dir,
+                &bytes_clone,
+                &gif_clone,
+                output_format,
+                &model,
+                &metadata,
+                Some(generation_time_ms as i64),
+                db.as_ref().as_ref(),
+            );
+        });
+    }
+
+    let video = build_video_data(
+        bytes,
+        output_format,
+        &req,
+        frame_count,
+        thumbnail,
+        gif_preview,
+    );
+    let response = ChainResponse {
+        video,
+        stage_count,
+        gpu: None,
+        script: ChainScript::from(&req),
+        vram_estimate: None,
+    };
+    Ok((response, generation_time_ms))
+}
+
+/// Internal typed error returned by the `run_chain_blocking` closure in
+/// `run_chain_pooled`. Lets the caller distinguish an unsupported-model
+/// bailout from an orchestrator failure without string-matching.
+enum ClosureError {
+    Unsupported(String),
+    Orchestrator(ChainOrchestratorError),
+}
+
+/// Concrete `ChainPrep` type used by `run_chain_pooled`'s spawn_blocking
+/// task. Names the Result-in-Result-in-Result explicitly so the unwrap
+/// block above can match exhaustively.
+type ChainPooledOutcome = gpu_worker::ChainPrep<mold_inference::ltx2::ChainRunOutput, ClosureError>;
+
+/// Pick a `GpuWorker` for this chain. Honours `req.placement` if set,
+/// otherwise delegates to `gpu_pool.select_worker` with the same VRAM
+/// estimate logic as single-clip dispatch.
+fn select_worker_for_chain(
+    state: &AppState,
+    req: &ChainRequest,
+) -> Result<Arc<GpuWorker>, ChainRunError> {
+    if let Some(ord) = state
+        .gpu_pool
+        .resolve_explicit_placement_gpu(req.placement.as_ref())
+        .map_err(ChainRunError::UnsupportedModel)?
+    {
+        return state.gpu_pool.worker_by_ordinal(ord).ok_or_else(|| {
+            ChainRunError::NoWorker(format!("gpu:{ord} is not in the worker pool"))
+        });
+    }
+
+    let est = crate::queue::estimate_model_vram(&req.model);
+    state
+        .gpu_pool
+        .select_worker(&req.model, est)
+        .ok_or_else(|| {
+            ChainRunError::NoWorker(format!("no GPU worker available for model '{}'", req.model))
+        })
+}
+
+/// RAII guard that bumps `worker.in_flight` on creation and decrements it on Drop.
+struct InFlightGuard {
+    worker: Arc<GpuWorker>,
+}
+
+impl InFlightGuard {
+    fn increment(worker: Arc<GpuWorker>) -> Self {
+        worker.in_flight.fetch_add(1, Ordering::SeqCst);
+        Self { worker }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// RAII guard that sets `worker.active_generation` on creation and clears it on Drop.
+struct ActiveGenerationGuard {
+    worker: Arc<GpuWorker>,
+}
+
+impl ActiveGenerationGuard {
+    fn set(worker: Arc<GpuWorker>, req: &ChainRequest) -> anyhow::Result<Self> {
+        let first_prompt = req.stages.first().map(|s| s.prompt.as_str()).unwrap_or("");
+        {
+            let mut slot = worker
+                .active_generation
+                .write()
+                .map_err(|e| anyhow::anyhow!("active_generation lock poisoned: {e}"))?;
+            *slot = Some(ActiveGeneration {
+                model: req.model.clone(),
+                prompt_sha256: format!("{:x}", Sha256::digest(first_prompt.as_bytes())),
+                started_at_unix_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                started_at: Instant::now(),
+            });
+        } // drop the write guard before moving worker
+        Ok(Self { worker })
+    }
+}
+
+impl Drop for ActiveGenerationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.worker.active_generation.write() {
+            *slot = None;
         }
     }
 }
@@ -279,7 +603,7 @@ impl From<ChainRunError> for ApiError {
 /// Drive the chain to completion. Shared between the non-streaming and SSE
 /// paths — the only caller-provided variable is `progress_cb`, which is
 /// `None` for the plain JSON endpoint and `Some` for the SSE endpoint.
-async fn run_chain(
+async fn run_chain_legacy(
     state: &AppState,
     req: ChainRequest,
     progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
@@ -332,7 +656,26 @@ async fn run_chain(
                     } else {
                         orch.run(&req_for_task, None)
                     };
-                    result.map_err(|e| ChainRunError::Inference(format!("{e:#}")))
+                    result.map_err(|e| {
+                        use mold_inference::ltx2::ChainOrchestratorError;
+                        match e {
+                            ChainOrchestratorError::StageFailed {
+                                stage_idx,
+                                elapsed_stages,
+                                elapsed_ms,
+                                inner,
+                            } => ChainRunError::StageFailed(mold_core::chain::ChainFailure {
+                                error: "stage render failed".into(),
+                                failed_stage_idx: stage_idx,
+                                elapsed_stages,
+                                elapsed_ms,
+                                stage_error: format!("{inner:#}"),
+                            }),
+                            ChainOrchestratorError::Invalid(inner) => {
+                                ChainRunError::Inference(format!("{inner:#}"))
+                            }
+                        }
+                    })
                 }
                 None => Err(ChainRunError::UnsupportedModel(format!(
                     "model '{}' does not support chained video generation",
@@ -362,7 +705,9 @@ async fn run_chain(
     let chain_output = outcome?;
     let stage_count = chain_output.stage_count;
     let generation_time_ms = chain_output.generation_time_ms;
-    let mut frames = chain_output.frames;
+
+    let mut frames = stitch_chain_output(chain_output, &req)
+        .map_err(|e| ChainRunError::StitchFailed(e.to_string()))?;
     trim_to_total_frames(&mut frames, req.total_frames);
 
     if frames.is_empty() {
@@ -418,6 +763,8 @@ async fn run_chain(
         video,
         stage_count,
         gpu: None,
+        script: ChainScript::from(&req),
+        vram_estimate: None,
     };
     Ok((response, generation_time_ms))
 }
@@ -432,16 +779,20 @@ async fn run_chain(
         (status = 200, description = "Stitched chain video", body = mold_core::ChainResponse),
         (status = 422, description = "Invalid request or unsupported model"),
         (status = 500, description = "Chain render failed"),
-        (status = 502, description = "Chain render failed mid-stage"),
+        (status = 502, description = "Chain render failed mid-stage", body = mold_core::ChainFailure),
     )
 )]
 pub async fn generate_chain(
     State(state): State<AppState>,
     Json(req): Json<ChainRequest>,
-) -> Result<Json<ChainResponse>, ApiError> {
-    let req = req
-        .normalise()
-        .map_err(|e| ApiError::validation(e.to_string()))?;
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let req = match req.normalise() {
+        Ok(r) => r,
+        Err(e) => return ApiError::validation(e.to_string()).into_response(),
+    };
 
     tracing::info!(
         model = %req.model,
@@ -452,8 +803,13 @@ pub async fn generate_chain(
         "generate/chain request"
     );
 
-    let (response, _elapsed_ms) = run_chain(&state, req, None).await?;
-    Ok(Json(response))
+    match run_chain(&state, req, None).await {
+        Ok((response, _elapsed_ms)) => Json(response).into_response(),
+        Err(ChainRunError::StageFailed(failure)) => {
+            (StatusCode::BAD_GATEWAY, Json(failure)).into_response()
+        }
+        Err(other) => ApiError::from(other).into_response(),
+    }
 }
 
 /// `POST /api/generate/chain/stream` — SSE-streamed chain generation. Emits
@@ -501,7 +857,7 @@ pub async fn generate_chain_stream(
         match run_chain(&state_clone, req, Some(cb)).await {
             Ok((response, elapsed_ms)) => {
                 let complete = build_sse_chain_complete_event(&response, elapsed_ms);
-                let _ = tx_for_task.send(ChainSseMessage::Complete(complete));
+                let _ = tx_for_task.send(ChainSseMessage::Complete(Box::new(complete)));
             }
             Err(err) => {
                 let api_err: ApiError = err.into();
@@ -526,13 +882,17 @@ pub async fn generate_chain_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu_pool::GpuJob;
     use anyhow::Result;
     use image::{Rgb, RgbImage};
-    use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage};
+    use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
     use mold_core::{GenerateRequest, GenerateResponse};
+    use mold_inference::device::DiscoveredGpu;
     use mold_inference::ltx2::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
+    use mold_inference::shared_pool::SharedPool;
     use mold_inference::InferenceEngine;
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, RwLock};
 
     /// Mock engine that delegates to a simple chain renderer producing
     /// deterministic solid-color frames + a zero-valued latent tail. The
@@ -640,6 +1000,11 @@ mod tests {
                     source_image: None,
                     negative_prompt: None,
                     seed_offset: None,
+                    transition: TransitionMode::Smooth,
+                    fade_frames: None,
+                    model: None,
+                    loras: vec![],
+                    references: vec![],
                 })
                 .collect(),
             motion_tail_frames: 0, // simplifies frame accounting for the mock
@@ -732,14 +1097,51 @@ mod tests {
             .await
             .expect_err("mid-chain failure must bubble up");
         match err {
-            ChainRunError::Inference(msg) => {
+            ChainRunError::StageFailed(failure) => {
+                assert_eq!(
+                    failure.failed_stage_idx, 1,
+                    "failed_stage_idx must be 1, got {}",
+                    failure.failed_stage_idx
+                );
                 assert!(
-                    msg.contains("simulated chain failure"),
-                    "inference error must carry renderer message, got: {msg}"
+                    failure.stage_error.contains("simulated chain failure"),
+                    "stage_error must carry renderer message, got: {}",
+                    failure.stage_error
                 );
             }
-            other => panic!("expected Inference error, got {other:?}"),
+            other => panic!("expected StageFailed error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn generate_chain_handler_returns_502_with_chain_failure_body() {
+        use axum::body::to_bytes;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let engine = ChainMockEngine::failing_at(1);
+        let state = state_with_chain_engine(engine);
+        let req = chain_req_for_mock("ltx-2-19b-distilled:mock", 3);
+
+        let resp = generate_chain(State(state), Json(req)).await;
+        let (parts, body) = resp.into_response().into_parts();
+
+        assert_eq!(parts.status, StatusCode::BAD_GATEWAY, "must be 502");
+
+        let bytes = to_bytes(body, usize::MAX).await.unwrap();
+        let failure: mold_core::chain::ChainFailure =
+            serde_json::from_slice(&bytes).expect("body must be ChainFailure JSON");
+
+        assert_eq!(
+            failure.failed_stage_idx, 1,
+            "failed_stage_idx must be 1, got {}",
+            failure.failed_stage_idx
+        );
+        assert!(
+            failure.stage_error.contains("simulated chain failure"),
+            "stage_error must carry renderer message, got: {}",
+            failure.stage_error
+        );
     }
 
     #[tokio::test]
@@ -792,6 +1194,57 @@ mod tests {
         assert_eq!(
             resp.video.frames, 10,
             "total_frames must trim the stitched output length"
+        );
+    }
+
+    fn minimal_worker_for_guard_test() -> Arc<GpuWorker> {
+        let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuJob>(2);
+        Arc::new(GpuWorker {
+            gpu: DiscoveredGpu {
+                ordinal: 0,
+                name: "fake".to_string(),
+                total_vram_bytes: 24_000_000_000,
+                free_vram_bytes: 24_000_000_000,
+            },
+            model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(3))),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        })
+    }
+
+    /// Guards must clear worker state even when the protected scope unwinds.
+    /// Without the Drop impls firing on panic, `in_flight` would remain
+    /// incremented forever and `active_generation` would remain set — biasing
+    /// the dispatcher's `select_worker` away from this worker permanently.
+    #[test]
+    fn guards_clear_state_on_panic() {
+        let worker = minimal_worker_for_guard_test();
+        let req = chain_req_for_mock("fake-model", 1);
+
+        let worker_for_catch = worker.clone();
+        let result = std::panic::catch_unwind(move || {
+            let _in_flight = InFlightGuard::increment(worker_for_catch.clone());
+            let _active = ActiveGenerationGuard::set(worker_for_catch.clone(), &req)
+                .expect("set active_generation");
+            assert_eq!(worker_for_catch.in_flight.load(Ordering::SeqCst), 1);
+            assert!(worker_for_catch.active_generation.read().unwrap().is_some());
+            panic!("simulated orchestrator failure");
+        });
+
+        assert!(result.is_err(), "panic must propagate");
+        assert_eq!(
+            worker.in_flight.load(Ordering::SeqCst),
+            0,
+            "InFlightGuard must decrement on panic"
+        );
+        assert!(
+            worker.active_generation.read().unwrap().is_none(),
+            "ActiveGenerationGuard must clear on panic"
         );
     }
 }

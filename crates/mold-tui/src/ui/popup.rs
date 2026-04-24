@@ -751,6 +751,7 @@ mod tests {
                 filtering: false,
             },
             settings: crate::app::SettingsState::default(),
+            script: crate::ui::script_composer::ScriptComposerState::default(),
             config: mold_core::Config::default(),
             server_url: None,
             picker,

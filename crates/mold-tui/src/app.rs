@@ -76,6 +76,14 @@ pub enum BackgroundEvent {
     /// message so the UI can surface it and re-sync the local list with
     /// whatever state remains on the server.
     GalleryDeleteFailed(String),
+    /// Chain progress update from server SSE.
+    ChainProgress(mold_core::ChainProgressEvent),
+    /// Chain generation completed — video bytes ready.
+    ChainComplete {
+        response: Box<mold_core::ChainResponse>,
+    },
+    /// Chain generation failed.
+    ChainError(String),
 }
 
 /// A single entry in the progress log.
@@ -968,6 +976,8 @@ pub enum ConfirmAction {
     /// Delete a gallery image by index.
     DeleteGalleryImage,
     RemoveModel(String),
+    /// Delete the currently selected script stage.
+    DeleteScriptStage,
 }
 
 /// The root application state.
@@ -977,6 +987,7 @@ pub struct App {
     pub gallery: GalleryState,
     pub models: ModelsState,
     pub settings: SettingsState,
+    pub script: crate::ui::script_composer::ScriptComposerState,
     pub config: Config,
     pub server_url: Option<String>,
     pub picker: Picker,
@@ -1309,6 +1320,7 @@ impl App {
                     ..Default::default()
                 }
             },
+            script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url,
             picker,
@@ -2547,16 +2559,18 @@ impl App {
                     View::Gallery => View::Models,
                     View::Models => View::Queue,
                     View::Queue => View::Settings,
-                    View::Settings => View::Generate,
+                    View::Settings => View::Script,
+                    View::Script => View::Generate,
                 };
             }
             Action::ViewPrev => {
                 self.active_view = match self.active_view {
-                    View::Generate => View::Settings,
+                    View::Generate => View::Script,
                     View::Gallery => View::Generate,
                     View::Models => View::Gallery,
                     View::Queue => View::Models,
                     View::Settings => View::Queue,
+                    View::Script => View::Settings,
                 };
             }
             Action::FocusNext if self.active_view == View::Generate => {
@@ -2600,6 +2614,7 @@ impl App {
                 }
                 View::Queue => {}
                 View::Settings => self.settings_navigate(-1),
+                View::Script => {}
             },
             Action::Down => match self.active_view {
                 View::Generate => {
@@ -2634,6 +2649,7 @@ impl App {
                 }
                 View::Queue => {}
                 View::Settings => self.settings_navigate(1),
+                View::Script => {}
             },
             Action::Increment => {
                 if self.active_view == View::Settings {
@@ -2705,6 +2721,7 @@ impl App {
                         self.settings_confirm();
                     }
                 }
+                View::Script => {}
             },
             Action::PullModel if self.active_view == View::Models => {
                 if let Some(model) = self.models.catalog.get(self.models.selected) {
@@ -2928,6 +2945,85 @@ impl App {
                         message,
                         on_confirm: ConfirmAction::RemoveModel(name),
                     });
+                }
+            }
+            Action::ScriptMoveDown => self.script.move_down(),
+            Action::ScriptMoveUp => self.script.move_up(),
+            Action::ScriptReorderDown => self.script.reorder_down(),
+            Action::ScriptReorderUp => self.script.reorder_up(),
+            Action::ScriptAddAfter => self.script.add_stage_after(),
+            Action::ScriptAddBefore => self.script.add_stage_before(),
+            Action::ScriptDelete if self.script.script.stages.len() > 1 => {
+                self.popup = Some(Popup::Confirm {
+                    message: format!("Delete stage {}?", self.script.selected + 1,),
+                    on_confirm: ConfirmAction::DeleteScriptStage,
+                });
+            }
+            Action::ScriptCycleTransition => self.script.cycle_transition(),
+            Action::ScriptSave => self.script.open_save_dialog(),
+            Action::ScriptLoad => self.script.open_load_dialog(),
+            Action::ScriptSubmit if !self.generate.generating => {
+                let req = self.script.build_chain_request();
+                self.generate.generating = true;
+                self.generate.error_message = None;
+                self.generate.progress.clear();
+                self.generate.progress.mark_generation_start();
+                self.generate.preview_image = None;
+                self.generate.image_state = None;
+                self.generate.animation = None;
+
+                let tx = self.bg_tx.clone();
+                let server_url = self.server_url.clone();
+
+                self.tokio_handle.spawn(async move {
+                    crate::backend::run_chain_generation(server_url, req, tx).await;
+                });
+            }
+            Action::ScriptOpenPromptEditor => self.script.open_prompt_editor(),
+            Action::ScriptOpenFramesEditor => self.script.open_frames_editor(),
+            Action::ScriptModalSubmit => {
+                use crate::ui::script_composer::ScriptModal;
+                match self.script.modal {
+                    ScriptModal::PromptEdit { .. } => self.script.commit_prompt(),
+                    ScriptModal::FramesEdit { .. } => self.script.commit_frames(),
+                    ScriptModal::SavePath { .. } => self.script.save_to_path(),
+                    ScriptModal::LoadPath { .. } => self.script.load_from_path(),
+                    ScriptModal::Closed => {}
+                }
+            }
+            Action::ScriptModalCancel => self.script.cancel_modal(),
+            Action::ScriptModalChar(c) => {
+                use crate::ui::script_composer::ScriptModal;
+                match &mut self.script.modal {
+                    ScriptModal::PromptEdit { buffer } => buffer.push(c),
+                    ScriptModal::FramesEdit { buffer, error }
+                    | ScriptModal::SavePath { buffer, error }
+                    | ScriptModal::LoadPath { buffer, error } => {
+                        buffer.push(c);
+                        *error = None;
+                    }
+                    ScriptModal::Closed => {}
+                }
+            }
+            Action::ScriptModalBackspace => {
+                use crate::ui::script_composer::ScriptModal;
+                match &mut self.script.modal {
+                    ScriptModal::PromptEdit { buffer } => {
+                        buffer.pop();
+                    }
+                    ScriptModal::FramesEdit { buffer, error }
+                    | ScriptModal::SavePath { buffer, error }
+                    | ScriptModal::LoadPath { buffer, error } => {
+                        buffer.pop();
+                        *error = None;
+                    }
+                    ScriptModal::Closed => {}
+                }
+            }
+            Action::ScriptModalNewline => {
+                use crate::ui::script_composer::ScriptModal;
+                if let ScriptModal::PromptEdit { buffer } = &mut self.script.modal {
+                    buffer.push('\n');
                 }
             }
             _ => {}
@@ -3395,6 +3491,9 @@ impl App {
                 self.tokio_handle.spawn_blocking(move || {
                     crate::backend::remove_model(model_name, tx);
                 });
+            }
+            ConfirmAction::DeleteScriptStage => {
+                self.script.delete_stage();
             }
         }
     }
@@ -4966,6 +5065,66 @@ impl App {
                         self.models.selected = self.models.catalog.len() - 1;
                     }
                 }
+                BackgroundEvent::ChainProgress(event) => {
+                    use mold_core::ChainProgressEvent;
+                    let msg = match &event {
+                        ChainProgressEvent::ChainStart {
+                            stage_count,
+                            estimated_total_frames,
+                        } => {
+                            format!("Chain: {stage_count} stages, ~{estimated_total_frames} frames")
+                        }
+                        ChainProgressEvent::StageStart { stage_idx } => {
+                            format!(
+                                "Stage {}/{} started",
+                                stage_idx + 1,
+                                self.script.script.stages.len()
+                            )
+                        }
+                        ChainProgressEvent::DenoiseStep {
+                            stage_idx,
+                            step,
+                            total,
+                        } => {
+                            format!("Stage {} step {}/{}", stage_idx + 1, step, total)
+                        }
+                        ChainProgressEvent::StageDone {
+                            stage_idx,
+                            frames_emitted,
+                        } => {
+                            format!("Stage {} done ({} frames)", stage_idx + 1, frames_emitted)
+                        }
+                        ChainProgressEvent::Stitching { total_frames } => {
+                            format!("Stitching {total_frames} frames...")
+                        }
+                    };
+                    self.generate.progress.push_log(ProgressLogEntry {
+                        message: msg,
+                        style: ProgressStyle::Info,
+                    });
+                }
+                BackgroundEvent::ChainComplete { response } => {
+                    self.generate.generating = false;
+                    self.generate.progress.generation_started_at = None;
+                    self.generate.progress.stage_started_at = None;
+                    self.generate.progress.push_log(ProgressLogEntry {
+                        message: format!(
+                            "Chain complete: {} stages, GPU {}",
+                            response.stage_count,
+                            response
+                                .gpu
+                                .map(|g| g.to_string())
+                                .unwrap_or_else(|| "unknown".into()),
+                        ),
+                        style: ProgressStyle::Done,
+                    });
+                }
+                BackgroundEvent::ChainError(msg) => {
+                    self.generate.generating = false;
+                    self.generate.progress.generation_started_at = None;
+                    self.generate.progress.stage_started_at = None;
+                    self.generate.error_message = Some(msg);
+                }
                 BackgroundEvent::GalleryDeleteFailed(msg) => {
                     self.apply_delete_failure(&msg);
                 }
@@ -6103,6 +6262,7 @@ mod tests {
                 skip_save: true,
                 ..Default::default()
             },
+            script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url: None,
             picker,
@@ -6201,9 +6361,16 @@ mod tests {
         // Queue sits at index 3 between Models and Settings.
         assert_eq!(View::Queue.index(), 3);
         assert_eq!(View::Settings.index(), 4);
-        assert_eq!(View::ALL.len(), 5);
+        assert_eq!(View::ALL.len(), 6);
         assert_eq!(View::ALL[3], View::Queue);
         assert_eq!(View::ALL[4], View::Settings);
+        assert_eq!(View::ALL[5], View::Script);
+    }
+
+    #[test]
+    fn view_all_includes_script() {
+        assert_eq!(View::ALL.len(), 6);
+        assert_eq!(View::ALL[5], View::Script);
     }
 
     // ── Settings E2E: display values ──────────────────────
@@ -6688,8 +6855,9 @@ mod tests {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         // Tab bar is 3 rows tall; tabs render on row 1 (under the title
-        // row, above the bottom border). 80-col terminal.
-        let tab_bar = ratatui::layout::Rect::new(0, 0, 80, 3);
+        // row, above the bottom border). 120-col terminal (wide enough for
+        // all 6 tabs).
+        let tab_bar = ratatui::layout::Rect::new(0, 0, 120, 3);
 
         // Actual rendered layout (verified via TestBackend probe) —
         // ratatui's Tabs widget adds its own pad_left(" ") and
@@ -6743,6 +6911,11 @@ mod tests {
             (57, View::Settings, "Settings '5'"),
             (62, View::Settings, "Settings 'n'"),
             (68, View::Settings, "Settings pad_right"),
+            (69, View::Settings, "Settings trailing divider"),
+            (70, View::Script, "Script pad_left"),
+            (72, View::Script, "Script '6'"),
+            (76, View::Script, "Script 'p'"),
+            (81, View::Script, "Script pad_right"),
         ];
 
         for (col, expected, name) in cases {
@@ -6772,14 +6945,14 @@ mod tests {
         // on the host/version indicator silently switched views.
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut app = make_settings_test_app();
-        app.layout.tab_bar = ratatui::layout::Rect::new(0, 0, 80, 3);
+        app.layout.tab_bar = ratatui::layout::Rect::new(0, 0, 120, 3);
         app.active_view = View::Generate;
 
-        // Col 75 is well past Settings (which ends at col 68) — it sits
+        // Col 90 is well past Script (which ends around col 82) — it sits
         // under the right-aligned "mold 0.9.0" version indicator.
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 75,
+            column: 90,
             row: 1,
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
@@ -6823,6 +6996,7 @@ mod tests {
             ("3", View::Models),
             ("4", View::Queue),
             ("5", View::Settings),
+            ("6", View::Script),
         ];
         for (digit, expected) in digit_to_view {
             let col = (0..tab_bar.width)

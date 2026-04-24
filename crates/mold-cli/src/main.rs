@@ -338,6 +338,19 @@ Examples:
 }
 
 #[derive(Subcommand)]
+enum ChainSub {
+    /// Parse and normalise a TOML script without submitting.
+    #[command(after_long_help = "\
+Examples:
+  mold chain validate shot.toml")]
+    Validate {
+        /// Path to the TOML chain script.
+        #[arg(value_hint = ValueHint::FilePath)]
+        path: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Generate images from a text prompt
@@ -485,6 +498,28 @@ Examples:
         /// Skip server and run inference locally (requires GPU features)
         #[arg(long, help_heading = "Server")]
         local: bool,
+
+        /// Prompt(s). Repeat for a multi-stage uniform chain with smooth
+        /// transitions. For heterogeneous stages, use --script.
+        #[arg(long, help_heading = "Image")]
+        prompt: Vec<String>,
+
+        /// Per-clip frame cap for multi-prompt sugar. Clamped to the model's
+        /// per-clip cap. Only used when --prompt is repeated. Defaults to 97
+        /// (the LTX-2 19B/22B distilled cap).
+        #[arg(long, value_name = "N", help_heading = "Video")]
+        frames_per_clip: Option<u32>,
+
+        /// Path to a `mold.chain.v1` TOML script. When set, every other
+        /// generation flag is ignored except `--output`, `--local`, `--host`,
+        /// and `--dry-run`.
+        #[arg(long, value_name = "PATH", help_heading = "Server")]
+        script: Option<std::path::PathBuf>,
+
+        /// Parse and normalise the script without submitting. Prints the
+        /// canonical stage list and estimated total frames to stdout.
+        #[arg(long, help_heading = "Server")]
+        dry_run: bool,
 
         /// Comma-separated GPU ordinals to use for local generation (default: all)
         #[arg(long, env = "MOLD_GPUS", help_heading = "Advanced")]
@@ -688,6 +723,15 @@ Examples:
     Server {
         #[command(subcommand)]
         action: ServerAction,
+    },
+
+    /// Script-mode chain authoring tools
+    #[command(after_long_help = "\
+Examples:
+  mold chain validate shot.toml    Parse and normalise a TOML chain script")]
+    Chain {
+        #[command(subcommand)]
+        action: ChainSub,
     },
 
     /// Download model weights via the running server, or locally if no server is reachable
@@ -1219,6 +1263,10 @@ async fn run() -> anyhow::Result<()> {
             no_metadata,
             preview,
             local,
+            prompt,
+            frames_per_clip,
+            script,
+            dry_run,
             gpus,
             t5_variant,
             qwen3_variant,
@@ -1250,6 +1298,71 @@ async fn run() -> anyhow::Result<()> {
             expand_model,
             upscale: _upscale, // TODO: wire into generate pipeline for post-generation upscaling
         } => {
+            if let Some(ref path) = script {
+                return commands::chain::run_from_script(
+                    path,
+                    host.clone(),
+                    output.clone(),
+                    local,
+                    dry_run,
+                    no_metadata,
+                    preview,
+                    gpus.clone(),
+                    t5_variant.clone(),
+                    qwen3_variant.clone(),
+                    qwen2_variant.clone(),
+                    qwen2_text_encoder_mode.clone(),
+                    eager,
+                    offload,
+                )
+                .await;
+            }
+
+            // Reject positional prompt + --prompt flag combo (Task 3.6).
+            if !prompt.is_empty() {
+                let config = mold_core::Config::load_or_default();
+                let has_positional_prompt = match model_or_prompt.as_deref() {
+                    Some(first) if mold_core::manifest::is_known_model(first, &config) => {
+                        !prompt_rest.is_empty()
+                    }
+                    Some(_) => true, // first positional isn't a model → it's prompt text
+                    None => !prompt_rest.is_empty(),
+                };
+                if has_positional_prompt {
+                    anyhow::bail!(
+                        "cannot combine positional prompt and --prompt; pick one or use --script"
+                    );
+                }
+            }
+
+            if prompt.len() > 1 {
+                return commands::chain::run_from_sugar(
+                    model_or_prompt.clone(),
+                    prompt.clone(),
+                    frames_per_clip,
+                    motion_tail,
+                    dry_run,
+                    host.clone(),
+                    output.clone(),
+                    local,
+                    no_metadata,
+                    preview,
+                    gpus.clone(),
+                    t5_variant.clone(),
+                    qwen3_variant.clone(),
+                    qwen2_variant.clone(),
+                    qwen2_text_encoder_mode.clone(),
+                    eager,
+                    offload,
+                )
+                .await;
+            }
+            // Fold single --prompt into prompt_rest when there's no positional prompt.
+            let prompt_rest = if prompt.len() == 1 && prompt_rest.is_empty() {
+                prompt.into_iter().collect()
+            } else {
+                prompt_rest
+            };
             commands::run::run(
                 model_or_prompt,
                 prompt_rest,
@@ -1364,6 +1477,9 @@ async fn run() -> anyhow::Result<()> {
             ServerAction::Stop => {
                 commands::server::run_stop().await?;
             }
+        },
+        Commands::Chain { action } => match action {
+            ChainSub::Validate { path } => commands::chain_validate::run(&path).await?,
         },
         Commands::Pull { model, skip_verify } => {
             let opts = mold_core::download::PullOptions { skip_verify };

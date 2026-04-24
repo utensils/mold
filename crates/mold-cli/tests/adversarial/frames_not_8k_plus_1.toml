@@ -1,0 +1,16 @@
+schema = "mold.chain.v1"
+
+[chain]
+model = "ltx-2-19b-distilled:fp8"
+width = 1216
+height = 704
+fps = 24
+steps = 8
+guidance = 3.0
+strength = 1.0
+motion_tail_frames = 4
+output_format = "mp4"
+
+[[stage]]
+prompt = "a"
+frames = 96
