@@ -23,6 +23,23 @@ pub struct ScanOptions {
     pub civitai_token: Option<String>,
     pub per_family_cap: Option<usize>,
     pub request_timeout: Duration,
+    /// Sleep before every HF request. Defaults to 250 ms (~4 req/s), well
+    /// under the documented unauthenticated `/api/models` ceiling. A full
+    /// `mold catalog refresh` makes thousands of requests; without this
+    /// throttle the scanner fires them as fast as the network returns,
+    /// which is what triggers HTTP 429s. Tests set this to `Duration::ZERO`.
+    pub hf_request_delay: Duration,
+    /// Sleep before every Civitai request. Defaults to 1.5 s (~40 req/min)
+    /// — Civitai's anonymous limit is closer to ~50/min and we want a
+    /// safety margin. Tests set this to `Duration::ZERO`.
+    pub civitai_request_delay: Duration,
+    /// Number of times to retry after an HTTP 429 before giving up on a
+    /// request. Defaults to 3. Tests set this to 0 so they don't pay
+    /// retry latency on intentional 429 fixtures.
+    pub max_429_retries: u8,
+    /// Backoff used when a 429 response carries no `Retry-After` header.
+    /// Doubled on each subsequent retry (5 s → 10 s → 20 s by default).
+    pub default_429_backoff: Duration,
 }
 
 impl Default for ScanOptions {
@@ -35,6 +52,10 @@ impl Default for ScanOptions {
             civitai_token: None,
             per_family_cap: None,
             request_timeout: Duration::from_secs(30),
+            hf_request_delay: Duration::from_millis(250),
+            civitai_request_delay: Duration::from_millis(1500),
+            max_429_retries: 3,
+            default_429_backoff: Duration::from_secs(5),
         }
     }
 }

@@ -44,6 +44,9 @@ async fn run_scan_aggregates_per_family_outcomes_and_isolates_failures() {
 
     let opts = ScanOptions {
         families: vec![Family::Flux, Family::Sdxl],
+        hf_request_delay: std::time::Duration::ZERO,
+        civitai_request_delay: std::time::Duration::ZERO,
+        max_429_retries: 0,
         ..ScanOptions::default()
     };
     let report = run_scan(&hf_server.uri(), &cv_server.uri(), &opts).await;

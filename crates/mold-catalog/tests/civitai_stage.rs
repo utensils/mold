@@ -62,8 +62,9 @@ async fn scan_drops_pickle_files_and_keeps_safetensors() {
         .await;
 
     let opts = ScanOptions {
-        // include_nsfw is irrelevant here; both fixtures are SFW. The
-        // assertion checks the safetensor/pt distinction.
+        hf_request_delay: std::time::Duration::ZERO,
+        civitai_request_delay: std::time::Duration::ZERO,
+        max_429_retries: 0,
         ..ScanOptions::default()
     };
     let entries = civitai::scan(&server.uri(), &opts, &["SDXL 1.0"])
@@ -92,6 +93,9 @@ async fn scan_passes_token_via_bearer_when_present() {
 
     let opts = ScanOptions {
         civitai_token: Some("civitai-secret".into()),
+        hf_request_delay: std::time::Duration::ZERO,
+        civitai_request_delay: std::time::Duration::ZERO,
+        max_429_retries: 0,
         ..ScanOptions::default()
     };
     let entries = civitai::scan(&server.uri(), &opts, &["SDXL 1.0"])

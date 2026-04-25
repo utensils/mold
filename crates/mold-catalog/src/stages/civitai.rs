@@ -81,21 +81,19 @@ async fn http_get(
     options: &ScanOptions,
     url: &str,
 ) -> Result<String, ScanError> {
-    let mut req = client.get(url);
+    let mut builder = client.get(url);
     if let Some(t) = options.civitai_token.as_deref() {
-        req = req.bearer_auth(t);
+        builder = builder.bearer_auth(t);
     }
-    let resp = req.send().await?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(ScanError::AuthRequired {
-            host: "civitai.com",
-        });
-    }
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Err(ScanError::RateLimited {
-            host: "civitai.com",
-        });
-    }
-    Ok(resp.text().await?)
+    let req = builder.build()?;
+    let outcome = crate::stages::throttle::polite_send(
+        client,
+        req,
+        options.civitai_request_delay,
+        options.default_429_backoff,
+        options.max_429_retries,
+        "civitai.com",
+    )
+    .await?;
+    Ok(outcome.body)
 }
