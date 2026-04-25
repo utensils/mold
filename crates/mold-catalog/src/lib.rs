@@ -8,5 +8,6 @@
 #![forbid(unsafe_code)]
 
 pub mod civitai_map;
+pub mod companions;
 pub mod entry;
 pub mod families;
