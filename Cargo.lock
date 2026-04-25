@@ -3031,6 +3031,7 @@ dependencies = [
  "mold-ai-core",
  "mold-ai-db",
  "reqwest",
+ "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",
