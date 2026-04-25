@@ -1509,8 +1509,13 @@ async fn run() -> anyhow::Result<()> {
             ChainSub::Validate { path } => commands::chain_validate::run(&path).await?,
         },
         Commands::Pull { model, skip_verify } => {
+            let resolved = if model.starts_with("hf:") || model.starts_with("cv:") {
+                resolve_catalog_id(&model)?
+            } else {
+                model
+            };
             let opts = mold_core::download::PullOptions { skip_verify };
-            commands::pull::run(&model, &opts).await?;
+            commands::pull::run(&resolved, &opts).await?;
         }
         Commands::Rm { models, force } => {
             commands::rm::run(&models, force).await?;
@@ -1799,6 +1804,34 @@ compdef _clap_dynamic_completer_mold mold
         .unwrap_or_else(|| "mold".to_string());
     completer.write_registration("COMPLETE", "mold", "mold", &bin, &mut std::io::stdout())?;
     Ok(())
+}
+
+/// Resolve a catalog ID (e.g. `hf:bfl/FLUX.1-dev`) to the manifest model name
+/// that the existing pull flow understands (e.g. `bfl/FLUX.1-dev`).
+fn resolve_catalog_id(id: &str) -> anyhow::Result<String> {
+    let path =
+        mold_db::default_db_path().ok_or_else(|| anyhow::anyhow!("cannot resolve mold.db path"))?;
+    let mut conn = rusqlite::Connection::open(path)?;
+    mold_db::migrations::apply_pending(&mut conn)
+        .map_err(|e| anyhow::anyhow!("DB migration failed: {e}"))?;
+    let row = mold_db::catalog::get_by_id(&conn, id)
+        .map_err(|e| anyhow::anyhow!("catalog DB lookup failed: {e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("no catalog entry with id {id} — run `mold catalog refresh` first")
+        })?;
+    if row.engine_phase >= 2 {
+        anyhow::bail!(
+            "engine_phase {} not yet supported by this build of mold (release notes for status)",
+            row.engine_phase
+        );
+    }
+    if row.source == "hf" {
+        // Use the HF source_id as the manifest model name. Existing manifest
+        // resolution then turns it into a real download.
+        Ok(row.source_id)
+    } else {
+        anyhow::bail!("civitai catalog pulls are implemented in phase 2")
+    }
 }
 
 #[cfg(test)]

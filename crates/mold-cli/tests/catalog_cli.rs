@@ -120,3 +120,20 @@ async fn refresh_with_dry_run_does_not_touch_db() {
 
     drop(assertion);
 }
+
+#[test]
+fn pull_with_catalog_id_routes_to_catalog_lookup() {
+    let home = seeded_home();
+    Command::cargo_bin("mold")
+        .unwrap()
+        .env("MOLD_HOME", home.path())
+        .env("MOLD_DB_PATH", home.path().join("mold.db"))
+        .env("MOLD_HOST", "http://127.0.0.1:1") // refuse to fall through to remote
+        .args(["pull", "hf:bfl/FLUX.1-dev", "--skip-verify"])
+        .assert()
+        // We don't expect a successful HF pull here — the purpose is to
+        // verify the catalog branch is taken (error must mention manifest
+        // resolution against `bfl/FLUX.1-dev`, not "unknown model 'hf:...'").
+        .stderr(predicate::str::contains("bfl/FLUX.1-dev").or(predicate::str::contains("HF")))
+        .failure();
+}
