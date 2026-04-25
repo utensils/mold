@@ -50,6 +50,7 @@ serde = { version = "1", features = ["derive"] }
 sysinfo = "0.34"
 tar = "0.4"
 sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "macros"] }
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 tracing = "0.1"
@@ -66,3 +67,5 @@ filetime = "0.2"
 predicates = "3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"

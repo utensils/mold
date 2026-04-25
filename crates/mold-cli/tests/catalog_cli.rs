@@ -84,3 +84,39 @@ fn catalog_where_prints_not_downloaded() {
         .success()
         .stdout(predicate::str::contains("<not downloaded>"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refresh_with_dry_run_does_not_touch_db() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&server)
+        .await;
+
+    let home = seeded_home();
+    let assertion = Command::cargo_bin("mold")
+        .unwrap()
+        .env("MOLD_HOME", home.path())
+        .env("MOLD_DB_PATH", home.path().join("mold.db"))
+        .env("MOLD_CATALOG_HF_BASE", server.uri())
+        .env("MOLD_CATALOG_CIVITAI_BASE", server.uri())
+        .args(["catalog", "refresh", "--family", "flux", "--dry-run"])
+        .assert()
+        .success();
+
+    // After --dry-run, the seeded row from `seeded_home` is still present.
+    let conn = rusqlite::Connection::open(home.path().join("mold.db")).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM catalog WHERE id='hf:bfl/FLUX.1-dev'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "dry-run must not delete existing rows");
+
+    drop(assertion);
+}

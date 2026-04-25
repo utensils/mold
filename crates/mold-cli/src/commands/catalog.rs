@@ -125,10 +125,129 @@ pub async fn run_show(id: String, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_refresh(_args: RefreshArgs) -> Result<()> {
-    Err(anyhow::anyhow!(
-        "mold catalog refresh — implemented in Task 27"
-    ))
+pub async fn run_refresh(args: RefreshArgs) -> Result<()> {
+    let hf_base =
+        std::env::var("MOLD_CATALOG_HF_BASE").unwrap_or_else(|_| "https://huggingface.co".into());
+    let cv_base =
+        std::env::var("MOLD_CATALOG_CIVITAI_BASE").unwrap_or_else(|_| "https://civitai.com".into());
+
+    let mut opts = mold_catalog::scanner::ScanOptions::default();
+    if let Some(family) = args.family.as_deref() {
+        let fam = mold_catalog::families::Family::from_str(family)
+            .map_err(|e| anyhow::anyhow!("unknown family: {e}"))?;
+        opts.families = vec![fam];
+    }
+    opts.min_downloads = args.min_downloads;
+    opts.include_nsfw = !args.no_nsfw;
+    opts.hf_token = std::env::var("HF_TOKEN").ok();
+    opts.civitai_token = std::env::var("CIVITAI_TOKEN").ok();
+
+    let report = mold_catalog::scanner::run_scan(&hf_base, &cv_base, &opts).await;
+
+    println!(
+        "scanned {} entries across {} families",
+        report.total_entries,
+        report.per_family.len()
+    );
+    for (fam, outcome) in &report.per_family {
+        println!("  {:<12} {:?}", fam.as_str(), outcome);
+    }
+
+    if args.dry_run {
+        println!("(dry-run; not writing shards or DB)");
+        return Ok(());
+    }
+
+    // For commit_to_repo, write into the repo-relative shard dir; otherwise
+    // into $MOLD_HOME/catalog/.
+    let shard_dir = if args.commit_to_repo {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("mold-catalog")
+            .join("data")
+            .join("catalog")
+    } else {
+        mold_core::Config::mold_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot resolve MOLD_HOME"))?
+            .join("catalog")
+    };
+
+    let conn = open_conn()?;
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into());
+
+    // Re-run the scanner per family so we can group entries by family
+    // before sinking. The orchestrator already grouped them, but does not
+    // currently return the grouped vec; for phase 1 the simpler path is a
+    // second pass keyed off `family`.
+    let mut by_family: std::collections::BTreeMap<
+        mold_catalog::families::Family,
+        Vec<mold_catalog::entry::CatalogEntry>,
+    > = Default::default();
+    // Re-run minimal scans family-by-family. This is the same pattern the
+    // server's refresh endpoint uses; the duplicated network cost is OK
+    // because manual refresh is rare and `--family` already narrows it.
+    for fam in &opts.families {
+        let mut single_opts = opts.clone();
+        single_opts.families = vec![*fam];
+        let report = mold_catalog::scanner::run_scan(&hf_base, &cv_base, &single_opts).await;
+        by_family.insert(
+            *fam,
+            fetch_family_entries(&hf_base, &cv_base, &single_opts, *fam).await?,
+        );
+        let _ = report;
+    }
+
+    for (fam, entries) in by_family {
+        let shard = mold_catalog::sink::build_shard(
+            fam.as_str(),
+            env!("CARGO_PKG_VERSION"),
+            &now,
+            entries.clone(),
+        );
+        mold_catalog::sink::write_shard_atomic(&shard_dir, &shard)?;
+        mold_catalog::sink::upsert_family(&conn, fam, &entries)?;
+    }
+    println!("wrote shards to {}", shard_dir.display());
+    Ok(())
+}
+
+async fn fetch_family_entries(
+    hf_base: &str,
+    cv_base: &str,
+    opts: &mold_catalog::scanner::ScanOptions,
+    family: mold_catalog::families::Family,
+) -> Result<Vec<mold_catalog::entry::CatalogEntry>> {
+    let mut entries: Vec<mold_catalog::entry::CatalogEntry> = Vec::new();
+    if let Ok(hf) = mold_catalog::stages::hf::scan_family(
+        hf_base,
+        opts,
+        family,
+        mold_catalog::hf_seeds::seeds_for(family),
+    )
+    .await
+    {
+        entries.extend(hf);
+    }
+
+    let cv_keys: Vec<&'static str> = mold_catalog::civitai_map::CIVITAI_BASE_MODELS
+        .iter()
+        .copied()
+        .filter(|k| {
+            matches!(
+                mold_catalog::civitai_map::map_base_model(k),
+                Some((f, _, _)) if f == family
+            )
+        })
+        .collect();
+    if !cv_keys.is_empty() {
+        if let Ok(cv) = mold_catalog::stages::civitai::scan(cv_base, opts, &cv_keys).await {
+            entries.extend(cv);
+        }
+    }
+
+    Ok(mold_catalog::filter::apply(entries, opts))
 }
 
 pub async fn run_where(id: String) -> Result<()> {
