@@ -377,7 +377,7 @@ fn canonicalize_existing_output_dirs(tx: &Transaction<'_>) -> Result<()> {
 /// half-migrated state. A catastrophic crash between migrations is safe
 /// because each transaction commits the `user_version` bump alongside
 /// the DDL.
-pub(crate) fn apply_pending(conn: &mut Connection) -> Result<i64> {
+pub fn apply_pending(conn: &mut Connection) -> Result<i64> {
     // Sanity-check the migration list in debug builds — the SCHEMA_VERSION
     // constant must match the last entry and versions must be monotonic.
     debug_assert!(!MIGRATIONS.is_empty(), "migration list cannot be empty");
