@@ -15,4 +15,5 @@ pub mod filter;
 pub mod hf_seeds;
 pub mod normalizer;
 pub mod scanner;
+pub mod shards;
 pub mod stages;

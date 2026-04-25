@@ -1,0 +1,7 @@
+{
+  "$schema": "mold.catalog.v1",
+  "family": "qwen-image",
+  "generated_at": "1970-01-01T00:00:00Z",
+  "scanner_version": "0.0",
+  "entries": []
+}
