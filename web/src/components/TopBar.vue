@@ -141,6 +141,13 @@ function clearSearch() {
       >
         Generate
       </router-link>
+      <router-link
+        to="/catalog"
+        class="rounded-full px-3 py-1 text-ink-200 transition hover:text-white"
+        active-class="bg-brand-500 text-white shadow-sm"
+      >
+        Catalog
+      </router-link>
     </nav>
 
     <!-- Downloads drawer opener + badge (Agent A). Visible on every page. -->
