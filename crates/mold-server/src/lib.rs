@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod catalog_api;
 pub mod chain_limits;
 // Agent A (downloads)
 pub mod downloads;
