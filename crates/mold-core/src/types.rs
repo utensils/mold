@@ -2373,12 +2373,22 @@ pub struct GalleryCapabilities {
     pub can_delete: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CatalogCapabilities {
+    /// Whether the catalog system is available and enabled on this server.
+    /// Disabled via `MOLD_CATALOG_DISABLE=1` or `MOLD_CATALOG_DISABLE=true`.
+    pub available: bool,
+    /// List of model family names available in the catalog.
+    pub families: Vec<String>,
+}
+
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
 /// the shape extensible — future areas (inpainting, upscaling modes, etc.)
 /// can add their own sub-structs without churning existing fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerCapabilities {
     pub gallery: GalleryCapabilities,
+    pub catalog: CatalogCapabilities,
 }
 
 /// Build a default output filename, sanitizing colons from model names.

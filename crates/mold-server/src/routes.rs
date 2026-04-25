@@ -1639,9 +1639,20 @@ async fn health() -> impl IntoResponse {
 /// delete button when delete isn't allowed, etc.). No auth required — this
 /// is a read-only introspection endpoint.
 async fn server_capabilities() -> Json<mold_core::ServerCapabilities> {
+    let catalog_available = std::env::var("MOLD_CATALOG_DISABLE")
+        .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+
     Json(mold_core::ServerCapabilities {
         gallery: mold_core::GalleryCapabilities {
             can_delete: gallery_delete_allowed(),
+        },
+        catalog: mold_core::CatalogCapabilities {
+            available: catalog_available,
+            families: mold_catalog::families::ALL_FAMILIES
+                .iter()
+                .map(|f| f.as_str().to_string())
+                .collect::<Vec<_>>(),
         },
     })
 }

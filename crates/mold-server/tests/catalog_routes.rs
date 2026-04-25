@@ -83,3 +83,13 @@ async fn download_known_id_returns_202_with_job_id() {
     let v: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
     assert!(v["job_ids"].is_array());
 }
+
+#[tokio::test]
+async fn capabilities_includes_catalog_block() {
+    let app = TestApp::with_seeded_catalog().await;
+    let resp = app.get("/api/capabilities").await;
+    assert_eq!(resp.status, axum::http::StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+    assert_eq!(v["catalog"]["available"], serde_json::Value::Bool(true));
+    assert!(v["catalog"]["families"].is_array());
+}
