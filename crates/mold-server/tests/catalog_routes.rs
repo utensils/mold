@@ -39,3 +39,27 @@ async fn list_with_search_uses_fts() {
         .iter()
         .any(|e| { e["name"].as_str().unwrap_or("").contains("Juggernaut") }));
 }
+
+#[tokio::test]
+async fn refresh_enqueue_then_status_returns_pending_or_running() {
+    let app = TestApp::with_seeded_catalog().await;
+    let post = app.post_json("/api/catalog/refresh", "{}").await;
+    assert_eq!(post.status, axum::http::StatusCode::ACCEPTED);
+    let v: serde_json::Value = serde_json::from_str(&post.body).unwrap();
+    let id = v["id"].as_str().expect("id field").to_string();
+
+    let status = app.get(&format!("/api/catalog/refresh/{id}")).await;
+    assert_eq!(status.status, axum::http::StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&status.body).unwrap();
+    let state = body["state"].as_str().unwrap();
+    assert!(matches!(state, "pending" | "running" | "done"));
+}
+
+#[tokio::test]
+async fn refresh_returns_409_when_already_running() {
+    let app = TestApp::with_seeded_catalog().await;
+    let first = app.post_json("/api/catalog/refresh", "{}").await;
+    assert_eq!(first.status, axum::http::StatusCode::ACCEPTED);
+    let second = app.post_json("/api/catalog/refresh", "{}").await;
+    assert_eq!(second.status, axum::http::StatusCode::CONFLICT);
+}

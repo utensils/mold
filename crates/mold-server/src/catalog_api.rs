@@ -243,6 +243,64 @@ fn catalog_row_to_wire(r: mold_db::catalog::CatalogRow) -> serde_json::Value {
     })
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct RefreshBody {
+    #[serde(default)]
+    pub family: Option<String>,
+    #[serde(default)]
+    pub min_downloads: Option<u64>,
+    #[serde(default)]
+    pub no_nsfw: Option<bool>,
+    #[serde(default)]
+    pub include_nsfw: Option<bool>,
+    #[serde(default)]
+    pub hf_token: Option<String>,
+    #[serde(default)]
+    pub civitai_token: Option<String>,
+}
+
+pub async fn post_refresh(
+    State(state): State<crate::state::AppState>,
+    body: Option<Json<RefreshBody>>,
+) -> impl IntoResponse {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let mut opts = ScanOptions::default();
+    if let Some(family) = body.family.as_deref() {
+        if let Ok(f) = mold_catalog::families::Family::from_str(family) {
+            opts.families = vec![f];
+        } else {
+            return (StatusCode::BAD_REQUEST, format!("unknown family: {family}")).into_response();
+        }
+    }
+    if let Some(m) = body.min_downloads {
+        opts.min_downloads = m;
+    }
+    if let Some(true) = body.no_nsfw {
+        opts.include_nsfw = false;
+    } else if let Some(true) = body.include_nsfw {
+        opts.include_nsfw = true;
+    }
+    opts.hf_token = body.hf_token.or_else(|| std::env::var("HF_TOKEN").ok());
+    opts.civitai_token = body
+        .civitai_token
+        .or_else(|| std::env::var("CIVITAI_TOKEN").ok());
+
+    match state.catalog_scan.enqueue(opts).await {
+        Ok(id) => (StatusCode::ACCEPTED, Json(serde_json::json!({ "id": id }))).into_response(),
+        Err(msg) => (StatusCode::CONFLICT, msg).into_response(),
+    }
+}
+
+pub async fn get_refresh_status(
+    State(state): State<crate::state::AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.catalog_scan.status(&id).await {
+        Some(status) => Json(status).into_response(),
+        None => (StatusCode::NOT_FOUND, "unknown scan id").into_response(),
+    }
+}
+
 #[cfg(test)]
 #[path = "catalog_api_test.rs"]
 mod catalog_api_test;

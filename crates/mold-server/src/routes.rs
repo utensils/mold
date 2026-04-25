@@ -226,6 +226,14 @@ pub fn create_router(state: AppState) -> Router {
             get(crate::catalog_api::list_families),
         )
         .route(
+            "/api/catalog/refresh",
+            post(crate::catalog_api::post_refresh),
+        )
+        .route(
+            "/api/catalog/refresh/:id",
+            get(crate::catalog_api::get_refresh_status),
+        )
+        .route(
             "/api/catalog/:id",
             get(crate::catalog_api::get_catalog_entry),
         )

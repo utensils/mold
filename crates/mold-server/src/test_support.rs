@@ -74,4 +74,20 @@ impl TestApp {
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         TestResponse { status, body }
     }
+
+    pub async fn post_json(&self, uri: &str, body: &str) -> TestResponse {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        TestResponse { status, body }
+    }
 }
