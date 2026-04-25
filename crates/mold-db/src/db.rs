@@ -236,7 +236,7 @@ impl MetadataDb {
     /// Run `f` against the locked connection. Exposed to sibling modules
     /// (settings, model_prefs, prompt_history) so they don't need to
     /// re-implement the mutex dance for every read/write.
-    pub(crate) fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
+    pub fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
         let conn = self.conn.lock().expect("metadata db mutex poisoned");
         f(&conn)
     }
