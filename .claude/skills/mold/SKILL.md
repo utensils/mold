@@ -402,6 +402,24 @@ mold rm flux-dev:q4          # Remove a downloaded model
 mold rm flux-dev:q4 --force  # Remove without confirmation
 ```
 
+## Model discovery catalog (sub-project A)
+
+**Browse:** `mold catalog list [--family flux] [--q juggernaut] [--json]` reads the local `mold.db` `catalog` table and prints rows.
+
+**Inspect:** `mold catalog show hf:black-forest-labs/FLUX.1-dev` (or `cv:618692`) prints a single entry; `--json` for machine-readable.
+
+**Refresh:** `mold catalog refresh [--family flux] [--no-nsfw] [--dry-run]` re-runs the scanner against Hugging Face + Civitai, writes shards into `$MOLD_HOME/catalog/`, reseeds the DB. Maintainer-only `--commit-to-repo` writes into `crates/mold-catalog/data/catalog/`.
+
+**Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692` route through the catalog. Phase-1 supports HF separated-bundling entries with `engine_phase=1`. Single-file (Civitai) entries land in mold v0.10+ when sub-projects 2–5 ship.
+
+**Auth:** `HF_TOKEN` for gated Hugging Face repos; `CIVITAI_TOKEN` for early-access / NSFW Civitai. Web Settings persists these to `mold.db` `settings` (`huggingface.token`, `civitai.token`).
+
+**Web:** `/catalog` route in the SPA — sidebar, topbar, card grid, detail drawer.
+
+**Internals:** scanner / shards / FTS5 search live in `mold-catalog`. Catalog rows persist in the SQLite `catalog` table; FTS5 mirrors `name + author + description + tags`.
+
+**`MOLD_CATALOG_DISABLE=1`** flags the catalog as unavailable in `/api/capabilities`.
+
 ## Configuration Management
 
 View and edit settings from the CLI using dot-notation keys. Settings are split between `config.toml` (paths, ports, credentials) and `mold.db` (user preferences — `expand.*`, generation defaults, per-model generation overrides). `mold config` routes by key prefix transparently.
