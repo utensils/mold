@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 use mold_inference::shared_pool::SharedPool;
 
+use crate::catalog_api::CatalogScanQueue;
 use crate::downloads::DownloadQueue;
 use crate::gpu_pool::GpuPool;
 use crate::model_cache::ModelCache;
@@ -163,10 +164,25 @@ pub struct AppState {
     pub downloads: Arc<DownloadQueue>,
     /// Always-on resource telemetry (Agent B).
     pub resources: Arc<ResourceBroadcaster>,
+    // ── Catalog (sub-project A) ─────────────────────────────────────────────
+    /// Single-writer catalog scan queue.
+    pub catalog_scan: Arc<CatalogScanQueue>,
+    /// Catalog + gallery metadata DB. Shared across catalog endpoints.
+    pub catalog_db: Arc<mold_db::MetadataDb>,
 }
 
 /// Default maximum number of cached models (loaded + unloaded engine structs).
 const DEFAULT_MAX_CACHED_MODELS: usize = 3;
+
+/// Open the default catalog DB, falling back to in-memory if unavailable.
+fn open_catalog_db() -> Arc<mold_db::MetadataDb> {
+    // Try the real on-disk DB first (honours MOLD_DB_PATH / MOLD_HOME).
+    if let Ok(Some(db)) = mold_db::open_default() {
+        return Arc::new(db);
+    }
+    // Fall back to an ephemeral in-memory DB (tests and disabled-DB mode).
+    Arc::new(mold_db::MetadataDb::open_in_memory().expect("in-memory DB"))
+}
 
 impl AppState {
     /// Create state with a pre-loaded engine (server starts with a configured model).
@@ -204,6 +220,8 @@ impl AppState {
             metadata_db: Arc::new(None),
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
+            catalog_scan: Arc::new(CatalogScanQueue::new()),
+            catalog_db: open_catalog_db(),
         }
     }
 
@@ -232,6 +250,8 @@ impl AppState {
             metadata_db: Arc::new(None),
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
+            catalog_scan: Arc::new(CatalogScanQueue::new()),
+            catalog_db: open_catalog_db(),
         }
     }
 
@@ -282,6 +302,8 @@ impl AppState {
             metadata_db: Arc::new(None),
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
+            catalog_scan: Arc::new(CatalogScanQueue::new()),
+            catalog_db: Arc::new(mold_db::MetadataDb::open_in_memory().expect("in-memory DB")),
         }
     }
 
@@ -319,8 +341,40 @@ impl AppState {
             metadata_db: Arc::new(None),
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
+            catalog_scan: Arc::new(CatalogScanQueue::new()),
+            catalog_db: Arc::new(mold_db::MetadataDb::open_in_memory().expect("in-memory DB")),
         };
         (state, rx)
+    }
+
+    /// Create state wired to a specific catalog DB — used by integration tests
+    /// that need pre-seeded catalog data.
+    pub fn for_tests(catalog_db: Arc<mold_db::MetadataDb>) -> Self {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = QueueHandle::new(tx);
+        Self {
+            gpu_pool: Arc::new(GpuPool {
+                workers: Vec::new(),
+            }),
+            queue_capacity: 200,
+            model_cache: Arc::new(Mutex::new(ModelCache::new(DEFAULT_MAX_CACHED_MODELS))),
+            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot::default())),
+            active_generation: Arc::new(RwLock::new(None)),
+            config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            start_time: Instant::now(),
+            model_load_lock: Arc::new(Mutex::new(())),
+            pull_lock: Arc::new(Mutex::new(())),
+            chain_lock: Arc::new(Mutex::new(())),
+            queue,
+            shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
+            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
+            metadata_db: Arc::new(None),
+            downloads: DownloadQueue::new(),
+            resources: ResourceBroadcaster::new(),
+            catalog_scan: Arc::new(CatalogScanQueue::new()),
+            catalog_db,
+        }
     }
 }
 

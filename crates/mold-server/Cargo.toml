@@ -28,6 +28,8 @@ expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]
 metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 nvml = ["dep:nvml-wrapper"]
+# Exposes test helpers (TestApp, etc.) for integration tests.
+test-support = []
 
 
 [dependencies]

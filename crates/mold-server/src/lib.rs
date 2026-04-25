@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod catalog_api;
 pub mod chain_limits;
+pub mod test_support;
 // Agent A (downloads)
 pub mod downloads;
 pub mod gpu_pool;

@@ -1274,6 +1274,10 @@ mod tests {
             metadata_db: Arc::new(None),
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
+            catalog_scan: std::sync::Arc::new(crate::catalog_api::CatalogScanQueue::new()),
+            catalog_db: std::sync::Arc::new(
+                mold_db::MetadataDb::open_in_memory().expect("in-memory catalog DB"),
+            ),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1328,6 +1332,10 @@ mod tests {
             metadata_db: Arc::new(None),
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
+            catalog_scan: std::sync::Arc::new(crate::catalog_api::CatalogScanQueue::new()),
+            catalog_db: std::sync::Arc::new(
+                mold_db::MetadataDb::open_in_memory().expect("in-memory catalog DB"),
+            ),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1585,6 +1593,10 @@ mod tests {
             metadata_db: Arc::new(None),
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
+            catalog_scan: std::sync::Arc::new(crate::catalog_api::CatalogScanQueue::new()),
+            catalog_db: std::sync::Arc::new(
+                mold_db::MetadataDb::open_in_memory().expect("in-memory catalog DB"),
+            ),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));

@@ -219,6 +219,16 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/downloads", get(list_downloads).post(create_download))
         .route("/api/downloads/:id", delete(delete_download))
         .route("/api/downloads/stream", get(stream_downloads))
+        // ─── Catalog (sub-project A) ─────────────────────────────────────
+        .route("/api/catalog", get(crate::catalog_api::list_catalog))
+        .route(
+            "/api/catalog/families",
+            get(crate::catalog_api::list_families),
+        )
+        .route(
+            "/api/catalog/:id",
+            get(crate::catalog_api::get_catalog_entry),
+        )
         .route("/api/upscale", post(upscale))
         .route("/api/upscale/stream", post(upscale_stream))
         .route("/api/resources", get(get_resources))

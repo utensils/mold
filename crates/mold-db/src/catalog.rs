@@ -6,6 +6,8 @@
 
 use rusqlite::{params, Connection, Row, ToSql};
 
+use crate::MetadataDb;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CatalogRow {
     pub id: String,
@@ -261,4 +263,28 @@ pub fn search_fts(conn: &Connection, query: &str) -> rusqlite::Result<Vec<Catalo
         ..Default::default()
     };
     list(conn, &params)
+}
+
+// ── MetadataDb convenience methods for catalog access ─────────────────────────
+
+impl MetadataDb {
+    /// List catalog rows matching `params`. Acquires the DB lock once.
+    pub fn catalog_list(&self, params: &ListParams) -> anyhow::Result<Vec<CatalogRow>> {
+        self.with_conn(|conn| Ok(list(conn, params)?))
+    }
+
+    /// Fetch a single catalog row by its `id`. Returns `None` when not found.
+    pub fn catalog_get(&self, id: &str) -> anyhow::Result<Option<CatalogRow>> {
+        self.with_conn(|conn| Ok(get_by_id(conn, id)?))
+    }
+
+    /// Aggregate foundation/finetune counts per family.
+    pub fn catalog_family_counts(&self) -> anyhow::Result<Vec<FamilyCount>> {
+        self.with_conn(|conn| Ok(family_counts(conn)?))
+    }
+
+    /// Upsert a batch of catalog rows for a family.
+    pub fn catalog_upsert(&self, family: &str, rows: &[CatalogRow]) -> anyhow::Result<()> {
+        self.with_conn(|conn| Ok(upsert_entries(conn, family, rows)?))
+    }
 }
