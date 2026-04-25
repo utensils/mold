@@ -3153,6 +3153,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "mime_guess",
+ "mold-ai-catalog",
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-inference",
