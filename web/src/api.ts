@@ -345,3 +345,70 @@ export async function fetchResources(
   if (!res.ok) throw new Error(`fetchResources failed: ${res.status}`);
   return (await res.json()) as ResourceSnapshot;
 }
+
+// ─── Catalog (sub-project A) ──────────────────────────────────────────────
+import type {
+  CatalogEntryWire,
+  CatalogFamiliesResponse,
+  CatalogListParams,
+  CatalogListResponse,
+  CatalogRefreshStatus,
+} from "./types";
+
+export async function fetchCatalog(
+  params: CatalogListParams,
+): Promise<CatalogListResponse> {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null) continue;
+    sp.set(k, String(v));
+  }
+  const r = await fetch(`/api/catalog?${sp.toString()}`);
+  if (!r.ok) throw new Error(`/api/catalog ${r.status}`);
+  return r.json();
+}
+
+export async function fetchCatalogEntry(id: string): Promise<CatalogEntryWire> {
+  const r = await fetch(`/api/catalog/${encodeURIComponent(id)}`);
+  if (!r.ok) throw new Error(`/api/catalog/${id} ${r.status}`);
+  return r.json();
+}
+
+export async function fetchCatalogFamilies(): Promise<CatalogFamiliesResponse> {
+  const r = await fetch(`/api/catalog/families`);
+  if (!r.ok) throw new Error(`/api/catalog/families ${r.status}`);
+  return r.json();
+}
+
+export async function postCatalogRefresh(body: {
+  family?: string;
+  min_downloads?: number;
+  no_nsfw?: boolean;
+  include_nsfw?: boolean;
+}): Promise<{ id: string }> {
+  const r = await fetch(`/api/catalog/refresh`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`/api/catalog/refresh ${r.status}`);
+  return r.json();
+}
+
+export async function fetchCatalogRefresh(
+  id: string,
+): Promise<CatalogRefreshStatus> {
+  const r = await fetch(`/api/catalog/refresh/${encodeURIComponent(id)}`);
+  if (!r.ok) throw new Error(`/api/catalog/refresh/${id} ${r.status}`);
+  return r.json();
+}
+
+export async function postCatalogDownload(
+  id: string,
+): Promise<{ job_ids: string[] }> {
+  const r = await fetch(`/api/catalog/${encodeURIComponent(id)}/download`, {
+    method: "POST",
+  });
+  if (!r.ok) throw new Error(`/api/catalog/${id}/download ${r.status}`);
+  return r.json();
+}
