@@ -391,7 +391,13 @@ export async function postCatalogRefresh(body: {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`/api/catalog/refresh ${r.status}`);
+  if (!r.ok) {
+    // Surface the server's body (e.g. "a catalog refresh is already in
+    // progress" on 409) so the UI can show something better than a bare
+    // status code.
+    const detail = await r.text().catch(() => "");
+    throw new Error(detail || `/api/catalog/refresh ${r.status}`);
+  }
   return r.json();
 }
 

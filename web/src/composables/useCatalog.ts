@@ -82,8 +82,19 @@ function build() {
   }
 
   async function startRefresh(family?: string) {
-    const { id } = await postCatalogRefresh(family ? { family } : {});
     refreshStatus.value = { state: "pending" };
+    let id: string;
+    try {
+      ({ id } = await postCatalogRefresh(family ? { family } : {}));
+    } catch (e: unknown) {
+      // Most common case here is the server returning 409 with body
+      // "a catalog refresh is already in progress" — bubble that into
+      // refreshStatus so the TopBar's failed-state chip shows it
+      // instead of swallowing the error in console.error.
+      const message = e instanceof Error ? e.message : String(e);
+      refreshStatus.value = { state: "failed", message };
+      throw e;
+    }
     pollRefresh(id);
   }
 

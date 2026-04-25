@@ -35,8 +35,18 @@ const refreshLabel = computed(() => {
   if (s.state === "pending") return "Queued…";
   if (s.state === "running") return "Scanning…";
   if (s.state === "done") return `Done · ${s.total_entries}`;
-  if (s.state === "failed") return "Failed — retry";
+  if (s.state === "failed") {
+    // "Busy" reads better than "Failed" when the actual reason is the
+    // server's 409 conflict (another scan is mid-flight).
+    return /in progress/i.test(s.message) ? "Busy — try later" : "Failed";
+  }
   return "Refresh catalog";
+});
+
+const refreshTitle = computed(() => {
+  const s = cat.refreshStatus.value;
+  if (s?.state === "failed") return s.message;
+  return refreshLabel.value;
 });
 
 async function onRefreshCatalog() {
@@ -194,8 +204,8 @@ function clearSearch() {
       }"
       :disabled="refreshBusy"
       :aria-busy="refreshBusy"
-      :aria-label="refreshLabel"
-      :title="refreshLabel"
+      :aria-label="refreshTitle"
+      :title="refreshTitle"
       @click="onRefreshCatalog"
     >
       <svg
