@@ -146,7 +146,7 @@ function clearSearch() {
         class="rounded-full px-3 py-1 text-ink-200 transition hover:text-white"
         active-class="bg-brand-500 text-white shadow-sm"
       >
-        Catalog
+        Model Catalog
       </router-link>
     </nav>
 
