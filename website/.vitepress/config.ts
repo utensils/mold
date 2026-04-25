@@ -107,6 +107,12 @@ export default defineConfig({
           ],
         },
       ],
+      '/docs/': [
+        {
+          text: 'Docs',
+          items: [{ text: 'Catalog', link: '/docs/catalog' }],
+        },
+      ],
     },
 
     socialLinks: [{ icon: 'github', link: 'https://github.com/utensils/mold' }],
