@@ -59,3 +59,34 @@ async fn second_enqueue_while_running_is_rejected() {
         .await;
     assert!(second.is_err(), "single-writer guarantee");
 }
+
+/// `active()` is what the web UI's `GET /api/catalog/refresh` handler
+/// reads to decide whether to disable the refresh button. It must
+/// return `None` for an idle queue and `Some((id, status))` for any
+/// in-flight scan, regardless of who enqueued it.
+#[tokio::test]
+async fn active_returns_in_flight_scan_id_and_status() {
+    let report = Arc::new(Mutex::new(None));
+    let driver = Arc::new(FakeDriver { report });
+    let queue = CatalogScanQueue::new();
+    let q2 = queue.clone();
+    tokio::spawn(async move { q2.drive(driver.clone()).await });
+
+    assert!(queue.active().await.is_none(), "idle queue → no active");
+
+    let id = queue
+        .enqueue(mold_catalog::scanner::ScanOptions::default())
+        .await
+        .expect("enqueue");
+
+    let (active_id, active_status) = queue.active().await.expect("active scan present");
+    assert_eq!(active_id, id);
+    assert!(
+        matches!(
+            active_status,
+            CatalogScanStatus::Pending | CatalogScanStatus::Running
+        ),
+        "expected pending or running, got {:?}",
+        active_status
+    );
+}

@@ -409,6 +409,21 @@ export async function fetchCatalogRefresh(
   return r.json();
 }
 
+/// Returns the in-flight scan (active or pending) so the UI can attach
+/// to scans started by other browser tabs or the CLI. Resolves to
+/// `null` when the queue is idle.
+export async function fetchActiveCatalogRefresh(): Promise<{
+  id: string;
+  status: CatalogRefreshStatus;
+} | null> {
+  const r = await fetch(`/api/catalog/refresh`);
+  if (!r.ok) throw new Error(`/api/catalog/refresh ${r.status}`);
+  const body = (await r.json()) as {
+    active: { id: string; status: CatalogRefreshStatus } | null;
+  };
+  return body.active;
+}
+
 export async function postCatalogDownload(
   id: string,
 ): Promise<{ job_ids: string[] }> {

@@ -88,6 +88,20 @@ impl CatalogScanQueue {
         self.inner.lock().await.statuses.get(id).cloned()
     }
 
+    /// Returns the in-flight scan (active or pending) so clients other
+    /// than the one that submitted it can still observe it. Used by the
+    /// web UI to disable the "Refresh catalog" button when a scan
+    /// initiated by another browser tab or the CLI is already running.
+    pub async fn active(&self) -> Option<(String, CatalogScanStatus)> {
+        let inner = self.inner.lock().await;
+        let id = inner
+            .active
+            .clone()
+            .or_else(|| inner.pending.as_ref().map(|(id, _)| id.clone()))?;
+        let status = inner.statuses.get(&id).cloned()?;
+        Some((id, status))
+    }
+
     pub async fn drive(self, driver: Arc<dyn ScanDriver>) {
         loop {
             self.notify.notified().await;
@@ -314,6 +328,18 @@ pub async fn get_refresh_status(
     match state.catalog_scan.status(&id).await {
         Some(status) => Json(status).into_response(),
         None => (StatusCode::NOT_FOUND, "unknown scan id").into_response(),
+    }
+}
+
+/// `GET /api/catalog/refresh` — returns the in-flight scan if any. The
+/// web UI calls this on mount to disable the refresh button when a scan
+/// initiated by another tab or the CLI is already running.
+pub async fn get_active_refresh(State(state): State<crate::state::AppState>) -> impl IntoResponse {
+    match state.catalog_scan.active().await {
+        Some((id, status)) => {
+            Json(serde_json::json!({ "active": { "id": id, "status": status } })).into_response()
+        }
+        None => Json(serde_json::json!({ "active": null })).into_response(),
     }
 }
 

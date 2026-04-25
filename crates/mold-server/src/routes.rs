@@ -227,7 +227,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/catalog/refresh",
-            post(crate::catalog_api::post_refresh),
+            post(crate::catalog_api::post_refresh).get(crate::catalog_api::get_active_refresh),
         )
         .route(
             "/api/catalog/refresh/:id",

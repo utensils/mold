@@ -20,11 +20,13 @@ function openDownloadsDrawer() {
   window.dispatchEvent(new CustomEvent("mold:open-downloads"));
 }
 
-// ─── Catalog refresh (visible on /generate + /catalog) ────────────────────────
+// ─── Catalog refresh (visible on /catalog only) ───────────────────────────────
+// The refresh button used to live on /generate too, but operators kept
+// confusing it with model downloads. Restrict it to the catalog view —
+// users discovering the catalog will click it there; generators rarely
+// care about catalog metadata refreshes.
 const cat = useCatalog();
-const showCatalogControls = computed(
-  () => route.name === "generate" || route.name === "catalog",
-);
+const showCatalogControls = computed(() => route.name === "catalog");
 const refreshState = computed(() => cat.refreshStatus.value?.state ?? null);
 const refreshBusy = computed(
   () => refreshState.value === "pending" || refreshState.value === "running",

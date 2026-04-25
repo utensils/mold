@@ -1,5 +1,6 @@
 import { ref, watch } from "vue";
 import {
+  fetchActiveCatalogRefresh,
   fetchCatalog,
   fetchCatalogEntry,
   fetchCatalogFamilies,
@@ -115,6 +116,29 @@ function build() {
     void tick();
   }
 
+  /// Discover an in-flight scan started by another tab/CLI and attach to
+  /// it so the refresh button reflects cross-client state. Safe to call
+  /// repeatedly — it short-circuits when we already have a status.
+  async function discoverActiveRefresh() {
+    const s = refreshStatus.value;
+    if (s && (s.state === "pending" || s.state === "running")) return;
+    try {
+      const active = await fetchActiveCatalogRefresh();
+      if (active) {
+        refreshStatus.value = active.status;
+        if (
+          active.status.state === "pending" ||
+          active.status.state === "running"
+        ) {
+          pollRefresh(active.id);
+        }
+      }
+    } catch {
+      // Older servers (without GET /api/catalog/refresh) just leave the
+      // chip in its default idle state — graceful degrade.
+    }
+  }
+
   return {
     filter,
     entries,
@@ -130,6 +154,7 @@ function build() {
     canDownload,
     startDownload,
     startRefresh,
+    discoverActiveRefresh,
   };
 }
 

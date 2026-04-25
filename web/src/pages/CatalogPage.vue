@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onBeforeUnmount, onMounted } from "vue";
 import { useCatalog } from "../composables/useCatalog";
 import CatalogSidebar from "../components/CatalogSidebar.vue";
 import CatalogTopbar from "../components/CatalogTopbar.vue";
@@ -19,8 +19,21 @@ const topBarCounts = computed(() => ({
   filtered: cat.entries.value.length,
 }));
 
+// Detect cross-client scans so the Refresh button stays disabled when a
+// scan started by another tab or the CLI is in flight. We discover once
+// on mount, then poll every 10 s while the user is on /catalog and the
+// chip is idle. As soon as a scan id is discovered, useCatalog's own
+// 1.5 s pollRefresh takes over.
+let discoverTimer: ReturnType<typeof setInterval> | null = null;
 onMounted(() => {
   void cat.refresh();
+  void cat.discoverActiveRefresh();
+  discoverTimer = setInterval(() => {
+    if (!document.hidden) void cat.discoverActiveRefresh();
+  }, 10_000);
+});
+onBeforeUnmount(() => {
+  if (discoverTimer) clearInterval(discoverTimer);
 });
 </script>
 
