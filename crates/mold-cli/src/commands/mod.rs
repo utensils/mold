@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod chain;
 pub mod chain_validate;
 pub mod clean;

@@ -351,6 +351,22 @@ Examples:
 }
 
 #[derive(Subcommand)]
+enum CatalogAction {
+    /// List entries with filters
+    List(commands::catalog::ListArgs),
+    /// Show a single entry by id
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-run the scanner, write shards, reseed the DB
+    Refresh(commands::catalog::RefreshArgs),
+    /// Print the local path for a downloaded entry, or "<not downloaded>"
+    Where { id: String },
+}
+
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Generate images from a text prompt
@@ -1056,6 +1072,17 @@ Examples:
         preview: bool,
     },
 
+    /// Browse + refresh the model-discovery catalog (Hugging Face + Civitai)
+    #[command(after_long_help = "\
+Examples:
+  mold catalog list --family flux --limit 10
+  mold catalog show hf:black-forest-labs/FLUX.1-dev
+  mold catalog refresh --family flux
+  mold catalog where cv:618692")]
+    Catalog {
+        #[command(subcommand)]
+        action: CatalogAction,
+    },
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
         shell: String,
@@ -1668,6 +1695,12 @@ async fn run() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Commands::Catalog { action } => match action {
+            CatalogAction::List(args) => commands::catalog::run_list(args).await?,
+            CatalogAction::Show { id, json } => commands::catalog::run_show(id, json).await?,
+            CatalogAction::Refresh(args) => commands::catalog::run_refresh(args).await?,
+            CatalogAction::Where { id } => commands::catalog::run_where(id).await?,
+        },
         Commands::Completions { shell } => {
             generate_completions(&shell)?;
         }

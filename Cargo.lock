@@ -3000,6 +3000,7 @@ dependencies = [
  "image",
  "indicatif 0.17.11",
  "libc",
+ "mold-ai-catalog",
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-discord",
