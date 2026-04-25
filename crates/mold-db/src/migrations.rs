@@ -207,6 +207,60 @@ DROP TABLE model_prefs;
 ALTER TABLE model_prefs_v6 RENAME TO model_prefs;
 "#;
 
+/// v7 → add the `catalog` table for the model-catalog expansion, plus a
+/// companion `catalog_fts` FTS5 virtual table for full-text search over
+/// `name`, `author`, `description`, and `tags`. Six covering indexes are
+/// added to support the most common browse/sort patterns.
+const V7_CATALOG_TABLE: &str = r#"
+CREATE TABLE catalog (
+    id              TEXT PRIMARY KEY,
+    source          TEXT NOT NULL,
+    source_id       TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    author          TEXT,
+    family          TEXT NOT NULL,
+    family_role     TEXT NOT NULL,
+    sub_family      TEXT,
+    modality        TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    file_format     TEXT NOT NULL,
+    bundling        TEXT NOT NULL,
+    size_bytes      INTEGER,
+    download_count  INTEGER NOT NULL DEFAULT 0,
+    rating          REAL,
+    likes           INTEGER NOT NULL DEFAULT 0,
+    nsfw            INTEGER NOT NULL DEFAULT 0,
+    thumbnail_url   TEXT,
+    description     TEXT,
+    license         TEXT,
+    license_flags   TEXT,
+    tags            TEXT,
+    companions      TEXT,
+    download_recipe TEXT NOT NULL,
+    engine_phase    INTEGER NOT NULL,
+    created_at      INTEGER,
+    updated_at      INTEGER,
+    added_at        INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (source, source_id)
+);
+
+CREATE INDEX idx_catalog_family    ON catalog(family, family_role);
+CREATE INDEX idx_catalog_modality  ON catalog(modality);
+CREATE INDEX idx_catalog_downloads ON catalog(download_count DESC);
+CREATE INDEX idx_catalog_updated   ON catalog(updated_at DESC);
+CREATE INDEX idx_catalog_rating    ON catalog(rating DESC);
+CREATE INDEX idx_catalog_phase     ON catalog(engine_phase);
+
+CREATE VIRTUAL TABLE catalog_fts USING fts5(
+    name,
+    author,
+    description,
+    tags,
+    content='catalog',
+    content_rowid='rowid'
+);
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -234,11 +288,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 6,
         kind: MigrationKind::Sql(V6_PROFILE_SCOPING),
     },
+    Migration {
+        version: 7,
+        kind: MigrationKind::Sql(V7_CATALOG_TABLE),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -566,15 +624,15 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_reaches_schema_version_6() {
+    fn fresh_db_reaches_schema_version_7() {
         let mut conn = Connection::open_in_memory().unwrap();
         apply_pending(&mut conn).unwrap();
         assert_eq!(
             current_version(&conn).unwrap(),
-            6,
-            "SCHEMA_VERSION should be 6 after the v6 profile-scoping migration"
+            7,
+            "SCHEMA_VERSION should be 7 after the v7 catalog migration"
         );
-        assert_eq!(SCHEMA_VERSION, 6);
+        assert_eq!(SCHEMA_VERSION, 7);
     }
 
     /// v6: `settings` keeps every existing row under `profile = 'default'`
@@ -599,7 +657,7 @@ mod tests {
         .unwrap();
 
         apply_pending(&mut conn).unwrap();
-        assert_eq!(current_version(&conn).unwrap(), 6);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
 
         let cols = column_names(&conn, "settings");
         assert!(
@@ -812,5 +870,123 @@ mod tests {
         // `tx` drops here and rolls back. Version should stay put.
         drop(tx);
         assert_eq!(current_version(&conn).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod v7_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn open() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pending(&mut conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn schema_version_is_seven() {
+        assert_eq!(SCHEMA_VERSION, 7);
+    }
+
+    #[test]
+    fn catalog_table_exists_with_expected_columns() {
+        let conn = open();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(catalog)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        for required in [
+            "id",
+            "source",
+            "source_id",
+            "name",
+            "author",
+            "family",
+            "family_role",
+            "sub_family",
+            "modality",
+            "kind",
+            "file_format",
+            "bundling",
+            "size_bytes",
+            "download_count",
+            "rating",
+            "likes",
+            "nsfw",
+            "thumbnail_url",
+            "description",
+            "license",
+            "license_flags",
+            "tags",
+            "companions",
+            "download_recipe",
+            "engine_phase",
+            "created_at",
+            "updated_at",
+            "added_at",
+        ] {
+            assert!(
+                cols.contains(&required.to_string()),
+                "missing column: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_fts_virtual_table_exists() {
+        let conn = open();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'catalog_fts%'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(tables.contains(&"catalog_fts".to_string()));
+    }
+
+    #[test]
+    fn catalog_indexes_exist() {
+        let conn = open();
+        let idx: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='catalog'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        for name in [
+            "idx_catalog_family",
+            "idx_catalog_modality",
+            "idx_catalog_downloads",
+            "idx_catalog_updated",
+            "idx_catalog_rating",
+            "idx_catalog_phase",
+        ] {
+            assert!(idx.iter().any(|i| i == name), "missing index: {name}");
+        }
+    }
+
+    #[test]
+    fn unique_source_source_id_constraint() {
+        let conn = open();
+        conn.execute(
+            "INSERT INTO catalog (id, source, source_id, name, family, family_role, modality, kind, file_format, bundling, download_recipe, engine_phase, added_at)
+             VALUES ('hf:a', 'hf', 'a', 'A', 'flux', 'foundation', 'image', 'checkpoint', 'safetensors', 'separated', '{}', 1, 0)",
+            [],
+        ).unwrap();
+        let dup = conn.execute(
+            "INSERT INTO catalog (id, source, source_id, name, family, family_role, modality, kind, file_format, bundling, download_recipe, engine_phase, added_at)
+             VALUES ('hf:dup', 'hf', 'a', 'A2', 'flux', 'foundation', 'image', 'checkpoint', 'safetensors', 'separated', '{}', 1, 0)",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "duplicate (source, source_id) should violate UNIQUE"
+        );
     }
 }
