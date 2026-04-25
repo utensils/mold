@@ -196,6 +196,22 @@ pub async fn get_catalog_entry(
     }
 }
 
+/// POST dispatcher for `/api/catalog/*id` — routes sub-actions based on the
+/// trailing path segment.  Currently only `/download` is handled; everything
+/// else returns 404.
+pub async fn post_catalog_dispatch(
+    State(state): State<crate::state::AppState>,
+    Path(rest): Path<String>,
+) -> impl IntoResponse {
+    if let Some(id) = rest.strip_suffix("/download") {
+        post_catalog_download(State(state), Path(id.to_string()))
+            .await
+            .into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "unknown catalog action").into_response()
+    }
+}
+
 pub async fn list_families(State(state): State<crate::state::AppState>) -> impl IntoResponse {
     match state.catalog_db.catalog_family_counts() {
         Ok(rows) => Json(serde_json::json!({ "families": rows.into_iter().map(|fc| {
@@ -299,6 +315,64 @@ pub async fn get_refresh_status(
         Some(status) => Json(status).into_response(),
         None => (StatusCode::NOT_FOUND, "unknown scan id").into_response(),
     }
+}
+
+pub async fn post_catalog_download(
+    State(state): State<crate::state::AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let row = match state.catalog_db.catalog_get(&id) {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, "unknown catalog id").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    if row.engine_phase >= 2 {
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "engine_phase {} not yet supported by this build — see release notes",
+                row.engine_phase
+            ),
+        )
+            .into_response();
+    }
+
+    // Phase 1 reuses the existing `DownloadQueue` for HF entries that map
+    // 1:1 onto a manifest model name. For Civitai entries, the recipe's
+    // first file URL is used to build a stub manifest at runtime — that
+    // path is implemented in phase 2 alongside companion auto-pull. For
+    // now, return a placeholder list of pending job ids.
+    let mut job_ids: Vec<String> = Vec::new();
+    if row.source == "hf" {
+        // Best-effort: use the source_id (e.g. "black-forest-labs/FLUX.1-dev")
+        // to look up an existing manifest model name; if not found, surface
+        // the catalog-id directly to the queue.
+        let model = match mold_core::manifest::find_manifest(&row.source_id) {
+            Some(m) => m.name.clone(),
+            None => row.source_id.clone(),
+        };
+        match state.downloads.enqueue(model).await {
+            Ok((jid, _, _)) => job_ids.push(jid),
+            // Phase 2 will wire up catalog-native downloads; for entries that
+            // aren't in the static manifest yet, accept the request and return
+            // an empty job list — the caller can poll the catalog entry status.
+            Err(crate::downloads::EnqueueError::UnknownModel(_)) => {}
+            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        }
+    } else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "civitai catalog download is implemented in phase 2 (single-file loaders)",
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "job_ids": job_ids })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

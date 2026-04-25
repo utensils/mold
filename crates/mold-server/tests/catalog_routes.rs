@@ -63,3 +63,23 @@ async fn refresh_returns_409_when_already_running() {
     let second = app.post_json("/api/catalog/refresh", "{}").await;
     assert_eq!(second.status, axum::http::StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn download_unknown_id_404() {
+    let app = TestApp::with_seeded_catalog().await;
+    let resp = app
+        .post_json("/api/catalog/hf:does/not-exist/download", "{}")
+        .await;
+    assert_eq!(resp.status, axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn download_known_id_returns_202_with_job_id() {
+    let app = TestApp::with_seeded_catalog().await;
+    let resp = app
+        .post_json("/api/catalog/hf:RunDiffusion/Juggernaut-XL/download", "{}")
+        .await;
+    assert_eq!(resp.status, axum::http::StatusCode::ACCEPTED);
+    let v: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+    assert!(v["job_ids"].is_array());
+}

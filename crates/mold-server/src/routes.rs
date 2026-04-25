@@ -234,8 +234,9 @@ pub fn create_router(state: AppState) -> Router {
             get(crate::catalog_api::get_refresh_status),
         )
         .route(
-            "/api/catalog/:id",
-            get(crate::catalog_api::get_catalog_entry),
+            "/api/catalog/*id",
+            get(crate::catalog_api::get_catalog_entry)
+                .post(crate::catalog_api::post_catalog_dispatch),
         )
         .route("/api/upscale", post(upscale))
         .route("/api/upscale/stream", post(upscale_stream))
