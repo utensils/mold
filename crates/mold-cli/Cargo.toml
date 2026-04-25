@@ -44,6 +44,7 @@ flate2 = "1"
 indicatif = "0.17"
 rand = "0.8"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+rusqlite = { version = "0.31", features = ["bundled"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 sysinfo = "0.34"
@@ -63,4 +64,5 @@ walkdir = "2.5.0"
 assert_cmd = "2"
 filetime = "0.2"
 predicates = "3"
+rusqlite = { version = "0.31", features = ["bundled"] }
 tempfile = "3"
