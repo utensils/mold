@@ -13,4 +13,5 @@ pub mod entry;
 pub mod families;
 pub mod filter;
 pub mod hf_seeds;
+pub mod normalizer;
 pub mod scanner;
