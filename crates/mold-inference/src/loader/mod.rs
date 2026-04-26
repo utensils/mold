@@ -6,6 +6,11 @@
 //! may add other ingest paths (kohya, A1111 LyCORIS, etc.) under the
 //! same module roof.
 
+pub mod sd15_keys;
 pub mod single_file;
 
+pub use sd15_keys::{
+    apply_sd15_clip_l_rename, apply_sd15_unet_rename, apply_sd15_vae_rename, build_sd15_remap,
+    Sd15Remap,
+};
 pub use single_file::{load, LoadError, SingleFileBundle};
