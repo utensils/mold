@@ -4,6 +4,7 @@
 //! see `ScanReport::per_family`.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::civitai_map::map_base_model;
@@ -66,6 +67,29 @@ pub struct ScanReport {
     pub total_entries: usize,
 }
 
+/// Live progress snapshot, updated by `run_scan_with_progress` as it walks
+/// each family. Lock briefly with `lock()`, copy out, drop the guard — the
+/// scanner contends for the same lock when it advances.
+#[derive(Clone, Debug, Default)]
+pub struct ScanProgress {
+    pub families_total: usize,
+    pub families_done: usize,
+    pub current_family: Option<Family>,
+    /// "hf" or "civitai" — set as the scanner enters that stage of the
+    /// current family. `None` between families.
+    pub current_stage: Option<&'static str>,
+}
+
+pub type ProgressHandle = Arc<Mutex<ScanProgress>>;
+
+fn update_progress<F: FnOnce(&mut ScanProgress)>(handle: Option<&ProgressHandle>, f: F) {
+    if let Some(h) = handle {
+        if let Ok(mut p) = h.lock() {
+            f(&mut p);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum FamilyScanOutcome {
     Ok { entries: usize },
@@ -98,9 +122,32 @@ pub type FamilyScanResult = Result<Vec<CatalogEntry>, ScanError>;
 /// wiremock; production callers pass `"https://huggingface.co"` and
 /// `"https://civitai.com"`.
 pub async fn run_scan(hf_base: &str, civitai_base: &str, options: &ScanOptions) -> ScanReport {
+    run_scan_with_progress(hf_base, civitai_base, options, None).await
+}
+
+/// Same as [`run_scan`] but writes intra-scan progress into a shared
+/// `ScanProgress`. The server hands the same handle to its REST status
+/// endpoint so clients can render "Scanning sdxl… (3/9)" with a
+/// determinate progress bar instead of a blind spinner.
+pub async fn run_scan_with_progress(
+    hf_base: &str,
+    civitai_base: &str,
+    options: &ScanOptions,
+    progress: Option<ProgressHandle>,
+) -> ScanReport {
     let mut report = ScanReport::default();
+    update_progress(progress.as_ref(), |p| {
+        p.families_total = options.families.len();
+        p.families_done = 0;
+        p.current_family = None;
+        p.current_stage = None;
+    });
 
     for &family in &options.families {
+        update_progress(progress.as_ref(), |p| {
+            p.current_family = Some(family);
+            p.current_stage = Some("hf");
+        });
         let mut bucket: Vec<crate::entry::CatalogEntry> = Vec::new();
         let mut auth_required = false;
         let mut rate_limited = false;
@@ -133,6 +180,9 @@ pub async fn run_scan(hf_base: &str, civitai_base: &str, options: &ScanOptions) 
             .filter(|k| matches!(map_base_model(k), Some((f, _, _)) if f == family))
             .collect();
         if !cv_keys.is_empty() {
+            update_progress(progress.as_ref(), |p| {
+                p.current_stage = Some("civitai");
+            });
             match stages::civitai::scan(civitai_base, options, &cv_keys).await {
                 Ok(entries) => bucket.extend(entries),
                 Err(ScanError::AuthRequired { .. }) => auth_required = true,
@@ -162,7 +212,16 @@ pub async fn run_scan(hf_base: &str, civitai_base: &str, options: &ScanOptions) 
             FamilyScanOutcome::Ok { entries: 0 }
         };
         report.per_family.insert(family, outcome);
+        update_progress(progress.as_ref(), |p| {
+            p.families_done += 1;
+            p.current_stage = None;
+        });
     }
+
+    update_progress(progress.as_ref(), |p| {
+        p.current_family = None;
+        p.current_stage = None;
+    });
 
     report
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted } from "vue";
 import { useCatalog } from "../composables/useCatalog";
+import CatalogRefreshPanel from "../components/CatalogRefreshPanel.vue";
 import CatalogSidebar from "../components/CatalogSidebar.vue";
 import CatalogTopbar from "../components/CatalogTopbar.vue";
 import CatalogCardGrid from "../components/CatalogCardGrid.vue";
@@ -56,6 +57,10 @@ onBeforeUnmount(() => {
 
     <div class="mt-4 sm:mt-6">
       <CatalogTopbar />
+    </div>
+
+    <div class="mt-4">
+      <CatalogRefreshPanel />
     </div>
 
     <div class="mt-4 flex flex-col gap-4 lg:flex-row lg:items-start">

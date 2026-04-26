@@ -4,9 +4,12 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use mold_catalog::scanner::{run_scan, ScanOptions, ScanReport};
+use mold_catalog::scanner::{
+    run_scan_with_progress, ProgressHandle, ScanOptions, ScanProgress, ScanReport,
+};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -14,7 +17,15 @@ use uuid::Uuid;
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CatalogScanStatus {
     Pending,
-    Running,
+    Running {
+        families_total: usize,
+        families_done: usize,
+        current_family: Option<String>,
+        current_stage: Option<String>,
+        /// Wall-clock ms since epoch — lets the UI render an elapsed
+        /// timer that's correct even for clients attaching mid-scan.
+        started_at_ms: u64,
+    },
     Done {
         total_entries: usize,
         per_family: BTreeMap<String, String>,
@@ -26,7 +37,10 @@ pub enum CatalogScanStatus {
 
 #[async_trait]
 pub trait ScanDriver: Send + Sync + 'static {
-    async fn run(&self, opts: ScanOptions) -> ScanReport;
+    /// Scans must write into the supplied progress handle as they walk
+    /// each family — the queue's `status()` reads from the same handle
+    /// so polling clients see the bar advance.
+    async fn run(&self, opts: ScanOptions, progress: ProgressHandle) -> ScanReport;
 }
 
 /// Production driver. Hits the real Hugging Face + Civitai endpoints.
@@ -34,8 +48,14 @@ pub struct LiveScanDriver;
 
 #[async_trait]
 impl ScanDriver for LiveScanDriver {
-    async fn run(&self, opts: ScanOptions) -> ScanReport {
-        run_scan("https://huggingface.co", "https://civitai.com", &opts).await
+    async fn run(&self, opts: ScanOptions, progress: ProgressHandle) -> ScanReport {
+        run_scan_with_progress(
+            "https://huggingface.co",
+            "https://civitai.com",
+            &opts,
+            Some(progress),
+        )
+        .await
     }
 }
 
@@ -45,15 +65,43 @@ pub struct CatalogScanQueue {
     notify: Arc<tokio::sync::Notify>,
 }
 
+/// In-flight scan bookkeeping. The progress handle is shared with the
+/// scanner so `status()` can read live counters without the driver
+/// having to push updates back into `Inner`.
+struct InFlight {
+    id: String,
+    started_at_ms: u64,
+    progress: ProgressHandle,
+}
+
 struct Inner {
     pending: Option<(String, ScanOptions)>,
+    /// Holds Pending/Done/Failed snapshots only — Running is derived
+    /// live from `in_flight` so families_done/current_family stay fresh.
     statuses: BTreeMap<String, CatalogScanStatus>,
-    active: Option<String>,
+    in_flight: Option<InFlight>,
 }
 
 impl Default for CatalogScanQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn running_from(snapshot: &ScanProgress, started_at_ms: u64) -> CatalogScanStatus {
+    CatalogScanStatus::Running {
+        families_total: snapshot.families_total,
+        families_done: snapshot.families_done,
+        current_family: snapshot.current_family.map(|f| f.as_str().to_string()),
+        current_stage: snapshot.current_stage.map(str::to_string),
+        started_at_ms,
     }
 }
 
@@ -63,7 +111,7 @@ impl CatalogScanQueue {
             inner: Arc::new(Mutex::new(Inner {
                 pending: None,
                 statuses: BTreeMap::new(),
-                active: None,
+                in_flight: None,
             })),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -71,7 +119,7 @@ impl CatalogScanQueue {
 
     pub async fn enqueue(&self, opts: ScanOptions) -> Result<String, String> {
         let mut inner = self.inner.lock().await;
-        if inner.active.is_some() || inner.pending.is_some() {
+        if inner.in_flight.is_some() || inner.pending.is_some() {
             return Err("a catalog refresh is already in progress".into());
         }
         let id = Uuid::new_v4().to_string();
@@ -85,7 +133,18 @@ impl CatalogScanQueue {
     }
 
     pub async fn status(&self, id: &str) -> Option<CatalogScanStatus> {
-        self.inner.lock().await.statuses.get(id).cloned()
+        let inner = self.inner.lock().await;
+        if let Some(flight) = &inner.in_flight {
+            if flight.id == id {
+                let snapshot = flight
+                    .progress
+                    .lock()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                return Some(running_from(&snapshot, flight.started_at_ms));
+            }
+        }
+        inner.statuses.get(id).cloned()
     }
 
     /// Returns the in-flight scan (active or pending) so clients other
@@ -94,12 +153,26 @@ impl CatalogScanQueue {
     /// initiated by another browser tab or the CLI is already running.
     pub async fn active(&self) -> Option<(String, CatalogScanStatus)> {
         let inner = self.inner.lock().await;
-        let id = inner
-            .active
-            .clone()
-            .or_else(|| inner.pending.as_ref().map(|(id, _)| id.clone()))?;
-        let status = inner.statuses.get(&id).cloned()?;
-        Some((id, status))
+        if let Some(flight) = &inner.in_flight {
+            let snapshot = flight
+                .progress
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            return Some((
+                flight.id.clone(),
+                running_from(&snapshot, flight.started_at_ms),
+            ));
+        }
+        if let Some((id, _)) = &inner.pending {
+            let status = inner
+                .statuses
+                .get(id)
+                .cloned()
+                .unwrap_or(CatalogScanStatus::Pending);
+            return Some((id.clone(), status));
+        }
+        None
     }
 
     pub async fn drive(self, driver: Arc<dyn ScanDriver>) {
@@ -109,21 +182,33 @@ impl CatalogScanQueue {
                 let mut inner = self.inner.lock().await;
                 let job = inner.pending.take();
                 if let Some((id, _)) = &job {
-                    inner.active = Some(id.clone());
-                    inner
-                        .statuses
-                        .insert(id.clone(), CatalogScanStatus::Running);
+                    let progress: ProgressHandle =
+                        Arc::new(std::sync::Mutex::new(ScanProgress::default()));
+                    inner.in_flight = Some(InFlight {
+                        id: id.clone(),
+                        started_at_ms: now_ms(),
+                        progress,
+                    });
                 }
                 job
             };
             let Some((id, opts)) = job else { continue };
-            let report = driver.run(opts).await;
+            let progress = {
+                let inner = self.inner.lock().await;
+                inner
+                    .in_flight
+                    .as_ref()
+                    .expect("in_flight set above")
+                    .progress
+                    .clone()
+            };
+            let report = driver.run(opts, progress).await;
             let mut summary = BTreeMap::new();
             for (fam, outcome) in &report.per_family {
                 summary.insert(fam.as_str().to_string(), format!("{:?}", outcome));
             }
             let mut inner = self.inner.lock().await;
-            inner.active = None;
+            inner.in_flight = None;
             inner.statuses.insert(
                 id.clone(),
                 CatalogScanStatus::Done {

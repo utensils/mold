@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use mold_catalog::scanner::ScanReport;
+use mold_catalog::scanner::{ProgressHandle, ScanReport};
 use tokio::sync::Mutex;
 
 use super::{CatalogScanQueue, CatalogScanStatus, ScanDriver};
@@ -11,9 +11,12 @@ struct FakeDriver {
 
 #[async_trait::async_trait]
 impl ScanDriver for FakeDriver {
-    async fn run(&self, _opts: mold_catalog::scanner::ScanOptions) -> ScanReport {
-        let r = self.report.lock().await.take().unwrap_or_default();
-        r
+    async fn run(
+        &self,
+        _opts: mold_catalog::scanner::ScanOptions,
+        _progress: ProgressHandle,
+    ) -> ScanReport {
+        self.report.lock().await.take().unwrap_or_default()
     }
 }
 
@@ -84,9 +87,76 @@ async fn active_returns_in_flight_scan_id_and_status() {
     assert!(
         matches!(
             active_status,
-            CatalogScanStatus::Pending | CatalogScanStatus::Running
+            CatalogScanStatus::Pending | CatalogScanStatus::Running { .. }
         ),
         "expected pending or running, got {:?}",
         active_status
     );
+}
+
+/// While a scan is running, `status()` must derive Running from the
+/// live progress handle. The driver writes `families_done = 4`; the
+/// queue must surface that — not a stale `families_done = 0`.
+#[tokio::test]
+async fn status_reflects_live_progress_during_running_scan() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+
+    struct ProgressDriver {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait::async_trait]
+    impl ScanDriver for ProgressDriver {
+        async fn run(
+            &self,
+            _opts: mold_catalog::scanner::ScanOptions,
+            progress: ProgressHandle,
+        ) -> ScanReport {
+            {
+                let mut p = progress.lock().expect("progress");
+                p.families_total = 9;
+                p.families_done = 4;
+                p.current_family = Some(mold_catalog::families::Family::Sdxl);
+                p.current_stage = Some("hf");
+            }
+            self.started.notify_one();
+            self.release.notified().await;
+            ScanReport::default()
+        }
+    }
+
+    let driver = Arc::new(ProgressDriver {
+        started: started.clone(),
+        release: release.clone(),
+    });
+    let queue = CatalogScanQueue::new();
+    let q2 = queue.clone();
+    tokio::spawn(async move { q2.drive(driver).await });
+
+    let id = queue
+        .enqueue(mold_catalog::scanner::ScanOptions::default())
+        .await
+        .expect("enqueue");
+    started.notified().await;
+
+    let status = queue.status(&id).await.expect("status while running");
+    match status {
+        CatalogScanStatus::Running {
+            families_total,
+            families_done,
+            current_family,
+            current_stage,
+            started_at_ms,
+        } => {
+            assert_eq!(families_total, 9);
+            assert_eq!(families_done, 4);
+            assert_eq!(current_family.as_deref(), Some("sdxl"));
+            assert_eq!(current_stage.as_deref(), Some("hf"));
+            assert!(started_at_ms > 0);
+        }
+        other => panic!("expected Running with live counters, got {:?}", other),
+    }
+
+    release.notify_one();
 }

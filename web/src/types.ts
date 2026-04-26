@@ -523,6 +523,15 @@ export interface CatalogListParams {
 
 export type CatalogRefreshStatus =
   | { state: "pending" }
-  | { state: "running" }
+  | {
+      state: "running";
+      // All four optional so older servers (pre live-progress) still parse.
+      // The web UI guards with nullish-coalescing where needed.
+      families_total?: number;
+      families_done?: number;
+      current_family?: string | null;
+      current_stage?: string | null;
+      started_at_ms?: number;
+    }
   | { state: "done"; total_entries: number; per_family: Record<string, string> }
   | { state: "failed"; message: string };

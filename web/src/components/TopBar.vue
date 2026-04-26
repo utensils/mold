@@ -2,7 +2,6 @@
 import { computed, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useDownloads } from "../composables/useDownloads";
-import { useCatalog } from "../composables/useCatalog";
 import ResourceStrip from "./ResourceStrip.vue";
 
 const route = useRoute();
@@ -20,50 +19,14 @@ function openDownloadsDrawer() {
   window.dispatchEvent(new CustomEvent("mold:open-downloads"));
 }
 
-// ─── Catalog refresh (visible on /catalog only) ───────────────────────────────
-// The refresh button used to live on /generate too, but operators kept
-// confusing it with model downloads. Restrict it to the catalog view —
-// users discovering the catalog will click it there; generators rarely
-// care about catalog metadata refreshes.
-const cat = useCatalog();
-const showCatalogControls = computed(() => route.name === "catalog");
-const refreshState = computed(() => cat.refreshStatus.value?.state ?? null);
-const refreshBusy = computed(
-  () => refreshState.value === "pending" || refreshState.value === "running",
-);
-const refreshLabel = computed(() => {
-  const s = cat.refreshStatus.value;
-  if (!s) return "Refresh catalog";
-  if (s.state === "pending") return "Queued…";
-  if (s.state === "running") return "Scanning…";
-  if (s.state === "done") return `Done · ${s.total_entries}`;
-  if (s.state === "failed") {
-    // "Busy" reads better than "Failed" when the actual reason is the
-    // server's 409 conflict (another scan is mid-flight).
-    return /in progress/i.test(s.message) ? "Busy — try later" : "Failed";
-  }
-  return "Refresh catalog";
-});
-
-const refreshTitle = computed(() => {
-  const s = cat.refreshStatus.value;
-  if (s?.state === "failed") return s.message;
-  return refreshLabel.value;
-});
-
-async function onRefreshCatalog() {
-  if (refreshBusy.value) return;
-  try {
-    await cat.startRefresh();
-  } catch (err) {
-    console.error("catalog refresh failed", err);
-  }
-}
-
 // Gallery-only props (`hideMode`, `selectMode`, `selectionCount`,
 // `canDelete`) are optional. The Generate page mounts this same TopBar
 // without a gallery underneath it, so their defaults keep the toolbar
 // in its "no bulk actions" state.
+//
+// Catalog refresh used to live in this toolbar; it now lives inside the
+// /catalog page itself (CatalogRefreshPanel) so it can render rich
+// progress beside the catalog grid instead of a tiny spinner pill.
 const props = withDefaults(
   defineProps<{
     filter: FilterKind;
@@ -190,44 +153,6 @@ function clearSearch() {
         Model Catalog
       </router-link>
     </nav>
-
-    <!-- Catalog refresh button + status. Mirrors the Downloads slot so the
-         operator can kick off a `mold catalog refresh` and watch progress
-         from either /generate or /catalog without leaving their workflow.
-         Hidden on /gallery (route is read-only with respect to model state). -->
-    <button
-      v-if="showCatalogControls"
-      type="button"
-      class="relative inline-flex h-10 items-center gap-2 rounded-full border border-white/5 bg-white/5 px-3 text-sm text-ink-200 transition hover:text-white disabled:opacity-60"
-      :class="{
-        'bg-brand-500/20 border-brand-400/40 text-brand-100': refreshBusy,
-        'bg-rose-500/20 border-rose-400/40 text-rose-100':
-          refreshState === 'failed',
-      }"
-      :disabled="refreshBusy"
-      :aria-busy="refreshBusy"
-      :aria-label="refreshTitle"
-      :title="refreshTitle"
-      @click="onRefreshCatalog"
-    >
-      <svg
-        class="h-4 w-4"
-        :class="{ 'animate-spin': refreshBusy }"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8" />
-        <path d="M21 3v5h-5" />
-        <path d="M21 12a9 9 0 0 1-15.5 6.3L3 16" />
-        <path d="M3 21v-5h5" />
-      </svg>
-      <span class="hidden sm:inline">{{ refreshLabel }}</span>
-    </button>
 
     <!-- Downloads drawer opener + badge (Agent A). Visible on every page. -->
     <button
