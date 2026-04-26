@@ -11,7 +11,7 @@ Branch `feat/catalog-expansion`. The six phase-2 commits are
 
 | Commit | Origin? | Scope |
 |---|---|---|
-| `<2.6 hash>` | local | feat(inference): single-file factory routing + load() (phase 2.6) |
+| `14c6061` | local | feat(inference): single-file factory routing + load() (phase 2.6) |
 | `c072967` | yes | docs(tasks): catalog-expansion phase-2 task 2.6 kickoff handoff |
 | `a579a0c` | local | feat(inference): SDXL single-file engine constructor (phase 2.5) |
 | `9e00bd3` | yes | docs(tasks): catalog-expansion phase-2 task 2.5 kickoff handoff |
@@ -247,7 +247,7 @@ Paste from here into a fresh Claude Code session:
 
 I'm starting **task 2.7** of the mold catalog-expansion phase 2 — server
 companion auto-pull on `POST /api/catalog/:id/download`. Tasks 2.1–2.6
-are done. **2.6 (commit `<hash>`, local-only) shipped factory routing
+are done. **2.6 (commit `14c6061`, local-only) shipped factory routing
 plus the load-bearing `SingleFileBackend`, but `load()` materialisation
 is staged behind a `candle-transformers-mold` fork bump** — see the
 handoff for context. 2.7 itself doesn't touch that; it's purely server
