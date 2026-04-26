@@ -44,6 +44,7 @@ required-features = ["dev-bins"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.9.0" }
+mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.9.0" }
 anyhow = "1"
 candle-core = { package = "candle-core-mold", version = "0.9.10" }
 candle-nn = { package = "candle-nn-mold", version = "0.9.10" }
