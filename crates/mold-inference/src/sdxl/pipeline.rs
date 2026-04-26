@@ -3,6 +3,7 @@ use candle_core::{DType, Device, Module, Tensor, D};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -42,6 +43,14 @@ pub struct SDXLEngine {
     source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// `Some(path)` when the engine was built from a Civitai single-file
+    /// checkpoint via `from_single_file()`. Future `load()` paths branch on
+    /// this to wire a custom `SimpleBackend` (per phase-2.4 plan) instead
+    /// of calling candle's per-component `build_*` helpers. `None` for
+    /// diffusers-layout (HF) checkpoints. Read only by tests today; the
+    /// production `load()` branch is wired in a downstream phase.
+    #[allow(dead_code)]
+    pub(crate) single_file_path: Option<PathBuf>,
 }
 
 /// VAE scaling factor for standard SDXL models.
@@ -66,7 +75,98 @@ impl SDXLEngine {
             source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             pending_placement: None,
+            single_file_path: None,
         }
+    }
+
+    /// Construct an SDXL engine from a Civitai single-file `.safetensors`
+    /// checkpoint.
+    ///
+    /// Header-parses the file via `loader::single_file::load(_, Family::Sdxl)`,
+    /// validates that the SDXL A1111 → diffusers rename rules cover its
+    /// UNet / VAE / CLIP-L / CLIP-G tensor keys via
+    /// `loader::sdxl_keys::build_sdxl_remap(_)`, and stashes the path in
+    /// `single_file_path`. The actual UNet / VAE / CLIP-L / CLIP-G
+    /// materialisation (with a custom `SimpleBackend` that translates each
+    /// diffusers `vb.get(name)` into the corresponding A1111 key — including
+    /// row-wise slicing for the CLIP-G fused QKV slabs — inside the mmap'd
+    /// single file) lands in a downstream phase. This constructor does
+    /// **not** build the model.
+    ///
+    /// `clip_l_tokenizer` and `clip_g_tokenizer` are paths to companion-pulled
+    /// tokenizer assets (phase 2.7); tokenizers never live inside the
+    /// single-file checkpoint.
+    pub fn from_single_file(
+        model_name: String,
+        single_file_path: PathBuf,
+        clip_l_tokenizer: PathBuf,
+        clip_g_tokenizer: PathBuf,
+        scheduler: Scheduler,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+    ) -> Result<Self> {
+        if !single_file_path.exists() {
+            bail!(
+                "single-file checkpoint not found: {}",
+                single_file_path.display()
+            );
+        }
+
+        // Header-parse and validate the SDXL layout. `single_file::load`
+        // is header-only — no tensor data is mmap'd here.
+        let bundle = crate::loader::single_file::load(
+            &single_file_path,
+            mold_catalog::families::Family::Sdxl,
+        )?;
+
+        // Validate that every diffusers key the future SimpleBackend will
+        // request resolves to a real A1111 source — including the CLIP-G
+        // fused QKV slabs (each `attn.in_proj_*` key expands into three
+        // diffusers entries via `RenameOutput::FusedSlice`). Catches
+        // malformed checkpoints at construction time rather than deep in
+        // the eventual `load()` call.
+        let _remap = crate::loader::sdxl_keys::build_sdxl_remap(&bundle)?;
+
+        // `ModelPaths` is a diffusers-layout view; for single-file the
+        // transformer / vae / clip_encoder / clip_encoder_2 all materialise
+        // from the same checkpoint at load time. The real branch lives on
+        // the new `single_file_path` field — future `load()` consults it
+        // before falling through to the diffusers `build_*` helpers.
+        let paths = ModelPaths {
+            transformer: single_file_path.clone(),
+            transformer_shards: Vec::new(),
+            vae: single_file_path.clone(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: Some(single_file_path.clone()),
+            t5_tokenizer: None,
+            clip_tokenizer: Some(clip_l_tokenizer),
+            clip_encoder_2: Some(single_file_path.clone()),
+            clip_tokenizer_2: Some(clip_g_tokenizer),
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+
+        // `is_turbo` defaults to `false` for the single-file path. Civitai
+        // SDXL Turbo checkpoints aren't structurally distinguishable from
+        // standard SDXL at the safetensors-header level — turbo-vs-standard
+        // is a load-time concern (different VAE scale + scheduler defaults)
+        // that 2.6's factory routing surfaces from the manifest. The
+        // constructor's job is to validate the rename surface, not pick the
+        // pipeline variant.
+        Ok(Self {
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
+            scheduler,
+            is_turbo: false,
+            prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
+            mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
+            pending_placement: None,
+            single_file_path: Some(single_file_path),
+        })
     }
 
     /// Validate and return required SDXL paths.
@@ -1043,5 +1143,118 @@ impl InferenceEngine for SDXLEngine {
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
         Some(&self.base.paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::InferenceEngine;
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+    use std::collections::HashMap;
+
+    /// Synthesise a minimal SDXL-shaped single-file safetensors with one
+    /// representative key per component bucket. Tensor data is one zero
+    /// F32 — `loader::single_file::load` is header-only and the
+    /// constructor doesn't materialise weights.
+    fn synth_sdxl_single_file(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mold-sdxl-from-sf-{}-{}-{}.safetensors",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+
+        let keys: &[&str] = &[
+            // UNet
+            "model.diffusion_model.input_blocks.0.0.weight",
+            "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+            // VAE
+            "first_stage_model.encoder.down.0.block.0.norm1.weight",
+            "first_stage_model.quant_conv.weight",
+            // CLIP-L
+            "conditioner.embedders.0.transformer.text_model.encoder.layers.0.self_attn.q_proj.weight",
+            "conditioner.embedders.0.transformer.text_model.final_layer_norm.weight",
+            // CLIP-G — including the fused QKV slab so the constructor
+            // exercises the FusedSlice branch in build_sdxl_remap.
+            "conditioner.embedders.1.model.transformer.resblocks.0.attn.in_proj_weight",
+            "conditioner.embedders.1.model.text_projection",
+        ];
+
+        let f32_zero = 0.0f32.to_le_bytes().to_vec();
+        let buffers: Vec<Vec<u8>> = keys.iter().map(|_| f32_zero.clone()).collect();
+        let mut tensors: HashMap<String, TensorView<'_>> = HashMap::new();
+        for (key, buf) in keys.iter().zip(buffers.iter()) {
+            tensors.insert(
+                (*key).to_string(),
+                TensorView::new(SafeDtype::F32, vec![1], buf).unwrap(),
+            );
+        }
+        serialize_to_file(&tensors, &None, &path).unwrap();
+        path
+    }
+
+    #[test]
+    fn from_single_file_constructs_for_synthetic_sdxl_checkpoint() {
+        let single_file = synth_sdxl_single_file("ok");
+        // Companion CLIP-L / CLIP-G tokenizers are pulled separately
+        // (phase 2.7) and are not validated by the constructor — their
+        // paths are just stored.
+        let clip_l_tok = std::env::temp_dir().join("mold-sdxl-clip-l-stub.json");
+        let clip_g_tok = std::env::temp_dir().join("mold-sdxl-clip-g-stub.json");
+
+        let engine = SDXLEngine::from_single_file(
+            "juggernaut-xl-v9".to_string(),
+            single_file.clone(),
+            clip_l_tok,
+            clip_g_tok,
+            Scheduler::default(),
+            LoadStrategy::Eager,
+            0,
+        )
+        .expect("constructor must accept a valid SDXL single-file layout");
+
+        assert_eq!(engine.model_name(), "juggernaut-xl-v9");
+        assert_eq!(
+            engine.single_file_path.as_deref(),
+            Some(single_file.as_path()),
+            "single-file path must be stashed for the future load() branch",
+        );
+        assert!(
+            !engine.is_loaded(),
+            "constructor must not eagerly materialise model weights",
+        );
+
+        let _ = std::fs::remove_file(single_file);
+    }
+
+    #[test]
+    fn from_single_file_rejects_missing_file() {
+        let bogus = std::env::temp_dir().join(format!(
+            "mold-sdxl-from-sf-missing-{}-{}.safetensors",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+
+        let result = SDXLEngine::from_single_file(
+            "missing".to_string(),
+            bogus,
+            std::env::temp_dir().join("mold-sdxl-clip-l-stub.json"),
+            std::env::temp_dir().join("mold-sdxl-clip-g-stub.json"),
+            Scheduler::default(),
+            LoadStrategy::Eager,
+            0,
+        );
+
+        assert!(
+            result.is_err(),
+            "constructor must surface a missing-file error before deeper parsing",
+        );
     }
 }
