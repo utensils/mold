@@ -27,12 +27,51 @@ async fn enqueue_unknown_model_errors() {
     assert!(err.is_err(), "expected unknown-model error");
 }
 
-use crate::downloads::{spawn_driver, PullDriver};
+use crate::downloads::{spawn_driver, PullDriver, RecipePayload, RecipePullDriver};
 use mold_core::types::{DownloadEvent, JobStatus};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// Recipe driver that the manifest-flow tests never invoke. If a test
+/// expects manifest behavior and the queue accidentally takes the recipe
+/// branch, the test sees `Err("noop recipe driver")` rather than silent
+/// success.
+struct NoopRecipeDriver;
+
+#[async_trait::async_trait]
+impl RecipePullDriver for NoopRecipeDriver {
+    async fn pull(
+        &self,
+        _payload: RecipePayload,
+        _models_dir: std::path::PathBuf,
+        _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        _cancel: CancellationToken,
+    ) -> Result<(), String> {
+        Err("noop recipe driver".into())
+    }
+}
+
+fn test_models_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("mold_dl_test_{}", uuid::Uuid::new_v4().simple()))
+}
+
+/// Wrap `spawn_driver` for the manifest-only tests — they don't care
+/// about the recipe driver or models dir, so default both.
+fn spawn_test_driver(
+    queue: Arc<DownloadQueue>,
+    driver: Arc<dyn PullDriver>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    spawn_driver(
+        queue,
+        driver,
+        Arc::new(NoopRecipeDriver),
+        test_models_dir(),
+        shutdown,
+    )
+}
 
 /// Fake pull driver that emits a single `Progress` then returns `Ok`.
 #[derive(Clone, Default)]
@@ -93,7 +132,8 @@ async fn driver_happy_path_emits_started_progress_jobdone() {
     let shutdown = CancellationToken::new();
 
     let mut rx = queue.subscribe();
-    let driver_handle = spawn_driver(queue.clone(), Arc::new(puller.clone()), shutdown.clone());
+    let driver_handle =
+        spawn_test_driver(queue.clone(), Arc::new(puller.clone()), shutdown.clone());
 
     // Enqueue with a manifest-known model so validation passes. Use a model
     // that's cheap to resolve — the real pull is replaced by the fake.
@@ -160,7 +200,7 @@ impl PullDriver for SlowPuller {
 async fn cancel_active_emits_job_cancelled_and_clears_active() {
     let queue = DownloadQueue::new();
     let shutdown = CancellationToken::new();
-    let driver = spawn_driver(queue.clone(), Arc::new(SlowPuller), shutdown.clone());
+    let driver = spawn_test_driver(queue.clone(), Arc::new(SlowPuller), shutdown.clone());
 
     let mut rx = queue.subscribe();
     let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
@@ -364,7 +404,7 @@ async fn driver_failed_retry_sequence_cleans_up_partials() {
     let queue = DownloadQueue::new();
     let puller = AlwaysFailsPuller::default();
     let shutdown = CancellationToken::new();
-    let handle = spawn_driver(queue.clone(), Arc::new(puller.clone()), shutdown.clone());
+    let handle = spawn_test_driver(queue.clone(), Arc::new(puller.clone()), shutdown.clone());
     let mut rx = queue.subscribe();
 
     let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
@@ -425,7 +465,7 @@ async fn driver_cancel_also_cleans_up_partials() {
 
     let queue = DownloadQueue::new();
     let shutdown = CancellationToken::new();
-    let handle = spawn_driver(queue.clone(), Arc::new(CancellablePuller), shutdown.clone());
+    let handle = spawn_test_driver(queue.clone(), Arc::new(CancellablePuller), shutdown.clone());
     let mut rx = queue.subscribe();
 
     let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
@@ -582,7 +622,7 @@ impl PullDriver for MultiFilePuller {
 async fn progress_events_carry_current_files_done_counter() {
     let queue = DownloadQueue::new();
     let shutdown = CancellationToken::new();
-    let handle = spawn_driver(queue.clone(), Arc::new(MultiFilePuller), shutdown.clone());
+    let handle = spawn_test_driver(queue.clone(), Arc::new(MultiFilePuller), shutdown.clone());
     let mut rx = queue.subscribe();
 
     let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
@@ -644,7 +684,7 @@ async fn driver_retries_once_then_succeeds() {
     let queue = DownloadQueue::new();
     let puller = FlakyPuller::default();
     let shutdown = CancellationToken::new();
-    let handle = spawn_driver(queue.clone(), Arc::new(puller.clone()), shutdown.clone());
+    let handle = spawn_test_driver(queue.clone(), Arc::new(puller.clone()), shutdown.clone());
     let mut rx = queue.subscribe();
 
     let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
@@ -673,4 +713,152 @@ async fn driver_retries_once_then_succeeds() {
         2,
         "expected exactly 2 attempts"
     );
+}
+
+// ── Recipe-queue tests (round 4 / Option A') ────────────────────────────────
+
+use crate::downloads::OwnedRecipeFile;
+
+fn synthetic_recipe(catalog_id: &str) -> RecipePayload {
+    RecipePayload {
+        catalog_id: catalog_id.to_string(),
+        files: vec![OwnedRecipeFile {
+            url: "http://recipe.example.invalid/primary.safetensors".to_string(),
+            dest: "primary.safetensors".to_string(),
+            sha256: None,
+            size_bytes: Some(123),
+        }],
+        auth: mold_core::download::RecipeAuth::None,
+    }
+}
+
+#[tokio::test]
+async fn enqueue_recipe_returns_job_id() {
+    let queue = DownloadQueue::new_for_test();
+    let payload = synthetic_recipe("cv:618692");
+    let (job_id, position, outcome) = queue
+        .enqueue_recipe(payload.clone())
+        .await
+        .expect("enqueue_recipe must succeed");
+    assert!(!job_id.is_empty());
+    assert_eq!(position, 1);
+    assert_eq!(outcome, crate::downloads::EnqueueOutcome::Created);
+
+    // Listing should reflect the queued recipe job with the catalog id as `model`.
+    let listing = queue.listing().await;
+    assert_eq!(listing.queued.len(), 1);
+    assert_eq!(listing.queued[0].id, job_id);
+    assert_eq!(listing.queued[0].model, "cv:618692");
+}
+
+#[tokio::test]
+async fn enqueue_recipe_idempotent_on_same_catalog_id() {
+    let queue = DownloadQueue::new_for_test();
+    let payload = synthetic_recipe("cv:42");
+    let (id1, _, outcome1) = queue.enqueue_recipe(payload.clone()).await.unwrap();
+    let (id2, _, outcome2) = queue.enqueue_recipe(payload).await.unwrap();
+    assert_eq!(
+        id1, id2,
+        "duplicate enqueue must return the existing job id"
+    );
+    assert_eq!(outcome1, crate::downloads::EnqueueOutcome::Created);
+    assert_eq!(outcome2, crate::downloads::EnqueueOutcome::AlreadyPresent);
+    let listing = queue.listing().await;
+    assert_eq!(listing.queued.len(), 1, "no duplicate job should be queued");
+}
+
+#[tokio::test]
+async fn enqueue_recipe_rejects_blank_catalog_id() {
+    let queue = DownloadQueue::new_for_test();
+    let mut payload = synthetic_recipe("cv:1");
+    payload.catalog_id = "   ".into();
+    let err = queue.enqueue_recipe(payload).await;
+    assert!(err.is_err(), "blank catalog id must error");
+}
+
+/// Recipe driver that captures the payload it was called with so tests
+/// can assert dispatch.
+#[derive(Clone, Default)]
+struct CapturingRecipeDriver {
+    pub captured: Arc<std::sync::Mutex<Option<RecipePayload>>>,
+}
+
+#[async_trait::async_trait]
+impl RecipePullDriver for CapturingRecipeDriver {
+    async fn pull(
+        &self,
+        payload: RecipePayload,
+        _models_dir: std::path::PathBuf,
+        _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        _cancel: CancellationToken,
+    ) -> Result<(), String> {
+        *self.captured.lock().unwrap() = Some(payload);
+        Ok(())
+    }
+}
+
+/// Manifest driver that should NOT be invoked when a recipe payload is
+/// present. Calling it surfaces a test failure.
+#[derive(Clone, Default)]
+struct UnexpectedManifestDriver {
+    pub called: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl PullDriver for UnexpectedManifestDriver {
+    async fn pull(
+        &self,
+        _model: &str,
+        _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        _cancel: CancellationToken,
+    ) -> Result<(), String> {
+        self.called.store(true, Ordering::SeqCst);
+        Err("manifest driver should not have been invoked for a recipe job".into())
+    }
+}
+
+#[tokio::test]
+async fn recipe_job_dispatches_to_recipe_driver_not_manifest_driver() {
+    let queue = DownloadQueue::new();
+    let recipe_driver = CapturingRecipeDriver::default();
+    let manifest_driver = UnexpectedManifestDriver::default();
+    let shutdown = CancellationToken::new();
+    let models_dir = test_models_dir();
+    let handle = spawn_driver(
+        queue.clone(),
+        Arc::new(manifest_driver.clone()),
+        Arc::new(recipe_driver.clone()),
+        models_dir,
+        shutdown.clone(),
+    );
+
+    let mut rx = queue.subscribe();
+    let payload = synthetic_recipe("cv:99");
+    let (job_id, _, _) = queue.enqueue_recipe(payload.clone()).await.unwrap();
+
+    // Wait for JobDone (recipe driver returns Ok immediately).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut seen_done = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            Ok(Ok(DownloadEvent::JobDone { id: ev, .. })) if ev == job_id => {
+                seen_done = true;
+                break;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => {}
+        }
+    }
+
+    shutdown.cancel();
+    let _ = handle.await;
+
+    assert!(seen_done, "recipe job should complete via recipe driver");
+    assert!(
+        !manifest_driver.called.load(Ordering::SeqCst),
+        "manifest driver must not be invoked for recipe jobs"
+    );
+    let captured = recipe_driver.captured.lock().unwrap();
+    let captured = captured.as_ref().expect("recipe driver should have run");
+    assert_eq!(captured.catalog_id, "cv:99");
 }

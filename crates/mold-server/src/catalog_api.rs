@@ -440,23 +440,6 @@ pub struct CompanionJob {
     pub job_id: String,
 }
 
-/// True when every file declared by the companion's synthetic manifest is
-/// present under `models_dir` AND no `.pulling` marker for the manifest's
-/// canonical name exists. A leftover marker means a previous pull was
-/// interrupted and the on-disk content can't be trusted yet.
-fn companion_present_on_disk(
-    models_dir: &std::path::Path,
-    manifest: &mold_core::manifest::ModelManifest,
-) -> bool {
-    if mold_core::download::pulling_marker_path_in(models_dir, &manifest.name).exists() {
-        return false;
-    }
-    manifest.files.iter().all(|f| {
-        let storage = mold_core::manifest::storage_path(manifest, f);
-        models_dir.join(storage).exists()
-    })
-}
-
 /// Enqueue any companions referenced by `companions_json` that are not
 /// already fully present under `models_dir`. Returns the per-companion job
 /// ids in the order they appear in the catalog row.
@@ -464,6 +447,10 @@ fn companion_present_on_disk(
 /// `companions_json` is the raw value from `CatalogRow::companions` — a
 /// JSON-encoded `Vec<String>` of canonical companion names. Phase-1 HF
 /// diffusers entries pass `None` here because they don't strip components.
+///
+/// On-disk presence + name resolution are delegated to
+/// `mold_core::download::missing_companions_from_json`, which the CLI also
+/// consumes for `mold pull cv:<id>`'s companion-first ordering.
 ///
 /// `DownloadQueue::enqueue` is idempotent against canonical manifest
 /// names: re-enqueuing a companion that's mid-flight returns the existing
@@ -475,34 +462,20 @@ pub(crate) async fn enqueue_missing_companions(
     models_dir: &std::path::Path,
     queue: &crate::downloads::DownloadQueue,
 ) -> Vec<CompanionJob> {
-    let Some(json) = companions_json else {
-        return Vec::new();
-    };
-    let names: Vec<String> = match serde_json::from_str(json) {
-        Ok(n) => n,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut jobs = Vec::with_capacity(names.len());
-    for name in names {
-        // Synthetic companion manifests live in `mold-core` —
-        // `family: "companion"`, hidden from `mold list`. Catalog scanners
-        // can ship new canonical names ahead of the binary; skip the ones
-        // this build doesn't know about.
-        let Some(manifest) = mold_core::manifest::find_manifest(&name) else {
-            tracing::warn!(
-                companion = %name,
-                "skipping companion with no synthetic manifest in this build",
-            );
-            continue;
-        };
-        if companion_present_on_disk(models_dir, manifest) {
-            continue;
-        }
+    let manifests = mold_core::download::missing_companions_from_json(companions_json, models_dir);
+    let mut jobs = Vec::with_capacity(manifests.len());
+    for manifest in manifests {
         match queue.enqueue(manifest.name.clone()).await {
-            Ok((job_id, _, _)) => jobs.push(CompanionJob { name, job_id }),
+            Ok((job_id, _, _)) => jobs.push(CompanionJob {
+                name: manifest.name.clone(),
+                job_id,
+            }),
             Err(e) => {
-                tracing::warn!(companion = %name, error = %e, "companion enqueue failed");
+                tracing::warn!(
+                    companion = %manifest.name,
+                    error = %e,
+                    "companion enqueue failed",
+                );
             }
         }
     }
@@ -539,13 +512,14 @@ pub async fn post_catalog_download(
     let companion_jobs =
         enqueue_missing_companions(row.companions.as_deref(), &models_dir, &state.downloads).await;
 
-    // Primary entry: HF entries map onto a manifest model name (best-effort
-    // — diffusers HF entries with a recognised source_id flow through; the
-    // rest surface a `null` primary while companion downloads still run).
-    // Civitai single-file checkpoints land here too, but their
-    // recipe-driven download path lands with task 2.8's CLI integration —
-    // until then `primary_job_id` stays `null` for `cv:` entries and the
-    // user runs `mold pull cv:<id>` to fetch the safetensors itself.
+    // Primary entry. HF rows map onto a manifest model name (best-effort —
+    // diffusers entries with a recognised source_id flow through; the rest
+    // surface a `null` primary while companion downloads still run). `cv:`
+    // rows go through the recipe path: parse `download_recipe`, resolve
+    // `CIVITAI_TOKEN` if `needs_token: Civitai`, and call
+    // `DownloadQueue::enqueue_recipe`. The job id surfaces in
+    // `primary_job_id` so the SPA's downloads drawer can poll it like any
+    // other job.
     let primary_job_id: Option<String> = if row.source == "hf" {
         let model = match mold_core::manifest::find_manifest(&row.source_id) {
             Some(m) => m.name.clone(),
@@ -554,6 +528,48 @@ pub async fn post_catalog_download(
         match state.downloads.enqueue(model).await {
             Ok((jid, _, _)) => Some(jid),
             Err(crate::downloads::EnqueueError::UnknownModel(_)) => None,
+            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        }
+    } else if row.source == "civitai" {
+        let recipe: mold_catalog::entry::DownloadRecipe =
+            match serde_json::from_str(&row.download_recipe) {
+                Ok(r) => r,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("catalog row {} has malformed download_recipe: {e}", row.id),
+                    )
+                        .into_response();
+                }
+            };
+        let auth = match recipe.needs_token {
+            Some(mold_catalog::entry::TokenKind::Civitai) => {
+                match mold_core::download::civitai_auth_or_error(&row.id) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        return (StatusCode::UNAUTHORIZED, e.to_string()).into_response();
+                    }
+                }
+            }
+            _ => mold_core::download::RecipeAuth::None,
+        };
+        let files: Vec<crate::downloads::OwnedRecipeFile> = recipe
+            .files
+            .into_iter()
+            .map(|f| crate::downloads::OwnedRecipeFile {
+                url: f.url,
+                dest: f.dest,
+                sha256: f.sha256,
+                size_bytes: f.size_bytes,
+            })
+            .collect();
+        let payload = crate::downloads::RecipePayload {
+            catalog_id: row.id.clone(),
+            files,
+            auth,
+        };
+        match state.downloads.enqueue_recipe(payload).await {
+            Ok((jid, _, _)) => Some(jid),
             Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         }
     } else {

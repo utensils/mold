@@ -1509,13 +1509,19 @@ async fn run() -> anyhow::Result<()> {
             ChainSub::Validate { path } => commands::chain_validate::run(&path).await?,
         },
         Commands::Pull { model, skip_verify } => {
-            let resolved = if model.starts_with("hf:") || model.starts_with("cv:") {
-                resolve_catalog_id(&model)?
-            } else {
-                model
-            };
             let opts = mold_core::download::PullOptions { skip_verify };
-            commands::pull::run(&resolved, &opts).await?;
+            if model.starts_with("hf:") || model.starts_with("cv:") {
+                match resolve_catalog_id(&model)? {
+                    CatalogIdResolution::Manifest(name) => {
+                        commands::pull::run(&name, &opts).await?
+                    }
+                    CatalogIdResolution::Recipe(row) => {
+                        commands::pull::run_recipe(*row, &opts).await?
+                    }
+                }
+            } else {
+                commands::pull::run(&model, &opts).await?;
+            }
         }
         Commands::Rm { models, force } => {
             commands::rm::run(&models, force).await?;
@@ -1806,9 +1812,29 @@ compdef _clap_dynamic_completer_mold mold
     Ok(())
 }
 
-/// Resolve a catalog ID (e.g. `hf:bfl/FLUX.1-dev`) to the manifest model name
-/// that the existing pull flow understands (e.g. `bfl/FLUX.1-dev`).
-fn resolve_catalog_id(id: &str) -> anyhow::Result<String> {
+/// Result of resolving a `hf:` / `cv:` catalog id. HF entries map onto an
+/// existing manifest model name; Civitai single-file checkpoints carry a
+/// recipe that the CLI fetches directly. The `Recipe` variant boxes the
+/// row because `CatalogRow` is ~560 bytes (lots of `Option<String>`
+/// fields) and the `Manifest` variant is just a `String`.
+pub enum CatalogIdResolution {
+    /// HF row — pull through the existing manifest path with this name.
+    Manifest(String),
+    /// Civitai row — pull companions then fetch each `download_recipe`
+    /// file directly into `MOLD_MODELS_DIR/<sanitized-id>/`.
+    Recipe(Box<mold_db::catalog::CatalogRow>),
+}
+
+/// Resolve a catalog ID (e.g. `hf:bfl/FLUX.1-dev`, `cv:618692`) to the
+/// dispatch shape the CLI's pull command consumes.
+///
+/// HF entries return `Manifest(source_id)` for backwards-compatibility
+/// with the existing manifest path. Civitai entries return `Recipe(row)`
+/// so the caller can drive the recipe-fetcher with companion-first ordering.
+///
+/// Gates `engine_phase >= 3` — phases 1 and 2 are now downloadable
+/// (matches the server's `post_catalog_download` gate at 2.7).
+pub fn resolve_catalog_id(id: &str) -> anyhow::Result<CatalogIdResolution> {
     let path =
         mold_db::default_db_path().ok_or_else(|| anyhow::anyhow!("cannot resolve mold.db path"))?;
     let mut conn = rusqlite::Connection::open(path)?;
@@ -1819,18 +1845,23 @@ fn resolve_catalog_id(id: &str) -> anyhow::Result<String> {
         .ok_or_else(|| {
             anyhow::anyhow!("no catalog entry with id {id} — run `mold catalog refresh` first")
         })?;
-    if row.engine_phase >= 2 {
+    if row.engine_phase >= 3 {
         anyhow::bail!(
             "engine_phase {} not yet supported by this build of mold (release notes for status)",
             row.engine_phase
         );
     }
     if row.source == "hf" {
-        // Use the HF source_id as the manifest model name. Existing manifest
-        // resolution then turns it into a real download.
-        Ok(row.source_id)
+        // HF source_id maps onto an existing manifest model name; the existing
+        // manifest path takes it from here.
+        Ok(CatalogIdResolution::Manifest(row.source_id))
+    } else if row.source == "civitai" {
+        Ok(CatalogIdResolution::Recipe(Box::new(row)))
     } else {
-        anyhow::bail!("civitai catalog pulls are implemented in phase 2")
+        anyhow::bail!(
+            "catalog source '{}' not supported by `mold pull` — run `mold catalog list` to inspect",
+            row.source
+        )
     }
 }
 

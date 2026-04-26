@@ -407,10 +407,11 @@ impl SD15Engine {
             "single-file SD1.5 load is staged behind a candle-transformers-mold fork bump: \
              StableDiffusionConfig.unet/.autoencoder are private in candle-mold 0.9.10 with no \
              accessor, so UNet2DConditionModel::new / AutoEncoderKL::new can't be reached with \
-             a custom VarBuilder. The SingleFileBackend (built and validated above) is ready; \
-             follow-up commit will publish candle-transformers-mold 0.9.11 with pub accessors \
-             and wire VarBuilder::from_backend(SingleFileBackend) into the three candle \
-             constructors. Until then: pull diffusers-layout shards or wait for the bump."
+             a custom VarBuilder. The SingleFileBackend (built and validated above) is ready. \
+             Tracking PR upstream: https://github.com/utensils/candle/pull/1 — once merged + \
+             published as candle-transformers-mold 0.9.11, mold's 2.8.5 follow-up commit bumps \
+             the pin and wires VarBuilder::from_backend(SingleFileBackend) into the three \
+             candle constructors. Until then: pull diffusers-layout shards or wait for the bump."
         )
     }
 

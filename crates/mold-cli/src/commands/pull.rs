@@ -181,6 +181,142 @@ pub async fn run(model: &str, opts: &mold_core::download::PullOptions) -> Result
     Ok(())
 }
 
+/// Run a recipe-driven pull for a Civitai catalog row. Pulls each missing
+/// canonical companion FIRST (so the SDXL/SD1.5 engine has clip-l, clip-g,
+/// vae before it tries to load the primary), then fetches the recipe's
+/// files into `MOLD_MODELS_DIR/<sanitized-id>/`.
+///
+/// Mirrors the manifest path's lifecycle (status prints, marker, sha-verify)
+/// but doesn't try to upgrade through the manifest registry — the catalog
+/// id is the canonical identifier for this download.
+pub async fn run_recipe(
+    row: mold_db::catalog::CatalogRow,
+    opts: &mold_core::download::PullOptions,
+) -> Result<()> {
+    use mold_core::download::{
+        civitai_auth_or_error, fetch_recipe, missing_companions_from_json, DownloadError,
+        RecipeAuth, RecipeFetchFile,
+    };
+
+    let recipe: mold_catalog::entry::DownloadRecipe = serde_json::from_str(&row.download_recipe)
+        .map_err(|e| {
+            anyhow::anyhow!("catalog row {} has malformed download_recipe: {e}", row.id)
+        })?;
+
+    // Resolve auth before printing anything so a missing token surfaces
+    // an actionable error instead of "starting download...". The
+    // mold-core helper already crafts a remediation message naming the env var.
+    let auth = match recipe.needs_token {
+        Some(mold_catalog::entry::TokenKind::Civitai) => match civitai_auth_or_error(&row.id) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!();
+                eprintln!("{} {e}", theme::icon_fail());
+                return Err(AlreadyReported.into());
+            }
+        },
+        _ => RecipeAuth::None,
+    };
+
+    let total_recipe_bytes: u64 = recipe.files.iter().filter_map(|f| f.size_bytes).sum();
+    let total_gb = total_recipe_bytes as f64 / 1_073_741_824.0;
+    status!(
+        "{} Pulling {} ({:.1}GB to download)",
+        theme::icon_info(),
+        row.id.bold(),
+        total_gb,
+    );
+    if let Some(desc) = row.description.as_deref() {
+        if !desc.is_empty() {
+            status!("  {}", crate::output::colorize_description(desc));
+        }
+    }
+    status!("");
+
+    // Companion-first ordering: find every canonical companion the
+    // catalog row declares that isn't already on disk, then pull each
+    // through the manifest path. mold-core de-dupes against in-flight
+    // pulls of the same name, so concurrent requests won't double-pull.
+    let models_dir = mold_core::Config::load_or_default().resolved_models_dir();
+    let companions = missing_companions_from_json(row.companions.as_deref(), &models_dir);
+    if !companions.is_empty() {
+        status!(
+            "{} {} companion file(s) needed before primary",
+            theme::icon_info(),
+            companions.len(),
+        );
+        for manifest in companions {
+            pull_and_configure(&manifest.name, opts).await?;
+        }
+        status!("");
+    }
+
+    // Primary: fetch the recipe files. Translate from the catalog's owned
+    // strings into the borrowed slice mold-core expects.
+    let fetch_files: Vec<RecipeFetchFile<'_>> = recipe
+        .files
+        .iter()
+        .map(|f| RecipeFetchFile {
+            url: f.url.as_str(),
+            dest: f.dest.as_str(),
+            sha256: f.sha256.as_deref(),
+            size_bytes: f.size_bytes,
+        })
+        .collect();
+
+    fetch_recipe(&row.id, &fetch_files, auth, &models_dir, None, opts)
+        .await
+        .map_err(|e| -> anyhow::Error {
+            match e {
+                DownloadError::MissingCivitaiToken { .. } => {
+                    eprintln!();
+                    eprintln!("{} {e}", theme::icon_fail());
+                }
+                DownloadError::Sha256Mismatch {
+                    filename,
+                    expected,
+                    actual,
+                    ..
+                } => {
+                    eprintln!();
+                    eprintln!(
+                        "{} SHA-256 mismatch for {}",
+                        theme::icon_fail(),
+                        filename.bold()
+                    );
+                    eprintln!("  Expected: {expected}");
+                    eprintln!("  Got:      {actual}");
+                    eprintln!();
+                    eprintln!(
+                        "The corrupted file has been removed. Re-run: mold pull {}",
+                        row.id
+                    );
+                }
+                DownloadError::RecipeHttp { url, status, body } => {
+                    eprintln!();
+                    eprintln!(
+                        "{} HTTP {status} for {}{}",
+                        theme::icon_fail(),
+                        url,
+                        body.as_deref()
+                            .map(|b| format!(" — {b}"))
+                            .unwrap_or_default(),
+                    );
+                }
+                other => {
+                    eprintln!();
+                    eprintln!("{} Download failed: {other}", theme::icon_fail());
+                }
+            }
+            AlreadyReported.into()
+        })?;
+
+    status!("");
+    status!("{} {} is ready!", theme::icon_done(), row.id.bold());
+    status!("  mold run {} \"your prompt\"", row.id);
+    Ok(())
+}
+
 async fn pull_via_server(ctx: &CliContext, manifest: &ModelManifest) -> Result<()> {
     status!(
         "{} Pulling {} on {}",

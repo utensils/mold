@@ -1,3 +1,8 @@
+// Env-var tests use `std::sync::Mutex<()>` to serialize process-global
+// mutations; holding the guard across `.await` is intentional under the
+// current-thread tokio test runtime.
+#![allow(clippy::await_holding_lock)]
+
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -170,9 +175,20 @@ async fn status_reflects_live_progress_during_running_scan() {
 // ── post_catalog_download — gate + companion auto-pull ──────────────────────
 
 /// Build a catalog row with sane defaults so individual tests can override
-/// only the fields under test. `download_recipe` is required-NOT-NULL by
-/// the schema; the empty JSON object is a valid placeholder.
+/// only the fields under test. `download_recipe` ships a minimal but
+/// schema-valid recipe (one synthetic file, no token) so the
+/// `post_catalog_download` Civitai branch parses it without erroring; tests
+/// that care about specific recipe content override `row.download_recipe`.
 fn make_catalog_row(id: &str, source: &str, family: &str, engine_phase: i64) -> CatalogRow {
+    let recipe = serde_json::json!({
+        "files": [{
+            "url": "http://test.invalid/primary.safetensors",
+            "dest": "primary.safetensors",
+            "sha256": null,
+            "size_bytes": 1000,
+        }],
+        "needs_token": null,
+    });
     CatalogRow {
         id: id.to_string(),
         source: source.to_string(),
@@ -197,7 +213,7 @@ fn make_catalog_row(id: &str, source: &str, family: &str, engine_phase: i64) -> 
         license_flags: None,
         tags: None,
         companions: None,
-        download_recipe: "{}".into(),
+        download_recipe: recipe.to_string(),
         engine_phase,
         created_at: None,
         updated_at: None,
@@ -477,4 +493,79 @@ async fn companion_jobs_in_response_match_row_companions_in_order() {
             "each companion_jobs entry must include a non-empty job_id, got {entry}",
         );
     }
+}
+
+/// Option A' contract: `cv:` entries must surface a real `primary_job_id`
+/// instead of `null`. Before 2.8 the queue couldn't accept a recipe so this
+/// field was always `null` for civitai sources; the SPA's downloads drawer
+/// had to skip rendering the primary job and instructions said "run mold
+/// pull from a terminal." After 2.8 the recipe path makes this real.
+#[tokio::test]
+async fn civitai_post_catalog_download_returns_real_primary_job_id() {
+    let row = make_catalog_row("cv:sdxl-primary-test", "civitai", "sdxl", 2);
+    let state = seeded_state(&[row]);
+    let resp = invoke_download(state, "cv:sdxl-primary-test").await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = read_body_json(resp).await;
+    let primary = body.get("primary_job_id");
+    assert!(
+        primary.is_some(),
+        "primary_job_id field must be present, got {body}"
+    );
+    let v = primary.unwrap();
+    assert!(
+        !v.is_null(),
+        "primary_job_id must NOT be null for civitai entries (Option A'), got {body}"
+    );
+    let id = v.as_str().expect("primary_job_id must be a string");
+    assert!(
+        !id.is_empty(),
+        "primary_job_id must be non-empty, got {body}"
+    );
+}
+
+/// Civitai recipes flagged `needs_token: Civitai` must surface a 401 when
+/// `CIVITAI_TOKEN` is unset, with a remediation pointing at the env var.
+/// Test serializes env-var access with a process-global mutex (matches the
+/// `HF_TOKEN_LOCK` pattern in mold-core::download tests).
+static CIVITAI_TOKEN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[tokio::test]
+async fn civitai_recipe_with_needs_token_returns_unauthorized_when_no_env_var() {
+    let _guard = CIVITAI_TOKEN_TEST_LOCK.lock().unwrap();
+    let original = std::env::var("CIVITAI_TOKEN").ok();
+    std::env::remove_var("CIVITAI_TOKEN");
+
+    let mut row = make_catalog_row("cv:gated-test", "civitai", "sdxl", 2);
+    let recipe = serde_json::json!({
+        "files": [{
+            "url": "http://test.invalid/primary.safetensors",
+            "dest": "primary.safetensors",
+            "sha256": null,
+            "size_bytes": 1000,
+        }],
+        "needs_token": "civitai",
+    });
+    row.download_recipe = recipe.to_string();
+    let state = seeded_state(&[row]);
+    let resp = invoke_download(state, "cv:gated-test").await;
+
+    if let Some(v) = original {
+        std::env::set_var("CIVITAI_TOKEN", v);
+    }
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "needs_token:civitai without CIVITAI_TOKEN must surface 401",
+    );
+    let body_bytes = axum::body::to_bytes(resp.into_body(), 4096)
+        .await
+        .expect("read body")
+        .to_vec();
+    let body = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        body.contains("CIVITAI_TOKEN"),
+        "401 body should name the env var: {body}"
+    );
 }

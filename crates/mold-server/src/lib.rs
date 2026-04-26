@@ -275,9 +275,12 @@ pub async fn run_server(
     // outlive graceful shutdown and keep polling its cancellation token until
     // process exit.
     let downloads_shutdown = tokio_util::sync::CancellationToken::new();
+    let downloads_models_dir = state.config.read().await.resolved_models_dir();
     let downloads_driver = crate::downloads::spawn_driver(
         state.downloads.clone(),
         std::sync::Arc::new(crate::downloads::HfPullDriver),
+        std::sync::Arc::new(crate::downloads::CivitaiRecipeDriver),
+        downloads_models_dir,
         downloads_shutdown.clone(),
     );
 

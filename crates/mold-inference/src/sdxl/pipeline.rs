@@ -458,10 +458,11 @@ impl SDXLEngine {
             "single-file SDXL load is staged behind a candle-transformers-mold fork bump: \
              StableDiffusionConfig.unet/.autoencoder are private in candle-mold 0.9.10 with no \
              accessor. The SingleFileBackend (incl. the CLIP-G fused-QKV FusedSlice path, built \
-             and validated above) is ready; follow-up commit will publish candle-transformers-mold \
-             0.9.11 with pub accessors and wire VarBuilder::from_backend(SingleFileBackend) into \
-             the four candle constructors. Until then: pull diffusers-layout shards or wait for \
-             the bump."
+             and validated above) is ready. Tracking PR upstream: \
+             https://github.com/utensils/candle/pull/1 — once merged + published as \
+             candle-transformers-mold 0.9.11, mold's 2.8.5 follow-up commit bumps the pin and \
+             wires VarBuilder::from_backend(SingleFileBackend) into the four candle \
+             constructors. Until then: pull diffusers-layout shards or wait for the bump."
         )
     }
 
