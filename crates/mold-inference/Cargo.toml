@@ -37,6 +37,11 @@ name = "ltx2_vae_probe"
 path = "src/bin/ltx2_vae_probe.rs"
 required-features = ["dev-bins", "mp4"]
 
+[[bin]]
+name = "sd_singlefile_inspect"
+path = "src/bin/sd_singlefile_inspect.rs"
+required-features = ["dev-bins"]
+
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.9.0" }
 anyhow = "1"
