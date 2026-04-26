@@ -355,35 +355,24 @@ impl SD15Engine {
         Ok((unet, vae, clip))
     }
 
-    /// Single-file (Civitai) component loader (phase 2.6).
+    /// Single-file (Civitai) component loader (phase 2.6 + 2.8.5).
     ///
-    /// Header-parses the checkpoint, builds the diffusers→A1111 remap,
-    /// and prepares a `SingleFileBackend` ready to feed candle's
-    /// per-component constructors. **The final bridge —
-    /// `UNet2DConditionModel::new(VarBuilder, …, sd_config.unet.clone())`
-    /// and friends — is gated behind a `candle-transformers-mold` fork
-    /// bump:** today the fork (v0.9.10) keeps `StableDiffusionConfig.unet`
-    /// and `.autoencoder` private with no accessor, so the only public
-    /// path through `build_unet` / `build_vae` mmaps a *path* rather than
-    /// accepting a `VarBuilder`. Per the 2.6 handoff's "minimum stub"
-    /// guidance, we surface a precise error so the 2.10 UAT failure mode
-    /// is "single-file load needs the candle accessor follow-up", not
-    /// "single-file path silently fell through to a diffusers loader."
+    /// Header-parses the checkpoint, builds the diffusers→A1111 remap, wraps
+    /// it in a `SingleFileBackend` (which translates diffusers `vb.get(key)`
+    /// calls into reads from the mmap'd source tensors), then hands three
+    /// `VarBuilder::from_backend(SingleFileBackend)` instances to candle's
+    /// per-component constructors. UNet, VAE, and CLIP-L all read from the
+    /// same single-file mmap — no on-disk shard files needed.
     ///
-    /// The follow-up commit (deferred to 2.7-or-later) is one fork bump
-    /// (publish `candle-transformers-mold` 0.9.11 with `unet()` /
-    /// `autoencoder()` `pub` accessors) plus ~30 lines of wiring here that
-    /// drop in three `VarBuilder::from_backend(SingleFileBackend)` calls.
-    /// The `SingleFileBackend` itself — the load-bearing piece — is
-    /// already built, tested, and exercised by the 2.6 unit tests in
-    /// `loader::single_file_backend::tests`.
+    /// Reaches into `sd_config.unet()` / `.autoencoder()` accessors exposed
+    /// by candle-transformers-mold 0.9.12 (utensils/candle PR #1).
     fn load_components_single_file(
         &mut self,
         single_file: &std::path::Path,
-        _sd_config: &stable_diffusion::StableDiffusionConfig,
-        _device: &Device,
-        _clip_device: &Device,
-        _dtype: DType,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        clip_device: &Device,
+        dtype: DType,
     ) -> Result<(
         stable_diffusion::unet_2d::UNet2DConditionModel,
         stable_diffusion::vae::AutoEncoderKL,
@@ -391,28 +380,58 @@ impl SD15Engine {
     )> {
         use crate::loader::single_file_backend::SingleFileBackend;
         use crate::loader::{build_sd15_remap, single_file as single_file_loader};
+        use candle_nn::VarBuilder;
         use mold_catalog::families::Family;
 
-        // Validate the rename surface up-front so the error names a real
-        // problem (corrupt header / unsupported tensor layout) when the
-        // checkpoint is broken — rather than always landing on the
-        // candle-fork-accessor sentinel below.
         let bundle = single_file_loader::load(single_file, Family::Sd15)
             .map_err(|e| anyhow::anyhow!("partition single-file SD1.5 checkpoint: {e}"))?;
         let remap = build_sd15_remap(&bundle)
             .map_err(|e| anyhow::anyhow!("build SD1.5 diffusers→A1111 remap: {e}"))?;
-        let _backend = SingleFileBackend::from_sd15_remap(single_file, &remap)?;
 
-        bail!(
-            "single-file SD1.5 load is staged behind a candle-transformers-mold fork bump: \
-             StableDiffusionConfig.unet/.autoencoder are private in candle-mold 0.9.10 with no \
-             accessor, so UNet2DConditionModel::new / AutoEncoderKL::new can't be reached with \
-             a custom VarBuilder. The SingleFileBackend (built and validated above) is ready. \
-             Tracking PR upstream: https://github.com/utensils/candle/pull/1 — once merged + \
-             published as candle-transformers-mold 0.9.11, mold's 2.8.5 follow-up commit bumps \
-             the pin and wires VarBuilder::from_backend(SingleFileBackend) into the three \
-             candle constructors. Until then: pull diffusers-layout shards or wait for the bump."
-        )
+        self.base.progress.stage_start("Loading UNet (single-file)");
+        let unet_start = Instant::now();
+        let unet_backend = SingleFileBackend::from_sd15_remap(single_file, &remap)?;
+        let vb_unet = VarBuilder::from_backend(Box::new(unet_backend), dtype, device.clone());
+        let unet = stable_diffusion::unet_2d::UNet2DConditionModel::new(
+            vb_unet,
+            4,     // in_channels (latent channels for SD1.5)
+            4,     // out_channels (matches build_unet's hardcoded value)
+            false, // use_flash_attn — feature parity with diffusers path
+            sd_config.unet().clone(),
+        )?;
+        self.base
+            .progress
+            .stage_done("Loading UNet (single-file)", unet_start.elapsed());
+
+        self.base.progress.stage_start("Loading VAE (single-file)");
+        let vae_start = Instant::now();
+        let vae_backend = SingleFileBackend::from_sd15_remap(single_file, &remap)?;
+        let vb_vae = VarBuilder::from_backend(Box::new(vae_backend), dtype, device.clone());
+        let vae = stable_diffusion::vae::AutoEncoderKL::new(
+            vb_vae,
+            3, // in_channels (RGB)
+            3, // out_channels (RGB)
+            sd_config.autoencoder().clone(),
+        )?;
+        self.base
+            .progress
+            .stage_done("Loading VAE (single-file)", vae_start.elapsed());
+
+        self.base
+            .progress
+            .stage_start("Loading CLIP-L (single-file)");
+        let clip_start = Instant::now();
+        let clip_backend = SingleFileBackend::from_sd15_remap(single_file, &remap)?;
+        // CLIP-L weights are F32 in the diffusers path; mirror that here so
+        // tokenization output dtype matches what `LoadedSD15.dtype` expects.
+        let vb_clip =
+            VarBuilder::from_backend(Box::new(clip_backend), DType::F32, clip_device.clone());
+        let clip = stable_diffusion::clip::ClipTextTransformer::new(vb_clip, &sd_config.clip)?;
+        self.base
+            .progress
+            .stage_done("Loading CLIP-L (single-file)", clip_start.elapsed());
+
+        Ok((unet, vae, clip))
     }
 
     /// Tokenize a prompt for the CLIP encoder, padding/truncating to max_len tokens.
@@ -1331,19 +1350,17 @@ mod tests {
     }
 
     #[test]
-    fn load_branches_to_single_file_path_and_reaches_candle_fork_sentinel() {
-        // Round 3 smoke (TDD): the `load()` branch on `single_file_path`
-        // must fire, the SingleFileBackend must construct cleanly, and
-        // the final candle-fork-accessor sentinel error must surface.
-        // This pins down the wiring without paying the real-shape model
-        // construction cost (see the comment on
-        // `load_components_single_file` for why the candle constructors
-        // can't be reached today). The full real-shape `load().unwrap()`
-        // smoke runs in 2.10's killswitch UAT against a real DreamShaper
+    fn load_branches_to_single_file_path_and_invokes_candle_constructors() {
+        // Phase 2.8.5 smoke: `load()` must dispatch to the single-file
+        // branch, hand a `VarBuilder::from_backend(SingleFileBackend)` to
+        // candle's `UNet2DConditionModel::new`, and surface an error
+        // sourced from the SingleFileBackend's tensor lookup (because the
+        // synthetic checkpoint doesn't carry the full SD1.5 tensor set).
+        // This confirms the wiring without paying the real-shape model
+        // construction cost. The full real-shape `load().unwrap()` smoke
+        // runs in 2.10's killswitch UAT against a real DreamShaper
         // checkpoint.
         let single_file = synth_sd15_single_file("load-branch");
-        // validate_paths() existence-checks the tokenizer; a zero-byte
-        // file is enough — the test bails before any actual parsing.
         let tokenizer_stub = std::env::temp_dir().join(format!(
             "mold-sd15-tok-stub-{}-{}.json",
             std::process::id(),
@@ -1359,28 +1376,27 @@ mod tests {
             single_file.clone(),
             tokenizer_stub.clone(),
             Scheduler::Ddim,
-            // Eager triggers the load() body; Sequential is a no-op.
             LoadStrategy::Eager,
             0,
         )
         .expect("constructor");
 
-        // Force CPU so create_device's GPU-detection path doesn't muddle
-        // the test on Macs (Metal would otherwise be picked).
         std::env::set_var("MOLD_DEVICE", "cpu");
         let err = SD15Engine::load(&mut engine).expect_err(
-            "Round 3 sentinel must surface — single-file load is gated on the candle fork bump",
+            "synthetic single-file checkpoint can't satisfy SD1.5's full tensor set; \
+             dispatch should land in the candle constructor and fail there",
         );
         std::env::remove_var("MOLD_DEVICE");
 
         let msg = err.to_string();
+        // Proof we got past the dispatch: the error originates from the
+        // single-file remap / SingleFileBackend layer, not from the
+        // diffusers loader (which would say "transformer/diffusion_pytorch_model.safetensors")
+        // or from the dispatch itself (which has no error surface — it
+        // just calls `load_components_single_file`).
         assert!(
-            msg.contains("candle-transformers-mold fork bump"),
-            "expected sentinel error referencing the candle fork bump, got: {msg}",
-        );
-        assert!(
-            msg.contains("SingleFileBackend"),
-            "sentinel must reference the load-bearing piece that *is* shipping in 2.6: {msg}",
+            msg.contains("single-file") || msg.contains("rename rule"),
+            "expected error from the single-file load layer, got: {msg}",
         );
 
         let _ = std::fs::remove_file(single_file);

@@ -420,24 +420,24 @@ impl SDXLEngine {
         Ok((unet, vae, clip_l, clip_g))
     }
 
-    /// Single-file (Civitai) component loader (phase 2.6).
+    /// Single-file (Civitai) component loader (phase 2.6 + 2.8.5).
     ///
     /// Header-parses the checkpoint, builds the diffusers→A1111 remap
     /// (incl. CLIP-G `RenameOutput::FusedSlice` entries for the OpenCLIP
-    /// `attn.in_proj_*` slabs), and prepares a `SingleFileBackend` ready
-    /// to feed candle's per-component constructors. **The final bridge
-    /// is gated behind a `candle-transformers-mold` fork bump** — see
-    /// `SD15Engine::load_components_single_file` for the full
-    /// explanation; the same constraint applies (private
-    /// `StableDiffusionConfig.unet/.autoencoder` fields, no accessor in
-    /// candle-mold 0.9.10).
+    /// `attn.in_proj_*` slabs), wraps it in `SingleFileBackend`, and feeds
+    /// four `VarBuilder::from_backend(SingleFileBackend)` instances to
+    /// candle's per-component constructors: UNet, VAE, CLIP-L, CLIP-G.
+    /// All four read from the same single-file mmap.
+    ///
+    /// Reaches into `sd_config.unet()` / `.autoencoder()` accessors exposed
+    /// by candle-transformers-mold 0.9.12 (utensils/candle PR #1).
     fn load_components_single_file(
         &mut self,
         single_file: &std::path::Path,
-        _sd_config: &stable_diffusion::StableDiffusionConfig,
-        _device: &Device,
-        _clip_device: &Device,
-        _dtype: DType,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        clip_device: &Device,
+        dtype: DType,
     ) -> Result<(
         stable_diffusion::unet_2d::UNet2DConditionModel,
         stable_diffusion::vae::AutoEncoderKL,
@@ -446,24 +446,72 @@ impl SDXLEngine {
     )> {
         use crate::loader::single_file_backend::SingleFileBackend;
         use crate::loader::{build_sdxl_remap, single_file as single_file_loader};
+        use candle_nn::VarBuilder;
         use mold_catalog::families::Family;
 
         let bundle = single_file_loader::load(single_file, Family::Sdxl)
             .map_err(|e| anyhow::anyhow!("partition single-file SDXL checkpoint: {e}"))?;
         let remap = build_sdxl_remap(&bundle)
             .map_err(|e| anyhow::anyhow!("build SDXL diffusers→A1111 remap: {e}"))?;
-        let _backend = SingleFileBackend::from_sdxl_remap(single_file, &remap)?;
 
-        bail!(
-            "single-file SDXL load is staged behind a candle-transformers-mold fork bump: \
-             StableDiffusionConfig.unet/.autoencoder are private in candle-mold 0.9.10 with no \
-             accessor. The SingleFileBackend (incl. the CLIP-G fused-QKV FusedSlice path, built \
-             and validated above) is ready. Tracking PR upstream: \
-             https://github.com/utensils/candle/pull/1 — once merged + published as \
-             candle-transformers-mold 0.9.11, mold's 2.8.5 follow-up commit bumps the pin and \
-             wires VarBuilder::from_backend(SingleFileBackend) into the four candle \
-             constructors. Until then: pull diffusers-layout shards or wait for the bump."
-        )
+        self.base.progress.stage_start("Loading UNet (single-file)");
+        let unet_start = Instant::now();
+        let unet_backend = SingleFileBackend::from_sdxl_remap(single_file, &remap)?;
+        let vb_unet = VarBuilder::from_backend(Box::new(unet_backend), dtype, device.clone());
+        let unet = stable_diffusion::unet_2d::UNet2DConditionModel::new(
+            vb_unet,
+            4,     // in_channels (latent)
+            4,     // out_channels
+            false, // use_flash_attn
+            sd_config.unet().clone(),
+        )?;
+        self.base
+            .progress
+            .stage_done("Loading UNet (single-file)", unet_start.elapsed());
+
+        self.base.progress.stage_start("Loading VAE (single-file)");
+        let vae_start = Instant::now();
+        let vae_backend = SingleFileBackend::from_sdxl_remap(single_file, &remap)?;
+        let vb_vae = VarBuilder::from_backend(Box::new(vae_backend), dtype, device.clone());
+        let vae = stable_diffusion::vae::AutoEncoderKL::new(
+            vb_vae,
+            3,
+            3,
+            sd_config.autoencoder().clone(),
+        )?;
+        self.base
+            .progress
+            .stage_done("Loading VAE (single-file)", vae_start.elapsed());
+
+        self.base
+            .progress
+            .stage_start("Loading CLIP-L (single-file)");
+        let clip_l_start = Instant::now();
+        let clip_l_backend = SingleFileBackend::from_sdxl_remap(single_file, &remap)?;
+        let vb_clip_l =
+            VarBuilder::from_backend(Box::new(clip_l_backend), DType::F32, clip_device.clone());
+        let clip_l = stable_diffusion::clip::ClipTextTransformer::new(vb_clip_l, &sd_config.clip)?;
+        self.base
+            .progress
+            .stage_done("Loading CLIP-L (single-file)", clip_l_start.elapsed());
+
+        self.base
+            .progress
+            .stage_start("Loading CLIP-G (single-file)");
+        let clip_g_start = Instant::now();
+        let clip2_config = sd_config
+            .clip2
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("SDXL config missing clip2 configuration"))?;
+        let clip_g_backend = SingleFileBackend::from_sdxl_remap(single_file, &remap)?;
+        let vb_clip_g =
+            VarBuilder::from_backend(Box::new(clip_g_backend), DType::F32, clip_device.clone());
+        let clip_g = stable_diffusion::clip::ClipTextTransformer::new(vb_clip_g, clip2_config)?;
+        self.base
+            .progress
+            .stage_done("Loading CLIP-G (single-file)", clip_g_start.elapsed());
+
+        Ok((unet, vae, clip_l, clip_g))
     }
 
     /// Tokenize a prompt for a CLIP encoder, padding/truncating to max_len tokens.
@@ -1350,13 +1398,16 @@ mod tests {
     }
 
     #[test]
-    fn load_branches_to_single_file_path_and_reaches_candle_fork_sentinel() {
-        // Round 3 smoke (TDD parity with SD15): single-file SDXL `load()`
-        // must reach the candle-fork-accessor sentinel, proving the
-        // header-parse → build_sdxl_remap → SingleFileBackend wiring is
-        // sound. Real-shape model construction lands when the candle-mold
-        // fork bumps to expose StableDiffusionConfig.unet/.autoencoder
-        // (see `load_components_single_file`).
+    fn load_branches_to_single_file_path_and_invokes_candle_constructors() {
+        // Phase 2.8.5 smoke (TDD parity with SD15): single-file SDXL
+        // `load()` must dispatch to the single-file branch and hand four
+        // `VarBuilder::from_backend(SingleFileBackend)` instances to
+        // candle's per-component constructors. The synthetic checkpoint
+        // doesn't carry the full SDXL tensor set (UNet, VAE, CLIP-L,
+        // CLIP-G with fused QKV), so the load surfaces an error sourced
+        // from the single-file layer rather than from the diffusers
+        // fallback. Real-shape construction is exercised by 2.10's
+        // killswitch UAT against a real Pony / Juggernaut XL checkpoint.
         let single_file = synth_sdxl_single_file("load-branch");
         let make_stub = |label: &str| -> PathBuf {
             let path = std::env::temp_dir().join(format!(
@@ -1387,17 +1438,14 @@ mod tests {
         .expect("constructor");
 
         std::env::set_var("MOLD_DEVICE", "cpu");
-        let err = SDXLEngine::load(&mut engine).expect_err("Round 3 sentinel must surface");
+        let err = SDXLEngine::load(&mut engine)
+            .expect_err("synthetic checkpoint can't satisfy SDXL's full tensor set");
         std::env::remove_var("MOLD_DEVICE");
 
         let msg = err.to_string();
         assert!(
-            msg.contains("candle-transformers-mold fork bump"),
-            "expected sentinel error referencing candle fork bump, got: {msg}",
-        );
-        assert!(
-            msg.contains("SingleFileBackend"),
-            "sentinel must reference the load-bearing piece: {msg}",
+            msg.contains("single-file") || msg.contains("rename rule"),
+            "expected error from the single-file load layer, got: {msg}",
         );
 
         let _ = std::fs::remove_file(single_file);

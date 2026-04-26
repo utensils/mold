@@ -48,7 +48,7 @@ mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version 
 anyhow = "1"
 candle-core = { package = "candle-core-mold", version = "0.9.10" }
 candle-nn = { package = "candle-nn-mold", version = "0.9.10" }
-candle-transformers = { package = "candle-transformers-mold", version = "0.9.10" }
+candle-transformers = { package = "candle-transformers-mold", version = "0.9.12" }
 gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
 image = "0.25"

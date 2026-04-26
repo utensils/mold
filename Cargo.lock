@@ -577,9 +577,9 @@ dependencies = [
 
 [[package]]
 name = "candle-transformers-mold"
-version = "0.9.10"
+version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a3c7b39e0e88620f333b11026958c15dc97178205152310d649f5190c440e5b"
+checksum = "589960fc3a18e813f3d12446351db1fb973f4b405b47baf1e40b9b7c92e915e5"
 dependencies = [
  "byteorder",
  "candle-core-mold",
