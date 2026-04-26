@@ -67,12 +67,21 @@ describe("catalog api", () => {
     expect(out.families[0].family).toBe("flux");
   });
 
-  it("postCatalogDownload returns the job_ids", async () => {
+  it("postCatalogDownload returns primary_job_id + companion_jobs", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,
-      json: async () => ({ job_ids: ["x"] }),
+      json: async () => ({
+        primary_job_id: "primary-uuid",
+        companion_jobs: [
+          { name: "clip-l", job_id: "c1" },
+          { name: "sdxl-vae", job_id: "c2" },
+        ],
+      }),
     });
-    const out = await postCatalogDownload("hf:bfl/FLUX.1-dev");
-    expect(out.job_ids).toEqual(["x"]);
+    const out = await postCatalogDownload("cv:sdxl-pony");
+    expect(out.primary_job_id).toBe("primary-uuid");
+    expect(out.companion_jobs).toHaveLength(2);
+    expect(out.companion_jobs[0].name).toBe("clip-l");
+    expect(out.companion_jobs[0].job_id).toBe("c1");
   });
 });

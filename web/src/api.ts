@@ -424,9 +424,24 @@ export async function fetchActiveCatalogRefresh(): Promise<{
   return body.active;
 }
 
+export interface CompanionJob {
+  name: string;
+  job_id: string;
+}
+
+export interface CatalogDownloadResponse {
+  /// Queue id for the catalog entry itself. `null` for Civitai entries
+  /// whose recipe-driven download path is implemented in 2.8 — companion
+  /// downloads (CLIP-L / CLIP-G / VAE) still flow through `companion_jobs`.
+  primary_job_id: string | null;
+  /// One entry per canonical companion the server enqueued. Present in
+  /// the same order the catalog row's `companions` field declares.
+  companion_jobs: CompanionJob[];
+}
+
 export async function postCatalogDownload(
   id: string,
-): Promise<{ job_ids: string[] }> {
+): Promise<CatalogDownloadResponse> {
   const r = await fetch(`/api/catalog/${encodeURIComponent(id)}/download`, {
     method: "POST",
   });

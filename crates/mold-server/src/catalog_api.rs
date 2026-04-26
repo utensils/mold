@@ -428,6 +428,87 @@ pub async fn get_active_refresh(State(state): State<crate::state::AppState>) -> 
     }
 }
 
+/// One queued companion download surfaced in the
+/// `POST /api/catalog/:id/download` response.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CompanionJob {
+    /// Canonical companion name from the catalog scanner
+    /// (`mold_catalog::companions::COMPANIONS`). Same string the
+    /// `companions` array on the catalog row carries.
+    pub name: String,
+    /// Job id that polls against `GET /api/downloads`.
+    pub job_id: String,
+}
+
+/// True when every file declared by the companion's synthetic manifest is
+/// present under `models_dir` AND no `.pulling` marker for the manifest's
+/// canonical name exists. A leftover marker means a previous pull was
+/// interrupted and the on-disk content can't be trusted yet.
+fn companion_present_on_disk(
+    models_dir: &std::path::Path,
+    manifest: &mold_core::manifest::ModelManifest,
+) -> bool {
+    if mold_core::download::pulling_marker_path_in(models_dir, &manifest.name).exists() {
+        return false;
+    }
+    manifest.files.iter().all(|f| {
+        let storage = mold_core::manifest::storage_path(manifest, f);
+        models_dir.join(storage).exists()
+    })
+}
+
+/// Enqueue any companions referenced by `companions_json` that are not
+/// already fully present under `models_dir`. Returns the per-companion job
+/// ids in the order they appear in the catalog row.
+///
+/// `companions_json` is the raw value from `CatalogRow::companions` — a
+/// JSON-encoded `Vec<String>` of canonical companion names. Phase-1 HF
+/// diffusers entries pass `None` here because they don't strip components.
+///
+/// `DownloadQueue::enqueue` is idempotent against canonical manifest
+/// names: re-enqueuing a companion that's mid-flight returns the existing
+/// job id so concurrent download requests won't double-pull. That lets
+/// the on-disk presence check fall back on "missing → enqueue" without a
+/// race condition.
+pub(crate) async fn enqueue_missing_companions(
+    companions_json: Option<&str>,
+    models_dir: &std::path::Path,
+    queue: &crate::downloads::DownloadQueue,
+) -> Vec<CompanionJob> {
+    let Some(json) = companions_json else {
+        return Vec::new();
+    };
+    let names: Vec<String> = match serde_json::from_str(json) {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut jobs = Vec::with_capacity(names.len());
+    for name in names {
+        // Synthetic companion manifests live in `mold-core` —
+        // `family: "companion"`, hidden from `mold list`. Catalog scanners
+        // can ship new canonical names ahead of the binary; skip the ones
+        // this build doesn't know about.
+        let Some(manifest) = mold_core::manifest::find_manifest(&name) else {
+            tracing::warn!(
+                companion = %name,
+                "skipping companion with no synthetic manifest in this build",
+            );
+            continue;
+        };
+        if companion_present_on_disk(models_dir, manifest) {
+            continue;
+        }
+        match queue.enqueue(manifest.name.clone()).await {
+            Ok((job_id, _, _)) => jobs.push(CompanionJob { name, job_id }),
+            Err(e) => {
+                tracing::warn!(companion = %name, error = %e, "companion enqueue failed");
+            }
+        }
+    }
+    jobs
+}
+
 pub async fn post_catalog_download(
     State(state): State<crate::state::AppState>,
     Path(id): Path<String>,
@@ -438,7 +519,7 @@ pub async fn post_catalog_download(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
-    if row.engine_phase >= 2 {
+    if row.engine_phase >= 3 {
         return (
             StatusCode::CONFLICT,
             format!(
@@ -449,39 +530,42 @@ pub async fn post_catalog_download(
             .into_response();
     }
 
-    // Phase 1 reuses the existing `DownloadQueue` for HF entries that map
-    // 1:1 onto a manifest model name. For Civitai entries, the recipe's
-    // first file URL is used to build a stub manifest at runtime — that
-    // path is implemented in phase 2 alongside companion auto-pull. For
-    // now, return a placeholder list of pending job ids.
-    let mut job_ids: Vec<String> = Vec::new();
-    if row.source == "hf" {
-        // Best-effort: use the source_id (e.g. "black-forest-labs/FLUX.1-dev")
-        // to look up an existing manifest model name; if not found, surface
-        // the catalog-id directly to the queue.
+    // Phase 2: companions auto-pull before the primary entry. Civitai
+    // single-file checkpoints commonly strip their text encoders + VAE,
+    // so the catalog scanner records `companions: ["clip-l", ...]` on
+    // those entries. Each canonical companion has a hidden synthetic
+    // manifest in `mold-core` so the queue can enqueue them by name.
+    let models_dir = state.config.read().await.resolved_models_dir();
+    let companion_jobs =
+        enqueue_missing_companions(row.companions.as_deref(), &models_dir, &state.downloads).await;
+
+    // Primary entry: HF entries map onto a manifest model name (best-effort
+    // — diffusers HF entries with a recognised source_id flow through; the
+    // rest surface a `null` primary while companion downloads still run).
+    // Civitai single-file checkpoints land here too, but their
+    // recipe-driven download path lands with task 2.8's CLI integration —
+    // until then `primary_job_id` stays `null` for `cv:` entries and the
+    // user runs `mold pull cv:<id>` to fetch the safetensors itself.
+    let primary_job_id: Option<String> = if row.source == "hf" {
         let model = match mold_core::manifest::find_manifest(&row.source_id) {
             Some(m) => m.name.clone(),
             None => row.source_id.clone(),
         };
         match state.downloads.enqueue(model).await {
-            Ok((jid, _, _)) => job_ids.push(jid),
-            // Phase 2 will wire up catalog-native downloads; for entries that
-            // aren't in the static manifest yet, accept the request and return
-            // an empty job list — the caller can poll the catalog entry status.
-            Err(crate::downloads::EnqueueError::UnknownModel(_)) => {}
+            Ok((jid, _, _)) => Some(jid),
+            Err(crate::downloads::EnqueueError::UnknownModel(_)) => None,
             Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         }
     } else {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            "civitai catalog download is implemented in phase 2 (single-file loaders)",
-        )
-            .into_response();
-    }
+        None
+    };
 
     (
         StatusCode::ACCEPTED,
-        Json(serde_json::json!({ "job_ids": job_ids })),
+        Json(serde_json::json!({
+            "primary_job_id": primary_job_id,
+            "companion_jobs": companion_jobs,
+        })),
     )
         .into_response()
 }

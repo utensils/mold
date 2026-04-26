@@ -1,9 +1,15 @@
 use std::sync::Arc;
 
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use mold_catalog::scanner::{ProgressHandle, ScanReport};
+use mold_db::catalog::CatalogRow;
+use mold_db::MetadataDb;
 use tokio::sync::Mutex;
 
-use super::{CatalogScanQueue, CatalogScanStatus, ScanDriver};
+use super::{post_catalog_download, CatalogScanQueue, CatalogScanStatus, ScanDriver};
+use crate::state::AppState;
 
 struct FakeDriver {
     report: Arc<Mutex<Option<ScanReport>>>,
@@ -159,4 +165,316 @@ async fn status_reflects_live_progress_during_running_scan() {
     }
 
     release.notify_one();
+}
+
+// ── post_catalog_download — gate + companion auto-pull ──────────────────────
+
+/// Build a catalog row with sane defaults so individual tests can override
+/// only the fields under test. `download_recipe` is required-NOT-NULL by
+/// the schema; the empty JSON object is a valid placeholder.
+fn make_catalog_row(id: &str, source: &str, family: &str, engine_phase: i64) -> CatalogRow {
+    CatalogRow {
+        id: id.to_string(),
+        source: source.to_string(),
+        source_id: id.to_string(),
+        name: id.to_string(),
+        author: None,
+        family: family.to_string(),
+        family_role: "finetune".into(),
+        sub_family: None,
+        modality: "text-to-image".into(),
+        kind: "checkpoint".into(),
+        file_format: "safetensors".into(),
+        bundling: "single-file".into(),
+        size_bytes: Some(1_000),
+        download_count: 0,
+        rating: None,
+        likes: 0,
+        nsfw: 0,
+        thumbnail_url: None,
+        description: None,
+        license: None,
+        license_flags: None,
+        tags: None,
+        companions: None,
+        download_recipe: "{}".into(),
+        engine_phase,
+        created_at: None,
+        updated_at: None,
+        added_at: 0,
+    }
+}
+
+fn seeded_state(rows: &[CatalogRow]) -> AppState {
+    let db = Arc::new(MetadataDb::open_in_memory().expect("in-memory DB"));
+    // catalog_upsert is family-scoped; group rows by family before upserting.
+    use std::collections::BTreeMap;
+    let mut by_family: BTreeMap<String, Vec<CatalogRow>> = BTreeMap::new();
+    for row in rows {
+        by_family
+            .entry(row.family.clone())
+            .or_default()
+            .push(row.clone());
+    }
+    for (family, batch) in by_family {
+        db.catalog_upsert(&family, &batch).expect("upsert");
+    }
+    AppState::for_tests(db)
+}
+
+async fn invoke_download(state: AppState, id: &str) -> axum::http::Response<axum::body::Body> {
+    post_catalog_download(State(state), Path(id.to_string()))
+        .await
+        .into_response()
+}
+
+/// Phase 2 (SD1.5 + SDXL single-file) entries become downloadable in 2.7.
+/// Today the gate hard-rejects anything `>= 2` with 409. After the gate
+/// drop they MUST flow past the gate — the response status must not be
+/// 409 CONFLICT regardless of the downstream companion-pull logic.
+#[tokio::test]
+async fn post_catalog_download_no_longer_conflicts_for_engine_phase_2() {
+    let row = make_catalog_row("cv:phase-2-test", "civitai", "sdxl", 2);
+    let state = seeded_state(&[row]);
+    let resp = invoke_download(state, "cv:phase-2-test").await;
+    assert_ne!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "engine_phase 2 must flow past the gate after 2.7",
+    );
+}
+
+/// Phase 3+ (FLUX single-file, Z-Image, LTX-Video, ...) are still gated.
+/// Dropping the gate to `>= 3` keeps phases 3 and beyond rejected.
+#[tokio::test]
+async fn post_catalog_download_still_conflicts_for_engine_phase_3() {
+    let row = make_catalog_row("cv:phase-3-test", "civitai", "flux", 3);
+    let state = seeded_state(&[row]);
+    let resp = invoke_download(state, "cv:phase-3-test").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "engine_phase 3 must remain gated until phase 3 lands",
+    );
+}
+
+// ── Companion auto-pull (Round 2b) ──────────────────────────────────────────
+
+use crate::catalog_api::enqueue_missing_companions;
+use crate::downloads::DownloadQueue;
+use mold_core::manifest::{find_manifest, storage_path};
+
+/// Materialise every file declared by the companion's synthetic manifest
+/// under `models_dir`, so the on-disk presence check sees a "fully pulled"
+/// companion. Files are 1-byte stubs — the check only cares about presence.
+fn stage_companion_on_disk(models_dir: &std::path::Path, name: &str) {
+    let manifest = find_manifest(name).expect("companion manifest");
+    for file in &manifest.files {
+        let path = models_dir.join(storage_path(manifest, file));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&path, b"x").expect("write stub");
+    }
+}
+
+/// Write a `.pulling` marker for a companion to simulate a half-pulled
+/// state — files might exist but the previous pull was interrupted before
+/// the marker was cleaned up.
+fn stage_pulling_marker(models_dir: &std::path::Path, name: &str) {
+    let path = mold_core::download::pulling_marker_path_in(models_dir, name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir");
+    }
+    std::fs::write(&path, name).expect("write marker");
+}
+
+/// SDXL companions in the order they appear on a Civitai SDXL entry's
+/// `companions` field — clip-l, clip-g, sdxl-vae. The companion-pull
+/// helper must surface them in declaration order so the DownloadsDrawer
+/// renders the same sequence the client requested.
+#[tokio::test]
+async fn companions_enqueued_in_declaration_order_when_none_present() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let queue = DownloadQueue::new_for_test();
+    let companions = serde_json::to_string(&["clip-l", "clip-g", "sdxl-vae"]).unwrap();
+
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+
+    let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(names, vec!["clip-l", "clip-g", "sdxl-vae"]);
+    for job in &jobs {
+        assert!(!job.job_id.is_empty(), "{} must get a job id", job.name);
+    }
+}
+
+/// On-disk presence check: when every file a companion declares is already
+/// present under `models_dir`, the helper skips the enqueue entirely.
+/// Companions that ARE missing still flow through.
+#[tokio::test]
+async fn companion_skipped_when_already_present_on_disk() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_companion_on_disk(tmp.path(), "clip-l");
+
+    let queue = DownloadQueue::new_for_test();
+    let companions = serde_json::to_string(&["clip-l", "clip-g", "sdxl-vae"]).unwrap();
+
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+
+    let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["clip-g", "sdxl-vae"],
+        "clip-l is fully on disk and must be skipped",
+    );
+}
+
+/// `.pulling` marker means a previous pull was interrupted. Treat as
+/// "missing" even when the underlying files exist — the half-pulled
+/// content might be corrupt and re-enqueuing is the safe call.
+/// `DownloadQueue::enqueue` is idempotent against in-flight jobs, so a
+/// concurrent retry won't double-pull.
+#[tokio::test]
+async fn companion_with_pulling_marker_is_re_enqueued() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    stage_companion_on_disk(tmp.path(), "clip-l");
+    stage_pulling_marker(tmp.path(), "clip-l");
+
+    let queue = DownloadQueue::new_for_test();
+    let companions = serde_json::to_string(&["clip-l"]).unwrap();
+
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+
+    let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["clip-l"],
+        ".pulling marker must force a re-enqueue",
+    );
+}
+
+/// Unknown canonical companion names (typos, future entries the build
+/// doesn't recognise) are skipped without aborting the rest of the
+/// auto-pull. The catalog scanner can ship new companion names ahead of
+/// the binary supporting them.
+#[tokio::test]
+async fn unknown_companion_canonical_name_is_skipped() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let queue = DownloadQueue::new_for_test();
+    // `z-image-te` is reserved in the registry for phase 4 — there's no
+    // synthetic manifest yet, so the helper should skip it gracefully.
+    let companions = serde_json::to_string(&["clip-l", "z-image-te"]).unwrap();
+
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+
+    let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["clip-l"],
+        "unknown companion must not block the rest",
+    );
+}
+
+/// Empty / missing companions field returns an empty job list — the
+/// helper must not panic on `None` or an empty array. Phase-1 HF entries
+/// land here.
+#[tokio::test]
+async fn empty_companions_returns_empty_job_list() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let queue = DownloadQueue::new_for_test();
+
+    let none_jobs = enqueue_missing_companions(None, tmp.path(), &queue).await;
+    assert!(none_jobs.is_empty(), "None must yield empty list");
+
+    let empty_jobs = enqueue_missing_companions(Some("[]"), tmp.path(), &queue).await;
+    assert!(empty_jobs.is_empty(), "[] must yield empty list");
+}
+
+// ── Response schema (Round 3) ──────────────────────────────────────────────
+
+async fn read_body_json(resp: axum::http::Response<axum::body::Body>) -> serde_json::Value {
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .expect("body bytes");
+    serde_json::from_slice(&body).unwrap_or_else(|e| panic!("body not JSON: {e}"))
+}
+
+/// 2.7 breaks the response shape: the bare `{ "job_ids": [...] }` form
+/// is replaced with `{ "primary_job_id", "companion_jobs": [{name, job_id}] }`.
+/// Phase-1 HF entries surface no companions but must still produce the
+/// new shape so the web client can rely on the keys' existence.
+#[tokio::test]
+async fn download_response_has_companion_jobs_array() {
+    let row = make_catalog_row("hf:phase-1-test", "hf", "flux", 1);
+    let state = seeded_state(&[row]);
+    let resp = invoke_download(state, "hf:phase-1-test").await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED, "phase-1 must accept");
+    let body = read_body_json(resp).await;
+    assert!(
+        body.get("companion_jobs").is_some(),
+        "response must surface companion_jobs key, got {body}",
+    );
+    assert!(
+        body.get("primary_job_id").is_some(),
+        "response must surface primary_job_id key (may be null), got {body}",
+    );
+    assert!(
+        body.get("job_ids").is_none(),
+        "legacy job_ids key must be removed, got {body}",
+    );
+}
+
+/// Civitai phase-2 entries (the whole point of 2.7's gate drop) must no
+/// longer get the 501 NOT_IMPLEMENTED wall — they need to flow through
+/// the companion auto-pull and surface companion_jobs in the response.
+#[tokio::test]
+async fn civitai_phase_2_no_longer_returns_not_implemented() {
+    let mut row = make_catalog_row("cv:sdxl-pony-test", "civitai", "sdxl", 2);
+    row.companions = Some(serde_json::to_string(&["clip-l", "clip-g", "sdxl-vae"]).expect("json"));
+    let state = seeded_state(&[row]);
+    let resp = invoke_download(state, "cv:sdxl-pony-test").await;
+    assert_ne!(
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "civitai phase-2 must flow through after 2.7",
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "civitai phase-2 must return 202 Accepted",
+    );
+}
+
+/// The companion-pull contract: every companion declared on the catalog
+/// row must appear in the response's `companion_jobs` array (in order)
+/// when none are present on disk yet. The web client renders these into
+/// the DownloadsDrawer in the same order the user sees in the UI.
+#[tokio::test]
+async fn companion_jobs_in_response_match_row_companions_in_order() {
+    let mut row = make_catalog_row("cv:sdxl-order-test", "civitai", "sdxl", 2);
+    row.companions = Some(serde_json::to_string(&["clip-l", "clip-g", "sdxl-vae"]).expect("json"));
+    let state = seeded_state(&[row]);
+    let resp = invoke_download(state, "cv:sdxl-order-test").await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = read_body_json(resp).await;
+    let arr = body
+        .get("companion_jobs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let names: Vec<String> = arr
+        .iter()
+        .filter_map(|j| j.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    assert_eq!(names, vec!["clip-l", "clip-g", "sdxl-vae"]);
+    for entry in &arr {
+        assert!(
+            entry
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            "each companion_jobs entry must include a non-empty job_id, got {entry}",
+        );
+    }
 }

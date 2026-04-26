@@ -81,7 +81,21 @@ async fn download_known_id_returns_202_with_job_id() {
         .await;
     assert_eq!(resp.status, axum::http::StatusCode::ACCEPTED);
     let v: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
-    assert!(v["job_ids"].is_array());
+    // Phase 2.7: response surfaces `primary_job_id` (string|null) and
+    // `companion_jobs` (array of `{name, job_id}`). The legacy `job_ids`
+    // bag is replaced.
+    assert!(
+        v.get("companion_jobs").is_some_and(|c| c.is_array()),
+        "companion_jobs must be an array, got {v}",
+    );
+    assert!(
+        v.get("primary_job_id").is_some(),
+        "primary_job_id key must exist (may be null), got {v}",
+    );
+    assert!(
+        v.get("job_ids").is_none(),
+        "legacy job_ids key must be removed, got {v}",
+    );
 }
 
 #[tokio::test]
