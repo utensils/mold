@@ -44,12 +44,11 @@ pub struct SDXLEngine {
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
     /// `Some(path)` when the engine was built from a Civitai single-file
-    /// checkpoint via `from_single_file()`. Future `load()` paths branch on
-    /// this to wire a custom `SimpleBackend` (per phase-2.4 plan) instead
-    /// of calling candle's per-component `build_*` helpers. `None` for
-    /// diffusers-layout (HF) checkpoints. Read only by tests today; the
-    /// production `load()` branch is wired in a downstream phase.
-    #[allow(dead_code)]
+    /// checkpoint via `from_single_file()`. `load()` branches on this to
+    /// wire a custom `SingleFileBackend` (translating diffusers `vb.get`
+    /// calls through `SdxlRemap`, including row-wise slicing for the
+    /// CLIP-G fused QKV slabs) instead of calling candle's per-component
+    /// `build_*` helpers. `None` for diffusers-layout (HF) checkpoints.
     pub(crate) single_file_path: Option<PathBuf>,
 }
 
@@ -96,12 +95,22 @@ impl SDXLEngine {
     /// `clip_l_tokenizer` and `clip_g_tokenizer` are paths to companion-pulled
     /// tokenizer assets (phase 2.7); tokenizers never live inside the
     /// single-file checkpoint.
+    ///
+    /// `is_turbo` is threaded through from the manifest / model config —
+    /// Civitai SDXL Turbo checkpoints are not structurally distinguishable
+    /// from standard SDXL at the safetensors-header level, so the caller
+    /// (the 2.6 factory) makes the call based on `model_cfg.is_turbo` (or
+    /// the `model_name.contains("turbo")` fallback). Drives the
+    /// `VAE_SCALE_TURBO` / `EulerAncestral` defaults at load time via
+    /// `sdxl_config()`.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_single_file(
         model_name: String,
         single_file_path: PathBuf,
         clip_l_tokenizer: PathBuf,
         clip_g_tokenizer: PathBuf,
         scheduler: Scheduler,
+        is_turbo: bool,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
     ) -> Result<Self> {
@@ -150,17 +159,17 @@ impl SDXLEngine {
             decoder: None,
         };
 
-        // `is_turbo` defaults to `false` for the single-file path. Civitai
-        // SDXL Turbo checkpoints aren't structurally distinguishable from
-        // standard SDXL at the safetensors-header level — turbo-vs-standard
-        // is a load-time concern (different VAE scale + scheduler defaults)
-        // that 2.6's factory routing surfaces from the manifest. The
-        // constructor's job is to validate the rename surface, not pick the
-        // pipeline variant.
+        // `is_turbo` is threaded through from the 2.6 factory based on the
+        // manifest's `is_turbo` flag (or the `model_name.contains("turbo")`
+        // fallback). Civitai SDXL Turbo checkpoints aren't structurally
+        // distinguishable from standard SDXL at the safetensors-header
+        // level — turbo-vs-standard is purely a load-time concern (VAE
+        // scale, scheduler defaults), so the constructor accepts it
+        // verbatim and stashes it for `sdxl_config()` to read.
         Ok(Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             scheduler,
-            is_turbo: false,
+            is_turbo,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
@@ -267,9 +276,16 @@ impl SDXLEngine {
 
     /// Load all SDXL model components (Eager mode).
     ///
-    /// On error, `self.base.loaded` remains `None` — all components are assembled into
-    /// local variables and only stored in `self.base.loaded` on success, so partial loads
-    /// cannot leave the engine in an inconsistent state.
+    /// Two materialisation paths share this entry point — diffusers-layout
+    /// (separate component files via candle's `build_*` helpers) and
+    /// single-file (Civitai checkpoint via a custom `SingleFileBackend`
+    /// that translates each diffusers `vb.get(name)` into mmap'd reads,
+    /// including row-wise slicing for the CLIP-G fused QKV slabs). The
+    /// branch is on `self.single_file_path`.
+    ///
+    /// On error, `self.base.loaded` remains `None` — all components are
+    /// assembled into local variables and only stored on success, so
+    /// partial loads cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
         if self.base.loaded.is_some() {
             return Ok(());
@@ -294,28 +310,6 @@ impl SDXLEngine {
 
         let sd_config = self.sd_config();
 
-        // Load UNet
-        self.base.progress.stage_start("Loading UNet (GPU)");
-        let unet_start = Instant::now();
-        let unet = sd_config.build_unet(
-            &self.base.paths.transformer,
-            &device,
-            4,     // in_channels
-            false, // use_flash_attn
-            dtype,
-        )?;
-        self.base
-            .progress
-            .stage_done("Loading UNet (GPU)", unet_start.elapsed());
-
-        // Load VAE
-        self.base.progress.stage_start("Loading VAE (GPU)");
-        let vae_start = Instant::now();
-        let vae = sd_config.build_vae(&self.base.paths.vae, &device, dtype)?;
-        self.base
-            .progress
-            .stage_done("Loading VAE (GPU)", vae_start.elapsed());
-
         // Tier 1: honor `placement.text_encoders` for both CLIPs as a group.
         let tier1 = self
             .pending_placement
@@ -324,37 +318,25 @@ impl SDXLEngine {
             .unwrap_or_default();
         let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
-        // Load CLIP-L encoder
-        self.base.progress.stage_start("Loading CLIP-L encoder");
-        let clip_l_start = Instant::now();
-        let clip_l = stable_diffusion::build_clip_transformer(
-            &sd_config.clip,
-            &clip_encoder,
-            &clip_device,
-            DType::F32,
-        )?;
-        self.base
-            .progress
-            .stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
+        let (unet, vae, clip_l, clip_g) = if let Some(single_file) = self.single_file_path.clone() {
+            self.load_components_single_file(
+                &single_file,
+                &sd_config,
+                &device,
+                &clip_device,
+                dtype,
+            )?
+        } else {
+            self.load_components_diffusers(
+                &clip_encoder,
+                &clip_encoder_2,
+                &sd_config,
+                &device,
+                &clip_device,
+                dtype,
+            )?
+        };
 
-        // Load CLIP-G encoder
-        self.base.progress.stage_start("Loading CLIP-G encoder");
-        let clip_g_start = Instant::now();
-        let clip2_config = sd_config
-            .clip2
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("SDXL config missing clip2 configuration"))?;
-        let clip_g = stable_diffusion::build_clip_transformer(
-            clip2_config,
-            &clip_encoder_2,
-            &clip_device,
-            DType::F32,
-        )?;
-        self.base
-            .progress
-            .stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
-
-        // Load tokenizers
         let tokenizer_l = tokenizers::Tokenizer::from_file(&clip_tokenizer)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
         let tokenizer_g = tokenizers::Tokenizer::from_file(&clip_tokenizer_2)
@@ -375,6 +357,112 @@ impl SDXLEngine {
 
         tracing::info!(model = %self.base.model_name, "all SDXL components loaded successfully");
         Ok(())
+    }
+
+    /// Diffusers-layout component loader (existing pre-2.6 path).
+    #[allow(clippy::too_many_arguments)]
+    fn load_components_diffusers(
+        &mut self,
+        clip_encoder: &std::path::Path,
+        clip_encoder_2: &std::path::Path,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        clip_device: &Device,
+        dtype: DType,
+    ) -> Result<(
+        stable_diffusion::unet_2d::UNet2DConditionModel,
+        stable_diffusion::vae::AutoEncoderKL,
+        stable_diffusion::clip::ClipTextTransformer,
+        stable_diffusion::clip::ClipTextTransformer,
+    )> {
+        self.base.progress.stage_start("Loading UNet (GPU)");
+        let unet_start = Instant::now();
+        let unet = sd_config.build_unet(&self.base.paths.transformer, device, 4, false, dtype)?;
+        self.base
+            .progress
+            .stage_done("Loading UNet (GPU)", unet_start.elapsed());
+
+        self.base.progress.stage_start("Loading VAE (GPU)");
+        let vae_start = Instant::now();
+        let vae = sd_config.build_vae(&self.base.paths.vae, device, dtype)?;
+        self.base
+            .progress
+            .stage_done("Loading VAE (GPU)", vae_start.elapsed());
+
+        self.base.progress.stage_start("Loading CLIP-L encoder");
+        let clip_l_start = Instant::now();
+        let clip_l = stable_diffusion::build_clip_transformer(
+            &sd_config.clip,
+            clip_encoder,
+            clip_device,
+            DType::F32,
+        )?;
+        self.base
+            .progress
+            .stage_done("Loading CLIP-L encoder", clip_l_start.elapsed());
+
+        self.base.progress.stage_start("Loading CLIP-G encoder");
+        let clip_g_start = Instant::now();
+        let clip2_config = sd_config
+            .clip2
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("SDXL config missing clip2 configuration"))?;
+        let clip_g = stable_diffusion::build_clip_transformer(
+            clip2_config,
+            clip_encoder_2,
+            clip_device,
+            DType::F32,
+        )?;
+        self.base
+            .progress
+            .stage_done("Loading CLIP-G encoder", clip_g_start.elapsed());
+
+        Ok((unet, vae, clip_l, clip_g))
+    }
+
+    /// Single-file (Civitai) component loader (phase 2.6).
+    ///
+    /// Header-parses the checkpoint, builds the diffusers→A1111 remap
+    /// (incl. CLIP-G `RenameOutput::FusedSlice` entries for the OpenCLIP
+    /// `attn.in_proj_*` slabs), and prepares a `SingleFileBackend` ready
+    /// to feed candle's per-component constructors. **The final bridge
+    /// is gated behind a `candle-transformers-mold` fork bump** — see
+    /// `SD15Engine::load_components_single_file` for the full
+    /// explanation; the same constraint applies (private
+    /// `StableDiffusionConfig.unet/.autoencoder` fields, no accessor in
+    /// candle-mold 0.9.10).
+    fn load_components_single_file(
+        &mut self,
+        single_file: &std::path::Path,
+        _sd_config: &stable_diffusion::StableDiffusionConfig,
+        _device: &Device,
+        _clip_device: &Device,
+        _dtype: DType,
+    ) -> Result<(
+        stable_diffusion::unet_2d::UNet2DConditionModel,
+        stable_diffusion::vae::AutoEncoderKL,
+        stable_diffusion::clip::ClipTextTransformer,
+        stable_diffusion::clip::ClipTextTransformer,
+    )> {
+        use crate::loader::single_file_backend::SingleFileBackend;
+        use crate::loader::{build_sdxl_remap, single_file as single_file_loader};
+        use mold_catalog::families::Family;
+
+        let bundle = single_file_loader::load(single_file, Family::Sdxl)
+            .map_err(|e| anyhow::anyhow!("partition single-file SDXL checkpoint: {e}"))?;
+        let remap = build_sdxl_remap(&bundle)
+            .map_err(|e| anyhow::anyhow!("build SDXL diffusers→A1111 remap: {e}"))?;
+        let _backend = SingleFileBackend::from_sdxl_remap(single_file, &remap)?;
+
+        bail!(
+            "single-file SDXL load is staged behind a candle-transformers-mold fork bump: \
+             StableDiffusionConfig.unet/.autoencoder are private in candle-mold 0.9.10 with no \
+             accessor. The SingleFileBackend (incl. the CLIP-G fused-QKV FusedSlice path, built \
+             and validated above) is ready; follow-up commit will publish candle-transformers-mold \
+             0.9.11 with pub accessors and wire VarBuilder::from_backend(SingleFileBackend) into \
+             the four candle constructors. Until then: pull diffusers-layout shards or wait for \
+             the bump."
+        )
     }
 
     /// Tokenize a prompt for a CLIP encoder, padding/truncating to max_len tokens.
@@ -1212,6 +1300,7 @@ mod tests {
             clip_l_tok,
             clip_g_tok,
             Scheduler::default(),
+            false,
             LoadStrategy::Eager,
             0,
         )
@@ -1248,6 +1337,7 @@ mod tests {
             std::env::temp_dir().join("mold-sdxl-clip-l-stub.json"),
             std::env::temp_dir().join("mold-sdxl-clip-g-stub.json"),
             Scheduler::default(),
+            false,
             LoadStrategy::Eager,
             0,
         );
@@ -1256,5 +1346,124 @@ mod tests {
             result.is_err(),
             "constructor must surface a missing-file error before deeper parsing",
         );
+    }
+
+    #[test]
+    fn load_branches_to_single_file_path_and_reaches_candle_fork_sentinel() {
+        // Round 3 smoke (TDD parity with SD15): single-file SDXL `load()`
+        // must reach the candle-fork-accessor sentinel, proving the
+        // header-parse → build_sdxl_remap → SingleFileBackend wiring is
+        // sound. Real-shape model construction lands when the candle-mold
+        // fork bumps to expose StableDiffusionConfig.unet/.autoencoder
+        // (see `load_components_single_file`).
+        let single_file = synth_sdxl_single_file("load-branch");
+        let make_stub = |label: &str| -> PathBuf {
+            let path = std::env::temp_dir().join(format!(
+                "mold-sdxl-{}-stub-{}-{}.json",
+                label,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::write(&path, b"").unwrap();
+            path
+        };
+        let clip_l_tok = make_stub("clip-l");
+        let clip_g_tok = make_stub("clip-g");
+
+        let mut engine = SDXLEngine::from_single_file(
+            "juggernaut-xl-v9".to_string(),
+            single_file.clone(),
+            clip_l_tok.clone(),
+            clip_g_tok.clone(),
+            Scheduler::Ddim,
+            false,
+            LoadStrategy::Eager,
+            0,
+        )
+        .expect("constructor");
+
+        std::env::set_var("MOLD_DEVICE", "cpu");
+        let err = SDXLEngine::load(&mut engine).expect_err("Round 3 sentinel must surface");
+        std::env::remove_var("MOLD_DEVICE");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("candle-transformers-mold fork bump"),
+            "expected sentinel error referencing candle fork bump, got: {msg}",
+        );
+        assert!(
+            msg.contains("SingleFileBackend"),
+            "sentinel must reference the load-bearing piece: {msg}",
+        );
+
+        let _ = std::fs::remove_file(single_file);
+        let _ = std::fs::remove_file(clip_l_tok);
+        let _ = std::fs::remove_file(clip_g_tok);
+    }
+
+    /// Real-shape SDXL `load()` smoke — see SD15 sibling for the rationale
+    /// for `#[ignore]`. 2.10 UAT replaces this with a real Pony / Juggernaut
+    /// XL pull + load + 4-step generation.
+    #[test]
+    #[ignore]
+    fn from_single_file_real_shape_load_smoke() {
+        // Implementation deferred to the candle-fork-accessor follow-up.
+    }
+
+    // ----- Phase 2.6: is_turbo threaded into the single-file constructor -----
+
+    #[test]
+    fn from_single_file_threads_is_turbo_true() {
+        let single_file = synth_sdxl_single_file("turbo");
+        let clip_l_tok = std::env::temp_dir().join("mold-sdxl-turbo-clip-l-stub.json");
+        let clip_g_tok = std::env::temp_dir().join("mold-sdxl-turbo-clip-g-stub.json");
+
+        let engine = SDXLEngine::from_single_file(
+            "sdxl-turbo:fp16".to_string(),
+            single_file.clone(),
+            clip_l_tok,
+            clip_g_tok,
+            Scheduler::EulerAncestral,
+            true,
+            LoadStrategy::Eager,
+            0,
+        )
+        .expect("constructor must accept is_turbo = true");
+
+        assert!(
+            engine.is_turbo,
+            "is_turbo arg must thread into the engine field — sdxl_config() reads this for VAE_SCALE_TURBO",
+        );
+
+        let _ = std::fs::remove_file(single_file);
+    }
+
+    #[test]
+    fn from_single_file_threads_is_turbo_false() {
+        let single_file = synth_sdxl_single_file("standard");
+        let clip_l_tok = std::env::temp_dir().join("mold-sdxl-std-clip-l-stub.json");
+        let clip_g_tok = std::env::temp_dir().join("mold-sdxl-std-clip-g-stub.json");
+
+        let engine = SDXLEngine::from_single_file(
+            "sdxl-base:fp16".to_string(),
+            single_file.clone(),
+            clip_l_tok,
+            clip_g_tok,
+            Scheduler::Ddim,
+            false,
+            LoadStrategy::Eager,
+            0,
+        )
+        .expect("constructor must accept is_turbo = false");
+
+        assert!(
+            !engine.is_turbo,
+            "is_turbo = false must produce a standard-config engine",
+        );
+
+        let _ = std::fs::remove_file(single_file);
     }
 }

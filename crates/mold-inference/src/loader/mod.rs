@@ -9,6 +9,7 @@
 pub mod sd15_keys;
 pub mod sdxl_keys;
 pub mod single_file;
+pub mod single_file_backend;
 pub mod vae_keys;
 
 pub use sd15_keys::{
@@ -20,4 +21,5 @@ pub use sdxl_keys::{
     RenameOutput, SdxlRemap,
 };
 pub use single_file::{load, LoadError, SingleFileBundle};
+pub use single_file_backend::SingleFileBackend;
 pub use vae_keys::apply_vae_rename;
