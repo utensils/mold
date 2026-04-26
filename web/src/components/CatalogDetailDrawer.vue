@@ -67,7 +67,7 @@ async function handleDownload() {
     <!-- Meta -->
     <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
       <!-- Phase badge -->
-      <div v-if="cat.detail.value.engine_phase >= 2" class="inline-flex">
+      <div v-if="cat.detail.value.engine_phase >= 3" class="inline-flex">
         <span
           class="text-[11px] px-2 py-0.5 rounded bg-amber-700/30 text-amber-200"
         >

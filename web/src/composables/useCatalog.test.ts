@@ -83,10 +83,11 @@ describe("useCatalog", () => {
     ).toBe(true);
   });
 
-  it("disables download for entries with engine_phase >= 2", async () => {
+  it("enables download for engine_phase 1 + 2, disables for engine_phase >= 3", async () => {
     const cat = useCatalog();
     expect(cat.canDownload({ engine_phase: 1 } as any)).toBe(true);
-    expect(cat.canDownload({ engine_phase: 2 } as any)).toBe(false);
+    expect(cat.canDownload({ engine_phase: 2 } as any)).toBe(true);
+    expect(cat.canDownload({ engine_phase: 3 } as any)).toBe(false);
     expect(cat.canDownload({ engine_phase: 99 } as any)).toBe(false);
   });
 });

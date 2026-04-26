@@ -37,7 +37,7 @@ const makeEntry = (phase: number) => ({
 const mockCloseDetail = vi.fn();
 const mockStartDownload = vi.fn();
 const mockCanDownload = vi.fn(
-  (e: { engine_phase: number }) => e.engine_phase === 1,
+  (e: { engine_phase: number }) => e.engine_phase <= 2,
 );
 const mockDetail = ref<ReturnType<typeof makeEntry> | null>(null);
 
@@ -72,7 +72,15 @@ describe("CatalogDetailDrawer", () => {
     expect((btn.element as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("Download button is disabled when engine_phase >= 2 and shows phase tooltip", () => {
+  it("Download button is enabled for engine_phase === 2 (single-file SD1.5/SDXL)", () => {
+    mockDetail.value = makeEntry(2);
+    const w = mount(CatalogDetailDrawer);
+    const btn = w.find("[data-test=download-btn]");
+    expect(btn.exists()).toBe(true);
+    expect((btn.element as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("Download button is disabled when engine_phase >= 3 and shows phase tooltip", () => {
     mockDetail.value = makeEntry(3);
     const w = mount(CatalogDetailDrawer);
     const btn = w.find("[data-test=download-btn]");
@@ -80,6 +88,12 @@ describe("CatalogDetailDrawer", () => {
     expect((btn.element as HTMLButtonElement).disabled).toBe(true);
     const title = btn.attributes("title") ?? "";
     expect(title).toMatch(/phase 3|coming/i);
+  });
+
+  it("does not render the Coming-in-phase badge for engine_phase 2", () => {
+    mockDetail.value = makeEntry(2);
+    const w = mount(CatalogDetailDrawer);
+    expect(w.text()).not.toMatch(/coming in phase 2/i);
   });
 
   it("close button calls closeDetail", async () => {

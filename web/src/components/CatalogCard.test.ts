@@ -43,9 +43,15 @@ describe("CatalogCard", () => {
     expect(w.text()).toContain("1,234");
   });
 
-  it("shows phase badge for engine_phase >= 2", () => {
+  it("shows phase badge for engine_phase >= 3", () => {
     const entry: CatalogEntryWire = { ...baseEntry, engine_phase: 3 };
     const w = mount(CatalogCard, { props: { entry } });
     expect(w.text()).toMatch(/phase 3|coming/i);
+  });
+
+  it("does not show phase badge for engine_phase 2 (now downloadable)", () => {
+    const entry: CatalogEntryWire = { ...baseEntry, engine_phase: 2 };
+    const w = mount(CatalogCard, { props: { entry } });
+    expect(w.text()).not.toMatch(/phase 2/i);
   });
 });
