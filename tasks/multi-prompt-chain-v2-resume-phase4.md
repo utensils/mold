@@ -28,12 +28,12 @@ The TUI theme test `theme_save_then_load_round_trip_preserves_preset` is a known
 
 ### Phase 2 manual verification (still pending)
 
-**Killswitch end-to-end smoke on `killswitch@192.168.1.67` (CUDA sm_86) is NOT yet done.** Three renders (smooth / cut / fade / mixed) with visual seam inspection. This is user work — the renders complete on the GPU, but "do the seams look right" is a human judgment.
+**Killswitch end-to-end smoke on `<gpu-host>` (CUDA <arch-tag>) is NOT yet done.** Three renders (smooth / cut / fade / mixed) with visual seam inspection. This is user work — the renders complete on the GPU, but "do the seams look right" is a human judgment.
 
 To run it:
 
 ```bash
-ssh killswitch@192.168.1.67
+ssh <gpu-host>
 cd ~/github/mold
 git fetch origin feat/multi-prompt-chain-v2-phase3
 git checkout feat/multi-prompt-chain-v2-phase3
@@ -217,7 +217,7 @@ I'm resuming execution of **multi-prompt chain v2, sub-project A** for the mold 
 
 - Combined PR #268 targets `main` and contains 35 commits across phases 1/2/3 plus design/plan docs. Do not merge it from this session without explicit user confirmation.
 - Current branch: `feat/multi-prompt-chain-v2-phase3` (name is historical; contains all of phases 1/2/3 after the session-3 consolidation — don't be thrown by it).
-- Phase 2's killswitch smoke is still pending manual verification. If the user hasn't run it yet and asks you to, see `tasks/multi-prompt-chain-v2-resume-phase4.md` §"Phase 2 manual verification".
+- Phase 2's <gpu-host> smoke is still pending manual verification. If the user hasn't run it yet and asks you to, see `tasks/multi-prompt-chain-v2-resume-phase4.md` §"Phase 2 manual verification".
 - `cargo test --workspace` → 2382 passed on HEAD. TUI theme flake retries once.
 
 ## What you're doing

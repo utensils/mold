@@ -21,7 +21,7 @@
 
 - **No single-file checkpoint loaders.** P2 (SD1.5 + SDXL), P3 (FLUX), P4 (Z-Image), P5 (LTX) each get their own plan when their predecessor merges. Catalog entries with `engine_phase >= 2` are stored, scanned, and rendered, but their Download button is disabled with the badge "Coming in phase N".
 - **No CI cron auto-refresh.** `mold catalog refresh` is the only refresh path.
-- **No live HTTP in CI.** HF / Civitai network tests are `#[ignore]`d and run manually on the killswitch UAT box (`killswitch@192.168.1.67`, dual-3090 Arch, sm_86, repo at `~/github/mold`).
+- **No live HTTP in CI.** HF / Civitai network tests are `#[ignore]`d and run manually on the <gpu-host> UAT box (`<gpu-host>`, dual-GPU Arch, <arch-tag>, repo at `~/github/mold`).
 - **mold-discord and mold-tui MUST NOT depend on `mold-catalog`** — directly or transitively. Task 36 verifies this with `cargo tree`.
 - **No new `Family` enum exposed from `mold-core`.** The codebase keeps `family: String` everywhere; the new enum is internal to `mold-catalog` with `as_str()` / `from_str()` round-trip helpers that match the existing manifest strings (`"flux"`, `"flux2"`, `"sd15"`, `"sdxl"`, `"z-image"`, `"ltx-video"`, `"ltx2"`, `"qwen-image"`, `"wuerstchen"`).
 - **The catalog table has no `profile` column.** Catalog is global per mold install; per-profile state (downloaded? favorited?) lives in existing tables.
@@ -69,7 +69,7 @@
 | `crates/mold-catalog/tests/civitai_stage.rs` | wiremock-backed `scan` smoke test (drops `.pt` format, accepts safetensors). |
 | `crates/mold-catalog/tests/sink_roundtrip.rs` | Round-trip every committed shard byte-identically through `serde_json`. |
 | `crates/mold-catalog/tests/db_seed.rs` | Seed a `:memory:` DB from embedded shards; FTS5 query returns expected ids. |
-| `crates/mold-catalog/tests/scanner_live.rs` | `#[ignore]` live HF + Civitai scan; killswitch-only. |
+| `crates/mold-catalog/tests/scanner_live.rs` | `#[ignore]` live HF + Civitai scan; <gpu-host>-only. |
 | `crates/mold-db/src/sql/V7_catalog.sql` | Optional companion file (the SQL is also kept inline as a const string per existing pattern). |
 | `crates/mold-db/src/catalog.rs` | DB-side catalog repo: `upsert_family`, `delete_family`, `get_by_id`, `list`, `family_counts`, FTS5 search wrapper. |
 | `crates/mold-server/src/catalog_api.rs` | Axum handlers for `/api/catalog/*` and the `CatalogScanQueue` trait + production `CatalogScanDriver`. |
@@ -169,7 +169,7 @@ gh pr create --draft --base main --head feat/catalog-expansion \
 ## Test plan
 - [ ] Phase 1 lands: catalog crate + DB migration + CLI + server endpoints + web SPA
 - [ ] Phases 2–5 land progressively, each as its own worktree off this umbrella
-- [ ] killswitch UAT after each phase
+- [ ] <gpu-host> UAT after each phase
 EOF
 )"
 ```
@@ -7058,10 +7058,10 @@ git push origin feat/catalog-expansion
 
 Expected: GitHub PR refreshes; CI runs.
 
-- [ ] **Step 9: UAT on killswitch**
+- [ ] **Step 9: UAT on <gpu-host>**
 
 ```bash
-ssh killswitch@192.168.1.67 "cd ~/github/mold && git fetch origin && git checkout feat/catalog-expansion && nix build && ./result/bin/mold catalog refresh --family flux --dry-run"
+ssh <gpu-host> "cd ~/github/mold && git fetch origin && git checkout feat/catalog-expansion && nix build && ./result/bin/mold catalog refresh --family flux --dry-run"
 ```
 
 Expected: `mold catalog refresh --family flux --dry-run` reports per-family scan outcomes; no DB writes.
@@ -7069,8 +7069,8 @@ Expected: `mold catalog refresh --family flux --dry-run` reports per-family scan
 After UAT:
 
 ```bash
-ssh killswitch@192.168.1.67 "cd ~/github/mold && ./result/bin/mold catalog refresh --family sdxl"
-ssh killswitch@192.168.1.67 "cd ~/github/mold && ./result/bin/mold catalog list --family sdxl --limit 5"
+ssh <gpu-host> "cd ~/github/mold && ./result/bin/mold catalog refresh --family sdxl"
+ssh <gpu-host> "cd ~/github/mold && ./result/bin/mold catalog list --family sdxl --limit 5"
 ```
 
 Expected: live SDXL entries land in the local `mold.db` and round-trip out via `catalog list`.
@@ -7119,7 +7119,7 @@ Cross-cutting:
 
 - No single-file checkpoint loaders. Phase-2..5 entries are stored with `engine_phase >= 2`, rendered with a badge, and Download is disabled. The catalog never *teases* mold-runnable models that aren't.
 - No CI cron auto-refresh — only `mold catalog refresh`.
-- No live HTTP in CI (`#[ignore]` on the live test in Task 36's no-inheritance file pattern + the spec's reserved `#[ignore]` test in `crates/mold-catalog/tests/scanner_live.rs` which is not implemented in this plan but is reserved for the killswitch UAT path in Task 37 Step 9).
+- No live HTTP in CI (`#[ignore]` on the live test in Task 36's no-inheritance file pattern + the spec's reserved `#[ignore]` test in `crates/mold-catalog/tests/scanner_live.rs` which is not implemented in this plan but is reserved for the <gpu-host> UAT path in Task 37 Step 9).
 - `mold-discord` and `mold-tui` do not inherit `mold-catalog` (Task 36).
 - No `Family` enum exposed from `mold-core` — the new enum lives in `mold-catalog::families` only (Task 3 deliberately diverges from spec §1.1's "re-export from mold-core" because the codebase keeps `family: String` everywhere).
 - Catalog is global per mold install (no `profile` column in the V7 migration — Task 15).

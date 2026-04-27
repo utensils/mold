@@ -6,7 +6,7 @@
 
 ## Incident summary
 
-**When:** 2026-04-23 06:48:56 UTC on `killswitch@192.168.1.67` (dual RTX 3090).
+**When:** 2026-04-23 06:48:56 UTC on `<gpu-host>` (dual GPUs).
 
 **Binary:** `target/release/mold` built from `feat/multi-prompt-chain-v2-phase3`
 at commit `855b228` (`feat(chain): per-stage starting images in script mode`).
@@ -36,7 +36,7 @@ every recent commit.
 the same commit to symbolicate).
 
 **Server log (tail):**
-`~/github/mold/serve-20260422-234323.log` on killswitch.
+`~/github/mold/serve-20260422-234323.log` on <gpu-host>.
 
 ## Timeline (from `serve-20260422-234323.log`)
 
@@ -192,7 +192,7 @@ the first try. In order of likelihood:
    through `gpu_worker`, both targeting ordinal 0. Assert the second
    caller blocks until the first completes (i.e. a single per-ordinal
    lock is held across both paths).
-2. **Bench on killswitch** — after fix, replay today's pattern: 3
+2. **Bench on <gpu-host>** — after fix, replay today's pattern: 3
    chain submits to LTX-2 22B followed by 3 single-clip Qwen-Image
    submits within ~70 s, watch `coredumpctl list --since` for fresh
    entries. Pre-fix reproduces in the single-digit-trial range.
@@ -202,7 +202,7 @@ the first try. In order of likelihood:
 
 ## Artefacts to preserve
 
-- Coredump (above path on killswitch).
+- Coredump (above path on <gpu-host>).
 - `serve-20260422-234323.log` (last pre-crash server log).
 - This handoff file.
 
@@ -230,7 +230,7 @@ libcuda still won't — that's what the coredump is for.
 You are taking over an investigation on the mold repo
 (`/Users/jeffreydilley/github/mold`, feature branch
 `feat/multi-prompt-chain-v2-phase3`). A production mold server on
-killswitch@192.168.1.67 crashed with SIGSEGV inside
+<gpu-host> crashed with SIGSEGV inside
 `libcuda.so.1::cuModuleGetFunction` while two independent schedulers
 (the chain-route `model_manager` and a per-GPU `gpu_worker`) raced
 `cuDevicePrimaryCtxReset_v2` against the same GPU primary context.

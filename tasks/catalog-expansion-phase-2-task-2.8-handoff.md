@@ -74,7 +74,7 @@ question.
   wiring if 2.8 doesn't include it.
 - 2.9 web gate flip — `cat.canDownload(entry)` from `engine_phase === 1`
   to `<= 2`.
-- 2.10 UAT — full killswitch run (Pony / Juggernaut XL / DreamShaper 8).
+- 2.10 UAT — full <gpu-host> run (Pony / Juggernaut XL / DreamShaper 8).
 
 ## What 2.8 produces
 

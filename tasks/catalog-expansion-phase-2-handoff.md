@@ -27,18 +27,18 @@ Spec: `docs/superpowers/specs/2026-04-25-catalog-expansion-design.md` §2.
   When phase 2 is gate-green, push as one push and open PR
   `feat(catalog): SD1.5 + SDXL single-file loaders (phase 2/5)`.
 
-### Catalog state on killswitch
+### Catalog state on <gpu-host>
 
-- killswitch (Arch box, dual RTX 3090, sm_86) runs `mold serve` under
+- <gpu-host> (GPU host, dual GPUs) runs `mold serve` under
   `systemctl --user mold-server`. Tokens (HF + Civitai) come from
   `~/.config/mold/server.env`. Logs: `journalctl --user -u mold-server`.
   See `contrib/mold-server.user.service` for the unit + `contrib/README.md`.
-- The catalog DB on killswitch already contains Civitai entries for
+- The catalog DB on <gpu-host> already contains Civitai entries for
   `engine_phase: 2` (SD1.5 + SDXL). They render in the `/catalog` UI with
   a "phase 2" badge and a disabled Download button. The 409 path is in
   `crates/mold-server/src/catalog_api.rs::post_catalog_download` —
   phase 2's first task is dropping that gate from `>= 2` to `>= 3`.
-- **Run a fresh `mold catalog refresh` on killswitch before starting** if
+- **Run a fresh `mold catalog refresh` on <gpu-host> before starting** if
   the catalog hasn't been re-scanned with the throttled binary. Empty
   families = nothing to test against.
 
@@ -75,7 +75,7 @@ Spec: `docs/superpowers/specs/2026-04-25-catalog-expansion-design.md` §2.
 
 | # | Task | Touches |
 |---|---|---|
-| 2.1 | Pre-flight: confirm killswitch DB has SD15/SDXL Civitai entries; fresh `mold catalog refresh` if not. Document exemplar entries (1 SD15, 1 SDXL, 1 Pony) by id for use as test targets. | (no code) |
+| 2.1 | Pre-flight: confirm <gpu-host> DB has SD15/SDXL Civitai entries; fresh `mold catalog refresh` if not. Document exemplar entries (1 SD15, 1 SDXL, 1 Pony) by id for use as test targets. | (no code) |
 | 2.2 | Tensor-prefix audit (TDD pre-step): write a one-shot `dev-bins` binary that opens an SD1.5 fixture safetensors and prints unique tensor-key prefixes. Repeat for SDXL. Use real Civitai checkpoints (small ones) downloaded into `tests/fixtures/`. | new `crates/mold-inference/src/bin/sd_singlefile_inspect.rs` (gated on `dev-bins` feature, like the existing `ltx2_review` helper) |
 | 2.3 | `loader/single_file.rs` dispatcher (TDD) — small enum + `load(path, family)` that returns a `SingleFileBundle { unet, vae, clip_l, clip_g, t5 }` of `SafeTensors` slices. SD1.5/SDXL paths return `Some(...)`; FLUX/Z-Image/LTX return `Err(LoadError::Unsupported(family))` for now. | new `crates/mold-inference/src/loader/mod.rs`, `crates/mold-inference/src/loader/single_file.rs` |
 | 2.4 | `sd15::single_file::load(SafeTensors)` (TDD) — extract `model.diffusion_model.*` → mold's UNET key layout, `first_stage_model.*` → VAE (optional), `cond_stage_model.transformer.text_model.*` → CLIP-L. Return owned `Vec<u8>`-backed `SafeTensors` per component or candle `Tensor` map — pick whichever round-trips into the existing SD15 engine path with the smallest delta. | new `crates/mold-inference/src/sd15/single_file.rs`; modify `crates/mold-inference/src/sd15/engine.rs` to add `Sd15Engine::from_single_file(path, vae_companion: Option<&Path>)` |
@@ -84,7 +84,7 @@ Spec: `docs/superpowers/specs/2026-04-25-catalog-expansion-design.md` §2.
 | 2.7 | Companion auto-pull on `POST /api/catalog/:id/download` (TDD) — drop the engine_phase gate from `>= 2` to `>= 3`; for entries with `companions: ["clip-l", "sdxl-vae", ...]`, enqueue each missing companion **before** the entry itself; surface as `Vec<job_id>` in response. Companion presence check: look on disk, not just in DB, since phase 1 may have left half-pulled state. | `crates/mold-server/src/catalog_api.rs::post_catalog_download`; possibly extend `crates/mold-server/src/downloads.rs::DownloadQueue::enqueue` to take a recipe instead of a manifest name |
 | 2.8 | CLI `mold pull cv:<id>` integration — when the catalog row has `bundling: SingleFile` + `engine_phase ≤ 2`, dispatch through the new recipe path with companion auto-pull instead of the manifest-name fallback. Same companion-first ordering as 2.7. | `crates/mold-cli/src/commands/pull.rs` |
 | 2.9 | Web Download button — already wired to `POST /api/catalog/:id/download`; it just enables once 2.7 drops the 409. Confirm `cat.canDownload(entry)` in `web/src/composables/useCatalog.ts` switches from `engine_phase === 1` to `engine_phase <= 2`. | `web/src/composables/useCatalog.ts`, `web/src/components/CatalogCard.vue` (badge text), `web/src/components/CatalogDetailDrawer.vue` (CTA copy) |
-| 2.10 | Phase 2 gate: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; `bun run test && bun run build && bun run fmt:check`; **killswitch UAT** — pull + generate one Pony entry, one Juggernaut XL entry, one SD1.5 entry (e.g. epiCRealism). Visual inspection of outputs. CHANGELOG entry. | (no code) |
+| 2.10 | Phase 2 gate: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; `bun run test && bun run build && bun run fmt:check`; **<gpu-host> UAT** — pull + generate one Pony entry, one Juggernaut XL entry, one SD1.5 entry (e.g. epiCRealism). Visual inspection of outputs. CHANGELOG entry. | (no code) |
 
 The plan is intentionally smaller than multi-prompt-chain v2's 51 tasks
 because the spec is more concentrated and the surface is already mostly
@@ -163,7 +163,7 @@ Surprises to watch for:
   tasks 2.4/2.5/2.7/2.8 (mechanical). 2.2 (tensor audit) is too
   open-ended for a subagent — do it interactively.
 - **`superpowers:verification-before-completion`** before declaring 2.10
-  done. The killswitch UAT is the verification — don't mark phase 2
+  done. The <gpu-host> UAT is the verification — don't mark phase 2
   done without a real generation succeeding.
 
 ## Killswitch deploy / verify recipe
@@ -174,8 +174,8 @@ After 2.10 gate is green locally:
 # Push from your laptop
 git push origin feat/catalog-expansion
 
-# On killswitch
-ssh killswitch@192.168.1.67
+# On <gpu-host>
+ssh <gpu-host>
 cd ~/github/mold && git pull
 cargo build --release -p mold-ai \
   --features cuda,preview,discord,expand,tui,webp,mp4,metrics
@@ -261,29 +261,29 @@ Paste from here into a fresh Claude Code session:
 I'm starting **phase 2** of the mold catalog-expansion sub-project — adding
 **SD1.5 + SDXL single-file safetensors loaders**. This is the phase that
 unlocks ~95 % of Civitai checkpoints for download + run via mold's existing
-SD1.5 / SDXL engines. Phase 1 (catalog browse + scanner + UI + killswitch
+SD1.5 / SDXL engines. Phase 1 (catalog browse + scanner + UI + <gpu-host>
 systemd unit + live refresh progress) shipped on the same branch.
 
 ## Read first, in this order
 
 1. `~/.claude-personal/CLAUDE.md` and `/Users/jeffreydilley/github/mold/CLAUDE.md` — coding conventions.
-2. `tasks/catalog-expansion-phase-2-handoff.md` — **your primary briefing**. Read end-to-end. Status, task list (2.1–2.10), pre-investigation greps, gotchas, killswitch deploy recipe.
+2. `tasks/catalog-expansion-phase-2-handoff.md` — **your primary briefing**. Read end-to-end. Status, task list (2.1–2.10), pre-investigation greps, gotchas, <gpu-host> deploy recipe.
 3. `docs/superpowers/specs/2026-04-25-catalog-expansion-design.md` — approved design. **§2 is your contract**; §1.3 and §1.10 are the contracts §2 fulfills. Do not reopen design decisions.
 4. `crates/mold-catalog/src/companions.rs`, `crates/mold-catalog/src/entry.rs`, `crates/mold-server/src/catalog_api.rs::post_catalog_download` — the phase 1 surfaces phase 2 builds on.
 
 ## Status on entry
 
 - Branch: `feat/catalog-expansion`. Phase 1 is shipped on this branch (last commit before phase 2 work begins is the systemd-handoff + live-progress commit).
-- Killswitch (Arch, dual RTX 3090, sm_86) runs `mold serve` under `systemctl --user mold-server`. Tokens in `~/.config/mold/server.env`. Logs via `journalctl --user -u mold-server -f`. SSH: `killswitch@192.168.1.67`. Repo path: `~/github/mold`.
-- Catalog DB on killswitch already has SDXL/SD15 Civitai entries with `engine_phase: 2`, currently 409'd at the download endpoint.
+- Killswitch (Arch, dual GPUs) runs `mold serve` under `systemctl --user mold-server`. Tokens in `~/.config/mold/server.env`. Logs via `journalctl --user -u mold-server -f`. SSH: `<gpu-host>`. Repo path: `~/github/mold`.
+- Catalog DB on <gpu-host> already has SDXL/SD15 Civitai entries with `engine_phase: 2`, currently 409'd at the download endpoint.
 
 ## What you're doing
 
 Execute tasks **2.1 → 2.10** per `tasks/catalog-expansion-phase-2-handoff.md`. TDD per task. One scope per commit (`feat(inference) / feat(server) / feat(cli) / feat(web) / test(...)`). **No mid-phase pushes** — phase 2 lands as one push when 2.10 is gate-green. Open PR `feat(catalog): SD1.5 + SDXL single-file loaders (phase 2/5)` after the push.
 
-Use `superpowers:subagent-driven-development` for the mechanical tasks (2.4 / 2.5 / 2.7 / 2.8). Tasks 2.2 (tensor-prefix audit) and 2.10 (killswitch UAT) need to be interactive — too open-ended for a subagent and the second is hardware-dependent.
+Use `superpowers:subagent-driven-development` for the mechanical tasks (2.4 / 2.5 / 2.7 / 2.8). Tasks 2.2 (tensor-prefix audit) and 2.10 (<gpu-host> UAT) need to be interactive — too open-ended for a subagent and the second is hardware-dependent.
 
-Gate every commit: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`. Plus `bun run test && bun run build && bun run fmt:check` for any web-touching commit. Use `superpowers:verification-before-completion` before declaring 2.10 done — the killswitch UAT is the verification.
+Gate every commit: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`. Plus `bun run test && bun run build && bun run fmt:check` for any web-touching commit. Use `superpowers:verification-before-completion` before declaring 2.10 done — the <gpu-host> UAT is the verification.
 
 ## How to work
 
@@ -302,12 +302,12 @@ Gate every commit: `cargo fmt --check && cargo clippy --workspace --all-targets 
    git log --oneline origin/main..HEAD | head -10
    cargo test --workspace                       # green; retry once on TUI flake if it fires
    ```
-2. SSH to killswitch, confirm `mold-server.service` is active (`systemctl --user status mold-server`) and the catalog DB has SDXL/SD15 Civitai rows (`mold catalog list --family sdxl --json | jq '.[0].id'` — pick exemplars for the UAT). If the catalog has empty SDXL/SD15 families, run `mold catalog refresh` first; **wait for it to finish** (tail logs or watch the new live-progress panel in the web UI) before continuing.
+2. SSH to <gpu-host>, confirm `mold-server.service` is active (`systemctl --user status mold-server`) and the catalog DB has SDXL/SD15 Civitai rows (`mold catalog list --family sdxl --json | jq '.[0].id'` — pick exemplars for the UAT). If the catalog has empty SDXL/SD15 families, run `mold catalog refresh` first; **wait for it to finish** (tail logs or watch the new live-progress panel in the web UI) before continuing.
 3. Run the pre-investigation greps from the handoff. Capture findings inline in your working notes — they should change task 2.4 / 2.5 estimates if any of them surface a surprise.
-4. Start task 2.1 (the killswitch state-of-DB confirmation), then 2.2 (tensor audit), then 2.3 forward.
+4. Start task 2.1 (the <gpu-host> state-of-DB confirmation), then 2.2 (tensor audit), then 2.3 forward.
 
 ## If you hit a surprise
 
 If a tensor prefix doesn't match the spec, the SD15/SDXL engines need a constructor refactor that's bigger than 1 task, the DownloadQueue can't accept a URL recipe without a major rewrite, or a Civitai checkpoint uses an exotic VAE that isn't in `companions.rs` — **stop, document the surprise, ask the user before pressing forward.** The phase 1 patterns (atomic write, single-writer queue, embedded-shard fallback) are stable; surprises in phase 2 are most likely to surface at the **engine constructor boundary** and the **DownloadQueue input type**, both of which are pre-phase-1 code.
 
-When phase 2 is gate-green and the killswitch UAT shows real generations from Civitai single-file SDXL/SD15 entries, push the branch, open the PR, and write `tasks/catalog-expansion-phase-3-handoff.md` for FLUX single-file. The phase 2 handoff (`tasks/catalog-expansion-phase-2-handoff.md`) is your template — copy its shape, swap the contents per design doc §3.
+When phase 2 is gate-green and the <gpu-host> UAT shows real generations from Civitai single-file SDXL/SD15 entries, push the branch, open the PR, and write `tasks/catalog-expansion-phase-3-handoff.md` for FLUX single-file. The phase 2 handoff (`tasks/catalog-expansion-phase-2-handoff.md`) is your template — copy its shape, swap the contents per design doc §3.

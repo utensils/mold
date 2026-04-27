@@ -2517,7 +2517,7 @@ See `docs/superpowers/plans/2026-04-19-resource-telemetry.md` Task 1 outcome sec
 - [x] `cd web && bun run fmt:check && bun run test && bun run build`
 - [ ] Manual: `curl /api/resources` returns snapshot JSON
 - [ ] Manual: `curl -N /api/resources/stream` streams `event: snapshot` frames
-- [ ] UAT on killswitch (dual 3090) — `mold` number rises when a model loads on GPU 0; "other" rises when a competing Python process grabs memory on GPU 1.
+- [ ] UAT on <gpu-host> (dual 3090) — `mold` number rises when a model loads on GPU 0; "other" rises when a competing Python process grabs memory on GPU 1.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF

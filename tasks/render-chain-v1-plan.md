@@ -106,7 +106,7 @@ website/guide/video.md                             -- document --frames N and th
 
 - All new Rust code gets unit tests where the logic is pure (stage expansion, tail shape math, concat-drop math). The orchestrator's end-to-end path is covered by an integration test that swaps in a fake engine.
 - `mold-inference` crate has `test = false` on the `lib` target — new tests in `ltx2/chain.rs` must either run under `#[cfg(test)] mod tests` with logic that doesn't touch candle weights, or use the fake-engine pattern. Keep tests weight-free.
-- CLI manual UAT runs against BEAST (`MOLD_HOST=http://beast:7680`) with `ltx-2-19b-distilled:fp8`.
+- CLI manual UAT runs against <gpu-host> (`MOLD_HOST=http://beast:7680`) with `ltx-2-19b-distilled:fp8`.
 - Commit scopes: `feat(chain): …`, `fix(chain): …`, `test(chain): …`, `docs(chain): …`.
 - Every task ends with a commit. No mid-plan push.
 

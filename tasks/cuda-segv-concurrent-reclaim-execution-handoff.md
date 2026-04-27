@@ -17,7 +17,7 @@ re-litigate the approach. The task is now execution.
 
 ## The bug in one paragraph
 
-On 2026-04-23 at 06:48 UTC on killswitch (dual RTX 3090), the mold server
+On 2026-04-23 at 06:48 UTC on <gpu-host> (dual GPUs), the mold server
 SEGV'd inside `libcuda.so.1::cuModuleGetFunction` during model load. Root
 cause: the chain route (`routes_chain::run_chain`) is the last caller of
 the **legacy single-GPU subsystem** (`state.model_load_lock` +

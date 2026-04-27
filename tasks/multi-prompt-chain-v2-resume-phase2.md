@@ -87,7 +87,7 @@ Outstanding Minor issues deferred to later tasks (not blocking):
 1. `cargo fmt --all`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo test --workspace`
-4. **Killswitch box end-to-end renders** (requires SSH access to `killswitch@192.168.1.67`, mold repo at `~/github/mold`, sm_86 CUDA build):
+4. **Killswitch box end-to-end renders** (requires SSH access to `<gpu-host>`, mold repo at `~/github/mold`, <arch-tag> CUDA build):
    - 3-stage all-smooth chain
    - 3-stage all-cut chain
    - 3-stage all-fade chain
@@ -95,7 +95,7 @@ Outstanding Minor issues deferred to later tasks (not blocking):
    - Visual inspection of output MP4s for seam quality
 5. Open Phase 2 PR titled `feat(ltx2): engine transitions (cut/fade/stitch) (Phase 2/6)`.
 
-**If the killswitch box is unreachable** from the session, the fresh session should leave Phase 2 at the unit-test/integration-test level (green there) and flag the user to do the manual smoke before merging Phase 2.
+**If the <gpu-host> box is unreachable** from the session, the fresh session should leave Phase 2 at the unit-test/integration-test level (green there) and flag the user to do the manual smoke before merging Phase 2.
 
 ## What's left after Phase 2
 
@@ -212,7 +212,7 @@ Gate every phase with `cargo fmt --check && cargo clippy --workspace --all-targe
 
 4. Task 2.8 (`mixed_transitions_end_to_end` test) is a straightforward test addition — use the existing `FakeRenderer` and `sample_chain_request` helpers already added in Tasks 2.1/2.2.
 
-5. Task 2.9 (Phase 2 gate) — fmt + clippy + test + manual killswitch smoke. If killswitch is unreachable, green the unit/integration layer and flag to the user before opening the Phase 2 PR.
+5. Task 2.9 (Phase 2 gate) — fmt + clippy + test + manual <gpu-host> smoke. If <gpu-host> is unreachable, green the unit/integration layer and flag to the user before opening the Phase 2 PR.
 
 6. Open the Phase 2 PR: title `feat(ltx2): engine transitions (cut/fade/stitch) (Phase 2/6)`. It stacks on the Phase 1 branch (target: `main`); link Phase 1 PR #266 in the body.
 

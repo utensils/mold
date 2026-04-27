@@ -1358,7 +1358,7 @@ mod tests {
         // synthetic checkpoint doesn't carry the full SD1.5 tensor set).
         // This confirms the wiring without paying the real-shape model
         // construction cost. The full real-shape `load().unwrap()` smoke
-        // runs in 2.10's killswitch UAT against a real DreamShaper
+        // runs in 2.10's <gpu-host> UAT against a real DreamShaper
         // checkpoint.
         let single_file = synth_sd15_single_file("load-branch");
         let tokenizer_stub = std::env::temp_dir().join(format!(
@@ -1409,7 +1409,7 @@ mod tests {
     /// SD1.5-correct shapes is over the test budget, and the construction
     /// path also can't run today because of the candle-mold private-field
     /// blocker (see `load_components_single_file`). Kept as documentation
-    /// of the eventual UAT contract — 2.10's killswitch UAT runs the
+    /// of the eventual UAT contract — 2.10's <gpu-host> UAT runs the
     /// real-checkpoint variant.
     #[test]
     #[ignore]

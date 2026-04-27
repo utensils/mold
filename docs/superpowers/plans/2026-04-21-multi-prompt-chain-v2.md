@@ -1713,7 +1713,7 @@ No code commit here; the prior task commits constitute the PR. Open the PR with 
 
 ## Phase 2 — Engine transitions (cut/fade/stitch)
 
-**Goal of this phase:** teach the orchestrator about `TransitionMode::Cut` (pass `None` carry), add a post-stitch `fade_boundary` helper and a `StitchPlan` that assembles per-stage frames with correct per-boundary trim/blend rules, and wire the server's chain route to use it. Ends with end-to-end renders of smooth/cut/fade chains on the killswitch box.
+**Goal of this phase:** teach the orchestrator about `TransitionMode::Cut` (pass `None` carry), add a post-stitch `fade_boundary` helper and a `StitchPlan` that assembles per-stage frames with correct per-boundary trim/blend rules, and wire the server's chain route to use it. Ends with end-to-end renders of smooth/cut/fade chains on the <gpu-host> box.
 
 **Commit scope:** `feat(ltx2)` for engine changes, `feat(server)` for route wiring.
 
@@ -2620,7 +2620,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 2.9: Phase 2 gate — killswitch box end-to-end
+### Task 2.9: Phase 2 gate — <gpu-host> box end-to-end
 
 - [ ] **Step 1: fmt + clippy + full test**
 
@@ -2632,9 +2632,9 @@ cargo test --workspace
 ```
 Expected: clean.
 
-- [ ] **Step 2: Build for killswitch (CUDA sm_86)**
+- [ ] **Step 2: Build for <gpu-host> (CUDA <arch-tag>)**
 
-On the killswitch box (`killswitch@192.168.1.67`, `~/github/mold`):
+On the <gpu-host> box (`<gpu-host>`, `~/github/mold`):
 ```bash
 CUDA_COMPUTE_CAP=86 nix build .#mold
 ```
@@ -3278,10 +3278,10 @@ Create `crates/mold-cli/tests/adversarial/`:
 
 Run `mold chain validate` on each; assert appropriate error for all except `newline_prompt.toml` which should succeed.
 
-- [ ] **Step 3: Manual smoke on killswitch**
+- [ ] **Step 3: Manual smoke on <gpu-host>**
 
 ```bash
-# On killswitch
+# On <gpu-host>
 mold run --script shot_smooth.toml -o out.mp4
 mold run ltx-2-19b-distilled:fp8 --prompt "A" --prompt "B" --prompt "C" -o out.mp4
 ```
@@ -4592,7 +4592,7 @@ cd web && bun run fmt:check && bun run verify && bun run build
 - Add 3 stages, cycle transitions, drag-reorder, delete middle stage.
 - Click ✨ on stage 2 → expand modal writes back only to stage 2.
 - Copy TOML → paste into `mold chain validate <file>` in a terminal → exit 0.
-- Generate → chain renders end-to-end on killswitch.
+- Generate → chain renders end-to-end on <gpu-host>.
 
 - [ ] **Step 3: Open Phase 5 PR**
 

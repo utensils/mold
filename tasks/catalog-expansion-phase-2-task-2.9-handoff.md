@@ -67,7 +67,7 @@ merges + publishes:
    instead assert the constructor was called.
 
 This unblocks **end-to-end SDXL/SD1.5 single-file generation** —
-without it, the killswitch UAT in 2.10 can pull SDXL Pony but the
+without it, the <gpu-host> UAT in 2.10 can pull SDXL Pony but the
 inference path bails with the candle-mold sentinel.
 
 **Track the PR**: `gh pr view utensils/candle/1 --json state,mergedAt`.
@@ -79,7 +79,7 @@ land 2.8.5.
 - 2.8.5 (provisional) — candle-mold pin bump + `load()` real-shape
   wiring. Blocked on https://github.com/utensils/candle/pull/1.
 - **2.9 — this handoff's task** (web `cat.canDownload` gate flip).
-- 2.10 UAT — full killswitch run (Pony / Juggernaut XL / DreamShaper 8).
+- 2.10 UAT — full <gpu-host> run (Pony / Juggernaut XL / DreamShaper 8).
 
 ## What 2.9 produces
 
@@ -307,6 +307,6 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 When 2.9 is gate-green, write
 `tasks/catalog-expansion-phase-2-task-2.10-handoff.md` (template: this
-file). 2.10 is the killswitch UAT — depends on 2.8.5 being merged
+file). 2.10 is the <gpu-host> UAT — depends on 2.8.5 being merged
 first because the SDXL/SD1.5 generation path needs candle-mold 0.9.11
 to actually generate from single-file checkpoints.

@@ -8,7 +8,7 @@
 `sd3.5-large:q8` (and every other `sd3*` family) fails with
 `"shape mismatch in broadcast_add, lhs: [1, N, 768], rhs: [1, 77, 768]"`
 whenever the prompt tokenises to `N > 77` tokens. Observed three times in
-killswitch's server log over the last few hours (seq lengths 130, 131, 132).
+<gpu-host>'s server log over the last few hours (seq lengths 130, 131, 132).
 The shared SD1.5/SDXL encoder path already truncates to 77 correctly; the
 SD3-specific wrapper regressed.
 
@@ -147,8 +147,8 @@ This session just finished **render-chain v1**. The state:
   `https://github.com/utensils/mold/pull/new/feat/render-chain-v1`.
 - Last commit on the branch: `766322e fix(cli): pass owned String to
   create_engine in local chain path` — caught only when the CUDA build
-  ran on killswitch (Phase 3 feature-matrix check omitted `cuda`/`metal`).
-- killswitch is running the new binary at `766322e` as PID 1199380
+  ran on <gpu-host> (Phase 3 feature-matrix check omitted `cuda`/`metal`).
+- <gpu-host> is running the new binary at `766322e` as PID 1199380
   (`./target/release/mold serve --bind 0.0.0.0 --gpus 0,1`), logs at
   `~/.mold/logs/server.log`. `MOLD_HOST=http://beast:7680` reaches it.
 - Local `main` is parity with `origin/main` at `1410d08`. The chain work
@@ -202,10 +202,10 @@ for any prompt that tokenises to more than 77 CLIP tokens.
 - `feat/render-chain-v1` is on origin at `766322e` (12 commits ahead of
   main). It's unrelated to this bug but is a parallel in-flight PR;
   ignore unless you're explicitly asked to stack the fix on it.
-- killswitch (BEAST, dual-3090) is running `766322e` as
+- <gpu-host> (<gpu-host>, dual-GPU) is running `766322e` as
   `mold serve --bind 0.0.0.0 --gpus 0,1`. Reproduce against it via
   `MOLD_HOST=http://beast:7680`. Log tail:
-  `ssh killswitch@192.168.1.67 "tail -f ~/.mold/logs/server.log"`.
+  `ssh <gpu-host> "tail -f ~/.mold/logs/server.log"`.
 - `CLAUDE.md` claims `mold-inference`/`mold-server` have
   `[lib] test = false` — **stale, tests run normally**. Verified in
   render-chain v1's Phase 1d–4 landings.
@@ -216,7 +216,7 @@ for any prompt that tokenises to more than 77 CLIP tokens.
 ## What you're doing
 
 Fix the bug per the handoff's "The fix" section. Short commit, targeted
-test, verify on killswitch. One atomic commit, `fix(sd3): truncate CLIP
+test, verify on <gpu-host>. One atomic commit, `fix(sd3): truncate CLIP
 token sequences to 77 with EOS preserved` (or similar).
 
 Do NOT push unless the user asks. Do NOT stack on `feat/render-chain-v1`
@@ -233,7 +233,7 @@ cargo test -p mold-ai-core
 # + a new unit test you add for the truncation helper
 ```
 
-Then optionally rebuild on killswitch and retry the repro curl against
+Then optionally rebuild on <gpu-host> and retry the repro curl against
 `http://beast:7680` to confirm the user-surfaced symptom is gone.
 
 ## Process

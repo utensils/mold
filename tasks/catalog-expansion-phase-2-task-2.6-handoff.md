@@ -212,7 +212,7 @@ will accept (`down_blocks.0.resnets.0.norm1` is shape `[block_out_channels[0]]`,
 i.e. `[320]` — synthesisable).
 
 If real-shape synthesis blows the test budget, demote round 3 to a
-`#[ignore]` end-to-end gated on the killswitch UAT in 2.10 and call
+`#[ignore]` end-to-end gated on the <gpu-host> UAT in 2.10 and call
 out the gap in the commit.
 
 ## Out of scope for 2.6

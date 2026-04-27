@@ -26,7 +26,7 @@ solved question — see "Audit findings that 2.3 builds on" below.
 
 ### Done
 
-- **2.1 pre-flight** — killswitch (`killswitch@192.168.1.67`, dual-3090 sm_86, `~/github/mold`) is on the same branch, rebuilt at `088ab9b`, `mold-server.service` running. A `mold catalog refresh` (job `d722af92-7f3a-4dca-bee8-4f00f2f32eb4`) was kicked off before phase 2 work began and is still walking the flux HF base_model graph in the background — it will eventually populate SD15 + SDXL Civitai entries needed for 2.10 UAT, but **not blocking** any of 2.3 / 2.4 / 2.5 / 2.6 / 2.7 / 2.8 / 2.9. Poll: `ssh killswitch@192.168.1.67 "curl -sS http://localhost:7680/api/catalog/refresh/d722af92-7f3a-4dca-bee8-4f00f2f32eb4 | jq ."`
+- **2.1 pre-flight** — <gpu-host> (`<gpu-host>`, dual-GPU <arch-tag>, `~/github/mold`) is on the same branch, rebuilt at `088ab9b`, `mold-server.service` running. A `mold catalog refresh` (job `d722af92-7f3a-4dca-bee8-4f00f2f32eb4`) was kicked off before phase 2 work began and is still walking the flux HF base_model graph in the background — it will eventually populate SD15 + SDXL Civitai entries needed for 2.10 UAT, but **not blocking** any of 2.3 / 2.4 / 2.5 / 2.6 / 2.7 / 2.8 / 2.9. Poll: `ssh <gpu-host> "curl -sS http://localhost:7680/api/catalog/refresh/d722af92-7f3a-4dca-bee8-4f00f2f32eb4 | jq ."`
 - **2.2 tensor-prefix audit** — `sd_singlefile_inspect` dev-bin shipped, audit run against three Civitai checkpoints (DreamShaper 8 / SD1.5 — 1131 tensors, Juggernaut XL Ragnarok / SDXL — 2516, Pony Diffusion V6 / SDXL — 2515). Findings doc landed.
 
 ### Not yet done

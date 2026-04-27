@@ -578,14 +578,14 @@ is correct.
 | `mold-cli` | flags + script I/O | Sugar-flag parsing (repeated `--prompt`, uniform `--frames-per-clip`); `--script` file loading; relative source-image path resolution; `--dry-run` output format |
 | `mold-tui` | script mode | Keybindings (add/delete/reorder/transition-cycle); TOML save/load round-trip; editor pane focus discipline; stage 0 transition-row suppression |
 | `web` | composer | Script-mode state transitions (add/remove/reorder cards); TOML import/export symmetric with Rust writer; ExpandModal per-stage wiring; `localStorage` persistence |
-| **Integration** | end-to-end | 3-stage smooth, 3-stage cut, 3-stage fade, mixed — real GPU host (killswitch) |
+| **Integration** | end-to-end | 3-stage smooth, 3-stage cut, 3-stage fade, mixed — real GPU host (<gpu-host>) |
 | **UAT** | acceptance | `tui-uat.sh` script mode scenario; manual browser checklist for web |
 | **Regression** | v1 compat | v1 sugar `--prompt` still works byte-for-byte; v1 JSON without `transition` field normalises to all-smooth behavior |
 
 **CI rule:** no real-weight tests in CI (same discipline as v1). Fake
 engines via the trait seam for orchestrator tests. End-to-end only runs
-on-demand on the killswitch box (`killswitch@192.168.1.67`, mold repo at
-`~/github/mold`, sm_86).
+on-demand on the <gpu-host> box (`<gpu-host>`, mold repo at
+`~/github/mold`, <arch-tag>).
 
 ## 9. Team orchestration — six phases
 
@@ -595,7 +595,7 @@ starts.
 | # | Phase | Roles active | Gate |
 |---|---|---|---|
 | 1 | Wire format + capabilities endpoint + TOML I/O | code-explorer, code-architect, backend impl (2 parallel: core types/TOML, server routes), type-design analyzer, verification | `cargo test`, capabilities endpoint curl, TOML round-trip test passes |
-| 2 | Engine transitions (cut/fade/stitch) | code-explorer, code-architect, backend impl (single, serial — tightly coupled), silent-failure hunter, verification | end-to-end renders of each transition on killswitch box; fade boundary visual inspection |
+| 2 | Engine transitions (cut/fade/stitch) | code-explorer, code-architect, backend impl (single, serial — tightly coupled), silent-failure hunter, verification | end-to-end renders of each transition on <gpu-host> box; fade boundary visual inspection |
 | 3 | CLI surface (sugar + script) | code-architect, backend impl, adversarial, code-reviewer, verification | `cargo test`, adversarial's malformed-TOML corpus survives, manual run of `mold run --script ./shot.toml` |
 | 4 | TUI surface (script mode) | UI/UX designer-engineer, backend impl (TUI specialist), adversarial, verification | `tui-uat.sh` script mode scenario passes, manual interaction verified |
 | 5 | Web surface (composer script mode) | UI/UX designer-engineer via `frontend-design` skill, frontend impl, adversarial, code-reviewer, comment-analyzer, verification | `bun test`, import/export symmetric with CLI, manual browser test across 3 draft scenarios |
@@ -606,7 +606,7 @@ starts.
 - Phase 1 → Phase 2 (engine depends on wire format being frozen).
 - Phase 2 → Phases 3, 4, 5 (each surface needs the engine to actually
   render cuts and fades end-to-end; their gate criteria require real
-  renders on the killswitch box).
+  renders on the <gpu-host> box).
 - Phases 3, 4, 5 run concurrently (separate crates / directories, no
   shared-file contention after the Phase 1 wire freeze).
 - Phase 6 last.

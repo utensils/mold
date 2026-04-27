@@ -3699,7 +3699,7 @@ Targets spec `docs/superpowers/specs/2026-04-19-model-ui-overhaul-design.md`
 - [x] `cargo fmt --check`
 - [x] `cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4`
 - [x] `cd web && bun run fmt:check && bun run test && bun run build`
-- [ ] UAT on killswitch (pull sd1.5:fp16, enqueue flux-schnell:q4, cancel second, cancel first mid-stream, reload browser mid-download)
+- [ ] UAT on <gpu-host> (pull sd1.5:fp16, enqueue flux-schnell:q4, cancel second, cancel first mid-stream, reload browser mid-download)
 EOF
 )"
 ```

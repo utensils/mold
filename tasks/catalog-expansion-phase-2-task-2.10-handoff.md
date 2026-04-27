@@ -58,7 +58,7 @@ SPA gate flip + badge-gate bump.
 
 ### Not yet done
 
-- **2.10 — this handoff's task** — the killswitch UAT + CHANGELOG
+- **2.10 — this handoff's task** — the <gpu-host> UAT + CHANGELOG
   entry + single phase-2 push.
 
 ### Important context that changed since the 2.9 handoff was written
@@ -90,7 +90,7 @@ Per the canonical phase-2 spec
 
 > Phase 2 gate: `cargo fmt --all -- --check && cargo clippy --workspace
 > --all-targets -- -D warnings && cargo test --workspace`; `bun run
-> test && bun run build && bun run fmt:check`; **killswitch UAT** —
+> test && bun run build && bun run fmt:check`; **<gpu-host> UAT** —
 > pull + generate one Pony entry, one Juggernaut XL entry, one SD1.5
 > entry (e.g. epiCRealism). Visual inspection of outputs. CHANGELOG
 > entry.
@@ -99,8 +99,8 @@ This task is **non-coding** in the normal sense. It is:
 
 1. Confirm local gates are still green (5 minutes).
 2. CHANGELOG entry under `[Unreleased]` (one commit).
-3. SSH to killswitch (`killswitch@192.168.1.67`), build with CUDA
-   `sm_86`, restart `mold-server`, run the three-checkpoint UAT, eyeball
+3. SSH to <gpu-host> (`<gpu-host>`), build with CUDA
+   `<arch-tag>`, restart `mold-server`, run the three-checkpoint UAT, eyeball
    the renders.
 4. **Push the entire phase-2 commit chain as one push** and open the PR
    `feat(catalog): SD1.5 + SDXL single-file loaders (phase 2/5)`.
@@ -109,7 +109,7 @@ Three concrete deliverables:
 
 ### A. Local re-verify gate (no commits)
 
-Quick re-run before touching killswitch — phase-2 has been local for
+Quick re-run before touching <gpu-host> — phase-2 has been local for
 2 weeks of development; one final check that nothing rotted:
 
 ```bash
@@ -172,8 +172,8 @@ without three successful generations.
 # From your laptop, push the phase-2 commit chain
 git push origin feat/catalog-expansion
 
-# On killswitch
-ssh killswitch@192.168.1.67
+# On <gpu-host>
+ssh <gpu-host>
 cd ~/github/mold && git pull
 cargo build --release -p mold-ai \
   --features cuda,preview,discord,expand,tui,webp,mp4,metrics
@@ -227,7 +227,7 @@ Then test the same trio through the web UI as a smoke check:
 After the UAT passes:
 
 ```bash
-# From killswitch or laptop, doesn't matter — branch is already pushed
+# From <gpu-host> or laptop, doesn't matter — branch is already pushed
 gh pr create --title "feat(catalog): SD1.5 + SDXL single-file loaders (phase 2/5)" \
   --body "$(cat <<'EOF'
 ## Summary
@@ -290,7 +290,7 @@ condensed version of the CHANGELOG entry plus the UAT checklist.
   phase 2 done without UAT artifacts (image files, log lines from
   `journalctl --user -u mold-server`, the gh pr URL).
 - This task is small enough that it can be done interactively; **do
-  not dispatch a subagent for the killswitch UAT** — it's
+  not dispatch a subagent for the <gpu-host> UAT** — it's
   hardware-dependent and needs the human in the loop for visual
   inspection of generated images.
 
@@ -314,7 +314,7 @@ cargo test --workspace                           # retry once on TUI flake
 ### Killswitch (after push)
 
 ```bash
-ssh killswitch@192.168.1.67
+ssh <gpu-host>
 
 cd ~/github/mold && git pull
 cargo build --release -p mold-ai \
@@ -343,20 +343,20 @@ user memory — retry once before blaming your changes.
 - `CHANGELOG.md` — find the prior phase boundaries to match style.
 - `crates/mold-catalog/src/companions.rs` — canonical companion
   registry; reference if a UAT companion-pull misses.
-- `contrib/mold-server.user.service` + `contrib/README.md` — killswitch
+- `contrib/mold-server.user.service` + `contrib/README.md` — <gpu-host>
   systemd unit + token setup.
 
 ## Important machine details
 
-- **killswitch@192.168.1.67** — Arch box, dual RTX 3090 (sm_86), repo
+- **<gpu-host>** — GPU host, dual GPUs, repo
   at `~/github/mold`. Build with `--features
   cuda,preview,discord,expand,tui,webp,mp4,metrics`.
 - The HF + Civitai tokens live in `~/.config/mold/server.env` on
-  killswitch; the systemd unit reads them. Tokens are *not* on the
-  laptop — pulls run on killswitch.
+  <gpu-host>; the systemd unit reads them. Tokens are *not* on the
+  laptop — pulls run on <gpu-host>.
 - `mold-server` listens on port 7680 by default. The web UI is the
   embedded SPA; if you want to test from your laptop, set
-  `MOLD_HOST=http://192.168.1.67:7680`.
+  `MOLD_HOST=http://<gpu-host>:7680`.
 
 ---
 
@@ -369,7 +369,7 @@ Paste from here into a fresh Claude Code session:
 I'm starting **task 2.10** of the mold catalog-expansion phase 2 — the
 final phase-2 task. Tasks 2.1–2.9 + 2.8.5 are done; the entire stack
 (inference, server, CLI, web) is wired and locally green for SD1.5 +
-SDXL single-file Civitai checkpoints. 2.10 is the killswitch UAT plus
+SDXL single-file Civitai checkpoints. 2.10 is the <gpu-host> UAT plus
 the single phase-2 push + PR.
 
 This task is **non-coding** in the normal sense — there is no TDD
@@ -377,7 +377,7 @@ round. The work is:
 
 1. Confirm local gates are still green.
 2. Add a CHANGELOG entry under `[Unreleased]` (one commit).
-3. SSH to killswitch, build with CUDA `sm_86`, restart `mold-server`,
+3. SSH to <gpu-host>, build with CUDA `<arch-tag>`, restart `mold-server`,
    run the three-checkpoint UAT (Pony / Juggernaut XL / SD1.5), eyeball
    the renders.
 4. Push the entire phase-2 commit chain (10 commits) as one push and
@@ -407,8 +407,8 @@ Implement task 2.10 per this handoff. Four deliverables:
    fmt:check`. Fix any rot in scoped commits before proceeding.
 2. **CHANGELOG entry** — one commit, `[Unreleased]` block summarising
    phase 2 (Added / Changed). Suggested shape in this handoff § B.
-3. **Killswitch UAT** — SSH to `killswitch@192.168.1.67`, build with
-   CUDA `sm_86`, restart `mold-server`, pull + generate one Pony, one
+3. **Killswitch UAT** — SSH to `<gpu-host>`, build with
+   CUDA `<arch-tag>`, restart `mold-server`, pull + generate one Pony, one
    Juggernaut XL, one SD1.5 (e.g. epiCRealism). Visual inspection of
    each output. The recipe is in this handoff § C — the user picks
    the exemplar IDs at UAT time from the live catalog.
@@ -420,7 +420,7 @@ Implement task 2.10 per this handoff. Four deliverables:
 
 1. Pre-flight: `git status` clean, full local gate green.
 2. Write the CHANGELOG entry, commit, **do not push yet**.
-3. Walk the user through SSHing to killswitch and running the UAT —
+3. Walk the user through SSHing to <gpu-host> and running the UAT —
    this part needs the human in the loop because visual inspection of
    generated images cannot be automated.
 4. After the UAT passes, push the chain and open the PR.
@@ -447,10 +447,10 @@ Implement task 2.10 per this handoff. Four deliverables:
 
 ## Verification gate before opening PR
 
-The killswitch UAT IS the verification gate. Do not open the PR
+The <gpu-host> UAT IS the verification gate. Do not open the PR
 without:
 
-- Three image files in `~/.mold/output/` on killswitch (one per UAT
+- Three image files in `~/.mold/output/` on <gpu-host> (one per UAT
   generation), each visually inspected and not a failure mode.
 - Web UI smoke check: SPA Download button works for one phase-2
   entry, DownloadsDrawer shows companion ordering correctly.

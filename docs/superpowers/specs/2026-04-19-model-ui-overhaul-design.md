@@ -16,7 +16,7 @@
 
 - File-level parallelism inside a single model pull (bandwidth-bound; HF rate-limits parallel requests). Sequential inside a set is the final design.
 - Per-component device placement for model families outside the curated set. Those families show Tier 1 (group text-encoders knob) only; the Advanced panel is disabled with a tooltip.
-- Playwright / browser e2e testing. Unit-level coverage only; manual UAT on killswitch closes the loop.
+- Playwright / browser e2e testing. Unit-level coverage only; manual UAT on <gpu-host> closes the loop.
 - Model delete / disk management from the UI. `mold rm` CLI remains the only path for this PR.
 - Free-disk-space enforcement before download — soft warning only.
 - VRAM-fit prediction for a chosen placement config. Stretch only if Agent C has spare time.
@@ -30,8 +30,8 @@
   - `wt/resource-telemetry` → Agent B
   - `wt/device-placement` → Agent C
 - Each agent opens a non-draft PR **into the umbrella** when their phase is green.
-- After all three land: main agent runs the full suite, fixes merge breakage, pushes; killswitch pulls and final UAT runs. Then flip the umbrella PR to ready-for-review against `main`.
-- **UAT cadence**: killswitch syncs after each agent's merge into umbrella, and again after the final merge/fix pass.
+- After all three land: main agent runs the full suite, fixes merge breakage, pushes; <gpu-host> pulls and final UAT runs. Then flip the umbrella PR to ready-for-review against `main`.
+- **UAT cadence**: <gpu-host> syncs after each agent's merge into umbrella, and again after the final merge/fix pass.
 
 ---
 
@@ -409,14 +409,14 @@ cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4
 
 Plus at least one new test file proving the phase's core behavior (§1.8, §2.7, §3.7).
 
-### 4.4 Manual UAT on killswitch
+### 4.4 Manual UAT on <gpu-host>
 
 After each agent merges into umbrella:
 
-1. On killswitch: `cd ~/github/mold && git fetch && git checkout feat/model-ui-overhaul && git pull`.
-2. `cargo build --release --features cuda` (sm_86 compute cap).
+1. On <gpu-host>: `cd ~/github/mold && git fetch && git checkout feat/model-ui-overhaul && git pull`.
+2. `cargo build --release --features cuda` (<arch-tag> compute cap).
 3. Restart `mold serve` (check for existing systemd user service first).
-4. Hit `http://192.168.1.67:7680/` from this machine's browser.
+4. Hit `http://<gpu-host>:7680/` from this machine's browser.
 
 Scenarios to walk:
 
@@ -430,7 +430,7 @@ Scenarios to walk:
 - **`hf-hub` cancellation leaves partials** — dropping the tokio future is safe but files on disk may be half-written. Mitigation: explicit cleanup pass in the cancel path, tested in `downloads_test.rs`.
 - **SD3.5 Tier 2 scope creep** — stretch. Cut without ceremony if Agent C is behind; Tier 1 for SD3.5 must still land.
 - **Three-way merge noise in `types.rs` / `routes.rs`** — mitigated by file-overlap map (§4.2). Conflicts expected to be mechanical append-merges.
-- **Remote-host resource attribution subtleties** — if killswitch's `mold` runs inside a shared user session, `used_by_mold` only counts our PID, not child processes. For v1 that's acceptable (mold doesn't fork CUDA-using children), but we call it out.
+- **Remote-host resource attribution subtleties** — if <gpu-host>'s `mold` runs inside a shared user session, `used_by_mold` only counts our PID, not child processes. For v1 that's acceptable (mold doesn't fork CUDA-using children), but we call it out.
 
 ---
 

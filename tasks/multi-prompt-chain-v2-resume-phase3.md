@@ -24,12 +24,12 @@
 
 ### Phase 2 manual verification (pending)
 
-**Killswitch end-to-end smoke on `killswitch@192.168.1.67` (CUDA sm_86) is NOT yet done.** The plan called for three renders (smooth / cut / fade / mixed) with visual inspection of seam quality. This is user work — the renders complete on the GPU, but whether the seams *look right* is a human judgment.
+**Killswitch end-to-end smoke on `<gpu-host>` (CUDA <arch-tag>) is NOT yet done.** The plan called for three renders (smooth / cut / fade / mixed) with visual inspection of seam quality. This is user work — the renders complete on the GPU, but whether the seams *look right* is a human judgment.
 
 To run it:
 
 ```bash
-ssh killswitch@192.168.1.67
+ssh <gpu-host>
 cd ~/github/mold
 git fetch origin feat/multi-prompt-chain-v2-phase2
 git checkout feat/multi-prompt-chain-v2-phase2
@@ -216,7 +216,7 @@ I'm resuming execution of **multi-prompt chain v2, sub-project A** for the mold 
 
 - Branch strategy: `feat/multi-prompt-chain-v2-phase3` will be created from `feat/multi-prompt-chain-v2-phase2` (Phase 2 tip).
 - Phase 1 PR #266 + Phase 2 PR #267 both open, stacked on `main`. Do not merge them from this session without explicit user confirmation.
-- Phase 2's killswitch smoke is still pending manual verification. If the user hasn't run it yet and asks you to, see `tasks/multi-prompt-chain-v2-resume-phase3.md` §"Phase 2 manual verification".
+- Phase 2's <gpu-host> smoke is still pending manual verification. If the user hasn't run it yet and asks you to, see `tasks/multi-prompt-chain-v2-resume-phase3.md` §"Phase 2 manual verification".
 
 ## What you're doing
 

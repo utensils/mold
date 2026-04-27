@@ -20,7 +20,7 @@
   - `cd web && bun run check` — the `build` script runs `vue-tsc -b` which is our type check (use `bunx vue-tsc --noEmit` where we don't want to emit).
   - `bun run build` — full production build; catches Vite-level issues.
   - `bun run fmt:check` — Prettier.
-  - When the task touches runtime behavior, a short manual UAT step against the live server on BEAST (the SSH tunnel and `MOLD_HOST=http://localhost:7680` are already configured).
+  - When the task touches runtime behavior, a short manual UAT step against the live server on <gpu-host> (the SSH tunnel and `MOLD_HOST=http://localhost:7680` are already configured).
 - Commits are scoped per task with conventional-commit prefixes (`feat(web): …`, `fix(web): …`, `chore(web): …`).
 - Every file path is relative to the repo root unless noted.
 - Every task ends with a git commit. Push is a separate late task; don't push mid-plan.
@@ -2362,11 +2362,11 @@ git commit -m "feat(web): wire GeneratePage — composer, running strip, modals,
 
 ---
 
-## Task 16: Manual UAT against BEAST
+## Task 16: Manual UAT against <gpu-host>
 
 **Files:** none (live test)
 
-The SSH tunnel is already up (`localhost:7680 → killswitch@192.168.1.67:7680`). `MOLD_HOST` is set in the user's zshrc. Two models are downloaded there: `sd15:fp16` and `sdxl-turbo:fp16`.
+The SSH tunnel is already up (`localhost:7680 → <gpu-host>:7680`). `MOLD_HOST` is set in the user's zshrc. Two models are downloaded there: `sd15:fp16` and `sdxl-turbo:fp16`.
 
 - [ ] **Step 1: Start the dev server**
 

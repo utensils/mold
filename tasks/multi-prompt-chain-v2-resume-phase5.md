@@ -26,7 +26,7 @@ The TUI theme test `theme_save_then_load_round_trip_preserves_preset` and sessio
 
 ### Phase 2 manual verification (still pending)
 
-**Killswitch end-to-end smoke on `killswitch@192.168.1.67` (CUDA sm_86) is NOT yet done.** See `tasks/multi-prompt-chain-v2-resume-phase4.md` §"Phase 2 manual verification" for instructions.
+**Killswitch end-to-end smoke on `<gpu-host>` (CUDA <arch-tag>) is NOT yet done.** See `tasks/multi-prompt-chain-v2-resume-phase4.md` §"Phase 2 manual verification" for instructions.
 
 ### Phase 4 (TUI) — completed in session 4
 
@@ -174,7 +174,7 @@ I'm resuming execution of **multi-prompt chain v2, sub-project A** for the mold 
 
 - Combined PR #268 targets `main` and contains 44 commits across phases 1/2/3/4 plus design/plan docs. Do not merge it from this session without explicit user confirmation.
 - Current branch: `feat/multi-prompt-chain-v2-phase3` (name is historical; contains all phases after consolidation — don't be thrown by it).
-- Phase 2's killswitch smoke is still pending manual verification.
+- Phase 2's <gpu-host> smoke is still pending manual verification.
 - `cargo test --workspace` → 2413 passed on HEAD. TUI theme + session save flakes retry once.
 
 ## What you're doing

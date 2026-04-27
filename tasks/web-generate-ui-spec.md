@@ -245,7 +245,7 @@ No server crate changes. No `crates/mold-core` wire-format changes. No `crates/m
 
 ## 10. Testing
 
-- Manual UAT against the running `multi-gpu` server on BEAST via the existing SSH tunnel (`MOLD_HOST=http://localhost:7680`).
+- Manual UAT against the running `multi-gpu` server on <gpu-host> via the existing SSH tunnel (`MOLD_HOST=http://localhost:7680`).
 - `bun run dev` on the laptop for hot-iteration; Vite proxies `/api` to `:7680`.
 - The two downloaded models there (`sd15:fp16`, `sdxl-turbo:fp16`) cover two CFG-using families — good enough for v1 smoke tests. Video testing requires pulling `ltx-video` or `ltx2` on the server.
 - Cypress / Playwright tests are **out of v1**. Author will do scripted UAT (checklist in the plan) before marking ready.

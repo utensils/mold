@@ -7,7 +7,7 @@
 ## Context
 
 On 2026-04-23 at 06:48:56 UTC, the production `mold` server on
-`killswitch@192.168.1.67` (dual RTX 3090) received `SIGSEGV` inside
+`<gpu-host>` (dual GPUs) received `SIGSEGV` inside
 `libcuda.so.1::cuModuleGetFunction` while loading `qwen-image-2512:q8` on
 device 0. The crash occurred after three `POST /api/generate/chain/stream`
 requests for `ltx-2.3-22b-distilled:fp8` and three concurrent

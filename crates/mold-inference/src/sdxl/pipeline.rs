@@ -1407,7 +1407,7 @@ mod tests {
         // CLIP-G with fused QKV), so the load surfaces an error sourced
         // from the single-file layer rather than from the diffusers
         // fallback. Real-shape construction is exercised by 2.10's
-        // killswitch UAT against a real Pony / Juggernaut XL checkpoint.
+        // <gpu-host> UAT against a real Pony / Juggernaut XL checkpoint.
         let single_file = synth_sdxl_single_file("load-branch");
         let make_stub = |label: &str| -> PathBuf {
             let path = std::env::temp_dir().join(format!(

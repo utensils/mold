@@ -33,7 +33,7 @@
   - **Phase 4 — Z-Image single-file (Turbo + Base)**.
   - **Phase 5 — LTX single-file (LTXV / LTXV2 / LTXV 2.3)**.
 - Phase 1 ships the catalog as a usable product. Phases 2–5 progressively unlock `engine_phase`-gated entries — same UI, more clickable Download buttons.
-- **UAT cadence**: killswitch (the dual-3090 Arch box) pulls and exercises after each phase merges into the umbrella.
+- **UAT cadence**: <gpu-host> (the dual-GPU GPU host) pulls and exercises after each phase merges into the umbrella.
 
 ---
 
@@ -691,7 +691,7 @@ Runs on `mold-server` startup; idempotent.
 - **Round-trip** (`tests/shard_roundtrip.rs`): every committed shard parses, re-serializes byte-identical. Catches accidental hand-edits.
 - **DB seed** (`tests/db_seed.rs`): load all shards into a `:memory:` DB, run all FTS queries, assert results.
 - **CLI golden** (`tests/cli_list.rs`): spawn `mold catalog list --json` against fixture DB, assert stable output.
-- **No live HTTP in CI.** Real HF/Civitai calls only run with `cargo test --ignored` (manual on killswitch).
+- **No live HTTP in CI.** Real HF/Civitai calls only run with `cargo test --ignored` (manual on <gpu-host>).
 
 ---
 
@@ -754,7 +754,7 @@ In phase 1, companions are tracked but unenforced. In phase 2, `POST /api/catalo
 ### 2.6 Phase 2 testing
 
 - **Tensor extraction** (`tests/sdxl_single_file.rs`): fixture safetensors with known structure, assert UNET/VAE/CLIP-L/CLIP-G come out matching expected shapes.
-- **End-to-end small generation**: mark `#[ignore]`; killswitch UAT executes manually.
+- **End-to-end small generation**: mark `#[ignore]`; <gpu-host> UAT executes manually.
 - **Companion auto-pull**: integration test with mocked downloader, assert the order is companions-first.
 
 ---
@@ -792,7 +792,7 @@ Flux.2 architecture differs from Flux.1 (different block layout). Catalog `famil
 
 ### 3.5 Phase 3 testing
 
-Same shape as phase 2: fixture safetensors, tensor extraction tests, killswitch UAT for end-to-end.
+Same shape as phase 2: fixture safetensors, tensor extraction tests, <gpu-host> UAT for end-to-end.
 
 ---
 
