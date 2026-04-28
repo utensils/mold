@@ -17,7 +17,7 @@
 //! `max_429_retries` exhausted retries the caller sees
 //! `ScanError::RateLimited`, exactly as before.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use reqwest::{Request, Response, StatusCode};
@@ -101,6 +101,10 @@ pub async fn polite_send(
 ) -> Result<RequestOutcome, ScanError> {
     pre_request_delay(pre_delay).await;
 
+    // Capture the URL up front — `req` gets consumed if we hit the
+    // non-cloneable bail path, and we want it in every log line for
+    // bisecting "where did the scanner stall".
+    let url = req.url().clone();
     let mut attempt: u8 = 0;
     loop {
         let cloned = match req.try_clone() {
@@ -118,24 +122,60 @@ pub async fn polite_send(
                 ));
             }
         };
+        let started = Instant::now();
         let resp: Response = client.execute(cloned).await?;
         let status = resp.status();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
 
         if status == StatusCode::TOO_MANY_REQUESTS && attempt < max_retries {
+            let from_header = resp
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            tracing::info!(
+                host = host,
+                url = %url,
+                attempt = attempt,
+                retry_after_secs = ?from_header,
+                "polite_send: 429 received, backing off",
+            );
             after_429_delay(resp.headers(), default_backoff, attempt).await;
             attempt += 1;
             continue;
         }
 
         if let Some(err) = classify_status(status, host) {
+            if matches!(err, ScanError::RateLimited { .. }) {
+                tracing::warn!(
+                    host = host,
+                    url = %url,
+                    attempts = attempt,
+                    "polite_send: 429 retries exhausted",
+                );
+            }
             return Err(err);
         }
         if !status.is_success() {
+            tracing::warn!(
+                host = host,
+                url = %url,
+                status = status.as_u16(),
+                elapsed_ms = elapsed_ms,
+                "polite_send: non-success response",
+            );
             // Convert non-success into a Network error via reqwest's
             // error_for_status helper for a consistent error chain.
             return Err(resp.error_for_status().unwrap_err().into());
         }
 
+        tracing::debug!(
+            host = host,
+            url = %url,
+            status = status.as_u16(),
+            elapsed_ms = elapsed_ms,
+            "polite_send: ok",
+        );
         let body = resp.text().await?;
         return Ok(RequestOutcome { body });
     }

@@ -525,12 +525,17 @@ export type CatalogRefreshStatus =
   | { state: "pending" }
   | {
       state: "running";
-      // All four optional so older servers (pre live-progress) still parse.
+      // All optional so older servers (pre live-progress) still parse.
       // The web UI guards with nullish-coalescing where needed.
       families_total?: number;
       families_done?: number;
       current_family?: string | null;
       current_stage?: string | null;
+      // Per-seed / per-page detail. Pre-2026-04-27 servers omit these
+      // and the panel falls back to the family-only summary.
+      current_seed?: string | null;
+      pages_done?: number;
+      entries_so_far?: number;
       started_at_ms?: number;
     }
   | { state: "done"; total_entries: number; per_family: Record<string, string> }

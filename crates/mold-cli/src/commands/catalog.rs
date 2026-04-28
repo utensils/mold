@@ -38,6 +38,13 @@ pub struct RefreshArgs {
     pub no_nsfw: bool,
     #[arg(long)]
     pub dry_run: bool,
+    /// Defensive bound on per-family wall-clock walk time, in seconds.
+    /// When set, the HF stage of any single family bails gracefully
+    /// (returning the partial entry bucket) once the cap elapses. Useful
+    /// when a busy family like SDXL would otherwise pin the scanner for
+    /// hours; default `None` preserves the unbounded behaviour.
+    #[arg(long)]
+    pub max_family_wallclock_secs: Option<u64>,
     /// Maintainer-only: write into the repo's `crates/mold-catalog/data/catalog/`
     /// instead of `$MOLD_HOME/catalog/`.
     #[arg(long)]
@@ -141,6 +148,9 @@ pub async fn run_refresh(args: RefreshArgs) -> Result<()> {
     opts.include_nsfw = !args.no_nsfw;
     opts.hf_token = std::env::var("HF_TOKEN").ok();
     opts.civitai_token = std::env::var("CIVITAI_TOKEN").ok();
+    opts.max_family_wallclock = args
+        .max_family_wallclock_secs
+        .map(std::time::Duration::from_secs);
 
     let report = mold_catalog::scanner::run_scan(&hf_base, &cv_base, &opts).await;
 
@@ -225,6 +235,7 @@ async fn fetch_family_entries(
         opts,
         family,
         mold_catalog::hf_seeds::seeds_for(family),
+        None,
     )
     .await
     {

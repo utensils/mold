@@ -39,6 +39,26 @@ const currentStage = computed(() =>
     ? (status.value.current_stage ?? null)
     : null,
 );
+const currentSeed = computed(() =>
+  status.value?.state === "running"
+    ? (status.value.current_seed ?? null)
+    : null,
+);
+const pagesDone = computed(() =>
+  status.value?.state === "running" ? (status.value.pages_done ?? 0) : 0,
+);
+const entriesSoFar = computed(() =>
+  status.value?.state === "running" ? (status.value.entries_so_far ?? 0) : 0,
+);
+// Strip the org prefix so "stabilityai/stable-diffusion-xl-base-1.0"
+// renders as "stable-diffusion-xl-base-1.0" — keeps the subline tight
+// without losing the seed identity.
+const seedShort = computed(() => {
+  const seed = currentSeed.value;
+  if (!seed) return null;
+  const slash = seed.lastIndexOf("/");
+  return slash >= 0 ? seed.slice(slash + 1) : seed;
+});
 
 // Determinate when we know how many families are in scope; spinner-only
 // before the scanner has reported families_total.
@@ -97,6 +117,15 @@ const subline = computed(() => {
     const parts: string[] = [];
     if (familiesTotal.value > 0) {
       parts.push(`${familiesDone.value}/${familiesTotal.value} families`);
+    }
+    // Per-seed detail only shows during the HF stage — Civitai walks
+    // run a different code path and don't populate current_seed.
+    if (seedShort.value && currentStage.value === "hf") {
+      const detail: string[] = [`seed ${seedShort.value}`];
+      if (pagesDone.value > 0) detail.push(`page ${pagesDone.value}`);
+      if (entriesSoFar.value > 0)
+        detail.push(`${entriesSoFar.value} entries`);
+      parts.push(detail.join(" · "));
     }
     if (elapsedLabel.value) parts.push(`elapsed ${elapsedLabel.value}`);
     return parts.join(" · ");

@@ -130,6 +130,9 @@ async fn status_reflects_live_progress_during_running_scan() {
                 p.families_done = 4;
                 p.current_family = Some(mold_catalog::families::Family::Sdxl);
                 p.current_stage = Some("hf");
+                p.current_seed = Some("stabilityai/stable-diffusion-xl-base-1.0".into());
+                p.pages_done = 17;
+                p.entries_so_far = 1700;
             }
             self.started.notify_one();
             self.release.notified().await;
@@ -158,12 +161,21 @@ async fn status_reflects_live_progress_during_running_scan() {
             families_done,
             current_family,
             current_stage,
+            current_seed,
+            pages_done,
+            entries_so_far,
             started_at_ms,
         } => {
             assert_eq!(families_total, 9);
             assert_eq!(families_done, 4);
             assert_eq!(current_family.as_deref(), Some("sdxl"));
             assert_eq!(current_stage.as_deref(), Some("hf"));
+            assert_eq!(
+                current_seed.as_deref(),
+                Some("stabilityai/stable-diffusion-xl-base-1.0"),
+            );
+            assert_eq!(pages_done, 17);
+            assert_eq!(entries_so_far, 1700);
             assert!(started_at_ms > 0);
         }
         other => panic!("expected Running with live counters, got {:?}", other),

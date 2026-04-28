@@ -22,6 +22,14 @@ pub enum CatalogScanStatus {
         families_done: usize,
         current_family: Option<String>,
         current_stage: Option<String>,
+        /// HF-stage seed currently being walked. `None` when the stage
+        /// is idle, between families, or in the Civitai stage.
+        current_seed: Option<String>,
+        /// Pages walked within `current_seed`. Resets to 0 each seed.
+        pages_done: usize,
+        /// Entries collected for `current_family` so far. Cumulative
+        /// across both stages within a family; resets between families.
+        entries_so_far: usize,
         /// Wall-clock ms since epoch — lets the UI render an elapsed
         /// timer that's correct even for clients attaching mid-scan.
         started_at_ms: u64,
@@ -101,6 +109,9 @@ fn running_from(snapshot: &ScanProgress, started_at_ms: u64) -> CatalogScanStatu
         families_done: snapshot.families_done,
         current_family: snapshot.current_family.map(|f| f.as_str().to_string()),
         current_stage: snapshot.current_stage.map(str::to_string),
+        current_seed: snapshot.current_seed.clone(),
+        pages_done: snapshot.pages_done,
+        entries_so_far: snapshot.entries_so_far,
         started_at_ms,
     }
 }
@@ -372,6 +383,10 @@ pub struct RefreshBody {
     pub hf_token: Option<String>,
     #[serde(default)]
     pub civitai_token: Option<String>,
+    /// Defensive cap on per-family wall-clock walk time in seconds.
+    /// Mirrors the CLI's `--max-family-wallclock-secs`.
+    #[serde(default)]
+    pub max_family_wallclock_secs: Option<u64>,
 }
 
 pub async fn post_refresh(
@@ -399,6 +414,9 @@ pub async fn post_refresh(
     opts.civitai_token = body
         .civitai_token
         .or_else(|| std::env::var("CIVITAI_TOKEN").ok());
+    opts.max_family_wallclock = body
+        .max_family_wallclock_secs
+        .map(std::time::Duration::from_secs);
 
     match state.catalog_scan.enqueue(opts).await {
         Ok(id) => (StatusCode::ACCEPTED, Json(serde_json::json!({ "id": id }))).into_response(),

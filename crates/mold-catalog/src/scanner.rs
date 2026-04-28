@@ -41,6 +41,16 @@ pub struct ScanOptions {
     /// Backoff used when a 429 response carries no `Retry-After` header.
     /// Doubled on each subsequent retry (5 s → 10 s → 20 s by default).
     pub default_429_backoff: Duration,
+    /// Defensive cap on per-family wall-clock walk time. When `Some`,
+    /// the HF stage of any single family will gracefully bail (returning
+    /// the partial entry bucket collected so far) once `now >= start +
+    /// cap`. Default `None` preserves the unbounded behaviour for
+    /// callers that explicitly want a complete scan.
+    ///
+    /// Belt-and-braces against the "scanner appears hung" symptom — even
+    /// a true tokio-future-wakeup bug is bounded by this cap if it's
+    /// configured.
+    pub max_family_wallclock: Option<Duration>,
 }
 
 impl Default for ScanOptions {
@@ -57,6 +67,7 @@ impl Default for ScanOptions {
             civitai_request_delay: Duration::from_millis(1500),
             max_429_retries: 3,
             default_429_backoff: Duration::from_secs(5),
+            max_family_wallclock: None,
         }
     }
 }
@@ -70,6 +81,12 @@ pub struct ScanReport {
 /// Live progress snapshot, updated by `run_scan_with_progress` as it walks
 /// each family. Lock briefly with `lock()`, copy out, drop the guard — the
 /// scanner contends for the same lock when it advances.
+///
+/// The HF stage of a large family (SDXL has thousands of fine-tunes) takes
+/// hours to walk at the politeness throttle. Without per-seed and per-page
+/// fields, the SPA shows `families_done:0` for the entire walk, which is
+/// indistinguishable from a hang. The extra fields here let the UI render
+/// "Scanning sdxl seed 1: page 17 (1700 finetunes so far)".
 #[derive(Clone, Debug, Default)]
 pub struct ScanProgress {
     pub families_total: usize,
@@ -78,11 +95,20 @@ pub struct ScanProgress {
     /// "hf" or "civitai" — set as the scanner enters that stage of the
     /// current family. `None` between families.
     pub current_stage: Option<&'static str>,
+    /// Seed currently being walked within the HF stage. Resets to `None`
+    /// at the end of the HF stage and between families.
+    pub current_seed: Option<String>,
+    /// Pages walked within `current_seed`. Resets to 0 when the seed
+    /// changes.
+    pub pages_done: usize,
+    /// Entries collected within the current family. Resets to 0 between
+    /// families. Cumulative across both seeds and stages within a family.
+    pub entries_so_far: usize,
 }
 
 pub type ProgressHandle = Arc<Mutex<ScanProgress>>;
 
-fn update_progress<F: FnOnce(&mut ScanProgress)>(handle: Option<&ProgressHandle>, f: F) {
+pub(crate) fn update_progress<F: FnOnce(&mut ScanProgress)>(handle: Option<&ProgressHandle>, f: F) {
     if let Some(h) = handle {
         if let Ok(mut p) = h.lock() {
             f(&mut p);
@@ -147,6 +173,11 @@ pub async fn run_scan_with_progress(
         update_progress(progress.as_ref(), |p| {
             p.current_family = Some(family);
             p.current_stage = Some("hf");
+            // Per-family resets: the seed/page/entry counters track the
+            // *current* family only.
+            p.current_seed = None;
+            p.pages_done = 0;
+            p.entries_so_far = 0;
         });
         let mut bucket: Vec<crate::entry::CatalogEntry> = Vec::new();
         let mut auth_required = false;
@@ -157,8 +188,14 @@ pub async fn run_scan_with_progress(
         // Call scan_family once per seed so that a transient error on one
         // seed does not discard entries already fetched from earlier seeds.
         for seed in hf_seeds::seeds_for(family) {
-            match stages::hf::scan_family(hf_base, options, family, std::slice::from_ref(seed))
-                .await
+            match stages::hf::scan_family(
+                hf_base,
+                options,
+                family,
+                std::slice::from_ref(seed),
+                progress.as_ref(),
+            )
+            .await
             {
                 Ok(entries) => bucket.extend(entries),
                 Err(ScanError::AuthRequired { .. }) => {
@@ -182,6 +219,9 @@ pub async fn run_scan_with_progress(
         if !cv_keys.is_empty() {
             update_progress(progress.as_ref(), |p| {
                 p.current_stage = Some("civitai");
+                // The per-seed counter is HF-only; clear it so the SPA
+                // doesn't show a stale seed name during the Civitai stage.
+                p.current_seed = None;
             });
             match stages::civitai::scan(civitai_base, options, &cv_keys).await {
                 Ok(entries) => bucket.extend(entries),
