@@ -186,7 +186,12 @@ impl CatalogScanQueue {
         None
     }
 
-    pub async fn drive(self, driver: Arc<dyn ScanDriver>) {
+    /// Background driver loop. Pops one queued scan at a time, asks
+    /// `driver` to run it, then writes the resulting entries through
+    /// `mold_catalog::sink::upsert_family` so the catalog DB reflects
+    /// the scan. `catalog_db` is the sink target — typically
+    /// `state.catalog_db`.
+    pub async fn drive(self, driver: Arc<dyn ScanDriver>, catalog_db: Arc<mold_db::MetadataDb>) {
         loop {
             self.notify.notified().await;
             let job = {
@@ -214,6 +219,54 @@ impl CatalogScanQueue {
                     .clone()
             };
             let report = driver.run(opts, progress).await;
+
+            // Phase H follow-up: persist scanned entries. The orchestrator
+            // gathered them per family in `report.entries`; without this
+            // sink call the HTTP path would count entries and drop them on
+            // the floor (see commit history for the catalog-scanner
+            // observability work).
+            for (fam, entries) in &report.entries {
+                let fam_copy = *fam;
+                let entries_copy = entries.clone();
+                let db = catalog_db.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    db.with_conn(|conn| {
+                        Ok(mold_catalog::sink::upsert_family(
+                            conn,
+                            fam_copy,
+                            &entries_copy,
+                        )?)
+                    })
+                })
+                .await;
+                match res {
+                    Ok(Ok(())) => {
+                        tracing::info!(
+                            target: "catalog",
+                            family = %fam.as_str(),
+                            rows = entries.len(),
+                            "persisted scan entries",
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            target: "catalog",
+                            family = %fam.as_str(),
+                            error = %e,
+                            "persist failed",
+                        );
+                    }
+                    Err(join_err) => {
+                        tracing::warn!(
+                            target: "catalog",
+                            family = %fam.as_str(),
+                            error = %join_err,
+                            "persist task panicked",
+                        );
+                    }
+                }
+            }
+
             let mut summary = BTreeMap::new();
             for (fam, outcome) in &report.per_family {
                 summary.insert(fam.as_str().to_string(), format!("{:?}", outcome));

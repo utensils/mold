@@ -123,8 +123,7 @@ const subline = computed(() => {
     if (seedShort.value && currentStage.value === "hf") {
       const detail: string[] = [`seed ${seedShort.value}`];
       if (pagesDone.value > 0) detail.push(`page ${pagesDone.value}`);
-      if (entriesSoFar.value > 0)
-        detail.push(`${entriesSoFar.value} entries`);
+      if (entriesSoFar.value > 0) detail.push(`${entriesSoFar.value} entries`);
       parts.push(detail.join(" · "));
     }
     if (elapsedLabel.value) parts.push(`elapsed ${elapsedLabel.value}`);

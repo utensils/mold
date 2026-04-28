@@ -76,6 +76,15 @@ impl Default for ScanOptions {
 pub struct ScanReport {
     pub per_family: BTreeMap<Family, FamilyScanOutcome>,
     pub total_entries: usize,
+    /// Per-family filtered entries surviving `filter::apply`. The HTTP
+    /// refresh path writes these through `mold_catalog::sink::upsert_family`;
+    /// the CLI's `mold catalog refresh` reads from here so it doesn't have
+    /// to re-scan every family a second time.
+    ///
+    /// Populated only by [`run_scan_with_progress`]; tests that build a
+    /// [`ScanReport`] by hand (e.g. for fake `ScanDriver`s) must populate
+    /// this themselves if they need the persistence path to see entries.
+    pub entries: BTreeMap<Family, Vec<CatalogEntry>>,
 }
 
 /// Live progress snapshot, updated by `run_scan_with_progress` as it walks
@@ -252,6 +261,7 @@ pub async fn run_scan_with_progress(
             FamilyScanOutcome::Ok { entries: 0 }
         };
         report.per_family.insert(family, outcome);
+        report.entries.insert(family, kept);
         update_progress(progress.as_ref(), |p| {
             p.families_done += 1;
             p.current_stage = None;

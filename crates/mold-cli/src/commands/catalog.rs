@@ -187,29 +187,7 @@ pub async fn run_refresh(args: RefreshArgs) -> Result<()> {
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into());
 
-    // Re-run the scanner per family so we can group entries by family
-    // before sinking. The orchestrator already grouped them, but does not
-    // currently return the grouped vec; for phase 1 the simpler path is a
-    // second pass keyed off `family`.
-    let mut by_family: std::collections::BTreeMap<
-        mold_catalog::families::Family,
-        Vec<mold_catalog::entry::CatalogEntry>,
-    > = Default::default();
-    // Re-run minimal scans family-by-family. This is the same pattern the
-    // server's refresh endpoint uses; the duplicated network cost is OK
-    // because manual refresh is rare and `--family` already narrows it.
-    for fam in &opts.families {
-        let mut single_opts = opts.clone();
-        single_opts.families = vec![*fam];
-        let report = mold_catalog::scanner::run_scan(&hf_base, &cv_base, &single_opts).await;
-        by_family.insert(
-            *fam,
-            fetch_family_entries(&hf_base, &cv_base, &single_opts, *fam).await?,
-        );
-        let _ = report;
-    }
-
-    for (fam, entries) in by_family {
+    for (fam, entries) in &report.entries {
         let shard = mold_catalog::sink::build_shard(
             fam.as_str(),
             env!("CARGO_PKG_VERSION"),
@@ -217,48 +195,10 @@ pub async fn run_refresh(args: RefreshArgs) -> Result<()> {
             entries.clone(),
         );
         mold_catalog::sink::write_shard_atomic(&shard_dir, &shard)?;
-        mold_catalog::sink::upsert_family(&conn, fam, &entries)?;
+        mold_catalog::sink::upsert_family(&conn, *fam, entries)?;
     }
     println!("wrote shards to {}", shard_dir.display());
     Ok(())
-}
-
-async fn fetch_family_entries(
-    hf_base: &str,
-    cv_base: &str,
-    opts: &mold_catalog::scanner::ScanOptions,
-    family: mold_catalog::families::Family,
-) -> Result<Vec<mold_catalog::entry::CatalogEntry>> {
-    let mut entries: Vec<mold_catalog::entry::CatalogEntry> = Vec::new();
-    if let Ok(hf) = mold_catalog::stages::hf::scan_family(
-        hf_base,
-        opts,
-        family,
-        mold_catalog::hf_seeds::seeds_for(family),
-        None,
-    )
-    .await
-    {
-        entries.extend(hf);
-    }
-
-    let cv_keys: Vec<&'static str> = mold_catalog::civitai_map::CIVITAI_BASE_MODELS
-        .iter()
-        .copied()
-        .filter(|k| {
-            matches!(
-                mold_catalog::civitai_map::map_base_model(k),
-                Some((f, _, _)) if f == family
-            )
-        })
-        .collect();
-    if !cv_keys.is_empty() {
-        if let Ok(cv) = mold_catalog::stages::civitai::scan(cv_base, opts, &cv_keys).await {
-            entries.extend(cv);
-        }
-    }
-
-    Ok(mold_catalog::filter::apply(entries, opts))
 }
 
 pub async fn run_where(id: String) -> Result<()> {

@@ -3,12 +3,18 @@
 // current-thread tokio test runtime.
 #![allow(clippy::await_holding_lock)]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use mold_catalog::scanner::{ProgressHandle, ScanReport};
+use mold_catalog::entry::{
+    Bundling, CatalogEntry, DownloadRecipe, FamilyRole, FileFormat, Kind, LicenseFlags, Modality,
+    Source,
+};
+use mold_catalog::families::Family;
+use mold_catalog::scanner::{FamilyScanOutcome, ProgressHandle, ScanReport};
 use mold_db::catalog::CatalogRow;
 use mold_db::MetadataDb;
 use tokio::sync::Mutex;
@@ -36,11 +42,13 @@ async fn enqueue_then_status_transitions_to_done() {
     let report = Arc::new(Mutex::new(Some(ScanReport {
         per_family: Default::default(),
         total_entries: 7,
+        entries: Default::default(),
     })));
     let driver = Arc::new(FakeDriver { report });
     let queue = CatalogScanQueue::new();
     let q2 = queue.clone();
-    tokio::spawn(async move { q2.drive(driver.clone()).await });
+    let db_for_drive = Arc::new(MetadataDb::open_in_memory().expect("in-memory DB"));
+    tokio::spawn(async move { q2.drive(driver.clone(), db_for_drive).await });
 
     let id = queue
         .enqueue(mold_catalog::scanner::ScanOptions::default())
@@ -63,7 +71,8 @@ async fn second_enqueue_while_running_is_rejected() {
     let driver = Arc::new(FakeDriver { report });
     let queue = CatalogScanQueue::new();
     let q2 = queue.clone();
-    tokio::spawn(async move { q2.drive(driver.clone()).await });
+    let db_for_drive = Arc::new(MetadataDb::open_in_memory().expect("in-memory DB"));
+    tokio::spawn(async move { q2.drive(driver.clone(), db_for_drive).await });
     queue
         .enqueue(mold_catalog::scanner::ScanOptions::default())
         .await
@@ -84,7 +93,8 @@ async fn active_returns_in_flight_scan_id_and_status() {
     let driver = Arc::new(FakeDriver { report });
     let queue = CatalogScanQueue::new();
     let q2 = queue.clone();
-    tokio::spawn(async move { q2.drive(driver.clone()).await });
+    let db_for_drive = Arc::new(MetadataDb::open_in_memory().expect("in-memory DB"));
+    tokio::spawn(async move { q2.drive(driver.clone(), db_for_drive).await });
 
     assert!(queue.active().await.is_none(), "idle queue → no active");
 
@@ -146,7 +156,8 @@ async fn status_reflects_live_progress_during_running_scan() {
     });
     let queue = CatalogScanQueue::new();
     let q2 = queue.clone();
-    tokio::spawn(async move { q2.drive(driver).await });
+    let db_for_drive = Arc::new(MetadataDb::open_in_memory().expect("in-memory DB"));
+    tokio::spawn(async move { q2.drive(driver, db_for_drive).await });
 
     let id = queue
         .enqueue(mold_catalog::scanner::ScanOptions::default())
@@ -579,5 +590,109 @@ async fn civitai_recipe_with_needs_token_returns_unauthorized_when_no_env_var() 
     assert!(
         body.contains("CIVITAI_TOKEN"),
         "401 body should name the env var: {body}"
+    );
+}
+
+// ── Persistence (HTTP refresh writes through to the catalog DB) ─────────────
+
+/// Build a minimal, schema-valid `CatalogEntry` for SDXL fixtures. Every
+/// field is non-empty enough to round-trip through the sink.
+fn make_catalog_entry(id: &str, name: &str) -> CatalogEntry {
+    CatalogEntry {
+        id: id.into(),
+        source: Source::Hf,
+        source_id: id.trim_start_matches("hf:").to_string(),
+        name: name.to_string(),
+        author: Some("test-author".into()),
+        family: Family::Sdxl,
+        family_role: FamilyRole::Finetune,
+        sub_family: None,
+        modality: Modality::Image,
+        kind: Kind::Checkpoint,
+        file_format: FileFormat::Safetensors,
+        bundling: Bundling::Separated,
+        size_bytes: Some(1_000),
+        download_count: 100,
+        rating: Some(4.5),
+        likes: 0,
+        nsfw: false,
+        thumbnail_url: None,
+        description: None,
+        license: None,
+        license_flags: LicenseFlags::default(),
+        tags: Vec::new(),
+        companions: Vec::new(),
+        download_recipe: DownloadRecipe {
+            files: Vec::new(),
+            needs_token: None,
+        },
+        engine_phase: 1,
+        created_at: None,
+        updated_at: None,
+        added_at: 0,
+    }
+}
+
+/// Persistence guarantee: after the queue drives a scan to completion,
+/// the entries surfaced in `ScanReport::entries` MUST land in the catalog
+/// DB. Phase H exposed a phase-1 wart where the orchestrator counted
+/// entries but dropped them on the floor — `total_entries=2464` reported,
+/// catalog had 0 SDXL rows. This test prevents regression.
+#[tokio::test]
+async fn drive_persists_scanned_entries_through_sink() {
+    let db = Arc::new(MetadataDb::open_in_memory().expect("in-memory DB"));
+    let entries = vec![
+        make_catalog_entry("hf:test/one", "Test Entry One"),
+        make_catalog_entry("hf:test/two", "Test Entry Two"),
+        make_catalog_entry("hf:test/three", "Test Entry Three"),
+    ];
+    let mut by_family = BTreeMap::new();
+    by_family.insert(Family::Sdxl, entries);
+
+    let mut per_family = BTreeMap::new();
+    per_family.insert(Family::Sdxl, FamilyScanOutcome::Ok { entries: 3 });
+    let report = Arc::new(Mutex::new(Some(ScanReport {
+        per_family,
+        total_entries: 3,
+        entries: by_family,
+    })));
+    let driver = Arc::new(FakeDriver { report });
+    let queue = CatalogScanQueue::new();
+    let q2 = queue.clone();
+    let db_for_drive = db.clone();
+    tokio::spawn(async move { q2.drive(driver, db_for_drive).await });
+
+    let id = queue
+        .enqueue(mold_catalog::scanner::ScanOptions::default())
+        .await
+        .expect("enqueue");
+    for _ in 0..50 {
+        if let Some(CatalogScanStatus::Done { .. }) = queue.status(&id).await {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let rows = db
+        .catalog_list(&mold_db::catalog::ListParams {
+            family: Some("sdxl".into()),
+            limit: 10,
+            offset: 0,
+            include_nsfw: true,
+            ..Default::default()
+        })
+        .expect("list catalog");
+    assert_eq!(
+        rows.len(),
+        3,
+        "expected 3 SDXL rows after drive(), got {} — persistence dropped",
+        rows.len()
+    );
+    let mut names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["Test Entry One", "Test Entry Three", "Test Entry Two"],
+        "rows must be the fakes we fed in",
     );
 }

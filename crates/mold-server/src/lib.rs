@@ -261,9 +261,13 @@ pub async fn run_server(
     }
     let catalog_driver = {
         let queue = (*state.catalog_scan).clone();
+        let catalog_db = state.catalog_db.clone();
         tokio::spawn(async move {
             queue
-                .drive(std::sync::Arc::new(crate::catalog_api::LiveScanDriver))
+                .drive(
+                    std::sync::Arc::new(crate::catalog_api::LiveScanDriver),
+                    catalog_db,
+                )
                 .await;
         })
     };
