@@ -27,6 +27,7 @@ metrics = ["mold-server/metrics"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.9.0" }
+mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.9.0" }
 mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.9.0" }
 mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.9.0" }
 mold-server = { path = "../mold-server", package = "mold-ai-server", version = "0.9.0" }
@@ -43,11 +44,13 @@ flate2 = "1"
 indicatif = "0.17"
 rand = "0.8"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+rusqlite = { version = "0.31", features = ["bundled"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 sysinfo = "0.34"
 tar = "0.4"
 sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "macros"] }
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 tracing = "0.1"
@@ -62,4 +65,7 @@ walkdir = "2.5.0"
 assert_cmd = "2"
 filetime = "0.2"
 predicates = "3"
+rusqlite = { version = "0.31", features = ["bundled"] }
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"

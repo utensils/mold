@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 /// Model families that are utility models (not image generators).
 /// These are excluded from default-model selection and don't produce ModelPaths.
-pub const UTILITY_FAMILIES: &[&str] = &["qwen3-expand"];
+pub const UTILITY_FAMILIES: &[&str] = &["qwen3-expand", "companion"];
 
 /// Model families that are upscaler models (image-to-image enhancement, not generation).
 /// These are excluded from default-model selection and use a simplified config path.
@@ -1194,6 +1194,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(controlnet_manifests());
     manifests.extend(qwen3_expand_manifests());
     manifests.extend(upscaler_manifests());
+    manifests.extend(companion_manifests());
     manifests
 }
 
@@ -3285,6 +3286,13 @@ pub fn resolve_model_name(input: &str) -> String {
     if input.contains(':') {
         return input.to_string();
     }
+    // Bare-name match — companion manifests ("clip-l", "sdxl-vae", ...)
+    // register without a `:tag` because there's only one variant. Catch
+    // them here so the tag-resolution loop below doesn't synthesize a
+    // bogus `clip-l:q8` and miss the real entry.
+    if find_manifest_exact(input).is_some() {
+        return input.to_string();
+    }
     if input == "qwen-image-edit" {
         return "qwen-image-edit-2511:q8".to_string();
     }
@@ -4400,6 +4408,153 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
     ]
 }
 
+/// Synthetic manifest entries for the canonical companions in
+/// `mold_catalog::companions::COMPANIONS`. Single-file Civitai checkpoints
+/// (SDXL Pony, FLUX-dev finetunes, etc.) routinely strip their text encoders
+/// and VAE; the catalog scanner records `companions: ["clip-l", ...]` on
+/// those entries, and `POST /api/catalog/:id/download` enqueues each missing
+/// companion before the primary entry. The download queue is keyed on
+/// manifest names, so each canonical companion needs an entry here.
+///
+/// These manifests live in `family: "companion"` (see `UTILITY_FAMILIES`) so
+/// they're hidden from `mold list`, never selected as defaults, and routed
+/// through `pull_model_files_only_with_callback` instead of the
+/// config-writing path.
+///
+/// File lists are deliberately minimal — just the safetensors + (where
+/// applicable) the unified `tokenizer.json`. Phase-2 single-file engines
+/// only need the encoder weights and a tokenizer; richer A1111-style
+/// loaders that want config/vocab/merges files are a phase-3+ concern.
+fn companion_manifests() -> Vec<ModelManifest> {
+    let defaults = ManifestDefaults {
+        steps: 0,
+        guidance: 0.0,
+        width: 0,
+        height: 0,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: None,
+        fps: None,
+    };
+
+    vec![
+        // CLIP-L — text encoder for SD1.5, SDXL, FLUX, Flux.2.
+        ModelManifest {
+            name: "clip-l".to_string(),
+            family: "companion".to_string(),
+            description: "OpenAI CLIP-L companion (single-file SD1.5/SDXL/FLUX checkpoints)"
+                .to_string(),
+            files: vec![
+                ModelFile {
+                    hf_repo: "openai/clip-vit-large-patch14".to_string(),
+                    hf_filename: "model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 1_710_540_580,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "openai/clip-vit-large-patch14".to_string(),
+                    hf_filename: "tokenizer.json".to_string(),
+                    component: ModelComponent::ClipTokenizer,
+                    size_bytes: 2_224_003,
+                    gated: false,
+                    sha256: None,
+                },
+            ],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // CLIP-G — second text encoder for SDXL.
+        ModelManifest {
+            name: "clip-g".to_string(),
+            family: "companion".to_string(),
+            description: "OpenCLIP ViT-bigG companion (single-file SDXL checkpoints)".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k".to_string(),
+                hf_filename: "open_clip_pytorch_model.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 5_711_927_064,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // SDXL VAE — fp16-fix VAE used by every SDXL single-file checkpoint.
+        ModelManifest {
+            name: "sdxl-vae".to_string(),
+            family: "companion".to_string(),
+            description: "SDXL fp16-fix VAE companion".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "madebyollin/sdxl-vae-fp16-fix".to_string(),
+                hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 334_643_268,
+                gated: false,
+                sha256: Some("1b909373b28f2137098b0fd9dbc6f97f8410854f31f84ddc9fa04b077b0ace2c"),
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // SD1.5 VAE — ft-mse stability VAE used by SD1.5 single-file checkpoints.
+        ModelManifest {
+            name: "sd-vae-ft-mse".to_string(),
+            family: "companion".to_string(),
+            description: "Stability SD1.5 ft-mse VAE companion".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "stabilityai/sd-vae-ft-mse".to_string(),
+                hf_filename: "diffusion_pytorch_model.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 334_643_276,
+                gated: false,
+                sha256: Some("a1d993488569e928462932c8c38a0760b874d166399b14414135bd9c42df5815"),
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // T5-XXL — shared text encoder for FLUX, Flux.2, LTX-Video, LTX-2.
+        // The bf16 variant is the canonical full-precision companion; phase-3
+        // FLUX single-file flows can pull this instead of bundling T5 in the
+        // checkpoint.
+        ModelManifest {
+            name: "t5-v1_1-xxl".to_string(),
+            family: "companion".to_string(),
+            description: "T5-XXL bf16 companion (single-file FLUX / Flux.2 / LTX-Video)"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "city96/t5-v1_1-xxl-encoder-bf16".to_string(),
+                hf_filename: "t5xxl_fp16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 9_787_841_024,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // FLUX VAE — used by FLUX and Flux.2 single-file checkpoints. BFL
+        // gating applies; the catalog UI shows the "needs token" badge.
+        ModelManifest {
+            name: "flux-vae".to_string(),
+            family: "companion".to_string(),
+            description: "Black Forest Labs FLUX VAE companion (single-file FLUX/Flux.2)"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "black-forest-labs/FLUX.1-schnell".to_string(),
+                hf_filename: "ae.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 335_304_388,
+                gated: true,
+                sha256: Some("afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"),
+            }],
+            defaults,
+            hidden: true,
+        },
+    ]
+}
+
 fn upscaler_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
         steps: 0,
@@ -4959,8 +5114,8 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler = 97
-        assert_eq!(known_manifests().len(), 97);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 6 Companion = 103
+        assert_eq!(known_manifests().len(), 103);
     }
 
     #[test]
@@ -6218,10 +6373,11 @@ mod tests {
     #[test]
     fn all_utility_models_identified_by_is_utility() {
         let utility_count = known_manifests().iter().filter(|m| m.is_utility()).count();
-        // Currently 2: qwen3-expand:q8, qwen3-expand-small:q8
+        // Currently 8: 2 qwen3-expand variants + 6 catalog companions
+        // (clip-l, clip-g, sdxl-vae, sd-vae-ft-mse, t5-v1_1-xxl, flux-vae).
         assert_eq!(
-            utility_count, 2,
-            "expected exactly 2 utility models, got {utility_count}"
+            utility_count, 8,
+            "expected exactly 8 utility models, got {utility_count}"
         );
     }
 
@@ -6243,6 +6399,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- Companion manifests (single-file Civitai checkpoint dependencies) ---
+
+    /// All canonical companion names from `mold_catalog::companions::COMPANIONS`
+    /// that the `POST /api/catalog/:id/download` companion auto-pull resolves.
+    /// `z-image-te` is intentionally absent — phase 4 reserves the canonical
+    /// name but the synthetic manifest waits until the Z-Image single-file
+    /// loader lands.
+    const COMPANION_NAMES: &[&str] = &[
+        "clip-l",
+        "clip-g",
+        "sdxl-vae",
+        "sd-vae-ft-mse",
+        "t5-v1_1-xxl",
+        "flux-vae",
+    ];
+
+    #[test]
+    fn companion_canonical_names_all_resolve() {
+        for name in COMPANION_NAMES {
+            let manifest = find_manifest(name).unwrap_or_else(|| {
+                panic!("companion {name} must resolve via find_manifest");
+            });
+            assert_eq!(manifest.name, *name, "{name} canonical-name mismatch");
+            assert_eq!(
+                manifest.family, "companion",
+                "{name} should land in the companion family"
+            );
+            assert!(
+                manifest.hidden,
+                "{name} must be hidden — companions never appear in `mold list`"
+            );
+            assert!(
+                !manifest.files.is_empty(),
+                "{name} must declare at least one file to pull"
+            );
+        }
+    }
+
+    #[test]
+    fn companion_manifests_are_utility() {
+        for name in COMPANION_NAMES {
+            let manifest = find_manifest(name).expect("companion resolves");
+            assert!(
+                manifest.is_utility(),
+                "{name} must be utility — companions don't get config entries or default-model status",
+            );
+            assert!(
+                !manifest.is_generation_model(),
+                "{name} must not be a generation model",
+            );
+        }
+    }
+
+    #[test]
+    fn companion_clip_l_points_at_openai_repo() {
+        // Mirrors mold_catalog::companions::COMPANIONS["clip-l"].repo —
+        // the synthetic manifest must keep tracking the canonical source.
+        let manifest = find_manifest("clip-l").expect("clip-l resolves");
+        assert!(
+            manifest
+                .files
+                .iter()
+                .any(|f| f.hf_repo == "openai/clip-vit-large-patch14"),
+            "clip-l must source from openai/clip-vit-large-patch14",
+        );
     }
 
     #[test]

@@ -13,10 +13,6 @@ const props = defineProps<{
   // the top bar so the viewer has a sense of place in a 1000-item feed.
   index: number;
   total: number;
-  // When false (the default on a vanilla server), the drawer renders in
-  // read-only mode — the destructive delete affordance is hidden entirely
-  // rather than inviting a 403 from the backend.
-  canDelete: boolean;
   // Global audio preference — the drawer honours it for consistency with
   // the feed, but also shows the native `controls` so the user can
   // override per item.
@@ -366,7 +362,6 @@ function confirmDelete() {
           <Metadata
             :item="item"
             :copied="copied"
-            :can-delete="canDelete"
             @copy="copy"
             @delete-clicked="confirmDelete"
           />
@@ -397,7 +392,6 @@ function confirmDelete() {
             <Metadata
               :item="item"
               :copied="copied"
-              :can-delete="canDelete"
               @copy="copy"
               @delete-clicked="confirmDelete"
             />

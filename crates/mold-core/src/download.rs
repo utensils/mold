@@ -111,6 +111,26 @@ pub enum DownloadError {
 
     #[error("Failed to save config: {0}")]
     ConfigSave(String),
+
+    #[error("Recipe destination path '{dest}' escapes the per-recipe subdirectory")]
+    RecipePathTraversal { dest: String },
+
+    #[error("Civitai download requires CIVITAI_TOKEN.\n\n  1. Create a token at: https://civitai.com/user/account (Add API Key)\n  2. Set: export CIVITAI_TOKEN=...\n  3. Retry: mold pull {id}")]
+    MissingCivitaiToken { id: String },
+
+    #[error("Recipe HTTP fetch failed for {url}: status {status}{}", .body.as_ref().map(|b| format!(" — {b}")).unwrap_or_default())]
+    RecipeHttp {
+        url: String,
+        status: u16,
+        body: Option<String>,
+    },
+
+    #[error("Recipe transport error for {url}: {source}")]
+    RecipeTransport {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
 }
 
 /// Does a GGUF file's header contain the given tensor name?
@@ -1339,6 +1359,365 @@ pub async fn pull_and_configure_with_callback(
     Ok((config, Some(paths)))
 }
 
+// ── Civitai token resolution ────────────────────────────────────────────────
+
+/// Resolve `CIVITAI_TOKEN` from the environment. Mirrors `resolve_hf_token`'s
+/// shape, but Civitai has no token-file convention — just the env var. An
+/// empty / whitespace-only env var resolves to `None` so a stale shell can't
+/// silently send blank `Authorization: Bearer ` headers.
+pub fn resolve_civitai_token() -> Option<String> {
+    std::env::var("CIVITAI_TOKEN").ok().and_then(|t| {
+        let trimmed = t.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+/// Build the [`RecipeAuth`] required for a Civitai-gated recipe. Returns
+/// [`DownloadError::MissingCivitaiToken`] when no token is set; the error
+/// message names the env var so the CLI/server can surface a clear remediation.
+pub fn civitai_auth_or_error(id: &str) -> Result<RecipeAuth, DownloadError> {
+    match resolve_civitai_token() {
+        Some(t) => Ok(RecipeAuth::Bearer(t)),
+        None => Err(DownloadError::MissingCivitaiToken { id: id.to_string() }),
+    }
+}
+
+// ── Companion presence helpers ──────────────────────────────────────────────
+//
+// Civitai single-file checkpoints ship without their text encoders / VAE,
+// so the catalog scanner records `companions: ["clip-l", "sdxl-vae", ...]`
+// on those entries. Both server (`POST /api/catalog/:id/download`) and CLI
+// (`mold pull cv:<id>`) need to enqueue/pull missing companions before the
+// primary entry. The on-disk presence check + name-resolution loop lives
+// here so they share one implementation; the server's
+// `enqueue_missing_companions` consumes this through `DownloadQueue`, the
+// CLI through `pull_and_configure_with_callback`.
+
+/// True when every file the companion's synthetic manifest declares is
+/// present under `models_dir` AND no `.pulling` marker for the manifest's
+/// canonical name exists. A leftover marker means a previous pull was
+/// interrupted and the on-disk content can't be trusted yet.
+pub fn companion_present_on_disk(
+    models_dir: &Path,
+    manifest: &crate::manifest::ModelManifest,
+) -> bool {
+    if pulling_marker_path_in(models_dir, &manifest.name).exists() {
+        return false;
+    }
+    manifest.files.iter().all(|f| {
+        let storage = crate::manifest::storage_path(manifest, f);
+        models_dir.join(storage).exists()
+    })
+}
+
+/// Parse a `Vec<String>` of companion names out of `companions_json` and
+/// return the ones that (a) resolve to a known synthetic manifest and (b)
+/// aren't already fully present under `models_dir`.
+///
+/// Order is preserved — callers depend on companion-first ordering. Unknown
+/// companions (no synthetic manifest in this build) are silently skipped:
+/// catalog scanners may ship new canonical names ahead of the binary, and
+/// surfacing those as errors would break catalog rows older builds can
+/// never satisfy. `None` / unparsable JSON returns an empty vec.
+pub fn missing_companions_from_json(
+    companions_json: Option<&str>,
+    models_dir: &Path,
+) -> Vec<&'static crate::manifest::ModelManifest> {
+    let Some(json) = companions_json else {
+        return Vec::new();
+    };
+    let names: Vec<String> = match serde_json::from_str(json) {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        let Some(manifest) = crate::manifest::find_manifest(&name) else {
+            tracing::warn!(
+                companion = %name,
+                "skipping companion with no synthetic manifest in this build",
+            );
+            continue;
+        };
+        if companion_present_on_disk(models_dir, manifest) {
+            continue;
+        }
+        out.push(manifest);
+    }
+    out
+}
+
+// ── Recipe-driven downloads (Civitai single-file checkpoints) ───────────────
+//
+// Catalog rows for `cv:<id>` entries carry a `download_recipe.files` list of
+// `(url, dest, sha256, size_bytes)` tuples that the manifest path can't
+// express (the manifest assumes HF repos). The recipe fetcher lives here so
+// it can share `compute_sha256`, `verify_sha256`, and the `.pulling` marker
+// lifecycle with the manifest path. mold-core takes a plain
+// `&[RecipeFetchFile]` slice + `RecipeAuth`; CLI/server callers translate
+// from `mold_catalog::DownloadRecipe` at the boundary so this crate stays
+// catalog-free (`mold-catalog` already depends on `mold-core`).
+
+/// Plain recipe-input shape for [`fetch_recipe`]. Callers translate from
+/// `mold_catalog::DownloadRecipe` to a slice of these.
+#[derive(Debug, Clone)]
+pub struct RecipeFetchFile<'a> {
+    /// HTTP URL the file is fetched from.
+    pub url: &'a str,
+    /// Destination path relative to the per-recipe subdirectory
+    /// (`<models_dir>/<sanitized-id>/`). May contain forward slashes for
+    /// nested layouts; `..` and absolute paths are rejected.
+    pub dest: &'a str,
+    /// Optional SHA-256 hex digest. Verified after download when present.
+    pub sha256: Option<&'a str>,
+    /// Optional declared file size, used for progress reporting before the
+    /// `Content-Length` header arrives.
+    pub size_bytes: Option<u64>,
+}
+
+/// Authentication required for the recipe's URLs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecipeAuth {
+    /// No bearer token required.
+    None,
+    /// Send the given bearer token as `Authorization: Bearer <token>`.
+    /// Used for Civitai (`needs_token: Civitai`); callers resolve the
+    /// token from `CIVITAI_TOKEN` / config before calling.
+    Bearer(String),
+}
+
+/// Sanitize a catalog id (e.g. `cv:618692`) into a filesystem-safe subdir
+/// name (`cv-618692`). Mirrors the manifest path's `replace(':', "-")`
+/// rule so both sides land under the same models-dir subtree convention.
+pub fn sanitize_recipe_id(id: &str) -> String {
+    id.replace(':', "-")
+}
+
+/// Verify that a recipe `dest` stays under the per-recipe subdir. Rejects
+/// absolute paths and any segment that traverses upward (`..`). Returns the
+/// resolved per-file path under `subdir_root` on success.
+fn resolve_recipe_dest(subdir_root: &Path, dest: &str) -> Result<PathBuf, DownloadError> {
+    let candidate = Path::new(dest);
+    if candidate.is_absolute() {
+        return Err(DownloadError::RecipePathTraversal {
+            dest: dest.to_string(),
+        });
+    }
+    for component in candidate.components() {
+        match component {
+            std::path::Component::Normal(_) => {}
+            // ParentDir / Prefix / RootDir / CurDir all escape or are
+            // pointless. CurDir (`./`) is harmless but signals a malformed
+            // recipe — reject for consistency.
+            _ => {
+                return Err(DownloadError::RecipePathTraversal {
+                    dest: dest.to_string(),
+                });
+            }
+        }
+    }
+    Ok(subdir_root.join(candidate))
+}
+
+/// Fetch a recipe-driven download. Writes each file under
+/// `models_dir/<sanitized-id>/<dest>`, verifies SHA-256 when present, and
+/// manages the `.pulling` marker lifecycle.
+///
+/// The marker is written before the first byte and removed only after every
+/// file has been integrity-checked. On any error the marker is removed
+/// best-effort so callers can retry; partial files are NOT cleaned up here
+/// (callers wire that into their failure path the same way the manifest
+/// path does, via `cleanup_partials_in_dir`).
+pub async fn fetch_recipe(
+    id: &str,
+    files: &[RecipeFetchFile<'_>],
+    auth: RecipeAuth,
+    models_dir: &Path,
+    progress: Option<DownloadProgressCallback>,
+    opts: &PullOptions,
+) -> Result<Vec<PathBuf>, DownloadError> {
+    let sanitized = sanitize_recipe_id(id);
+    let subdir_root = models_dir.join(&sanitized);
+
+    // Pre-flight: validate every dest before touching the network. A bad
+    // `..` in any file aborts the whole recipe with no side-effects.
+    let resolved: Vec<PathBuf> = files
+        .iter()
+        .map(|f| resolve_recipe_dest(&subdir_root, f.dest))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    std::fs::create_dir_all(&subdir_root).map_err(|e| {
+        DownloadError::FilePlacement(format!(
+            "failed to create recipe subdir {}: {e}",
+            subdir_root.display()
+        ))
+    })?;
+
+    let marker = pulling_marker_path_in(models_dir, id);
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&marker, id).map_err(|e| {
+        DownloadError::FilePlacement(format!(
+            "failed to write recipe marker {}: {e}",
+            marker.display()
+        ))
+    })?;
+
+    let result = fetch_recipe_inner(id, files, &resolved, auth, progress, opts).await;
+    // Marker removed on success and best-effort on error. Cleanup of
+    // partial files is the caller's responsibility (matches manifest path).
+    let _ = std::fs::remove_file(&marker);
+    result
+}
+
+async fn fetch_recipe_inner(
+    id: &str,
+    files: &[RecipeFetchFile<'_>],
+    resolved: &[PathBuf],
+    auth: RecipeAuth,
+    progress: Option<DownloadProgressCallback>,
+    opts: &PullOptions,
+) -> Result<Vec<PathBuf>, DownloadError> {
+    use std::io::Write;
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("mold/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| DownloadError::Other(format!("failed to build HTTP client: {e}")))?;
+
+    let total_files = files.len();
+    let batch_bytes_total: u64 = files.iter().filter_map(|f| f.size_bytes).sum();
+    let mut batch_bytes_downloaded: u64 = 0;
+    let started = Instant::now();
+
+    for (file_index, (file, dest_path)) in files.iter().zip(resolved.iter()).enumerate() {
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                DownloadError::FilePlacement(format!(
+                    "failed to create directory {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+
+        let mut req = client.get(file.url);
+        if let RecipeAuth::Bearer(token) = &auth {
+            req = req.bearer_auth(token);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| DownloadError::RecipeTransport {
+                url: file.url.to_string(),
+                source: e,
+            })?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.ok().map(|b| {
+                let mut t = b.trim().to_string();
+                if t.len() > 200 {
+                    t.truncate(200);
+                }
+                t
+            });
+            return Err(DownloadError::RecipeHttp {
+                url: file.url.to_string(),
+                status,
+                body,
+            });
+        }
+
+        let content_length = resp.content_length();
+        let size_bytes = file.size_bytes.or(content_length).unwrap_or(0);
+
+        if let Some(cb) = progress.as_deref() {
+            cb(DownloadProgressEvent::FileStart {
+                filename: file.dest.to_string(),
+                file_index,
+                total_files,
+                size_bytes,
+                batch_bytes_downloaded,
+                batch_bytes_total,
+                batch_elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+
+        let mut bytes_downloaded: u64 = 0;
+        let mut out = std::fs::File::create(dest_path).map_err(|e| {
+            DownloadError::FilePlacement(format!("failed to create {}: {e}", dest_path.display()))
+        })?;
+        let mut resp = resp;
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| DownloadError::RecipeTransport {
+                url: file.url.to_string(),
+                source: e,
+            })?
+        {
+            out.write_all(&chunk).map_err(|e| {
+                DownloadError::FilePlacement(format!(
+                    "failed to write to {}: {e}",
+                    dest_path.display()
+                ))
+            })?;
+            bytes_downloaded += chunk.len() as u64;
+            batch_bytes_downloaded += chunk.len() as u64;
+            if let Some(cb) = progress.as_deref() {
+                cb(DownloadProgressEvent::FileProgress {
+                    filename: file.dest.to_string(),
+                    file_index,
+                    bytes_downloaded,
+                    bytes_total: size_bytes,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+        }
+        // Drop file handle so the SHA-256 read sees a flushed file.
+        drop(out);
+
+        if let Some(expected) = file.sha256 {
+            if !opts.skip_verify {
+                let actual = compute_sha256(dest_path).map_err(|e| {
+                    DownloadError::Other(format!(
+                        "failed to compute SHA-256 for {}: {e}",
+                        dest_path.display()
+                    ))
+                })?;
+                if actual != expected {
+                    let _ = std::fs::remove_file(dest_path);
+                    return Err(DownloadError::Sha256Mismatch {
+                        filename: file.dest.to_string(),
+                        expected: expected.to_string(),
+                        actual,
+                        model: id.to_string(),
+                    });
+                }
+            }
+        }
+
+        if let Some(cb) = progress.as_deref() {
+            cb(DownloadProgressEvent::FileDone {
+                filename: file.dest.to_string(),
+                file_index,
+                total_files,
+                batch_bytes_downloaded,
+                batch_bytes_total,
+                batch_elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+    }
+
+    Ok(resolved.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1862,5 +2241,466 @@ mod tests {
         assert!(msg.contains("transformer.gguf"));
         assert!(msg.contains("mold pull flux-dev:q8"));
         assert!(msg.contains("--skip-verify"));
+    }
+
+    // ── Civitai token resolution (round 3) ──────────────────────────────
+
+    static CIVITAI_TOKEN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn resolve_civitai_token_reads_env_var() {
+        let _guard = CIVITAI_TOKEN_LOCK.lock().unwrap();
+        let original = std::env::var("CIVITAI_TOKEN").ok();
+        std::env::set_var("CIVITAI_TOKEN", "cv_test_token_abc");
+        let token = resolve_civitai_token();
+        match &original {
+            Some(v) => std::env::set_var("CIVITAI_TOKEN", v),
+            None => std::env::remove_var("CIVITAI_TOKEN"),
+        }
+        assert_eq!(token, Some("cv_test_token_abc".to_string()));
+    }
+
+    #[test]
+    fn resolve_civitai_token_ignores_empty() {
+        let _guard = CIVITAI_TOKEN_LOCK.lock().unwrap();
+        let original = std::env::var("CIVITAI_TOKEN").ok();
+        std::env::set_var("CIVITAI_TOKEN", "  ");
+        let token = resolve_civitai_token();
+        match &original {
+            Some(v) => std::env::set_var("CIVITAI_TOKEN", v),
+            None => std::env::remove_var("CIVITAI_TOKEN"),
+        }
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn civitai_auth_or_error_returns_bearer_when_set() {
+        let _guard = CIVITAI_TOKEN_LOCK.lock().unwrap();
+        let original = std::env::var("CIVITAI_TOKEN").ok();
+        std::env::set_var("CIVITAI_TOKEN", "cv_secret_xyz");
+        let auth = civitai_auth_or_error("cv:123");
+        match &original {
+            Some(v) => std::env::set_var("CIVITAI_TOKEN", v),
+            None => std::env::remove_var("CIVITAI_TOKEN"),
+        }
+        match auth {
+            Ok(RecipeAuth::Bearer(t)) => assert_eq!(t, "cv_secret_xyz"),
+            other => panic!("expected Bearer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn civitai_auth_or_error_returns_missing_token_error_when_unset() {
+        let _guard = CIVITAI_TOKEN_LOCK.lock().unwrap();
+        let original = std::env::var("CIVITAI_TOKEN").ok();
+        std::env::remove_var("CIVITAI_TOKEN");
+        let err = civitai_auth_or_error("cv:618692").unwrap_err();
+        if let Some(v) = &original {
+            std::env::set_var("CIVITAI_TOKEN", v);
+        }
+        match err {
+            DownloadError::MissingCivitaiToken { id } => {
+                assert_eq!(id, "cv:618692");
+            }
+            other => panic!("expected MissingCivitaiToken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_civitai_token_error_message_points_at_env_var() {
+        let err = DownloadError::MissingCivitaiToken {
+            id: "cv:618692".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("CIVITAI_TOKEN"),
+            "msg should name the env var: {msg}"
+        );
+        assert!(
+            msg.contains("mold pull cv:618692"),
+            "msg should suggest the retry command verbatim: {msg}"
+        );
+        assert!(msg.contains("https://civitai.com"));
+    }
+
+    // ── Companion presence helpers (round 2) ────────────────────────────
+
+    fn stage_complete_companion(models_dir: &std::path::Path, name: &str) {
+        let manifest = crate::manifest::find_manifest(name)
+            .unwrap_or_else(|| panic!("companion manifest {name} must exist"));
+        for f in &manifest.files {
+            let dest = models_dir.join(crate::manifest::storage_path(manifest, f));
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&dest, b"stub").unwrap();
+        }
+    }
+
+    #[test]
+    fn companion_present_returns_false_when_files_missing() {
+        let models_dir = recipe_tmp_dir("companion_missing");
+        let manifest =
+            crate::manifest::find_manifest("clip-l").expect("clip-l manifest must exist");
+        assert!(!companion_present_on_disk(&models_dir, manifest));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn companion_present_returns_true_when_files_present() {
+        let models_dir = recipe_tmp_dir("companion_present");
+        stage_complete_companion(&models_dir, "clip-l");
+        let manifest = crate::manifest::find_manifest("clip-l").unwrap();
+        assert!(companion_present_on_disk(&models_dir, manifest));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn companion_present_returns_false_when_pulling_marker_present() {
+        let models_dir = recipe_tmp_dir("companion_marker");
+        stage_complete_companion(&models_dir, "clip-l");
+        let marker = pulling_marker_path_in(&models_dir, "clip-l");
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&marker, "in-progress").unwrap();
+        let manifest = crate::manifest::find_manifest("clip-l").unwrap();
+        assert!(
+            !companion_present_on_disk(&models_dir, manifest),
+            "marker must override on-disk completeness"
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn missing_companions_skips_unknown_names() {
+        let models_dir = recipe_tmp_dir("companion_unknown");
+        // "clip-l" is real; "future-encoder-9000" doesn't exist.
+        let json = r#"["clip-l","future-encoder-9000"]"#;
+        let missing = missing_companions_from_json(Some(json), &models_dir);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "clip-l");
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn missing_companions_skips_present_returns_only_missing() {
+        let models_dir = recipe_tmp_dir("companion_skip_present");
+        stage_complete_companion(&models_dir, "clip-l");
+        // clip-l is staged, sdxl-vae is not.
+        let json = r#"["clip-l","sdxl-vae"]"#;
+        let missing = missing_companions_from_json(Some(json), &models_dir);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "sdxl-vae");
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn missing_companions_preserves_input_order() {
+        let models_dir = recipe_tmp_dir("companion_order");
+        let json = r#"["sdxl-vae","clip-l","clip-g"]"#;
+        let missing = missing_companions_from_json(Some(json), &models_dir);
+        let names: Vec<&str> = missing.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["sdxl-vae", "clip-l", "clip-g"]);
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn missing_companions_returns_empty_for_none_or_invalid() {
+        let models_dir = recipe_tmp_dir("companion_empty");
+        assert!(missing_companions_from_json(None, &models_dir).is_empty());
+        assert!(missing_companions_from_json(Some("not json"), &models_dir).is_empty());
+        assert!(missing_companions_from_json(Some("[]"), &models_dir).is_empty());
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    // ── Recipe fetcher (round 1) ────────────────────────────────────────
+
+    fn recipe_tmp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mold_recipe_{label}_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_writes_files_under_models_dir() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/file1.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello".as_ref()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/sub/file2.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"world".as_ref()))
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("writes");
+        let url1 = format!("{}/file1.safetensors", server.uri());
+        let url2 = format!("{}/sub/file2.safetensors", server.uri());
+        let files = vec![
+            RecipeFetchFile {
+                url: &url1,
+                dest: "file1.safetensors",
+                sha256: None,
+                size_bytes: None,
+            },
+            RecipeFetchFile {
+                url: &url2,
+                dest: "sub/file2.safetensors",
+                sha256: None,
+                size_bytes: None,
+            },
+        ];
+
+        let written = fetch_recipe(
+            "cv:42",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("fetch_recipe ok");
+
+        let f1 = models_dir.join("cv-42").join("file1.safetensors");
+        let f2 = models_dir
+            .join("cv-42")
+            .join("sub")
+            .join("file2.safetensors");
+        assert_eq!(written, vec![f1.clone(), f2.clone()]);
+        assert_eq!(std::fs::read(&f1).unwrap(), b"hello");
+        assert_eq!(std::fs::read(&f2).unwrap(), b"world");
+
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_verifies_sha256_when_present_match() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = b"hello world";
+        // SHA-256 of "hello world"
+        let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        Mock::given(method("GET"))
+            .and(path("/m.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_ref()))
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("sha_match");
+        let url = format!("{}/m.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "m.safetensors",
+            sha256: Some(expected),
+            size_bytes: None,
+        }];
+        fetch_recipe(
+            "cv:1",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("matching SHA must succeed");
+
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_verifies_sha256_when_present_mismatch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bad.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello".as_ref()))
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("sha_mismatch");
+        let url = format!("{}/bad.safetensors", server.uri());
+        // Wrong digest — file content is "hello".
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "bad.safetensors",
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+            size_bytes: None,
+        }];
+
+        let err = fetch_recipe(
+            "cv:2",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect_err("mismatched SHA must error");
+
+        match err {
+            DownloadError::Sha256Mismatch { filename, .. } => {
+                assert_eq!(filename, "bad.safetensors");
+            }
+            other => panic!("expected Sha256Mismatch, got {other:?}"),
+        }
+        // Corrupted file should be deleted.
+        let bad = models_dir.join("cv-2").join("bad.safetensors");
+        assert!(
+            !bad.exists(),
+            "corrupted file should be removed on mismatch"
+        );
+
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_marker_lifecycle() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/x.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"x".as_ref()))
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("marker");
+        let url = format!("{}/x.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "x.safetensors",
+            sha256: None,
+            size_bytes: None,
+        }];
+        let marker = pulling_marker_path_in(&models_dir, "cv:7");
+        assert!(!marker.exists(), "marker should not exist before fetch");
+
+        fetch_recipe(
+            "cv:7",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("ok");
+
+        assert!(
+            !marker.exists(),
+            "marker should be removed after successful fetch"
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_rejects_path_traversal_in_dest() {
+        let models_dir = recipe_tmp_dir("traversal");
+        let files = vec![RecipeFetchFile {
+            url: "http://example.invalid/should-not-be-fetched",
+            dest: "../etc/passwd",
+            sha256: None,
+            size_bytes: None,
+        }];
+        let err = fetch_recipe(
+            "cv:8",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect_err("traversal must be rejected");
+        match err {
+            DownloadError::RecipePathTraversal { dest } => {
+                assert_eq!(dest, "../etc/passwd");
+            }
+            other => panic!("expected RecipePathTraversal, got {other:?}"),
+        }
+        // Sanity: nothing should have been created outside the per-id subdir.
+        assert!(
+            !models_dir.join("cv-8").exists()
+                || std::fs::read_dir(models_dir.join("cv-8"))
+                    .map(|d| d.count())
+                    .unwrap_or(0)
+                    == 0
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_rejects_absolute_dest() {
+        let models_dir = recipe_tmp_dir("absolute");
+        let files = vec![RecipeFetchFile {
+            url: "http://example.invalid/should-not-be-fetched",
+            dest: "/etc/passwd",
+            sha256: None,
+            size_bytes: None,
+        }];
+        let err = fetch_recipe(
+            "cv:9",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect_err("absolute dest must be rejected");
+        assert!(matches!(err, DownloadError::RecipePathTraversal { .. }));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_sends_bearer_token_when_auth_set() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/civitai.safetensors"))
+            .and(header("authorization", "Bearer secret-cv-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".as_ref()))
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("bearer");
+        let url = format!("{}/civitai.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "civitai.safetensors",
+            sha256: None,
+            size_bytes: None,
+        }];
+        fetch_recipe(
+            "cv:618692",
+            &files,
+            RecipeAuth::Bearer("secret-cv-token".to_string()),
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("authenticated request must succeed");
+
+        let _ = std::fs::remove_dir_all(&models_dir);
     }
 }

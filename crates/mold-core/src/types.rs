@@ -2361,16 +2361,22 @@ fn is_false(b: &bool) -> bool {
 
 /// Server-reported capabilities the SPA uses to decide which UI affordances
 /// to surface. Additive — clients that deserialize older responses simply
-/// see `None` for fields they don't know about. Opt-in destructive
-/// operations (like gallery delete) default to `false` so a client that
-/// forgets to check gets the safe behavior.
+/// see `None` for fields they don't know about.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GalleryCapabilities {
     /// Whether `DELETE /api/gallery/image/:filename` is allowed by the
-    /// server configuration. Operators opt in via
-    /// `MOLD_GALLERY_ALLOW_DELETE=1` (combined with the existing API-key
-    /// middleware when the server is exposed beyond localhost).
+    /// server. Always `true` on current builds; kept as a capability field
+    /// so older clients that still check it continue to work.
     pub can_delete: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CatalogCapabilities {
+    /// Whether the catalog system is available and enabled on this server.
+    /// Disabled via `MOLD_CATALOG_DISABLE=1` or `MOLD_CATALOG_DISABLE=true`.
+    pub available: bool,
+    /// List of model family names available in the catalog.
+    pub families: Vec<String>,
 }
 
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
@@ -2379,6 +2385,7 @@ pub struct GalleryCapabilities {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerCapabilities {
     pub gallery: GalleryCapabilities,
+    pub catalog: CatalogCapabilities,
 }
 
 /// Build a default output filename, sanitizing colons from model names.

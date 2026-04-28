@@ -6,6 +6,11 @@
 # Claude Code
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+
+# Local-only AI-assisted dev scaffolding (handoffs, phase plans, design docs).
+# Kept on disk for session context; not part of the public repo.
+tasks/
+docs/superpowers/
 .worktrees/
 .playwright-mcp/
 .direnv/

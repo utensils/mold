@@ -8,7 +8,7 @@ use std::cell::Cell;
 // Each GPU worker thread is pinned to a single ordinal. We stash that ordinal
 // in a thread-local so cross-engine hotpaths (`create_device`, `reclaim_gpu_memory`)
 // can debug-assert the caller isn't drifting onto a sibling GPU's context —
-// the exact footgun that took the process down on killswitch when LTX-2 had
+// the exact footgun that took the process down on <gpu-host> when LTX-2 had
 // `reclaim_gpu_memory(0)` hardcoded and nuked GPU 0's context while SD3.5
 // was still denoising there.
 //

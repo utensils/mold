@@ -42,7 +42,7 @@ pub struct Ltx2Engine {
     pending_placement: Option<mold_core::types::DevicePlacement>,
     /// GPU ordinal this engine is pinned to. Every `Device::new_cuda` and
     /// `reclaim_gpu_memory` call must use this ordinal — hardcoding `0` here
-    /// is what took down the process on killswitch when LTX-2 ran alongside
+    /// is what took down the process on <gpu-host> when LTX-2 ran alongside
     /// SD3.5 on a multi-GPU host.
     gpu_ordinal: usize,
 }
