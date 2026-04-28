@@ -120,8 +120,14 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<CatalogRow> {
     })
 }
 
-/// Replace every row for `family` in a single transaction. The previous
-/// rows are deleted first; the FTS5 mirror is rebuilt at the end.
+/// Replace every row for `family` in a single transaction. Rows for this
+/// family are deleted first; the new batch is then written via
+/// `INSERT OR REPLACE` so cross-family overlap (an entry the scanner now
+/// classifies under `family` but that already exists under a different
+/// family from a prior scan or the embedded seed shards) reassigns rather
+/// than blowing up on the `UNIQUE (source, source_id)` constraint.
+/// Within a single batch, duplicates by `id` (primary key) similarly
+/// collapse to the last write. The FTS5 mirror is rebuilt at the end.
 pub fn upsert_entries(
     conn: &Connection,
     family: &str,
@@ -132,7 +138,7 @@ pub fn upsert_entries(
     for r in rows {
         tx.execute(
             &format!(
-                "INSERT INTO catalog ({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)",
+                "INSERT OR REPLACE INTO catalog ({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)",
             ),
             params![
                 r.id, r.source, r.source_id, r.name, r.author, r.family, r.family_role,

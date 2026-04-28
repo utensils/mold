@@ -135,3 +135,74 @@ fn search_fts_matches_name() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].name, "Juggernaut XL");
 }
+
+/// Cross-family overlap regression: the same `(source, source_id)` can show
+/// up under two different family scans (e.g. a VAE referenced by both
+/// qwen-image and sdxl seeds). Without `ON CONFLICT(id) DO UPDATE`, the
+/// second `upsert_entries` call hits the `UNIQUE (source, source_id)`
+/// constraint and the entire family's batch is rejected.
+///
+/// This was Phase H+1's actual production failure: SDXL refresh on a DB
+/// already seeded with the embedded shards (which have qwen-image entries
+/// like `chatpig/vae`) bailed with `UNIQUE constraint failed:
+/// catalog.source, catalog.source_id` and surfaced 0 rows in the catalog
+/// despite the scanner reporting `total_entries=159`.
+#[test]
+fn upsert_reassigns_entry_when_family_changes() {
+    let conn = open();
+    upsert_entries(
+        &conn,
+        "qwen-image",
+        &[row(
+            "hf:chatpig/vae",
+            "hf",
+            "qwen-image",
+            "Chatpig VAE",
+            100,
+        )],
+    )
+    .unwrap();
+    // SDXL scan re-finds the same model and classifies it under sdxl.
+    upsert_entries(
+        &conn,
+        "sdxl",
+        &[row("hf:chatpig/vae", "hf", "sdxl", "Chatpig VAE", 100)],
+    )
+    .unwrap();
+    let fetched = get_by_id(&conn, "hf:chatpig/vae").unwrap().unwrap();
+    assert_eq!(
+        fetched.family, "sdxl",
+        "most-recent classification must win — entry should now belong to sdxl",
+    );
+    // Still exactly one row for that primary key.
+    let qwen_rows = list(
+        &conn,
+        &ListParams {
+            family: Some("qwen-image".into()),
+            limit: 100,
+            offset: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        qwen_rows.iter().all(|r| r.id != "hf:chatpig/vae"),
+        "old qwen-image row must be gone after reassignment, got {qwen_rows:?}",
+    );
+}
+
+/// Same `(source, source_id)` showing up in the *same family*'s batch must
+/// not blow up — the orchestrator can hand us duplicates if a model
+/// surfaces from two HF seeds within one family scan.
+#[test]
+fn upsert_handles_duplicate_id_within_one_batch() {
+    let conn = open();
+    let r = row("hf:a/dup", "hf", "sdxl", "Dup", 1);
+    let mut second = r.clone();
+    second.name = "Dup (newer download_count)".into();
+    second.download_count = 999;
+    upsert_entries(&conn, "sdxl", &[r, second]).unwrap();
+    let fetched = get_by_id(&conn, "hf:a/dup").unwrap().unwrap();
+    assert_eq!(fetched.download_count, 999);
+    assert_eq!(fetched.name, "Dup (newer download_count)");
+}
