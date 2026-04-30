@@ -3,6 +3,7 @@ use candle_core::{DType, Device, Module, Tensor};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -54,6 +55,13 @@ pub struct SD15Engine {
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
     control_tensor_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// `Some(path)` when the engine was built from a Civitai single-file
+    /// checkpoint via `from_single_file()`. `load()` branches on this to
+    /// wire a custom `SingleFileBackend` (translating diffusers `vb.get`
+    /// calls through `Sd15Remap` into mmap'd A1111 reads) instead of
+    /// calling candle's per-component `build_*` helpers. `None` for
+    /// diffusers-layout (HF) checkpoints.
+    pub(crate) single_file_path: Option<PathBuf>,
 }
 
 impl SD15Engine {
@@ -72,7 +80,87 @@ impl SD15Engine {
             mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             control_tensor_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             pending_placement: None,
+            single_file_path: None,
         }
+    }
+
+    /// Construct a SD1.5 engine from a Civitai single-file `.safetensors`
+    /// checkpoint.
+    ///
+    /// Header-parses the file via `loader::single_file::load(_,
+    /// Family::Sd15)`, validates that the SD1.5 A1111 → diffusers rename
+    /// rules cover its UNet / VAE / CLIP-L tensor keys via
+    /// `loader::sd15_keys::build_sd15_remap(_)`, and stashes the path in
+    /// `single_file_path`. The actual UNet / VAE / CLIP-L materialisation
+    /// (with a custom `SimpleBackend` that translates each diffusers
+    /// `vb.get(name)` into the corresponding A1111 key inside the mmap'd
+    /// single file) lands in a downstream phase — this constructor does
+    /// **not** build the model.
+    ///
+    /// `clip_tokenizer` is the path to a companion-pulled CLIP-L
+    /// tokenizer (phase 2.7); the tokenizer never lives inside the
+    /// single-file checkpoint.
+    pub fn from_single_file(
+        model_name: String,
+        single_file_path: PathBuf,
+        clip_tokenizer: PathBuf,
+        scheduler: Scheduler,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+    ) -> Result<Self> {
+        if !single_file_path.exists() {
+            bail!(
+                "single-file checkpoint not found: {}",
+                single_file_path.display()
+            );
+        }
+
+        // Header-parse and validate the SD1.5 layout. `single_file::load`
+        // is header-only — no tensor data is mmap'd here.
+        let bundle = crate::loader::single_file::load(
+            &single_file_path,
+            mold_catalog::families::Family::Sd15,
+        )?;
+
+        // Validate that every diffusers key the future SimpleBackend will
+        // request resolves to a real A1111 key inside the file. Catches
+        // malformed checkpoints at construction time rather than deep in
+        // the eventual `load()` call.
+        let _remap = crate::loader::sd15_keys::build_sd15_remap(&bundle)?;
+
+        // `ModelPaths` is a diffusers-layout view; for single-file the
+        // transformer / vae / clip_encoder all materialise from the same
+        // checkpoint at load time. The real branch lives on the new
+        // `single_file_path` field — future `load()` consults it before
+        // falling through to the diffusers `build_*` helpers.
+        let paths = ModelPaths {
+            transformer: single_file_path.clone(),
+            transformer_shards: Vec::new(),
+            vae: single_file_path.clone(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: Some(single_file_path.clone()),
+            t5_tokenizer: None,
+            clip_tokenizer: Some(clip_tokenizer),
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+
+        Ok(Self {
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
+            scheduler,
+            prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
+            mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
+            control_tensor_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
+            pending_placement: None,
+            single_file_path: Some(single_file_path),
+        })
     }
 
     /// Validate and return required SD1.5 paths (CLIP-L encoder + tokenizer).
@@ -141,9 +229,23 @@ impl SD15Engine {
 
     /// Load all SD1.5 model components (Eager mode).
     ///
-    /// On error, `self.base.loaded` remains `None` — all components are assembled into
-    /// local variables and only stored in `self.base.loaded` on success, so partial loads
-    /// cannot leave the engine in an inconsistent state.
+    /// Two materialisation paths share this entry point:
+    ///
+    /// - **Diffusers-layout** (`single_file_path == None`) — calls candle's
+    ///   `build_unet` / `build_vae` / `build_clip_transformer` helpers,
+    ///   each of which mmaps a separate component file through the
+    ///   default `VarBuilder::from_mmaped_safetensors`.
+    /// - **Single-file** (`single_file_path == Some(path)`) — header-parses
+    ///   the checkpoint, runs `build_sd15_remap` to produce a
+    ///   diffusers→A1111 lookup, and feeds candle's per-component
+    ///   constructors a `VarBuilder::from_backend(SingleFileBackend)` that
+    ///   translates each `vb.get(diffusers_key)` into an mmap'd A1111 read.
+    ///   Three backends share the underlying mmap (one per component VB);
+    ///   peak memory is identical to the diffusers path.
+    ///
+    /// On error, `self.base.loaded` remains `None` — all components are
+    /// assembled into local variables and only stored on success, so
+    /// partial loads cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
         if self.base.loaded.is_some() {
             return Ok(());
@@ -167,29 +269,6 @@ impl SD15Engine {
 
         let sd_config = self.sd_config();
 
-        // Load UNet
-        self.base.progress.stage_start("Loading UNet (GPU)");
-        let unet_start = Instant::now();
-        let unet = sd_config.build_unet(
-            &self.base.paths.transformer,
-            &device,
-            4,     // in_channels
-            false, // use_flash_attn
-            dtype,
-        )?;
-        self.base
-            .progress
-            .stage_done("Loading UNet (GPU)", unet_start.elapsed());
-
-        // Load VAE
-        self.base.progress.stage_start("Loading VAE (GPU)");
-        let vae_start = Instant::now();
-        let vae = sd_config.build_vae(&self.base.paths.vae, &device, dtype)?;
-        self.base
-            .progress
-            .stage_done("Loading VAE (GPU)", vae_start.elapsed());
-
-        // Load CLIP-L encoder
         // Tier 1: honor `placement.text_encoders` override (group knob).
         let tier1 = self
             .pending_placement
@@ -197,19 +276,19 @@ impl SD15Engine {
             .map(|p| p.text_encoders)
             .unwrap_or_default();
         let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
-        self.base.progress.stage_start("Loading CLIP-L encoder");
-        let clip_start = Instant::now();
-        let clip = stable_diffusion::build_clip_transformer(
-            &sd_config.clip,
-            &clip_encoder,
-            &clip_device,
-            DType::F32,
-        )?;
-        self.base
-            .progress
-            .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
 
-        // Load tokenizer
+        let (unet, vae, clip) = if let Some(single_file) = self.single_file_path.clone() {
+            self.load_components_single_file(
+                &single_file,
+                &sd_config,
+                &device,
+                &clip_device,
+                dtype,
+            )?
+        } else {
+            self.load_components_diffusers(&clip_encoder, &sd_config, &device, &clip_device, dtype)?
+        };
+
         let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer)
             .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
 
@@ -226,6 +305,133 @@ impl SD15Engine {
 
         tracing::info!(model = %self.base.model_name, "all SD1.5 components loaded successfully");
         Ok(())
+    }
+
+    /// Diffusers-layout component loader (existing pre-2.6 path).
+    fn load_components_diffusers(
+        &mut self,
+        clip_encoder: &std::path::Path,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        clip_device: &Device,
+        dtype: DType,
+    ) -> Result<(
+        stable_diffusion::unet_2d::UNet2DConditionModel,
+        stable_diffusion::vae::AutoEncoderKL,
+        stable_diffusion::clip::ClipTextTransformer,
+    )> {
+        self.base.progress.stage_start("Loading UNet (GPU)");
+        let unet_start = Instant::now();
+        let unet = sd_config.build_unet(
+            &self.base.paths.transformer,
+            device,
+            4,     // in_channels
+            false, // use_flash_attn
+            dtype,
+        )?;
+        self.base
+            .progress
+            .stage_done("Loading UNet (GPU)", unet_start.elapsed());
+
+        self.base.progress.stage_start("Loading VAE (GPU)");
+        let vae_start = Instant::now();
+        let vae = sd_config.build_vae(&self.base.paths.vae, device, dtype)?;
+        self.base
+            .progress
+            .stage_done("Loading VAE (GPU)", vae_start.elapsed());
+
+        self.base.progress.stage_start("Loading CLIP-L encoder");
+        let clip_start = Instant::now();
+        let clip = stable_diffusion::build_clip_transformer(
+            &sd_config.clip,
+            clip_encoder,
+            clip_device,
+            DType::F32,
+        )?;
+        self.base
+            .progress
+            .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
+
+        Ok((unet, vae, clip))
+    }
+
+    /// Single-file (Civitai) component loader (phase 2.6 + 2.8.5).
+    ///
+    /// Header-parses the checkpoint, builds the diffusers→A1111 remap, wraps
+    /// it in a `SingleFileBackend` (which translates diffusers `vb.get(key)`
+    /// calls into reads from the mmap'd source tensors), then hands three
+    /// `VarBuilder::from_backend(SingleFileBackend)` instances to candle's
+    /// per-component constructors. UNet, VAE, and CLIP-L all read from the
+    /// same single-file mmap — no on-disk shard files needed.
+    ///
+    /// Reaches into `sd_config.unet()` / `.autoencoder()` accessors exposed
+    /// by candle-transformers-mold 0.9.12 (utensils/candle PR #1).
+    fn load_components_single_file(
+        &mut self,
+        single_file: &std::path::Path,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        clip_device: &Device,
+        dtype: DType,
+    ) -> Result<(
+        stable_diffusion::unet_2d::UNet2DConditionModel,
+        stable_diffusion::vae::AutoEncoderKL,
+        stable_diffusion::clip::ClipTextTransformer,
+    )> {
+        use crate::loader::single_file_backend::SingleFileBackend;
+        use crate::loader::{build_sd15_remap, single_file as single_file_loader};
+        use candle_nn::VarBuilder;
+        use mold_catalog::families::Family;
+
+        let bundle = single_file_loader::load(single_file, Family::Sd15)
+            .map_err(|e| anyhow::anyhow!("partition single-file SD1.5 checkpoint: {e}"))?;
+        let remap = build_sd15_remap(&bundle)
+            .map_err(|e| anyhow::anyhow!("build SD1.5 diffusers→A1111 remap: {e}"))?;
+
+        self.base.progress.stage_start("Loading UNet (single-file)");
+        let unet_start = Instant::now();
+        let unet_backend = SingleFileBackend::from_sd15_remap(single_file, &remap)?;
+        let vb_unet = VarBuilder::from_backend(Box::new(unet_backend), dtype, device.clone());
+        let unet = stable_diffusion::unet_2d::UNet2DConditionModel::new(
+            vb_unet,
+            4,     // in_channels (latent channels for SD1.5)
+            4,     // out_channels (matches build_unet's hardcoded value)
+            false, // use_flash_attn — feature parity with diffusers path
+            sd_config.unet().clone(),
+        )?;
+        self.base
+            .progress
+            .stage_done("Loading UNet (single-file)", unet_start.elapsed());
+
+        self.base.progress.stage_start("Loading VAE (single-file)");
+        let vae_start = Instant::now();
+        let vae_backend = SingleFileBackend::from_sd15_remap(single_file, &remap)?;
+        let vb_vae = VarBuilder::from_backend(Box::new(vae_backend), dtype, device.clone());
+        let vae = stable_diffusion::vae::AutoEncoderKL::new(
+            vb_vae,
+            3, // in_channels (RGB)
+            3, // out_channels (RGB)
+            sd_config.autoencoder().clone(),
+        )?;
+        self.base
+            .progress
+            .stage_done("Loading VAE (single-file)", vae_start.elapsed());
+
+        self.base
+            .progress
+            .stage_start("Loading CLIP-L (single-file)");
+        let clip_start = Instant::now();
+        let clip_backend = SingleFileBackend::from_sd15_remap(single_file, &remap)?;
+        // CLIP-L weights are F32 in the diffusers path; mirror that here so
+        // tokenization output dtype matches what `LoadedSD15.dtype` expects.
+        let vb_clip =
+            VarBuilder::from_backend(Box::new(clip_backend), DType::F32, clip_device.clone());
+        let clip = stable_diffusion::clip::ClipTextTransformer::new(vb_clip, &sd_config.clip)?;
+        self.base
+            .progress
+            .stage_done("Loading CLIP-L (single-file)", clip_start.elapsed());
+
+        Ok((unet, vae, clip))
     }
 
     /// Tokenize a prompt for the CLIP encoder, padding/truncating to max_len tokens.
@@ -1061,5 +1267,181 @@ impl InferenceEngine for SD15Engine {
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
         Some(&self.base.paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::InferenceEngine;
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    /// Synthesise a minimal SD1.5-shaped single-file safetensors with one
+    /// representative key per component bucket. Tensor data is one zero
+    /// F32 — `loader::single_file::load` is header-only and the
+    /// constructor doesn't materialise weights.
+    fn synth_sd15_single_file(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mold-sd15-from-sf-{}-{}-{}.safetensors",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+
+        let keys: &[&str] = &[
+            // UNet
+            "model.diffusion_model.input_blocks.0.0.weight",
+            "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+            // VAE
+            "first_stage_model.encoder.down.0.block.0.norm1.weight",
+            "first_stage_model.quant_conv.weight",
+            // CLIP-L
+            "cond_stage_model.transformer.text_model.encoder.layers.0.self_attn.q_proj.weight",
+            "cond_stage_model.transformer.text_model.final_layer_norm.weight",
+        ];
+
+        let f32_zero = 0.0f32.to_le_bytes().to_vec();
+        let buffers: Vec<Vec<u8>> = keys.iter().map(|_| f32_zero.clone()).collect();
+        let mut tensors: HashMap<String, TensorView<'_>> = HashMap::new();
+        for (key, buf) in keys.iter().zip(buffers.iter()) {
+            tensors.insert(
+                (*key).to_string(),
+                TensorView::new(SafeDtype::F32, vec![1], buf).unwrap(),
+            );
+        }
+        serialize_to_file(&tensors, &None, &path).unwrap();
+        path
+    }
+
+    #[test]
+    fn from_single_file_constructs_for_synthetic_sd15_checkpoint() {
+        let single_file = synth_sd15_single_file("ok");
+        // The companion tokenizer is pulled separately (phase 2.7) and is
+        // not validated by the constructor — its path is just stored.
+        let tokenizer_path = std::env::temp_dir().join("mold-sd15-tok-stub.json");
+
+        let engine = SD15Engine::from_single_file(
+            "dreamshaper-8".to_string(),
+            single_file.clone(),
+            tokenizer_path,
+            Scheduler::default(),
+            LoadStrategy::Eager,
+            0,
+        )
+        .expect("constructor must accept a valid SD1.5 single-file layout");
+
+        assert_eq!(engine.model_name(), "dreamshaper-8");
+        assert_eq!(
+            engine.single_file_path.as_deref(),
+            Some(single_file.as_path()),
+            "single-file path must be stashed for the future load() branch",
+        );
+        assert!(
+            !engine.is_loaded(),
+            "constructor must not eagerly materialise model weights",
+        );
+
+        let _ = std::fs::remove_file(single_file);
+    }
+
+    #[test]
+    fn load_branches_to_single_file_path_and_invokes_candle_constructors() {
+        // Phase 2.8.5 smoke: `load()` must dispatch to the single-file
+        // branch, hand a `VarBuilder::from_backend(SingleFileBackend)` to
+        // candle's `UNet2DConditionModel::new`, and surface an error
+        // sourced from the SingleFileBackend's tensor lookup (because the
+        // synthetic checkpoint doesn't carry the full SD1.5 tensor set).
+        // This confirms the wiring without paying the real-shape model
+        // construction cost. The full real-shape `load().unwrap()` smoke
+        // runs in 2.10's <gpu-host> UAT against a real DreamShaper
+        // checkpoint.
+        let single_file = synth_sd15_single_file("load-branch");
+        let tokenizer_stub = std::env::temp_dir().join(format!(
+            "mold-sd15-tok-stub-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::write(&tokenizer_stub, b"").unwrap();
+
+        let mut engine = SD15Engine::from_single_file(
+            "dreamshaper-8".to_string(),
+            single_file.clone(),
+            tokenizer_stub.clone(),
+            Scheduler::Ddim,
+            LoadStrategy::Eager,
+            0,
+        )
+        .expect("constructor");
+
+        std::env::set_var("MOLD_DEVICE", "cpu");
+        let err = SD15Engine::load(&mut engine).expect_err(
+            "synthetic single-file checkpoint can't satisfy SD1.5's full tensor set; \
+             dispatch should land in the candle constructor and fail there",
+        );
+        std::env::remove_var("MOLD_DEVICE");
+
+        let msg = err.to_string();
+        // Proof we got past the dispatch: the error originates from the
+        // single-file remap / SingleFileBackend layer, not from the
+        // diffusers loader (which would say "transformer/diffusion_pytorch_model.safetensors")
+        // or from the dispatch itself (which has no error surface — it
+        // just calls `load_components_single_file`).
+        assert!(
+            msg.contains("single-file") || msg.contains("rename rule"),
+            "expected error from the single-file load layer, got: {msg}",
+        );
+
+        let _ = std::fs::remove_file(single_file);
+        let _ = std::fs::remove_file(tokenizer_stub);
+    }
+
+    /// Real-shape SD1.5 `load()` smoke — full UNet + VAE + CLIP-L
+    /// construction against a synthetic checkpoint. Demoted to
+    /// `#[ignore]` per the 2.6 handoff: ~3.4 GB of f32 zeros at
+    /// SD1.5-correct shapes is over the test budget, and the construction
+    /// path also can't run today because of the candle-mold private-field
+    /// blocker (see `load_components_single_file`). Kept as documentation
+    /// of the eventual UAT contract — 2.10's <gpu-host> UAT runs the
+    /// real-checkpoint variant.
+    #[test]
+    #[ignore]
+    fn from_single_file_real_shape_load_smoke() {
+        // Implementation deferred to the candle-fork-accessor follow-up.
+        // 2.10 UAT replaces this with a real DreamShaper 8 / Realistic
+        // Vision V5 checkpoint pull + load + 4-step generation.
+    }
+
+    #[test]
+    fn from_single_file_rejects_missing_file() {
+        let bogus = std::env::temp_dir().join(format!(
+            "mold-sd15-from-sf-missing-{}-{}.safetensors",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+
+        let result = SD15Engine::from_single_file(
+            "missing".to_string(),
+            bogus,
+            std::env::temp_dir().join("mold-sd15-tok-stub.json"),
+            Scheduler::default(),
+            LoadStrategy::Eager,
+            0,
+        );
+
+        assert!(
+            result.is_err(),
+            "constructor must surface a missing-file error before deeper parsing",
+        );
     }
 }

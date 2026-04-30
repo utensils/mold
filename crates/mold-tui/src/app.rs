@@ -1087,14 +1087,9 @@ pub(crate) fn tab_at_column(col: u16, tab_bar_x: u16) -> Option<View> {
 }
 
 /// Configure the background `mold serve` command — pure helper so tests
-/// can inspect the args and env without actually spawning a process. The
-/// TUI owns this server lifecycle (starts it, talks to it over the loopback,
-/// stops it on quit), so it must opt into destructive endpoints like
-/// `DELETE /api/gallery/image/:filename` — otherwise the user's `d` in the
-/// Gallery returns 403 and the tile re-appears on the next scan.
+/// can inspect the args and env without actually spawning a process.
 pub(crate) fn configure_background_server_command(cmd: &mut std::process::Command, port: u16) {
     cmd.args(["serve", "--port", &port.to_string(), "--log-file"])
-        .env("MOLD_GALLERY_ALLOW_DELETE", "1")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 }
@@ -3348,10 +3343,9 @@ impl App {
         if let Some(ref url) = entry.server_url {
             // Delete from server via API. Propagate errors through the
             // background channel so the UI can surface them and rescan —
-            // a silent fire-and-forget here masks 403 responses from
-            // `MOLD_GALLERY_ALLOW_DELETE=0` servers and transient
-            // network errors, leaving the deleted tile "gone" locally
-            // while the server still holds the file.
+            // a silent fire-and-forget would mask transient network errors
+            // and leave the deleted tile "gone" locally while the server
+            // still holds the file.
             let url = url.clone();
             let filename = entry.filename();
             let tx = self.bg_tx.clone();
@@ -8808,29 +8802,9 @@ mod tests {
     }
 
     #[test]
-    fn background_server_command_enables_gallery_delete() {
-        // The TUI-spawned `mold serve` owns the same `~/.mold/output` the
-        // TUI deletes from — if the server default (`MOLD_GALLERY_ALLOW_DELETE=0`)
-        // applies, every DELETE API call returns 403, the recent
-        // `GalleryDeleteFailed` plumbing surfaces the error, and the
-        // follow-up rescan brings the tile back. Setting the env var when
-        // configuring the spawn lets the loopback server honour the delete.
+    fn background_server_command_passes_serve_args() {
         let mut cmd = std::process::Command::new("mold");
         super::configure_background_server_command(&mut cmd, 7680);
-
-        let env_entry = cmd
-            .get_envs()
-            .find(|(k, _)| k.to_string_lossy() == "MOLD_GALLERY_ALLOW_DELETE")
-            .map(|(_, v)| v.map(|os| os.to_string_lossy().into_owned()))
-            .expect(
-                "MOLD_GALLERY_ALLOW_DELETE must be configured on the background server command",
-            );
-
-        assert_eq!(
-            env_entry.as_deref(),
-            Some("1"),
-            "MOLD_GALLERY_ALLOW_DELETE must be '1' so loopback deletes succeed"
-        );
 
         let args: Vec<String> = cmd
             .get_args()

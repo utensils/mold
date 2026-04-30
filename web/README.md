@@ -91,20 +91,11 @@ router; the SPA fallback handles everything else and reuses
   - Keyboard: Esc closes, ← / → or ↑ / ↓ or k / j to step through the
     filtered list, `i` toggles the mobile sheet.
   - Full `OutputMetadata` panel, prompt + seed copy-to-clipboard,
-    download. Delete is hidden unless the server advertises
-    `gallery.can_delete: true` via `/api/capabilities`.
+    download, delete.
 - **Supports every `OutputFormat`** the server can emit: PNG, JPEG,
   GIF, APNG, WebP, MP4. MP4 thumbnails are real first-frame PNGs.
 - **Transparent mold logo** mirrored from the docs site at
   `web/public/logo.png` — also used as the favicon / apple-touch-icon.
-
-## Server-side feature gates
-
-- `MOLD_GALLERY_ALLOW_DELETE=1` — required on the host to enable the
-  `DELETE /api/gallery/image/:filename` endpoint. Off by default. Pair
-  with `MOLD_API_KEY` when the server is reachable from outside
-  localhost. The SPA fetches `/api/capabilities` at mount and hides
-  the delete button when this isn't set.
 
 ## Stack
 

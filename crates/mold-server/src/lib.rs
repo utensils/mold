@@ -1,5 +1,7 @@
 pub mod auth;
+pub mod catalog_api;
 pub mod chain_limits;
+pub mod test_support;
 // Agent A (downloads)
 pub mod downloads;
 pub mod gpu_pool;
@@ -247,6 +249,29 @@ pub async fn run_server(
         tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
     }
 
+    // ── Catalog: seed from embedded shards on first boot, spawn scan driver.
+    {
+        let res = state.catalog_db.with_conn(|conn| {
+            mold_catalog::shards::seed_db_from_embedded_if_empty(conn, None)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        });
+        if let Err(e) = res {
+            tracing::warn!(target: "catalog", "seed failed: {e}");
+        }
+    }
+    let catalog_driver = {
+        let queue = (*state.catalog_scan).clone();
+        let catalog_db = state.catalog_db.clone();
+        tokio::spawn(async move {
+            queue
+                .drive(
+                    std::sync::Arc::new(crate::catalog_api::LiveScanDriver),
+                    catalog_db,
+                )
+                .await;
+        })
+    };
+
     // ── Downloads UI (Agent A) ──────────────────────────────────────────────
     // Single-writer download queue driver. Bind the `JoinHandle` so we can
     // `.abort()` it when `axum::serve` returns — same pattern as the resource
@@ -254,9 +279,12 @@ pub async fn run_server(
     // outlive graceful shutdown and keep polling its cancellation token until
     // process exit.
     let downloads_shutdown = tokio_util::sync::CancellationToken::new();
+    let downloads_models_dir = state.config.read().await.resolved_models_dir();
     let downloads_driver = crate::downloads::spawn_driver(
         state.downloads.clone(),
         std::sync::Arc::new(crate::downloads::HfPullDriver),
+        std::sync::Arc::new(crate::downloads::CivitaiRecipeDriver),
+        downloads_models_dir,
         downloads_shutdown.clone(),
     );
 
@@ -411,6 +439,7 @@ pub async fn run_server(
     // Matches the aggregator handle pattern from commit 5e43886.
     downloads_shutdown.cancel();
     downloads_driver.abort();
+    catalog_driver.abort();
     // Server has stopped accepting requests — stop the telemetry aggregator
     // so it doesn't outlive the server loop.
     resources_aggregator.abort();

@@ -1,0 +1,8 @@
+[
+  { "type": "file", "path": "ae.safetensors", "size": 335000000 },
+  { "type": "file", "path": "flux1-dev.safetensors", "size": 23800000000 },
+  { "type": "file", "path": "model_index.json", "size": 600 },
+  { "type": "directory", "path": "text_encoder", "size": 0 },
+  { "type": "directory", "path": "text_encoder_2", "size": 0 },
+  { "type": "directory", "path": "vae", "size": 0 }
+]

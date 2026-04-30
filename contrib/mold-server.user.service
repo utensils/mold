@@ -1,0 +1,34 @@
+[Unit]
+Description=mold inference server (user mode)
+Documentation=https://github.com/utensils/mold
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Path to the mold binary. Adjust if you build from a different worktree
+# or have it installed elsewhere. %h expands to the user's home directory.
+ExecStart=%h/github/mold/target/release/mold serve --port 7680 --bind 0.0.0.0
+WorkingDirectory=%h
+
+# Tokens (HF_TOKEN, CIVITAI_TOKEN, MOLD_API_KEY) live in this file —
+# chmod 600. The leading "-" makes the path optional so the service
+# still starts on a fresh box without an env file.
+EnvironmentFile=-%h/.config/mold/server.env
+
+# Sane defaults; override in server.env if needed.
+Environment=MOLD_LOG=info
+Environment=MOLD_PORT=7680
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Logs go to the user journal: `journalctl --user -u mold-server -f`
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

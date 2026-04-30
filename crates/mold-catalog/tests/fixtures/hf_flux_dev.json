@@ -1,0 +1,17 @@
+{
+  "id": "black-forest-labs/FLUX.1-dev",
+  "modelId": "black-forest-labs/FLUX.1-dev",
+  "author": "black-forest-labs",
+  "downloads": 5400000,
+  "likes": 12300,
+  "private": false,
+  "tags": ["text-to-image", "flux", "diffusers"],
+  "pipeline_tag": "text-to-image",
+  "library_name": "diffusers",
+  "createdAt": "2024-08-01T12:00:00.000Z",
+  "lastModified": "2024-09-15T08:30:00.000Z",
+  "cardData": {
+    "license": "flux-1-dev-non-commercial-license",
+    "extra_gated_eu_disallowed": false
+  }
+}

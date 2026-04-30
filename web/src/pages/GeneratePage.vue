@@ -8,12 +8,7 @@ import RunningStrip from "../components/RunningStrip.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
 import TopBar from "../components/TopBar.vue";
-import {
-  deleteGalleryImage,
-  fetchCapabilities,
-  fetchModels,
-  listGallery,
-} from "../api";
+import { deleteGalleryImage, fetchModels, listGallery } from "../api";
 import { useGenerateForm } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { useHideMode } from "../composables/useHideMode";
@@ -25,7 +20,6 @@ import type {
   ExpandFormState,
   GalleryImage,
   ModelInfoExtended,
-  ServerCapabilities,
   SourceImageState,
 } from "../types";
 import type { ChainScriptToml } from "../lib/chainToml";
@@ -71,9 +65,6 @@ const models = ref<ModelInfoExtended[]>([]);
 const galleryEntries = ref<GalleryImage[]>([]);
 const view = ref<ViewMode>(loadViewMode());
 const muted = ref(loadMuted());
-const capabilities = ref<ServerCapabilities>({
-  gallery: { can_delete: false },
-});
 
 const showSettings = ref(false);
 const showExpand = ref(false);
@@ -361,11 +352,6 @@ onMounted(async () => {
   } catch (e) {
     console.error(e);
   }
-  try {
-    capabilities.value = await fetchCapabilities();
-  } catch {
-    /* keep default */
-  }
   if (!form.state.value.model) {
     const first = models.value.find((m) => m.downloaded);
     if (first) form.applyModelDefaults(first);
@@ -491,7 +477,6 @@ onBeforeUnmount(() => {
       "
       :index="selectedIndex"
       :total="galleryEntries.length"
-      :can-delete="capabilities.gallery.can_delete"
       :muted="muted"
       @close="closeDrawer"
       @prev="stepDrawer(-1)"

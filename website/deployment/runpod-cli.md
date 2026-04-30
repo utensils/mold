@@ -74,11 +74,8 @@ mold runpod connect <pod-id>
 # → gallery: https://<pod-id>-7680.proxy.runpod.net
 ```
 
-The delete button is hidden unless the server advertises
-`gallery.can_delete: true` via `/api/capabilities` — set
-`MOLD_GALLERY_ALLOW_DELETE=1` on the pod (env var) if you want to prune
-from the browser. Pair that with `MOLD_API_KEY` so the endpoint isn't
-open to the public proxy.
+The delete button is always available. Pair `MOLD_API_KEY` with the pod
+if you don't want the endpoint open to the public proxy.
 
 ### Common flags
 

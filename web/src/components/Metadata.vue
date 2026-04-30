@@ -21,7 +21,6 @@ type CopyTarget = "prompt" | "seed";
 defineProps<{
   item: GalleryImage;
   copied: false | CopyTarget;
-  canDelete: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -260,9 +259,8 @@ function onCopy(text: string, kind: CopyTarget) {
     </div>
   </section>
 
-  <!-- Danger zone (opt-in — hidden unless the server advertises
-       `gallery.can_delete`). -->
-  <section v-if="canDelete" class="mt-6 flex justify-end">
+  <!-- Danger zone — destructive delete is always available. -->
+  <section class="mt-6 flex justify-end">
     <button
       class="inline-flex h-9 items-center gap-1.5 rounded-full bg-rose-500/15 px-3 text-[12.5px] font-medium text-rose-200 transition hover:bg-rose-500/25 hover:text-rose-100"
       @click="emit('delete-clicked')"

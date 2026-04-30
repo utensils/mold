@@ -13,6 +13,7 @@ pub mod flux2;
 mod image;
 pub(crate) mod img2img;
 pub mod img_utils;
+pub mod loader;
 pub mod ltx2;
 pub mod ltx_video;
 pub mod model_registry;

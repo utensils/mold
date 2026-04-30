@@ -78,8 +78,42 @@ function onKey(e: KeyboardEvent) {
   toggle();
 }
 
-onMounted(() => window.addEventListener("keydown", onKey));
-onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
+// Expose the tray's rendered height as a CSS custom property on the root
+// element so other fixed-position UI (the bulk-select action bar, etc.)
+// can sit just above the tray and track its expand/collapse live. We use
+// a ResizeObserver so layout-driven height changes (font sizing, wrap,
+// expanded body) re-propagate without an explicit subscription.
+const trayEl = ref<HTMLElement | null>(null);
+let resizeObserver: ResizeObserver | null = null;
+
+function publishHeight(h: number) {
+  document.documentElement.style.setProperty(
+    "--mold-tray-height",
+    `${Math.round(h)}px`,
+  );
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", onKey);
+  if (typeof ResizeObserver !== "undefined" && trayEl.value) {
+    resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      publishHeight(entry.contentRect.height);
+    });
+    resizeObserver.observe(trayEl.value);
+    // Prime the var immediately — ResizeObserver fires on the next frame,
+    // and consumers that mount in the same tick would otherwise briefly
+    // see `0px` and snap upward once the observer kicks in.
+    publishHeight(trayEl.value.getBoundingClientRect().height);
+  }
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onKey);
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  document.documentElement.style.removeProperty("--mold-tray-height");
+});
 </script>
 
 <template>
@@ -87,6 +121,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
     class="pointer-events-none fixed inset-x-0 bottom-0 z-30 flex justify-center"
   >
     <div
+      ref="trayEl"
       class="pointer-events-auto w-full border-t border-white/5 bg-slate-950"
     >
       <button

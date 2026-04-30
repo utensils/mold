@@ -7,12 +7,37 @@
 //! **Agent A boundary** — this module is owned by the Downloads phase. Do
 //! not take a lock on resources (Agent B) or placement (Agent C) from here.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 
+use mold_core::download::RecipeAuth;
 use mold_core::types::{DownloadEvent, DownloadJob, DownloadsListing, JobStatus};
 use tokio::sync::{broadcast, Mutex as AsyncMutex, Notify};
 use tokio_util::sync::CancellationToken;
+
+/// Owned counterpart of [`mold_core::download::RecipeFetchFile`]. The queue
+/// stores files until the driver task picks the job up, so we can't carry
+/// borrowed lifetimes here.
+#[derive(Clone, Debug)]
+pub struct OwnedRecipeFile {
+    pub url: String,
+    pub dest: String,
+    pub sha256: Option<String>,
+    pub size_bytes: Option<u64>,
+}
+
+/// Everything the recipe driver needs to fetch a `cv:<id>` primary
+/// safetensors. Stored on the queue separately from `DownloadJob` so the
+/// public `DownloadJob` type (broadcast / `/api/downloads` listing) stays
+/// unchanged; only the driver dispatch reads it.
+#[derive(Clone, Debug)]
+pub struct RecipePayload {
+    /// Catalog id (e.g. `cv:618692`); used as both the dedup key and the
+    /// per-recipe subdir name (sanitized via `replace(':', "-")`).
+    pub catalog_id: String,
+    pub files: Vec<OwnedRecipeFile>,
+    pub auth: RecipeAuth,
+}
 
 /// Capacity of the broadcast channel. Slow subscribers see the oldest events
 /// lag (we accept this — the SPA will also re-fetch `/api/downloads` on reconnect).
@@ -34,6 +59,10 @@ pub struct DownloadQueue {
     events: broadcast::Sender<DownloadEvent>,
     /// Wakes the driver task when new work arrives.
     notify: Notify,
+    /// Recipe payloads indexed by job id. Populated by `enqueue_recipe`,
+    /// drained by the driver task before running the job. Manifest jobs
+    /// have no entry here and fall through to the `PullDriver` path.
+    recipe_payloads: StdMutex<HashMap<String, RecipePayload>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +90,7 @@ impl DownloadQueue {
             history: StdMutex::new(VecDeque::new()),
             events,
             notify: Notify::new(),
+            recipe_payloads: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -162,6 +192,92 @@ impl DownloadQueue {
         Ok((id, position, EnqueueOutcome::Created))
     }
 
+    /// Enqueue a recipe-driven download (Civitai single-file checkpoint).
+    /// Returns `(job_id, position, outcome)`. Dedupes on `payload.catalog_id`
+    /// — re-enqueuing the same recipe returns the existing job id so the
+    /// SPA's idempotent retry doesn't double-pull.
+    ///
+    /// Recipe jobs use the catalog id (e.g. `cv:618692`) as `DownloadJob.model`
+    /// so the drawer / API listing show something meaningful. The driver task
+    /// looks up the recipe payload by job id and dispatches to the recipe
+    /// driver instead of the manifest driver.
+    pub async fn enqueue_recipe(
+        &self,
+        payload: RecipePayload,
+    ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
+        if payload.catalog_id.trim().is_empty() {
+            return Err(EnqueueError::UnknownModel(payload.catalog_id));
+        }
+
+        // Dedup: active or queued recipe with the same catalog id?
+        {
+            let active = self.active.lock().await;
+            if let Some(handle) = active.as_ref() {
+                if handle.job.model == payload.catalog_id {
+                    return Ok((handle.job.id.clone(), 0, EnqueueOutcome::AlreadyPresent));
+                }
+            }
+        }
+        {
+            let queued = self.queued.lock().map_err(|_| EnqueueError::LockPoisoned)?;
+            if let Some((idx, existing)) = queued
+                .iter()
+                .enumerate()
+                .find(|(_, j)| j.model == payload.catalog_id)
+            {
+                return Ok((existing.id.clone(), idx + 1, EnqueueOutcome::AlreadyPresent));
+            }
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let job = DownloadJob {
+            id: id.clone(),
+            model: payload.catalog_id.clone(),
+            status: JobStatus::Queued,
+            files_done: 0,
+            files_total: payload.files.len(),
+            bytes_done: 0,
+            bytes_total: payload.files.iter().filter_map(|f| f.size_bytes).sum(),
+            current_file: None,
+            started_at: None,
+            completed_at: None,
+            error: None,
+        };
+
+        // Stash the recipe payload before pushing the job so the driver
+        // can never observe a queued job whose payload hasn't arrived yet.
+        {
+            let mut payloads = self
+                .recipe_payloads
+                .lock()
+                .map_err(|_| EnqueueError::LockPoisoned)?;
+            payloads.insert(id.clone(), payload.clone());
+        }
+
+        let position = {
+            let mut queued = self.queued.lock().map_err(|_| EnqueueError::LockPoisoned)?;
+            queued.push_back(job);
+            queued.len()
+        };
+        let _ = self.events.send(DownloadEvent::Enqueued {
+            id: id.clone(),
+            model: payload.catalog_id,
+            position,
+        });
+        self.notify.notify_one();
+        Ok((id, position, EnqueueOutcome::Created))
+    }
+
+    /// Take ownership of the recipe payload registered for a job, if any.
+    /// The driver task calls this before running a job to determine which
+    /// driver to dispatch.
+    pub(crate) fn take_recipe_payload(&self, job_id: &str) -> Option<RecipePayload> {
+        self.recipe_payloads
+            .lock()
+            .ok()
+            .and_then(|mut p| p.remove(job_id))
+    }
+
     /// Cancel an in-flight or queued download. Returns `true` if a job was
     /// found and cancelled; `false` if the id is unknown.
     pub async fn cancel(&self, id: &str) -> bool {
@@ -250,6 +366,60 @@ pub trait PullDriver: Send + Sync + 'static {
         on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         cancel: CancellationToken,
     ) -> Result<(), String>;
+}
+
+/// Trait that hides the recipe-driven (Civitai) pull. Parallel to
+/// `PullDriver` so the existing 6 manifest-driver implementations don't
+/// need to change. The driver task picks between them based on whether
+/// the queue stored a recipe payload for the job id.
+#[async_trait::async_trait]
+pub trait RecipePullDriver: Send + Sync + 'static {
+    async fn pull(
+        &self,
+        payload: RecipePayload,
+        models_dir: std::path::PathBuf,
+        on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        cancel: CancellationToken,
+    ) -> Result<(), String>;
+}
+
+/// Production recipe driver — calls `mold_core::download::fetch_recipe`.
+pub struct CivitaiRecipeDriver;
+
+#[async_trait::async_trait]
+impl RecipePullDriver for CivitaiRecipeDriver {
+    async fn pull(
+        &self,
+        payload: RecipePayload,
+        models_dir: std::path::PathBuf,
+        on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        let on_progress: mold_core::download::DownloadProgressCallback =
+            std::sync::Arc::from(on_progress);
+        let opts = mold_core::download::PullOptions::default();
+        let files: Vec<mold_core::download::RecipeFetchFile<'_>> = payload
+            .files
+            .iter()
+            .map(|f| mold_core::download::RecipeFetchFile {
+                url: f.url.as_str(),
+                dest: f.dest.as_str(),
+                sha256: f.sha256.as_deref(),
+                size_bytes: f.size_bytes,
+            })
+            .collect();
+        tokio::select! {
+            res = mold_core::download::fetch_recipe(
+                &payload.catalog_id,
+                &files,
+                payload.auth.clone(),
+                &models_dir,
+                Some(on_progress),
+                &opts,
+            ) => res.map(|_| ()).map_err(|e| e.to_string()),
+            _ = cancel.cancelled() => Err("cancelled".into()),
+        }
+    }
 }
 
 /// Production driver — wraps the real HF pull.
@@ -437,6 +607,8 @@ fn cleanup_partials_in_dir_under_root(dir: &std::path::Path, root: &std::path::P
 pub fn spawn_driver(
     queue: Arc<DownloadQueue>,
     driver: Arc<dyn PullDriver>,
+    recipe_driver: Arc<dyn RecipePullDriver>,
+    models_dir: std::path::PathBuf,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -450,7 +622,7 @@ pub fn spawn_driver(
                 if shutdown.is_cancelled() {
                     break;
                 }
-                run_one_job(&queue, &driver, &mut job).await;
+                run_one_job(&queue, &driver, &recipe_driver, &models_dir, &mut job).await;
                 if shutdown.is_cancelled() {
                     break;
                 }
@@ -463,12 +635,18 @@ pub fn spawn_driver(
 async fn run_one_job(
     queue: &Arc<DownloadQueue>,
     driver: &Arc<dyn PullDriver>,
+    recipe_driver: &Arc<dyn RecipePullDriver>,
+    models_dir: &std::path::Path,
     job: &mut DownloadJob,
 ) {
     job.status = JobStatus::Active;
     job.started_at = Some(now_ms());
     let cancel = CancellationToken::new();
     let handle_job = job.clone();
+
+    // Pull the recipe payload off the queue once, before the retry loop.
+    // Subsequent retries clone from this owned copy.
+    let recipe_payload = queue.take_recipe_payload(&job.id);
 
     // Install the job as active. The pull runs inline in this function so we
     // don't need a separate task handle — cancellation flows through `abort`.
@@ -478,7 +656,16 @@ async fn run_one_job(
     };
     queue.set_active(active_handle).await;
 
-    let _ = try_pull_with_retry(queue, driver, job, cancel.clone()).await;
+    let _ = try_pull_with_retry(
+        queue,
+        driver,
+        recipe_driver,
+        models_dir,
+        recipe_payload.as_ref(),
+        job,
+        cancel.clone(),
+    )
+    .await;
 
     // Move the finished job into history.
     let final_job = queue
@@ -489,15 +676,28 @@ async fn run_one_job(
     queue.push_history(final_job);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn try_pull_with_retry(
     queue: &Arc<DownloadQueue>,
     driver: &Arc<dyn PullDriver>,
+    recipe_driver: &Arc<dyn RecipePullDriver>,
+    models_dir: &std::path::Path,
+    recipe_payload: Option<&RecipePayload>,
     job: &mut DownloadJob,
     cancel: CancellationToken,
 ) -> Result<(), ()> {
     // Initial attempt + optional single retry.
     for attempt in 0..=1u8 {
-        let result = run_single_attempt(queue, driver, job, cancel.clone()).await;
+        let result = run_single_attempt(
+            queue,
+            driver,
+            recipe_driver,
+            models_dir,
+            recipe_payload,
+            job,
+            cancel.clone(),
+        )
+        .await;
         match result {
             Ok(()) => {
                 job.status = JobStatus::Completed;
@@ -571,9 +771,13 @@ enum AttemptError {
     Failed(String),
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_single_attempt(
     queue: &Arc<DownloadQueue>,
     driver: &Arc<dyn PullDriver>,
+    recipe_driver: &Arc<dyn RecipePullDriver>,
+    models_dir: &std::path::Path,
+    recipe_payload: Option<&RecipePayload>,
     job: &mut DownloadJob,
     cancel: CancellationToken,
 ) -> Result<(), AttemptError> {
@@ -593,7 +797,19 @@ async fn run_single_attempt(
         }
     });
 
-    let result = driver.pull(&job.model, on_progress, cancel.clone()).await;
+    let result = match recipe_payload {
+        Some(payload) => {
+            recipe_driver
+                .pull(
+                    payload.clone(),
+                    models_dir.to_path_buf(),
+                    on_progress,
+                    cancel.clone(),
+                )
+                .await
+        }
+        None => driver.pull(&job.model, on_progress, cancel.clone()).await,
+    };
     // Wait for the drain task to finish (sender dropped when `pull` returned).
     let _ = drain_handle.await;
 

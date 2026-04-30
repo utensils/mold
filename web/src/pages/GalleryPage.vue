@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { listGallery, deleteGalleryImage, fetchCapabilities } from "../api";
-import type { GalleryImage, ServerCapabilities } from "../types";
+import { listGallery, deleteGalleryImage } from "../api";
+import type { GalleryImage } from "../types";
 import { mediaKind } from "../types";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
@@ -203,16 +203,6 @@ async function deleteAllFiltered() {
   await handleDeleteMany(names);
 }
 
-/*
- * Server-reported feature toggles. We fetch these once on mount so the UI
- * can hide affordances the operator hasn't opted in to — most notably the
- * gallery delete button, which requires MOLD_GALLERY_ALLOW_DELETE=1 on the
- * host.
- */
-const capabilities = ref<ServerCapabilities>({
-  gallery: { can_delete: false },
-});
-
 // Filter pass #1: kind (all / images / video)
 const kindFiltered = computed(() => {
   if (filter.value === "all") return entries.value;
@@ -331,11 +321,7 @@ onBeforeUnmount(() => {
 });
 
 onMounted(async () => {
-  // Fire capabilities + listing in parallel. Capabilities fail-closed — an
-  // older server that doesn't know the endpoint simply gets the default
-  // `can_delete: false`, which is the safe behavior.
-  const [caps] = await Promise.all([fetchCapabilities(), refresh()]);
-  capabilities.value = caps;
+  await refresh();
 });
 </script>
 
@@ -353,7 +339,6 @@ onMounted(async () => {
       :hide-mode="!hide.anyVisible.value"
       :select-mode="selectMode"
       :selection-count="selection.size"
-      :can-delete="capabilities.gallery.can_delete"
       @update:filter="(f) => (filter = f)"
       @update:search="(s) => (search = s)"
       @update:view="setView"
@@ -404,10 +389,14 @@ onMounted(async () => {
     <Transition name="fade">
       <div
         v-if="selectMode"
-        class="fixed inset-x-0 bottom-[max(1.25rem,env(safe-area-inset-bottom))] z-30 flex justify-center px-4"
+        class="pointer-events-none fixed inset-x-0 z-40 flex justify-center px-4"
+        :style="{
+          bottom:
+            'calc(var(--mold-tray-height, 0px) + max(0.75rem, env(safe-area-inset-bottom)))',
+        }"
       >
         <div
-          class="glass flex max-w-full flex-wrap items-center gap-2 rounded-full border border-white/10 bg-ink-900/80 px-3 py-2 text-[13px] text-ink-100 shadow-xl backdrop-blur"
+          class="glass pointer-events-auto flex max-w-full flex-wrap items-center gap-2 rounded-full border border-white/10 bg-ink-900/80 px-3 py-2 text-[13px] text-ink-100 shadow-xl backdrop-blur"
           role="toolbar"
           aria-label="Selection actions"
         >
@@ -473,13 +462,18 @@ onMounted(async () => {
 
     <!-- Back-to-top FAB. Appears once the user has scrolled more than one
          viewport down, replacing the on-desktop convenience of the sticky
-         header on mobile. Fade/translate transition keeps it unobtrusive. -->
+         header on mobile. Sits above the tray so an expanded CPU/GPU tray
+         doesn't swallow it. Fade/translate transition keeps it unobtrusive. -->
     <Transition name="fade">
       <button
         v-if="showBackToTop"
         type="button"
         aria-label="Scroll to top"
-        class="fixed bottom-[max(1.25rem,env(safe-area-inset-bottom))] right-4 z-20 inline-flex h-12 w-12 items-center justify-center rounded-full bg-brand-500 text-white shadow-[0_12px_30px_-10px_rgba(99,102,241,0.7)] backdrop-blur transition hover:bg-brand-400 active:scale-95 sm:right-6"
+        class="fixed right-4 z-20 inline-flex h-12 w-12 items-center justify-center rounded-full bg-brand-500 text-white shadow-[0_12px_30px_-10px_rgba(99,102,241,0.7)] backdrop-blur transition hover:bg-brand-400 active:scale-95 sm:right-6"
+        :style="{
+          bottom:
+            'calc(var(--mold-tray-height, 0px) + max(0.75rem, env(safe-area-inset-bottom)))',
+        }"
         @click="scrollToTop"
       >
         <svg
@@ -504,7 +498,6 @@ onMounted(async () => {
       :has-next="selectedIndex >= 0 && selectedIndex < filtered.length - 1"
       :index="selectedIndex"
       :total="filtered.length"
-      :can-delete="capabilities.gallery.can_delete"
       :muted="muted"
       @close="closeDrawer"
       @prev="stepDrawer(-1)"

@@ -219,6 +219,25 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/downloads", get(list_downloads).post(create_download))
         .route("/api/downloads/:id", delete(delete_download))
         .route("/api/downloads/stream", get(stream_downloads))
+        // ─── Catalog (sub-project A) ─────────────────────────────────────
+        .route("/api/catalog", get(crate::catalog_api::list_catalog))
+        .route(
+            "/api/catalog/families",
+            get(crate::catalog_api::list_families),
+        )
+        .route(
+            "/api/catalog/refresh",
+            post(crate::catalog_api::post_refresh).get(crate::catalog_api::get_active_refresh),
+        )
+        .route(
+            "/api/catalog/refresh/:id",
+            get(crate::catalog_api::get_refresh_status),
+        )
+        .route(
+            "/api/catalog/*id",
+            get(crate::catalog_api::get_catalog_entry)
+                .post(crate::catalog_api::post_catalog_dispatch),
+        )
         .route("/api/upscale", post(upscale))
         .route("/api/upscale/stream", post(upscale_stream))
         .route("/api/resources", get(get_resources))
@@ -1620,9 +1639,18 @@ async fn health() -> impl IntoResponse {
 /// delete button when delete isn't allowed, etc.). No auth required — this
 /// is a read-only introspection endpoint.
 async fn server_capabilities() -> Json<mold_core::ServerCapabilities> {
+    let catalog_available = std::env::var("MOLD_CATALOG_DISABLE")
+        .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+
     Json(mold_core::ServerCapabilities {
-        gallery: mold_core::GalleryCapabilities {
-            can_delete: gallery_delete_allowed(),
+        gallery: mold_core::GalleryCapabilities { can_delete: true },
+        catalog: mold_core::CatalogCapabilities {
+            available: catalog_available,
+            families: mold_catalog::families::ALL_FAMILIES
+                .iter()
+                .map(|f| f.as_str().to_string())
+                .collect::<Vec<_>>(),
         },
     })
 }
@@ -1953,19 +1981,12 @@ fn content_type_for_filename(name: &str) -> &'static str {
 
 /// Delete a gallery image and its server-side thumbnail.
 ///
-/// Opt-in: the endpoint returns `403 Forbidden` unless
-/// `MOLD_GALLERY_ALLOW_DELETE=1` is set on the server. Destructive writes
-/// should not be reachable by default — operators explicitly allow them,
-/// ideally in combination with the existing API-key middleware.
+/// Destructive, but always enabled — pair with the `MOLD_API_KEY` middleware
+/// when the server is exposed beyond localhost.
 async fn delete_gallery_image(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if !gallery_delete_allowed() {
-        return Err(ApiError::forbidden(
-            "gallery delete is disabled; set MOLD_GALLERY_ALLOW_DELETE=1 to enable",
-        ));
-    }
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -2016,15 +2037,6 @@ async fn delete_gallery_image(
     }
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Whether the destructive `DELETE /api/gallery/image/:filename` route
-/// is enabled. Off by default — operators opt in with
-/// `MOLD_GALLERY_ALLOW_DELETE=1` (accepts `1` / `true` / `yes`, any case).
-fn gallery_delete_allowed() -> bool {
-    std::env::var("MOLD_GALLERY_ALLOW_DELETE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
 }
 
 /// Serve a thumbnail for a gallery image. Generated on-demand and cached
@@ -2168,8 +2180,8 @@ async fn get_gallery_preview(
 
     // The preview cache lifecycle is tied to the underlying gallery file:
     // if the MP4 has been deleted (via `DELETE /api/gallery/image/:filename`
-    // with `MOLD_GALLERY_ALLOW_DELETE=1` set, or an out-of-band `rm`), the
-    // sidecar may still be on disk but is orphaned and must not be served.
+    // or an out-of-band `rm`), the sidecar may still be on disk but is
+    // orphaned and must not be served.
     // Check the source file first and 404 before touching the cache so a
     // stale `.preview.gif` never leaks deleted content.
     let source_path = output_dir.join(&clean_name);
@@ -3425,43 +3437,6 @@ mod tests {
         assert_eq!(parse_byte_range("bytes=0-10", 0), None);
         // wrong unit prefix
         assert_eq!(parse_byte_range("items=0-10", 1000), None);
-    }
-
-    #[test]
-    fn gallery_delete_toggle_reads_env_var() {
-        // Use a plausible-but-unique key so we don't clobber a caller's env.
-        let key = "MOLD_GALLERY_ALLOW_DELETE";
-        // Safety: env mutation is test-global; we restore the pre-test value
-        // below regardless of assertion outcomes.
-        let prev = std::env::var(key).ok();
-        for val in ["1", "true", "YES"] {
-            unsafe {
-                std::env::set_var(key, val);
-            }
-            assert!(
-                gallery_delete_allowed(),
-                "delete should be allowed for env {val:?}"
-            );
-        }
-        for val in ["0", "false", "no", ""] {
-            unsafe {
-                std::env::set_var(key, val);
-            }
-            assert!(
-                !gallery_delete_allowed(),
-                "delete should be blocked for env {val:?}"
-            );
-        }
-        unsafe {
-            std::env::remove_var(key);
-        }
-        assert!(!gallery_delete_allowed(), "default is off");
-        // Restore.
-        if let Some(v) = prev {
-            unsafe {
-                std::env::set_var(key, v);
-            }
-        }
     }
 
     #[test]

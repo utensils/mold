@@ -9,6 +9,19 @@ import {
 import ModelPicker from "./ModelPicker.vue";
 import { outputFormatsForFamily } from "../composables/useGenerateForm";
 
+// ── Model Discovery (catalog auth + NSFW) ────────────────────────────────────
+const hfToken = ref("");
+const civitaiToken = ref("");
+const showNsfw = ref(false);
+
+async function saveSetting(key: string, value: string): Promise<void> {
+  await fetch("/api/settings/set", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key, value }),
+  });
+}
+
 const props = defineProps<{
   open: boolean;
   modelValue: GenerateFormState;
@@ -403,6 +416,41 @@ const schedulerOptions: Scheduler[] = [
               </select>
             </div>
           </div>
+        </section>
+
+        <section class="space-y-3 mt-6">
+          <h3 class="text-sm uppercase text-zinc-500">Model Discovery</h3>
+          <label class="flex items-center justify-between gap-3 text-sm">
+            <span>Hugging Face token</span>
+            <input
+              name="hf_token"
+              type="password"
+              v-model="hfToken"
+              placeholder="hf_..."
+              class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 w-64"
+              @change="saveSetting('huggingface.token', hfToken)"
+            />
+          </label>
+          <label class="flex items-center justify-between gap-3 text-sm">
+            <span>Civitai token</span>
+            <input
+              name="civitai_token"
+              type="password"
+              v-model="civitaiToken"
+              placeholder="cv_..."
+              class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 w-64"
+              @change="saveSetting('civitai.token', civitaiToken)"
+            />
+          </label>
+          <label class="flex items-center justify-between gap-3 text-sm">
+            <span>Show NSFW models</span>
+            <input
+              name="catalog_show_nsfw"
+              type="checkbox"
+              v-model="showNsfw"
+              @change="saveSetting('catalog.show_nsfw', String(showNsfw))"
+            />
+          </label>
         </section>
       </div>
     </div>

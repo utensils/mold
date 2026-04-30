@@ -1,0 +1,32 @@
+{
+  "id": 133005,
+  "name": "Juggernaut XL",
+  "type": "Checkpoint",
+  "nsfw": false,
+  "creator": { "username": "RunDiffusion" },
+  "stats": { "downloadCount": 950000, "rating": 4.8, "favoriteCount": 42000 },
+  "tags": ["base model", "photorealistic"],
+  "modelVersions": [
+    {
+      "id": 618692,
+      "name": "v10",
+      "baseModel": "SDXL 1.0",
+      "baseModelType": "Standard",
+      "trainedWords": [],
+      "files": [
+        {
+          "id": 999111,
+          "name": "juggernautXL_v10.safetensors",
+          "sizeKB": 6700000,
+          "downloadCount": 600000,
+          "metadata": { "format": "SafeTensor", "size": "full", "fp": "fp16" },
+          "downloadUrl": "https://civitai.com/api/download/models/618692",
+          "hashes": { "SHA256": "ABC123" }
+        }
+      ],
+      "images": [
+        { "url": "https://image.civitai.com/.../thumb.jpeg", "nsfwLevel": 1 }
+      ]
+    }
+  ]
+}

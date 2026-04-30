@@ -19,10 +19,14 @@ function openDownloadsDrawer() {
   window.dispatchEvent(new CustomEvent("mold:open-downloads"));
 }
 
-// Gallery-only props (`hideMode`, `selectMode`, `selectionCount`,
-// `canDelete`) are optional. The Generate page mounts this same TopBar
-// without a gallery underneath it, so their defaults keep the toolbar
-// in its "no bulk actions" state.
+// Gallery-only props (`hideMode`, `selectMode`, `selectionCount`) are
+// optional. The Generate page mounts this same TopBar without a gallery
+// underneath it, so their defaults keep the toolbar in its "no bulk
+// actions" state.
+//
+// Catalog refresh used to live in this toolbar; it now lives inside the
+// /catalog page itself (CatalogRefreshPanel) so it can render rich
+// progress beside the catalog grid instead of a tiny spinner pill.
 const props = withDefaults(
   defineProps<{
     filter: FilterKind;
@@ -34,13 +38,11 @@ const props = withDefaults(
     hideMode?: boolean;
     selectMode?: boolean;
     selectionCount?: number;
-    canDelete?: boolean;
   }>(),
   {
     hideMode: false,
     selectMode: false,
     selectionCount: 0,
-    canDelete: false,
   },
 );
 
@@ -140,6 +142,13 @@ function clearSearch() {
         active-class="bg-brand-500 text-white shadow-sm"
       >
         Generate
+      </router-link>
+      <router-link
+        to="/catalog"
+        class="rounded-full px-3 py-1 text-ink-200 transition hover:text-white"
+        active-class="bg-brand-500 text-white shadow-sm"
+      >
+        Model Catalog
       </router-link>
     </nav>
 
@@ -420,11 +429,9 @@ function clearSearch() {
 
       <!-- Select mode toggle. Opens a bulk-edit mode where clicks select
            instead of opening the detail drawer, shift-clicks extend the
-           range, and drag draws a marquee. Only shown when the server
-           actually allows deletion — the only destructive action we gate
-           behind selection today. -->
+           range, and drag draws a marquee. Gateway to the bulk delete
+           action bar. -->
       <button
-        v-if="canDelete"
         class="inline-flex h-10 items-center gap-1.5 rounded-full border border-white/5 px-3 text-[13px] font-medium transition hover:text-white"
         :class="
           selectMode ? 'bg-brand-500 text-white' : 'bg-white/5 text-ink-200'

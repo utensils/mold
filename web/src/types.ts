@@ -445,3 +445,98 @@ export interface ResourceSnapshot {
   /** `null` on the first sample (sysinfo needs a prior refresh to compute deltas). */
   cpu?: CpuSnapshot | null;
 }
+
+// ─── Catalog (sub-project A) ──────────────────────────────────────────────
+
+export interface CatalogEntryWire {
+  id: string;
+  source: "hf" | "civitai";
+  source_id: string;
+  name: string;
+  author: string | null;
+  family: string;
+  family_role: "foundation" | "finetune";
+  sub_family: string | null;
+  modality: "image" | "video";
+  kind: "checkpoint" | "lora" | "vae" | "text-encoder" | "control-net";
+  file_format: "safetensors" | "gguf" | "diffusers";
+  bundling: "separated" | "single-file";
+  size_bytes: number | null;
+  download_count: number;
+  rating: number | null;
+  likes: number;
+  nsfw: boolean;
+  thumbnail_url: string | null;
+  description: string | null;
+  license: string | null;
+  license_flags: {
+    commercial?: boolean | null;
+    derivatives?: boolean | null;
+    different_license?: boolean | null;
+  } | null;
+  tags: string[];
+  companions: string[];
+  download_recipe: {
+    files: {
+      url: string;
+      dest: string;
+      sha256: string | null;
+      size_bytes: number | null;
+    }[];
+    needs_token: "hf" | "civitai" | null;
+  };
+  engine_phase: number;
+  created_at: number | null;
+  updated_at: number | null;
+  added_at: number;
+}
+
+export interface CatalogListResponse {
+  entries: CatalogEntryWire[];
+  page: number;
+  page_size: number;
+}
+
+export interface CatalogFamilyCount {
+  family: string;
+  foundation: number;
+  finetune: number;
+}
+
+export interface CatalogFamiliesResponse {
+  families: CatalogFamilyCount[];
+}
+
+export interface CatalogListParams {
+  family?: string;
+  family_role?: "foundation" | "finetune";
+  modality?: "image" | "video";
+  source?: "hf" | "civitai";
+  sub_family?: string;
+  q?: string;
+  include_nsfw?: boolean;
+  max_engine_phase?: number;
+  sort?: "downloads" | "rating" | "recent" | "name";
+  page?: number;
+  page_size?: number;
+}
+
+export type CatalogRefreshStatus =
+  | { state: "pending" }
+  | {
+      state: "running";
+      // All optional so older servers (pre live-progress) still parse.
+      // The web UI guards with nullish-coalescing where needed.
+      families_total?: number;
+      families_done?: number;
+      current_family?: string | null;
+      current_stage?: string | null;
+      // Per-seed / per-page detail. Pre-2026-04-27 servers omit these
+      // and the panel falls back to the family-only summary.
+      current_seed?: string | null;
+      pages_done?: number;
+      entries_so_far?: number;
+      started_at_ms?: number;
+    }
+  | { state: "done"; total_entries: number; per_family: Record<string, string> }
+  | { state: "failed"; message: string };

@@ -351,6 +351,22 @@ Examples:
 }
 
 #[derive(Subcommand)]
+enum CatalogAction {
+    /// List entries with filters
+    List(commands::catalog::ListArgs),
+    /// Show a single entry by id
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-run the scanner, write shards, reseed the DB
+    Refresh(commands::catalog::RefreshArgs),
+    /// Print the local path for a downloaded entry, or "<not downloaded>"
+    Where { id: String },
+}
+
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Generate images from a text prompt
@@ -1056,6 +1072,17 @@ Examples:
         preview: bool,
     },
 
+    /// Browse + refresh the model-discovery catalog (Hugging Face + Civitai)
+    #[command(after_long_help = "\
+Examples:
+  mold catalog list --family flux --limit 10
+  mold catalog show hf:black-forest-labs/FLUX.1-dev
+  mold catalog refresh --family flux
+  mold catalog where cv:618692")]
+    Catalog {
+        #[command(subcommand)]
+        action: CatalogAction,
+    },
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
         shell: String,
@@ -1483,7 +1510,18 @@ async fn run() -> anyhow::Result<()> {
         },
         Commands::Pull { model, skip_verify } => {
             let opts = mold_core::download::PullOptions { skip_verify };
-            commands::pull::run(&model, &opts).await?;
+            if model.starts_with("hf:") || model.starts_with("cv:") {
+                match resolve_catalog_id(&model)? {
+                    CatalogIdResolution::Manifest(name) => {
+                        commands::pull::run(&name, &opts).await?
+                    }
+                    CatalogIdResolution::Recipe(row) => {
+                        commands::pull::run_recipe(*row, &opts).await?
+                    }
+                }
+            } else {
+                commands::pull::run(&model, &opts).await?;
+            }
         }
         Commands::Rm { models, force } => {
             commands::rm::run(&models, force).await?;
@@ -1668,6 +1706,12 @@ async fn run() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Commands::Catalog { action } => match action {
+            CatalogAction::List(args) => commands::catalog::run_list(args).await?,
+            CatalogAction::Show { id, json } => commands::catalog::run_show(id, json).await?,
+            CatalogAction::Refresh(args) => commands::catalog::run_refresh(args).await?,
+            CatalogAction::Where { id } => commands::catalog::run_where(id).await?,
+        },
         Commands::Completions { shell } => {
             generate_completions(&shell)?;
         }
@@ -1766,6 +1810,59 @@ compdef _clap_dynamic_completer_mold mold
         .unwrap_or_else(|| "mold".to_string());
     completer.write_registration("COMPLETE", "mold", "mold", &bin, &mut std::io::stdout())?;
     Ok(())
+}
+
+/// Result of resolving a `hf:` / `cv:` catalog id. HF entries map onto an
+/// existing manifest model name; Civitai single-file checkpoints carry a
+/// recipe that the CLI fetches directly. The `Recipe` variant boxes the
+/// row because `CatalogRow` is ~560 bytes (lots of `Option<String>`
+/// fields) and the `Manifest` variant is just a `String`.
+pub enum CatalogIdResolution {
+    /// HF row — pull through the existing manifest path with this name.
+    Manifest(String),
+    /// Civitai row — pull companions then fetch each `download_recipe`
+    /// file directly into `MOLD_MODELS_DIR/<sanitized-id>/`.
+    Recipe(Box<mold_db::catalog::CatalogRow>),
+}
+
+/// Resolve a catalog ID (e.g. `hf:bfl/FLUX.1-dev`, `cv:618692`) to the
+/// dispatch shape the CLI's pull command consumes.
+///
+/// HF entries return `Manifest(source_id)` for backwards-compatibility
+/// with the existing manifest path. Civitai entries return `Recipe(row)`
+/// so the caller can drive the recipe-fetcher with companion-first ordering.
+///
+/// Gates `engine_phase >= 3` — phases 1 and 2 are now downloadable
+/// (matches the server's `post_catalog_download` gate at 2.7).
+pub fn resolve_catalog_id(id: &str) -> anyhow::Result<CatalogIdResolution> {
+    let path =
+        mold_db::default_db_path().ok_or_else(|| anyhow::anyhow!("cannot resolve mold.db path"))?;
+    let mut conn = rusqlite::Connection::open(path)?;
+    mold_db::migrations::apply_pending(&mut conn)
+        .map_err(|e| anyhow::anyhow!("DB migration failed: {e}"))?;
+    let row = mold_db::catalog::get_by_id(&conn, id)
+        .map_err(|e| anyhow::anyhow!("catalog DB lookup failed: {e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("no catalog entry with id {id} — run `mold catalog refresh` first")
+        })?;
+    if row.engine_phase >= 3 {
+        anyhow::bail!(
+            "engine_phase {} not yet supported by this build of mold (release notes for status)",
+            row.engine_phase
+        );
+    }
+    if row.source == "hf" {
+        // HF source_id maps onto an existing manifest model name; the existing
+        // manifest path takes it from here.
+        Ok(CatalogIdResolution::Manifest(row.source_id))
+    } else if row.source == "civitai" {
+        Ok(CatalogIdResolution::Recipe(Box::new(row)))
+    } else {
+        anyhow::bail!(
+            "catalog source '{}' not supported by `mold pull` — run `mold catalog list` to inspect",
+            row.source
+        )
+    }
 }
 
 #[cfg(test)]

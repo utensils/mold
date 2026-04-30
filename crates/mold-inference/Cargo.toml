@@ -37,12 +37,18 @@ name = "ltx2_vae_probe"
 path = "src/bin/ltx2_vae_probe.rs"
 required-features = ["dev-bins", "mp4"]
 
+[[bin]]
+name = "sd_singlefile_inspect"
+path = "src/bin/sd_singlefile_inspect.rs"
+required-features = ["dev-bins"]
+
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.9.0" }
+mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.9.0" }
 anyhow = "1"
 candle-core = { package = "candle-core-mold", version = "0.9.10" }
 candle-nn = { package = "candle-nn-mold", version = "0.9.10" }
-candle-transformers = { package = "candle-transformers-mold", version = "0.9.10" }
+candle-transformers = { package = "candle-transformers-mold", version = "0.9.12" }
 gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
 image = "0.25"

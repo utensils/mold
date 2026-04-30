@@ -577,9 +577,9 @@ dependencies = [
 
 [[package]]
 name = "candle-transformers-mold"
-version = "0.9.10"
+version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a3c7b39e0e88620f333b11026958c15dc97178205152310d649f5190c440e5b"
+checksum = "589960fc3a18e813f3d12446351db1fb973f4b405b47baf1e40b9b7c92e915e5"
 dependencies = [
  "byteorder",
  "candle-core-mold",
@@ -2000,6 +2000,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "globset"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "governor"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2987,6 +3000,7 @@ dependencies = [
  "image",
  "indicatif 0.17.11",
  "libc",
+ "mold-ai-catalog",
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-discord",
@@ -2996,18 +3010,42 @@ dependencies = [
  "predicates",
  "rand 0.8.5",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "sysinfo",
  "tar",
  "tempfile",
+ "time",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
  "viuer",
  "walkdir",
+ "wiremock",
+]
+
+[[package]]
+name = "mold-ai-catalog"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "mold-ai-core",
+ "mold-ai-db",
+ "reqwest",
+ "rusqlite",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "wiremock",
 ]
 
 [[package]]
@@ -3080,6 +3118,7 @@ dependencies = [
  "fdk-aac",
  "gif 0.13.3",
  "image",
+ "mold-ai-catalog",
  "mold-ai-core",
  "mp4",
  "openh264",
@@ -3119,6 +3158,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "mime_guess",
+ "mold-ai-catalog",
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-inference",
@@ -4354,6 +4394,7 @@ version = "8.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5bcdef0be6fe7f6fa333b1073c949729274b05f123a0ad7efcb8efd878e5c3b1"
 dependencies = [
+ "globset",
  "mime_guess",
  "sha2",
  "walkdir",
@@ -5963,6 +6004,12 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "utf-8"

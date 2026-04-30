@@ -1,0 +1,35 @@
+[package]
+name = "mold-ai-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Model-discovery catalog for mold — Hugging Face + Civitai scanner, embedded shards, FTS5-backed lookup."
+
+[lib]
+name = "mold_catalog"
+
+[dependencies]
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.9.0" }
+mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.9.0" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+rust-embed = { version = "8", features = ["interpolate-folder-path", "include-exclude"] }
+tracing = "0.1"
+urlencoding = "2"
+time = { version = "0.3", features = ["parsing", "formatting", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+wiremock = "0.6"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = "1"

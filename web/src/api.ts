@@ -35,21 +35,14 @@ export async function deleteGalleryImage(filename: string): Promise<void> {
       method: "DELETE",
     },
   );
-  if (res.status === 403) {
-    throw new Error(
-      "Delete is disabled on this server (set MOLD_GALLERY_ALLOW_DELETE=1 on the host).",
-    );
-  }
   if (!res.ok && res.status !== 204) {
     throw new Error(`DELETE failed: ${res.status} ${res.statusText}`);
   }
 }
 
 /**
- * Fetch server capabilities. The SPA uses these to decide which UI
- * affordances to surface — e.g. hiding the delete button when the operator
- * hasn't opted in. Returns safe defaults if the server is too old to know
- * about the endpoint.
+ * Fetch server capabilities. Delete is always enabled on current builds;
+ * the capability struct is kept so older clients still see a stable shape.
  */
 export async function fetchCapabilities(): Promise<ServerCapabilities> {
   try {
@@ -62,7 +55,7 @@ export async function fetchCapabilities(): Promise<ServerCapabilities> {
 }
 
 function defaultCapabilities(): ServerCapabilities {
-  return { gallery: { can_delete: false } };
+  return { gallery: { can_delete: true } };
 }
 
 export interface ChainLimits {
@@ -344,4 +337,107 @@ export async function fetchResources(
   const res = await fetch("/api/resources", { signal });
   if (!res.ok) throw new Error(`fetchResources failed: ${res.status}`);
   return (await res.json()) as ResourceSnapshot;
+}
+
+// ─── Catalog (sub-project A) ──────────────────────────────────────────────
+import type {
+  CatalogEntryWire,
+  CatalogFamiliesResponse,
+  CatalogListParams,
+  CatalogListResponse,
+  CatalogRefreshStatus,
+} from "./types";
+
+export async function fetchCatalog(
+  params: CatalogListParams,
+): Promise<CatalogListResponse> {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null) continue;
+    sp.set(k, String(v));
+  }
+  const r = await fetch(`/api/catalog?${sp.toString()}`);
+  if (!r.ok) throw new Error(`/api/catalog ${r.status}`);
+  return r.json();
+}
+
+export async function fetchCatalogEntry(id: string): Promise<CatalogEntryWire> {
+  const r = await fetch(`/api/catalog/${encodeURIComponent(id)}`);
+  if (!r.ok) throw new Error(`/api/catalog/${id} ${r.status}`);
+  return r.json();
+}
+
+export async function fetchCatalogFamilies(): Promise<CatalogFamiliesResponse> {
+  const r = await fetch(`/api/catalog/families`);
+  if (!r.ok) throw new Error(`/api/catalog/families ${r.status}`);
+  return r.json();
+}
+
+export async function postCatalogRefresh(body: {
+  family?: string;
+  min_downloads?: number;
+  no_nsfw?: boolean;
+  include_nsfw?: boolean;
+}): Promise<{ id: string }> {
+  const r = await fetch(`/api/catalog/refresh`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    // Surface the server's body (e.g. "a catalog refresh is already in
+    // progress" on 409) so the UI can show something better than a bare
+    // status code.
+    const detail = await r.text().catch(() => "");
+    throw new Error(detail || `/api/catalog/refresh ${r.status}`);
+  }
+  return r.json();
+}
+
+export async function fetchCatalogRefresh(
+  id: string,
+): Promise<CatalogRefreshStatus> {
+  const r = await fetch(`/api/catalog/refresh/${encodeURIComponent(id)}`);
+  if (!r.ok) throw new Error(`/api/catalog/refresh/${id} ${r.status}`);
+  return r.json();
+}
+
+/// Returns the in-flight scan (active or pending) so the UI can attach
+/// to scans started by other browser tabs or the CLI. Resolves to
+/// `null` when the queue is idle.
+export async function fetchActiveCatalogRefresh(): Promise<{
+  id: string;
+  status: CatalogRefreshStatus;
+} | null> {
+  const r = await fetch(`/api/catalog/refresh`);
+  if (!r.ok) throw new Error(`/api/catalog/refresh ${r.status}`);
+  const body = (await r.json()) as {
+    active: { id: string; status: CatalogRefreshStatus } | null;
+  };
+  return body.active;
+}
+
+export interface CompanionJob {
+  name: string;
+  job_id: string;
+}
+
+export interface CatalogDownloadResponse {
+  /// Queue id for the catalog entry itself. `null` for Civitai entries
+  /// whose recipe-driven download path is implemented in 2.8 — companion
+  /// downloads (CLIP-L / CLIP-G / VAE) still flow through `companion_jobs`.
+  primary_job_id: string | null;
+  /// One entry per canonical companion the server enqueued. Present in
+  /// the same order the catalog row's `companions` field declares.
+  companion_jobs: CompanionJob[];
+}
+
+export async function postCatalogDownload(
+  id: string,
+): Promise<CatalogDownloadResponse> {
+  const r = await fetch(`/api/catalog/${encodeURIComponent(id)}/download`, {
+    method: "POST",
+  });
+  if (!r.ok) throw new Error(`/api/catalog/${id}/download ${r.status}`);
+  return r.json();
 }
