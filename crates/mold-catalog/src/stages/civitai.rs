@@ -29,25 +29,58 @@ struct CivitaiPaging {
     next_page: Option<String>,
 }
 
+/// Scan one or more Civitai base-model buckets. Returns whatever entries
+/// were collected before any unrecoverable error, paired with `Some(err)`
+/// when the page walk had to bail (rate limit, auth, network, decode).
+///
+/// The partial-success contract is load-bearing: in production the
+/// scanner walks ~10 pages successfully, then Civitai's per-IP cooldown
+/// kicks in around page 11 and the throttle layer surfaces a
+/// `RateLimited` error after exponential backoff. Returning the
+/// already-collected entries (instead of `Err`-shaped early-return that
+/// drops them) is the difference between "100 SDXL Civitai rows
+/// catalogued" and "0 SDXL Civitai rows catalogued and the orchestrator
+/// reports `RateLimited { partial: 0 }`".
+///
+/// Once the first persistent error fires we stop walking entirely:
+/// remaining base_models share the same per-IP cooldown so every
+/// subsequent request would 429 too.
 pub async fn scan(
     base: &str,
     options: &ScanOptions,
     base_models: &[&str],
-) -> Result<Vec<CatalogEntry>, ScanError> {
-    let client = reqwest::Client::builder()
+) -> (Vec<CatalogEntry>, Option<ScanError>) {
+    let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(options.request_timeout.as_secs()))
-        .build()?;
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return (Vec::new(), Some(ScanError::Network(e))),
+    };
 
     let mut entries = Vec::new();
-    for base_model in base_models {
+    'outer: for base_model in base_models {
         let mut page = 1u32;
         loop {
             let url = format!(
                 "{base}/api/v1/models?baseModels={bm}&types=Checkpoint&sort=Most+Downloaded&limit=100&page={page}",
                 bm = urlencoding::encode(base_model),
             );
-            let resp = http_get(&client, options, &url).await?;
-            let parsed: CivitaiResponse = serde_json::from_str(&resp)?;
+            let resp = match http_get(&client, options, &url).await {
+                Ok(r) => r,
+                Err(e) => {
+                    // Per-IP rate limit / auth / network failure is
+                    // global to civitai.com — break the *outer* loop so
+                    // the partial bucket is returned alongside the error.
+                    return (entries, Some(e));
+                }
+            };
+            let parsed: CivitaiResponse = match serde_json::from_str(&resp) {
+                Ok(p) => p,
+                Err(e) => {
+                    return (entries, Some(ScanError::Decode(e)));
+                }
+            };
             if parsed.items.is_empty() {
                 break;
             }
@@ -56,7 +89,7 @@ pub async fn scan(
                     entries.push(e);
                     if let Some(cap) = options.per_family_cap {
                         if entries.len() >= cap {
-                            return Ok(entries);
+                            return (entries, None);
                         }
                     }
                 }
@@ -68,12 +101,12 @@ pub async fn scan(
                     .map(|t| page >= t)
                     .unwrap_or(true)
             {
-                break;
+                continue 'outer;
             }
             page += 1;
         }
     }
-    Ok(entries)
+    (entries, None)
 }
 
 async fn http_get(
