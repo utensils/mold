@@ -372,11 +372,14 @@ pub fn compute_sha256(path: &std::path::Path) -> anyhow::Result<String> {
 }
 
 /// Verify the SHA-256 digest of a file against an expected hex string.
+/// Comparison is hex-case-insensitive — Civitai's API publishes uppercase
+/// hashes and `compute_sha256` produces lowercase, so a literal `==`
+/// would false-mismatch on bit-identical files.
 ///
 /// Returns `Ok(true)` when the digest matches, `Ok(false)` on mismatch.
 /// Errors only on I/O failures (e.g. file not found).
 pub fn verify_sha256(path: &std::path::Path, expected: &str) -> anyhow::Result<bool> {
-    Ok(compute_sha256(path)? == expected)
+    Ok(compute_sha256(path)?.eq_ignore_ascii_case(expected))
 }
 
 // ── Pull marker file (.pulling) ──────────────────────────────────────────────
@@ -444,7 +447,7 @@ fn verify_file_integrity(
         return Ok(());
     }
     match compute_sha256(clean_path) {
-        Ok(actual) if actual == expected => Ok(()),
+        Ok(actual) if actual.eq_ignore_ascii_case(expected) => Ok(()),
         Ok(actual) => {
             let _ = std::fs::remove_file(clean_path);
             Err(DownloadError::Sha256Mismatch {
@@ -1691,7 +1694,7 @@ async fn fetch_recipe_inner(
                         dest_path.display()
                     ))
                 })?;
-                if actual != expected {
+                if !actual.eq_ignore_ascii_case(expected) {
                     let _ = std::fs::remove_file(dest_path);
                     return Err(DownloadError::Sha256Mismatch {
                         filename: file.dest.to_string(),
@@ -2135,6 +2138,36 @@ mod tests {
         std::fs::write(&path, b"hello world").unwrap();
         let wrong = "0000000000000000000000000000000000000000000000000000000000000000";
         assert!(!verify_sha256(&path, wrong).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Civitai's API returns SHA-256 hashes in uppercase hex
+    /// (`DD08FA32...`), while `compute_sha256` formats with `{:x}` so it
+    /// produces lowercase. A literal string comparison treats these as
+    /// distinct, so every Civitai pull bailed out with a "mismatch" even
+    /// when the file was bit-identical to what was advertised. The
+    /// verifier must be hex-case-insensitive.
+    #[test]
+    fn verify_sha256_is_hex_case_insensitive() {
+        let dir = std::env::temp_dir().join("mold_test_sha256_case");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_file.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let lower = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        let upper = "B94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9";
+        let mixed = "B94d27b9934D3e08a52E52d7Da7dabfac484EFE37A5380ee9088f7Ace2efcDE9";
+        assert!(
+            verify_sha256(&path, lower).unwrap(),
+            "lowercase digest must match"
+        );
+        assert!(
+            verify_sha256(&path, upper).unwrap(),
+            "uppercase digest must match (Civitai-style)",
+        );
+        assert!(
+            verify_sha256(&path, mixed).unwrap(),
+            "mixed-case must match"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
