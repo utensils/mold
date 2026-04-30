@@ -101,6 +101,26 @@ pub struct DownloadRecipe {
     pub needs_token: Option<TokenKind>,
 }
 
+/// Render a recipe `dest` template by substituting `{family}`, `{author}`,
+/// and `{name}` with concrete values. Templates ship literal in the
+/// catalog (`"{family}/civitai/{id}/{filename}"` for Civitai;
+/// `"{family}/{author}/{name}/{path}"` for HF) so consumers don't have
+/// to bake the per-row context into normaliser output. Without this
+/// step, `mold pull cv:<id>` would deposit files under
+/// `~/.mold/models/cv-<id>/{family}/civitai/...` — i.e. with a literal
+/// `{family}` directory name — and `mold run cv:<id>` could never find
+/// the safetensors.
+///
+/// `author` and `name` are only meaningful for HF entries; pass empty
+/// strings for Civitai (the template never references them, so the
+/// substitution is a no-op).
+pub fn render_recipe_dest(template: &str, family: &str, author: &str, name: &str) -> String {
+    template
+        .replace("{family}", family)
+        .replace("{author}", author)
+        .replace("{name}", name)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CatalogEntry {
     pub id: CatalogId,
@@ -145,3 +165,37 @@ pub struct Shard {
 }
 
 pub const SHARD_SCHEMA: &str = "mold.catalog.v1";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_recipe_dest_substitutes_family_for_civitai() {
+        let template = "{family}/civitai/1759168/juggernautXL_ragnarokBy.safetensors";
+        let rendered = render_recipe_dest(template, "sdxl", "", "");
+        assert_eq!(
+            rendered,
+            "sdxl/civitai/1759168/juggernautXL_ragnarokBy.safetensors"
+        );
+    }
+
+    #[test]
+    fn render_recipe_dest_substitutes_all_three_for_hf() {
+        let template = "{family}/{author}/{name}/sd_xl_base_1.0.safetensors";
+        let rendered = render_recipe_dest(template, "sdxl", "stabilityai", "stable-diffusion-xl");
+        assert_eq!(
+            rendered,
+            "sdxl/stabilityai/stable-diffusion-xl/sd_xl_base_1.0.safetensors"
+        );
+    }
+
+    #[test]
+    fn render_recipe_dest_passes_through_when_no_placeholders() {
+        let template = "static/path/to/file.safetensors";
+        assert_eq!(
+            render_recipe_dest(template, "sdxl", "", ""),
+            "static/path/to/file.safetensors"
+        );
+    }
+}

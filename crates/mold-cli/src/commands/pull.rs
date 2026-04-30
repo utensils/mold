@@ -251,14 +251,29 @@ pub async fn run_recipe(
         status!("");
     }
 
-    // Primary: fetch the recipe files. Translate from the catalog's owned
-    // strings into the borrowed slice mold-core expects.
+    // Primary: fetch the recipe files. Templates ship literal `{family}`,
+    // `{author}`, `{name}` placeholders; render them now so the file lands
+    // under e.g. `models/sdxl/civitai/<id>/...` instead of the literal
+    // `models/{family}/civitai/<id>/...` that the runner can never find.
+    // Author/name are derived from `source_id` (e.g. `RunDiffusion/Juggernaut-XL-v9`
+    // → author=`RunDiffusion`, name=`Juggernaut-XL-v9`); for Civitai the
+    // template never references them, so they default to empty.
+    let (author, name) = match row.source_id.split_once('/') {
+        Some((a, n)) => (a, n),
+        None => ("", row.source_id.as_str()),
+    };
+    let rendered_dests: Vec<String> = recipe
+        .files
+        .iter()
+        .map(|f| mold_catalog::entry::render_recipe_dest(&f.dest, &row.family, author, name))
+        .collect();
     let fetch_files: Vec<RecipeFetchFile<'_>> = recipe
         .files
         .iter()
-        .map(|f| RecipeFetchFile {
+        .zip(rendered_dests.iter())
+        .map(|(f, dest)| RecipeFetchFile {
             url: f.url.as_str(),
-            dest: f.dest.as_str(),
+            dest: dest.as_str(),
             sha256: f.sha256.as_deref(),
             size_bytes: f.size_bytes,
         })
