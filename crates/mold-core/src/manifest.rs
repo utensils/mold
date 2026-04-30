@@ -4473,9 +4473,12 @@ fn companion_manifests() -> Vec<ModelManifest> {
             description: "OpenCLIP ViT-bigG companion (single-file SDXL checkpoints)".to_string(),
             files: vec![ModelFile {
                 hf_repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k".to_string(),
-                hf_filename: "open_clip_pytorch_model.safetensors".to_string(),
+                // `open_clip_pytorch_model.safetensors` 404s; the actual
+                // OpenCLIP-format file is `open_clip_model.safetensors`
+                // (10.16 GB).
+                hf_filename: "open_clip_model.safetensors".to_string(),
                 component: ModelComponent::Transformer,
-                size_bytes: 5_711_927_064,
+                size_bytes: 10_158_382_892,
                 gated: false,
                 sha256: None,
             }],

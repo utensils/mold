@@ -53,11 +53,11 @@ pub static COMPANIONS: &[Companion] = &[
         family_scope: &[Family::Sdxl],
         source: Source::Hf,
         repo: "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
-        files: &[
-            "open_clip_pytorch_model.safetensors",
-            "open_clip_config.json",
-        ],
-        size_bytes: 5_700_000_000,
+        // Repo file is `open_clip_model.safetensors` (10.16 GB, OpenCLIP
+        // format); the older `open_clip_pytorch_model.safetensors` name
+        // never existed and 404'd on every SDXL Civitai pull.
+        files: &["open_clip_model.safetensors", "open_clip_config.json"],
+        size_bytes: 10_158_382_892,
     },
     Companion {
         canonical_name: "sdxl-vae",
