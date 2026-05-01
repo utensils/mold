@@ -1,4 +1,4 @@
-import { reactive, ref, watch, type Ref } from "vue";
+import { onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import { generateChainStream, generateStream } from "../api";
 import type {
   ChainProgressEvent,
@@ -237,18 +237,52 @@ export interface UseGenerateStream {
 
 const STORAGE_KEY = "mold.generate.jobs";
 
+/// Maximum number of *settled* (done/error/canceled) jobs we keep in
+/// localStorage. Running jobs are never dropped — the user might be
+/// watching them across navigations. Past this cap, oldest settled
+/// jobs are forgotten on the next persist cycle. The completed image
+/// itself lives in the gallery DB; the in-memory `jobs` list is just
+/// the SPA's "recent activity" rail.
+const SETTLED_HISTORY_CAP = 10;
+
 /** Shape we persist to localStorage — everything in `Job` minus the
  * non-serializable `AbortController`, plus a marker so we can short-circuit
- * loads from a future schema bump. */
+ * loads from a future schema bump.
+ *
+ * `result` is *trimmed*: we drop the base64 `image`/`video_thumbnail`/
+ * `video_gif_preview` bytes before writing. They're megabytes each;
+ * persisting them on every progress tick (200 ms debounced deep watch)
+ * blocks the main thread on `JSON.stringify` + `localStorage.setItem`.
+ * The live UI still holds the full result in memory; on reload the
+ * image/video re-loads from `/api/gallery` which is the durable source
+ * of truth anyway.
+ */
+type PersistedResult = Omit<
+  SseCompleteEvent,
+  "image" | "video_thumbnail" | "video_gif_preview"
+>;
+
 interface PersistedJob {
   id: string;
   request: GenerateRequestWire | ChainRequestWire;
   startedAt: number;
   progress: JobProgress;
-  result: SseCompleteEvent | null;
+  result: PersistedResult | null;
   error: string | null;
   state: Job["state"];
   chain: ChainJobMeta | null;
+}
+
+function stripHeavyResult(r: SseCompleteEvent | null): PersistedResult | null {
+  if (!r) return null;
+  // Discriminated drop — leave every metadata field intact so the
+  // RunningJobCard can still render dimensions/timing on rehydrate.
+  // The intentionally-omitted ones are exactly the base64 payloads.
+  const { image: _i, video_thumbnail: _t, video_gif_preview: _g, ...rest } = r;
+  void _i;
+  void _t;
+  void _g;
+  return rest;
 }
 
 function loadPersistedJobs(): Job[] {
@@ -258,15 +292,23 @@ function loadPersistedJobs(): Job[] {
     const parsed = JSON.parse(raw) as PersistedJob[];
     if (!Array.isArray(parsed)) return [];
     return parsed.map((p) => {
-      // Running jobs can't survive a reload — the SSE stream is gone and we
-      // have no request-id to reconnect to. Mark them so the user can see
-      // "this was running when I hit refresh" and either retry or dismiss,
-      // but don't pretend they're still alive.
-      const state: Job["state"] = p.state === "running" ? "error" : p.state;
-      const error =
-        p.state === "running"
-          ? "Disconnected — generation may still be running on the server"
-          : p.error;
+      // Running jobs are kept as `running` after a route change — with the
+      // singleton scope the SSE callback closures from `submit()` continue
+      // mutating the same `jobs` ref across navigation, so a job that was
+      // mid-generation when the user navigated away is still receiving
+      // live progress events.
+      //
+      // Hard refreshes / server restarts are different: the SSE stream is
+      // truly gone and no further events will arrive. We don't have a
+      // way to tell those cases apart from in-progress-still-streaming
+      // here — RunningJobCard renders a "stale"/"reconnecting" hint
+      // after a timeout, and the user can dismiss / retry from the UI.
+      //
+      // `result` is null for running/error/cancelled jobs and a
+      // metadata-only object for done jobs (the base64 image was
+      // stripped at persist time — see `persistJobs`). The live result
+      // is repopulated from `/api/gallery` if the user clicks back into
+      // a completed job's preview.
       return {
         id: p.id,
         request: p.request,
@@ -275,9 +317,9 @@ function loadPersistedJobs(): Job[] {
         // bails early for non-running jobs anyway.
         controller: new AbortController(),
         progress: p.progress ?? emptyProgress(),
-        result: p.result,
-        error,
-        state,
+        result: p.result as SseCompleteEvent | null,
+        error: p.error,
+        state: p.state,
         chain: p.chain,
       };
     });
@@ -288,12 +330,22 @@ function loadPersistedJobs(): Job[] {
 
 function persistJobs(jobs: Job[]) {
   try {
-    const serializable: PersistedJob[] = jobs.map((j) => ({
+    // Always keep running jobs (the user is watching them); cap the
+    // number of settled jobs persisted so localStorage doesn't grow
+    // unbounded across sessions. Order is preserved — `submit` prepends
+    // new jobs, so the cap takes the most recent settled entries.
+    const settledCount = { n: 0 };
+    const filtered = jobs.filter((j) => {
+      if (j.state === "running") return true;
+      settledCount.n += 1;
+      return settledCount.n <= SETTLED_HISTORY_CAP;
+    });
+    const serializable: PersistedJob[] = filtered.map((j) => ({
       id: j.id,
       request: j.request,
       startedAt: j.startedAt,
       progress: j.progress,
-      result: j.result,
+      result: stripHeavyResult(j.result),
       error: j.error,
       state: j.state,
       chain: j.chain,
@@ -304,134 +356,179 @@ function persistJobs(jobs: Job[]) {
   }
 }
 
+// ── Module-level singleton state ─────────────────────────────────────────────
+//
+// Pre-singleton: `useGenerateStream()` was invoked inside `GeneratePage.vue`'s
+// `setup()`, so each mount got its own `jobs` ref and watcher. Navigating
+// away → back created a fresh instance whose `jobs` was loaded from
+// localStorage; the SSE callbacks from the previous instance kept mutating
+// the *old* (orphaned) ref, so live progress was invisible to the new view.
+// Lifting `jobs` and `submit` to module scope makes the state survive route
+// changes — the same ref is shared by every consumer.
+//
+// Per-mount concerns (the `onComplete` listener) move to a Set with
+// register/unregister, so a stale toast handler from an unmounted component
+// doesn't keep firing.
+
+const jobs = ref<Job[]>(loadPersistedJobs());
+
+// Persist whenever the list or any job's mutable state changes. 200 ms
+// debounce keeps writes out of the SSE hot path (we get a progress event
+// roughly every 50 ms during denoising).
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+watch(
+  jobs,
+  (v) => {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => persistJobs(v), 200);
+  },
+  { deep: true },
+);
+
+type CompleteListener = (job: Job) => void;
+const completeListeners = new Set<CompleteListener>();
+
+function fireComplete(job: Job) {
+  for (const cb of completeListeners) {
+    try {
+      cb(job);
+    } catch (e) {
+      console.error("generate onComplete listener threw", e);
+    }
+  }
+}
+
+function submitJob(
+  req: GenerateRequestWire | ChainRequestWire,
+  decision: ChainRoutingDecision = { kind: "single" },
+): string {
+  const id = crypto.randomUUID();
+  const controller = new AbortController();
+  const isChain = decision.kind === "chain";
+  // Wrap in reactive() so that property mutations during SSE streaming
+  // (stage, step, state, result) trigger RunningJobCard re-renders. The
+  // closure must hold the proxy, not the raw object — mutations through
+  // the raw target bypass the Proxy's set trap and skip dep notification.
+  const job = reactive<Job>({
+    id,
+    request: req,
+    startedAt: Date.now(),
+    controller,
+    progress: emptyProgress(),
+    result: null,
+    error: null,
+    state: "running",
+    chain: isChain
+      ? {
+          stageCount: (
+            decision as Extract<ChainRoutingDecision, { kind: "chain" }>
+          ).stageCount,
+          currentStage: 0,
+          estimatedTotalFrames: null,
+        }
+      : null,
+  }) as Job;
+  jobs.value = [job, ...jobs.value];
+
+  const onErrorCommon = (err: {
+    kind: "http" | "network";
+    status?: number;
+    retryAfter?: number;
+    body?: string;
+    message?: string;
+  }) => {
+    if (err.kind === "http") {
+      job.error =
+        err.status === 503
+          ? `Queue full (retry after ${err.retryAfter ?? "?"}s)`
+          : `HTTP ${err.status}: ${err.body ?? ""}`;
+    } else {
+      job.error = err.message ?? "network error";
+    }
+    job.state = "error";
+  };
+
+  if (decision.kind === "chain") {
+    const chainReq = resolveChainRequest(req, decision);
+    generateChainStream(
+      chainReq,
+      {
+        onProgress: (evt) => applyChainProgress(job, evt),
+        onComplete: (evt) => {
+          job.result = chainCompleteToSingle(req, evt);
+          job.state = "done";
+          if (evt.gpu !== null && evt.gpu !== undefined)
+            job.progress.gpu = evt.gpu;
+          fireComplete(job);
+        },
+        onError: onErrorCommon,
+      },
+      controller.signal,
+    );
+  } else if (isPrebuiltChainRequest(req)) {
+    // Caller bug: a stages-based ChainRequestWire was submitted with a
+    // non-chain routing decision. The single-clip endpoint would reject
+    // the unknown `stages` field, so bail early with a clear message
+    // instead of producing an opaque 422/500.
+    job.error =
+      "internal: ChainRequestWire submitted with non-chain routing decision";
+    job.state = "error";
+  } else {
+    generateStream(
+      req,
+      {
+        onProgress: (evt) => applyProgress(job, evt),
+        onComplete: (evt) => {
+          job.result = evt;
+          job.state = "done";
+          if (evt.gpu !== null && evt.gpu !== undefined)
+            job.progress.gpu = evt.gpu;
+          fireComplete(job);
+        },
+        onError: onErrorCommon,
+      },
+      controller.signal,
+    );
+  }
+
+  return id;
+}
+
+function cancelJob(id: string) {
+  const job = jobs.value.find((j) => j.id === id);
+  if (!job) return;
+  job.controller.abort();
+  job.state = "canceled";
+}
+
+function clearDoneJobs() {
+  jobs.value = jobs.value.filter((j) => j.state === "running");
+}
+
+function removeJob(id: string) {
+  jobs.value = jobs.value.filter((j) => j.id !== id);
+}
+
 export function useGenerateStream(
   onComplete?: (job: Job) => void,
 ): UseGenerateStream {
-  const jobs = ref<Job[]>(loadPersistedJobs());
+  // Per-call: register the optional `onComplete` listener and tear it
+  // down when the calling component unmounts so navigating away from
+  // GeneratePage doesn't leak callbacks into module-level state.
+  // `onUnmounted` is a no-op outside a component instance, which keeps
+  // direct test invocations harmless.
+  if (onComplete) {
+    completeListeners.add(onComplete);
+    onUnmounted(() => {
+      completeListeners.delete(onComplete);
+    });
+  }
 
-  // Persist whenever the list or any job's mutable state changes. 200 ms
-  // debounce keeps writes out of the SSE hot path (we get a progress event
-  // roughly every 50 ms during denoising).
-  let persistTimer: ReturnType<typeof setTimeout> | null = null;
-  watch(
+  return {
     jobs,
-    (v) => {
-      if (persistTimer) clearTimeout(persistTimer);
-      persistTimer = setTimeout(() => persistJobs(v), 200);
-    },
-    { deep: true },
-  );
-
-  function submit(
-    req: GenerateRequestWire | ChainRequestWire,
-    decision: ChainRoutingDecision = { kind: "single" },
-  ): string {
-    const id = crypto.randomUUID();
-    const controller = new AbortController();
-    const isChain = decision.kind === "chain";
-    // Wrap in reactive() so that property mutations during SSE streaming
-    // (stage, step, state, result) trigger RunningJobCard re-renders. The
-    // closure must hold the proxy, not the raw object — mutations through
-    // the raw target bypass the Proxy's set trap and skip dep notification.
-    const job = reactive<Job>({
-      id,
-      request: req,
-      startedAt: Date.now(),
-      controller,
-      progress: emptyProgress(),
-      result: null,
-      error: null,
-      state: "running",
-      chain: isChain
-        ? {
-            stageCount: (
-              decision as Extract<ChainRoutingDecision, { kind: "chain" }>
-            ).stageCount,
-            currentStage: 0,
-            estimatedTotalFrames: null,
-          }
-        : null,
-    }) as Job;
-    jobs.value = [job, ...jobs.value];
-
-    const onErrorCommon = (err: {
-      kind: "http" | "network";
-      status?: number;
-      retryAfter?: number;
-      body?: string;
-      message?: string;
-    }) => {
-      if (err.kind === "http") {
-        job.error =
-          err.status === 503
-            ? `Queue full (retry after ${err.retryAfter ?? "?"}s)`
-            : `HTTP ${err.status}: ${err.body ?? ""}`;
-      } else {
-        job.error = err.message ?? "network error";
-      }
-      job.state = "error";
-    };
-
-    if (decision.kind === "chain") {
-      const chainReq = resolveChainRequest(req, decision);
-      generateChainStream(
-        chainReq,
-        {
-          onProgress: (evt) => applyChainProgress(job, evt),
-          onComplete: (evt) => {
-            job.result = chainCompleteToSingle(req, evt);
-            job.state = "done";
-            if (evt.gpu !== null && evt.gpu !== undefined)
-              job.progress.gpu = evt.gpu;
-            onComplete?.(job);
-          },
-          onError: onErrorCommon,
-        },
-        controller.signal,
-      );
-    } else if (isPrebuiltChainRequest(req)) {
-      // Caller bug: a stages-based ChainRequestWire was submitted with a
-      // non-chain routing decision. The single-clip endpoint would reject
-      // the unknown `stages` field, so bail early with a clear message
-      // instead of producing an opaque 422/500.
-      job.error =
-        "internal: ChainRequestWire submitted with non-chain routing decision";
-      job.state = "error";
-    } else {
-      generateStream(
-        req,
-        {
-          onProgress: (evt) => applyProgress(job, evt),
-          onComplete: (evt) => {
-            job.result = evt;
-            job.state = "done";
-            if (evt.gpu !== null && evt.gpu !== undefined)
-              job.progress.gpu = evt.gpu;
-            onComplete?.(job);
-          },
-          onError: onErrorCommon,
-        },
-        controller.signal,
-      );
-    }
-
-    return id;
-  }
-
-  function cancel(id: string) {
-    const job = jobs.value.find((j) => j.id === id);
-    if (!job) return;
-    job.controller.abort();
-    job.state = "canceled";
-  }
-
-  function clearDone() {
-    jobs.value = jobs.value.filter((j) => j.state === "running");
-  }
-
-  function remove(id: string) {
-    jobs.value = jobs.value.filter((j) => j.id !== id);
-  }
-
-  return { jobs, submit, cancel, clearDone, remove };
+    submit: submitJob,
+    cancel: cancelJob,
+    clearDone: clearDoneJobs,
+    remove: removeJob,
+  };
 }

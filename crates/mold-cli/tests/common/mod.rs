@@ -130,6 +130,10 @@ impl TestEnv {
             }
             // Write a small stub — enough for existence checks, not for inference
             std::fs::write(&path, b"stub").unwrap();
+            // Stamp a `.sha256-verified` marker so the post-B3 completeness
+            // check accepts the stub as installed (size mismatch would
+            // otherwise reject it as truncated).
+            mold_core::download::write_sha256_marker(&path, "deadbeef").unwrap();
         }
     }
 }

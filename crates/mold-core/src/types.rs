@@ -2448,6 +2448,17 @@ pub struct DownloadJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DownloadEvent {
+    /// Sent as the *first* SSE frame to every new subscriber, containing
+    /// the queue's current state (active + queued + history). Eliminates
+    /// the bootstrap race where a fresh subscriber would otherwise have
+    /// to wait for the next delta to know what's running. Mirrors the
+    /// pattern already used by `/api/resources/stream`.
+    ///
+    /// SPA reducer drops this into state via `applyListing` rather than
+    /// per-job mutation — it's a full snapshot, not a delta.
+    Snapshot {
+        listing: DownloadsListing,
+    },
     Enqueued {
         id: String,
         model: String,
@@ -2482,6 +2493,15 @@ pub enum DownloadEvent {
     },
     JobCancelled {
         id: String,
+    },
+    /// All jobs (primary + every companion) belonging to a catalog entry
+    /// have settled. `ok` is true iff every job in the group reached
+    /// `Completed`. The SPA listens for this and refreshes its model list
+    /// — it replaces the older "refresh on the primary's `JobDone`" path
+    /// that fired before companions were necessarily on disk.
+    CatalogReady {
+        id: String,
+        ok: bool,
     },
 }
 

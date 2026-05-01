@@ -154,7 +154,11 @@ mod tests {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            std::fs::write(path, b"test").unwrap();
+            std::fs::write(&path, b"test").unwrap();
+            // Stamp a `.sha256-verified` marker so post-B3 acceptance
+            // logic recognises the fixture as installed (4-byte stub
+            // would otherwise fail the size-match fallback).
+            crate::download::write_sha256_marker(&path, "deadbeef").unwrap();
         }
     }
 

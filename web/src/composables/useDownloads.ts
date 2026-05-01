@@ -32,6 +32,22 @@ export function applyDownloadEvent(
   event: DownloadEventWire,
 ): void {
   switch (event.type) {
+    case "snapshot": {
+      // Full-state replace. Server emits this as the first frame to every
+      // subscriber so navigation / reconnect doesn't need a separate
+      // `fetchDownloads()` call to rehydrate. Any per-job event the
+      // server emits afterward is a delta on top of this snapshot.
+      //
+      // `active` may arrive as `undefined` when the server has nothing
+      // running — `DownloadsListing.active` is `Option<DownloadJob>` and
+      // serde's `skip_serializing_if = Option::is_none` strips the field.
+      // Coalesce so downstream consumers don't have to handle both null
+      // and undefined.
+      state.active = event.listing.active ?? null;
+      state.queued = [...event.listing.queued];
+      state.history = [...event.listing.history];
+      return;
+    }
     case "enqueued": {
       state.queued.push({
         id: event.id,
@@ -132,6 +148,14 @@ export function applyDownloadEvent(
       while (state.history.length > HISTORY_CAP) state.history.shift();
       return;
     }
+    case "catalog_ready": {
+      // Pure notification — no per-job state to mutate. The reducer
+      // ignores it so the active/queued/history shape stays consistent
+      // with what the server's `GET /api/downloads` would return for the
+      // same instant. Side-effect (refresh model list) lives in the
+      // event-source consumer above.
+      return;
+    }
   }
 }
 
@@ -164,6 +188,10 @@ export interface UseDownloads {
   ratesByJob: Ref<Record<string, Array<{ ts: number; bytes: number }>>>;
   enqueue: (model: string) => Promise<void>;
   cancel: (id: string) => Promise<void>;
+  /// Force-fetch the current downloads listing. Use after any caller
+  /// triggers an action that's expected to alter the queue (e.g. catalog
+  /// downloads) but the relevant SSE event might be lagged or missed.
+  refresh: () => Promise<void>;
   connected: Ref<boolean>;
   close: () => void;
 }
@@ -229,7 +257,11 @@ function buildSingleton(): UseDownloads {
     applyDownloadEvent(snap, evt);
     writeBack(snap);
 
-    // Maintain rate sample window for the active job.
+    // Maintain rate sample window for the active job. Mutate the array
+    // in place rather than spreading the whole `ratesByJob` object —
+    // pre-fix, every progress tick allocated a fresh object containing
+    // every job ever rate-tracked, scaling O(N) with cumulative session
+    // length and dragging the main thread after long sessions.
     if (evt.type === "progress" && active.value && active.value.id === evt.id) {
       const id = evt.id;
       const samples = ratesByJob.value[id] ?? [];
@@ -238,10 +270,42 @@ function buildSingleton(): UseDownloads {
       // Drop samples older than 10 s.
       while (samples.length > 0 && now - samples[0].ts > 10_000)
         samples.shift();
-      ratesByJob.value = { ...ratesByJob.value, [id]: samples };
+      // Direct property assignment — the parent ref's reactivity is
+      // triggered by reading `ratesByJob.value[id]` consumers anyway,
+      // and we want to avoid O(N) copies. If a consumer needs full-
+      // object reactivity, the rate-tracker gets exposed via a
+      // dedicated computed.
+      ratesByJob.value[id] = samples;
     }
 
-    if (evt.type === "job_done") {
+    // Drop the rate window for jobs that just terminated. Without this
+    // `ratesByJob` was a slow memory leak — every download ever started
+    // kept its rate buckets indefinitely, and the in-place mutation we
+    // do above doesn't help unbounded key growth.
+    if (
+      evt.type === "job_done" ||
+      evt.type === "job_failed" ||
+      evt.type === "job_cancelled"
+    ) {
+      delete ratesByJob.value[evt.id];
+    }
+    // Snapshot replaces the entire view of the queue — any job not in
+    // the new listing's active/queued is gone, so its rate window is
+    // dead weight too. Rebuild against the surviving id set.
+    if (evt.type === "snapshot") {
+      const live = new Set<string>();
+      if (evt.listing.active) live.add(evt.listing.active.id);
+      for (const j of evt.listing.queued) live.add(j.id);
+      for (const id of Object.keys(ratesByJob.value)) {
+        if (!live.has(id)) delete ratesByJob.value[id];
+      }
+    }
+
+    if (evt.type === "job_done" || evt.type === "catalog_ready") {
+      // `job_done` covers single-pull manifest fetches. `catalog_ready`
+      // covers the multi-job catalog case where the model only becomes
+      // usable once the primary AND every companion are on disk —
+      // refreshing earlier just shows an incomplete model.
       for (const cb of completionListeners) cb();
     }
   }
@@ -287,12 +351,30 @@ function buildSingleton(): UseDownloads {
     .catch(() => undefined);
   connect();
 
+  /// Force-fetch the current `/api/downloads` listing and apply it. The
+  /// SSE stream also keeps state fresh, but `refresh()` is the click-time
+  /// guarantee — user actions must produce a visible result without
+  /// depending on SSE event delivery (which can lag, especially right
+  /// after a reconnect or when the page is in a background tab).
+  async function refresh(): Promise<void> {
+    try {
+      const listing = await fetchDownloads();
+      applyListing(listing);
+    } catch {
+      /* network blip — SSE will catch us up if it stays connected */
+    }
+  }
+
   async function enqueue(model: string): Promise<void> {
     await postDownload(model);
+    // Belt-and-suspenders against SSE lag. `applyListing` is idempotent
+    // with the SSE-driven mutations so the worst case is a no-op write.
+    void refresh();
   }
 
   async function cancel(id: string): Promise<void> {
     await cancelDownload(id);
+    void refresh();
   }
 
   function close() {
@@ -309,6 +391,7 @@ function buildSingleton(): UseDownloads {
     ratesByJob,
     enqueue,
     cancel,
+    refresh,
     connected,
     close,
   };

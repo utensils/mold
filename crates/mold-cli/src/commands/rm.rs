@@ -707,6 +707,7 @@ mod tests {
                 std::fs::create_dir_all(parent).unwrap();
             }
             std::fs::write(&path, b"x").unwrap();
+            mold_core::download::write_sha256_marker(&path, "deadbeef").unwrap();
         }
 
         let orphan = tmp.join("shared/flux/orphan.bin");
@@ -816,6 +817,8 @@ mod tests {
                 std::fs::create_dir_all(parent).unwrap();
             }
             std::fs::write(&path, b"test").unwrap();
+            // Marker so post-B3 completeness check accepts the 4-byte stub.
+            mold_core::download::write_sha256_marker(&path, "deadbeef").unwrap();
         }
         std::env::set_var("MOLD_MODELS_DIR", &tmp);
 
@@ -850,6 +853,7 @@ mod tests {
                 std::fs::create_dir_all(parent).unwrap();
             }
             std::fs::write(&path, b"test").unwrap();
+            mold_core::download::write_sha256_marker(&path, "deadbeef").unwrap();
         }
 
         let config = Config {
@@ -900,6 +904,7 @@ mod tests {
                     std::fs::create_dir_all(parent).unwrap();
                 }
                 std::fs::write(&path, b"test").unwrap();
+                mold_core::download::write_sha256_marker(&path, "deadbeef").unwrap();
             }
         }
         std::env::set_var("MOLD_MODELS_DIR", &tmp);

@@ -338,7 +338,7 @@ async fn companions_enqueued_in_declaration_order_when_none_present() {
     let queue = DownloadQueue::new_for_test();
     let companions = serde_json::to_string(&["clip-l", "clip-g", "sdxl-vae"]).unwrap();
 
-    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue, None).await;
 
     let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
     assert_eq!(names, vec!["clip-l", "clip-g", "sdxl-vae"]);
@@ -358,7 +358,7 @@ async fn companion_skipped_when_already_present_on_disk() {
     let queue = DownloadQueue::new_for_test();
     let companions = serde_json::to_string(&["clip-l", "clip-g", "sdxl-vae"]).unwrap();
 
-    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue, None).await;
 
     let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
     assert_eq!(
@@ -382,7 +382,7 @@ async fn companion_with_pulling_marker_is_re_enqueued() {
     let queue = DownloadQueue::new_for_test();
     let companions = serde_json::to_string(&["clip-l"]).unwrap();
 
-    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue, None).await;
 
     let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
     assert_eq!(
@@ -404,7 +404,7 @@ async fn unknown_companion_canonical_name_is_skipped() {
     // synthetic manifest yet, so the helper should skip it gracefully.
     let companions = serde_json::to_string(&["clip-l", "z-image-te"]).unwrap();
 
-    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue, None).await;
 
     let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
     assert_eq!(
@@ -422,10 +422,10 @@ async fn empty_companions_returns_empty_job_list() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let queue = DownloadQueue::new_for_test();
 
-    let none_jobs = enqueue_missing_companions(None, tmp.path(), &queue).await;
+    let none_jobs = enqueue_missing_companions(None, tmp.path(), &queue, None).await;
     assert!(none_jobs.is_empty(), "None must yield empty list");
 
-    let empty_jobs = enqueue_missing_companions(Some("[]"), tmp.path(), &queue).await;
+    let empty_jobs = enqueue_missing_companions(Some("[]"), tmp.path(), &queue, None).await;
     assert!(empty_jobs.is_empty(), "[] must yield empty list");
 }
 

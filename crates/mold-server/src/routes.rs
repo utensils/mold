@@ -2897,14 +2897,35 @@ pub async fn stream_downloads(
     use tokio_stream::wrappers::BroadcastStream;
     use tokio_stream::StreamExt as _;
 
+    // Subscribe BEFORE snapshotting so any event arriving during the
+    // snapshot read is queued in the broadcast channel instead of being
+    // missed. The first frame we yield is `Snapshot { listing }` —
+    // mirrors `/api/resources/stream`'s initial-snapshot pattern so a
+    // freshly-mounted SPA paints current state without waiting for the
+    // next delta.
     let rx = state.downloads.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
-        Ok(event) => {
-            let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
-            Some(Ok(Event::default().event("download").data(data)))
+    let initial = state.downloads.listing().await;
+    let snapshot_event = mold_core::types::DownloadEvent::Snapshot { listing: initial };
+
+    let stream = async_stream::stream! {
+        let data = serde_json::to_string(&snapshot_event).unwrap_or_else(|_| "{}".to_string());
+        yield Ok::<_, std::convert::Infallible>(Event::default().event("download").data(data));
+
+        let mut bs = BroadcastStream::new(rx);
+        while let Some(item) = bs.next().await {
+            match item {
+                Ok(event) => {
+                    let data = serde_json::to_string(&event)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    yield Ok(Event::default().event("download").data(data));
+                }
+                // Slow subscribers see lag silently; the snapshot above
+                // already carries the full state so we don't need to
+                // resync on every drop.
+                Err(_lagged) => continue,
+            }
         }
-        Err(_lagged) => None,
-    });
+    };
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()

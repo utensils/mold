@@ -431,40 +431,100 @@ pub fn has_pulling_marker(model_name: &str) -> bool {
     pulling_marker_path(&canonical).exists()
 }
 
-/// Verify SHA-256 integrity of a downloaded file. On mismatch, deletes the
-/// corrupted file and returns `Sha256Mismatch`. Respects `skip_verify`.
+/// Filename suffix for the "this file is fully written and integrity-checked"
+/// sidecar marker: `model.safetensors` → `model.safetensors.sha256-verified`.
+///
+/// The marker is written by [`verify_file_integrity`] on a successful pull
+/// (or by the post-startup backfill sweep for pre-marker installs). Two
+/// downstream consumers depend on it:
+///
+/// 1. `cleanup_partials_in_dir` (in `mold-server`) preserves any file that
+///    has a sibling marker — those are known-good and survive cancel/retry.
+/// 2. `Config::manifest_files_exist` requires the marker before reporting a
+///    model as "downloaded" — eliminates the existence-only race that let
+///    truncated files masquerade as complete installs.
+pub const SHA256_VERIFIED_SUFFIX: &str = ".sha256-verified";
+
+/// Build the marker path for a downloaded file. `model.safetensors` →
+/// `model.safetensors.sha256-verified` in the same directory.
+pub fn sha256_marker_path(path: &Path) -> PathBuf {
+    let mut marker = path.as_os_str().to_os_string();
+    marker.push(SHA256_VERIFIED_SUFFIX);
+    PathBuf::from(marker)
+}
+
+/// True iff `<path>.sha256-verified` exists.
+pub fn has_sha256_marker(path: &Path) -> bool {
+    sha256_marker_path(path).exists()
+}
+
+/// Atomically write the `.sha256-verified` marker for `path` recording the
+/// computed digest. Atomic via tempfile-then-rename so a crash mid-write
+/// never leaves a half-populated marker (which would otherwise read as a
+/// successfully-installed file).
+pub fn write_sha256_marker(path: &Path, digest: &str) -> std::io::Result<()> {
+    let marker = sha256_marker_path(path);
+    let tmp = marker.with_extension(format!("sha256-verified.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, format!("{digest}\n"))?;
+    std::fs::rename(&tmp, &marker)
+}
+
+/// Verify SHA-256 integrity of a downloaded file and write the
+/// `.sha256-verified` marker on success.
+///
+/// - Manifest declares `sha256`: compute, compare, on match write marker
+///   (containing the verified digest); on mismatch delete the corrupted
+///   file and return `Sha256Mismatch`.
+/// - Manifest does not declare a hash: still compute and write the marker
+///   so the file is positively attested as "fully written." This is the
+///   load-bearing change for the gallery race — `Config::manifest_files_exist`
+///   consults marker presence, so unmarked-but-present files no longer
+///   appear in the available-models list.
+/// - `skip_verify = true`: respected from the original contract — no read,
+///   no marker. The caller has explicitly asked us to trust the bytes.
 fn verify_file_integrity(
     clean_path: &std::path::Path,
     file: &ModelFile,
     model_name: &str,
     skip_verify: bool,
 ) -> Result<(), DownloadError> {
-    let expected = match file.sha256 {
-        Some(h) => h,
-        None => return Ok(()),
-    };
     if skip_verify {
         return Ok(());
     }
-    match compute_sha256(clean_path) {
-        Ok(actual) if actual.eq_ignore_ascii_case(expected) => Ok(()),
-        Ok(actual) => {
-            let _ = std::fs::remove_file(clean_path);
-            Err(DownloadError::Sha256Mismatch {
-                filename: file.hf_filename.clone(),
-                expected: expected.to_string(),
-                actual,
-                model: model_name.to_string(),
-            })
-        }
+    let actual = match compute_sha256(clean_path) {
+        Ok(d) => d,
         Err(e) => {
+            // I/O failure during hashing — log and move on without a marker.
+            // The downstream `manifest_files_exist` check will report the
+            // file incomplete, prompting a retry rather than a silent pass.
             eprintln!(
                 "warning: failed to verify SHA-256 for {}: {e}",
                 file.hf_filename
             );
-            Ok(())
+            return Ok(());
+        }
+    };
+    if let Some(expected) = file.sha256 {
+        if !actual.eq_ignore_ascii_case(expected) {
+            let _ = std::fs::remove_file(clean_path);
+            return Err(DownloadError::Sha256Mismatch {
+                filename: file.hf_filename.clone(),
+                expected: expected.to_string(),
+                actual,
+                model: model_name.to_string(),
+            });
         }
     }
+    if let Err(e) = write_sha256_marker(clean_path, &actual) {
+        // Marker-write failure isn't fatal to this attempt — the file is
+        // good. But it does mean the next `manifest_files_exist` check will
+        // report incomplete. Log loudly so users can see why.
+        eprintln!(
+            "warning: failed to write .sha256-verified marker for {}: {e}",
+            file.hf_filename
+        );
+    }
+    Ok(())
 }
 
 /// Truncate a string to fit within `max_len`, replacing the middle with "..." if needed.
@@ -1686,14 +1746,21 @@ async fn fetch_recipe_inner(
         // Drop file handle so the SHA-256 read sees a flushed file.
         drop(out);
 
-        if let Some(expected) = file.sha256 {
-            if !opts.skip_verify {
-                let actual = compute_sha256(dest_path).map_err(|e| {
-                    DownloadError::Other(format!(
-                        "failed to compute SHA-256 for {}: {e}",
-                        dest_path.display()
-                    ))
-                })?;
+        // Hash-and-mark on success. Mirror of the manifest-pull path: when
+        // the recipe declares an expected hash we compare and bail on
+        // mismatch; either way we end up writing the `.sha256-verified`
+        // marker so `Config::manifest_files_exist` recognises this file
+        // as a positively-attested install (not just "exists on disk").
+        // Skipped under `skip_verify` — the user has explicitly asked us
+        // not to read the file, so we have nothing to attest.
+        if !opts.skip_verify {
+            let actual = compute_sha256(dest_path).map_err(|e| {
+                DownloadError::Other(format!(
+                    "failed to compute SHA-256 for {}: {e}",
+                    dest_path.display()
+                ))
+            })?;
+            if let Some(expected) = file.sha256 {
                 if !actual.eq_ignore_ascii_case(expected) {
                     let _ = std::fs::remove_file(dest_path);
                     return Err(DownloadError::Sha256Mismatch {
@@ -1703,6 +1770,12 @@ async fn fetch_recipe_inner(
                         model: id.to_string(),
                     });
                 }
+            }
+            if let Err(e) = write_sha256_marker(dest_path, &actual) {
+                eprintln!(
+                    "warning: failed to write .sha256-verified marker for {}: {e}",
+                    file.dest
+                );
             }
         }
 
@@ -2241,6 +2314,171 @@ mod tests {
         };
 
         assert!(verify_file_integrity(&path, &file, "test:q8", false).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── .sha256-verified marker helpers (B1) ─────────────────────────────
+
+    #[test]
+    fn sha256_marker_path_appends_suffix() {
+        let p = std::path::Path::new("/tmp/foo/model.safetensors");
+        let marker = sha256_marker_path(p);
+        assert_eq!(
+            marker,
+            std::path::PathBuf::from("/tmp/foo/model.safetensors.sha256-verified")
+        );
+    }
+
+    #[test]
+    fn sha256_marker_path_handles_dotted_filenames() {
+        let p = std::path::Path::new("/tmp/.hidden.bin");
+        let marker = sha256_marker_path(p);
+        assert_eq!(
+            marker,
+            std::path::PathBuf::from("/tmp/.hidden.bin.sha256-verified")
+        );
+    }
+
+    #[test]
+    fn write_sha256_marker_creates_file_with_digest() {
+        let dir = std::env::temp_dir().join("mold_test_marker_write");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let digest = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        write_sha256_marker(&path, digest).unwrap();
+
+        let marker = sha256_marker_path(&path);
+        assert!(marker.exists(), "marker should exist next to file");
+        let content = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            content.contains(digest),
+            "marker content should contain the digest, got: {content:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_sha256_marker_is_idempotent() {
+        let dir = std::env::temp_dir().join("mold_test_marker_idempotent");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.bin");
+        std::fs::write(&path, b"x").unwrap();
+        let digest = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
+        write_sha256_marker(&path, digest).unwrap();
+        // Second call must not fail.
+        write_sha256_marker(&path, digest).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn has_sha256_marker_reflects_existence() {
+        let dir = std::env::temp_dir().join("mold_test_marker_has");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.bin");
+        std::fs::write(&path, b"x").unwrap();
+        assert!(!has_sha256_marker(&path), "no marker yet");
+        write_sha256_marker(&path, "deadbeef").unwrap();
+        assert!(has_sha256_marker(&path), "marker should exist");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── verify_file_integrity now writes a marker on success (B2) ────────
+
+    #[test]
+    fn verify_file_integrity_writes_marker_on_match() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_writes_marker");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ok.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "ok.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 11,
+            gated: false,
+            sha256: Some("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"),
+        };
+        verify_file_integrity(&path, &file, "test:q8", false).unwrap();
+        assert!(
+            has_sha256_marker(&path),
+            "marker should be written after a successful verify"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_file_integrity_writes_marker_when_no_hash_declared() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_no_hash_marker");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ok.bin");
+        std::fs::write(&path, b"data").unwrap();
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "ok.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 4,
+            gated: false,
+            sha256: None,
+        };
+        verify_file_integrity(&path, &file, "test:q8", false).unwrap();
+        assert!(
+            has_sha256_marker(&path),
+            "marker must be written even when manifest declares no expected hash \
+             (the marker still proves the file finished writing)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_file_integrity_no_marker_on_mismatch() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_no_marker_on_miss");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bad.bin");
+        std::fs::write(&path, b"corrupted").unwrap();
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "bad.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 9,
+            gated: false,
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        };
+        let result = verify_file_integrity(&path, &file, "test:q8", false);
+        assert!(result.is_err(), "mismatch should error");
+        // The corrupted file is removed by verify_file_integrity, but more
+        // importantly: there must be no marker pointing at the bad bytes.
+        assert!(
+            !has_sha256_marker(&path),
+            "no marker may exist after a hash mismatch"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_file_integrity_skip_verify_does_not_write_marker() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_skip_no_marker");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.bin");
+        std::fs::write(&path, b"some data").unwrap();
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "file.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 9,
+            gated: false,
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        };
+        // skip_verify = true: we don't know the file is good, so no marker.
+        verify_file_integrity(&path, &file, "test:q8", true).unwrap();
+        assert!(
+            !has_sha256_marker(&path),
+            "skip_verify must not produce a marker — we have no integrity guarantee"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

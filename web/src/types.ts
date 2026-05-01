@@ -385,6 +385,17 @@ export interface DownloadsListingWire {
 }
 
 export type DownloadEventWire =
+  /// First frame of any new SSE subscription — full queue snapshot so a
+  /// fresh client paints current state without waiting for the next
+  /// delta. The reducer replaces all state with the listing payload.
+  | {
+      type: "snapshot";
+      listing: {
+        active: DownloadJobWire | null;
+        queued: DownloadJobWire[];
+        history: DownloadJobWire[];
+      };
+    }
   | { type: "enqueued"; id: string; model: string; position: number }
   | { type: "dequeued"; id: string }
   | {
@@ -403,7 +414,13 @@ export type DownloadEventWire =
   | { type: "file_done"; id: string; filename: string }
   | { type: "job_done"; id: string; model: string }
   | { type: "job_failed"; id: string; error: string }
-  | { type: "job_cancelled"; id: string };
+  | { type: "job_cancelled"; id: string }
+  /// All jobs (primary + companions) for a catalog entry have settled.
+  /// Emitted exactly once per catalog download. Listen for this instead
+  /// of `job_done` when refreshing the model list after a catalog pull —
+  /// the primary's `job_done` fires before companions are necessarily on
+  /// disk, which is the "model sometimes doesn't show up" race.
+  | { type: "catalog_ready"; id: string; ok: boolean };
 // ──────────────────────────────────────────────────────────────────────────────
 // Resource telemetry (Agent B scope). Mirror of `mold_core::ResourceSnapshot`
 // et al. `vram_used_by_mold` / `vram_used_by_other` are null on Metal hosts

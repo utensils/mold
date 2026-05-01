@@ -862,3 +862,163 @@ async fn recipe_job_dispatches_to_recipe_driver_not_manifest_driver() {
     let captured = captured.as_ref().expect("recipe driver should have run");
     assert_eq!(captured.catalog_id, "cv:99");
 }
+
+// ── C: catalog group completion event ──────────────────────────────────
+
+/// Drain ready CatalogReady events from the queue's broadcast channel.
+/// Returns `(id, ok)` for each. Used by the C tests below.
+fn drain_catalog_ready(
+    rx: &mut tokio::sync::broadcast::Receiver<DownloadEvent>,
+) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(DownloadEvent::CatalogReady { id, ok }) => out.push((id, ok)),
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn catalog_group_emits_ready_when_all_jobs_complete() {
+    // Three companions + a primary all complete; CatalogReady fires once
+    // with ok=true. Pre-C the SPA fired its model-list refresh on the
+    // primary's JobDone, sometimes before companions hit disk — this is
+    // the regression test for that bug.
+    let queue = DownloadQueue::new_for_test();
+    let mut rx = queue.subscribe();
+
+    let (j1, _, _) = queue
+        .enqueue_in_group("flux-schnell:q4".into(), "cv:42")
+        .await
+        .unwrap();
+    let (j2, _, _) = queue
+        .enqueue_in_group("flux-dev:q4".into(), "cv:42")
+        .await
+        .unwrap();
+    let (j3, _, _) = queue
+        .enqueue_in_group("real-esrgan-x4plus:fp16".into(), "cv:42")
+        .await
+        .unwrap();
+
+    queue.settle_for_group(&j1, JobStatus::Completed);
+    queue.settle_for_group(&j2, JobStatus::Completed);
+    assert!(
+        drain_catalog_ready(&mut rx).is_empty(),
+        "no event until last job settles"
+    );
+
+    queue.settle_for_group(&j3, JobStatus::Completed);
+    let ready = drain_catalog_ready(&mut rx);
+    assert_eq!(ready, vec![("cv:42".to_string(), true)]);
+}
+
+#[tokio::test]
+async fn catalog_group_emits_ready_with_ok_false_on_failure() {
+    // Mixed outcome: one Failed → group is settled but ok=false. The SPA
+    // can still react (refresh, show repair pill) without losing the signal.
+    let queue = DownloadQueue::new_for_test();
+    let mut rx = queue.subscribe();
+
+    let (j1, _, _) = queue
+        .enqueue_in_group("flux-schnell:q4".into(), "cv:99")
+        .await
+        .unwrap();
+    let (j2, _, _) = queue
+        .enqueue_in_group("flux-dev:q4".into(), "cv:99")
+        .await
+        .unwrap();
+
+    queue.settle_for_group(&j1, JobStatus::Completed);
+    queue.settle_for_group(&j2, JobStatus::Failed);
+
+    let ready = drain_catalog_ready(&mut rx);
+    assert_eq!(ready, vec![("cv:99".to_string(), false)]);
+}
+
+#[tokio::test]
+async fn catalog_group_emits_ready_with_ok_false_on_cancellation() {
+    // User cancels one of the companions → group settled with ok=false.
+    let queue = DownloadQueue::new_for_test();
+    let mut rx = queue.subscribe();
+
+    let (j1, _, _) = queue
+        .enqueue_in_group("flux-schnell:q4".into(), "cv:7")
+        .await
+        .unwrap();
+    let (j2, _, _) = queue
+        .enqueue_in_group("flux-dev:q4".into(), "cv:7")
+        .await
+        .unwrap();
+
+    queue.settle_for_group(&j1, JobStatus::Completed);
+    queue.settle_for_group(&j2, JobStatus::Cancelled);
+
+    let ready = drain_catalog_ready(&mut rx);
+    assert_eq!(ready, vec![("cv:7".to_string(), false)]);
+}
+
+#[tokio::test]
+async fn catalog_group_emits_ready_only_once() {
+    // After the group emits, repeated settle calls for the same job ids
+    // are no-ops (the group has been removed from the ledger). Guards
+    // against a double-refresh storm in the SPA if a stale event leaks.
+    let queue = DownloadQueue::new_for_test();
+    let mut rx = queue.subscribe();
+
+    let (j1, _, _) = queue
+        .enqueue_in_group("flux-schnell:q4".into(), "cv:1")
+        .await
+        .unwrap();
+    queue.settle_for_group(&j1, JobStatus::Completed);
+    queue.settle_for_group(&j1, JobStatus::Completed);
+    queue.settle_for_group(&j1, JobStatus::Completed);
+
+    let ready = drain_catalog_ready(&mut rx);
+    assert_eq!(ready.len(), 1);
+}
+
+#[tokio::test]
+async fn settle_for_group_is_no_op_for_ungrouped_jobs() {
+    // Manifest pulls outside any catalog group must not fire CatalogReady.
+    let queue = DownloadQueue::new_for_test();
+    let mut rx = queue.subscribe();
+
+    let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+    queue.settle_for_group(&id, JobStatus::Completed);
+
+    assert!(
+        drain_catalog_ready(&mut rx).is_empty(),
+        "ungrouped jobs must not produce CatalogReady"
+    );
+}
+
+#[tokio::test]
+async fn enqueue_in_group_dedupes_membership_for_already_present() {
+    // If a manual `mold pull` raced ahead and put `flux-schnell:q4` in the
+    // queue, then a catalog enqueue tries to register it under group "cv:5",
+    // we still want the existing job to count toward the group — otherwise
+    // CatalogReady would never fire because that job's settle never finds
+    // the group.
+    let queue = DownloadQueue::new_for_test();
+    let mut rx = queue.subscribe();
+
+    let (j_pre, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+    let (j_in_group, _, outcome) = queue
+        .enqueue_in_group("flux-schnell:q4".into(), "cv:5")
+        .await
+        .unwrap();
+    assert_eq!(j_pre, j_in_group, "dedup must return the same job id");
+    assert_eq!(
+        outcome,
+        crate::downloads::EnqueueOutcome::AlreadyPresent,
+        "second enqueue should be AlreadyPresent"
+    );
+
+    queue.settle_for_group(&j_in_group, JobStatus::Completed);
+
+    let ready = drain_catalog_ready(&mut rx);
+    assert_eq!(ready, vec![("cv:5".to_string(), true)]);
+}

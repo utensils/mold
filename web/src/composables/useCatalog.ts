@@ -8,6 +8,7 @@ import {
   postCatalogRefresh,
   fetchCatalogRefresh,
 } from "../api";
+import { useDownloads } from "./useDownloads";
 import type {
   CatalogEntryWire,
   CatalogFamilyCount,
@@ -79,7 +80,13 @@ function build() {
   }
 
   async function startDownload(id: string) {
-    return await postCatalogDownload(id);
+    const result = await postCatalogDownload(id);
+    // The catalog endpoint enqueues 1–N download jobs (primary + companions).
+    // Force the downloads drawer to repaint immediately rather than waiting
+    // for the SSE `enqueued` events, which can lag when the page is in a
+    // background tab or right after an SSE reconnect.
+    void useDownloads().refresh();
+    return result;
   }
 
   async function startRefresh(family?: string) {

@@ -532,11 +532,21 @@ pub(crate) async fn enqueue_missing_companions(
     companions_json: Option<&str>,
     models_dir: &std::path::Path,
     queue: &crate::downloads::DownloadQueue,
+    catalog_id: Option<&str>,
 ) -> Vec<CompanionJob> {
     let manifests = mold_core::download::missing_companions_from_json(companions_json, models_dir);
     let mut jobs = Vec::with_capacity(manifests.len());
     for manifest in manifests {
-        match queue.enqueue(manifest.name.clone()).await {
+        // When called for a catalog download, the companion job is
+        // registered in the catalog group so `CatalogReady` waits for
+        // it. Outside that context (no catalog id), fall back to the
+        // ungrouped enqueue — companions invoked from elsewhere don't
+        // synchronise on a group event.
+        let result = match catalog_id {
+            Some(id) => queue.enqueue_in_group(manifest.name.clone(), id).await,
+            None => queue.enqueue(manifest.name.clone()).await,
+        };
+        match result {
             Ok((job_id, _, _)) => jobs.push(CompanionJob {
                 name: manifest.name.clone(),
                 job_id,
@@ -580,8 +590,13 @@ pub async fn post_catalog_download(
     // those entries. Each canonical companion has a hidden synthetic
     // manifest in `mold-core` so the queue can enqueue them by name.
     let models_dir = state.config.read().await.resolved_models_dir();
-    let companion_jobs =
-        enqueue_missing_companions(row.companions.as_deref(), &models_dir, &state.downloads).await;
+    let companion_jobs = enqueue_missing_companions(
+        row.companions.as_deref(),
+        &models_dir,
+        &state.downloads,
+        Some(&row.id),
+    )
+    .await;
 
     // Primary entry. HF rows map onto a manifest model name (best-effort —
     // diffusers entries with a recognised source_id flow through; the rest
@@ -596,7 +611,7 @@ pub async fn post_catalog_download(
             Some(m) => m.name.clone(),
             None => row.source_id.clone(),
         };
-        match state.downloads.enqueue(model).await {
+        match state.downloads.enqueue_in_group(model, &row.id).await {
             Ok((jid, _, _)) => Some(jid),
             Err(crate::downloads::EnqueueError::UnknownModel(_)) => None,
             Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -639,7 +654,11 @@ pub async fn post_catalog_download(
             files,
             auth,
         };
-        match state.downloads.enqueue_recipe(payload).await {
+        match state
+            .downloads
+            .enqueue_recipe_in_group(payload, &row.id)
+            .await
+        {
             Ok((jid, _, _)) => Some(jid),
             Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         }
