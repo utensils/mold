@@ -217,14 +217,124 @@ impl SD15Engine {
 
             self.base.progress.stage_start("Reloading UNet (GPU)");
             let reload_start = Instant::now();
-            let unet =
-                sd_config.build_unet(&self.base.paths.transformer, &device, 4, false, dtype)?;
+            let unet = self.build_unet_for_strategy(&sd_config, &device, dtype)?;
             self.base.loaded.as_mut().unwrap().unet = Some(unet);
             self.base
                 .progress
                 .stage_done("Reloading UNet (GPU)", reload_start.elapsed());
         }
         Ok(())
+    }
+
+    /// UNet load that branches on `single_file_path` — Civitai single-file
+    /// checkpoints (A1111 naming) get the `SingleFileBackend` dispatch,
+    /// diffusers-layout falls through to candle's `build_unet`. Used by
+    /// every UNet load site (eager `load`, sequential `generate_sequential`,
+    /// and `reload_unet_if_needed`) so the branch logic lives in exactly
+    /// one place.
+    fn build_unet_for_strategy(
+        &self,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
+        if let Some(single_file) = self.single_file_path.as_ref() {
+            let remap = Self::load_sd15_remap(single_file)?;
+            Self::build_unet_single_file(single_file, &remap, sd_config, device, dtype)
+        } else {
+            Ok(sd_config.build_unet(&self.base.paths.transformer, device, 4, false, dtype)?)
+        }
+    }
+
+    /// VAE load with the same single-file vs diffusers branch as
+    /// `build_unet_for_strategy`. Sequential SD1.5 loads the VAE twice
+    /// (once for img2img encode, once for post-denoise decode), so this
+    /// helper keeps the branch logic in a single place.
+    fn build_vae_for_strategy(
+        &self,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<stable_diffusion::vae::AutoEncoderKL> {
+        if let Some(single_file) = self.single_file_path.as_ref() {
+            let remap = Self::load_sd15_remap(single_file)?;
+            Self::build_vae_single_file(single_file, &remap, sd_config, device, dtype)
+        } else {
+            Ok(sd_config.build_vae(&self.base.paths.vae, device, dtype)?)
+        }
+    }
+
+    /// Header-parse the single-file checkpoint and build the SD1.5
+    /// diffusers→A1111 remap. Cheap (no tensor data is mmap'd) — sequential
+    /// reload calls this each time a component is reloaded after dropping.
+    fn load_sd15_remap(single_file: &std::path::Path) -> Result<crate::loader::Sd15Remap> {
+        use crate::loader::{build_sd15_remap, single_file as single_file_loader};
+        use mold_catalog::families::Family;
+        let bundle = single_file_loader::load(single_file, Family::Sd15)
+            .map_err(|e| anyhow::anyhow!("partition single-file SD1.5 checkpoint: {e}"))?;
+        build_sd15_remap(&bundle)
+            .map_err(|e| anyhow::anyhow!("build SD1.5 diffusers→A1111 remap: {e}"))
+    }
+
+    /// Build a UNet from a Civitai single-file checkpoint via
+    /// `SingleFileBackend`. Used by both eager `load_components_single_file`
+    /// and sequential `generate_sequential`.
+    fn build_unet_single_file(
+        single_file: &std::path::Path,
+        remap: &crate::loader::Sd15Remap,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
+        use crate::loader::SingleFileBackend;
+        use candle_nn::VarBuilder;
+        let backend = SingleFileBackend::from_sd15_remap(single_file, remap)?;
+        let vb = VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
+        Ok(stable_diffusion::unet_2d::UNet2DConditionModel::new(
+            vb,
+            4,
+            4,
+            false,
+            sd_config.unet().clone(),
+        )?)
+    }
+
+    /// Build a VAE from a Civitai single-file checkpoint via `SingleFileBackend`.
+    fn build_vae_single_file(
+        single_file: &std::path::Path,
+        remap: &crate::loader::Sd15Remap,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<stable_diffusion::vae::AutoEncoderKL> {
+        use crate::loader::SingleFileBackend;
+        use candle_nn::VarBuilder;
+        let backend = SingleFileBackend::from_sd15_remap(single_file, remap)?;
+        let vb = VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
+        Ok(stable_diffusion::vae::AutoEncoderKL::new(
+            vb,
+            3,
+            3,
+            sd_config.autoencoder().clone(),
+        )?)
+    }
+
+    /// Build CLIP-L from a Civitai single-file checkpoint via `SingleFileBackend`.
+    /// SD1.5 has only one CLIP-L (no CLIP-G).
+    fn build_clip_single_file(
+        single_file: &std::path::Path,
+        remap: &crate::loader::Sd15Remap,
+        clip_config: &stable_diffusion::clip::Config,
+        clip_device: &Device,
+    ) -> Result<stable_diffusion::clip::ClipTextTransformer> {
+        use crate::loader::SingleFileBackend;
+        use candle_nn::VarBuilder;
+        let backend = SingleFileBackend::from_sd15_remap(single_file, remap)?;
+        let vb = VarBuilder::from_backend(Box::new(backend), DType::F32, clip_device.clone());
+        Ok(stable_diffusion::clip::ClipTextTransformer::new(
+            vb,
+            clip_config,
+        )?)
     }
 
     /// Load all SD1.5 model components (Eager mode).
@@ -378,41 +488,18 @@ impl SD15Engine {
         stable_diffusion::vae::AutoEncoderKL,
         stable_diffusion::clip::ClipTextTransformer,
     )> {
-        use crate::loader::single_file_backend::SingleFileBackend;
-        use crate::loader::{build_sd15_remap, single_file as single_file_loader};
-        use candle_nn::VarBuilder;
-        use mold_catalog::families::Family;
-
-        let bundle = single_file_loader::load(single_file, Family::Sd15)
-            .map_err(|e| anyhow::anyhow!("partition single-file SD1.5 checkpoint: {e}"))?;
-        let remap = build_sd15_remap(&bundle)
-            .map_err(|e| anyhow::anyhow!("build SD1.5 diffusers→A1111 remap: {e}"))?;
+        let remap = Self::load_sd15_remap(single_file)?;
 
         self.base.progress.stage_start("Loading UNet (single-file)");
         let unet_start = Instant::now();
-        let unet_backend = SingleFileBackend::from_sd15_remap(single_file, &remap)?;
-        let vb_unet = VarBuilder::from_backend(Box::new(unet_backend), dtype, device.clone());
-        let unet = stable_diffusion::unet_2d::UNet2DConditionModel::new(
-            vb_unet,
-            4,     // in_channels (latent channels for SD1.5)
-            4,     // out_channels (matches build_unet's hardcoded value)
-            false, // use_flash_attn — feature parity with diffusers path
-            sd_config.unet().clone(),
-        )?;
+        let unet = Self::build_unet_single_file(single_file, &remap, sd_config, device, dtype)?;
         self.base
             .progress
             .stage_done("Loading UNet (single-file)", unet_start.elapsed());
 
         self.base.progress.stage_start("Loading VAE (single-file)");
         let vae_start = Instant::now();
-        let vae_backend = SingleFileBackend::from_sd15_remap(single_file, &remap)?;
-        let vb_vae = VarBuilder::from_backend(Box::new(vae_backend), dtype, device.clone());
-        let vae = stable_diffusion::vae::AutoEncoderKL::new(
-            vb_vae,
-            3, // in_channels (RGB)
-            3, // out_channels (RGB)
-            sd_config.autoencoder().clone(),
-        )?;
+        let vae = Self::build_vae_single_file(single_file, &remap, sd_config, device, dtype)?;
         self.base
             .progress
             .stage_done("Loading VAE (single-file)", vae_start.elapsed());
@@ -421,12 +508,7 @@ impl SD15Engine {
             .progress
             .stage_start("Loading CLIP-L (single-file)");
         let clip_start = Instant::now();
-        let clip_backend = SingleFileBackend::from_sd15_remap(single_file, &remap)?;
-        // CLIP-L weights are F32 in the diffusers path; mirror that here so
-        // tokenization output dtype matches what `LoadedSD15.dtype` expects.
-        let vb_clip =
-            VarBuilder::from_backend(Box::new(clip_backend), DType::F32, clip_device.clone());
-        let clip = stable_diffusion::clip::ClipTextTransformer::new(vb_clip, &sd_config.clip)?;
+        let clip = Self::build_clip_single_file(single_file, &remap, &sd_config.clip, clip_device)?;
         self.base
             .progress
             .stage_done("Loading CLIP-L (single-file)", clip_start.elapsed());
@@ -847,17 +929,41 @@ impl SD15Engine {
                 .map(|p| p.text_encoders)
                 .unwrap_or_default();
             let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
-            self.base.progress.stage_start("Loading CLIP-L encoder");
-            let clip_start = Instant::now();
-            let clip = stable_diffusion::build_clip_transformer(
-                &sd_config.clip,
-                &clip_encoder,
-                &clip_device,
-                DType::F32,
-            )?;
-            self.base
-                .progress
-                .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
+            // Branch on single_file_path so cv:<id>-style Civitai checkpoints
+            // (A1111 naming) go through `SingleFileBackend` just like eager
+            // mode does. Without this, candle's diffusers-keyed
+            // `build_clip_transformer` errors with
+            // "cannot find tensor text_model.embeddings.token_embedding.weight".
+            let clip = if let Some(single_file) = self.single_file_path.clone() {
+                let remap = Self::load_sd15_remap(&single_file)?;
+                self.base
+                    .progress
+                    .stage_start("Loading CLIP-L (single-file)");
+                let clip_start = Instant::now();
+                let clip = Self::build_clip_single_file(
+                    &single_file,
+                    &remap,
+                    &sd_config.clip,
+                    &clip_device,
+                )?;
+                self.base
+                    .progress
+                    .stage_done("Loading CLIP-L (single-file)", clip_start.elapsed());
+                clip
+            } else {
+                self.base.progress.stage_start("Loading CLIP-L encoder");
+                let clip_start = Instant::now();
+                let clip = stable_diffusion::build_clip_transformer(
+                    &sd_config.clip,
+                    &clip_encoder,
+                    &clip_device,
+                    DType::F32,
+                )?;
+                self.base
+                    .progress
+                    .stage_done("Loading CLIP-L encoder", clip_start.elapsed());
+                clip
+            };
 
             let text_embeddings = self.encode_prompt(
                 &clip,
@@ -889,7 +995,7 @@ impl SD15Engine {
 
         self.base.progress.stage_start("Loading UNet (GPU)");
         let unet_start = Instant::now();
-        let unet = sd_config.build_unet(&self.base.paths.transformer, &device, 4, false, dtype)?;
+        let unet = self.build_unet_for_strategy(&sd_config, &device, dtype)?;
         self.base
             .progress
             .stage_done("Loading UNet (GPU)", unet_start.elapsed());
@@ -908,7 +1014,7 @@ impl SD15Engine {
             // Load VAE first for encoding
             self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_start = Instant::now();
-            let vae = sd_config.build_vae(&self.base.paths.vae, &device, dtype)?;
+            let vae = self.build_vae_for_strategy(&sd_config, &device, dtype)?;
             self.base
                 .progress
                 .stage_done("Loading VAE (GPU)", vae_start.elapsed());
@@ -998,7 +1104,7 @@ impl SD15Engine {
         };
         self.base.progress.stage_start(vae_load_label);
         let vae_start = Instant::now();
-        let vae = sd_config.build_vae(&self.base.paths.vae, &device, dtype)?;
+        let vae = self.build_vae_for_strategy(&sd_config, &device, dtype)?;
         self.base
             .progress
             .stage_done(vae_load_label, vae_start.elapsed());
@@ -1401,6 +1507,62 @@ mod tests {
 
         let _ = std::fs::remove_file(single_file);
         let _ = std::fs::remove_file(tokenizer_stub);
+    }
+
+    /// Sequential single-file dispatch must hand CLIP-L construction to
+    /// `SingleFileBackend` (which translates diffusers `text_model.X` keys
+    /// through `Sd15Remap` into A1111 reads), NOT to candle's diffusers-keyed
+    /// `build_clip_transformer`. Same contract as the SDXL sibling.
+    ///
+    /// Locks the SD1.5 half of bug 1 from
+    /// `tasks/catalog-run-bridge-option-c-handoff.md`.
+    #[test]
+    fn build_clip_single_file_dispatches_through_backend_not_diffusers_loader() {
+        let single_file = synth_sd15_single_file("seq-clip-dispatch");
+        let remap = SD15Engine::load_sd15_remap(&single_file).expect("remap");
+
+        let result = SD15Engine::build_clip_single_file(
+            &single_file,
+            &remap,
+            &stable_diffusion::clip::Config::v1_5(),
+            &Device::Cpu,
+        );
+
+        let err = result.expect_err("synthetic CLIP-L is incomplete");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("cannot find tensor text_model"),
+            "expected failure from SingleFileBackend ('no rename rule for diffusers key …'), \
+             not from candle's diffusers `from_mmaped_safetensors`. Sequential dispatch \
+             is still routing through `build_clip_transformer`. Got: {msg}",
+        );
+
+        let _ = std::fs::remove_file(single_file);
+    }
+
+    /// UNet sequential dispatch parity. SD1.5 sibling of the SDXL UNet
+    /// dispatch test.
+    #[test]
+    fn build_unet_single_file_dispatches_through_backend_not_diffusers_loader() {
+        let single_file = synth_sd15_single_file("seq-unet-dispatch");
+        let remap = SD15Engine::load_sd15_remap(&single_file).expect("remap");
+
+        let result = SD15Engine::build_unet_single_file(
+            &single_file,
+            &remap,
+            &stable_diffusion::StableDiffusionConfig::v1_5(None, None, None),
+            &Device::Cpu,
+            DType::F32,
+        );
+
+        let err = result.expect_err("synthetic UNet is incomplete");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("cannot find tensor conv_in"),
+            "expected failure from SingleFileBackend, not diffusers loader. Got: {msg}",
+        );
+
+        let _ = std::fs::remove_file(single_file);
     }
 
     /// Real-shape SD1.5 `load()` smoke — full UNet + VAE + CLIP-L
