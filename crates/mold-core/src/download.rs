@@ -445,6 +445,13 @@ pub fn has_pulling_marker(model_name: &str) -> bool {
 ///    truncated files masquerade as complete installs.
 pub const SHA256_VERIFIED_SUFFIX: &str = ".sha256-verified";
 
+/// Minimum interval between `FileProgress` events emitted by the recipe-pull
+/// path (`fetch_recipe_inner`). The manifest-pull path's `CallbackProgress`
+/// throttles to the same cadence; this constant keeps them in sync. 250ms
+/// matches a comfortable UI refresh rate (~4 Hz) without flooding SSE
+/// subscribers when downloads run at multi-MB/s chunk rates.
+pub const RECIPE_PROGRESS_THROTTLE_MS: u64 = 250;
+
 /// Build the marker path for a downloaded file. `model.safetensors` →
 /// `model.safetensors.sha256-verified` in the same directory.
 pub fn sha256_marker_path(path: &Path) -> PathBuf {
@@ -1715,6 +1722,12 @@ async fn fetch_recipe_inner(
             DownloadError::FilePlacement(format!("failed to create {}: {e}", dest_path.display()))
         })?;
         let mut resp = resp;
+        // Throttle FileProgress to once per RECIPE_PROGRESS_THROTTLE_MS so SSE
+        // subscribers and reactive UIs aren't drowned in chunk-rate events
+        // (a multi-GB Civitai pull emits hundreds of thousands of chunks).
+        // Mirrors the throttle in the manifest-pull `CallbackProgress::update`.
+        let mut last_emit = Instant::now();
+        let mut last_emit_bytes: u64 = 0;
         while let Some(chunk) = resp
             .chunk()
             .await
@@ -1732,6 +1745,29 @@ async fn fetch_recipe_inner(
             bytes_downloaded += chunk.len() as u64;
             batch_bytes_downloaded += chunk.len() as u64;
             if let Some(cb) = progress.as_deref() {
+                let now = Instant::now();
+                let elapsed = now.duration_since(last_emit).as_millis();
+                if elapsed >= RECIPE_PROGRESS_THROTTLE_MS as u128 {
+                    last_emit = now;
+                    last_emit_bytes = bytes_downloaded;
+                    cb(DownloadProgressEvent::FileProgress {
+                        filename: file.dest.to_string(),
+                        file_index,
+                        bytes_downloaded,
+                        bytes_total: size_bytes,
+                        batch_bytes_downloaded,
+                        batch_bytes_total,
+                        batch_elapsed_ms: started.elapsed().as_millis() as u64,
+                    });
+                }
+            }
+        }
+        // Final progress emit so the file's last few chunks aren't swallowed
+        // by the throttle (FileDone fires below, but it doesn't carry the
+        // intermediate bytes_downloaded value — drawers that key off
+        // FileProgress for their byte counter would otherwise stall short).
+        if let Some(cb) = progress.as_deref() {
+            if bytes_downloaded > last_emit_bytes {
                 cb(DownloadProgressEvent::FileProgress {
                     filename: file.dest.to_string(),
                     file_index,

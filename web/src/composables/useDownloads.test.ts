@@ -176,3 +176,76 @@ describe("applyDownloadEvent", () => {
     expect(state.queued).toHaveLength(0);
   });
 });
+
+import { afterEach, beforeEach, vi } from "vitest";
+import { __resetUseDownloadsForTest, useDownloads } from "./useDownloads";
+
+describe("useDownloads.enqueue dispatch", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEventSource = globalThis.EventSource;
+
+  beforeEach(() => {
+    __resetUseDownloadsForTest();
+    // Stub EventSource so the singleton's SSE setup is a no-op.
+    class StubES {
+      onopen: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: (() => void) | null = null;
+      addEventListener() {}
+      close() {}
+    }
+    // @ts-expect-error - test stub
+    globalThis.EventSource = StubES;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    globalThis.EventSource = originalEventSource;
+    __resetUseDownloadsForTest();
+    vi.restoreAllMocks();
+  });
+
+  it("routes manifest names to /api/downloads", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith("/api/downloads")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ id: "job-1", position: 0 }),
+          headers: new Map(),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const dl = useDownloads();
+    await dl.enqueue("flux-dev:q4");
+    dl.close();
+
+    const urls = fetchMock.mock.calls.map((c) => c[0] as string);
+    expect(urls.some((u) => u.endsWith("/api/downloads"))).toBe(true);
+    expect(urls.some((u) => u.includes("/api/catalog/"))).toBe(false);
+  });
+
+  it("routes cv:/hf: ids to /api/catalog/:id/download", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/api/catalog/")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ primary_job_id: "p", companion_jobs: [] }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const dl = useDownloads();
+    await dl.enqueue("cv:232703");
+    dl.close();
+
+    const urls = fetchMock.mock.calls.map((c) => c[0] as string);
+    expect(urls.some((u) => u.includes("/api/catalog/cv%3A232703/download"))).toBe(true);
+  });
+});

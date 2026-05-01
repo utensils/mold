@@ -441,3 +441,13 @@ export async function postCatalogDownload(
   if (!r.ok) throw new Error(`/api/catalog/${id}/download ${r.status}`);
   return r.json();
 }
+
+/// True for values that have the structural shape of a catalog id
+/// (`cv:<civitai-version-id>` or `hf:<author>/<name>`). Mirrors the
+/// server-side check in `crates/mold-cli/src/catalog_bridge.rs`.
+///
+/// Manifest names like `flux-dev:q4` do NOT match — the colon there
+/// separates `model` from `tag`, and the head never starts with `cv`/`hf`.
+export function looksLikeCatalogId(input: string): boolean {
+  return input.startsWith("cv:") || input.startsWith("hf:");
+}

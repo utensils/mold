@@ -3,6 +3,7 @@ import {
   fetchCatalog,
   fetchCatalogEntry,
   fetchCatalogFamilies,
+  looksLikeCatalogId,
   postCatalogRefresh,
   postCatalogDownload,
 } from "../api";
@@ -65,6 +66,14 @@ describe("catalog api", () => {
     });
     const out = await fetchCatalogFamilies();
     expect(out.families[0].family).toBe("flux");
+  });
+
+  it("looksLikeCatalogId matches cv:/hf: but not manifest tags", () => {
+    expect(looksLikeCatalogId("cv:232703")).toBe(true);
+    expect(looksLikeCatalogId("hf:RunDiffusion/Juggernaut-XL-v9")).toBe(true);
+    expect(looksLikeCatalogId("flux-dev:q4")).toBe(false);
+    expect(looksLikeCatalogId("flux-dev")).toBe(false);
+    expect(looksLikeCatalogId("")).toBe(false);
   });
 
   it("postCatalogDownload returns primary_job_id + companion_jobs", async () => {

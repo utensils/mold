@@ -3,6 +3,8 @@ import {
   cancelDownload,
   downloadsStreamUrl,
   fetchDownloads,
+  looksLikeCatalogId,
+  postCatalogDownload,
   postDownload,
 } from "../api";
 import type {
@@ -214,6 +216,14 @@ export function useDownloads(): UseDownloads {
   return singleton;
 }
 
+/// Test-only escape hatch — resets the module-level singleton so each test
+/// gets a fresh `EventSource` / state. Not exported through the public
+/// surface; consumers must import the underscore-prefixed name explicitly.
+export function __resetUseDownloadsForTest(): void {
+  singleton?.close();
+  singleton = null;
+}
+
 function buildSingleton(): UseDownloads {
   const active = ref<DownloadJobWire | null>(null);
   const queued = ref<DownloadJobWire[]>([]);
@@ -366,7 +376,16 @@ function buildSingleton(): UseDownloads {
   }
 
   async function enqueue(model: string): Promise<void> {
-    await postDownload(model);
+    // Catalog rows (`cv:` / `hf:`) carry their canonical id in `job.model`,
+    // but `/api/downloads` only validates against the manifest registry —
+    // so retrying a failed catalog download by re-POSTing that id 400s.
+    // Route catalog-shaped ids through `/api/catalog/:id/download`, which
+    // owns the recipe-payload + companion-pull flow.
+    if (looksLikeCatalogId(model)) {
+      await postCatalogDownload(model);
+    } else {
+      await postDownload(model);
+    }
     // Belt-and-suspenders against SSE lag. `applyListing` is idempotent
     // with the SSE-driven mutations so the worst case is a no-op write.
     void refresh();
