@@ -1,3 +1,4 @@
+mod catalog_bridge;
 mod commands;
 mod control;
 mod errors;

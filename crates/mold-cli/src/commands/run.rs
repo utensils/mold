@@ -29,13 +29,17 @@ pub fn complete_model_name() -> Vec<CompletionCandidate> {
 ///
 /// Rules:
 /// - If model_or_prompt matches a known model → (model, prompt_rest joined).
+/// - If model_or_prompt is a known catalog ID (`cv:<id>` / `hf:<author>/<name>`) and
+///   `catalog_db` carries a hit, synthesize a `ModelConfig` into `config.models`
+///   so the rest of the run flow treats it like any config-known model.
 /// - If model_or_prompt looks like a model name but isn't known → error with suggestions.
 /// - Else → (config default_model, all args joined as prompt).
 /// - Empty prompt → None (error: prompt required).
 fn resolve_run_args(
     model_or_prompt: Option<&str>,
     prompt_rest: &[String],
-    config: &Config,
+    config: &mut Config,
+    catalog_db: Option<&mold_db::MetadataDb>,
 ) -> Result<(String, Option<String>)> {
     if let Some(first) = model_or_prompt {
         if is_known_model(first, config) {
@@ -45,6 +49,24 @@ fn resolve_run_args(
                 Some(prompt_rest.join(" "))
             };
             return Ok((resolve_model_name(first), prompt));
+        }
+
+        // Catalog bridge: turn `cv:<id>` / `hf:<author>/<name>` inputs into
+        // synthesized `ModelConfig` entries before the looks-like-a-model
+        // shortcut bails. Catalog IDs are their own canonical name (not
+        // run through `resolve_model_name`), since they don't take tag
+        // suffixes.
+        if crate::catalog_bridge::looks_like_catalog_id(first) {
+            if let Some(db) = catalog_db {
+                if crate::catalog_bridge::install_catalog_model_with_db(db, config, first)? {
+                    let prompt = if prompt_rest.is_empty() {
+                        None
+                    } else {
+                        Some(prompt_rest.join(" "))
+                    };
+                    return Ok((first.to_string(), prompt));
+                }
+            }
         }
 
         // Check if the first arg looks like it was intended as a model name
@@ -477,9 +499,14 @@ pub async fn run(
     expand_backend: Option<String>,
     expand_model: Option<String>,
 ) -> Result<()> {
-    let config = Config::load_or_default();
+    let mut config = Config::load_or_default();
 
-    let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &config)?;
+    let (model, prompt) = resolve_run_args(
+        model_or_prompt.as_deref(),
+        &prompt_rest,
+        &mut config,
+        mold_db::global_db(),
+    )?;
     let family = resolve_family(&model, &config);
 
     // Validate file-based arguments early — before expansion or inference.
@@ -1061,13 +1088,112 @@ mod tests {
         }
     }
 
+    /// Real CatalogRow shape for cv:1759168 (Juggernaut XL Ragnarok). The
+    /// `download_recipe` here matches what the scanner writes when it
+    /// classifies a single-file Civitai SDXL checkpoint, so the bridge
+    /// gets exercised against realistic input rather than a stripped-down
+    /// fixture that hides regressions.
+    fn juggernaut_catalog_row() -> mold_db::catalog::CatalogRow {
+        mold_db::catalog::CatalogRow {
+            id: "cv:1759168".into(),
+            source: "civitai".into(),
+            source_id: "1759168".into(),
+            name: "Juggernaut XL Ragnarok".into(),
+            author: Some("RunDiffusion".into()),
+            family: "sdxl".into(),
+            family_role: "finetune".into(),
+            sub_family: None,
+            modality: "image".into(),
+            kind: "checkpoint".into(),
+            file_format: "safetensors".into(),
+            bundling: "single-file".into(),
+            size_bytes: Some(6_938_040_788),
+            download_count: 12_345,
+            rating: None,
+            likes: 0,
+            nsfw: 0,
+            thumbnail_url: None,
+            description: None,
+            license: None,
+            license_flags: None,
+            tags: Some("[]".into()),
+            companions: Some(r#"["clip-l","clip-g","sdxl-vae"]"#.into()),
+            download_recipe: r#"{"files":[{"url":"https://civitai.com/api/download/models/1759168","dest":"{family}/civitai/1759168/juggernautXL_ragnarokBy.safetensors","sha256":null,"size_bytes":6938040788}],"needs_token":"civitai"}"#.into(),
+            engine_phase: 1,
+            created_at: None,
+            updated_at: None,
+            added_at: 0,
+        }
+    }
+
+    #[test]
+    fn catalog_id_is_accepted_when_db_has_row() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut config = test_config();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        db.catalog_upsert("sdxl", &[juggernaut_catalog_row()])
+            .unwrap();
+
+        let (model, prompt) = resolve_run_args(
+            Some("cv:1759168"),
+            &["a".to_string(), "cat".to_string()],
+            &mut config,
+            Some(&db),
+        )
+        .unwrap();
+
+        // Catalog IDs are their own canonical name — not run through
+        // `resolve_model_name` (which would mangle them by trying to add
+        // a `:tag` suffix).
+        assert_eq!(model, "cv:1759168");
+        assert_eq!(prompt.unwrap(), "a cat");
+        // The synthesized ModelConfig is now in config.models so the
+        // downstream `ModelPaths::resolve` path picks it up.
+        assert!(config.models.contains_key("cv:1759168"));
+    }
+
+    #[test]
+    fn catalog_id_errors_when_db_has_no_row() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut config = test_config();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        // Empty DB — bridge returns false, looks_like_model_name shortcut
+        // bails with the standard "unknown model" message.
+        let err = resolve_run_args(
+            Some("cv:9999999"),
+            &["a cat".to_string()],
+            &mut config,
+            Some(&db),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown model 'cv:9999999'"), "got: {msg}");
+    }
+
+    #[test]
+    fn catalog_id_errors_when_no_db_handle() {
+        // Without a DB handle (e.g. MOLD_DB_DISABLE=1), the bridge
+        // silently skips and the standard unknown-model path runs.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut config = test_config();
+        let err = resolve_run_args(
+            Some("cv:1759168"),
+            &["a cat".to_string()],
+            &mut config,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown model"), "got: {err}");
+    }
+
     #[test]
     fn first_arg_is_model() {
-        let config = test_config();
+        let mut config = test_config();
         let (model, prompt) = resolve_run_args(
             Some("flux-dev:q4"),
             &["a".to_string(), "cat".to_string()],
-            &config,
+            &mut config,
+            None,
         )
         .unwrap();
         assert_eq!(model, "flux-dev:q4");
@@ -1076,8 +1202,9 @@ mod tests {
 
     #[test]
     fn model_only_no_prompt() {
-        let config = test_config();
-        let (model, prompt) = resolve_run_args(Some("flux-dev:q4"), &[], &config).unwrap();
+        let mut config = test_config();
+        let (model, prompt) =
+            resolve_run_args(Some("flux-dev:q4"), &[], &mut config, None).unwrap();
         assert_eq!(model, "flux-dev:q4");
         assert!(prompt.is_none());
     }
@@ -1087,7 +1214,7 @@ mod tests {
         // ENV_LOCK: resolved_default_model() reads MOLD_DEFAULT_MODEL and
         // MOLD_MODELS_DIR env vars, which concurrent tests may mutate.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let config = test_config();
+        let mut config = test_config();
         let (model, prompt) = resolve_run_args(
             Some("a"),
             &[
@@ -1095,7 +1222,8 @@ mod tests {
                 "over".to_string(),
                 "mountains".to_string(),
             ],
-            &config,
+            &mut config,
+            None,
         )
         .unwrap();
         assert_eq!(model, "flux2-klein:q8");
@@ -1105,8 +1233,8 @@ mod tests {
     #[test]
     fn single_prompt_word() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let config = test_config();
-        let (model, prompt) = resolve_run_args(Some("sunset"), &[], &config).unwrap();
+        let mut config = test_config();
+        let (model, prompt) = resolve_run_args(Some("sunset"), &[], &mut config, None).unwrap();
         assert_eq!(model, "flux2-klein:q8");
         assert_eq!(prompt.unwrap(), "sunset");
     }
@@ -1114,37 +1242,48 @@ mod tests {
     #[test]
     fn no_args_returns_none_prompt() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let config = test_config();
-        let (model, prompt) = resolve_run_args(None, &[], &config).unwrap();
+        let mut config = test_config();
+        let (model, prompt) = resolve_run_args(None, &[], &mut config, None).unwrap();
         assert_eq!(model, "flux2-klein:q8");
         assert!(prompt.is_none());
     }
 
     #[test]
     fn bare_model_name_resolves() {
-        let config = test_config();
-        let (model, prompt) =
-            resolve_run_args(Some("flux-dev"), &["a turtle".to_string()], &config).unwrap();
+        let mut config = test_config();
+        let (model, prompt) = resolve_run_args(
+            Some("flux-dev"),
+            &["a turtle".to_string()],
+            &mut config,
+            None,
+        )
+        .unwrap();
         assert_eq!(model, "flux-dev:q8");
         assert_eq!(prompt.unwrap(), "a turtle");
     }
 
     #[test]
     fn sd15_model_name_is_recognized() {
-        let config = test_config();
-        let (model, prompt) =
-            resolve_run_args(Some("sd15"), &["a".to_string(), "dog".to_string()], &config).unwrap();
+        let mut config = test_config();
+        let (model, prompt) = resolve_run_args(
+            Some("sd15"),
+            &["a".to_string(), "dog".to_string()],
+            &mut config,
+            None,
+        )
+        .unwrap();
         assert_eq!(model, "sd15:fp16");
         assert_eq!(prompt.unwrap(), "a dog");
     }
 
     #[test]
     fn dreamshaper_v8_model_is_recognized() {
-        let config = test_config();
+        let mut config = test_config();
         let (model, prompt) = resolve_run_args(
             Some("dreamshaper-v8"),
             &["photorealistic".to_string()],
-            &config,
+            &mut config,
+            None,
         )
         .unwrap();
         assert_eq!(model, "dreamshaper-v8:fp16");
@@ -1153,9 +1292,14 @@ mod tests {
 
     #[test]
     fn unknown_model_with_known_family_errors() {
-        let config = test_config();
-        let err =
-            resolve_run_args(Some("ultrareal-v8"), &["a cat".to_string()], &config).unwrap_err();
+        let mut config = test_config();
+        let err = resolve_run_args(
+            Some("ultrareal-v8"),
+            &["a cat".to_string()],
+            &mut config,
+            None,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown model 'ultrareal-v8'"), "got: {msg}");
         assert!(
@@ -1166,18 +1310,23 @@ mod tests {
 
     #[test]
     fn unknown_model_with_colon_tag_errors() {
-        let config = test_config();
-        let err =
-            resolve_run_args(Some("flux-dev:q99"), &["a cat".to_string()], &config).unwrap_err();
+        let mut config = test_config();
+        let err = resolve_run_args(
+            Some("flux-dev:q99"),
+            &["a cat".to_string()],
+            &mut config,
+            None,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown model 'flux-dev:q99'"), "got: {msg}");
     }
 
     #[test]
     fn natural_language_not_flagged_as_model() {
-        let config = test_config();
+        let mut config = test_config();
         for word in &["a", "sunset", "photorealistic", "cat", "beautiful"] {
-            let result = resolve_run_args(Some(word), &[], &config);
+            let result = resolve_run_args(Some(word), &[], &mut config, None);
             assert!(
                 result.is_ok(),
                 "'{word}' should not be flagged as a model name"
