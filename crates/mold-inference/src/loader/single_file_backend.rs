@@ -252,15 +252,37 @@ impl SingleFileBackend {
 }
 
 impl SimpleBackend for SingleFileBackend {
+    /// Shape-checked lookup. Mirrors the `SafeTensorWithRouting` /
+    /// `MmapedSafetensors` / `HashMap<String, Tensor>` SimpleBackend impls
+    /// (which all return `UnexpectedShape` on mismatch) so candle constructors
+    /// that probe for alternative tensor layouts via `Ok / Err` keep working.
+    ///
+    /// The motivating case is `stable_diffusion::attention::get_qkv_linear`
+    /// (used by VAE mid-block attention): it probes for the HF Linear shape
+    /// `(channels, channels)` first, and on `Err` falls back to the A1111
+    /// Conv2d 1×1 shape `(channels, channels, 1, 1)` plus a reshape to
+    /// `(channels, channels)`. Without the shape check the rank-2 probe
+    /// silently succeeds with a rank-4 tensor, the resulting `Linear` is
+    /// constructed with a 4D weight, and the next forward call blows up
+    /// with `shape mismatch in matmul, lhs: [1, 9216, 512],
+    /// rhs: [1, 512, 512, 1, 1]`.
     fn get(
         &self,
-        _shape: candle_core::Shape,
+        s: candle_core::Shape,
         name: &str,
         _h: candle_nn::Init,
         dtype: DType,
         dev: &Device,
     ) -> candle_core::Result<Tensor> {
         let t = self.lookup(name, dev)?;
+        if t.shape() != &s {
+            return Err(candle_core::Error::UnexpectedShape {
+                msg: format!("single-file backend: shape mismatch for {name}"),
+                expected: s,
+                got: t.shape().clone(),
+            }
+            .bt());
+        }
         if t.dtype() != dtype {
             t.to_dtype(dtype)
         } else {
@@ -665,6 +687,90 @@ mod tests {
             SimpleBackend::contains_tensor(&backend_g, "text_projection.weight"),
             "CLIP-G scoped backend must include CLIP-G's text_projection.weight",
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Bug 3 from `tasks/catalog-run-bridge-option-c-handoff.md` (surfaced
+    /// during the killswitch UAT after Bug 1 + Bug 2 landed): SDXL VAE decode
+    /// failed with `shape mismatch in matmul, lhs: [1, 9216, 512],
+    /// rhs: [1, 512, 512, 1, 1]` — the rank-5 rhs is a Conv2d weight
+    /// `[512, 512, 1, 1]` after `broadcast_left + .t()`, meaning candle
+    /// constructed a `Linear` with a Conv2d-shaped weight.
+    ///
+    /// Cause: candle's `stable_diffusion::attention::get_qkv_linear` probes
+    /// for the HF Linear weight shape `(C, C)` first, and on `Err` falls
+    /// back to the A1111 Conv2d 1×1 shape `(C, C, 1, 1)` + reshape. The
+    /// `Err` branch relies on the SimpleBackend enforcing the requested
+    /// shape — every other backend impl in candle (`SafeTensorWithRouting`,
+    /// `MmapedSafetensors`, `HashMap<String, Tensor>`, `NpzTensors`,
+    /// `PthTensors`) returns `UnexpectedShape` on mismatch.
+    ///
+    /// Our `SingleFileBackend::get` previously ignored the requested shape,
+    /// so the rank-2 probe silently succeeded with the rank-4 on-disk tensor
+    /// and candle took the wrong branch. Fix locked here: rank-2 probe must
+    /// error so candle's fallback path fires; rank-4 probe must succeed.
+    #[test]
+    fn backend_get_validates_shape_so_candle_attnblock_falls_through_to_conv_path() {
+        let c = 4usize;
+        let on_disk: Vec<f32> = (0..c * c).map(|i| 1.0 + i as f32 * 0.1).collect();
+        let path = write_synthetic(
+            "sd15-vae-attn-conv-shape",
+            &[
+                // SD1.5 VAE attention query weight in A1111 layout:
+                // Conv2d 1×1, shape [C, C, 1, 1].
+                (
+                    "first_stage_model.encoder.mid.attn_1.q.weight",
+                    vec![c, c, 1, 1],
+                    on_disk.clone(),
+                ),
+            ],
+        );
+        let bundle = load_bundle(&path, Family::Sd15).expect("partition");
+        let remap = build_sd15_remap(&bundle).expect("remap");
+        let backend = SingleFileBackend::from_sd15_vae(&path, &remap).expect("backend");
+        let dev = Device::Cpu;
+
+        // The diffusers-side rename for the VAE mid-block attention query —
+        // see `loader::vae_keys::rename_vae_mid_attn`.
+        let diffusers_key = "encoder.mid_block.attentions.0.to_q.weight";
+
+        // Probe with the (C, C) Linear shape — must error so candle's
+        // get_qkv_linear falls through to the conv path. The on-disk
+        // tensor is rank-4, so a rank-2 request must report a shape
+        // mismatch.
+        let result_rank2 = SimpleBackend::get(
+            &backend,
+            candle_core::Shape::from((c, c)),
+            diffusers_key,
+            candle_nn::Init::Const(0.0),
+            DType::F32,
+            &dev,
+        );
+        let err = result_rank2.expect_err(
+            "rank-2 probe must error so candle's get_qkv_linear falls through to the conv path",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("shape mismatch") || msg.contains("UnexpectedShape"),
+            "expected shape-mismatch error so candle's Err-arm fires; got: {msg}",
+        );
+
+        // Probe with the actual (C, C, 1, 1) shape — must succeed. After
+        // candle's fallback fires, it requests this shape and reshapes
+        // the result to (C, C) for the Linear constructor.
+        let t = SimpleBackend::get(
+            &backend,
+            candle_core::Shape::from((c, c, 1, 1)),
+            diffusers_key,
+            candle_nn::Init::Const(0.0),
+            DType::F32,
+            &dev,
+        )
+        .expect("rank-4 probe must succeed for A1111 Conv2d 1×1 weight");
+        assert_eq!(t.dims(), &[c, c, 1, 1]);
+        let flat: Vec<f32> = t.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(flat, on_disk);
 
         let _ = std::fs::remove_file(path);
     }
