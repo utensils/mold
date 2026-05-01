@@ -179,7 +179,19 @@ fn copy_companion_into_cfg(cfg: &mut ModelConfig, companion_name: &str, paths: &
         }
         "clip-g" => {
             cfg.clip_encoder_2 = to_string(&paths.transformer);
-            cfg.clip_tokenizer_2 = paths.clip_tokenizer.as_ref().and_then(to_string);
+            // The clip-g companion manifest doesn't ship a tokenizer
+            // entry — OpenCLIP's vocab is byte-identical to OpenAI's
+            // CLIP-L tokenizer, and shipping both would make
+            // `shared/companion/tokenizer.json` collide. Fall back to
+            // clip-l's tokenizer (already populated above when companion
+            // ordering puts clip-l first). The single-file SDXL engine
+            // tokenises clip-l and clip-g prompts independently but uses
+            // the same vocab/merges file for both, so this is correct.
+            cfg.clip_tokenizer_2 = paths
+                .clip_tokenizer
+                .as_ref()
+                .and_then(to_string)
+                .or_else(|| cfg.clip_tokenizer.clone());
         }
         "sdxl-vae" | "sd-vae-ft-mse" | "flux-vae" => {
             // Single-file checkpoints embed VAE weights, so leave
@@ -370,6 +382,64 @@ mod tests {
         ] {
             std::env::remove_var(key);
         }
+    }
+
+    /// `stub_companion_paths` above stubs both clip-l and clip-g with
+    /// their own `tokenizer.json`. Real on-disk state has clip-g without
+    /// a tokenizer entry on its companion manifest — clip-g's text
+    /// encoder uses the same vocab/merges as clip-l, so there's no
+    /// second `tokenizer.json` to ship. Stub that asymmetry to verify
+    /// the bridge's clip-l → clip-g fallback.
+    fn stub_companion_paths_no_clip_g_tokenizer(config: &mut Config, models_dir: &str) {
+        let clip_l_dir = format!("{models_dir}/clip-l");
+        config.models.insert(
+            "clip-l".into(),
+            mold_core::ModelConfig {
+                family: Some("clip-l".into()),
+                transformer: Some(format!("{clip_l_dir}/model.safetensors")),
+                vae: Some(format!("{clip_l_dir}/model.safetensors")),
+                clip_tokenizer: Some(format!("{clip_l_dir}/tokenizer.json")),
+                ..Default::default()
+            },
+        );
+        let clip_g_dir = format!("{models_dir}/clip-g");
+        config.models.insert(
+            "clip-g".into(),
+            mold_core::ModelConfig {
+                family: Some("clip-g".into()),
+                transformer: Some(format!("{clip_g_dir}/open_clip_model.safetensors")),
+                vae: Some(format!("{clip_g_dir}/open_clip_model.safetensors")),
+                // Intentionally no clip_tokenizer — matches the real
+                // clip-g companion manifest.
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn sdxl_synth_falls_back_clip_g_tokenizer_to_clip_l() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_models_dir_env();
+
+        let models_dir = "/tmp/mold-test-models";
+        let mut config = explicit_config(models_dir);
+        stub_companion_paths_no_clip_g_tokenizer(&mut config, models_dir);
+
+        let row = juggernaut_row();
+        let synth =
+            synthesize_model_config(&row, std::path::Path::new(models_dir), &config).unwrap();
+
+        let expected_tokenizer = format!("{models_dir}/clip-l/tokenizer.json");
+        assert_eq!(
+            synth.clip_tokenizer.as_deref(),
+            Some(expected_tokenizer.as_str()),
+            "clip_tokenizer comes straight from clip-l's manifest path"
+        );
+        assert_eq!(
+            synth.clip_tokenizer_2.as_deref(),
+            Some(expected_tokenizer.as_str()),
+            "clip_tokenizer_2 falls back to clip-l's tokenizer when clip-g has none"
+        );
     }
 
     #[test]
