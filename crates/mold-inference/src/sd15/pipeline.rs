@@ -276,9 +276,11 @@ impl SD15Engine {
             .map_err(|e| anyhow::anyhow!("build SD1.5 diffusers→A1111 remap: {e}"))
     }
 
-    /// Build a UNet from a Civitai single-file checkpoint via
+    /// Build a UNet from a Civitai single-file checkpoint via a UNet-scoped
     /// `SingleFileBackend`. Used by both eager `load_components_single_file`
-    /// and sequential `generate_sequential`.
+    /// and sequential `generate_sequential`. SD1.5 component keyspaces are
+    /// disjoint (no collision risk), but per-scope factories keep parity
+    /// with SDXL's collision-avoidance pattern.
     fn build_unet_single_file(
         single_file: &std::path::Path,
         remap: &crate::loader::Sd15Remap,
@@ -288,7 +290,7 @@ impl SD15Engine {
     ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
         use crate::loader::SingleFileBackend;
         use candle_nn::VarBuilder;
-        let backend = SingleFileBackend::from_sd15_remap(single_file, remap)?;
+        let backend = SingleFileBackend::from_sd15_unet(single_file, remap)?;
         let vb = VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
         Ok(stable_diffusion::unet_2d::UNet2DConditionModel::new(
             vb,
@@ -299,7 +301,8 @@ impl SD15Engine {
         )?)
     }
 
-    /// Build a VAE from a Civitai single-file checkpoint via `SingleFileBackend`.
+    /// Build a VAE from a Civitai single-file checkpoint via a VAE-scoped
+    /// `SingleFileBackend`.
     fn build_vae_single_file(
         single_file: &std::path::Path,
         remap: &crate::loader::Sd15Remap,
@@ -309,7 +312,7 @@ impl SD15Engine {
     ) -> Result<stable_diffusion::vae::AutoEncoderKL> {
         use crate::loader::SingleFileBackend;
         use candle_nn::VarBuilder;
-        let backend = SingleFileBackend::from_sd15_remap(single_file, remap)?;
+        let backend = SingleFileBackend::from_sd15_vae(single_file, remap)?;
         let vb = VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
         Ok(stable_diffusion::vae::AutoEncoderKL::new(
             vb,
@@ -319,8 +322,8 @@ impl SD15Engine {
         )?)
     }
 
-    /// Build CLIP-L from a Civitai single-file checkpoint via `SingleFileBackend`.
-    /// SD1.5 has only one CLIP-L (no CLIP-G).
+    /// Build CLIP-L from a Civitai single-file checkpoint via a CLIP-L-scoped
+    /// `SingleFileBackend`. SD1.5 has only one CLIP-L (no CLIP-G).
     fn build_clip_single_file(
         single_file: &std::path::Path,
         remap: &crate::loader::Sd15Remap,
@@ -329,7 +332,7 @@ impl SD15Engine {
     ) -> Result<stable_diffusion::clip::ClipTextTransformer> {
         use crate::loader::SingleFileBackend;
         use candle_nn::VarBuilder;
-        let backend = SingleFileBackend::from_sd15_remap(single_file, remap)?;
+        let backend = SingleFileBackend::from_sd15_clip_l(single_file, remap)?;
         let vb = VarBuilder::from_backend(Box::new(backend), DType::F32, clip_device.clone());
         Ok(stable_diffusion::clip::ClipTextTransformer::new(
             vb,

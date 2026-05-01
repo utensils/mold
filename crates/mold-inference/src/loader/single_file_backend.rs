@@ -57,42 +57,19 @@ pub struct SingleFileBackend {
 }
 
 impl SingleFileBackend {
-    /// Construct from an SD1.5 remap. Every entry is `Direct` since
-    /// SD1.5 has no fused QKV slabs (CLIP-L is HF layout, not OpenCLIP).
-    pub fn from_sd15_remap(checkpoint: &Path, remap: &Sd15Remap) -> Result<Self> {
-        let mut entries: BTreeMap<String, BackendEntry> = BTreeMap::new();
-        for (diffusers, a1111) in remap
-            .unet
-            .iter()
-            .chain(remap.vae.iter())
-            .chain(remap.clip_l.iter())
-        {
-            entries.insert(
-                diffusers.clone(),
-                BackendEntry::Direct {
-                    source_key: a1111.clone(),
-                },
-            );
-        }
-
+    /// Mmap the checkpoint and wrap it in a backend with the given entries.
+    /// Internal helper — used by every per-component factory.
+    fn from_entries(checkpoint: &Path, entries: BTreeMap<String, BackendEntry>) -> Result<Self> {
         let st = unsafe { MmapedSafetensors::new(checkpoint) }
             .with_context(|| format!("mmap single-file checkpoint at {}", checkpoint.display()))?;
-
         Ok(Self { st, entries })
     }
 
-    /// Construct from an SDXL remap. UNet / VAE / CLIP-L are `Direct`;
-    /// CLIP-G threads `RenameOutput` through — `Direct(_)` becomes a
-    /// `Direct` entry, `FusedSlice {axis, component, num_components, …}`
-    /// becomes a `Slice` entry.
-    pub fn from_sdxl_remap(checkpoint: &Path, remap: &SdxlRemap) -> Result<Self> {
+    /// Direct-only entries from a `BTreeMap<diffusers, a1111>` slice — used by
+    /// the UNet, VAE, and SD1.5 / SDXL CLIP-L factories.
+    fn direct_entries(remap_slice: &BTreeMap<String, String>) -> BTreeMap<String, BackendEntry> {
         let mut entries: BTreeMap<String, BackendEntry> = BTreeMap::new();
-        for (diffusers, a1111) in remap
-            .unet
-            .iter()
-            .chain(remap.vae.iter())
-            .chain(remap.clip_l.iter())
-        {
+        for (diffusers, a1111) in remap_slice {
             entries.insert(
                 diffusers.clone(),
                 BackendEntry::Direct {
@@ -100,7 +77,15 @@ impl SingleFileBackend {
                 },
             );
         }
-        for (diffusers, (a1111_key, output)) in &remap.clip_g {
+        entries
+    }
+
+    /// SDXL CLIP-G entries (Direct or FusedSlice) from `remap.clip_g`.
+    fn clip_g_entries(
+        clip_g_remap: &BTreeMap<String, (String, RenameOutput)>,
+    ) -> BTreeMap<String, BackendEntry> {
+        let mut entries: BTreeMap<String, BackendEntry> = BTreeMap::new();
+        for (diffusers, (a1111_key, output)) in clip_g_remap {
             let entry = match output {
                 RenameOutput::Direct(_) => BackendEntry::Direct {
                     source_key: a1111_key.clone(),
@@ -119,11 +104,118 @@ impl SingleFileBackend {
             };
             entries.insert(diffusers.clone(), entry);
         }
+        entries
+    }
 
-        let st = unsafe { MmapedSafetensors::new(checkpoint) }
-            .with_context(|| format!("mmap single-file checkpoint at {}", checkpoint.display()))?;
+    /// Construct from an SD1.5 remap. Every entry is `Direct` since
+    /// SD1.5 has no fused QKV slabs (CLIP-L is HF layout, not OpenCLIP).
+    ///
+    /// Carries UNet + VAE + CLIP-L in one entries map. SD1.5's three
+    /// component keyspaces are disjoint (UNet under `down_blocks/up_blocks/...`,
+    /// VAE under `encoder/decoder/...`, CLIP-L under `text_model.X`) so
+    /// no key collides.
+    pub fn from_sd15_remap(checkpoint: &Path, remap: &Sd15Remap) -> Result<Self> {
+        let mut entries: BTreeMap<String, BackendEntry> = BTreeMap::new();
+        for (diffusers, a1111) in remap
+            .unet
+            .iter()
+            .chain(remap.vae.iter())
+            .chain(remap.clip_l.iter())
+        {
+            entries.insert(
+                diffusers.clone(),
+                BackendEntry::Direct {
+                    source_key: a1111.clone(),
+                },
+            );
+        }
+        Self::from_entries(checkpoint, entries)
+    }
 
-        Ok(Self { st, entries })
+    /// SD1.5 UNet-scoped backend — only `remap.unet` entries. Used by the
+    /// per-component construction helpers in `mold-inference::sd15`.
+    pub fn from_sd15_unet(checkpoint: &Path, remap: &Sd15Remap) -> Result<Self> {
+        Self::from_entries(checkpoint, Self::direct_entries(&remap.unet))
+    }
+
+    /// SD1.5 VAE-scoped backend.
+    pub fn from_sd15_vae(checkpoint: &Path, remap: &Sd15Remap) -> Result<Self> {
+        Self::from_entries(checkpoint, Self::direct_entries(&remap.vae))
+    }
+
+    /// SD1.5 CLIP-L-scoped backend.
+    pub fn from_sd15_clip_l(checkpoint: &Path, remap: &Sd15Remap) -> Result<Self> {
+        Self::from_entries(checkpoint, Self::direct_entries(&remap.clip_l))
+    }
+
+    /// Construct from an SDXL remap. UNet / VAE / CLIP-L are `Direct`;
+    /// CLIP-G threads `RenameOutput` through — `Direct(_)` becomes a
+    /// `Direct` entry, `FusedSlice {axis, component, num_components, …}`
+    /// becomes a `Slice` entry.
+    ///
+    /// **Collision-prone** when the consumer wraps the backend in a
+    /// CLIP-L-or-CLIP-G `VarBuilder`: SDXL CLIP-L's renamed diffusers
+    /// keys (`text_model.embeddings.token_embedding.weight`, every
+    /// encoder layer's `self_attn.{q,k,v,out}_proj.weight`,
+    /// `final_layer_norm.weight`, `position_embedding.weight`) collide
+    /// with CLIP-G's renamed keys for the same diffusers paths. The
+    /// `clip_g` insertion happens after `clip_l`, so CLIP-G overwrites
+    /// CLIP-L on collision — when CLIP-L's `ClipTextTransformer` then
+    /// requests `text_model.embeddings.token_embedding.weight`, it
+    /// receives CLIP-G's `[vocab, 1280]` weight (instead of its own
+    /// `[vocab, 768]`), and the next `Embedding::forward` reshape
+    /// fails with `shape mismatch in reshape, lhs: [77, 1280],
+    /// rhs: [1, 77, 768]`.
+    ///
+    /// Production code should prefer the per-component
+    /// `from_sdxl_{unet,vae,clip_l,clip_g}` factories. This method is
+    /// kept for the existing CLIP-G-only `sdxl_backend_slices_clip_g_*`
+    /// tests (which assert the slice semantics in isolation) and for
+    /// callers that explicitly want the all-in-one entries map.
+    pub fn from_sdxl_remap(checkpoint: &Path, remap: &SdxlRemap) -> Result<Self> {
+        let mut entries: BTreeMap<String, BackendEntry> = BTreeMap::new();
+        for (diffusers, a1111) in remap
+            .unet
+            .iter()
+            .chain(remap.vae.iter())
+            .chain(remap.clip_l.iter())
+        {
+            entries.insert(
+                diffusers.clone(),
+                BackendEntry::Direct {
+                    source_key: a1111.clone(),
+                },
+            );
+        }
+        for (diffusers, entry) in Self::clip_g_entries(&remap.clip_g) {
+            entries.insert(diffusers, entry);
+        }
+        Self::from_entries(checkpoint, entries)
+    }
+
+    /// SDXL UNet-scoped backend — only `remap.unet` entries.
+    pub fn from_sdxl_unet(checkpoint: &Path, remap: &SdxlRemap) -> Result<Self> {
+        Self::from_entries(checkpoint, Self::direct_entries(&remap.unet))
+    }
+
+    /// SDXL VAE-scoped backend.
+    pub fn from_sdxl_vae(checkpoint: &Path, remap: &SdxlRemap) -> Result<Self> {
+        Self::from_entries(checkpoint, Self::direct_entries(&remap.vae))
+    }
+
+    /// SDXL CLIP-L-scoped backend — only `remap.clip_l` entries. Avoids
+    /// collisions with CLIP-G that would otherwise materialise CLIP-L's
+    /// `ClipTextTransformer` with CLIP-G's `[vocab, 1280]` weights when
+    /// CLIP-L expects `[vocab, 768]`.
+    pub fn from_sdxl_clip_l(checkpoint: &Path, remap: &SdxlRemap) -> Result<Self> {
+        Self::from_entries(checkpoint, Self::direct_entries(&remap.clip_l))
+    }
+
+    /// SDXL CLIP-G-scoped backend — only `remap.clip_g` entries (Direct
+    /// for layer norms / embeddings / projections / fc / out_proj, FusedSlice
+    /// for the `attn.in_proj_*` slabs).
+    pub fn from_sdxl_clip_g(checkpoint: &Path, remap: &SdxlRemap) -> Result<Self> {
+        Self::from_entries(checkpoint, Self::clip_g_entries(&remap.clip_g))
     }
 
     /// Resolve `diffusers_key` to a tensor on `dev` per the projection rule.
@@ -420,6 +512,158 @@ mod tests {
         assert!(
             err.to_string().contains("no rename rule"),
             "expected legible error mentioning 'no rename rule', got: {err}",
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Bug 2 from `tasks/catalog-run-bridge-option-c-handoff.md`: when both
+    /// CLIP-L and CLIP-G keys are present in the same `SdxlRemap`, the all-in-one
+    /// `from_sdxl_remap` collapses them under one BTreeMap. CLIP-L and CLIP-G
+    /// produce identical diffusers keys (`text_model.embeddings.token_embedding.weight`,
+    /// every encoder layer's `self_attn.{q,k,v}_proj.weight`, …); CLIP-G's
+    /// insertion overwrites CLIP-L's because clip_g is inserted second.
+    ///
+    /// On a real Juggernaut XL Ragnarok pull, that means CLIP-L's
+    /// `ClipTextTransformer` materialises with CLIP-G's `[vocab, 1280]`
+    /// `token_embedding`, and the next `Embedding::forward` reshape blows
+    /// up with `shape mismatch in reshape, lhs: [77, 1280], rhs: [1, 77, 768]`
+    /// the moment we run encode_prompt.
+    ///
+    /// Scoped factories (`from_sdxl_clip_l` / `from_sdxl_clip_g`) avoid the
+    /// collision by including only one component's entries per backend —
+    /// each `ClipTextTransformer::new` then sees only the keys it actually
+    /// owns. Production code in `crates/mold-inference/src/sdxl/pipeline.rs`
+    /// uses the scoped factories; this test locks the contract on the
+    /// underlying backend.
+    #[test]
+    fn sdxl_clip_l_scoped_backend_returns_clip_l_tensor_when_keys_collide_with_clip_g() {
+        // d_l = CLIP-L hidden dim (toy stand-in for 768).
+        // d_g = CLIP-G hidden dim (toy stand-in for 1280) — different from d_l
+        // so a wrong-component lookup surfaces as a shape mismatch.
+        let d_l: usize = 4;
+        let d_g: usize = 6;
+
+        let l_data: Vec<f32> = (0..d_l * d_l).map(|i| 0.5 + i as f32 * 0.1).collect();
+        let g_qkv_data: Vec<f32> = (0..3 * d_g * d_g).map(|i| 10.0 + i as f32).collect();
+
+        let path = write_synthetic(
+            "sdxl-no-collision-clip-l",
+            &[
+                // CLIP-L's q_proj — Direct rename to text_model.encoder.layers.0.self_attn.q_proj.weight.
+                (
+                    "conditioner.embedders.0.transformer.text_model.encoder.layers.0.self_attn.q_proj.weight",
+                    vec![d_l, d_l],
+                    l_data.clone(),
+                ),
+                // CLIP-G's fused QKV — FusedSlice expands into THREE diffusers
+                // entries, one of which collides with CLIP-L's q_proj above.
+                (
+                    "conditioner.embedders.1.model.transformer.resblocks.0.attn.in_proj_weight",
+                    vec![3 * d_g, d_g],
+                    g_qkv_data,
+                ),
+            ],
+        );
+        let bundle = load_bundle(&path, Family::Sdxl).expect("partition sdxl");
+        let remap = build_sdxl_remap(&bundle).expect("build remap");
+
+        // Sanity check: the all-in-one `from_sdxl_remap` exhibits the
+        // collision — the diffusers q_proj key resolves to CLIP-G's slice
+        // (shape `[d_g, d_g]`), not CLIP-L's tensor (shape `[d_l, d_l]`).
+        // Documents the bug so a future refactor of `from_sdxl_remap`
+        // doesn't silently change the all-in-one semantics without
+        // explicit thought.
+        let all_in_one = SingleFileBackend::from_sdxl_remap(&path, &remap).expect("backend");
+        let collided = SimpleBackend::get_unchecked(
+            &all_in_one,
+            "text_model.encoder.layers.0.self_attn.q_proj.weight",
+            DType::F32,
+            &Device::Cpu,
+        )
+        .expect("lookup");
+        assert_eq!(
+            collided.dims(),
+            &[d_g, d_g],
+            "all-in-one from_sdxl_remap must still exhibit the collision (CLIP-G wins) — \
+             this is the bug that motivates the scoped factories",
+        );
+
+        // Real assertion: CLIP-L-scoped backend returns CLIP-L's tensor.
+        let backend_l =
+            SingleFileBackend::from_sdxl_clip_l(&path, &remap).expect("clip-l scoped backend");
+        let t_l = SimpleBackend::get_unchecked(
+            &backend_l,
+            "text_model.encoder.layers.0.self_attn.q_proj.weight",
+            DType::F32,
+            &Device::Cpu,
+        )
+        .expect("clip-l scoped lookup");
+        assert_eq!(
+            t_l.dims(),
+            &[d_l, d_l],
+            "CLIP-L scoped backend must return CLIP-L's [d_l, d_l] tensor, \
+             not CLIP-G's [d_g, d_g] slice — collision elimination is the \
+             whole point of the scoped factory",
+        );
+        let flat: Vec<f32> = t_l.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(flat, l_data, "values must match the CLIP-L source tensor");
+
+        // CLIP-G scoped backend gets the slice (independent verification).
+        let backend_g =
+            SingleFileBackend::from_sdxl_clip_g(&path, &remap).expect("clip-g scoped backend");
+        let t_g = SimpleBackend::get_unchecked(
+            &backend_g,
+            "text_model.encoder.layers.0.self_attn.q_proj.weight",
+            DType::F32,
+            &Device::Cpu,
+        )
+        .expect("clip-g scoped lookup");
+        assert_eq!(
+            t_g.dims(),
+            &[d_g, d_g],
+            "CLIP-G scoped backend keeps the slice semantics — q_proj is the \
+             0th component of the [3*d_g, d_g] in_proj_weight slab",
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Companion to the slice/collision test above: scoped CLIP-L backend
+    /// must NOT see CLIP-G's `text_projection`, `token_embedding`, or any
+    /// other CLIP-G-only key. Locks the per-scope visibility contract.
+    #[test]
+    fn sdxl_clip_l_scoped_backend_excludes_clip_g_only_keys() {
+        let path = write_synthetic(
+            "sdxl-clip-l-isolation",
+            &[
+                (
+                    "conditioner.embedders.0.transformer.text_model.encoder.layers.0.self_attn.q_proj.weight",
+                    vec![2, 2],
+                    vec![0.1, 0.2, 0.3, 0.4],
+                ),
+                (
+                    "conditioner.embedders.1.model.text_projection",
+                    vec![1],
+                    vec![99.0],
+                ),
+            ],
+        );
+        let bundle = load_bundle(&path, Family::Sdxl).unwrap();
+        let remap = build_sdxl_remap(&bundle).unwrap();
+
+        let backend_l = SingleFileBackend::from_sdxl_clip_l(&path, &remap).unwrap();
+        // text_projection.weight is a CLIP-G-only diffusers key — must NOT
+        // be present in the CLIP-L scope.
+        assert!(
+            !SimpleBackend::contains_tensor(&backend_l, "text_projection.weight"),
+            "CLIP-L scoped backend must not advertise CLIP-G-only keys",
+        );
+
+        let backend_g = SingleFileBackend::from_sdxl_clip_g(&path, &remap).unwrap();
+        assert!(
+            SimpleBackend::contains_tensor(&backend_g, "text_projection.weight"),
+            "CLIP-G scoped backend must include CLIP-G's text_projection.weight",
         );
 
         let _ = std::fs::remove_file(path);

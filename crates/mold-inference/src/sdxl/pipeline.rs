@@ -549,7 +549,7 @@ impl SDXLEngine {
     ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
         use crate::loader::SingleFileBackend;
         use candle_nn::VarBuilder;
-        let backend = SingleFileBackend::from_sdxl_remap(single_file, remap)?;
+        let backend = SingleFileBackend::from_sdxl_unet(single_file, remap)?;
         let vb = VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
         Ok(stable_diffusion::unet_2d::UNet2DConditionModel::new(
             vb,
@@ -560,7 +560,8 @@ impl SDXLEngine {
         )?)
     }
 
-    /// Build a VAE from a Civitai single-file checkpoint via `SingleFileBackend`.
+    /// Build a VAE from a Civitai single-file checkpoint via a VAE-scoped
+    /// `SingleFileBackend`.
     fn build_vae_single_file(
         single_file: &std::path::Path,
         remap: &crate::loader::SdxlRemap,
@@ -570,7 +571,7 @@ impl SDXLEngine {
     ) -> Result<stable_diffusion::vae::AutoEncoderKL> {
         use crate::loader::SingleFileBackend;
         use candle_nn::VarBuilder;
-        let backend = SingleFileBackend::from_sdxl_remap(single_file, remap)?;
+        let backend = SingleFileBackend::from_sdxl_vae(single_file, remap)?;
         let vb = VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
         Ok(stable_diffusion::vae::AutoEncoderKL::new(
             vb,
@@ -580,7 +581,16 @@ impl SDXLEngine {
         )?)
     }
 
-    /// Build CLIP-L from a Civitai single-file checkpoint via `SingleFileBackend`.
+    /// Build CLIP-L from a Civitai single-file checkpoint via a CLIP-L-scoped
+    /// `SingleFileBackend`. Scoping is critical: CLIP-L and CLIP-G produce
+    /// the same diffusers keys (e.g. `text_model.embeddings.token_embedding.weight`
+    /// and every encoder layer's `self_attn.{q,k,v,out}_proj.weight`), so
+    /// an all-in-one entries map collapses them and CLIP-L's
+    /// `ClipTextTransformer` would materialise with CLIP-G's `[vocab, 1280]`
+    /// weights instead of its own `[vocab, 768]`. The next
+    /// `Embedding::forward` reshape then blows up with `lhs: [77, 1280],
+    /// rhs: [1, 77, 768]`. See
+    /// `loader::single_file_backend::tests::sdxl_clip_l_scoped_backend_returns_clip_l_tensor_when_keys_collide_with_clip_g`.
     fn build_clip_l_single_file(
         single_file: &std::path::Path,
         remap: &crate::loader::SdxlRemap,
@@ -589,7 +599,7 @@ impl SDXLEngine {
     ) -> Result<stable_diffusion::clip::ClipTextTransformer> {
         use crate::loader::SingleFileBackend;
         use candle_nn::VarBuilder;
-        let backend = SingleFileBackend::from_sdxl_remap(single_file, remap)?;
+        let backend = SingleFileBackend::from_sdxl_clip_l(single_file, remap)?;
         let vb = VarBuilder::from_backend(Box::new(backend), DType::F32, clip_device.clone());
         Ok(stable_diffusion::clip::ClipTextTransformer::new(
             vb,
@@ -597,10 +607,9 @@ impl SDXLEngine {
         )?)
     }
 
-    /// Build CLIP-G from a Civitai single-file checkpoint via `SingleFileBackend`.
-    /// Same shape as `build_clip_l_single_file` — both share the SDXL backend
-    /// (which carries the FusedSlice entries for CLIP-G's OpenCLIP `attn.in_proj_*`
-    /// slabs); the difference is the `clip_config` (1280-dim sdxl2 vs 768-dim sdxl).
+    /// Build CLIP-G from a Civitai single-file checkpoint via a CLIP-G-scoped
+    /// `SingleFileBackend`. Scoped factory keeps CLIP-G's FusedSlice entries
+    /// for the OpenCLIP `attn.in_proj_*` slabs and excludes CLIP-L's overlap.
     fn build_clip_g_single_file(
         single_file: &std::path::Path,
         remap: &crate::loader::SdxlRemap,
@@ -609,7 +618,7 @@ impl SDXLEngine {
     ) -> Result<stable_diffusion::clip::ClipTextTransformer> {
         use crate::loader::SingleFileBackend;
         use candle_nn::VarBuilder;
-        let backend = SingleFileBackend::from_sdxl_remap(single_file, remap)?;
+        let backend = SingleFileBackend::from_sdxl_clip_g(single_file, remap)?;
         let vb = VarBuilder::from_backend(Box::new(backend), DType::F32, clip_device.clone());
         Ok(stable_diffusion::clip::ClipTextTransformer::new(
             vb,
