@@ -2918,6 +2918,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recipe_fetcher_skips_files_with_matching_size() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = b"hello world";
+        Mock::given(method("GET"))
+            .and(path("/m.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_ref()))
+            // First call serves the body; any second call is an unexpected re-fetch.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("idempotent_size");
+        let url = format!("{}/m.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(body.len() as u64),
+        }];
+
+        fetch_recipe(
+            "cv:idemp",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("first fetch ok");
+
+        // Second call must skip the HTTP fetch entirely because the file is on
+        // disk with the declared size.
+        fetch_recipe(
+            "cv:idemp",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("second fetch ok (skip path)");
+
+        // wiremock's `.expect(1)` is verified on `MockServer::drop`; explicit
+        // verify here gives a clearer failure message at the assertion site.
+        server.verify().await;
+
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_skips_files_with_sha256_marker_when_size_unknown() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/m.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"x".as_ref()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("idempotent_marker");
+        let url = format!("{}/m.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "m.safetensors",
+            sha256: None,
+            // size_bytes intentionally None — fall through to marker check.
+            size_bytes: None,
+        }];
+
+        // First call writes the marker via the existing post-download codepath.
+        fetch_recipe(
+            "cv:idemp_marker",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("first fetch ok");
+
+        // Confirm marker is in place (sanity check for the test setup).
+        let dest = models_dir.join("cv-idemp_marker").join("m.safetensors");
+        assert!(
+            sha256_marker_path(&dest).exists(),
+            "first fetch should have written the .sha256-verified marker"
+        );
+
+        fetch_recipe(
+            "cv:idemp_marker",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("second fetch ok");
+
+        server.verify().await;
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_pulls_when_size_mismatch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/m.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"correct".as_ref()))
+            // Size mismatch must trigger the fetch.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("idempotent_mismatch");
+        let subdir = models_dir.join("cv-idemp_mismatch");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        // Pre-stage a wrong-size file (4 bytes vs. the recipe's declared 7).
+        std::fs::write(&dest, b"WRNG").unwrap();
+
+        let url = format!("{}/m.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(7),
+        }];
+
+        fetch_recipe(
+            "cv:idemp_mismatch",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("ok");
+
+        // File should now match the server response.
+        assert_eq!(std::fs::read(&dest).unwrap(), b"correct");
+        server.verify().await;
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
     async fn recipe_fetcher_rejects_path_traversal_in_dest() {
         let models_dir = recipe_tmp_dir("traversal");
         let files = vec![RecipeFetchFile {
