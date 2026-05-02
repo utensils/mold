@@ -767,3 +767,48 @@ async fn catalog_get_emits_installed_true_when_recipe_files_on_disk() {
         "expected installed=false after removal; body={body}",
     );
 }
+
+/// Regression: the HF arm of `catalog_row_to_wire`'s installed predicate
+/// must successfully bridge HF repo paths (e.g. "black-forest-labs/FLUX.1-dev")
+/// to their canonical manifest names via `find_manifest_by_hf_repo`. Before
+/// the fix, the HF branch silently degraded to `installed=false` for every
+/// HF entry, breaking the Repair button on the HF half of the catalog.
+#[tokio::test]
+async fn catalog_get_emits_installed_true_for_hf_row_when_manifest_is_downloaded() {
+    if std::env::var_os("MOLD_MODELS_DIR").is_some() {
+        eprintln!(
+            "skipping catalog_get_emits_installed_for_hf: MOLD_MODELS_DIR is set; \
+             this test requires the cfg.models_dir override path"
+        );
+        return;
+    }
+
+    // Build an HF row whose source_id matches a known manifest's transformer hf_repo.
+    // FLUX.1-schnell is shipped as the BF16 variant from black-forest-labs/FLUX.1-schnell
+    // (see the corresponding manifest in mold-core/src/manifest.rs).
+    let mut row = make_catalog_row("hf:black-forest-labs/FLUX.1-schnell", "hf", "flux", 1);
+    row.source_id = "black-forest-labs/FLUX.1-schnell".to_string();
+    let state = seeded_state(std::slice::from_ref(&row));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+
+    // With nothing on disk, HF row reports installed=false. This pins the
+    // negative case as a sanity check (no false positives from the new
+    // bridge logic).
+    let resp = crate::catalog_api::get_catalog_entry(
+        State(state.clone()),
+        Path("hf:black-forest-labs/FLUX.1-schnell".to_string()),
+    )
+    .await
+    .into_response();
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("installed").and_then(|x| x.as_bool()),
+        Some(false),
+        "expected installed=false for HF row with nothing on disk; body={body}",
+    );
+}

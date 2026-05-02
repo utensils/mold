@@ -3328,6 +3328,31 @@ pub fn find_manifest(name: &str) -> Option<&'static ModelManifest> {
     MANIFEST_INDEX.get(&canonical).map(|&i| &KNOWN_MANIFESTS[i])
 }
 
+/// Find a manifest whose Transformer (or TransformerShard) file points
+/// at the given Hugging Face repo (e.g. `"black-forest-labs/FLUX.1-dev"`).
+/// Used by the catalog API to map HF catalog rows back to a known model
+/// name when computing the `installed` wire field — `find_manifest`
+/// itself is keyed on canonical names like `"flux-dev:q8"`, so HF repo
+/// paths never resolve through it directly.
+///
+/// Returns the FIRST matching manifest in `KNOWN_MANIFESTS` order. When
+/// multiple quantizations of the same model share an HF repo
+/// (e.g. several `flux-dev:qN` variants from `city96/FLUX.1-dev-gguf`),
+/// the caller may not get the variant the user actually has on disk —
+/// that's fine, because `manifest_model_is_downloaded` then queries
+/// the resolved canonical name and returns `false` if the user has
+/// no copy of that specific variant.
+pub fn find_manifest_by_hf_repo(hf_repo: &str) -> Option<&'static ModelManifest> {
+    KNOWN_MANIFESTS.iter().find(|m| {
+        m.files.iter().any(|f| {
+            matches!(
+                f.component,
+                ModelComponent::Transformer | ModelComponent::TransformerShard
+            ) && f.hf_repo == hf_repo
+        })
+    })
+}
+
 /// Find smaller quantized alternatives for a model.
 /// Given `"ultrareal-v2:bf16"`, returns `["ultrareal-v3:q4", "ultrareal-v3:q8", ...]`
 /// sorted by model size ascending. Returns empty if no alternatives found.
@@ -6928,5 +6953,36 @@ mod tests {
                 manifest.name
             );
         }
+    }
+
+    #[test]
+    fn find_manifest_by_hf_repo_matches_transformer_repo() {
+        // FLUX.1-dev is a well-known canonical entry — its transformer
+        // ships from black-forest-labs/FLUX.1-dev (BF16 path) and from
+        // city96/FLUX.1-dev-gguf (GGUF quantizations). Either repo string
+        // must surface a matching manifest.
+        assert!(find_manifest_by_hf_repo("black-forest-labs/FLUX.1-dev").is_some());
+        assert!(find_manifest_by_hf_repo("city96/FLUX.1-dev-gguf").is_some());
+    }
+
+    #[test]
+    fn find_manifest_by_hf_repo_returns_none_for_unknown_repo() {
+        assert!(find_manifest_by_hf_repo("some-random-org/never-shipped").is_none());
+    }
+
+    #[test]
+    fn find_manifest_by_hf_repo_ignores_non_transformer_repos() {
+        // lmz/mt5-tokenizers ships only T5Tokenizer files across every
+        // manifest that references it — never as a Transformer or
+        // TransformerShard. The lookup must not surface those manifests
+        // when keyed on the tokenizer repo, otherwise an HF catalog row
+        // pointing at a tokenizer would mis-route to whatever model
+        // happens to bundle that tokenizer.
+        //
+        // (Note: openai/clip-vit-large-patch14 is NOT a safe choice for
+        // this assertion — the `clip-l` companion manifest declares its
+        // CLIP weights as `ModelComponent::Transformer`, so the lookup
+        // legitimately resolves CLIP-L there.)
+        assert!(find_manifest_by_hf_repo("lmz/mt5-tokenizers").is_none());
     }
 }

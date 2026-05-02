@@ -404,17 +404,17 @@ fn catalog_row_to_wire(
     config: &mold_core::Config,
 ) -> serde_json::Value {
     let installed = match r.source.as_str() {
-        // HF rows install via the manifest path; if find_manifest resolves
-        // the source_id to a known canonical name, ask the manifest path's
-        // is-downloaded check. Unknown HF rows (no manifest in this build)
-        // currently can't surface installed=true — they need a manifest
-        // entry to be installable in the first place.
-        "hf" => {
-            let canonical = mold_core::manifest::find_manifest(&r.source_id)
-                .map(|m| m.name.clone())
-                .unwrap_or_else(|| r.source_id.clone());
-            config.manifest_model_is_downloaded(&canonical)
-        }
+        // HF rows install via the manifest path. The catalog stores the
+        // HF repo path in `source_id` (e.g. "black-forest-labs/FLUX.1-dev")
+        // — mold's manifest registry is keyed on canonical names like
+        // "flux-dev:q8" instead, so we use the reverse lookup
+        // `find_manifest_by_hf_repo` to bridge them. When no manifest in
+        // this build matches the HF repo, the entry can't be installed
+        // (no canonical name to point disk-state at), so report false.
+        "hf" => match mold_core::manifest::find_manifest_by_hf_repo(&r.source_id) {
+            Some(manifest) => config.manifest_model_is_downloaded(&manifest.name),
+            None => false,
+        },
         // Civitai rows go through the recipe path. Parse the stored recipe
         // JSON, translate to RecipeFetchFile borrowed slice, and delegate
         // to mold_core::download::catalog_entry_installed (which uses the
@@ -435,7 +435,15 @@ fn catalog_row_to_wire(
                         .collect();
                     mold_core::download::catalog_entry_installed(models_dir, &r.id, &files)
                 }
-                Err(_) => false,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "catalog",
+                        catalog_id = %r.id,
+                        error = %e,
+                        "failed to parse stored download_recipe; reporting installed=false",
+                    );
+                    false
+                }
             }
         }
         _ => false,
