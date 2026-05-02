@@ -55,4 +55,15 @@ describe("CatalogCard", () => {
     const w = mount(CatalogCard, { props: { entry } });
     expect(w.text()).not.toMatch(/phase 2/i);
   });
+
+  it("shows Installed badge when entry.installed is true", () => {
+    const entry: CatalogEntryWire = { ...baseEntry, installed: true };
+    const w = mount(CatalogCard, { props: { entry } });
+    expect(w.text()).toMatch(/installed/i);
+  });
+
+  it("does not show Installed badge when entry.installed is false", () => {
+    const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    expect(w.text()).not.toMatch(/installed/i);
+  });
 });
