@@ -337,9 +337,14 @@ pub async fn list_catalog(
         limit: page_size,
         offset,
     };
+    let cfg_guard = state.config.read().await;
+    let models_dir = cfg_guard.resolved_models_dir();
     match state.catalog_db.catalog_list(&params) {
         Ok(rows) => Json(serde_json::json!({
-            "entries": rows.into_iter().map(catalog_row_to_wire).collect::<Vec<_>>(),
+            "entries": rows
+                .into_iter()
+                .map(|r| catalog_row_to_wire(r, &models_dir, &cfg_guard))
+                .collect::<Vec<_>>(),
             "page": page,
             "page_size": page_size,
         }))
@@ -352,8 +357,12 @@ pub async fn get_catalog_entry(
     State(state): State<crate::state::AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let cfg_guard = state.config.read().await;
+    let models_dir = cfg_guard.resolved_models_dir();
     match state.catalog_db.catalog_get(&id) {
-        Ok(Some(row)) => Json(catalog_row_to_wire(row)).into_response(),
+        Ok(Some(row)) => {
+            Json(catalog_row_to_wire(row, &models_dir, &cfg_guard)).into_response()
+        }
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -389,7 +398,48 @@ pub async fn list_families(State(state): State<crate::state::AppState>) -> impl 
     }
 }
 
-fn catalog_row_to_wire(r: mold_db::catalog::CatalogRow) -> serde_json::Value {
+fn catalog_row_to_wire(
+    r: mold_db::catalog::CatalogRow,
+    models_dir: &std::path::Path,
+    config: &mold_core::Config,
+) -> serde_json::Value {
+    let installed = match r.source.as_str() {
+        // HF rows install via the manifest path; if find_manifest resolves
+        // the source_id to a known canonical name, ask the manifest path's
+        // is-downloaded check. Unknown HF rows (no manifest in this build)
+        // currently can't surface installed=true — they need a manifest
+        // entry to be installable in the first place.
+        "hf" => {
+            let canonical = mold_core::manifest::find_manifest(&r.source_id)
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| r.source_id.clone());
+            config.manifest_model_is_downloaded(&canonical)
+        }
+        // Civitai rows go through the recipe path. Parse the stored recipe
+        // JSON, translate to RecipeFetchFile borrowed slice, and delegate
+        // to mold_core::download::catalog_entry_installed (which uses the
+        // shared recipe_file_is_placed predicate so the wire field can't
+        // disagree with the fetcher's idempotency check).
+        "civitai" => {
+            match serde_json::from_str::<mold_catalog::entry::DownloadRecipe>(&r.download_recipe) {
+                Ok(recipe) => {
+                    let files: Vec<mold_core::download::RecipeFetchFile<'_>> = recipe
+                        .files
+                        .iter()
+                        .map(|f| mold_core::download::RecipeFetchFile {
+                            url: f.url.as_str(),
+                            dest: f.dest.as_str(),
+                            sha256: f.sha256.as_deref(),
+                            size_bytes: f.size_bytes,
+                        })
+                        .collect();
+                    mold_core::download::catalog_entry_installed(models_dir, &r.id, &files)
+                }
+                Err(_) => false,
+            }
+        }
+        _ => false,
+    };
     serde_json::json!({
         "id": r.id,
         "source": r.source,
@@ -416,6 +466,7 @@ fn catalog_row_to_wire(r: mold_db::catalog::CatalogRow) -> serde_json::Value {
         "companions": r.companions.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
         "download_recipe": serde_json::from_str::<serde_json::Value>(&r.download_recipe).unwrap_or(serde_json::json!({})),
         "engine_phase": r.engine_phase,
+        "installed": installed,
         "created_at": r.created_at,
         "updated_at": r.updated_at,
         "added_at": r.added_at,
