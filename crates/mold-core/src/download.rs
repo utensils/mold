@@ -1484,6 +1484,50 @@ pub fn companion_present_on_disk(
     })
 }
 
+/// True iff every file in the recipe is present at its declared size (or,
+/// when the recipe omits the size, has a `.sha256-verified` marker from
+/// a prior verified pull) AND no `.pulling` marker for the catalog id is
+/// present. Used by the catalog API to set `installed: bool` on each
+/// wire entry so the SPA can hide the Download button and show Repair
+/// instead.
+///
+/// Empty file slice returns `false` — callers (see `catalog_row_to_wire`
+/// in mold-server) use this for Civitai-style recipe rows. HF rows
+/// without a recipe go through `Config::manifest_model_is_downloaded`
+/// instead, so an empty input here means "no recipe to walk" and we
+/// refuse to claim install.
+///
+/// `id` is the catalog id (`cv:1234` / `hf:author/name`) — same string
+/// the recipe-pull path uses to derive its marker and subdir name.
+pub fn catalog_entry_installed(
+    models_dir: &Path,
+    id: &str,
+    files: &[RecipeFetchFile<'_>],
+) -> bool {
+    if files.is_empty() {
+        return false;
+    }
+    if pulling_marker_path_in(models_dir, id).exists() {
+        return false;
+    }
+    let sanitized = sanitize_recipe_id(id);
+    let subdir_root = models_dir.join(&sanitized);
+    files.iter().all(|f| {
+        let Ok(dest) = resolve_recipe_dest(&subdir_root, f.dest) else {
+            return false;
+        };
+        if !dest.exists() {
+            return false;
+        }
+        match f.size_bytes {
+            Some(expected) => std::fs::metadata(&dest)
+                .map(|m| m.len() == expected)
+                .unwrap_or(false),
+            None => sha256_marker_path(&dest).exists(),
+        }
+    })
+}
+
 /// Parse a `Vec<String>` of companion names out of `companions_json` and
 /// return the ones that (a) resolve to a known synthetic manifest and (b)
 /// aren't already fully present under `models_dir`.
@@ -3282,6 +3326,75 @@ mod tests {
             !catalog_entry_installed(&models_dir, "cv:installed_g", &files),
             "path traversal must be treated as not-installed, not as a panic"
         );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_for_empty_files() {
+        let models_dir = recipe_tmp_dir("installed_empty");
+        assert!(
+            !catalog_entry_installed(&models_dir, "cv:installed_h", &[]),
+            "empty file slice means no recipe to verify; must refuse to claim install"
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_true_for_multi_file_complete_recipe() {
+        let models_dir = recipe_tmp_dir("installed_multi");
+        let subdir = models_dir.join("cv-installed_i");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("a.safetensors"), b"present").unwrap();
+        std::fs::write(subdir.join("b.safetensors"), b"present_too").unwrap();
+        std::fs::write(subdir.join("c.safetensors"), b"third").unwrap();
+
+        let files = vec![
+            RecipeFetchFile {
+                url: "https://example.invalid/a.safetensors",
+                dest: "a.safetensors",
+                sha256: None,
+                size_bytes: Some(7),
+            },
+            RecipeFetchFile {
+                url: "https://example.invalid/b.safetensors",
+                dest: "b.safetensors",
+                sha256: None,
+                size_bytes: Some(11),
+            },
+            RecipeFetchFile {
+                url: "https://example.invalid/c.safetensors",
+                dest: "c.safetensors",
+                sha256: None,
+                size_bytes: Some(5),
+            },
+        ];
+
+        assert!(
+            catalog_entry_installed(&models_dir, "cv:installed_i", &files),
+            "every file present at declared size — must report installed"
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_when_file_larger_than_declared() {
+        // Mutation guard: pins == (not >=) for the size comparison. A
+        // 99-byte file declared as 5 bytes is just as wrong as a 5-byte file
+        // declared as 99 bytes — the existing `_size_mismatch` test only
+        // exercises the file-too-small direction.
+        let models_dir = recipe_tmp_dir("installed_too_big");
+        let subdir = models_dir.join("cv-installed_j");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("m.safetensors"), b"this is much longer than five bytes").unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(5),
+        }];
+
+        assert!(!catalog_entry_installed(&models_dir, "cv:installed_j", &files));
         let _ = std::fs::remove_dir_all(&models_dir);
     }
 
