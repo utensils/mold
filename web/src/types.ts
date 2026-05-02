@@ -503,6 +503,14 @@ export interface CatalogEntryWire {
     needs_token: "hf" | "civitai" | null;
   };
   engine_phase: number;
+  /**
+   * True when every file the entry needs is already present under the
+   * configured models_dir. Computed server-side per request from the
+   * recipe's `dest` paths (Civitai) or the resolved manifest's expected
+   * file set (HF). Drives the Download↔Repair button swap in the
+   * CatalogDetailDrawer and the "installed" chip on CatalogCard.
+   */
+  installed: boolean;
   created_at: number | null;
   updated_at: number | null;
   added_at: number;

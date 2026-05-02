@@ -8,6 +8,7 @@ const makeEntry = (phase: number) => ({
   name: "Alpha",
   family: "flux",
   engine_phase: phase,
+  installed: false,
   source: "hf" as const,
   source_id: "a",
   author: "alice",

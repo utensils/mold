@@ -8,6 +8,7 @@ const baseEntry: CatalogEntryWire = {
   name: "Alpha",
   family: "flux",
   engine_phase: 1,
+  installed: false,
   source: "hf",
   source_id: "a",
   author: "alice",
