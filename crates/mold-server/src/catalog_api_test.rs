@@ -754,12 +754,10 @@ async fn catalog_get_emits_installed_true_when_recipe_files_on_disk() {
 
     // Remove the file and assert installed=false on a fresh GET.
     std::fs::remove_file(&dest).expect("remove dest");
-    let resp = crate::catalog_api::get_catalog_entry(
-        State(state),
-        Path("cv:installed1".to_string()),
-    )
-    .await
-    .into_response();
+    let resp =
+        crate::catalog_api::get_catalog_entry(State(state), Path("cv:installed1".to_string()))
+            .await
+            .into_response();
     let body = read_body_json(resp).await;
     assert_eq!(
         body.get("installed").and_then(|x| x.as_bool()),

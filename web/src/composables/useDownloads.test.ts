@@ -246,6 +246,8 @@ describe("useDownloads.enqueue dispatch", () => {
     dl.close();
 
     const urls = fetchMock.mock.calls.map((c) => c[0] as string);
-    expect(urls.some((u) => u.includes("/api/catalog/cv%3A232703/download"))).toBe(true);
+    expect(
+      urls.some((u) => u.includes("/api/catalog/cv%3A232703/download")),
+    ).toBe(true);
   });
 });

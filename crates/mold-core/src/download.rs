@@ -1526,11 +1526,7 @@ fn recipe_file_is_placed(dest: &Path, file: &RecipeFetchFile<'_>) -> bool {
 ///
 /// `id` is the catalog id (`cv:1234` / `hf:author/name`) — same string
 /// the recipe-pull path uses to derive its marker and subdir name.
-pub fn catalog_entry_installed(
-    models_dir: &Path,
-    id: &str,
-    files: &[RecipeFetchFile<'_>],
-) -> bool {
+pub fn catalog_entry_installed(models_dir: &Path, id: &str, files: &[RecipeFetchFile<'_>]) -> bool {
     if files.is_empty() {
         return false;
     }
@@ -1752,9 +1748,9 @@ async fn fetch_recipe_inner(
         // predicate just claimed was installed.
         let already_placed = recipe_file_is_placed(dest_path, file);
         if already_placed {
-            let size_bytes = file.size_bytes.unwrap_or_else(|| {
-                std::fs::metadata(dest_path).map(|m| m.len()).unwrap_or(0)
-            });
+            let size_bytes = file
+                .size_bytes
+                .unwrap_or_else(|| std::fs::metadata(dest_path).map(|m| m.len()).unwrap_or(0));
             if let Some(cb) = progress.as_deref() {
                 cb(DownloadProgressEvent::FileStart {
                     filename: file.dest.to_string(),
@@ -3203,7 +3199,11 @@ mod tests {
             size_bytes: Some(5),
         }];
 
-        assert!(catalog_entry_installed(&models_dir, "cv:installed_a", &files));
+        assert!(catalog_entry_installed(
+            &models_dir,
+            "cv:installed_a",
+            &files
+        ));
         let _ = std::fs::remove_dir_all(&models_dir);
     }
 
@@ -3230,7 +3230,11 @@ mod tests {
             },
         ];
 
-        assert!(!catalog_entry_installed(&models_dir, "cv:installed_b", &files));
+        assert!(!catalog_entry_installed(
+            &models_dir,
+            "cv:installed_b",
+            &files
+        ));
         let _ = std::fs::remove_dir_all(&models_dir);
     }
 
@@ -3248,7 +3252,11 @@ mod tests {
             size_bytes: Some(99),
         }];
 
-        assert!(!catalog_entry_installed(&models_dir, "cv:installed_c", &files));
+        assert!(!catalog_entry_installed(
+            &models_dir,
+            "cv:installed_c",
+            &files
+        ));
         let _ = std::fs::remove_dir_all(&models_dir);
     }
 
@@ -3268,7 +3276,11 @@ mod tests {
             size_bytes: None,
         }];
 
-        assert!(catalog_entry_installed(&models_dir, "cv:installed_d", &files));
+        assert!(catalog_entry_installed(
+            &models_dir,
+            "cv:installed_d",
+            &files
+        ));
         let _ = std::fs::remove_dir_all(&models_dir);
     }
 
@@ -3287,7 +3299,11 @@ mod tests {
             size_bytes: None,
         }];
 
-        assert!(!catalog_entry_installed(&models_dir, "cv:installed_e", &files));
+        assert!(!catalog_entry_installed(
+            &models_dir,
+            "cv:installed_e",
+            &files
+        ));
         let _ = std::fs::remove_dir_all(&models_dir);
     }
 
@@ -3392,7 +3408,11 @@ mod tests {
         let models_dir = recipe_tmp_dir("installed_too_big");
         let subdir = models_dir.join("cv-installed_j");
         std::fs::create_dir_all(&subdir).unwrap();
-        std::fs::write(subdir.join("m.safetensors"), b"this is much longer than five bytes").unwrap();
+        std::fs::write(
+            subdir.join("m.safetensors"),
+            b"this is much longer than five bytes",
+        )
+        .unwrap();
 
         let files = vec![RecipeFetchFile {
             url: "https://example.invalid/m.safetensors",
@@ -3401,7 +3421,11 @@ mod tests {
             size_bytes: Some(5),
         }];
 
-        assert!(!catalog_entry_installed(&models_dir, "cv:installed_j", &files));
+        assert!(!catalog_entry_installed(
+            &models_dir,
+            "cv:installed_j",
+            &files
+        ));
         let _ = std::fs::remove_dir_all(&models_dir);
     }
 

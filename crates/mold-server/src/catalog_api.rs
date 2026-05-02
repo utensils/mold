@@ -360,9 +360,7 @@ pub async fn get_catalog_entry(
     let cfg_guard = state.config.read().await;
     let models_dir = cfg_guard.resolved_models_dir();
     match state.catalog_db.catalog_get(&id) {
-        Ok(Some(row)) => {
-            Json(catalog_row_to_wire(row, &models_dir, &cfg_guard)).into_response()
-        }
+        Ok(Some(row)) => Json(catalog_row_to_wire(row, &models_dir, &cfg_guard)).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
