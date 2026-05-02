@@ -34,13 +34,22 @@ function formatCount(n: number): string {
       <h3 class="text-sm font-medium text-zinc-100 truncate">
         {{ props.entry.name }}
       </h3>
-      <span
-        v-if="props.entry.engine_phase >= 3"
-        class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 bg-amber-700/30 text-amber-200 rounded"
-        :title="`Coming in phase ${props.entry.engine_phase}`"
-      >
-        phase {{ props.entry.engine_phase }}
-      </span>
+      <div class="flex items-center gap-1 shrink-0">
+        <span
+          v-if="props.entry.installed"
+          class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 bg-emerald-700/30 text-emerald-200 rounded"
+          title="Already on disk"
+        >
+          installed
+        </span>
+        <span
+          v-if="props.entry.engine_phase >= 3"
+          class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 bg-amber-700/30 text-amber-200 rounded"
+          :title="`Coming in phase ${props.entry.engine_phase}`"
+        >
+          phase {{ props.entry.engine_phase }}
+        </span>
+      </div>
     </div>
     <p class="text-xs text-zinc-500 truncate">
       {{ props.entry.author ?? "unknown" }}
