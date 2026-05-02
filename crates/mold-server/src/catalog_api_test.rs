@@ -696,3 +696,74 @@ async fn drive_persists_scanned_entries_through_sink() {
         "rows must be the fakes we fed in",
     );
 }
+
+// ── installed: bool wire field (catalog Repair button) ─────────────────────
+
+/// `GET /api/catalog/:id` must report `installed: true` when every recipe
+/// file is present under `models_dir` at the declared size, and
+/// `installed: false` after any of those files is removed.
+///
+/// Drives the SPA's catalog drawer Download↔Repair button swap.
+/// Currently fails: `catalog_row_to_wire` doesn't emit an `installed`
+/// field yet — that's Task 6.
+#[tokio::test]
+async fn catalog_get_emits_installed_true_when_recipe_files_on_disk() {
+    // Defensive: this test depends on `Config::resolved_models_dir` falling
+    // through to `cfg.models_dir`. If the harness env has MOLD_MODELS_DIR
+    // set, our cfg override is ignored and the assertions misfire.
+    if std::env::var_os("MOLD_MODELS_DIR").is_some() {
+        eprintln!(
+            "skipping catalog_get_emits_installed: MOLD_MODELS_DIR is set; \
+             this test requires the cfg.models_dir override path"
+        );
+        return;
+    }
+
+    let row = make_catalog_row("cv:installed1", "civitai", "sdxl", 2);
+    let state = seeded_state(std::slice::from_ref(&row));
+
+    // Point the AppState's config at a fresh tempdir so we control where
+    // the recipe files are looked up.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+
+    // Stage the recipe's only file at the declared size (1000 bytes).
+    let subdir = tmp
+        .path()
+        .join(mold_core::download::sanitize_recipe_id("cv:installed1"));
+    std::fs::create_dir_all(&subdir).expect("mkdir subdir");
+    let dest = subdir.join("primary.safetensors");
+    std::fs::write(&dest, vec![0u8; 1000]).expect("write stub");
+
+    // GET the entry and assert installed=true.
+    let resp = crate::catalog_api::get_catalog_entry(
+        State(state.clone()),
+        Path("cv:installed1".to_string()),
+    )
+    .await
+    .into_response();
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("installed").and_then(|x| x.as_bool()),
+        Some(true),
+        "expected installed=true with file staged; body={body}",
+    );
+
+    // Remove the file and assert installed=false on a fresh GET.
+    std::fs::remove_file(&dest).expect("remove dest");
+    let resp = crate::catalog_api::get_catalog_entry(
+        State(state),
+        Path("cv:installed1".to_string()),
+    )
+    .await
+    .into_response();
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("installed").and_then(|x| x.as_bool()),
+        Some(false),
+        "expected installed=false after removal; body={body}",
+    );
+}
