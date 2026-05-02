@@ -3137,6 +3137,154 @@ mod tests {
         let _ = std::fs::remove_dir_all(&models_dir);
     }
 
+    #[test]
+    fn catalog_entry_installed_returns_true_for_complete_recipe() {
+        let models_dir = recipe_tmp_dir("installed_complete");
+        let subdir = models_dir.join("cv-installed_a");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        std::fs::write(&dest, b"hello").unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(5),
+        }];
+
+        assert!(catalog_entry_installed(&models_dir, "cv:installed_a", &files));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_when_any_file_missing() {
+        let models_dir = recipe_tmp_dir("installed_partial");
+        let subdir = models_dir.join("cv-installed_b");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("a.safetensors"), b"present").unwrap();
+        // b.safetensors is intentionally missing.
+
+        let files = vec![
+            RecipeFetchFile {
+                url: "https://example.invalid/a.safetensors",
+                dest: "a.safetensors",
+                sha256: None,
+                size_bytes: Some(7),
+            },
+            RecipeFetchFile {
+                url: "https://example.invalid/b.safetensors",
+                dest: "b.safetensors",
+                sha256: None,
+                size_bytes: Some(7),
+            },
+        ];
+
+        assert!(!catalog_entry_installed(&models_dir, "cv:installed_b", &files));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_on_size_mismatch() {
+        let models_dir = recipe_tmp_dir("installed_mismatch");
+        let subdir = models_dir.join("cv-installed_c");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("m.safetensors"), b"WRONG").unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(99),
+        }];
+
+        assert!(!catalog_entry_installed(&models_dir, "cv:installed_c", &files));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_uses_marker_when_size_unknown() {
+        let models_dir = recipe_tmp_dir("installed_marker");
+        let subdir = models_dir.join("cv-installed_d");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        std::fs::write(&dest, b"hello").unwrap();
+        write_sha256_marker(&dest, "deadbeef").unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: None,
+        }];
+
+        assert!(catalog_entry_installed(&models_dir, "cv:installed_d", &files));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_without_marker_and_without_size() {
+        let models_dir = recipe_tmp_dir("installed_nomarker");
+        let subdir = models_dir.join("cv-installed_e");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("m.safetensors"), b"hello").unwrap();
+        // No marker, no declared size — refuse to claim install.
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: None,
+        }];
+
+        assert!(!catalog_entry_installed(&models_dir, "cv:installed_e", &files));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_when_pulling_marker_present() {
+        let models_dir = recipe_tmp_dir("installed_pulling");
+        let subdir = models_dir.join("cv-installed_f");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("m.safetensors"), b"hello").unwrap();
+
+        let marker = pulling_marker_path_in(&models_dir, "cv:installed_f");
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&marker, "in-progress").unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(5),
+        }];
+
+        assert!(
+            !catalog_entry_installed(&models_dir, "cv:installed_f", &files),
+            "active .pulling marker must override on-disk completeness"
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_rejects_path_traversal() {
+        let models_dir = recipe_tmp_dir("installed_traversal");
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "../escape.safetensors",
+            sha256: None,
+            size_bytes: Some(5),
+        }];
+
+        assert!(
+            !catalog_entry_installed(&models_dir, "cv:installed_g", &files),
+            "path traversal must be treated as not-installed, not as a panic"
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
     #[tokio::test]
     async fn recipe_fetcher_pulls_when_size_mismatch() {
         use wiremock::matchers::{method, path};
