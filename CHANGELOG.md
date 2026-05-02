@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SD1.5 + SDXL single-file Civitai checkpoints generate end-to-end (catalog phase 2/5).** `mold pull cv:<id>` and the web Catalog Download button now resolve Civitai single-file `.safetensors` checkpoints (Pony SDXL, Juggernaut XL, DreamShaper, epiCRealism, Realistic Vision, Anything v5, etc.) through the catalog's `download_recipe`, auto-pulling the required companions (`clip-l`, `clip-g`, `sdxl-vae`, `sd-vae-ft-mse`) before the primary checkpoint, then handing the merged tensor set to a new single-file dispatcher in `mold-inference` that reconstructs the engine. Both `mold run` and the web Generate flow run end-to-end against the resulting models — same prompts, schedulers, and LoRA / img2img surfaces as the existing manifest entries. The download response shape now includes companion job ids (`{ primary_job_id, companion_jobs: [{name, job_id}] }`) so the SPA's DownloadsDrawer can show companions in pull order.
 - `crates/mold-inference/src/loader/single_file.rs` + `single_file_backend.rs` — single-file checkpoint dispatcher (`load_components_single_file`) plus per-family SD1.5 and SDXL constructors. SDXL slices the fused CLIP-G `conditioner.embedders.1.model.transformer.resblocks.{n}.attn.in_proj_{weight,bias}` slab into the three split `text_model.encoder.layers.{n}.self_attn.{q,k,v}_proj.{weight,bias}` tensors candle's text encoder expects, and a custom `SingleFileBackend` impl plugs into `VarBuilder::from_backend(...)` so the merged in-memory tensor set drives candle's stable-diffusion model construction without a temporary on-disk safetensors round-trip. Factory routing (`create_engine`) recognises `engine_kind = "sd15-single-file" | "sdxl-single-file"` and dispatches to the constructor with `is_turbo` threaded through for SDXL Turbo / Lightning checkpoints.
 - `sd_singlefile_inspect` dev-bin (`cargo run -p mold-ai-inference --features dev-bins --bin sd_singlefile_inspect -- <ckpt.safetensors>`) for ad-hoc tensor-key audits of single-file checkpoints — used during the phase-2 tensor-prefix audit and kept available for future variant onboarding.
+- Catalog entries on `/catalog` now show an `installed` chip when their files are
+  on disk; the catalog detail drawer shows a subtle `Repair` button instead of
+  `Download` for installed entries. Repair re-uses `POST /api/catalog/:id/download`
+  — `mold_core::download::fetch_recipe` is now idempotent, so re-clicking
+  Download (or clicking Repair) costs zero bytes when nothing's missing. New
+  helpers: `mold_core::download::catalog_entry_installed(models_dir, id, files)`
+  and `mold_core::manifest::find_manifest_by_hf_repo(hf_repo)`. New wire field
+  `installed: boolean` on the `CatalogEntryWire` JSON returned by `GET /api/catalog`
+  and `GET /api/catalog/:id`.
 
 ### Changed
 
@@ -99,6 +108,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Gallery Grid's inspector-row threshold uses a new `show_grid_inspector()` helper gated by `GRID_INSPECTOR_MIN_HEIGHT = GRID_BOTTOM_HEIGHT + CELL_H + 2 = 24`. Previously the 8-row inspector appeared at area heights ≥ 14, so heights 14–23 rendered the inspector and zero thumbnails.
   - Models Details inspector row grew from 7 → 9 cells, matching the `DETAILS_LINE_COUNT + 2` border budget. The Default and HF KV rows were previously clipped on every terminal; a `const _: () = assert!(...)` guard fails the build if the constants drift apart again.
   - Generate's bottom row grew from 5 → 6 cells so the Recent strip's advertised `MAX_ENTRIES = 4` actually fit with a 2-cell border; another `const _: () = assert!(...)` guards the `BOTTOM_ROW_HEIGHT >= MAX_ENTRIES + 2` invariant at compile time.
+- `mold_core::download::fetch_recipe` is now idempotent: re-running a recipe
+  pull (catalog Repair, double-clicked Download, retry-after-partial-companion-
+  failure) skips files that already exist on disk at the recipe's declared size
+  — and additionally requires the `.sha256-verified` marker when the recipe
+  declares a SHA-256 — instead of truncating and re-downloading them. The
+  catalog detail drawer no longer offers a `Download` button for entries
+  already on disk.
 
 ### Added
 
