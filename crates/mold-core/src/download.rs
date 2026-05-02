@@ -1681,10 +1681,23 @@ async fn fetch_recipe_inner(
         // run. Mirrors `is_already_placed` from the manifest path so a
         // recipe re-pull (Repair, double-clicked Download, retry-after-
         // partial-companion-failure) costs zero bytes when nothing's missing.
+        // Idempotency rule: the file is "already placed" iff it exists with
+        // the right length AND, when the recipe declares a SHA-256, a
+        // `.sha256-verified` marker is also present. The marker is a
+        // positive attestation that a previous successful pull actually
+        // hashed and matched these bytes — without it, a same-size-but-
+        // corrupted file (manual `mv`, FS bug, cosmic ray) would silently
+        // slip past a size-only check. When the recipe omits the size we
+        // fall back to the marker as the only positive signal we have.
+        // Mirrors `Config::file_is_complete`'s acceptance rules so the
+        // recipe path and manifest path agree on what "installed" means.
         let already_placed = match file.size_bytes {
-            Some(expected) => std::fs::metadata(dest_path)
-                .map(|m| m.len() == expected)
-                .unwrap_or(false),
+            Some(expected) => {
+                std::fs::metadata(dest_path)
+                    .map(|m| m.len() == expected)
+                    .unwrap_or(false)
+                    && (file.sha256.is_none() || sha256_marker_path(dest_path).exists())
+            }
             None => sha256_marker_path(dest_path).exists(),
         };
         if already_placed {
@@ -3066,6 +3079,60 @@ mod tests {
         .await
         .expect("second fetch ok");
 
+        server.verify().await;
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_refetches_when_sha256_declared_but_marker_missing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = b"correct";
+        // SHA-256 of "correct"
+        let expected = "15a596e3c98c407e043751ff3b21ff0358a1bdfdf3fe948b1523893a8e5de2e8";
+        Mock::given(method("GET"))
+            .and(path("/m.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_ref()))
+            // The pre-staged file has the right size but no marker, so the
+            // skip path must refuse it and re-fetch exactly once.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("idempotent_no_marker");
+        let subdir = models_dir.join("cv-idemp_no_marker");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        // Pre-stage a file at the declared size — but NO marker, and bytes
+        // don't actually match the declared sha256. A size-only skip would
+        // accept this; the tightened predicate must not.
+        std::fs::write(&dest, b"BADBYTE").unwrap();
+        assert!(!sha256_marker_path(&dest).exists());
+
+        let url = format!("{}/m.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "m.safetensors",
+            sha256: Some(expected),
+            size_bytes: Some(body.len() as u64),
+        }];
+
+        fetch_recipe(
+            "cv:idemp_no_marker",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("fetch ok");
+
+        // After re-fetch the bytes match the server response and the marker exists.
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert!(sha256_marker_path(&dest).exists());
         server.verify().await;
         let _ = std::fs::remove_dir_all(&models_dir);
     }
