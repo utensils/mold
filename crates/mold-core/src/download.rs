@@ -1675,6 +1675,47 @@ async fn fetch_recipe_inner(
             })?;
         }
 
+        // Idempotency: skip the HTTP fetch when the file is already on disk
+        // with the declared size, or (when no size is declared) when the
+        // post-download .sha256-verified marker is present from a prior
+        // run. Mirrors `is_already_placed` from the manifest path so a
+        // recipe re-pull (Repair, double-clicked Download, retry-after-
+        // partial-companion-failure) costs zero bytes when nothing's missing.
+        let already_placed = match file.size_bytes {
+            Some(expected) => std::fs::metadata(dest_path)
+                .map(|m| m.len() == expected)
+                .unwrap_or(false),
+            None => sha256_marker_path(dest_path).exists(),
+        };
+        if already_placed {
+            let size_bytes = file.size_bytes.unwrap_or_else(|| {
+                std::fs::metadata(dest_path).map(|m| m.len()).unwrap_or(0)
+            });
+            if let Some(cb) = progress.as_deref() {
+                cb(DownloadProgressEvent::FileStart {
+                    filename: file.dest.to_string(),
+                    file_index,
+                    total_files,
+                    size_bytes,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            batch_bytes_downloaded = batch_bytes_downloaded.saturating_add(size_bytes);
+            if let Some(cb) = progress.as_deref() {
+                cb(DownloadProgressEvent::FileDone {
+                    filename: file.dest.to_string(),
+                    file_index,
+                    total_files,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            continue;
+        }
+
         let mut req = client.get(file.url);
         if let RecipeAuth::Bearer(token) = &auth {
             req = req.bearer_auth(token);
