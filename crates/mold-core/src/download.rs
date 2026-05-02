@@ -1484,6 +1484,33 @@ pub fn companion_present_on_disk(
     })
 }
 
+/// True iff the recipe file at `dest` should be considered already
+/// placed — used by both the catalog API's `installed: bool` predicate
+/// AND the `fetch_recipe_inner` skip path so they cannot drift apart.
+///
+/// Acceptance rule (matches `Config::file_is_complete`'s spirit):
+/// - When `file.size_bytes` is `Some(expected)`: on-disk size equals
+///   `expected`. AND, when `file.sha256` is also declared, the
+///   `.sha256-verified` marker must be present too — without it, a
+///   same-size-but-corrupted file (manual `mv`, FS bug, cosmic ray)
+///   would silently slip past a size-only check.
+/// - When `file.size_bytes` is `None`: the marker is the only positive
+///   attestation we have, so it's required.
+fn recipe_file_is_placed(dest: &Path, file: &RecipeFetchFile<'_>) -> bool {
+    if !dest.exists() {
+        return false;
+    }
+    match file.size_bytes {
+        Some(expected) => {
+            std::fs::metadata(dest)
+                .map(|m| m.len() == expected)
+                .unwrap_or(false)
+                && (file.sha256.is_none() || sha256_marker_path(dest).exists())
+        }
+        None => sha256_marker_path(dest).exists(),
+    }
+}
+
 /// True iff every file in the recipe is present at its declared size (or,
 /// when the recipe omits the size, has a `.sha256-verified` marker from
 /// a prior verified pull) AND no `.pulling` marker for the catalog id is
@@ -1516,15 +1543,7 @@ pub fn catalog_entry_installed(
         let Ok(dest) = resolve_recipe_dest(&subdir_root, f.dest) else {
             return false;
         };
-        if !dest.exists() {
-            return false;
-        }
-        match f.size_bytes {
-            Some(expected) => std::fs::metadata(&dest)
-                .map(|m| m.len() == expected)
-                .unwrap_or(false),
-            None => sha256_marker_path(&dest).exists(),
-        }
+        recipe_file_is_placed(&dest, f)
     })
 }
 
@@ -1725,25 +1744,13 @@ async fn fetch_recipe_inner(
         // run. Mirrors `is_already_placed` from the manifest path so a
         // recipe re-pull (Repair, double-clicked Download, retry-after-
         // partial-companion-failure) costs zero bytes when nothing's missing.
-        // Idempotency rule: the file is "already placed" iff it exists with
-        // the right length AND, when the recipe declares a SHA-256, a
-        // `.sha256-verified` marker is also present. The marker is a
-        // positive attestation that a previous successful pull actually
-        // hashed and matched these bytes — without it, a same-size-but-
-        // corrupted file (manual `mv`, FS bug, cosmic ray) would silently
-        // slip past a size-only check. When the recipe omits the size we
-        // fall back to the marker as the only positive signal we have.
-        // Mirrors `Config::file_is_complete`'s acceptance rules so the
-        // recipe path and manifest path agree on what "installed" means.
-        let already_placed = match file.size_bytes {
-            Some(expected) => {
-                std::fs::metadata(dest_path)
-                    .map(|m| m.len() == expected)
-                    .unwrap_or(false)
-                    && (file.sha256.is_none() || sha256_marker_path(dest_path).exists())
-            }
-            None => sha256_marker_path(dest_path).exists(),
-        };
+        //
+        // The acceptance rule is centralized in `recipe_file_is_placed` so
+        // that this skip path and `catalog_entry_installed` (the catalog
+        // API's `installed: bool` predicate) cannot drift apart — otherwise
+        // the SPA's Repair button would silently re-pull a model the
+        // predicate just claimed was installed.
+        let already_placed = recipe_file_is_placed(dest_path, file);
         if already_placed {
             let size_bytes = file.size_bytes.unwrap_or_else(|| {
                 std::fs::metadata(dest_path).map(|m| m.len()).unwrap_or(0)
@@ -3395,6 +3402,34 @@ mod tests {
         }];
 
         assert!(!catalog_entry_installed(&models_dir, "cv:installed_j", &files));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_requires_marker_when_sha256_declared() {
+        // Cross-consistency: catalog_entry_installed and the inline skip
+        // path inside fetch_recipe_inner must agree on what "placed" means.
+        // A file at the right size with no marker — and a declared sha256
+        // — would otherwise be reported `installed=true` by the catalog
+        // API while the fetch path re-downloads it on Repair. Pins the
+        // shared `recipe_file_is_placed` rule.
+        let models_dir = recipe_tmp_dir("installed_no_marker");
+        let subdir = models_dir.join("cv-installed_k");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("m.safetensors"), b"hello").unwrap();
+        // No marker.
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: Some("deadbeef00000000000000000000000000000000000000000000000000000000"),
+            size_bytes: Some(5),
+        }];
+
+        assert!(
+            !catalog_entry_installed(&models_dir, "cv:installed_k", &files),
+            "size matches but no marker AND sha256 declared — must refuse to claim install",
+        );
         let _ = std::fs::remove_dir_all(&models_dir);
     }
 
