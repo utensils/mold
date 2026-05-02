@@ -103,4 +103,26 @@ describe("CatalogDetailDrawer", () => {
     await w.find("[data-test=close-btn]").trigger("click");
     expect(mockCloseDetail).toHaveBeenCalledOnce();
   });
+
+  it("hides Download and shows Repair when entry is installed", () => {
+    mockDetail.value = { ...makeEntry(1), installed: true };
+    const w = mount(CatalogDetailDrawer);
+    expect(w.find("[data-test=download-btn]").exists()).toBe(false);
+    const repair = w.find("[data-test=repair-btn]");
+    expect(repair.exists()).toBe(true);
+    expect((repair.element as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("Repair button calls startDownload with the entry id", async () => {
+    mockDetail.value = { ...makeEntry(1), installed: true };
+    const w = mount(CatalogDetailDrawer);
+    await w.find("[data-test=repair-btn]").trigger("click");
+    expect(mockStartDownload).toHaveBeenCalledWith("hf:a");
+  });
+
+  it("renders an Installed chip when entry is installed", () => {
+    mockDetail.value = { ...makeEntry(1), installed: true };
+    const w = mount(CatalogDetailDrawer);
+    expect(w.text()).toMatch(/installed/i);
+  });
 });
