@@ -1,4 +1,4 @@
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   fetchActiveCatalogRefresh,
   fetchCatalog,
@@ -17,21 +17,35 @@ import type {
 } from "../types";
 
 const DEBOUNCE_MS = 250;
+const PAGE_SIZE = 48;
+
+// User-facing filter shape. Pagination (`page`, `page_size`) is internal —
+// keeping it out of the watched ref means `loadMore`'s page bumps don't
+// retrigger the deep watcher and stomp on the appended entries.
+type CatalogFilter = Omit<CatalogListParams, "page" | "page_size">;
 
 let singleton: ReturnType<typeof build> | null = null;
 
 function build() {
-  const filter = ref<CatalogListParams>({
-    page: 1,
-    page_size: 48,
-    sort: "downloads",
-  });
+  const filter = ref<CatalogFilter>({ sort: "downloads" });
+  const page = ref(1);
   const entries = ref<CatalogEntryWire[]>([]);
+  const total = ref<number | null>(null);
   const families = ref<CatalogFamilyCount[]>([]);
   const loading = ref(false);
+  const loadingMore = ref(false);
   const errorMsg = ref<string | null>(null);
   const detail = ref<CatalogEntryWire | null>(null);
   const refreshStatus = ref<CatalogRefreshStatus | null>(null);
+
+  // hasMore: server-reported total wins; if absent (older server), fall
+  // back to "the last page came back full" so we keep fetching until a
+  // short page signals end-of-stream.
+  const hasMore = computed(() => {
+    if (total.value !== null) return entries.value.length < total.value;
+    if (entries.value.length === 0) return false;
+    return entries.value.length % PAGE_SIZE === 0;
+  });
 
   let debounceHandle: ReturnType<typeof setTimeout> | null = null;
 
@@ -40,10 +54,12 @@ function build() {
     errorMsg.value = null;
     try {
       const [list, fams] = await Promise.all([
-        fetchCatalog(filter.value),
+        fetchCatalog({ ...filter.value, page: 1, page_size: PAGE_SIZE }),
         fetchCatalogFamilies(),
       ]);
       entries.value = list.entries;
+      total.value = typeof list.total === "number" ? list.total : null;
+      page.value = 1;
       families.value = fams.families;
     } catch (e: unknown) {
       errorMsg.value = e instanceof Error ? e.message : String(e);
@@ -52,8 +68,29 @@ function build() {
     }
   }
 
-  function setFilter(patch: Partial<CatalogListParams>) {
-    filter.value = { ...filter.value, ...patch, page: 1 };
+  async function loadMore() {
+    if (loading.value || loadingMore.value) return;
+    if (!hasMore.value) return;
+    loadingMore.value = true;
+    try {
+      const next = page.value + 1;
+      const list = await fetchCatalog({
+        ...filter.value,
+        page: next,
+        page_size: PAGE_SIZE,
+      });
+      entries.value = [...entries.value, ...list.entries];
+      page.value = next;
+      if (typeof list.total === "number") total.value = list.total;
+    } catch (e: unknown) {
+      errorMsg.value = e instanceof Error ? e.message : String(e);
+    } finally {
+      loadingMore.value = false;
+    }
+  }
+
+  function setFilter(patch: Partial<CatalogFilter>) {
+    filter.value = { ...filter.value, ...patch };
   }
 
   watch(
@@ -148,13 +185,18 @@ function build() {
 
   return {
     filter,
+    page,
     entries,
+    total,
+    hasMore,
     families,
     loading,
+    loadingMore,
     errorMsg,
     detail,
     refreshStatus,
     refresh,
+    loadMore,
     setFilter,
     openDetail,
     closeDetail,
@@ -168,4 +210,12 @@ function build() {
 export function useCatalog() {
   if (!singleton) singleton = build();
   return singleton;
+}
+
+/**
+ * Test-only: drop the module-level singleton so each test starts with a
+ * fresh state machine. Production code never touches this.
+ */
+export function __resetCatalogSingletonForTests() {
+  singleton = null;
 }

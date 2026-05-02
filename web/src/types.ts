@@ -520,6 +520,13 @@ export interface CatalogListResponse {
   entries: CatalogEntryWire[];
   page: number;
   page_size: number;
+  /**
+   * Total rows matching the request's WHERE clauses, ignoring pagination.
+   * Optional so older servers that don't yet emit it still parse — the
+   * SPA falls back to a "last page came back full → keep loading" heuristic
+   * when this is undefined.
+   */
+  total?: number;
 }
 
 export interface CatalogFamilyCount {

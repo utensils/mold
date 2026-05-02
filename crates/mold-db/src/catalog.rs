@@ -237,6 +237,54 @@ pub fn list(conn: &Connection, params: &ListParams) -> rusqlite::Result<Vec<Cata
     Ok(rows)
 }
 
+/// Count rows matching `params`. Same WHERE clauses as `list` (including
+/// the optional FTS join on `q`); `limit`/`offset` are ignored. Used by
+/// the HTTP layer to surface `total` in the list response so the SPA
+/// knows when to stop infinite-scrolling.
+pub fn count(conn: &Connection, params: &ListParams) -> rusqlite::Result<i64> {
+    let mut sql = String::from("SELECT COUNT(*) FROM catalog WHERE 1=1");
+    let mut args: Vec<Box<dyn ToSql>> = Vec::new();
+    if let Some(f) = &params.family {
+        sql.push_str(" AND family = ?");
+        args.push(Box::new(f.clone()));
+    }
+    if let Some(r) = &params.family_role {
+        sql.push_str(" AND family_role = ?");
+        args.push(Box::new(r.clone()));
+    }
+    if let Some(m) = &params.modality {
+        sql.push_str(" AND modality = ?");
+        args.push(Box::new(m.clone()));
+    }
+    if let Some(s) = &params.source {
+        sql.push_str(" AND source = ?");
+        args.push(Box::new(s.clone()));
+    }
+    if let Some(sf) = &params.sub_family {
+        sql.push_str(" AND sub_family = ?");
+        args.push(Box::new(sf.clone()));
+    }
+    if !params.include_nsfw {
+        sql.push_str(" AND nsfw = 0");
+    }
+    if let Some(p) = params.max_engine_phase {
+        sql.push_str(" AND engine_phase <= ?");
+        args.push(Box::new(p as i64));
+    }
+    if let Some(q) = &params.q {
+        let inner = sql.replacen("SELECT COUNT(*) FROM catalog WHERE ", "", 1);
+        sql = format!(
+            "SELECT COUNT(*) FROM catalog \
+             INNER JOIN catalog_fts ON catalog.rowid = catalog_fts.rowid \
+             WHERE catalog_fts MATCH ?1 AND ({inner})",
+        );
+        args.insert(0, Box::new(q.clone()));
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let refs: Vec<&dyn ToSql> = args.iter().map(|b| b.as_ref()).collect();
+    stmt.query_row(refs.as_slice(), |row| row.get::<_, i64>(0))
+}
+
 pub fn family_counts(conn: &Connection) -> rusqlite::Result<Vec<FamilyCount>> {
     let mut stmt = conn.prepare(
         "SELECT family,
@@ -287,6 +335,12 @@ impl MetadataDb {
     /// Aggregate foundation/finetune counts per family.
     pub fn catalog_family_counts(&self) -> anyhow::Result<Vec<FamilyCount>> {
         self.with_conn(|conn| Ok(family_counts(conn)?))
+    }
+
+    /// Total row count matching `params` (ignores limit/offset). The list
+    /// response surfaces this so the SPA's infinite scroll knows when to stop.
+    pub fn catalog_count(&self, params: &ListParams) -> anyhow::Result<i64> {
+        self.with_conn(|conn| Ok(count(conn, params)?))
     }
 
     /// Upsert a batch of catalog rows for a family.

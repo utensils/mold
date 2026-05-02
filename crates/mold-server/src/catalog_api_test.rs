@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use mold_catalog::entry::{
@@ -763,6 +763,107 @@ async fn catalog_get_emits_installed_true_when_recipe_files_on_disk() {
         body.get("installed").and_then(|x| x.as_bool()),
         Some(false),
         "expected installed=false after removal; body={body}",
+    );
+}
+
+// ── list_catalog: total wire field for infinite scroll ────────────────────
+
+/// Infinite scroll needs to know when to stop. The list response carries
+/// `total` (count(*) of rows matching the filter, ignoring page/page_size),
+/// alongside `entries`/`page`/`page_size`. Without `total`, the SPA can't
+/// distinguish "last page returned full" from "more rows exist", and either
+/// over-fetches or stops early.
+#[tokio::test]
+async fn list_catalog_response_includes_total_distinct_from_page_size() {
+    let rows: Vec<CatalogRow> = (0..5)
+        .map(|i| make_catalog_row(&format!("hf:test/row-{i}"), "hf", "sdxl", 1))
+        .collect();
+    let state = seeded_state(&rows);
+
+    let query = Query(crate::catalog_api::ListQuery {
+        family: None,
+        family_role: None,
+        modality: None,
+        source: None,
+        sub_family: None,
+        q: None,
+        include_nsfw: Some(true),
+        max_engine_phase: None,
+        sort: None,
+        page: Some(1),
+        page_size: Some(2),
+        limit: None,
+        offset: None,
+    });
+    let resp = crate::catalog_api::list_catalog(State(state), query)
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("page_size").and_then(|v| v.as_i64()),
+        Some(2),
+        "page_size echo missing or wrong: {body}",
+    );
+    assert_eq!(
+        body.get("entries").and_then(|v| v.as_array()).map(Vec::len),
+        Some(2),
+        "entries should be capped at page_size: {body}",
+    );
+    assert_eq!(
+        body.get("total").and_then(|v| v.as_i64()),
+        Some(5),
+        "total must reflect the unpaginated row count: {body}",
+    );
+}
+
+/// `total` must respect WHERE-clause filters, not just count every row.
+/// Filtering by family=flux on a corpus split between flux (3) and sdxl (2)
+/// must report total=3.
+#[tokio::test]
+async fn list_catalog_total_respects_filters() {
+    let mut rows = Vec::new();
+    for i in 0..3 {
+        rows.push(make_catalog_row(
+            &format!("hf:test/flux-{i}"),
+            "hf",
+            "flux",
+            1,
+        ));
+    }
+    for i in 0..2 {
+        rows.push(make_catalog_row(
+            &format!("hf:test/sdxl-{i}"),
+            "hf",
+            "sdxl",
+            1,
+        ));
+    }
+    let state = seeded_state(&rows);
+
+    let query = Query(crate::catalog_api::ListQuery {
+        family: Some("flux".into()),
+        family_role: None,
+        modality: None,
+        source: None,
+        sub_family: None,
+        q: None,
+        include_nsfw: Some(true),
+        max_engine_phase: None,
+        sort: None,
+        page: Some(1),
+        page_size: Some(48),
+        limit: None,
+        offset: None,
+    });
+    let resp = crate::catalog_api::list_catalog(State(state), query)
+        .await
+        .into_response();
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("total").and_then(|v| v.as_i64()),
+        Some(3),
+        "total must apply WHERE family=flux: {body}",
     );
 }
 

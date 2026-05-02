@@ -339,6 +339,12 @@ pub async fn list_catalog(
     };
     let cfg_guard = state.config.read().await;
     let models_dir = cfg_guard.resolved_models_dir();
+    // `total` is the unpaginated count for the same WHERE clauses — the SPA
+    // uses it to stop infinite-scrolling once `entries.length >= total`.
+    let total = match state.catalog_db.catalog_count(&params) {
+        Ok(n) => n,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
     match state.catalog_db.catalog_list(&params) {
         Ok(rows) => Json(serde_json::json!({
             "entries": rows
@@ -347,6 +353,7 @@ pub async fn list_catalog(
                 .collect::<Vec<_>>(),
             "page": page,
             "page_size": page_size,
+            "total": total,
         }))
         .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
