@@ -328,6 +328,7 @@ pub async fn run(
                     motion_tail: mt,
                     source_image: source_image.clone(),
                     placement: placement.clone(),
+                    enable_audio,
                 };
                 // Consume otherwise-unused LTX-2 knobs that chain v1 ignores so
                 // clippy doesn't fire `unused_variables` on the early return.
@@ -340,7 +341,6 @@ pub async fn run(
                     &retake_range,
                     &spatial_upscale,
                     &temporal_upscale,
-                    &enable_audio,
                     &mask_image,
                     &control_image,
                     &control_model,

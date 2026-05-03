@@ -36,7 +36,7 @@ fn sample_request() -> ChainRequest {
             loras: vec![],
             references: vec![],
         }],
-        motion_tail_frames: 4,
+        motion_tail_frames: 17,
         width: 1216,
         height: 704,
         fps: 24,
@@ -50,6 +50,7 @@ fn sample_request() -> ChainRequest {
         total_frames: None,
         clip_frames: None,
         source_image: None,
+        enable_audio: None,
     }
 }
 
@@ -75,7 +76,7 @@ fn minimal_chain_response_json() -> serde_json::Value {
                 "steps": 8,
                 "guidance": 3.0,
                 "strength": 1.0,
-                "motion_tail_frames": 4,
+                "motion_tail_frames": 17,
                 "output_format": "mp4"
             },
             "stage": []

@@ -12,6 +12,7 @@ mod plan;
 mod preset;
 mod runtime;
 mod sampler;
+pub(crate) mod single_file;
 pub mod stitch;
 mod text;
 
@@ -20,3 +21,4 @@ pub use chain::{
     ChainStageRenderer, ChainTail, Ltx2ChainOrchestrator, StageOutcome, StageProgressEvent,
 };
 pub use pipeline::Ltx2Engine;
+pub use runtime::NativeAudioTrack;

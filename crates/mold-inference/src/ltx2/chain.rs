@@ -19,6 +19,7 @@ use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionM
 use mold_core::{GenerateRequest, OutputFormat};
 
 use crate::ltx2::model::shapes::SpatioTemporalScaleFactors;
+use crate::ltx2::runtime::NativeAudioTrack;
 
 /// Opaque carryover payload handed from one chain stage to the next.
 ///
@@ -164,11 +165,18 @@ pub enum StageProgressEvent {
 
 /// Output of a single stage render: the decoded pixel frames (full clip,
 /// before motion-tail trim), the pre-VAE-decode latent tail the next stage
-/// needs, and the wall-clock elapsed time for the render.
+/// needs, the optional rendered audio track, and the wall-clock elapsed time
+/// for the render.
 #[derive(Debug)]
 pub struct StageOutcome {
     pub frames: Vec<RgbImage>,
     pub tail: ChainTail,
+    /// Per-stage decoded audio. `None` when the stage's
+    /// `GenerateRequest.enable_audio` was false or when the engine renders a
+    /// video-only model. Sample-rate and channel count are constant within a
+    /// chain (single model, single VAE), so the stitch layer can concatenate
+    /// these directly without resampling.
+    pub audio: Option<NativeAudioTrack>,
     pub generation_time_ms: u64,
 }
 
@@ -197,6 +205,11 @@ pub struct ChainRunOutput {
     /// Per-stage frame vectors in stage order, each containing the full
     /// un-trimmed pixel clip emitted by the renderer.
     pub stage_frames: Vec<Vec<RgbImage>>,
+    /// Per-stage audio tracks aligned 1:1 with `stage_frames`. `None` for
+    /// video-only stages (the v1 chain default and any non-AV model). The
+    /// stitch layer pairs each entry with the matching frame block to apply
+    /// per-boundary Smooth/Cut/Fade audio concat semantics.
+    pub stage_audio: Vec<Option<NativeAudioTrack>>,
     pub stage_count: u32,
     pub generation_time_ms: u64,
 }
@@ -247,6 +260,7 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
 
         let base_seed = req.seed.unwrap_or(0);
         let mut stage_frames: Vec<Vec<RgbImage>> = Vec::with_capacity(req.stages.len());
+        let mut stage_audio: Vec<Option<NativeAudioTrack>> = Vec::with_capacity(req.stages.len());
         let mut total_generation_ms: u64 = 0;
         let mut carry: Option<ChainTail> = None;
 
@@ -308,6 +322,7 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
 
             let frames_emitted = outcome.frames.len() as u32;
             stage_frames.push(outcome.frames);
+            stage_audio.push(outcome.audio);
             total_generation_ms = total_generation_ms.saturating_add(outcome.generation_time_ms);
             carry = Some(outcome.tail);
 
@@ -328,6 +343,7 @@ impl<'a, R: ChainStageRenderer + ?Sized> Ltx2ChainOrchestrator<'a, R> {
 
         Ok(ChainRunOutput {
             stage_frames,
+            stage_audio,
             stage_count,
             generation_time_ms: total_generation_ms,
         })
@@ -428,7 +444,11 @@ fn build_stage_generate_request(
         fps: Some(chain.fps),
         upscale_model: None,
         gif_preview: false,
-        enable_audio: Some(false), // v1 chain: no audio plumbing yet
+        // Chain wire-format default is None ("no preference") which collapses
+        // to false here so existing callers don't suddenly start producing
+        // audio they didn't ask for. Callers that want chain audio set
+        // `chain.enable_audio = Some(true)` explicitly.
+        enable_audio: Some(chain.enable_audio.unwrap_or(false)),
         audio_file: None,
         source_video: None,
         keyframes: None,
@@ -551,6 +571,10 @@ mod tests {
         /// If true, emit one DenoiseStep event per stage so tests can
         /// verify progress forwarding.
         emit_progress: bool,
+        /// If true, attach a synthetic NativeAudioTrack to every StageOutcome
+        /// so chain-audio plumbing tests can assert the orchestrator captures
+        /// per-stage audio without standing up a real LTX-2 vocoder.
+        synthesize_audio: bool,
     }
 
     #[derive(Debug, Clone)]
@@ -558,6 +582,7 @@ mod tests {
         seed: Option<u64>,
         has_source_image: bool,
         has_carry: bool,
+        enable_audio: Option<bool>,
     }
 
     impl FakeRenderer {
@@ -567,6 +592,7 @@ mod tests {
                 fail_on: Vec::new(),
                 frame_count_override: None,
                 emit_progress: false,
+                synthesize_audio: false,
             }
         }
     }
@@ -584,6 +610,7 @@ mod tests {
                 seed: stage_req.seed,
                 has_source_image: stage_req.source_image.is_some(),
                 has_carry: carry.is_some(),
+                enable_audio: stage_req.enable_audio,
             });
             if let Some((_, msg)) = self.fail_on.iter().find(|(stage_idx, _)| *stage_idx == idx) {
                 bail!("{msg}");
@@ -617,12 +644,31 @@ mod tests {
                 .min(frames.len());
             let tail_rgb_frames = frames[take_from..].to_vec();
 
+            // Synthesize a deterministic per-stage audio track when
+            // requested. Sample count is intentionally tied to the stage's
+            // pixel-frame count so audio-stitch tests can map sample
+            // boundaries back to motion-tail frame counts cleanly.
+            let audio = if self.synthesize_audio {
+                let samples_per_frame = 100usize;
+                let interleaved_samples: Vec<f32> = (0..frame_count as usize * samples_per_frame)
+                    .map(|n| ((idx as i32 * 1_000) + n as i32) as f32)
+                    .collect();
+                Some(NativeAudioTrack {
+                    interleaved_samples,
+                    sample_rate: 48_000,
+                    channels: 2,
+                })
+            } else {
+                None
+            };
+
             Ok(StageOutcome {
                 frames,
                 tail: ChainTail {
                     frames: tail_pixel_frames,
                     tail_rgb_frames,
                 },
+                audio,
                 generation_time_ms: 100,
             })
         }
@@ -661,6 +707,7 @@ mod tests {
             total_frames: None,
             clip_frames: None,
             source_image: None,
+            enable_audio: None,
         }
     }
 
@@ -903,6 +950,88 @@ mod tests {
     }
 
     #[test]
+    fn orchestrator_forwards_chain_enable_audio_to_each_stage_request() {
+        // The chain wire-format `enable_audio` flag must land on every
+        // per-stage GenerateRequest unchanged. Without this, the engine
+        // silently renders video-only on every stage even when the chain
+        // request asked for audio. Default (None) collapses to Some(false)
+        // so existing chain callers don't suddenly start producing audio.
+        let stages = vec![stage("a", 9), stage("a", 9), stage("a", 9)];
+        let mut req = chain_req(stages, 0);
+        req.enable_audio = Some(true);
+        let mut renderer = FakeRenderer::new();
+        renderer.frame_count_override = Some(9);
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        orch.run(&req, None).expect("chain runs");
+
+        for (idx, call) in renderer.calls.iter().enumerate() {
+            assert_eq!(
+                call.enable_audio,
+                Some(true),
+                "stage {idx} must inherit chain.enable_audio",
+            );
+        }
+    }
+
+    #[test]
+    fn orchestrator_default_enable_audio_resolves_to_false_for_each_stage() {
+        // None on the wire = "no preference" = off. Existing chain callers
+        // that never set `enable_audio` keep getting video-only output.
+        let stages = vec![stage("a", 9), stage("a", 9)];
+        let req = chain_req(stages, 0);
+        assert_eq!(req.enable_audio, None);
+        let mut renderer = FakeRenderer::new();
+        renderer.frame_count_override = Some(9);
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        orch.run(&req, None).expect("chain runs");
+        for call in renderer.calls.iter() {
+            assert_eq!(call.enable_audio, Some(false));
+        }
+    }
+
+    #[test]
+    fn orchestrator_collects_per_stage_audio_into_chain_run_output() {
+        // When stages emit audio (LTX-2.3 AV path), the orchestrator must
+        // expose the per-stage audio tracks in stage_audio so the stitch
+        // layer can concatenate them in lockstep with the per-stage video.
+        let stages = vec![stage("a", 9), stage("a", 9), stage("a", 9)];
+        let mut req = chain_req(stages, 0);
+        req.enable_audio = Some(true);
+        let mut renderer = FakeRenderer::new();
+        renderer.frame_count_override = Some(9);
+        renderer.synthesize_audio = true;
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        let out = orch.run(&req, None).expect("chain runs");
+
+        assert_eq!(out.stage_audio.len(), 3, "one entry per stage");
+        for (idx, audio) in out.stage_audio.iter().enumerate() {
+            let track = audio
+                .as_ref()
+                .unwrap_or_else(|| panic!("stage {idx} must carry an audio track"));
+            assert_eq!(track.sample_rate, 48_000);
+            assert_eq!(track.channels, 2);
+            assert_eq!(track.interleaved_samples.len(), 9 * 100);
+            // Sample value encoding: each stage offsets by 1_000 so
+            // assertions can confirm stages didn't get crossed in the vec.
+            assert_eq!(track.interleaved_samples[0], (idx as i32 * 1_000) as f32);
+        }
+    }
+
+    #[test]
+    fn orchestrator_omits_audio_when_renderer_returns_none() {
+        // Video-only chains (the v1 default) still produce a stage_audio vec,
+        // but every entry is None so downstream stitch can branch on it.
+        let stages = vec![stage("a", 9), stage("a", 9)];
+        let req = chain_req(stages, 0);
+        let mut renderer = FakeRenderer::new();
+        renderer.frame_count_override = Some(9);
+        let mut orch = Ltx2ChainOrchestrator::new(&mut renderer);
+        let out = orch.run(&req, None).expect("chain runs");
+        assert_eq!(out.stage_audio.len(), 2);
+        assert!(out.stage_audio.iter().all(Option::is_none));
+    }
+
+    #[test]
     fn chain_run_output_preserves_per_stage_frames() {
         let req = sample_chain_request(3, TransitionMode::Smooth);
         let mut renderer = FakeRenderer::new();
@@ -996,6 +1125,7 @@ mod tests {
             total_frames: Some(97 * count as u32),
             clip_frames: Some(97),
             source_image: None,
+            enable_audio: None,
         };
         let mut req = req.normalise().unwrap();
         for s in req.stages.iter_mut().skip(1) {

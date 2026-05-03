@@ -204,6 +204,7 @@ mod tests {
                 strength: 1.0,
                 motion_tail_frames: 25,
                 output_format: OutputFormat::Mp4,
+                enable_audio: None,
             },
             stages: vec![ChainStage {
                 prompt: "a cat walks into the autumn forest".into(),

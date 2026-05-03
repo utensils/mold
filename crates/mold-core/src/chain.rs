@@ -148,10 +148,13 @@ pub struct ChainRequest {
     /// stage N's latents are threaded into stage N+1's conditioning, and
     /// stage N+1's leading K output frames are dropped at stitch time.
     ///
-    /// Defaults to `4` for v1 (matches the CLI default). Must be strictly
-    /// less than each stage's `frames`.
+    /// Defaults to `17` (matches the CLI `--motion-tail` and SPA defaults):
+    /// `1 + 16` lands on the LTX-2 VAE's `1 + 8k` causal-grid for a clean
+    /// re-encode of the carryover RGB frames. Values that do not satisfy
+    /// `1 + 8k` will fail the receiving stage's tail re-encode at the VAE.
+    /// Must be strictly less than each stage's `frames`.
     #[serde(default = "default_motion_tail_frames")]
-    #[schema(example = 4)]
+    #[schema(example = 17)]
     pub motion_tail_frames: u32,
 
     #[schema(example = 1216)]
@@ -211,6 +214,14 @@ pub struct ChainRequest {
         with = "crate::types::base64_opt"
     )]
     pub source_image: Option<Vec<u8>>,
+
+    /// Generate per-stage audio and mux it into the final stitched output.
+    /// Only meaningful for AV-capable families (LTX-2 / LTX-2.3); the server
+    /// rejects `Some(true)` for non-AV models. `None` means "no preference"
+    /// and resolves to off — chains opt in to audio explicitly so existing
+    /// callers don't suddenly start producing audio they didn't ask for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_audio: Option<bool>,
 }
 
 /// Canonical TOML-shaped projection of a normalised [`ChainRequest`].
@@ -239,6 +250,10 @@ pub struct ChainScriptChain {
     pub strength: f64,
     pub motion_tail_frames: u32,
     pub output_format: OutputFormat,
+    /// Echo of [`ChainRequest::enable_audio`]. Omitted from TOML when unset
+    /// so v1 scripts (no audio) deserialise unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_audio: Option<bool>,
 }
 
 impl From<&ChainRequest> for ChainScript {
@@ -256,6 +271,7 @@ impl From<&ChainRequest> for ChainScript {
                 strength: req.strength,
                 motion_tail_frames: req.motion_tail_frames,
                 output_format: req.output_format,
+                enable_audio: req.enable_audio,
             },
             stages: req.stages.clone(),
         }
@@ -403,7 +419,7 @@ pub struct ChainFailure {
 }
 
 fn default_motion_tail_frames() -> u32 {
-    4
+    17
 }
 
 fn default_fps() -> u32 {
@@ -484,6 +500,13 @@ impl ChainRequest {
                 "chain request has {} stages; maximum is {}",
                 self.stages.len(),
                 MAX_CHAIN_STAGES,
+            )));
+        }
+        if self.motion_tail_frames != 0 && !is_ltx2_frame_count(self.motion_tail_frames) {
+            return Err(MoldError::Validation(format!(
+                "motion_tail_frames ({}) must be 0 or 8k+1 (1, 9, 17, 25, …) so the carryover \
+                 RGB frames re-encode cleanly through the LTX-2 video VAE's 8× causal grid",
+                self.motion_tail_frames,
             )));
         }
         for (idx, stage) in self.stages.iter().enumerate() {
@@ -685,6 +708,7 @@ mod tests {
             total_frames: Some(total_frames),
             clip_frames: Some(clip_frames),
             source_image,
+            enable_audio: None,
         }
     }
 
@@ -706,6 +730,7 @@ mod tests {
             total_frames: None,
             clip_frames: None,
             source_image: None,
+            enable_audio: None,
         }
     }
 
@@ -726,18 +751,18 @@ mod tests {
 
     #[test]
     fn normalise_splits_single_prompt_into_stages() {
-        // total=400, clip=97, tail=4 → effective=93, remainder=303,
-        // N = 1 + ceil(303/93) = 1 + 4 = 5 stages of 97 frames each.
-        // Stitched = 97 + 4*93 = 469, which will be trimmed to 400 at
+        // total=400, clip=97, tail=9 → effective=88, remainder=303,
+        // N = 1 + ceil(303/88) = 1 + 4 = 5 stages of 97 frames each.
+        // Stitched = 97 + 4*88 = 449, which will be trimmed to 400 at
         // stitch time (per the signed-off "trim from tail" decision).
-        let normalised = auto_expand_request("a cat walking", 400, 97, 4, None)
+        let normalised = auto_expand_request("a cat walking", 400, 97, 9, None)
             .normalise()
             .expect("normalise should succeed");
 
         assert_eq!(
             normalised.stages.len(),
             5,
-            "400/97 with a 4-frame motion tail should expand to 5 stages",
+            "400/97 with a 9-frame motion tail should expand to 5 stages",
         );
         for stage in &normalised.stages {
             assert_eq!(stage.frames, 97);
@@ -754,7 +779,7 @@ mod tests {
     #[test]
     fn normalise_preserves_starting_image_across_all_stages() {
         let png = vec![0x89, 0x50, 0x4e, 0x47, 0xde, 0xad, 0xbe, 0xef];
-        let normalised = auto_expand_request("test", 200, 97, 4, Some(png.clone()))
+        let normalised = auto_expand_request("test", 200, 97, 9, Some(png.clone()))
             .normalise()
             .expect("normalise should succeed");
 
@@ -774,7 +799,7 @@ mod tests {
 
     #[test]
     fn normalise_rejects_empty() {
-        let mut req = canonical_request(Vec::new(), 4);
+        let mut req = canonical_request(Vec::new(), 9);
         // No auto-expand fields either.
         req.prompt = None;
         req.total_frames = None;
@@ -790,7 +815,7 @@ mod tests {
     fn normalise_rejects_non_8k1_frames() {
         // Canonical form with a stage whose frames violates the 8k+1
         // constraint.
-        let req = canonical_request(vec![make_stage(50)], 4);
+        let req = canonical_request(vec![make_stage(50)], 9);
         let err = req.normalise().expect_err("non-8k+1 frames should fail");
         assert!(
             matches!(err, MoldError::Validation(msg) if msg.contains("8k+1")),
@@ -803,7 +828,7 @@ mod tests {
         // Caller already built stages; normalise should validate and clear
         // the (already-empty) auto-expand fields without touching stages.
         let stages = vec![make_stage(97), make_stage(97), make_stage(97)];
-        let normalised = canonical_request(stages.clone(), 4)
+        let normalised = canonical_request(stages.clone(), 9)
             .normalise()
             .expect("valid canonical form should pass");
         assert_eq!(normalised.stages.len(), 3);
@@ -816,8 +841,10 @@ mod tests {
     #[test]
     fn normalise_single_stage_when_total_leq_clip() {
         // total=9 fits in one clip; don't render a full 97-frame stage and
-        // throw most of it away.
-        let normalised = auto_expand_request("short", 9, 97, 4, None)
+        // throw most of it away. Use motion_tail=1 (smallest valid 1+8k)
+        // so the strict-less-than-stage-frames invariant still holds for
+        // the lone 9-frame stage.
+        let normalised = auto_expand_request("short", 9, 97, 1, None)
             .normalise()
             .expect("short single-clip chain should pass");
         assert_eq!(normalised.stages.len(), 1);
@@ -828,7 +855,7 @@ mod tests {
     fn normalise_rejects_too_many_stages() {
         // 17 canonical stages exceeds MAX_CHAIN_STAGES (16).
         let stages = (0..17).map(|_| make_stage(97)).collect();
-        let err = canonical_request(stages, 4)
+        let err = canonical_request(stages, 9)
             .normalise()
             .expect_err("17-stage chain should fail");
         assert!(
@@ -841,7 +868,7 @@ mod tests {
     fn normalise_rejects_auto_expand_too_long() {
         // 16 × 97 = 1552 max stitched frames before trim; asking for
         // 4000 frames should blow the guardrail.
-        let err = auto_expand_request("too long", 4000, 97, 4, None)
+        let err = auto_expand_request("too long", 4000, 97, 9, None)
             .normalise()
             .expect_err("runaway auto-expand should fail");
         assert!(
@@ -860,6 +887,89 @@ mod tests {
             matches!(err, MoldError::Validation(msg) if msg.contains("motion_tail_frames")),
             "error must name motion_tail_frames",
         );
+    }
+
+    #[test]
+    fn enable_audio_defaults_to_none_and_round_trips_when_set() {
+        // Wire-conservative default: chains opt in to audio explicitly. A
+        // request that omits the field stays None (engine-side resolves to
+        // false), so existing chain callers don't suddenly get audio they
+        // didn't ask for. Setting `enable_audio: true` on the request must
+        // round-trip into the canonical script echo so clients can save and
+        // re-render the same chain with audio enabled.
+        let req: ChainRequest = serde_json::from_value(serde_json::json!({
+            "model": "ltx-2.3-22b-distilled:fp8",
+            "stages": [],
+            "width": 704,
+            "height": 416,
+            "steps": 4,
+            "guidance": 3.0,
+        }))
+        .expect("valid minimal chain request");
+        assert_eq!(req.enable_audio, None);
+
+        let req_with_audio: ChainRequest = serde_json::from_value(serde_json::json!({
+            "model": "ltx-2.3-22b-distilled:fp8",
+            "stages": [{"prompt": "a bird", "frames": 33}],
+            "width": 704,
+            "height": 416,
+            "steps": 4,
+            "guidance": 3.0,
+            "enable_audio": true,
+        }))
+        .expect("valid chain request with audio");
+        assert_eq!(req_with_audio.enable_audio, Some(true));
+
+        let script = ChainScript::from(&req_with_audio);
+        assert_eq!(
+            script.chain.enable_audio,
+            Some(true),
+            "ChainScript echo must preserve enable_audio for round-trip save/reload",
+        );
+    }
+
+    #[test]
+    fn motion_tail_default_lands_on_8k_plus_1_grid() {
+        // Server JSON default must satisfy `1 + 8k` so chain tail RGB frames
+        // re-encode cleanly through the LTX-2 video VAE. CLI and SPA already
+        // default to 17; pin the JSON deserialiser to the same value.
+        let req: ChainRequest = serde_json::from_value(serde_json::json!({
+            "model": "ltx-2.3-22b-distilled:fp8",
+            "stages": [],
+            "width": 704,
+            "height": 416,
+            "steps": 4,
+            "guidance": 3.0,
+        }))
+        .expect("valid minimal chain request");
+        assert_eq!(req.motion_tail_frames, 17);
+        assert!(is_ltx2_frame_count(req.motion_tail_frames));
+    }
+
+    #[test]
+    fn normalise_rejects_motion_tail_off_grid() {
+        // motion_tail_frames=4 is what the JSON default used to be — it does
+        // NOT satisfy `1 + 8k`, so the carryover VAE re-encode would fail
+        // deep in the engine with a shape mismatch. Reject with a clear
+        // message at the wire boundary instead.
+        let req = canonical_request(vec![make_stage(33)], 4);
+        let err = req
+            .normalise()
+            .expect_err("motion_tail_frames=4 must be rejected");
+        assert!(
+            matches!(err, MoldError::Validation(msg) if msg.contains("8k+1")),
+            "error must name the 8k+1 grid constraint",
+        );
+    }
+
+    #[test]
+    fn normalise_accepts_motion_tail_zero() {
+        // motion_tail=0 means hard concat, no overlap, no carryover encode.
+        // Must be valid so cut/fade chains can opt out of the grid entirely.
+        let mut second = make_stage(33);
+        second.transition = TransitionMode::Cut;
+        let req = canonical_request(vec![make_stage(33), second], 0);
+        req.normalise().expect("motion_tail=0 must be accepted");
     }
 
     #[test]
@@ -943,9 +1053,9 @@ mod tests {
         // at least `total_frames` pixel frames. Stitch math:
         //   delivered = clip_frames + (N - 1) * (clip_frames - motion_tail)
         let cases = [
-            (400u32, 97u32, 4u32, 5u32), // 97 + 4*93 = 469 ≥ 400
-            (200, 97, 4, 3),             // 97 + 2*93 = 283 ≥ 200
-            (97, 97, 4, 1),              // single clip hits 97 exactly
+            (400u32, 97u32, 9u32, 5u32), // 97 + 4*88 = 449 ≥ 400
+            (200, 97, 9, 3),             // 97 + 2*88 = 273 ≥ 200
+            (97, 97, 9, 1),              // single clip hits 97 exactly
             (300, 97, 0, 4),             // zero tail, 4*97 = 388 ≥ 300
         ];
         for (total, clip, tail, expected_n) in cases {
@@ -1060,6 +1170,7 @@ mod tests {
             total_frames: None,
             clip_frames: None,
             source_image: None,
+            enable_audio: None,
         };
         let script = ChainScript::from(&req);
         assert_eq!(script.chain.model, "ltx-2-19b-distilled:fp8");
@@ -1197,6 +1308,7 @@ mod tests {
             total_frames: None,
             clip_frames: None,
             source_image: None,
+            enable_audio: None,
         }
     }
 

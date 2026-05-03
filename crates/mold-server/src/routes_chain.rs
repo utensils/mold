@@ -78,11 +78,15 @@ fn chain_sse_event(msg: ChainSseMessage) -> SseEvent {
 ///
 /// MP4 is gated behind the `mp4` feature flag; when the flag is disabled,
 /// the handler falls back to APNG so the endpoint still produces a usable
-/// animation on every build.
+/// animation on every build. When `audio` is `Some` and the output format
+/// is MP4, the audio is muxed in as an AAC track via the same path the
+/// single-clip pipeline uses; non-MP4 formats silently drop audio because
+/// they have no carrier for it.
 fn encode_chain_output(
     frames: &[image::RgbImage],
     fps: u32,
     format: OutputFormat,
+    audio: Option<&mold_inference::ltx2::NativeAudioTrack>,
 ) -> anyhow::Result<(Vec<u8>, OutputFormat, Vec<u8>)> {
     use mold_inference::ltx_video::video_enc;
 
@@ -99,10 +103,21 @@ fn encode_chain_output(
         OutputFormat::Mp4 => {
             #[cfg(feature = "mp4")]
             {
-                (video_enc::encode_mp4(frames, fps)?, OutputFormat::Mp4)
+                let video_only = video_enc::encode_mp4(frames, fps)?;
+                let muxed = match audio {
+                    Some(track) => mold_inference::ltx2::media::attach_aac_track_to_mp4_bytes(
+                        &video_only,
+                        &track.interleaved_samples,
+                        track.sample_rate,
+                        track.channels,
+                    )?,
+                    None => video_only,
+                };
+                (muxed, OutputFormat::Mp4)
             }
             #[cfg(not(feature = "mp4"))]
             {
+                let _ = audio; // suppress unused-without-mp4 warning
                 tracing::warn!(
                     "chain requested MP4 but server was built without the `mp4` feature — \
                      falling back to APNG"
@@ -113,16 +128,29 @@ fn encode_chain_output(
                 )
             }
         }
-        OutputFormat::Apng => (
-            video_enc::encode_apng(frames, fps, None)?,
-            OutputFormat::Apng,
-        ),
-        OutputFormat::Gif => (video_enc::encode_gif(frames, fps)?, OutputFormat::Gif),
+        OutputFormat::Apng => {
+            if audio.is_some() {
+                tracing::warn!("chain audio dropped: APNG output has no audio track carrier");
+            }
+            (
+                video_enc::encode_apng(frames, fps, None)?,
+                OutputFormat::Apng,
+            )
+        }
+        OutputFormat::Gif => {
+            if audio.is_some() {
+                tracing::warn!("chain audio dropped: GIF output has no audio track carrier");
+            }
+            (video_enc::encode_gif(frames, fps)?, OutputFormat::Gif)
+        }
         // WebP is always available here because mold-inference's webp
         // feature would need to gate at the transitive-dep level; for the
         // chain route v1 we fall back to APNG when WebP is requested so
         // we don't bind the server crate to another optional dep.
         OutputFormat::Webp => {
+            if audio.is_some() {
+                tracing::warn!("chain audio dropped: WebP output has no audio track carrier");
+            }
             tracing::warn!(
                 "chain WebP output is not supported on the server yet — falling back to APNG"
             );
@@ -178,12 +206,21 @@ fn trim_to_total_frames(frames: &mut Vec<image::RgbImage>, total_frames: Option<
 
 /// Assemble per-stage frame clips into a single output buffer using
 /// [`mold_inference::ltx2::stitch::StitchPlan`], honouring per-boundary
-/// transition rules (Smooth / Cut / Fade).
+/// transition rules (Smooth / Cut / Fade). Returns the stitched frames
+/// and, when any stage produced audio, the corresponding stitched audio
+/// track. Splitting the two return paths in one helper keeps the route
+/// handlers from re-deriving the same boundary/fade slices twice.
 pub(crate) fn stitch_chain_output(
     chain_output: mold_inference::ltx2::chain::ChainRunOutput,
     req: &mold_core::chain::ChainRequest,
-) -> Result<Vec<image::RgbImage>, mold_inference::ltx2::stitch::StitchError> {
-    use mold_inference::ltx2::stitch::StitchPlan;
+) -> Result<
+    (
+        Vec<image::RgbImage>,
+        Option<mold_inference::ltx2::NativeAudioTrack>,
+    ),
+    mold_inference::ltx2::stitch::StitchError,
+> {
+    use mold_inference::ltx2::stitch::{stitch_audio_clips, StitchPlan};
     let boundaries: Vec<_> = req.stages.iter().skip(1).map(|s| s.transition).collect();
     let fade_lens: Vec<_> = req
         .stages
@@ -191,13 +228,21 @@ pub(crate) fn stitch_chain_output(
         .skip(1)
         .map(|s| s.fade_frames.unwrap_or(8))
         .collect();
+    let audio = stitch_audio_clips(
+        &chain_output.stage_audio,
+        &boundaries,
+        &fade_lens,
+        req.motion_tail_frames,
+        req.fps,
+    )?;
     let plan = StitchPlan {
         clips: chain_output.stage_frames,
         boundaries,
         fade_lens,
         motion_tail_frames: req.motion_tail_frames,
     };
-    plan.assemble()
+    let frames = plan.assemble()?;
+    Ok((frames, audio))
 }
 
 /// Produce a PNG thumbnail for the chain output — best-effort, returns
@@ -212,7 +257,9 @@ fn chain_thumbnail(frames: &[image::RgbImage]) -> Vec<u8> {
     }
 }
 
-/// Build a `VideoData` for the `ChainResponse` body.
+/// Build a `VideoData` for the `ChainResponse` body. `audio` is populated
+/// only when the chain emitted an audio track AND the encoded output
+/// format can carry it (currently MP4 only).
 fn build_video_data(
     bytes: Vec<u8>,
     format: OutputFormat,
@@ -220,11 +267,19 @@ fn build_video_data(
     frame_count: u32,
     thumbnail: Vec<u8>,
     gif_preview: Vec<u8>,
+    audio: Option<&mold_inference::ltx2::NativeAudioTrack>,
 ) -> VideoData {
     let duration_ms = if req.fps == 0 {
         None
     } else {
         Some((frame_count as u64 * 1000) / req.fps as u64)
+    };
+    let has_audio = audio.is_some() && format == OutputFormat::Mp4;
+    let (audio_sample_rate, audio_channels) = if has_audio {
+        let track = audio.expect("has_audio implies Some");
+        (Some(track.sample_rate), Some(track.channels as u32))
+    } else {
+        (None, None)
     };
     VideoData {
         data: bytes,
@@ -235,10 +290,10 @@ fn build_video_data(
         fps: req.fps,
         thumbnail,
         gif_preview,
-        has_audio: false,
+        has_audio,
         duration_ms,
-        audio_sample_rate: None,
-        audio_channels: None,
+        audio_sample_rate,
+        audio_channels,
     }
 }
 
@@ -446,7 +501,7 @@ async fn run_chain_pooled(
     let stage_count = chain_output.stage_count;
     let generation_time_ms = chain_output.generation_time_ms;
 
-    let mut frames = stitch_chain_output(chain_output, &req)
+    let (mut frames, audio) = stitch_chain_output(chain_output, &req)
         .map_err(|e| ChainRunError::StitchFailed(e.to_string()))?;
     trim_to_total_frames(&mut frames, req.total_frames);
 
@@ -457,7 +512,7 @@ async fn run_chain_pooled(
     }
 
     let (bytes, output_format, gif_preview) =
-        encode_chain_output(&frames, req.fps, req.output_format)
+        encode_chain_output(&frames, req.fps, req.output_format, audio.as_ref())
             .map_err(|e| ChainRunError::Encode(format!("encode chain output: {e:#}")))?;
     let thumbnail = chain_thumbnail(&frames);
     let frame_count = frames.len() as u32;
@@ -497,6 +552,7 @@ async fn run_chain_pooled(
         frame_count,
         thumbnail,
         gif_preview,
+        audio.as_ref(),
     );
     let response = ChainResponse {
         video,
@@ -706,7 +762,7 @@ async fn run_chain_legacy(
     let stage_count = chain_output.stage_count;
     let generation_time_ms = chain_output.generation_time_ms;
 
-    let mut frames = stitch_chain_output(chain_output, &req)
+    let (mut frames, audio) = stitch_chain_output(chain_output, &req)
         .map_err(|e| ChainRunError::StitchFailed(e.to_string()))?;
     trim_to_total_frames(&mut frames, req.total_frames);
 
@@ -717,7 +773,7 @@ async fn run_chain_legacy(
     }
 
     let (bytes, output_format, gif_preview) =
-        encode_chain_output(&frames, req.fps, req.output_format)
+        encode_chain_output(&frames, req.fps, req.output_format, audio.as_ref())
             .map_err(|e| ChainRunError::Encode(format!("encode chain output: {e:#}")))?;
     let thumbnail = chain_thumbnail(&frames);
     let frame_count = frames.len() as u32;
@@ -758,6 +814,7 @@ async fn run_chain_legacy(
         frame_count,
         thumbnail,
         gif_preview,
+        audio.as_ref(),
     );
     let response = ChainResponse {
         video,
@@ -767,6 +824,60 @@ async fn run_chain_legacy(
         vram_estimate: None,
     };
     Ok((response, generation_time_ms))
+}
+
+/// Validate the chain request's model family and apply family-specific
+/// fixups. Returns `Err` with a 422 response if the family doesn't support
+/// chain generation. Mutates `req.motion_tail_frames` for families that lack
+/// latent context handoff (currently `ltx-video`) so the stitch layer doesn't
+/// trim independent fresh frames at Smooth boundaries.
+async fn validate_and_normalize_chain_family(
+    state: &AppState,
+    req: &mut ChainRequest,
+) -> Result<(), ApiError> {
+    let config = state.config.read().await;
+    let family = config
+        .resolved_model_config(&req.model)
+        .family
+        .unwrap_or_default();
+    // Only reject early when we positively know the family is non-chain-capable.
+    // An empty family means the model isn't in the manifest yet (catalog
+    // synth, mock test, etc.) — let it through; the engine's
+    // `as_chain_renderer()` check will still fire if it really can't render.
+    if !family.is_empty() && crate::chain_limits::family_cap(&family).is_none() {
+        return Err(ApiError::validation(format!(
+            "model '{}' (family '{}') does not support chained video generation",
+            req.model, family
+        )));
+    }
+    if family == "ltx-video" && req.motion_tail_frames > 0 {
+        // LtxVideoEngine has no img2vid path, so the carry tail can't anchor
+        // the next stage's denoise. Zero motion_tail makes Smooth boundaries
+        // collapse to clean concatenation at the stitch layer (Smooth is
+        // implemented as `next_clip.skip(motion_tail)` — with 0, no skip).
+        tracing::debug!(
+            model = %req.model,
+            original = req.motion_tail_frames,
+            "ltx-video has no context handoff; forcing motion_tail_frames=0"
+        );
+        req.motion_tail_frames = 0;
+    }
+    // Audio is only emitted by AV-capable families (currently LTX-2 / LTX-2.3).
+    // Reject `enable_audio: true` for video-only families (e.g. ltx-video) at
+    // the wire boundary so users get a clear upfront error instead of
+    // silently muted output. Empty `family` (mock / catalog-synth models) is
+    // permissive — the engine's renderer abstraction is the final gate.
+    if req.enable_audio == Some(true)
+        && !family.is_empty()
+        && !crate::chain_limits::family_supports_audio(&family)
+    {
+        return Err(ApiError::validation(format!(
+            "model '{}' (family '{}') does not support chain audio; \
+             remove `enable_audio: true` or pick an LTX-2 / LTX-2.3 model",
+            req.model, family
+        )));
+    }
+    Ok(())
 }
 
 /// `POST /api/generate/chain` — synchronous chained video generation.
@@ -789,10 +900,23 @@ pub async fn generate_chain(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let req = match req.normalise() {
+    // Family fixups (motion_tail clamp) must run BEFORE `normalise()`
+    // because normalise enforces `motion_tail < frames_per_stage` and would
+    // reject ltx-video's default 17-frame tail when stages are short.
+    let mut req = req;
+    if let Err(api_err) = validate_and_normalize_chain_family(&state, &mut req).await {
+        return api_err.into_response();
+    }
+    let mut req = match req.normalise() {
         Ok(r) => r,
         Err(e) => return ApiError::validation(e.to_string()).into_response(),
     };
+    // Re-clamp post-normalise — normalise may have populated stages from the
+    // auto-expand path, and we want the final shape to satisfy the same
+    // family invariants. Idempotent for the already-clamped case.
+    if let Err(api_err) = validate_and_normalize_chain_family(&state, &mut req).await {
+        return api_err.into_response();
+    }
 
     tracing::info!(
         model = %req.model,
@@ -832,9 +956,17 @@ pub async fn generate_chain_stream(
     State(state): State<AppState>,
     Json(req): Json<ChainRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    let req = req
+    // Family fixups (motion_tail clamp) must run BEFORE `normalise()`
+    // because normalise enforces `motion_tail < frames_per_stage` and would
+    // reject ltx-video's default 17-frame tail when stages are short.
+    let mut req = req;
+    validate_and_normalize_chain_family(&state, &mut req).await?;
+    let mut req = req
         .normalise()
         .map_err(|e| ApiError::validation(e.to_string()))?;
+    // Re-validate post-normalise (idempotent for already-clamped requests;
+    // catches the auto-expand path where normalise materialised the stages).
+    validate_and_normalize_chain_family(&state, &mut req).await?;
 
     tracing::info!(
         model = %req.model,
@@ -888,7 +1020,9 @@ mod tests {
     use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
     use mold_core::{GenerateRequest, GenerateResponse};
     use mold_inference::device::DiscoveredGpu;
-    use mold_inference::ltx2::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
+    use mold_inference::ltx2::{
+        ChainStageRenderer, ChainTail, NativeAudioTrack, StageOutcome, StageProgressEvent,
+    };
     use mold_inference::shared_pool::SharedPool;
     use mold_inference::InferenceEngine;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -952,12 +1086,30 @@ mod tests {
                 .saturating_sub(tail_pixel_frames)
                 .min(frames.len());
             let tail_rgb_frames = frames[take_from..].to_vec();
+            // Honour the chain's audio request: when the stage GenerateRequest
+            // asks for audio, fabricate a deterministic per-stage track so the
+            // route handler's stitch + mux paths can be exercised end-to-end
+            // without standing up a real LTX-2 vocoder.
+            let audio = if stage_req.enable_audio == Some(true) {
+                let samples_per_frame = 100usize;
+                let interleaved_samples: Vec<f32> = (0..frame_count * samples_per_frame)
+                    .map(|n| ((idx as i32 * 1_000) + n as i32) as f32)
+                    .collect();
+                Some(NativeAudioTrack {
+                    interleaved_samples,
+                    sample_rate: 48_000,
+                    channels: 2,
+                })
+            } else {
+                None
+            };
             Ok(StageOutcome {
                 frames,
                 tail: ChainTail {
                     frames: tail_pixel_frames as u32,
                     tail_rgb_frames,
                 },
+                audio,
                 generation_time_ms: 10,
             })
         }
@@ -1021,6 +1173,7 @@ mod tests {
             total_frames: None,
             clip_frames: None,
             source_image: None,
+            enable_audio: None,
         }
     }
 
@@ -1180,6 +1333,49 @@ mod tests {
             }
             other => panic!("expected UnsupportedModel, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn chain_audio_dropped_for_apng_output_format() {
+        // APNG can't carry audio. The chain handler must still succeed (the
+        // mock engine emits a real track), but the resulting VideoData has
+        // has_audio=false so callers don't reach for nonexistent audio
+        // metadata. This is the "mp4 feature off + audio requested" path.
+        let engine = ChainMockEngine::ready();
+        let state = state_with_chain_engine(engine);
+        let mut req = chain_req_for_mock("ltx-2-19b-distilled:mock", 2);
+        req.enable_audio = Some(true);
+        let (resp, _) = run_chain(&state, req, None).await.expect("chain runs");
+        assert_eq!(resp.video.format, OutputFormat::Apng);
+        assert!(
+            !resp.video.has_audio,
+            "APNG output cannot carry audio; has_audio must stay false even when audio was rendered",
+        );
+        assert_eq!(resp.video.audio_sample_rate, None);
+        assert_eq!(resp.video.audio_channels, None);
+    }
+
+    #[cfg(feature = "mp4")]
+    #[tokio::test]
+    async fn chain_audio_muxed_into_mp4_output_when_enabled() {
+        // End-to-end audio happy path: the chain handler renders per-stage
+        // audio via the mock engine, the stitch layer concatenates it, and
+        // encode_chain_output muxes it into MP4 via the same path the
+        // single-clip pipeline uses. resp.video.has_audio + sample_rate +
+        // channels must reflect the muxed track.
+        let engine = ChainMockEngine::ready();
+        let state = state_with_chain_engine(engine);
+        let mut req = chain_req_for_mock("ltx-2-19b-distilled:mock", 2);
+        req.enable_audio = Some(true);
+        req.output_format = OutputFormat::Mp4;
+        let (resp, _) = run_chain(&state, req, None).await.expect("chain runs");
+        assert_eq!(resp.video.format, OutputFormat::Mp4);
+        assert!(
+            resp.video.has_audio,
+            "MP4 output with chain audio must report has_audio=true",
+        );
+        assert_eq!(resp.video.audio_sample_rate, Some(48_000));
+        assert_eq!(resp.video.audio_channels, Some(2));
     }
 
     #[tokio::test]

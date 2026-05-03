@@ -137,6 +137,7 @@ pub struct ChainInputs {
     pub motion_tail: u32,
     pub source_image: Option<Vec<u8>>,
     pub placement: Option<mold_core::DevicePlacement>,
+    pub enable_audio: Option<bool>,
 }
 
 impl ChainInputs {
@@ -158,6 +159,7 @@ impl ChainInputs {
             total_frames: Some(self.total_frames),
             clip_frames: Some(self.clip_frames),
             source_image: self.source_image.clone(),
+            enable_audio: self.enable_audio,
         }
     }
 }
@@ -399,7 +401,7 @@ async fn run_chain_local(
         };
         let chain_output = orch.run(&req_clone, Some(&mut chain_cb))?;
 
-        use mold_inference::ltx2::stitch::StitchPlan;
+        use mold_inference::ltx2::stitch::{stitch_audio_clips, StitchPlan};
         let boundaries: Vec<_> = req_clone
             .stages
             .iter()
@@ -412,6 +414,14 @@ async fn run_chain_local(
             .skip(1)
             .map(|s| s.fade_frames.unwrap_or(8))
             .collect();
+        let audio = stitch_audio_clips(
+            &chain_output.stage_audio,
+            &boundaries,
+            &fade_lens,
+            req_clone.motion_tail_frames,
+            req_clone.fps,
+        )
+        .map_err(|e| anyhow::anyhow!("audio stitch failed: {e}"))?;
         let plan = StitchPlan {
             clips: chain_output.stage_frames,
             boundaries,
@@ -432,7 +442,7 @@ async fn run_chain_local(
             anyhow::bail!("chain run emitted zero frames after trim");
         }
 
-        encode_local_frames(&frames, fps, output_format)
+        encode_local_frames(&frames, fps, output_format, audio.as_ref())
     });
 
     let result = handle.await??;
@@ -462,12 +472,15 @@ fn apply_local_engine_env_overrides(
 }
 
 /// Encode stitched frames to the requested container. MP4 is feature-gated;
-/// fall back to APNG when the CLI was built without `mp4`.
+/// fall back to APNG when the CLI was built without `mp4`. When `audio` is
+/// `Some` and the output format is MP4, the audio is muxed in as an AAC
+/// track via the same path the single-clip pipeline uses.
 #[cfg(any(feature = "cuda", feature = "metal"))]
 fn encode_local_frames(
     frames: &[image::RgbImage],
     fps: u32,
     output_format: OutputFormat,
+    audio: Option<&mold_inference::ltx2::NativeAudioTrack>,
 ) -> Result<VideoData> {
     use mold_inference::ltx_video::video_enc;
 
@@ -478,10 +491,21 @@ fn encode_local_frames(
         OutputFormat::Mp4 => {
             #[cfg(feature = "mp4")]
             {
-                (video_enc::encode_mp4(frames, fps)?, OutputFormat::Mp4)
+                let video_only = video_enc::encode_mp4(frames, fps)?;
+                let muxed = match audio {
+                    Some(track) => mold_inference::ltx2::media::attach_aac_track_to_mp4_bytes(
+                        &video_only,
+                        &track.interleaved_samples,
+                        track.sample_rate,
+                        track.channels,
+                    )?,
+                    None => video_only,
+                };
+                (muxed, OutputFormat::Mp4)
             }
             #[cfg(not(feature = "mp4"))]
             {
+                let _ = audio;
                 crate::output::status!(
                     "{} MP4 requested but this binary was built without --features mp4; \
                      falling back to APNG",
@@ -493,11 +517,27 @@ fn encode_local_frames(
                 )
             }
         }
-        OutputFormat::Apng => (
-            video_enc::encode_apng(frames, fps, None)?,
-            OutputFormat::Apng,
-        ),
-        OutputFormat::Gif => (video_enc::encode_gif(frames, fps)?, OutputFormat::Gif),
+        OutputFormat::Apng => {
+            if audio.is_some() {
+                crate::output::status!(
+                    "{} chain audio dropped: APNG output has no audio track carrier",
+                    theme::prefix_warning(),
+                );
+            }
+            (
+                video_enc::encode_apng(frames, fps, None)?,
+                OutputFormat::Apng,
+            )
+        }
+        OutputFormat::Gif => {
+            if audio.is_some() {
+                crate::output::status!(
+                    "{} chain audio dropped: GIF output has no audio track carrier",
+                    theme::prefix_warning(),
+                );
+            }
+            (video_enc::encode_gif(frames, fps)?, OutputFormat::Gif)
+        }
         OutputFormat::Webp => {
             crate::output::status!(
                 "{} WebP chain output not supported locally yet; falling back to APNG",
@@ -520,6 +560,14 @@ fn encode_local_frames(
         Some((frame_count as u64 * 1000) / fps as u64)
     };
 
+    let has_audio = audio.is_some() && actual_format == OutputFormat::Mp4;
+    let (audio_sample_rate, audio_channels) = if has_audio {
+        let track = audio.expect("has_audio implies Some");
+        (Some(track.sample_rate), Some(track.channels as u32))
+    } else {
+        (None, None)
+    };
+
     Ok(VideoData {
         data: bytes,
         format: actual_format,
@@ -529,10 +577,10 @@ fn encode_local_frames(
         fps,
         thumbnail,
         gif_preview,
-        has_audio: false,
+        has_audio,
         duration_ms,
-        audio_sample_rate: None,
-        audio_channels: None,
+        audio_sample_rate,
+        audio_channels,
     })
 }
 
@@ -882,6 +930,7 @@ pub(crate) fn build_request_from_script(
         total_frames: None,
         clip_frames: None,
         source_image: None,
+        enable_audio: script.chain.enable_audio,
     })
 }
 
@@ -895,6 +944,7 @@ pub async fn run_from_sugar(
     prompts: Vec<String>,
     frames_per_clip: Option<u32>,
     motion_tail: u32,
+    enable_audio: Option<bool>,
     dry_run: bool,
     host: Option<String>,
     output: Option<String>,
@@ -980,6 +1030,7 @@ pub async fn run_from_sugar(
         total_frames: None,
         clip_frames: None,
         source_image: None,
+        enable_audio,
     }
     .normalise()?;
 
@@ -1232,7 +1283,7 @@ mod tests {
                     references: vec![],
                 },
             ],
-            motion_tail_frames: 4,
+            motion_tail_frames: 17,
             width: 1216,
             height: 704,
             fps: 24,
@@ -1246,6 +1297,7 @@ mod tests {
             total_frames: None,
             clip_frames: None,
             source_image: None,
+            enable_audio: None,
         };
         let video = VideoData {
             data: vec![],
@@ -1289,8 +1341,9 @@ mod tests {
                 steps: 8,
                 guidance: 3.0,
                 strength: 1.0,
-                motion_tail_frames: 4,
+                motion_tail_frames: 17,
                 output_format: OutputFormat::Mp4,
+                enable_audio: None,
             },
             stages: vec![
                 ChainStage {

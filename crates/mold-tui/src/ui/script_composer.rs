@@ -300,6 +300,7 @@ impl ScriptComposerState {
             total_frames: None,
             clip_frames: None,
             source_image: None,
+            enable_audio: self.script.chain.enable_audio,
         }
     }
 }
@@ -320,6 +321,7 @@ impl Default for ScriptComposerState {
                     strength: 1.0,
                     motion_tail_frames: 25,
                     output_format: OutputFormat::Mp4,
+                    enable_audio: None,
                 },
                 stages: vec![ChainStage {
                     prompt: String::new(),

@@ -21,11 +21,31 @@ pub struct ChainLimits {
 
 /// Per-model-family hardcoded caps. Keyed by the family string returned by
 /// `mold_core::manifest::resolve_family`.
+///
+/// LTX-2 19B (`ltx-2-19b-{dev,distilled}:fp8`) and LTX-2.3 22B
+/// (`ltx-2.3-22b-{dev,distilled}:fp8`) both resolve to the `"ltx2"` family
+/// and therefore share the same per-clip cap and chain-renderer wiring.
 pub fn family_cap(family: &str) -> Option<u32> {
     match family {
+        // LTX-2 distilled has true latent-handoff chain support via the
+        // engine's `as_chain_renderer()`. Covers both v2 and v2.3.
         "ltx2" => Some(97),
+        // LTX-Video uses an img2vid fallback: each stage renders independently
+        // and the stitch layer concatenates clips. There's no temporal context
+        // handoff, so subjects can drift between clips, but it lets users
+        // generate videos longer than the per-clip cap.
+        "ltx-video" => Some(97),
         _ => None,
     }
+}
+
+/// Whether a chain-capable family also has an audio path. Currently only
+/// LTX-2 / LTX-2.3 (`"ltx2"`) — LTX-Video is video-only and FLUX/SDXL/etc.
+/// don't render video at all. The chain handler rejects requests with
+/// `enable_audio: true` when this returns false, so users get a clear
+/// upfront error instead of silently-dropped audio.
+pub fn family_supports_audio(family: &str) -> bool {
+    matches!(family, "ltx2")
 }
 
 /// Compute the chain-limits response for a resolved model name.
@@ -60,12 +80,33 @@ mod tests {
 
     #[test]
     fn ltx2_cap_is_97() {
+        // ltx2 family covers both v2 19B and v2.3 22B (dev and distilled);
+        // both resolve to family="ltx2" via `resolve_family`.
         assert_eq!(family_cap("ltx2"), Some(97));
+    }
+
+    #[test]
+    fn ltx_video_cap_is_97() {
+        // LTX-Video uses the img2vid-less fallback; same per-clip cap as
+        // ltx2 because the chain endpoint stitches independent clips at the
+        // pixel level once the cap is hit.
+        assert_eq!(family_cap("ltx-video"), Some(97));
+    }
+
+    #[test]
+    fn audio_capability_is_ltx2_only() {
+        // Only the LTX-2 / LTX-2.3 AV transformer has an audio decode path.
+        // LTX-Video is video-only; FLUX/SDXL aren't in chain support at all.
+        assert!(family_supports_audio("ltx2"));
+        assert!(!family_supports_audio("ltx-video"));
+        assert!(!family_supports_audio("flux"));
+        assert!(!family_supports_audio(""));
     }
 
     #[test]
     fn unknown_family_has_no_cap() {
         assert_eq!(family_cap("flux"), None);
+        assert_eq!(family_cap("sdxl"), None);
     }
 
     #[test]

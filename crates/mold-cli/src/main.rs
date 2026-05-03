@@ -1369,6 +1369,13 @@ async fn run() -> anyhow::Result<()> {
                     prompt.clone(),
                     frames_per_clip,
                     motion_tail,
+                    if audio {
+                        Some(true)
+                    } else if no_audio {
+                        Some(false)
+                    } else {
+                        None
+                    },
                     dry_run,
                     host.clone(),
                     output.clone(),
