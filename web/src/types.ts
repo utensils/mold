@@ -129,6 +129,11 @@ export interface GenerateRequestWire {
   frames?: number | null;
   fps?: number | null;
   placement?: DevicePlacement | null;
+  /** AV-family (LTX-2 / LTX-2.3) audio decode toggle. `true` enables the
+   * audio VAE + vocoder tail and produces an AAC track in the MP4 mux;
+   * `false` skips audio decode; omit for "no preference" (server defaults
+   * to on for MP4 output). The server rejects `true` for non-AV families. */
+  enable_audio?: boolean | null;
 }
 
 export interface ModelDefaults {
@@ -246,6 +251,12 @@ export interface ChainRequestWire {
   total_frames?: number;
   clip_frames?: number;
   source_image?: string | null;
+  /** Mux per-stage audio into the stitched MP4 (LTX-2 / LTX-2.3 only).
+   * Omit for the wire default of off — chains opt in to audio
+   * explicitly so existing callers don't suddenly produce audio they
+   * didn't ask for. The server returns 400 if `true` for non-AV
+   * families (see `chain_limits::family_supports_audio`). */
+  enable_audio?: boolean | null;
 }
 
 export type ChainProgressEvent =
@@ -333,6 +344,16 @@ export const VIDEO_FAMILIES: ReadonlyArray<string> = [
   "ltx2",
   "ltx-2",
 ];
+
+// Families with an audio decode path. Mirrors the server-side
+// `chain_limits::family_supports_audio` — the SPA gates the audio
+// toggle on this so users can't enable an audio mux for a family
+// that has no audio output. Today only LTX-2 / LTX-2.3 (`"ltx2"`).
+export const AUDIO_FAMILIES: ReadonlyArray<string> = ["ltx2", "ltx-2"];
+
+export function familySupportsAudio(family: string): boolean {
+  return AUDIO_FAMILIES.includes(family);
+}
 
 // Families whose image pipeline ignores the negative prompt.
 export const NO_CFG_FAMILIES: ReadonlyArray<string> = [

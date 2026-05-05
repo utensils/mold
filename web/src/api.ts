@@ -67,6 +67,7 @@ export interface ChainLimits {
   fade_frames_max: number;
   transition_modes: string[];
   quantization_family: string;
+  supports_audio: boolean;
 }
 
 export function imageUrl(filename: string): string {

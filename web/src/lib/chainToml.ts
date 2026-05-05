@@ -11,6 +11,9 @@ export interface ChainScriptChain {
   strength: number;
   motion_tail_frames: number;
   output_format: "mp4" | "gif" | "apng" | "webp";
+  /** AV-family audio mux toggle (LTX-2 / LTX-2.3). Omit for the v1
+   * default of off so existing scripts deserialise unchanged. */
+  enable_audio?: boolean;
 }
 
 export interface ChainStageToml {

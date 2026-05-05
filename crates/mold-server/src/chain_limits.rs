@@ -17,6 +17,11 @@ pub struct ChainLimits {
     pub fade_frames_max: u32,
     pub transition_modes: Vec<String>,
     pub quantization_family: String,
+    /// Whether this model's family has an audio decode path. The SPA reads
+    /// this to decide whether to show the chain-level "Generate audio"
+    /// toggle; the chain endpoint refuses `enable_audio: true` upstream
+    /// when this is false. Single source of truth: `family_supports_audio`.
+    pub supports_audio: bool,
 }
 
 /// Per-model-family hardcoded caps. Keyed by the family string returned by
@@ -71,6 +76,7 @@ pub fn compute_limits(model: &str, family: &str, quant: &str, free_vram_bytes: u
         fade_frames_max: 32,
         transition_modes: vec!["smooth".into(), "cut".into(), "fade".into()],
         quantization_family: quant.to_string(),
+        supports_audio: family_supports_audio(family),
     }
 }
 
@@ -119,6 +125,21 @@ mod tests {
         assert_eq!(
             lim.transition_modes,
             vec!["smooth".to_string(), "cut".into(), "fade".into()]
+        );
+        assert!(
+            lim.supports_audio,
+            "ltx2 family has the AV transformer + audio VAE / vocoder path",
+        );
+    }
+
+    #[test]
+    fn compute_limits_for_ltx_video_has_no_audio() {
+        // LTX-Video is video-only; the SPA must hide the audio toggle and the
+        // chain endpoint will reject `enable_audio: true` upstream regardless.
+        let lim = compute_limits("ltx-video-0.9.7-distilled:fp8", "ltx-video", "fp8", 0);
+        assert!(
+            !lim.supports_audio,
+            "ltx-video has no audio path — toggle must stay off",
         );
     }
 }

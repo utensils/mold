@@ -2748,6 +2748,10 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&serde_json::Value::String("fade".into())));
+        assert_eq!(
+            limits["supports_audio"], true,
+            "ltx2 family advertises audio so the SPA can show the toggle",
+        );
     }
 
     #[tokio::test]
