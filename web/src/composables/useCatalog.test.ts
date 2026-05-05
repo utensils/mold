@@ -34,6 +34,7 @@ function makePageEntries(page: number, size: number) {
       tags: [],
       companions: [],
       download_recipe: { files: [], needs_token: null },
+      primary_path: null,
       created_at: null,
       updated_at: null,
       added_at: 0,
@@ -103,11 +104,14 @@ describe("useCatalog", () => {
     ).toBe(true);
   });
 
-  it("enables download for engine_phase 1 + 2, disables for engine_phase >= 3", async () => {
+  it("enables download for engine_phase 1–5, disables for engine_phase >= 6", async () => {
     const cat = useCatalog();
     expect(cat.canDownload({ engine_phase: 1 } as any)).toBe(true);
     expect(cat.canDownload({ engine_phase: 2 } as any)).toBe(true);
-    expect(cat.canDownload({ engine_phase: 3 } as any)).toBe(false);
+    expect(cat.canDownload({ engine_phase: 3 } as any)).toBe(true);
+    expect(cat.canDownload({ engine_phase: 4 } as any)).toBe(true);
+    expect(cat.canDownload({ engine_phase: 5 } as any)).toBe(true);
+    expect(cat.canDownload({ engine_phase: 6 } as any)).toBe(false);
     expect(cat.canDownload({ engine_phase: 99 } as any)).toBe(false);
   });
 });

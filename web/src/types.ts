@@ -511,6 +511,12 @@ export interface CatalogEntryWire {
    * CatalogDetailDrawer and the "installed" chip on CatalogCard.
    */
   installed: boolean;
+  /**
+   * Absolute filesystem path to the primary file when installed (Civitai
+   * entries only). Null for HF entries or when not installed. Used by the
+   * web generate UI to pass `lora.path` directly to the generate request.
+   */
+  primary_path: string | null;
   created_at: number | null;
   updated_at: number | null;
   added_at: number;
@@ -542,6 +548,7 @@ export interface CatalogFamiliesResponse {
 export interface CatalogListParams {
   family?: string;
   family_role?: "foundation" | "finetune";
+  kind?: "checkpoint" | "lora" | "vae" | "text-encoder" | "control-net";
   modality?: "image" | "video";
   source?: "hf" | "civitai";
   sub_family?: string;

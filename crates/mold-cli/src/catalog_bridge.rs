@@ -123,7 +123,7 @@ pub fn synthesize_model_config(
     // under its canonical manifest name and is populated when the catalog
     // pull ran). The single-file SDXL/SD1.5 backends only need tokenizers;
     // the encoder weights are bundled in the primary safetensors itself.
-    populate_companion_paths(&mut cfg, &row.family, config)?;
+    populate_companion_paths(&mut cfg, &row.family, row.sub_family.as_deref(), config)?;
 
     Ok(cfg)
 }
@@ -132,7 +132,12 @@ pub fn synthesize_model_config(
 /// companion's resolved manifest paths and copy the relevant token /
 /// encoder fields onto `cfg`. Errors out if a required companion is
 /// missing, naming the companion so the user knows what to pull.
-fn populate_companion_paths(cfg: &mut ModelConfig, family: &str, config: &Config) -> Result<()> {
+fn populate_companion_paths(
+    cfg: &mut ModelConfig,
+    family: &str,
+    sub_family: Option<&str>,
+    config: &Config,
+) -> Result<()> {
     use mold_catalog::companions::companions_for;
     use mold_catalog::entry::Bundling;
     use mold_catalog::families::Family;
@@ -157,7 +162,7 @@ fn populate_companion_paths(cfg: &mut ModelConfig, family: &str, config: &Config
     // here. This matters because the SDXL/SD1.5 VAE companions are pulled
     // for future external-VAE support but aren't actually needed by the
     // current single-file dispatch (the VAE is embedded in the primary).
-    for companion in companions_for(fam, Bundling::SingleFile) {
+    for companion in companions_for(fam, sub_family, Bundling::SingleFile) {
         if let Some(paths) = ModelPaths::resolve(&companion, config) {
             copy_companion_into_cfg(cfg, &companion, &paths);
         }
@@ -198,6 +203,32 @@ fn copy_companion_into_cfg(cfg: &mut ModelConfig, companion_name: &str, paths: &
             // `cfg.vae` alone (it points at the primary). Stash the
             // companion path on a free field for future external-VAE use.
             // For now this is a no-op.
+        }
+        "ltx-video-vae" => {
+            // LTX-Video Civitai checkpoints are transformer-only. The VAE
+            // companion is a separate file and must override cfg.vae so the
+            // engine's load_vae() finds it (rather than trying to load the
+            // VAE from the transformer safetensors).
+            cfg.vae = to_string(&paths.transformer);
+        }
+        "flux2-vae" => {
+            // Flux.2 single-file Civitai checkpoints are transformer-only —
+            // the Klein VAE (~168 MB) lives in a separate companion file.
+            // Override cfg.vae so the engine's load_vae() reads from the
+            // companion rather than from the transformer safetensors.
+            cfg.vae = to_string(&paths.transformer);
+        }
+        "flux2-te" | "flux2-te-9b" => {
+            // Flux.2 text encoder (Qwen3 4B with 2 shards for Klein-4B,
+            // Qwen3 8B with 4 shards for Klein-9B / FLUX.2-Dev) + Qwen3
+            // tokenizer. Mirrors the z-image-te wiring.
+            cfg.text_encoder_files = paths
+                .text_encoder_files
+                .iter()
+                .filter_map(to_string)
+                .collect::<Vec<_>>()
+                .into();
+            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_string);
         }
         "t5-v1_1-xxl" => {
             cfg.t5_encoder = to_string(&paths.transformer);
@@ -570,5 +601,206 @@ mod tests {
             install_catalog_model_with_db(&db, &mut config, "cv:does-not-exist").unwrap();
         assert!(!installed);
         assert!(!config.models.contains_key("cv:does-not-exist"));
+    }
+
+    // ── Flux.2 catalog bridge ────────────────────────────────────────────
+
+    fn flux2_recipe_json(version_id: &str, file_name: &str) -> String {
+        format!(
+            r#"{{
+  "files": [
+    {{
+      "url": "https://civitai.com/api/download/models/{version_id}",
+      "dest": "{{family}}/civitai/{version_id}/{file_name}",
+      "sha256": "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+      "size_bytes": 12345678
+    }}
+  ],
+  "needs_token": "civitai"
+}}"#
+        )
+    }
+
+    fn flux2_klein_9b_row() -> mold_db::catalog::CatalogRow {
+        mold_db::catalog::CatalogRow {
+            id: "cv:2759597".into(),
+            source: "civitai".into(),
+            source_id: "2759597".into(),
+            name: "Miraclein NSFW [Flux2Klein]".into(),
+            author: Some("someone".into()),
+            family: "flux2".into(),
+            family_role: "finetune".into(),
+            sub_family: Some("klein-9b".into()),
+            modality: "image".into(),
+            kind: "checkpoint".into(),
+            file_format: "safetensors".into(),
+            bundling: "single-file".into(),
+            size_bytes: Some(12_345_678),
+            download_count: 0,
+            rating: None,
+            likes: 0,
+            nsfw: 0,
+            thumbnail_url: None,
+            description: None,
+            license: None,
+            license_flags: None,
+            tags: Some("[]".into()),
+            companions: Some(r#"["flux2-te-9b","flux2-vae"]"#.into()),
+            download_recipe: flux2_recipe_json("2759597", "miraclein.safetensors"),
+            engine_phase: 1,
+            created_at: None,
+            updated_at: None,
+            added_at: 0,
+        }
+    }
+
+    fn flux2_klein_4b_row() -> mold_db::catalog::CatalogRow {
+        let mut row = flux2_klein_9b_row();
+        row.id = "cv:2612554".into();
+        row.source_id = "2612554".into();
+        row.name = "Flux.2 Klein 4B finetune".into();
+        row.sub_family = Some("klein-4b".into());
+        row.companions = Some(r#"["flux2-te","flux2-vae"]"#.into());
+        row.download_recipe = flux2_recipe_json("2612554", "klein4b.safetensors");
+        row
+    }
+
+    /// Stub the manifest-side companion paths for the Flux.2 9B encoder
+    /// (4 shards) + tokenizer + Klein VAE under `config.models` so the
+    /// bridge can resolve them without touching disk.
+    fn stub_flux2_9b_companion_paths(config: &mut Config, models_dir: &str) {
+        let te_dir = format!("{models_dir}/flux2-te-9b");
+        config.models.insert(
+            "flux2-te-9b".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!(
+                    "{te_dir}/text_encoder/model-00001-of-00004.safetensors"
+                )),
+                vae: Some(String::new()),
+                text_encoder_files: Some(vec![
+                    format!("{te_dir}/text_encoder/model-00001-of-00004.safetensors"),
+                    format!("{te_dir}/text_encoder/model-00002-of-00004.safetensors"),
+                    format!("{te_dir}/text_encoder/model-00003-of-00004.safetensors"),
+                    format!("{te_dir}/text_encoder/model-00004-of-00004.safetensors"),
+                ]),
+                text_tokenizer: Some(format!("{te_dir}/tokenizer/tokenizer.json")),
+                ..Default::default()
+            },
+        );
+        let vae_dir = format!("{models_dir}/flux2-vae");
+        config.models.insert(
+            "flux2-vae".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!("{vae_dir}/vae/diffusion_pytorch_model.safetensors")),
+                vae: Some(String::new()),
+                ..Default::default()
+            },
+        );
+    }
+
+    fn stub_flux2_4b_companion_paths(config: &mut Config, models_dir: &str) {
+        let te_dir = format!("{models_dir}/flux2-te");
+        config.models.insert(
+            "flux2-te".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!(
+                    "{te_dir}/text_encoder/model-00001-of-00002.safetensors"
+                )),
+                vae: Some(String::new()),
+                text_encoder_files: Some(vec![
+                    format!("{te_dir}/text_encoder/model-00001-of-00002.safetensors"),
+                    format!("{te_dir}/text_encoder/model-00002-of-00002.safetensors"),
+                ]),
+                text_tokenizer: Some(format!("{te_dir}/tokenizer/tokenizer.json")),
+                ..Default::default()
+            },
+        );
+        let vae_dir = format!("{models_dir}/flux2-vae");
+        config.models.insert(
+            "flux2-vae".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!("{vae_dir}/vae/diffusion_pytorch_model.safetensors")),
+                vae: Some(String::new()),
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn flux2_klein_9b_synth_populates_qwen3_8b_encoder_and_klein_vae() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_models_dir_env();
+
+        let models_dir = "/tmp/mold-test-models";
+        let mut config = explicit_config(models_dir);
+        stub_flux2_9b_companion_paths(&mut config, models_dir);
+
+        let row = flux2_klein_9b_row();
+        let synth =
+            synthesize_model_config(&row, std::path::Path::new(models_dir), &config).unwrap();
+
+        assert_eq!(synth.family.as_deref(), Some("flux2"));
+
+        // Transformer points at the recipe-rendered .safetensors.
+        let expected_transformer =
+            format!("{models_dir}/cv-2759597/flux2/civitai/2759597/miraclein.safetensors");
+        assert_eq!(
+            synth.transformer.as_deref(),
+            Some(expected_transformer.as_str())
+        );
+
+        // VAE is overridden to the Klein VAE companion (NOT the
+        // transformer file — Flux.2 single-file checkpoints don't bundle a
+        // VAE).
+        let expected_vae =
+            format!("{models_dir}/flux2-vae/vae/diffusion_pytorch_model.safetensors");
+        assert_eq!(synth.vae.as_deref(), Some(expected_vae.as_str()));
+
+        // Qwen3 8B encoder shards (4 files) populated from the gated
+        // Klein-9B companion.
+        let shards = synth
+            .text_encoder_files
+            .as_ref()
+            .expect("Klein-9B needs text_encoder_files set");
+        assert_eq!(shards.len(), 4, "Klein-9B uses 4 Qwen3-8B shards");
+        assert!(shards[0].ends_with("model-00001-of-00004.safetensors"));
+
+        // Tokenizer populated — this is what the original error
+        // (`text tokenizer path required for Flux.2 models`) was about.
+        let tokenizer = synth
+            .text_tokenizer
+            .as_deref()
+            .expect("text_tokenizer must be populated for Flux.2");
+        assert!(tokenizer.ends_with("tokenizer/tokenizer.json"));
+    }
+
+    #[test]
+    fn flux2_klein_4b_synth_populates_qwen3_4b_encoder() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_models_dir_env();
+
+        let models_dir = "/tmp/mold-test-models";
+        let mut config = explicit_config(models_dir);
+        stub_flux2_4b_companion_paths(&mut config, models_dir);
+
+        let row = flux2_klein_4b_row();
+        let synth =
+            synthesize_model_config(&row, std::path::Path::new(models_dir), &config).unwrap();
+
+        // Klein-4B uses the 2-shard Qwen3-4B encoder (not the 4-shard 8B).
+        let shards = synth
+            .text_encoder_files
+            .as_ref()
+            .expect("Klein-4B needs text_encoder_files set");
+        assert_eq!(shards.len(), 2, "Klein-4B uses 2 Qwen3-4B shards");
+        assert!(synth.text_tokenizer.is_some());
+        // Klein-specific VAE companion still overrides cfg.vae.
+        let expected_vae =
+            format!("{models_dir}/flux2-vae/vae/diffusion_pytorch_model.safetensors");
+        assert_eq!(synth.vae.as_deref(), Some(expected_vae.as_str()));
     }
 }

@@ -295,6 +295,7 @@ use mold_db::catalog::{ListParams, SortBy};
 pub struct ListQuery {
     pub family: Option<String>,
     pub family_role: Option<String>,
+    pub kind: Option<String>,
     pub modality: Option<String>,
     pub source: Option<String>,
     pub sub_family: Option<String>,
@@ -322,6 +323,7 @@ pub async fn list_catalog(
     let params = ListParams {
         family: q.family,
         family_role: q.family_role,
+        kind: q.kind,
         modality: q.modality,
         source: q.source,
         sub_family: q.sub_family,
@@ -408,7 +410,7 @@ fn catalog_row_to_wire(
     models_dir: &std::path::Path,
     config: &mold_core::Config,
 ) -> serde_json::Value {
-    let installed = match r.source.as_str() {
+    let (installed, primary_path) = match r.source.as_str() {
         // HF rows install via the manifest path. The catalog stores the
         // HF repo path in `source_id` (e.g. "black-forest-labs/FLUX.1-dev")
         // — mold's manifest registry is keyed on canonical names like
@@ -417,8 +419,8 @@ fn catalog_row_to_wire(
         // this build matches the HF repo, the entry can't be installed
         // (no canonical name to point disk-state at), so report false.
         "hf" => match mold_core::manifest::find_manifest_by_hf_repo(&r.source_id) {
-            Some(manifest) => config.manifest_model_is_downloaded(&manifest.name),
-            None => false,
+            Some(manifest) => (config.manifest_model_is_downloaded(&manifest.name), None),
+            None => (false, None),
         },
         // Civitai rows go through the recipe path. Parse the stored recipe
         // JSON, translate to RecipeFetchFile borrowed slice, and delegate
@@ -428,17 +430,46 @@ fn catalog_row_to_wire(
         "civitai" => {
             match serde_json::from_str::<mold_catalog::entry::DownloadRecipe>(&r.download_recipe) {
                 Ok(recipe) => {
+                    let (author, name) = match r.source_id.split_once('/') {
+                        Some((a, n)) => (a, n),
+                        None => ("", r.source_id.as_str()),
+                    };
+                    let rendered_dests: Vec<String> = recipe
+                        .files
+                        .iter()
+                        .map(|f| {
+                            mold_catalog::entry::render_recipe_dest(
+                                &f.dest, &r.family, author, name,
+                            )
+                        })
+                        .collect();
                     let files: Vec<mold_core::download::RecipeFetchFile<'_>> = recipe
                         .files
                         .iter()
-                        .map(|f| mold_core::download::RecipeFetchFile {
+                        .zip(rendered_dests.iter())
+                        .map(|(f, dest)| mold_core::download::RecipeFetchFile {
                             url: f.url.as_str(),
-                            dest: f.dest.as_str(),
+                            dest: dest.as_str(),
                             sha256: f.sha256.as_deref(),
                             size_bytes: f.size_bytes,
                         })
                         .collect();
-                    mold_core::download::catalog_entry_installed(models_dir, &r.id, &files)
+                    let is_installed =
+                        mold_core::download::catalog_entry_installed(models_dir, &r.id, &files);
+                    // For installed Civitai entries expose the absolute path of
+                    // the primary (first) recipe file so the web UI can pass it
+                    // directly as `lora.path` in a generate request.
+                    // Path layout: {models_dir}/{sanitized_id}/{rendered_dest}
+                    let path = if is_installed {
+                        let sanitized = mold_core::download::sanitize_recipe_id(&r.id);
+                        let subdir = models_dir.join(&sanitized);
+                        rendered_dests
+                            .first()
+                            .map(|dest| subdir.join(dest).to_string_lossy().into_owned())
+                    } else {
+                        None
+                    };
+                    (is_installed, path)
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -447,11 +478,11 @@ fn catalog_row_to_wire(
                         error = %e,
                         "failed to parse stored download_recipe; reporting installed=false",
                     );
-                    false
+                    (false, None)
                 }
             }
         }
-        _ => false,
+        _ => (false, None),
     };
     serde_json::json!({
         "id": r.id,
@@ -480,6 +511,7 @@ fn catalog_row_to_wire(
         "download_recipe": serde_json::from_str::<serde_json::Value>(&r.download_recipe).unwrap_or(serde_json::json!({})),
         "engine_phase": r.engine_phase,
         "installed": installed,
+        "primary_path": primary_path,
         "created_at": r.created_at,
         "updated_at": r.updated_at,
         "added_at": r.added_at,
@@ -637,7 +669,7 @@ pub async fn post_catalog_download(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
-    if row.engine_phase >= 3 {
+    if row.engine_phase >= 6 {
         return (
             StatusCode::CONFLICT,
             format!(
@@ -703,12 +735,16 @@ pub async fn post_catalog_download(
             }
             _ => mold_core::download::RecipeAuth::None,
         };
+        let (author, name) = match row.source_id.split_once('/') {
+            Some((a, n)) => (a.to_string(), n.to_string()),
+            None => (String::new(), row.source_id.clone()),
+        };
         let files: Vec<crate::downloads::OwnedRecipeFile> = recipe
             .files
             .into_iter()
             .map(|f| crate::downloads::OwnedRecipeFile {
                 url: f.url,
-                dest: f.dest,
+                dest: mold_catalog::entry::render_recipe_dest(&f.dest, &row.family, &author, &name),
                 sha256: f.sha256,
                 size_bytes: f.size_bytes,
             })

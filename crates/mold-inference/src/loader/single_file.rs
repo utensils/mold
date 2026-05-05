@@ -330,7 +330,11 @@ mod tests {
 
         let cases: &[(Family, u8)] = &[
             (Family::Flux, 3),
-            (Family::Flux2, 3),
+            // Flux.2 is wired through the catalog bridge (phase 1), but
+            // *this* SD15/SDXL key-partition loader still rejects it — the
+            // Flux.2 pipeline has its own loader. The error reports the
+            // canonical phase regardless.
+            (Family::Flux2, 1),
             (Family::ZImage, 4),
             (Family::LtxVideo, 5),
             (Family::Ltx2, 5),

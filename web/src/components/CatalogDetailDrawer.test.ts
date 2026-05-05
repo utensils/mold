@@ -30,6 +30,7 @@ const makeEntry = (phase: number) => ({
   tags: [],
   companions: [],
   download_recipe: { files: [], needs_token: null },
+  primary_path: null,
   created_at: null,
   updated_at: null,
   added_at: 0,
@@ -38,7 +39,7 @@ const makeEntry = (phase: number) => ({
 const mockCloseDetail = vi.fn();
 const mockStartDownload = vi.fn();
 const mockCanDownload = vi.fn(
-  (e: { engine_phase: number }) => e.engine_phase <= 2,
+  (e: { engine_phase: number }) => e.engine_phase <= 5,
 );
 const mockDetail = ref<ReturnType<typeof makeEntry> | null>(null);
 
@@ -81,20 +82,28 @@ describe("CatalogDetailDrawer", () => {
     expect((btn.element as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("Download button is disabled when engine_phase >= 3 and shows phase tooltip", () => {
-    mockDetail.value = makeEntry(3);
+  it("Download button is enabled for engine_phase 5 (LTX single-file)", () => {
+    mockDetail.value = makeEntry(5);
+    const w = mount(CatalogDetailDrawer);
+    const btn = w.find("[data-test=download-btn]");
+    expect(btn.exists()).toBe(true);
+    expect((btn.element as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("Download button is disabled when engine_phase >= 6 and shows phase tooltip", () => {
+    mockDetail.value = makeEntry(6);
     const w = mount(CatalogDetailDrawer);
     const btn = w.find("[data-test=download-btn]");
     expect(btn.exists()).toBe(true);
     expect((btn.element as HTMLButtonElement).disabled).toBe(true);
     const title = btn.attributes("title") ?? "";
-    expect(title).toMatch(/phase 3|coming/i);
+    expect(title).toMatch(/phase 6|coming/i);
   });
 
-  it("does not render the Coming-in-phase badge for engine_phase 2", () => {
-    mockDetail.value = makeEntry(2);
+  it("does not render the Coming-in-phase badge for engine_phase 5", () => {
+    mockDetail.value = makeEntry(5);
     const w = mount(CatalogDetailDrawer);
-    expect(w.text()).not.toMatch(/coming in phase 2/i);
+    expect(w.text()).not.toMatch(/coming in phase 5/i);
   });
 
   it("close button calls closeDetail", async () => {

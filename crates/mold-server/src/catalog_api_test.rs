@@ -283,17 +283,32 @@ async fn post_catalog_download_no_longer_conflicts_for_engine_phase_2() {
     );
 }
 
-/// Phase 3+ (FLUX single-file, Z-Image, LTX-Video, ...) are still gated.
-/// Dropping the gate to `>= 3` keeps phases 3 and beyond rejected.
+/// Phases 3–5 (FLUX, Z-Image, LTX single-file) are now downloadable.
 #[tokio::test]
-async fn post_catalog_download_still_conflicts_for_engine_phase_3() {
-    let row = make_catalog_row("cv:phase-3-test", "civitai", "flux", 3);
+async fn post_catalog_download_no_longer_conflicts_for_engine_phase_3_to_5() {
+    for phase in [3i64, 4, 5] {
+        let id = format!("cv:phase-{phase}-test");
+        let row = make_catalog_row(&id, "civitai", "flux", phase);
+        let state = seeded_state(&[row]);
+        let resp = invoke_download(state, &id).await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "engine_phase {phase} must flow past the gate after phase 5 lands",
+        );
+    }
+}
+
+/// Phase 6+ entries are still gated.
+#[tokio::test]
+async fn post_catalog_download_still_conflicts_for_engine_phase_6() {
+    let row = make_catalog_row("cv:phase-6-test", "civitai", "flux", 6);
     let state = seeded_state(&[row]);
-    let resp = invoke_download(state, "cv:phase-3-test").await;
+    let resp = invoke_download(state, "cv:phase-6-test").await;
     assert_eq!(
         resp.status(),
         StatusCode::CONFLICT,
-        "engine_phase 3 must remain gated until phase 3 lands",
+        "engine_phase 6 must remain gated",
     );
 }
 
@@ -490,9 +505,13 @@ async fn civitai_phase_2_no_longer_returns_not_implemented() {
 /// the DownloadsDrawer in the same order the user sees in the UI.
 #[tokio::test]
 async fn companion_jobs_in_response_match_row_companions_in_order() {
+    let tmp = tempfile::tempdir().expect("tempdir");
     let mut row = make_catalog_row("cv:sdxl-order-test", "civitai", "sdxl", 2);
     row.companions = Some(serde_json::to_string(&["clip-l", "clip-g", "sdxl-vae"]).expect("json"));
     let state = seeded_state(&[row]);
+    // Use an empty temp dir so on-disk presence checks always return "missing"
+    // — the test should not depend on whether companions happen to be installed.
+    state.config.write().await.models_dir = tmp.path().to_string_lossy().into_owned();
     let resp = invoke_download(state, "cv:sdxl-order-test").await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let body = read_body_json(resp).await;
@@ -766,6 +785,69 @@ async fn catalog_get_emits_installed_true_when_recipe_files_on_disk() {
     );
 }
 
+/// `installed=true` must be reported when the recipe `dest` template is
+/// `{family}/...` and the file lives at the rendered path on disk. The bug
+/// this guards against: `catalog_row_to_wire` was forwarding the literal
+/// `{family}` string to the install probe, so files at the rendered path
+/// (e.g. `flux2/civitai/2650607/foo.safetensors`) were reported as missing.
+/// The same flaw affected `installed_catalog_models`, which is why pulled
+/// Civitai fine-tunes never appeared in `/api/models`.
+#[tokio::test]
+async fn catalog_get_renders_family_placeholder_when_probing_install_state() {
+    if std::env::var_os("MOLD_MODELS_DIR").is_some() {
+        return;
+    }
+
+    let mut row = make_catalog_row("cv:rendered1", "civitai", "flux2", 2);
+    row.download_recipe = serde_json::json!({
+        "files": [{
+            "url": "http://test.invalid/foo.safetensors",
+            "dest": "{family}/civitai/rendered1/foo.safetensors",
+            "sha256": null,
+            "size_bytes": 1000,
+        }],
+        "needs_token": null,
+    })
+    .to_string();
+    let state = seeded_state(std::slice::from_ref(&row));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+
+    let subdir = tmp
+        .path()
+        .join(mold_core::download::sanitize_recipe_id("cv:rendered1"))
+        .join("flux2/civitai/rendered1");
+    std::fs::create_dir_all(&subdir).expect("mkdir rendered subdir");
+    std::fs::write(subdir.join("foo.safetensors"), vec![0u8; 1000]).expect("write stub");
+
+    let resp =
+        crate::catalog_api::get_catalog_entry(State(state), Path("cv:rendered1".to_string()))
+            .await
+            .into_response();
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("installed").and_then(|x| x.as_bool()),
+        Some(true),
+        "expected installed=true with file at rendered {{family}}=flux2 path; body={body}",
+    );
+    let path = body
+        .get("primary_path")
+        .and_then(|x| x.as_str())
+        .expect("primary_path should be present when installed");
+    assert!(
+        path.contains("/flux2/civitai/rendered1/"),
+        "reported path should use rendered family, got {path}",
+    );
+    assert!(
+        !path.contains("{family}"),
+        "reported path must not contain literal {{family}}, got {path}",
+    );
+}
+
 // ── list_catalog: total wire field for infinite scroll ────────────────────
 
 /// Infinite scroll needs to know when to stop. The list response carries
@@ -783,6 +865,7 @@ async fn list_catalog_response_includes_total_distinct_from_page_size() {
     let query = Query(crate::catalog_api::ListQuery {
         family: None,
         family_role: None,
+        kind: None,
         modality: None,
         source: None,
         sub_family: None,
@@ -844,6 +927,7 @@ async fn list_catalog_total_respects_filters() {
     let query = Query(crate::catalog_api::ListQuery {
         family: Some("flux".into()),
         family_role: None,
+        kind: None,
         modality: None,
         source: None,
         sub_family: None,

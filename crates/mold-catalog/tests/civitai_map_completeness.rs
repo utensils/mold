@@ -40,7 +40,8 @@ fn engine_phase_classifies_single_file_correctly() {
     assert_eq!(engine_phase_for(Family::Sd15, Bundling::SingleFile), 2);
     assert_eq!(engine_phase_for(Family::Sdxl, Bundling::SingleFile), 2);
     assert_eq!(engine_phase_for(Family::Flux, Bundling::SingleFile), 3);
-    assert_eq!(engine_phase_for(Family::Flux2, Bundling::SingleFile), 3);
+    // Flux.2 is wired through the catalog bridge — phase 1 (runnable).
+    assert_eq!(engine_phase_for(Family::Flux2, Bundling::SingleFile), 1);
     assert_eq!(engine_phase_for(Family::ZImage, Bundling::SingleFile), 4);
     assert_eq!(engine_phase_for(Family::LtxVideo, Bundling::SingleFile), 5);
     assert_eq!(engine_phase_for(Family::Ltx2, Bundling::SingleFile), 5);

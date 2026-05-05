@@ -1488,26 +1488,25 @@ pub fn companion_present_on_disk(
 /// placed — used by both the catalog API's `installed: bool` predicate
 /// AND the `fetch_recipe_inner` skip path so they cannot drift apart.
 ///
-/// Acceptance rule (matches `Config::file_is_complete`'s spirit):
-/// - When `file.size_bytes` is `Some(expected)`: on-disk size equals
-///   `expected`. AND, when `file.sha256` is also declared, the
-///   `.sha256-verified` marker must be present too — without it, a
-///   same-size-but-corrupted file (manual `mv`, FS bug, cosmic ray)
-///   would silently slip past a size-only check.
-/// - When `file.size_bytes` is `None`: the marker is the only positive
-///   attestation we have, so it's required.
+/// Acceptance rule:
+/// - `sha256` declared → `.sha256-verified` marker is the sole criterion.
+///   The marker is written only after cryptographic verification at download
+///   time, so it is more authoritative than `size_bytes` (which can be stale
+///   in the catalog DB when a model is re-uploaded under the same sha256 with
+///   a different compressed size).  A file at the exact declared size but
+///   without the marker is still rejected.
+/// - `sha256` absent, `size_bytes` known → on-disk length must equal declared.
+/// - Neither declared → marker is the only attestation; require it.
 fn recipe_file_is_placed(dest: &Path, file: &RecipeFetchFile<'_>) -> bool {
     if !dest.exists() {
         return false;
     }
-    match file.size_bytes {
-        Some(expected) => {
-            std::fs::metadata(dest)
-                .map(|m| m.len() == expected)
-                .unwrap_or(false)
-                && (file.sha256.is_none() || sha256_marker_path(dest).exists())
-        }
-        None => sha256_marker_path(dest).exists(),
+    match (file.sha256, file.size_bytes) {
+        (Some(_), _) => sha256_marker_path(dest).exists(),
+        (None, Some(expected)) => std::fs::metadata(dest)
+            .map(|m| m.len() == expected)
+            .unwrap_or(false),
+        (None, None) => sha256_marker_path(dest).exists(),
     }
 }
 
@@ -3453,6 +3452,39 @@ mod tests {
         assert!(
             !catalog_entry_installed(&models_dir, "cv:installed_k", &files),
             "size matches but no marker AND sha256 declared — must refuse to claim install",
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_trusts_marker_over_stale_size_bytes() {
+        // Regression guard: catalog DB can have stale size_bytes (e.g. model
+        // re-uploaded with same sha256 but different compressed size).  When a
+        // sha256 is declared and the marker exists, the file is verified —
+        // reject it only on size would cause installed models to disappear from
+        // the settings modal.
+        let models_dir = recipe_tmp_dir("installed_stale_size");
+        let subdir = models_dir.join("cv-installed_stale");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        // File is 5 bytes, but we'll declare size as 99 (stale) in the recipe.
+        std::fs::write(&dest, b"hello").unwrap();
+        write_sha256_marker(
+            &dest,
+            "deadbeef00000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: Some("deadbeef00000000000000000000000000000000000000000000000000000000"),
+            size_bytes: Some(99), // stale — actual file is 5 bytes
+        }];
+
+        assert!(
+            catalog_entry_installed(&models_dir, "cv:installed_stale", &files),
+            "sha256 marker present → installed despite stale size_bytes",
         );
         let _ = std::fs::remove_dir_all(&models_dir);
     }

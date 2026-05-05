@@ -44,6 +44,7 @@ pub struct CatalogRow {
 pub struct ListParams {
     pub family: Option<String>,
     pub family_role: Option<String>,
+    pub kind: Option<String>,
     pub modality: Option<String>,
     pub source: Option<String>,
     pub sub_family: Option<String>,
@@ -186,6 +187,10 @@ pub fn list(conn: &Connection, params: &ListParams) -> rusqlite::Result<Vec<Cata
         sql.push_str(" AND family_role = ?");
         args.push(Box::new(r.clone()));
     }
+    if let Some(k) = &params.kind {
+        sql.push_str(" AND kind = ?");
+        args.push(Box::new(k.clone()));
+    }
     if let Some(m) = &params.modality {
         sql.push_str(" AND modality = ?");
         args.push(Box::new(m.clone()));
@@ -251,6 +256,10 @@ pub fn count(conn: &Connection, params: &ListParams) -> rusqlite::Result<i64> {
     if let Some(r) = &params.family_role {
         sql.push_str(" AND family_role = ?");
         args.push(Box::new(r.clone()));
+    }
+    if let Some(k) = &params.kind {
+        sql.push_str(" AND kind = ?");
+        args.push(Box::new(k.clone()));
     }
     if let Some(m) = &params.modality {
         sql.push_str(" AND modality = ?");

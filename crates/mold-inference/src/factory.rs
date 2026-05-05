@@ -44,6 +44,37 @@ fn is_single_file(paths: &ModelPaths) -> bool {
             .is_some_and(|ext| ext == "safetensors")
 }
 
+/// Civitai / ComfyUI Flux.2 fine-tunes ship the transformer as one
+/// BFL-native single-file `.safetensors` (every key prefixed
+/// `model.diffusion_model.`) and rely on a separate `flux2-vae`
+/// companion for the VAE — so the SD-style `paths.transformer ==
+/// paths.vae` heuristic doesn't apply. Header-peek the transformer
+/// instead. Returns `true` for `BflNative`, `BflNativeRoot`, and
+/// `Nvfp4` — all three route through `SingleFileBackend` (NVFP4
+/// dequantises FP4×FP8-block to FP8-E4M3 on lookup; the BFL variants
+/// pass tensors through directly). Returns `false` for sharded
+/// transformers and for any non-`safetensors` path so HF diffusers
+/// layouts and GGUF quantised weights stay on the existing load paths.
+fn is_flux2_bfl_native_single_file(paths: &ModelPaths) -> bool {
+    if !paths.transformer_shards.is_empty() {
+        return false;
+    }
+    let path = &paths.transformer;
+    let is_safetensors = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"));
+    if !is_safetensors {
+        return false;
+    }
+    matches!(
+        crate::flux2::detect_format(path),
+        Ok(crate::flux2::Flux2SingleFileFormat::BflNative)
+            | Ok(crate::flux2::Flux2SingleFileFormat::BflNativeRoot)
+            | Ok(crate::flux2::Flux2SingleFileFormat::Nvfp4)
+    )
+}
+
 /// Create an inference engine for the given model, auto-detecting the family.
 ///
 /// Returns the appropriate engine (FluxEngine, SD15Engine, SDXLEngine, or ZImageEngine)
@@ -210,13 +241,30 @@ pub fn create_engine_with_pool(
             let qwen3_variant = std::env::var("MOLD_QWEN3_VARIANT")
                 .ok()
                 .or_else(|| config.qwen3_variant.clone());
-            Ok(Box::new(Flux2Engine::new(
-                model_name,
-                paths,
-                qwen3_variant,
-                load_strategy,
-                gpu_ordinal,
-            )))
+            if is_flux2_bfl_native_single_file(&paths) {
+                // Civitai / ComfyUI fine-tunes ship as one BFL-native
+                // safetensors. The VAE + Qwen3 text encoder come from the
+                // `flux2-vae` and `flux2-te*` companions wired by the
+                // catalog bridge — copy them through unchanged.
+                Ok(Box::new(Flux2Engine::from_single_file(
+                    model_name,
+                    paths.transformer.clone(),
+                    paths.vae.clone(),
+                    paths.text_encoder_files.clone(),
+                    paths.text_tokenizer.clone(),
+                    qwen3_variant,
+                    load_strategy,
+                    gpu_ordinal,
+                )?))
+            } else {
+                Ok(Box::new(Flux2Engine::new(
+                    model_name,
+                    paths,
+                    qwen3_variant,
+                    load_strategy,
+                    gpu_ordinal,
+                )))
+            }
         }
         "qwen-image" | "qwen_image" => Ok(Box::new(QwenImageEngine::new(
             model_name,
@@ -236,21 +284,56 @@ pub fn create_engine_with_pool(
             let t5_variant = std::env::var("MOLD_T5_VARIANT")
                 .ok()
                 .or_else(|| config.t5_variant.clone());
-            Ok(Box::new(LtxVideoEngine::new(
-                model_name,
-                paths,
-                t5_variant,
-                load_strategy,
-                gpu_ordinal,
-                shared_pool,
-            )))
+            if is_single_file(&paths) {
+                // Civitai single-file dispatch (phase 5). `paths.vae` is
+                // either the same checkpoint (combined transformer+VAE) or
+                // the ltx-video-vae companion set by `populate_companion_paths`.
+                let vae_path = if paths.vae != paths.transformer {
+                    Some(paths.vae.clone())
+                } else {
+                    None
+                };
+                Ok(Box::new(LtxVideoEngine::from_single_file(
+                    model_name,
+                    paths.transformer.clone(),
+                    vae_path,
+                    paths.t5_encoder.clone(),
+                    paths.t5_tokenizer.clone(),
+                    t5_variant,
+                    load_strategy,
+                    gpu_ordinal,
+                    shared_pool,
+                )?))
+            } else {
+                Ok(Box::new(LtxVideoEngine::new(
+                    model_name,
+                    paths,
+                    t5_variant,
+                    load_strategy,
+                    gpu_ordinal,
+                    shared_pool,
+                )))
+            }
         }
-        "ltx2" | "ltx-2" => Ok(Box::new(Ltx2Engine::new(
-            model_name,
-            paths,
-            load_strategy,
-            gpu_ordinal,
-        ))),
+        "ltx2" | "ltx-2" => {
+            if is_single_file(&paths) {
+                // Civitai single-file dispatch (phase 5). The combined
+                // LTX-2 checkpoint includes the VAE under `vae.*`.
+                Ok(Box::new(Ltx2Engine::from_single_file(
+                    model_name,
+                    paths.transformer.clone(),
+                    load_strategy,
+                    gpu_ordinal,
+                )?))
+            } else {
+                Ok(Box::new(Ltx2Engine::new(
+                    model_name,
+                    paths,
+                    load_strategy,
+                    gpu_ordinal,
+                )))
+            }
+        }
         "wuerstchen" | "wuerstchen-v2" => Ok(Box::new(WuerstchenEngine::new(
             model_name,
             paths,

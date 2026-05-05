@@ -16,6 +16,7 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -84,19 +85,109 @@ impl Flux2Engine {
         }
     }
 
-    /// Select the appropriate transformer config based on the model name.
-    /// Klein-9B uses a larger architecture than Klein-4B.
+    /// Construct a Flux.2 engine from a Civitai / ComfyUI single-file
+    /// safetensors checkpoint (BFL-native naming, every key prefixed
+    /// `model.diffusion_model.`).
+    ///
+    /// The transformer is the single-file checkpoint itself; the VAE,
+    /// Qwen3 text encoder, and tokenizer arrive via companion paths
+    /// resolved by the catalog bridge before the engine is constructed.
+    /// The header is not peeked here — `load_transformer` re-detects the
+    /// format at load time so a per-engine error surfaces in the same
+    /// place as every other transformer load failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_single_file(
+        model_name: String,
+        transformer_path: PathBuf,
+        vae_path: PathBuf,
+        text_encoder_files: Vec<PathBuf>,
+        text_tokenizer: Option<PathBuf>,
+        qwen3_variant: Option<String>,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+    ) -> Result<Self> {
+        if !transformer_path.exists() {
+            bail!(
+                "single-file Flux.2 checkpoint not found: {}",
+                transformer_path.display()
+            );
+        }
+
+        let paths = ModelPaths {
+            transformer: transformer_path,
+            transformer_shards: Vec::new(),
+            vae: vae_path,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files,
+            text_tokenizer,
+            decoder: None,
+        };
+
+        Ok(Self {
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
+            qwen3_variant,
+            prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
+            pending_placement: None,
+        })
+    }
+
+    /// Select the appropriate transformer config. Header-peeks the
+    /// checkpoint when it's a single-file `.safetensors` to determine
+    /// hidden_size (3072 → Klein-4B, 4096 → Klein-9B). Falls back to
+    /// the model-name heuristic for sharded HF diffusers layouts and
+    /// when header-peek can't find an `img_in.weight` marker (e.g. some
+    /// community FP8 conversions). This is necessary for opaque names
+    /// like `cv:2759597` whose mapping to a Klein variant is only
+    /// recoverable from the file itself.
     fn resolve_config(&self) -> Flux2Config {
-        let name = self.base.model_name.to_lowercase();
-        if name.contains("9b") {
+        if let Some(cfg) = self.detect_config_from_checkpoint() {
+            return cfg;
+        }
+        if self.base.model_name.to_lowercase().contains("9b") {
             Flux2Config::klein_9b()
         } else {
             Flux2Config::klein()
         }
     }
 
+    /// Header-peek the transformer file (if it's a single `.safetensors`)
+    /// and pick the config matching its `hidden_size`. Returns `None` for
+    /// sharded loads or when no `img_in.weight` marker is present.
+    fn detect_config_from_checkpoint(&self) -> Option<Flux2Config> {
+        if !self.base.paths.transformer_shards.is_empty() {
+            return None;
+        }
+        let path = &self.base.paths.transformer;
+        let is_safetensors = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"));
+        if !is_safetensors {
+            return None;
+        }
+        match super::single_file::detect_hidden_size(path) {
+            Ok(Some(4096)) => Some(Flux2Config::klein_9b()),
+            Ok(Some(3072)) => Some(Flux2Config::klein()),
+            // Anything else: unknown variant, defer to name heuristic.
+            _ => None,
+        }
+    }
+
     /// Whether this is a Klein-9B model (uses Qwen3-8B text encoder).
+    /// Mirrors `resolve_config` — peek the checkpoint first, fall back
+    /// to the model-name heuristic.
     fn is_9b(&self) -> bool {
+        if let Some(cfg) = self.detect_config_from_checkpoint() {
+            return cfg.hidden_size == 4096;
+        }
         self.base.model_name.to_lowercase().contains("9b")
     }
 
@@ -193,6 +284,28 @@ impl Flux2Engine {
                 ),
                 "Loading Flux.2 transformer (GPU, GGUF)",
             ))
+        } else if self.is_bfl_native_single_file() {
+            // Civitai / ComfyUI single-file checkpoints carry BFL-native
+            // tensor names (`model.diffusion_model.*`); the diffusers
+            // `Flux2Transformer::new` consumer is wrapped over a
+            // `SingleFileBackend` that translates those keys on the fly.
+            tracing::info!(
+                path = %self.base.paths.transformer.display(),
+                "loading Flux.2 transformer from BFL-native single-file checkpoint"
+            );
+            let backend =
+                crate::loader::single_file_backend::SingleFileBackend::from_flux2_singlefile(
+                    &self.base.paths.transformer,
+                    cfg,
+                )?;
+            let flux_vb =
+                candle_nn::VarBuilder::from_backend(Box::new(backend), gpu_dtype, device.clone());
+            Ok((
+                Flux2TransformerWrapper::BF16(super::transformer::Flux2Transformer::new(
+                    cfg, flux_vb,
+                )?),
+                "Loading Flux.2 transformer (GPU, BF16, single-file remap)",
+            ))
         } else {
             let xformer_paths = if !self.base.paths.transformer_shards.is_empty() {
                 self.base.paths.transformer_shards.clone()
@@ -213,6 +326,34 @@ impl Flux2Engine {
                 "Loading Flux.2 transformer (GPU, BF16)",
             ))
         }
+    }
+
+    /// `true` when the transformer is a single `.safetensors` file whose
+    /// tensor keys are BFL-native (`model.diffusion_model.*`). Returns
+    /// `true` for `BflNative`, `BflNativeRoot`, and `Nvfp4` — all route
+    /// through `SingleFileBackend` (the NVFP4 path dequantises FP4×FP8
+    /// blocks to FP8-E4M3 on lookup; the BFL variants pass tensors
+    /// through directly). Sharded loads (HF diffusers layout) and any
+    /// non-safetensors path skip this detection. Header-peeks the file
+    /// once per load — a few KB read.
+    fn is_bfl_native_single_file(&self) -> bool {
+        if !self.base.paths.transformer_shards.is_empty() {
+            return false;
+        }
+        let path = &self.base.paths.transformer;
+        let is_safetensors = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"));
+        if !is_safetensors {
+            return false;
+        }
+        matches!(
+            super::single_file::detect_format(path),
+            Ok(super::single_file::Flux2SingleFileFormat::BflNative)
+                | Ok(super::single_file::Flux2SingleFileFormat::BflNativeRoot)
+                | Ok(super::single_file::Flux2SingleFileFormat::Nvfp4)
+        )
     }
 
     /// Reload transformer using `&mut self` — called before the main `loaded` borrow
@@ -721,6 +862,22 @@ impl Flux2Engine {
         // --- Phase 3: VAE decode ---
         self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
+        // DEBUG: dump pre-VAE latent (B, 32, H, W) when MOLD_FLUX2_DUMP_LATENT is set.
+        if let Ok(dump_path) = std::env::var("MOLD_FLUX2_DUMP_LATENT") {
+            let latent_f32 = img.to_dtype(DType::F32)?.to_device(&candle_core::Device::Cpu)?;
+            let dims = latent_f32.dims().to_vec();
+            let v: Vec<f32> = latent_f32.flatten_all()?.to_vec1()?;
+            let mut bytes = Vec::with_capacity(8 * 4 + v.len() * 4);
+            bytes.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+            for d in &dims {
+                bytes.extend_from_slice(&(*d as u32).to_le_bytes());
+            }
+            for x in &v {
+                bytes.extend_from_slice(&x.to_le_bytes());
+            }
+            std::fs::write(&dump_path, &bytes)?;
+            tracing::info!(path = %dump_path, dims = ?dims, "dumped pre-VAE latent");
+        }
         let img = vae.decode(&img.to_dtype(gpu_dtype)?)?;
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
@@ -958,6 +1115,22 @@ impl Flux2Engine {
         // 7. Decode with VAE
         progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
+        // DEBUG: dump pre-VAE latent when MOLD_FLUX2_DUMP_LATENT is set.
+        if let Ok(dump_path) = std::env::var("MOLD_FLUX2_DUMP_LATENT") {
+            let latent_f32 = img.to_dtype(DType::F32)?.to_device(&candle_core::Device::Cpu)?;
+            let dims = latent_f32.dims().to_vec();
+            let v: Vec<f32> = latent_f32.flatten_all()?.to_vec1()?;
+            let mut bytes = Vec::with_capacity(8 * 4 + v.len() * 4);
+            bytes.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+            for d in &dims {
+                bytes.extend_from_slice(&(*d as u32).to_le_bytes());
+            }
+            for x in &v {
+                bytes.extend_from_slice(&x.to_le_bytes());
+            }
+            std::fs::write(&dump_path, &bytes)?;
+            tracing::info!(path = %dump_path, dims = ?dims, "dumped pre-VAE latent (parallel)");
+        }
         let img = loaded.vae.decode(&img.to_dtype(loaded.dtype)?)?;
 
         // 8. Convert to u8 image: clamp to [-1, 1], map to [0, 255]

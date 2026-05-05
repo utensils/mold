@@ -113,7 +113,7 @@ function build() {
   }
 
   function canDownload(entry: Pick<CatalogEntryWire, "engine_phase">): boolean {
-    return entry.engine_phase <= 2;
+    return entry.engine_phase <= 5;
   }
 
   async function startDownload(id: string) {

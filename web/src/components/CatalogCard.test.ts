@@ -30,6 +30,7 @@ const baseEntry: CatalogEntryWire = {
   tags: [],
   companions: [],
   download_recipe: { files: [], needs_token: null },
+  primary_path: null,
   created_at: null,
   updated_at: null,
   added_at: 0,
@@ -44,16 +45,16 @@ describe("CatalogCard", () => {
     expect(w.text()).toContain("1,234");
   });
 
-  it("shows phase badge for engine_phase >= 3", () => {
-    const entry: CatalogEntryWire = { ...baseEntry, engine_phase: 3 };
+  it("shows phase badge for engine_phase >= 6", () => {
+    const entry: CatalogEntryWire = { ...baseEntry, engine_phase: 6 };
     const w = mount(CatalogCard, { props: { entry } });
-    expect(w.text()).toMatch(/phase 3|coming/i);
+    expect(w.text()).toMatch(/phase 6|coming/i);
   });
 
-  it("does not show phase badge for engine_phase 2 (now downloadable)", () => {
-    const entry: CatalogEntryWire = { ...baseEntry, engine_phase: 2 };
+  it("does not show phase badge for engine_phase 5 (LTX single-file, now downloadable)", () => {
+    const entry: CatalogEntryWire = { ...baseEntry, engine_phase: 5 };
     const w = mount(CatalogCard, { props: { entry } });
-    expect(w.text()).not.toMatch(/phase 2/i);
+    expect(w.text()).not.toMatch(/phase 5/i);
   });
 
   it("shows Installed badge when entry.installed is true", () => {

@@ -140,7 +140,10 @@ pub fn from_hf(
     };
 
     let companions = match bundling {
-        Bundling::SingleFile => companions_for(family, bundling),
+        // HF entries don't currently carry a sub_family — pass None and let
+        // `companions_for` use its default branch. Single-file HF Flux.2
+        // entries are rare; the Civitai path is the load-bearing one.
+        Bundling::SingleFile => companions_for(family, None, bundling),
         Bundling::Separated => Vec::new(),
     };
     let phase = engine_phase_for(family, bundling);
@@ -291,7 +294,7 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
     } else {
         Bundling::Separated
     };
-    let companions = companions_for(family, bundling);
+    let companions = companions_for(family, sub_family.as_deref(), bundling);
     let phase = engine_phase_for(family, bundling);
     let modality = match family {
         Family::LtxVideo | Family::Ltx2 => Modality::Video,

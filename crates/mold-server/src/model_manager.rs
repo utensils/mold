@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use mold_core::{build_model_catalog, ModelInfoExtended, ModelPaths};
+use mold_core::{build_model_catalog, ModelDefaults, ModelInfo, ModelInfoExtended, ModelPaths};
 
 use crate::model_cache::ModelResidency;
 use crate::{routes::ApiError, state::AppState};
@@ -89,6 +89,7 @@ pub(crate) async fn refresh_config(state: &AppState) -> mold_core::Config {
 
 pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
     let config = refresh_config(state).await;
+    let models_dir = config.resolved_models_dir();
 
     // Multi-GPU mode: derive "loaded" state from the worker pool so /api/models
     // reflects the actual engine cache, not the legacy single-GPU snapshot.
@@ -102,11 +103,27 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
                 entry.info.is_loaded = true;
             }
         }
+        catalog.extend(installed_catalog_models(
+            state,
+            &config,
+            &models_dir,
+            primary.as_deref(),
+            primary.is_some(),
+        ));
         return catalog;
     }
 
     let snapshot = state.engine_snapshot.read().await.clone();
-    build_model_catalog(&config, snapshot.model_name.as_deref(), snapshot.is_loaded)
+    let mut catalog =
+        build_model_catalog(&config, snapshot.model_name.as_deref(), snapshot.is_loaded);
+    catalog.extend(installed_catalog_models(
+        state,
+        &config,
+        &models_dir,
+        snapshot.model_name.as_deref(),
+        snapshot.is_loaded,
+    ));
+    catalog
 }
 
 fn loaded_models_across_pool(state: &AppState) -> Vec<String> {
@@ -130,6 +147,284 @@ fn loaded_models_across_pool(state: &AppState) -> Vec<String> {
         }
     }
     names
+}
+
+// ── Catalog bridge ───────────────────────────────────────────────────────────
+//
+// Mirrors the logic in `mold-cli/src/catalog_bridge.rs` so the server can
+// resolve `cv:*` model IDs (Civitai single-file checkpoints downloaded via
+// the catalog web UI) without the binary crate as an intermediary.
+
+fn looks_like_catalog_id(id: &str) -> bool {
+    id.starts_with("cv:") || id.starts_with("hf:")
+}
+
+fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, paths: &ModelPaths) {
+    let to_str = |p: &std::path::PathBuf| p.to_str().map(str::to_owned);
+    match companion {
+        "clip-l" => {
+            cfg.clip_encoder = to_str(&paths.transformer);
+            cfg.clip_tokenizer = paths.clip_tokenizer.as_ref().and_then(to_str);
+        }
+        "clip-g" => {
+            cfg.clip_encoder_2 = to_str(&paths.transformer);
+            cfg.clip_tokenizer_2 = paths
+                .clip_tokenizer
+                .as_ref()
+                .and_then(to_str)
+                .or_else(|| cfg.clip_tokenizer.clone());
+        }
+        "sdxl-vae" | "sd-vae-ft-mse" | "flux-vae" => {}
+        "ltx-video-vae" | "flux2-vae" => {
+            cfg.vae = to_str(&paths.transformer);
+        }
+        "t5-v1_1-xxl" => {
+            cfg.t5_encoder = to_str(&paths.transformer);
+            cfg.t5_tokenizer = paths.t5_tokenizer.as_ref().and_then(to_str);
+        }
+        "z-image-te" | "flux2-te" | "flux2-te-9b" => {
+            cfg.text_encoder_files = paths
+                .text_encoder_files
+                .iter()
+                .filter_map(to_str)
+                .collect::<Vec<_>>()
+                .into();
+            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_str);
+        }
+        _ => {}
+    }
+}
+
+fn synthesize_catalog_config(
+    row: &mold_db::catalog::CatalogRow,
+    models_dir: &std::path::Path,
+    config: &mold_core::Config,
+) -> anyhow::Result<mold_core::ModelConfig> {
+    let recipe = serde_json::from_str::<mold_catalog::entry::DownloadRecipe>(&row.download_recipe)
+        .map_err(|e| anyhow::anyhow!("malformed download_recipe for {}: {e}", row.id))?;
+
+    let primary = recipe
+        .files
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("empty recipe for {}", row.id))?;
+
+    let sanitized = mold_core::download::sanitize_recipe_id(&row.id);
+    let (author, name) = match row.source_id.split_once('/') {
+        Some((a, n)) => (a, n),
+        None => ("", row.source_id.as_str()),
+    };
+    let rendered_dest =
+        mold_catalog::entry::render_recipe_dest(&primary.dest, &row.family, author, name);
+    let primary_path = models_dir.join(&sanitized).join(&rendered_dest);
+    let primary_str = primary_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("path not UTF-8: {primary_path:?}"))?
+        .to_string();
+
+    let mut cfg = mold_core::ModelConfig {
+        family: Some(row.family.clone()),
+        ..Default::default()
+    };
+
+    if row.bundling == "single-file" {
+        cfg.transformer = Some(primary_str.clone());
+        cfg.vae = Some(primary_str);
+    } else {
+        anyhow::bail!(
+            "bundling={:?} not supported (single-file only)",
+            row.bundling
+        );
+    }
+
+    // Populate companion paths from already-resolved manifest entries.
+    use mold_catalog::companions::companions_for;
+    use mold_catalog::entry::Bundling;
+    use mold_catalog::families::Family;
+    let fam = match row.family.as_str() {
+        "sd15" => Some(Family::Sd15),
+        "sdxl" => Some(Family::Sdxl),
+        "flux" => Some(Family::Flux),
+        "flux2" => Some(Family::Flux2),
+        "z-image" => Some(Family::ZImage),
+        "ltx-video" => Some(Family::LtxVideo),
+        "ltx2" => Some(Family::Ltx2),
+        "qwen-image" => Some(Family::QwenImage),
+        "wuerstchen" => Some(Family::Wuerstchen),
+        _ => None,
+    };
+    if let Some(fam) = fam {
+        for companion in companions_for(fam, row.sub_family.as_deref(), Bundling::SingleFile) {
+            if let Some(paths) = ModelPaths::resolve(&companion, config) {
+                copy_catalog_companion(&mut cfg, &companion, &paths);
+            }
+        }
+    }
+
+    Ok(cfg)
+}
+
+/// If `model_name` is a catalog ID and not yet in the config, synthesize its
+/// `ModelConfig` from the catalog DB and insert it. Returns `true` when a
+/// config entry was added (or already existed).
+async fn install_catalog_model(state: &AppState, model_name: &str) -> bool {
+    if !looks_like_catalog_id(model_name) {
+        return false;
+    }
+
+    // Already synthesized from a prior request?
+    {
+        let config = state.config.read().await;
+        if config.models.contains_key(model_name) {
+            return true;
+        }
+    }
+
+    let row = match state.catalog_db.catalog_get(model_name) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            tracing::debug!(model = model_name, "not found in catalog DB");
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!(model = model_name, error = %e, "catalog DB error");
+            return false;
+        }
+    };
+
+    let synth = {
+        let config = state.config.read().await;
+        let models_dir = config.resolved_models_dir();
+        match synthesize_catalog_config(&row, &models_dir, &config) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(model = model_name, error = %e, "synthesize failed");
+                return false;
+            }
+        }
+    };
+
+    let mut config = state.config.write().await;
+    config.models.insert(model_name.to_string(), synth);
+    true
+}
+
+/// Return `ModelInfoExtended` entries for every installed Civitai single-file
+/// checkpoint in the catalog DB that isn't already covered by a manifest.
+fn installed_catalog_models(
+    state: &AppState,
+    config: &mold_core::Config,
+    models_dir: &std::path::Path,
+    loaded_model: Option<&str>,
+    engine_is_loaded: bool,
+) -> Vec<ModelInfoExtended> {
+    let params = mold_db::catalog::ListParams {
+        kind: Some("checkpoint".to_string()),
+        source: Some("civitai".to_string()),
+        include_nsfw: true,
+        limit: 1000,
+        ..Default::default()
+    };
+    let rows = match state.catalog_db.catalog_list(&params) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to query catalog for installed models");
+            return vec![];
+        }
+    };
+
+    let mut out = Vec::new();
+    for row in rows {
+        if row.bundling != "single-file" {
+            continue;
+        }
+        // Skip entries already in the manifest (they're covered by build_model_catalog).
+        if mold_core::manifest::find_manifest_by_hf_repo(&row.source_id).is_some() {
+            continue;
+        }
+        let recipe =
+            match serde_json::from_str::<mold_catalog::entry::DownloadRecipe>(&row.download_recipe)
+            {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+        let (author, name) = match row.source_id.split_once('/') {
+            Some((a, n)) => (a, n),
+            None => ("", row.source_id.as_str()),
+        };
+        let rendered_dests: Vec<String> = recipe
+            .files
+            .iter()
+            .map(|f| mold_catalog::entry::render_recipe_dest(&f.dest, &row.family, author, name))
+            .collect();
+        let files: Vec<mold_core::download::RecipeFetchFile<'_>> = recipe
+            .files
+            .iter()
+            .zip(rendered_dests.iter())
+            .map(|(f, dest)| mold_core::download::RecipeFetchFile {
+                url: f.url.as_str(),
+                dest: dest.as_str(),
+                sha256: f.sha256.as_deref(),
+                size_bytes: f.size_bytes,
+            })
+            .collect();
+        if !mold_core::download::catalog_entry_installed(models_dir, &row.id, &files) {
+            continue;
+        }
+
+        let size_gb = row
+            .size_bytes
+            .map(|b| b as f32 / 1_000_000_000.0)
+            .unwrap_or(0.0);
+
+        // Use defaults from a visible manifest in the same family, fall back to
+        // family-specific constants.
+        let (w, h, steps, guidance) = mold_core::manifest::visible_manifests()
+            .find(|m| m.family == row.family)
+            .map(|m| {
+                let cfg = config.resolved_model_config(&m.name);
+                (
+                    cfg.effective_width(config),
+                    cfg.effective_height(config),
+                    cfg.effective_steps(config),
+                    cfg.effective_guidance(),
+                )
+            })
+            .unwrap_or_else(|| match row.family.as_str() {
+                "ltx-video" | "ltx2" => (768, 512, 25, 3.5),
+                "sdxl" => (1024, 1024, 20, 7.5),
+                "sd15" => (512, 512, 20, 7.5),
+                "flux" => (1024, 1024, 20, 3.5),
+                "flux2" => (512, 512, 4, 0.0),
+                _ => (1024, 1024, 20, 3.5),
+            });
+
+        let description = match &row.author {
+            Some(a) if !a.is_empty() => format!("{} by {a}", row.name),
+            _ => row.name.clone(),
+        };
+
+        out.push(ModelInfoExtended {
+            downloaded: true,
+            defaults: ModelDefaults {
+                default_width: w,
+                default_height: h,
+                default_steps: steps,
+                default_guidance: guidance,
+                description,
+            },
+            info: ModelInfo {
+                name: row.id.clone(),
+                family: row.family.clone(),
+                size_gb,
+                is_loaded: loaded_model.is_some_and(|n| engine_is_loaded && n == row.id),
+                last_used: None,
+                hf_repo: String::new(),
+            },
+            disk_usage_bytes: row.size_bytes.map(|b| b as u64),
+            remaining_download_bytes: Some(0),
+        });
+    }
+    out
 }
 
 /// Check whether a model is available — either already in the cache or
@@ -184,6 +479,20 @@ pub(crate) async fn check_model_available(
         if let Some(paths) = paths {
             return Ok(Some(paths));
         }
+    }
+
+    // Catalog bridge: synthesize config for installed cv:* / hf:* entries so
+    // the web UI can generate with models downloaded from the catalog.
+    if looks_like_catalog_id(model_name) {
+        if install_catalog_model(state, model_name).await {
+            let config = state.config.read().await;
+            if let Some(paths) = ModelPaths::resolve(model_name, &config) {
+                return Ok(Some(paths));
+            }
+        }
+        return Err(ApiError::not_found(format!(
+            "catalog model '{model_name}' is not installed. Download it from the catalog first."
+        )));
     }
 
     if mold_core::manifest::find_manifest(model_name).is_some() {
