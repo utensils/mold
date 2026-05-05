@@ -95,12 +95,18 @@ const composerRef = ref<InstanceType<typeof Composer> | null>(null);
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 
-const stream = useGenerateStream(async () => {
+// Auto-dismiss the done card once the gallery feed has the new entry —
+// the preview is now visible in the GalleryFeed below, so leaving the
+// strip card up is duplicate visual noise. Errored / canceled jobs stay
+// (they have nothing in the gallery to fall back to and the user may
+// want to re-read the error).
+const stream = useGenerateStream(async (job) => {
   try {
     galleryEntries.value = await listGallery();
   } catch {
     /* leave previous */
   }
+  if (job.state === "done") stream.remove(job.id);
 });
 
 async function refreshModels() {
@@ -198,7 +204,8 @@ const settingsDirty = computed(() => {
     Math.abs(s.guidance - m.default_guidance) > 0.001 ||
     s.batchSize !== 1 ||
     s.seed !== null ||
-    s.negativePrompt.length > 0
+    s.negativePrompt.length > 0 ||
+    s.lora !== null
   );
 });
 
@@ -260,6 +267,7 @@ function onSubmitScript(script: ChainScriptToml) {
     guidance: script.chain.guidance,
     strength: script.chain.strength,
     output_format: script.chain.output_format,
+    enable_audio: script.chain.enable_audio,
   };
   const decision = {
     kind: "chain" as const,

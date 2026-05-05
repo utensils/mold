@@ -410,7 +410,7 @@ mold rm flux-dev:q4 --force  # Remove without confirmation
 
 **Refresh:** `mold catalog refresh [--family flux] [--no-nsfw] [--dry-run]` re-runs the scanner against Hugging Face + Civitai, writes shards into `$MOLD_HOME/catalog/`, reseeds the DB. Maintainer-only `--commit-to-repo` writes into `crates/mold-catalog/data/catalog/`.
 
-**Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692` route through the catalog. Phase-1 supports HF separated-bundling entries with `engine_phase=1`. Single-file (Civitai) entries land in mold v0.10+ when sub-projects 2–5 ship.
+**Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692` route through the catalog. Phase-1 supports HF separated-bundling entries (`engine_phase=1`) and Flux.2 single-file Civitai fine-tunes. Phases 2 (SD1.5/SDXL), 3 (FLUX 1.x), 4 (Z-Image), and 5 (LTX-Video / LTX-2 / LTX-2.3) single-file Civitai checkpoints are supported — downloaded with companions and runnable via `mold run cv:<id>`. Flux.2 fine-tunes pull `flux2-vae` (168 MB Klein VAE, ungated) and either `flux2-te` (Qwen3-4B, ungated, for `sub_family=klein-4b`) or `flux2-te-9b` (Qwen3-8B, **HF_TOKEN required**, for `klein-9b` / `flux2-d`). Phase-5 LTX-Video entries pull `ltx-video-vae` as a companion (Civitai fine-tunes are transformer-only); LTX-2/2.3 entries require a combined checkpoint with bundled VAE (no companion). Single-file format detection is key-based (reads safetensors header only): `transformer_blocks.*` → LTX-Video, `blocks.*` → LTX-2, native vs diffusers prefix handled transparently.
 
 **Auth:** `HF_TOKEN` for gated Hugging Face repos; `CIVITAI_TOKEN` for early-access / NSFW Civitai. Web Settings persists these to `mold.db` `settings` (`huggingface.token`, `civitai.token`).
 

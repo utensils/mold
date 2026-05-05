@@ -5,6 +5,7 @@ import type {
   GenerateFormState,
   OutputFormat,
 } from "../types";
+import { familySupportsAudio } from "../types";
 import PlacementPanel from "./PlacementPanel.vue";
 import ScriptComposer from "./ScriptComposer.vue";
 import { outputFormatsForFamily } from "../composables/useGenerateForm";
@@ -97,6 +98,35 @@ function updateOutputFormat(v: string) {
     outputFormat: v as OutputFormat,
   });
 }
+
+// Audio toggle is only meaningful for AV-capable families (LTX-2 /
+// LTX-2.3). Hidden otherwise so users can't enable audio for a family
+// where the server would 400 on it.
+const supportsAudio = computed(() => familySupportsAudio(props.family));
+
+function updateEnableAudio(v: boolean) {
+  emit("update:modelValue", {
+    ...props.modelValue,
+    enableAudio: v,
+  });
+}
+
+// Defensive: if the selected family loses audio support (e.g. user picks
+// FLUX after generating with LTX-2.3), force enableAudio back to null so
+// the wire payload doesn't carry a stale `enable_audio: true` into a
+// chain auto-promotion that the server would reject. This is the last
+// line of defence — SettingsModal.selectModel + useGenerateForm both
+// already do this on their own paths, but watching family here covers
+// any future model-set path we might add.
+watch(
+  supportsAudio,
+  (sa) => {
+    if (!sa && props.modelValue.enableAudio !== null) {
+      emit("update:modelValue", { ...props.modelValue, enableAudio: null });
+    }
+  },
+  { immediate: true },
+);
 
 const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
 
@@ -250,6 +280,21 @@ defineExpose({ scriptComposerRef });
           </button>
         </div>
       </div>
+
+      <label
+        v-if="supportsAudio"
+        class="flex cursor-pointer items-center gap-2 px-1 text-xs text-slate-300"
+        title="Generate audio alongside video (LTX-2 / LTX-2.3 only). Mux'd into MP4 as a 48 kHz stereo AAC track."
+      >
+        <input
+          type="checkbox"
+          data-test="composer-enable-audio"
+          class="h-4 w-4 rounded border-slate-600 bg-slate-900 text-brand-500 focus:ring-brand-500"
+          :checked="modelValue.enableAudio === true"
+          @change="updateEnableAudio(($event.target as HTMLInputElement).checked)"
+        />
+        Generate audio
+      </label>
 
       <div v-if="statusLine" class="px-1 text-xs text-slate-500">
         {{ statusLine }}

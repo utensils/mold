@@ -271,3 +271,59 @@ describe("useGenerateForm placement", () => {
     expect(wire.placement).toBeUndefined();
   });
 });
+
+describe("useGenerateForm — enableAudio (LTX-2 / LTX-2.3)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("defaults enableAudio to null on hydrate so the wire stays clean for image families", () => {
+    const form = useGenerateForm();
+    expect(form.state.value.enableAudio).toBeNull();
+    expect(form.toRequest().enable_audio).toBeUndefined();
+  });
+
+  it("auto-enables audio when an LTX-2 model is selected so the AV path is on by default", () => {
+    // Mirrors the server-side `family_supports_audio("ltx2")` truth table.
+    // Switching to LTX-2 should turn audio on so the user gets the AV
+    // capability they expect from the model — they can still uncheck it.
+    const form = useGenerateForm();
+    form.applyModelDefaults(makeModel({ name: "ltx2:fp8", family: "ltx2" }));
+    expect(form.state.value.enableAudio).toBe(true);
+    expect(form.toRequest().enable_audio).toBe(true);
+  });
+
+  it("clears enableAudio back to null when switching from an AV family to an image family", () => {
+    // The server rejects `enable_audio: true` for non-AV families; the
+    // form must drop the toggle on family change so the user doesn't get
+    // a 400 they didn't ask for.
+    const form = useGenerateForm();
+    form.applyModelDefaults(makeModel({ name: "ltx2:fp8", family: "ltx2" }));
+    expect(form.state.value.enableAudio).toBe(true);
+    form.applyModelDefaults(
+      makeModel({ name: "flux-dev:q4", family: "flux" }),
+    );
+    expect(form.state.value.enableAudio).toBeNull();
+    expect(form.toRequest().enable_audio).toBeUndefined();
+  });
+
+  it("clears enableAudio when switching to LTX-Video (video but no audio path)", () => {
+    // LTX-Video is a video family but has no audio decode path. The toggle
+    // must NOT auto-on here even though the family is video — only LTX-2 /
+    // LTX-2.3 (`family === "ltx2"`) advertises audio support.
+    const form = useGenerateForm();
+    form.applyModelDefaults(makeModel({ name: "ltx2:fp8", family: "ltx2" }));
+    form.applyModelDefaults(
+      makeModel({ name: "ltx-video:fp16", family: "ltx-video" }),
+    );
+    expect(form.state.value.enableAudio).toBeNull();
+  });
+
+  it("forwards a user-set enableAudio onto the wire as enable_audio", () => {
+    const form = useGenerateForm();
+    form.state.value.enableAudio = false; // user explicitly disabled audio
+    expect(form.toRequest().enable_audio).toBe(false);
+    form.state.value.enableAudio = true;
+    expect(form.toRequest().enable_audio).toBe(true);
+  });
+});

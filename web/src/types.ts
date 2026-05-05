@@ -129,6 +129,7 @@ export interface GenerateRequestWire {
   frames?: number | null;
   fps?: number | null;
   placement?: DevicePlacement | null;
+  lora?: { path: string; scale: number } | null;
   /** AV-family (LTX-2 / LTX-2.3) audio decode toggle. `true` enables the
    * audio VAE + vocoder tail and produces an AAC track in the MP4 mux;
    * `false` skips audio decode; omit for "no preference" (server defaults
@@ -317,6 +318,11 @@ export interface ExpandFormState {
   familyOverride: string | null;
 }
 
+export interface LoraSelection {
+  path: string;
+  scale: number;
+}
+
 export interface GenerateFormState {
   version: 1;
   prompt: string;
@@ -336,6 +342,13 @@ export interface GenerateFormState {
   expand: ExpandFormState;
   sourceImage: SourceImageState | null;
   placement: DevicePlacement | null;
+  lora: LoraSelection | null;
+  /** Per-form audio toggle. `true`/`false` send the corresponding
+   * `enable_audio` on the wire; `null` omits the field so the server's
+   * MP4 default-on behavior takes over. Auto-set to `true` when the
+   * selected model's family supports audio (LTX-2 / LTX-2.3); otherwise
+   * forced to `null` so the wire stays clean. */
+  enableAudio: boolean | null;
 }
 
 // ── Video-family detection helper used by multiple components ──────────────

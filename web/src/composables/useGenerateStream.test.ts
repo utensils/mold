@@ -46,7 +46,7 @@ function scriptChain(
       { prompt: "cat on a rooftop", frames: 97, transition: "cut" },
       { prompt: "cat on the moon", frames: 97, transition: "fade" },
     ],
-    motion_tail_frames: 4,
+    motion_tail_frames: 17,
     width: 1216,
     height: 704,
     fps: 24,

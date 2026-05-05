@@ -195,6 +195,11 @@ function buildChainRequest(
     total_frames: req.frames ?? undefined,
     clip_frames: decision.clipFrames,
     source_image: req.source_image ?? null,
+    // Forward the single-mode audio toggle into the auto-expand chain so
+    // LTX-2.3 users with `frames > 97` still get audio. Omitted (undefined)
+    // when the form's enableAudio is null — the chain endpoint then
+    // defaults to off, matching the wire's omit-when-None semantics.
+    enable_audio: req.enable_audio ?? undefined,
   };
 }
 
