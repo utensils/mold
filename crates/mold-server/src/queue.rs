@@ -637,8 +637,11 @@ async fn process_job(state: &AppState, job: GenerationJob) {
     // Restore the engine to the cache as soon as the blocking task joins —
     // even panics must restore so the cache isn't left with a hole. If the
     // tokio task itself failed (JoinError), the engine is gone — restoration
-    // is impossible and the cache will repopulate via `ensure_model_ready`
-    // on the next request.
+    // is impossible. Without `clear_in_flight` the model name would leak
+    // forever in `in_flight`, so `ensure_model_ready` keeps fast-pathing
+    // through `contains()` while every subsequent `take()` returns `None`,
+    // permanently jamming this model. Clear the marker so the cache will
+    // legitimately re-load the engine on the next request.
     let result = match join_result {
         Ok((cached_engine, panic_or_result)) => {
             {
@@ -649,6 +652,10 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             Ok(panic_or_result)
         }
         Err(join_err) => {
+            {
+                let mut cache = state.model_cache.lock().await;
+                cache.clear_in_flight(&job.request.model);
+            }
             clear_active_generation(state);
             Err(join_err)
         }

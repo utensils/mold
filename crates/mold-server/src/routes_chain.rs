@@ -745,6 +745,18 @@ async fn run_chain_legacy(
     let (cached, outcome) = match join_handle.await {
         Ok(pair) => pair,
         Err(join_err) => {
+            // The blocking chain task aborted before returning the engine.
+            // We have no `CachedEngine` to restore, but we still hold an
+            // in_flight marker from the `cache.take(&req.model)` above.
+            // Without this cleanup the marker leaks forever: every later
+            // `ensure_model_ready` would fast-path through `contains()`
+            // (still true) and every later `cache.take()` would return
+            // None — permanently jamming this model. Clear the marker so
+            // the next request rebuilds the engine cleanly.
+            {
+                let mut cache = state.model_cache.lock().await;
+                cache.clear_in_flight(&req.model);
+            }
             return Err(ChainRunError::Internal(format!(
                 "chain orchestrator task failed: {join_err}"
             )));

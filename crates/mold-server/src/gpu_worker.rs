@@ -296,7 +296,7 @@ pub fn ensure_model_ready_sync(
         }
     }
 
-    // Check if we have it cached but not on GPU (Parked/Unloaded).
+    // Check if we have it cached but not on GPU (Parked).
     let has_cached = cache.contains(model_name);
 
     // Snapshot active VRAM and the cached engine's paths (if any) for the
@@ -615,7 +615,7 @@ mod tests {
     fn single_worker_pool_with_parked(model: &str, load_sleep: Duration) -> Arc<GpuWorker> {
         let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuJob>(2);
         let mut cache = ModelCache::new(3);
-        // Seed as Unloaded so `ensure_model_ready_sync` hits its reload path
+        // Seed as Parked so `ensure_model_ready_sync` hits its reload path
         // and calls `engine.load()` — that's where the sleep widens the window.
         cache.insert(FakeSlowEngine::boxed(model, load_sleep), 0);
         Arc::new(GpuWorker {

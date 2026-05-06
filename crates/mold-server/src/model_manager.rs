@@ -142,7 +142,7 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
         return catalog;
     }
 
-    let snapshot = state.engine_snapshot.read().await.clone();
+    let snapshot = state.model_cache.lock().await.snapshot();
     let mut catalog =
         build_model_catalog(&config, snapshot.model_name.as_deref(), snapshot.is_loaded);
     catalog.extend(installed_catalog_models(
@@ -471,15 +471,6 @@ pub(crate) async fn check_model_available(
         }
     }
 
-    // Check the snapshot as a fallback — it retains the model name even
-    // while the engine is temporarily taken out during loading.
-    {
-        let snapshot = state.engine_snapshot.read().await;
-        if snapshot.model_name.as_deref() == Some(model_name) {
-            return Ok(None);
-        }
-    }
-
     let paths = {
         let config = state.config.read().await;
         if config.manifest_model_needs_download(model_name) {
@@ -563,7 +554,7 @@ pub(crate) async fn ensure_model_ready(
                 return Ok(());
             }
 
-            // Cached but not on GPU (Unloaded or Parked) — need to reload.
+            // Cached but not on GPU (Parked) — need to reload.
             // MPS memory guard: check before unloading the active model.
             // Include the active model's footprint as reclaimable memory.
             if let Some(paths) = entry.engine.model_paths() {
@@ -588,11 +579,16 @@ pub(crate) async fn ensure_model_ready(
                 mold_inference::reclaim_gpu_memory(0);
             }
 
-            // Take the engine out of cache to load in spawn_blocking.
-            let mut engine = cache.remove(model_name).ok_or_else(|| {
+            // Take the engine out of cache to load in spawn_blocking. Using
+            // `take()` (not `remove()`) keeps the model name in the cache's
+            // `in_flight` set so concurrent `check_model_available` calls
+            // still see it as logically cached during the load window.
+            let cached = cache.take(model_name).ok_or_else(|| {
                 ApiError::internal(format!("cache race: model '{model_name}' vanished"))
             })?;
             drop(cache);
+
+            let mut engine = cached.engine;
 
             if let Some(callback) = progress.clone() {
                 engine.set_on_progress(Box::new(move |event| {
@@ -608,7 +604,7 @@ pub(crate) async fn ensure_model_ready(
             // Sample VRAM baseline before load so we can record the new
             // model's per-load delta rather than the device-global usage.
             let vram_baseline = mold_inference::device::vram_in_use_bytes(0);
-            let result = tokio::task::spawn_blocking(move || {
+            let join_result = tokio::task::spawn_blocking(move || {
                 tracing::info!(model = %model_log, "reloading cached engine...");
                 if let Err(e) = engine.load() {
                     tracing::error!("model reload failed: {e:#}");
@@ -619,11 +615,10 @@ pub(crate) async fn ensure_model_ready(
                 }
                 Ok(engine)
             })
-            .await
-            .map_err(|e| ApiError::internal(format!("model reload task failed: {e}")))?;
+            .await;
 
-            match result {
-                Ok(loaded_engine) => {
+            match join_result {
+                Ok(Ok(loaded_engine)) => {
                     #[cfg(feature = "metrics")]
                     {
                         let duration = load_start.elapsed().as_secs_f64();
@@ -636,16 +631,14 @@ pub(crate) async fn ensure_model_ready(
                     // Insert under the cache lock, but drop the evicted engine
                     // OUTSIDE the lock — `cuMemFree` and safetensor unmap during
                     // `Box<dyn ...>` drop can block other cache users for hundreds
-                    // of milliseconds.
+                    // of milliseconds. `insert` clears the in_flight marker.
                     let evicted = {
                         let mut cache = state.model_cache.lock().await;
-                        let evicted = cache.insert(loaded_engine, vram);
-                        update_snapshot(state, &cache).await;
-                        evicted
+                        cache.insert(loaded_engine, vram)
                     };
                     drop(evicted);
                 }
-                Err((api_err, unloaded_engine)) => {
+                Ok(Err((api_err, unloaded_engine))) => {
                     // Put it back as unloaded so cache isn't corrupted. The
                     // unloaded engine has no GPU resources to free, but for
                     // consistency with the file's invariant — never drop an
@@ -657,6 +650,25 @@ pub(crate) async fn ensure_model_ready(
                     };
                     drop(evicted);
                     return Err(api_err);
+                }
+                Err(join_err) => {
+                    // The blocking task aborted (panic that escaped the
+                    // closure, runtime shutdown, etc.). Engine is gone —
+                    // we can't restore it, so clear the in_flight marker
+                    // explicitly. Without this, the model name leaks
+                    // forever in `in_flight`: every subsequent
+                    // `ensure_model_ready` fast-paths through
+                    // `cache.contains()` (which still says true), then
+                    // `cache.take()` returns None, and generation fails
+                    // with "no engine available after model readiness
+                    // check" indefinitely for this model.
+                    {
+                        let mut cache = state.model_cache.lock().await;
+                        cache.clear_in_flight(model_name);
+                    }
+                    return Err(ApiError::internal(format!(
+                        "model reload task failed: {join_err}"
+                    )));
                 }
             }
             return Ok(());
@@ -740,7 +752,6 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
                 crate::metrics::clear_model_loaded(&name);
                 crate::metrics::record_gpu_memory(0);
             }
-            update_snapshot(state, &cache).await;
             drop(cache);
             // Legacy no-worker path only: hardcoded ordinal 0 is safe here
             // because `state.model_load_lock` (taken above) is the only
@@ -785,7 +796,6 @@ async fn create_and_load_engine(
                 "unloading active model before loading new one"
             );
         }
-        update_snapshot(state, &cache).await;
         result.is_some()
     };
     if had_active {
@@ -852,21 +862,11 @@ async fn create_and_load_engine(
     // block other cache users for hundreds of milliseconds.
     let evicted = {
         let mut cache = state.model_cache.lock().await;
-        let evicted = cache.insert(new_engine, vram);
-        update_snapshot(state, &cache).await;
-        evicted
+        cache.insert(new_engine, vram)
     };
     drop(evicted);
 
     Ok(())
-}
-
-/// Synchronize the engine snapshot with the current cache state.
-async fn update_snapshot(state: &AppState, cache: &crate::model_cache::ModelCache) {
-    let mut snapshot = state.engine_snapshot.write().await;
-    snapshot.model_name = cache.active_model().map(|s| s.to_string());
-    snapshot.is_loaded = cache.active_model().is_some();
-    snapshot.cached_models = cache.cached_model_names();
 }
 
 #[cfg(test)]

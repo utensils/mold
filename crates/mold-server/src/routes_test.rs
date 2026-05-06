@@ -22,10 +22,7 @@ mod tests {
     use std::time::Duration;
     use tower::ServiceExt;
 
-    use crate::{
-        routes::create_router,
-        state::{AppState, EngineSnapshot},
-    };
+    use crate::{routes::create_router, state::AppState};
 
     /// Serialize tests that mutate MOLD_MODELS_DIR env var.
     /// Uses std::sync::Mutex (not tokio) so it works across independent
@@ -1190,9 +1187,9 @@ mod tests {
         let state = AppState::with_engine(MockEngine::ready());
         let app = app_with_state(state.clone());
 
-        // Verify snapshot has model_name before unload
+        // Verify cache has an active model before unload
         {
-            let snapshot = state.engine_snapshot.read().await;
+            let snapshot = state.model_cache.lock().await.snapshot();
             assert!(snapshot.model_name.is_some());
             assert!(snapshot.is_loaded);
         }
@@ -1207,8 +1204,8 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // Snapshot must be fully cleared after unload
-        let snapshot = state.engine_snapshot.read().await;
+        // Cache snapshot must reflect no active model after unload
+        let snapshot = state.model_cache.lock().await.snapshot();
         assert!(
             snapshot.model_name.is_none(),
             "snapshot model_name should be None after unload"
@@ -1258,11 +1255,6 @@ mod tests {
             }),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
-                model_name: Some("mock-model".to_string()),
-                is_loaded: false,
-                cached_models: vec!["mock-model".to_string()],
-            })),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
             start_time: std::time::Instant::now(),
@@ -1316,11 +1308,6 @@ mod tests {
             }),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
-                model_name: Some("mock-model".to_string()),
-                is_loaded: false,
-                cached_models: vec!["mock-model".to_string()],
-            })),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
             start_time: std::time::Instant::now(),
@@ -1577,11 +1564,6 @@ mod tests {
             }),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot {
-                model_name: Some("mock-model".to_string()),
-                is_loaded: false,
-                cached_models: vec!["mock-model".to_string()],
-            })),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
             start_time: std::time::Instant::now(),
@@ -1618,7 +1600,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // After generation, snapshot should reflect the loaded model
-        let snapshot = state.engine_snapshot.read().await;
+        let snapshot = state.model_cache.lock().await.snapshot();
         assert_eq!(
             snapshot.model_name.as_deref(),
             Some("mock-model"),

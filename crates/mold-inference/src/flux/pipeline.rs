@@ -1997,11 +1997,15 @@ impl InferenceEngine for FluxEngine {
 
     fn unload(&mut self) {
         self.base.unload();
+        // prompt_cache holds GPU-resident T5/CLIP embedding tensors; clear so
+        // the unload actually frees VRAM.
         clear_cache(&self.prompt_cache);
+        // active_lora reflects the LoRA currently merged into the loaded
+        // transformer. After unload there is no transformer, so clear the
+        // marker — the next reload re-applies whatever is in the request.
         self.active_lora = None;
-        if let Ok(mut cache) = self.lora_delta_cache.lock() {
-            cache.clear();
-        }
+        // lora_delta_cache lives on CPU and survives park so the next reload
+        // can skip the B @ A · scale recompute. It dies with the engine on Drop.
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {

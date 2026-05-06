@@ -128,7 +128,6 @@ pub struct AppState {
 
     // ── Legacy single-GPU fields (retained during migration) ────────────────
     pub model_cache: Arc<Mutex<ModelCache>>,
-    pub engine_snapshot: Arc<tokio::sync::RwLock<EngineSnapshot>>,
     /// Uses std::sync::RwLock (not tokio) because it's only accessed from
     /// synchronous contexts (inside spawn_blocking closures and brief reads).
     /// Must never be held across an .await point.
@@ -171,7 +170,7 @@ pub struct AppState {
     pub catalog_db: Arc<mold_db::MetadataDb>,
 }
 
-/// Default maximum number of cached models (loaded + unloaded engine structs).
+/// Default maximum number of cached models (GPU-resident + parked engine structs).
 pub const DEFAULT_MAX_CACHED_MODELS: usize = 3;
 /// Lower / upper bounds applied to env-overridden cache caps. Below 1 the
 /// cache can't hold the active engine; above 16 the OOM risk dwarfs the
@@ -271,20 +270,12 @@ impl AppState {
         gpu_pool: Arc<GpuPool>,
         queue_capacity: usize,
     ) -> Self {
-        let name = engine.model_name().to_string();
-        let loaded = engine.is_loaded();
         let mut cache = ModelCache::new(resolve_max_cached_models());
         cache.insert(engine, 0);
-        let snapshot = EngineSnapshot {
-            model_name: Some(name),
-            is_loaded: loaded,
-            cached_models: cache.cached_model_names(),
-        };
         Self {
             gpu_pool,
             queue_capacity,
             model_cache: Arc::new(Mutex::new(cache)),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             start_time: Instant::now(),
@@ -314,7 +305,6 @@ impl AppState {
             gpu_pool,
             queue_capacity,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot::default())),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             start_time: Instant::now(),
@@ -353,20 +343,12 @@ impl AppState {
     pub fn with_engine(engine: impl InferenceEngine + 'static) -> Self {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = QueueHandle::new(tx);
-        let name = engine.model_name().to_string();
-        let loaded = engine.is_loaded();
         let mut cache = ModelCache::new(resolve_max_cached_models());
         cache.insert(Box::new(engine), 0);
-        let snapshot = EngineSnapshot {
-            model_name: Some(name),
-            is_loaded: loaded,
-            cached_models: cache.cached_model_names(),
-        };
         Self {
             gpu_pool: Self::empty_gpu_pool(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
             start_time: Instant::now(),
@@ -392,20 +374,12 @@ impl AppState {
     ) -> (Self, tokio::sync::mpsc::Receiver<GenerationJob>) {
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let queue = QueueHandle::new(tx);
-        let name = engine.model_name().to_string();
-        let loaded = engine.is_loaded();
         let mut cache = ModelCache::new(resolve_max_cached_models());
         cache.insert(Box::new(engine), 0);
-        let snapshot = EngineSnapshot {
-            model_name: Some(name),
-            is_loaded: loaded,
-            cached_models: cache.cached_model_names(),
-        };
         let state = Self {
             gpu_pool: Self::empty_gpu_pool(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
             start_time: Instant::now(),
@@ -436,7 +410,6 @@ impl AppState {
             }),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot::default())),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
             start_time: Instant::now(),
