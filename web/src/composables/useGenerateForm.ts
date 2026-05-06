@@ -2,6 +2,7 @@ import { ref, watch, type Ref } from "vue";
 import type {
   GenerateFormState,
   GenerateRequestWire,
+  LoraSelection,
   ModelInfoExtended,
   OutputFormat,
   Scheduler,
@@ -10,6 +11,7 @@ import {
   NO_CFG_FAMILIES,
   UNET_SCHEDULER_FAMILIES,
   VIDEO_FAMILIES,
+  familySupportsAudio,
 } from "../types";
 
 /** Output-format options for a given model family, ordered by preference.
@@ -47,6 +49,8 @@ function defaultForm(): GenerateFormState {
     expand: { enabled: false, variations: 1, familyOverride: null },
     sourceImage: null,
     placement: null,
+    lora: null,
+    enableAudio: null,
   };
 }
 
@@ -77,6 +81,7 @@ export interface UseGenerateForm {
   state: Ref<GenerateFormState>;
   reset: () => void;
   applyModelDefaults: (model: ModelInfoExtended) => void;
+  setLora: (lora: LoraSelection | null) => void;
   toRequest: () => GenerateRequestWire;
   isVideoFamily: (family: string) => boolean;
   supportsNegativePrompt: (family: string) => boolean;
@@ -101,12 +106,16 @@ export function useGenerateForm(): UseGenerateForm {
     reset: () => {
       state.value = defaultForm();
     },
+    setLora: (lora) => {
+      state.value.lora = lora;
+    },
     applyModelDefaults: (m) => {
       state.value.model = m.name;
       state.value.width = m.default_width;
       state.value.height = m.default_height;
       state.value.steps = m.default_steps;
       state.value.guidance = m.default_guidance;
+      state.value.lora = null; // LoRA is family-specific; clear on model change
       // Video families need sensible frame/fps defaults.
       if (VIDEO_FAMILIES.includes(m.family)) {
         state.value.frames ??= 25; // 8n+1
@@ -123,6 +132,11 @@ export function useGenerateForm(): UseGenerateForm {
       if (!formats.includes(state.value.outputFormat)) {
         state.value.outputFormat = formats[0];
       }
+      // Audio toggle defaults: ON for the only family with an audio path
+      // today (LTX-2 / LTX-2.3), null for everyone else so the wire stays
+      // clean and the server's MP4 default-on behaviour isn't fought.
+      // Mirrors `chain_limits::family_supports_audio` on the server.
+      state.value.enableAudio = familySupportsAudio(m.family) ? true : null;
     },
     toRequest: () => {
       const s = state.value;
@@ -144,6 +158,8 @@ export function useGenerateForm(): UseGenerateForm {
         frames: s.frames,
         fps: s.fps,
         placement: s.placement ?? undefined,
+        lora: s.lora ?? undefined,
+        enable_audio: s.enableAudio ?? undefined,
       };
     },
     isVideoFamily: (family: string) => VIDEO_FAMILIES.includes(family),

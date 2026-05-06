@@ -27,7 +27,37 @@ mod tests {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            std::fs::write(path, b"test").unwrap();
+            std::fs::write(&path, b"test").unwrap();
+            // Stamp the `.sha256-verified` marker so post-B3 acceptance
+            // logic recognises these fixtures as fully-installed. Without
+            // it, fixtures with a 4-byte body fail the size-match fallback
+            // (manifests declare GB-scale sizes) and `manifest_files_exist`
+            // returns false, breaking pre-existing assertions.
+            crate::download::write_sha256_marker(&path, "deadbeef").unwrap();
+        }
+    }
+
+    /// Variant that does NOT write markers — used to exercise the
+    /// "legacy install / truncated file" branches of `manifest_files_exist`.
+    /// Caller picks the on-disk size: pass `Some(n)` for a sized stub,
+    /// or `None` to write a 4-byte placeholder (will fail size-match for
+    /// any real manifest).
+    fn populate_manifest_files_unmarked(
+        root: &std::path::Path,
+        model: &str,
+        body_size: Option<usize>,
+    ) {
+        let manifest = find_manifest(model).unwrap();
+        for file in &manifest.files {
+            let path = root.join(storage_path(manifest, file));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            let body = match body_size {
+                Some(n) => vec![0u8; n],
+                None => b"test".to_vec(),
+            };
+            std::fs::write(&path, body).unwrap();
         }
     }
 
@@ -2271,6 +2301,65 @@ qwen3_variant = "iq4"
         assert!(
             !cfg.manifest_model_is_downloaded("real-esrgan-x4plus:fp16"),
             "upscaler without files should not be reported as downloaded"
+        );
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── B3: marker-or-size-match gating in `manifest_files_exist` ───────
+
+    #[test]
+    fn manifest_files_exist_accepts_marker_only_install() {
+        // Smallest body, marker present → must be reported as downloaded.
+        // Validates the new "marker is sufficient" acceptance.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("b3-marker-only");
+        populate_manifest_files(&dir, "real-esrgan-x4plus:fp16");
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+        let cfg = Config::default();
+        assert!(
+            cfg.manifest_model_is_downloaded("real-esrgan-x4plus:fp16"),
+            "files+marker must register as downloaded regardless of size"
+        );
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn manifest_files_exist_accepts_legacy_size_match_install() {
+        // No marker, but file size matches manifest → legacy install.
+        // Pre-existing users must not have their models disappear on upgrade.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("b3-legacy-size-match");
+        populate_manifest_files_unmarked(
+            &dir,
+            "real-esrgan-x4plus:fp16",
+            // The manifest declares 33_461_662 — match it exactly.
+            Some(33_461_662),
+        );
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+        let cfg = Config::default();
+        assert!(
+            cfg.manifest_model_is_downloaded("real-esrgan-x4plus:fp16"),
+            "unmarked-but-correct-size install must still be considered downloaded"
+        );
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn manifest_files_exist_rejects_truncated_unmarked() {
+        // No marker, wrong size — the partial-download case. This is the
+        // bug fix: pre-B3, a 4-byte stub was indistinguishable from a
+        // complete install for any model with `is_upscaler() || is_utility()`.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = test_models_dir("b3-truncated");
+        populate_manifest_files_unmarked(&dir, "real-esrgan-x4plus:fp16", None);
+        std::env::set_var("MOLD_MODELS_DIR", &dir);
+        let cfg = Config::default();
+        assert!(
+            !cfg.manifest_model_is_downloaded("real-esrgan-x4plus:fp16"),
+            "unmarked + size mismatch is the partial-download signature; must not register"
         );
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(dir);

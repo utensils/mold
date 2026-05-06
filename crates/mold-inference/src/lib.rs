@@ -17,6 +17,7 @@ pub mod loader;
 pub mod ltx2;
 pub mod ltx_video;
 pub mod model_registry;
+pub(crate) mod nvfp4;
 pub mod progress;
 pub mod qwen_image;
 pub mod scheduler;

@@ -52,6 +52,27 @@ pub struct ActiveHandle {
     pub abort: CancellationToken,
 }
 
+/// Membership ledger for a catalog entry's downloads. Tracks every job
+/// (primary + companions) that belongs to a single user-visible catalog
+/// id (`cv:1759168`, an HF entry, etc.) so the queue knows when the *whole*
+/// entry is ready — not just when one of its jobs finished.
+///
+/// Why this exists: `catalog_api::post_catalog_download` enqueues companions
+/// (CLIP-L/G, VAE) before the primary checkpoint. Pre-C, the SPA refreshed
+/// its model list on the primary's `JobDone` event, which sometimes fired
+/// before companions were on disk — that's the "model sometimes doesn't
+/// show up after download" bug. Now the SPA listens for `CatalogReady`,
+/// emitted exactly once when the last job in the group settles.
+#[derive(Debug, Clone)]
+struct CatalogGroup {
+    catalog_id: String,
+    /// Every job that must settle before the group is ready.
+    job_ids: std::collections::HashSet<String>,
+    /// Final status keyed by job id. Group is ready when
+    /// `outcomes.len() == job_ids.len()`.
+    outcomes: HashMap<String, JobStatus>,
+}
+
 pub struct DownloadQueue {
     active: AsyncMutex<Option<ActiveHandle>>,
     queued: StdMutex<VecDeque<DownloadJob>>,
@@ -63,6 +84,12 @@ pub struct DownloadQueue {
     /// drained by the driver task before running the job. Manifest jobs
     /// have no entry here and fall through to the `PullDriver` path.
     recipe_payloads: StdMutex<HashMap<String, RecipePayload>>,
+    /// Catalog group bookkeeping. Keyed by catalog id; cleared when the
+    /// group emits `CatalogReady`. Memory-only — server restart resets
+    /// the ledger, which is fine because in-flight downloads were lost
+    /// too and the next `manifest_files_exist` poll will report any
+    /// half-done install as incomplete.
+    groups: StdMutex<HashMap<String, CatalogGroup>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +118,7 @@ impl DownloadQueue {
             events,
             notify: Notify::new(),
             recipe_payloads: StdMutex::new(HashMap::new()),
+            groups: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -266,6 +294,92 @@ impl DownloadQueue {
         });
         self.notify.notify_one();
         Ok((id, position, EnqueueOutcome::Created))
+    }
+
+    /// Enqueue a manifest model and bind the resulting job to a catalog
+    /// group. Same return shape as [`Self::enqueue`]; an `AlreadyPresent`
+    /// outcome still registers the existing job into the group, so a
+    /// catalog-driven enqueue that races with a manual `mold pull` of the
+    /// same companion still gets its membership tracked correctly.
+    pub async fn enqueue_in_group(
+        &self,
+        model: String,
+        catalog_id: &str,
+    ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
+        let (id, pos, outcome) = self.enqueue(model).await?;
+        self.register_in_group(catalog_id, &id);
+        Ok((id, pos, outcome))
+    }
+
+    /// Recipe-pull variant of [`Self::enqueue_in_group`]. Catalog id is
+    /// taken from the payload, so callers don't pass it twice.
+    pub async fn enqueue_recipe_in_group(
+        &self,
+        payload: RecipePayload,
+        catalog_id: &str,
+    ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
+        let (id, pos, outcome) = self.enqueue_recipe(payload).await?;
+        self.register_in_group(catalog_id, &id);
+        Ok((id, pos, outcome))
+    }
+
+    fn register_in_group(&self, catalog_id: &str, job_id: &str) {
+        let mut groups = match self.groups.lock() {
+            Ok(g) => g,
+            Err(_) => return, // poisoned — best effort, the broadcast still works
+        };
+        let entry = groups
+            .entry(catalog_id.to_string())
+            .or_insert_with(|| CatalogGroup {
+                catalog_id: catalog_id.to_string(),
+                job_ids: std::collections::HashSet::new(),
+                outcomes: HashMap::new(),
+            });
+        entry.job_ids.insert(job_id.to_string());
+    }
+
+    /// Record a job's terminal status against any catalog group it belongs
+    /// to. When the group's outcome map fills (`outcomes.len() ==
+    /// job_ids.len()`), emit `CatalogReady { ok: all_completed }` and
+    /// drop the group from the ledger. Idempotent: a job not in any
+    /// group is a no-op.
+    ///
+    /// Called from `try_pull_with_retry` after each terminal arm
+    /// (Completed / Failed / Cancelled).
+    pub(crate) fn settle_for_group(&self, job_id: &str, status: JobStatus) {
+        // Two-phase to avoid emitting under the lock.
+        let to_emit = {
+            let mut groups = match self.groups.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            let mut emit_for: Option<(String, bool)> = None;
+            // O(groups). In practice catalogs queue 2–4 jobs each and
+            // there's rarely more than a handful of in-flight catalog
+            // entries — keeping the index direct rather than building a
+            // job_id → catalog_id reverse map.
+            for group in groups.values_mut() {
+                if !group.job_ids.contains(job_id) {
+                    continue;
+                }
+                group.outcomes.insert(job_id.to_string(), status);
+                if group.outcomes.len() == group.job_ids.len() {
+                    let ok = group
+                        .outcomes
+                        .values()
+                        .all(|s| matches!(s, JobStatus::Completed));
+                    emit_for = Some((group.catalog_id.clone(), ok));
+                }
+                break; // a job belongs to at most one group
+            }
+            if let Some((id, _)) = &emit_for {
+                groups.remove(id);
+            }
+            emit_for
+        };
+        if let Some((id, ok)) = to_emit {
+            self.emit(DownloadEvent::CatalogReady { id, ok });
+        }
     }
 
     /// Take ownership of the recipe payload registered for a job, if any.
@@ -505,8 +619,9 @@ pub(crate) mod test_hooks {
 
 /// Marker suffix written after a successful SHA-256 verification.
 /// A file `foo.safetensors` is "verified" when `foo.safetensors.sha256-verified`
-/// exists next to it.
-const SHA256_VERIFIED_SUFFIX: &str = ".sha256-verified";
+/// exists next to it. Sourced from `mold-core` so the constant has a single
+/// definition shared across the pull writer and cleanup reader.
+use mold_core::download::SHA256_VERIFIED_SUFFIX;
 
 /// Walk `dir` and delete every regular file that does NOT have a sibling
 /// `<file>.sha256-verified` marker. Files that are themselves `*.sha256-verified`
@@ -712,6 +827,7 @@ async fn try_pull_with_retry(
                     id: job.id.clone(),
                     model: job.model.clone(),
                 });
+                queue.settle_for_group(&job.id, JobStatus::Completed);
                 return Ok(());
             }
             Err(AttemptError::Cancelled) => {
@@ -724,6 +840,7 @@ async fn try_pull_with_retry(
                     .await;
                 cleanup_partials_for_model(&job.model);
                 queue.emit(DownloadEvent::JobCancelled { id: job.id.clone() });
+                queue.settle_for_group(&job.id, JobStatus::Cancelled);
                 return Err(());
             }
             Err(AttemptError::Failed(msg)) => {
@@ -741,6 +858,7 @@ async fn try_pull_with_retry(
                                 .await;
                             cleanup_partials_for_model(&job.model);
                             queue.emit(DownloadEvent::JobCancelled { id: job.id.clone() });
+                            queue.settle_for_group(&job.id, JobStatus::Cancelled);
                             return Err(());
                         }
                     }
@@ -759,6 +877,7 @@ async fn try_pull_with_retry(
                     id: job.id.clone(),
                     error: msg,
                 });
+                queue.settle_for_group(&job.id, JobStatus::Failed);
                 return Err(());
             }
         }

@@ -3328,6 +3328,31 @@ pub fn find_manifest(name: &str) -> Option<&'static ModelManifest> {
     MANIFEST_INDEX.get(&canonical).map(|&i| &KNOWN_MANIFESTS[i])
 }
 
+/// Find a manifest whose Transformer (or TransformerShard) file points
+/// at the given Hugging Face repo (e.g. `"black-forest-labs/FLUX.1-dev"`).
+/// Used by the catalog API to map HF catalog rows back to a known model
+/// name when computing the `installed` wire field — `find_manifest`
+/// itself is keyed on canonical names like `"flux-dev:q8"`, so HF repo
+/// paths never resolve through it directly.
+///
+/// Returns the FIRST matching manifest in `KNOWN_MANIFESTS` order. When
+/// multiple quantizations of the same model share an HF repo
+/// (e.g. several `flux-dev:qN` variants from `city96/FLUX.1-dev-gguf`),
+/// the caller may not get the variant the user actually has on disk —
+/// that's fine, because `manifest_model_is_downloaded` then queries
+/// the resolved canonical name and returns `false` if the user has
+/// no copy of that specific variant.
+pub fn find_manifest_by_hf_repo(hf_repo: &str) -> Option<&'static ModelManifest> {
+    KNOWN_MANIFESTS.iter().find(|m| {
+        m.files.iter().any(|f| {
+            matches!(
+                f.component,
+                ModelComponent::Transformer | ModelComponent::TransformerShard
+            ) && f.hf_repo == hf_repo
+        })
+    })
+}
+
 /// Find smaller quantized alternatives for a model.
 /// Given `"ultrareal-v2:bf16"`, returns `["ultrareal-v3:q4", "ultrareal-v3:q8", ...]`
 /// sorted by model size ascending. Returns empty if no alternatives found.
@@ -3793,9 +3818,23 @@ pub fn paths_from_downloads(
 
     let transformer_shards = collect(ModelComponent::TransformerShard);
 
-    // Transformer: use single Transformer file, or first TransformerShard as primary path
-    let transformer =
-        find(ModelComponent::Transformer).or_else(|| transformer_shards.first().cloned())?;
+    // Transformer: prefer Transformer / TransformerShard. Pure text-encoder
+    // companions (e.g. flux2-te) declare only TextEncoder files — fall back
+    // to the first TextEncoder shard so the companion still produces a
+    // usable ModelPaths for `manifest_files_exist` and the bridge's
+    // `text_encoder_files` collection logic.
+    let transformer = find(ModelComponent::Transformer)
+        .or_else(|| transformer_shards.first().cloned())
+        .or_else(|| {
+            if UTILITY_FAMILIES.contains(&family) {
+                downloads
+                    .iter()
+                    .find(|(c, _)| *c == ModelComponent::TextEncoder)
+                    .map(|(_, p)| p.clone())
+            } else {
+                None
+            }
+        })?;
 
     // Utility models and LTX-2: transformer + optional tokenizer, no standalone VAE asset
     let vae = if UTILITY_FAMILIES.contains(&family) || family == "ltx2" {
@@ -4528,7 +4567,7 @@ fn companion_manifests() -> Vec<ModelManifest> {
                 .to_string(),
             files: vec![ModelFile {
                 hf_repo: "city96/t5-v1_1-xxl-encoder-bf16".to_string(),
-                hf_filename: "t5xxl_fp16.safetensors".to_string(),
+                hf_filename: "model.safetensors".to_string(),
                 component: ModelComponent::Transformer,
                 size_bytes: 9_787_841_024,
                 gated: false,
@@ -4537,13 +4576,34 @@ fn companion_manifests() -> Vec<ModelManifest> {
             defaults: defaults.clone(),
             hidden: true,
         },
-        // FLUX VAE — used by FLUX and Flux.2 single-file checkpoints. BFL
-        // gating applies; the catalog UI shows the "needs token" badge.
+        // LTX-Video VAE — used by LTX-Video single-file Civitai checkpoints.
+        // Civitai fine-tunes are transformer-only; the VAE is pulled separately
+        // from the same HF repo mold uses for manifest-based LTX-Video models.
+        ModelManifest {
+            name: "ltx-video-vae".to_string(),
+            family: "companion".to_string(),
+            description: "LTX-Video VAE companion (single-file Civitai LTX-Video checkpoints)"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "Lightricks/LTX-Video-0.9.5".to_string(),
+                hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+                // Companion manifests are download-only; the engine resolves
+                // the VAE from paths.transformer. Same pattern as sdxl-vae /
+                // flux-vae / sd-vae-ft-mse companions.
+                component: ModelComponent::Transformer,
+                size_bytes: 2_493_855_612,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // FLUX VAE — used by FLUX single-file checkpoints. BFL gating
+        // applies; the catalog UI shows the "needs token" badge.
         ModelManifest {
             name: "flux-vae".to_string(),
             family: "companion".to_string(),
-            description: "Black Forest Labs FLUX VAE companion (single-file FLUX/Flux.2)"
-                .to_string(),
+            description: "Black Forest Labs FLUX VAE companion (single-file FLUX)".to_string(),
             files: vec![ModelFile {
                 hf_repo: "black-forest-labs/FLUX.1-schnell".to_string(),
                 hf_filename: "ae.safetensors".to_string(),
@@ -4551,6 +4611,114 @@ fn companion_manifests() -> Vec<ModelManifest> {
                 size_bytes: 335_304_388,
                 gated: true,
                 sha256: Some("afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"),
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // Flux.2 text encoder — Qwen3 4B (two safetensors shards) +
+        // tokenizer. Pulled from the Apache-2.0 Klein-4B repo so single-file
+        // Civitai Flux.2 checkpoints have a runnable text encoder.
+        ModelManifest {
+            name: "flux2-te".to_string(),
+            family: "companion".to_string(),
+            description: "Flux.2 Qwen3 text encoder + tokenizer companion (single-file Flux.2)"
+                .to_string(),
+            files: vec![
+                ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+                    hf_filename: "text_encoder/model-00001-of-00002.safetensors".to_string(),
+                    component: ModelComponent::TextEncoder,
+                    size_bytes: 4_967_215_360,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+                    hf_filename: "text_encoder/model-00002-of-00002.safetensors".to_string(),
+                    component: ModelComponent::TextEncoder,
+                    size_bytes: 3_077_766_632,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+                    hf_filename: "tokenizer/tokenizer.json".to_string(),
+                    component: ModelComponent::TextTokenizer,
+                    size_bytes: 11_422_654,
+                    gated: false,
+                    sha256: None,
+                },
+            ],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // Flux.2 text encoder for Klein-9B / FLUX.2-Dev — Qwen3 8B (four
+        // safetensors shards) + tokenizer. Sourced from the gated
+        // FLUX.2-klein-9B repo; users need a BFL token to pull it.
+        ModelManifest {
+            name: "flux2-te-9b".to_string(),
+            family: "companion".to_string(),
+            description:
+                "Flux.2 Qwen3-8B text encoder + tokenizer companion (single-file Klein-9B / Dev)"
+                    .to_string(),
+            files: vec![
+                ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+                    hf_filename: "text_encoder/model-00001-of-00004.safetensors".to_string(),
+                    component: ModelComponent::TextEncoder,
+                    size_bytes: 4_902_257_696,
+                    gated: true,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+                    hf_filename: "text_encoder/model-00002-of-00004.safetensors".to_string(),
+                    component: ModelComponent::TextEncoder,
+                    size_bytes: 4_915_960_368,
+                    gated: true,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+                    hf_filename: "text_encoder/model-00003-of-00004.safetensors".to_string(),
+                    component: ModelComponent::TextEncoder,
+                    size_bytes: 4_983_068_496,
+                    gated: true,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+                    hf_filename: "text_encoder/model-00004-of-00004.safetensors".to_string(),
+                    component: ModelComponent::TextEncoder,
+                    size_bytes: 1_580_230_264,
+                    gated: true,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "black-forest-labs/FLUX.2-klein-9B".to_string(),
+                    hf_filename: "tokenizer/tokenizer.json".to_string(),
+                    component: ModelComponent::TextTokenizer,
+                    size_bytes: 11_422_654,
+                    gated: true,
+                    sha256: None,
+                },
+            ],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // Flux.2 VAE — Klein-specific, ~168 MB. Distinct from `flux-vae`
+        // (FLUX.1's 335 MB ae.safetensors) which is incompatible.
+        ModelManifest {
+            name: "flux2-vae".to_string(),
+            family: "companion".to_string(),
+            description: "Flux.2 Klein VAE companion (single-file Flux.2)".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+                hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 168_120_878,
+                gated: false,
+                sha256: None,
             }],
             defaults,
             hidden: true,
@@ -5117,8 +5285,10 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 6 Companion = 103
-        assert_eq!(known_manifests().len(), 103);
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 10 Companion = 107
+        // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
+        // catalog bridge (single-file Civitai Flux.2 fine-tunes).
+        assert_eq!(known_manifests().len(), 107);
     }
 
     #[test]
@@ -6376,11 +6546,12 @@ mod tests {
     #[test]
     fn all_utility_models_identified_by_is_utility() {
         let utility_count = known_manifests().iter().filter(|m| m.is_utility()).count();
-        // Currently 8: 2 qwen3-expand variants + 6 catalog companions
-        // (clip-l, clip-g, sdxl-vae, sd-vae-ft-mse, t5-v1_1-xxl, flux-vae).
+        // Currently 12: 2 qwen3-expand variants + 10 catalog companions
+        // (clip-l, clip-g, sdxl-vae, sd-vae-ft-mse, t5-v1_1-xxl, flux-vae,
+        // ltx-video-vae, flux2-te, flux2-te-9b, flux2-vae).
         assert_eq!(
-            utility_count, 8,
-            "expected exactly 8 utility models, got {utility_count}"
+            utility_count, 12,
+            "expected exactly 12 utility models, got {utility_count}"
         );
     }
 
@@ -6418,6 +6589,10 @@ mod tests {
         "sd-vae-ft-mse",
         "t5-v1_1-xxl",
         "flux-vae",
+        "flux2-te",
+        "flux2-te-9b",
+        "flux2-vae",
+        "ltx-video-vae",
     ];
 
     #[test]
@@ -6928,5 +7103,36 @@ mod tests {
                 manifest.name
             );
         }
+    }
+
+    #[test]
+    fn find_manifest_by_hf_repo_matches_transformer_repo() {
+        // FLUX.1-dev is a well-known canonical entry — its transformer
+        // ships from black-forest-labs/FLUX.1-dev (BF16 path) and from
+        // city96/FLUX.1-dev-gguf (GGUF quantizations). Either repo string
+        // must surface a matching manifest.
+        assert!(find_manifest_by_hf_repo("black-forest-labs/FLUX.1-dev").is_some());
+        assert!(find_manifest_by_hf_repo("city96/FLUX.1-dev-gguf").is_some());
+    }
+
+    #[test]
+    fn find_manifest_by_hf_repo_returns_none_for_unknown_repo() {
+        assert!(find_manifest_by_hf_repo("some-random-org/never-shipped").is_none());
+    }
+
+    #[test]
+    fn find_manifest_by_hf_repo_ignores_non_transformer_repos() {
+        // lmz/mt5-tokenizers ships only T5Tokenizer files across every
+        // manifest that references it — never as a Transformer or
+        // TransformerShard. The lookup must not surface those manifests
+        // when keyed on the tokenizer repo, otherwise an HF catalog row
+        // pointing at a tokenizer would mis-route to whatever model
+        // happens to bundle that tokenizer.
+        //
+        // (Note: openai/clip-vit-large-patch14 is NOT a safe choice for
+        // this assertion — the `clip-l` companion manifest declares its
+        // CLIP weights as `ModelComponent::Transformer`, so the lookup
+        // legitimately resolves CLIP-L there.)
+        assert!(find_manifest_by_hf_repo("lmz/mt5-tokenizers").is_none());
     }
 }

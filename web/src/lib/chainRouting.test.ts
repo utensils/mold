@@ -56,12 +56,19 @@ describe("decideChainRouting", () => {
     ).toMatchObject({ kind: "chain", stageCount: 3 });
   });
 
-  it("rejects non-ltx2-distilled models when frames exceed the single-clip budget", () => {
+  it("rejects ltx2-non-distilled models when frames exceed the single-clip budget", () => {
+    // ltx2 family but non-distilled: only the distilled path implements
+    // chain rendering on the server.
     const d = decideChainRouting(241, "ltx2", "ltx-2-19b:fp8");
     expect(d.kind).toBe("reject");
   });
 
-  it("stays single for non-ltx2-distilled when frames are within budget", () => {
+  it("rejects entirely-unknown families when frames exceed the single-clip budget", () => {
+    const d = decideChainRouting(241, "flux", "flux-schnell:q4");
+    expect(d.kind).toBe("reject");
+  });
+
+  it("stays single when frames are within budget regardless of family", () => {
     expect(decideChainRouting(49, "ltx-video", "ltx-video-0.9.6:bf16")).toEqual(
       { kind: "single" },
     );
@@ -70,7 +77,34 @@ describe("decideChainRouting", () => {
     });
   });
 
-  it("rejects when motion tail is >= clip frames", () => {
+  it("chains ltx-video models above the cap with motion_tail=0 (no context handoff)", () => {
+    // ltx-video has no img2vid path on the server, so motion_tail is forced
+    // to 0 — the SPA mirrors that. 241 frames @ clip=97, tail=0 →
+    // effective=97, remainder=144, stageCount = 1 + ceil(144/97) = 1 + 2 = 3.
+    const d = decideChainRouting(
+      241,
+      "ltx-video",
+      "ltx-video-0.9.8-13b-dev:bf16",
+    );
+    expect(d).toEqual({
+      kind: "chain",
+      clipFrames: 97,
+      motionTail: 0,
+      stageCount: 3,
+    });
+  });
+
+  it("ignores caller-supplied motionTail for ltx-video (zeroed server-side)", () => {
+    const d = decideChainRouting(
+      300,
+      "ltx-video",
+      "ltx-video-0.9.8-13b-distilled:bf16",
+      17,
+    );
+    expect(d).toMatchObject({ kind: "chain", motionTail: 0 });
+  });
+
+  it("rejects when motion tail is >= clip frames (only relevant for ltx2 chains)", () => {
     const d = decideChainRouting(200, "ltx2", "ltx-2.3-22b-distilled:fp8", 97);
     expect(d.kind).toBe("reject");
   });

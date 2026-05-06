@@ -230,7 +230,18 @@ pub async fn run(
 
     // Load config and pull model-specific defaults.
     let ctx = CliContext::new(host.as_deref());
-    let config = ctx.config().clone();
+    let mut config = ctx.config().clone();
+    // Catalog bridge: when the user passed `cv:<id>` / `hf:<author>/<name>`,
+    // synthesise a `ModelConfig` and inject it into `config.models` so the
+    // downstream `ModelPaths::resolve` and engine factory accept it. This
+    // mirrors what `resolve_run_args` does in the run command — but the
+    // run command and `generate::run` each load their own `Config`
+    // (via `CliContext::new`), so the synthesis must run on this side
+    // too. Best-effort; failures fall through to the standard "unknown
+    // model" path.
+    if let Some(db) = mold_db::global_db() {
+        let _ = crate::catalog_bridge::install_catalog_model_with_db(db, &mut config, model);
+    }
     // `--no-metadata` is an opt-out override, so we only pass `Some(false)` when set.
     // Otherwise we defer to env/config/default precedence inside Config.
     let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
@@ -317,6 +328,7 @@ pub async fn run(
                     motion_tail: mt,
                     source_image: source_image.clone(),
                     placement: placement.clone(),
+                    enable_audio,
                 };
                 // Consume otherwise-unused LTX-2 knobs that chain v1 ignores so
                 // clippy doesn't fire `unused_variables` on the early return.
@@ -329,7 +341,6 @@ pub async fn run(
                     &retake_range,
                     &spatial_upscale,
                     &temporal_upscale,
-                    &enable_audio,
                     &mask_image,
                     &control_image,
                     &control_model,

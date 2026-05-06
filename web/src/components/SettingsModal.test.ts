@@ -21,6 +21,8 @@ const defaultModelValue = {
   outputFormat: "png" as const,
   expand: { enabled: false, variations: 1 as const, familyOverride: null },
   placement: null,
+  lora: null,
+  enableAudio: null,
 };
 
 // Teleport renders outside the wrapper root; attach to document.body and

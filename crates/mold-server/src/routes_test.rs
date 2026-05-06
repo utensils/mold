@@ -336,7 +336,11 @@ mod tests {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            std::fs::write(path, b"test").unwrap();
+            std::fs::write(&path, b"test").unwrap();
+            // Stamp a `.sha256-verified` marker so the post-B3 completeness
+            // check accepts these 4-byte stubs as installed (size mismatch
+            // would otherwise reject them as truncated).
+            mold_core::download::write_sha256_marker(&path, "deadbeef").unwrap();
         }
     }
 
@@ -2744,6 +2748,10 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&serde_json::Value::String("fade".into())));
+        assert_eq!(
+            limits["supports_audio"], true,
+            "ltx2 family advertises audio so the SPA can show the toggle",
+        );
     }
 
     #[tokio::test]

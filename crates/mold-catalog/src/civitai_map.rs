@@ -165,7 +165,11 @@ pub fn engine_phase_for(family: Family, bundling: Bundling) -> u8 {
         // Diffusers HF entries already work via existing engine paths.
         (_, Separated) => 1,
         (Sd15 | Sdxl, SingleFile) => 2,
-        (Flux | Flux2, SingleFile) => 3,
+        // Flux.2 single-file is wired through the catalog bridge with the
+        // `flux2-te` + `flux2-vae` companions. FLUX (1.x) single-file is
+        // still pending — its bridge wiring lands later.
+        (Flux2, SingleFile) => 1,
+        (Flux, SingleFile) => 3,
         (ZImage, SingleFile) => 4,
         (LtxVideo | Ltx2, SingleFile) => 5,
         (QwenImage | Wuerstchen, SingleFile) => 99,

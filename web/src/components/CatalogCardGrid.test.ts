@@ -1,0 +1,131 @@
+import { mount } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ref } from "vue";
+import CatalogCardGrid from "./CatalogCardGrid.vue";
+
+// Stub IntersectionObserver so jsdom/happy-dom mounts don't crash on it.
+// The test inspects markup rather than driving observer callbacks.
+class FakeIntersectionObserver {
+  observe = vi.fn();
+  disconnect = vi.fn();
+  unobserve = vi.fn();
+  takeRecords = vi.fn(() => []);
+}
+
+const baseEntry = {
+  id: "hf:row-0",
+  name: "Row 0",
+  family: "flux",
+  engine_phase: 1,
+  installed: false,
+  source: "hf",
+  source_id: "r0",
+  author: null,
+  family_role: "foundation",
+  sub_family: null,
+  modality: "image",
+  kind: "checkpoint",
+  file_format: "safetensors",
+  bundling: "separated",
+  size_bytes: 1,
+  download_count: 100,
+  rating: null,
+  likes: 0,
+  nsfw: false,
+  thumbnail_url: null,
+  description: null,
+  license: null,
+  license_flags: null,
+  tags: [],
+  companions: [],
+  download_recipe: { files: [], needs_token: null },
+  created_at: null,
+  updated_at: null,
+  added_at: 0,
+};
+
+let mockState: {
+  entries: any;
+  loading: any;
+  loadingMore: any;
+  hasMore: any;
+  errorMsg: any;
+  loadMore: ReturnType<typeof vi.fn>;
+  openDetail: ReturnType<typeof vi.fn>;
+};
+
+vi.mock("../composables/useCatalog", () => ({
+  useCatalog: () => mockState,
+}));
+
+beforeEach(() => {
+  (globalThis as any).IntersectionObserver = FakeIntersectionObserver;
+  mockState = {
+    entries: ref([baseEntry]),
+    loading: ref(false),
+    loadingMore: ref(false),
+    hasMore: ref(true),
+    errorMsg: ref<string | null>(null),
+    loadMore: vi.fn(),
+    openDetail: vi.fn(),
+  };
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  delete (globalThis as any).IntersectionObserver;
+});
+
+describe("CatalogCardGrid infinite scroll", () => {
+  it("renders the load-more sentinel when hasMore is true", () => {
+    const w = mount(CatalogCardGrid);
+    expect(w.find('[data-testid="catalog-load-more-sentinel"]').exists()).toBe(
+      true,
+    );
+  });
+
+  it("omits the sentinel when hasMore is false", () => {
+    mockState.hasMore = ref(false);
+    const w = mount(CatalogCardGrid);
+    expect(w.find('[data-testid="catalog-load-more-sentinel"]').exists()).toBe(
+      false,
+    );
+  });
+
+  it("shows a loading-more indicator when loadingMore is true", () => {
+    mockState.loadingMore = ref(true);
+    const w = mount(CatalogCardGrid);
+    expect(w.text()).toContain("Loading more");
+  });
+
+  it("attaches an IntersectionObserver to the sentinel on mount", () => {
+    const observeSpy = vi.fn();
+    (globalThis as any).IntersectionObserver = class {
+      observe = observeSpy;
+      disconnect = vi.fn();
+      unobserve = vi.fn();
+      takeRecords = () => [];
+    };
+    mount(CatalogCardGrid);
+    expect(observeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls loadMore when the observer reports the sentinel intersecting", () => {
+    let storedCallback: ((entries: any[]) => void) | null = null;
+    (globalThis as any).IntersectionObserver = class {
+      constructor(cb: (entries: any[]) => void) {
+        storedCallback = cb;
+      }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+      takeRecords() {
+        return [];
+      }
+    };
+    mount(CatalogCardGrid);
+    expect(storedCallback).not.toBeNull();
+    storedCallback!([{ isIntersecting: true }]);
+    expect(mockState.loadMore).toHaveBeenCalled();
+  });
+});

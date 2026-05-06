@@ -129,6 +129,12 @@ export interface GenerateRequestWire {
   frames?: number | null;
   fps?: number | null;
   placement?: DevicePlacement | null;
+  lora?: { path: string; scale: number } | null;
+  /** AV-family (LTX-2 / LTX-2.3) audio decode toggle. `true` enables the
+   * audio VAE + vocoder tail and produces an AAC track in the MP4 mux;
+   * `false` skips audio decode; omit for "no preference" (server defaults
+   * to on for MP4 output). The server rejects `true` for non-AV families. */
+  enable_audio?: boolean | null;
 }
 
 export interface ModelDefaults {
@@ -246,6 +252,12 @@ export interface ChainRequestWire {
   total_frames?: number;
   clip_frames?: number;
   source_image?: string | null;
+  /** Mux per-stage audio into the stitched MP4 (LTX-2 / LTX-2.3 only).
+   * Omit for the wire default of off — chains opt in to audio
+   * explicitly so existing callers don't suddenly produce audio they
+   * didn't ask for. The server returns 400 if `true` for non-AV
+   * families (see `chain_limits::family_supports_audio`). */
+  enable_audio?: boolean | null;
 }
 
 export type ChainProgressEvent =
@@ -306,6 +318,11 @@ export interface ExpandFormState {
   familyOverride: string | null;
 }
 
+export interface LoraSelection {
+  path: string;
+  scale: number;
+}
+
 export interface GenerateFormState {
   version: 1;
   prompt: string;
@@ -325,6 +342,13 @@ export interface GenerateFormState {
   expand: ExpandFormState;
   sourceImage: SourceImageState | null;
   placement: DevicePlacement | null;
+  lora: LoraSelection | null;
+  /** Per-form audio toggle. `true`/`false` send the corresponding
+   * `enable_audio` on the wire; `null` omits the field so the server's
+   * MP4 default-on behavior takes over. Auto-set to `true` when the
+   * selected model's family supports audio (LTX-2 / LTX-2.3); otherwise
+   * forced to `null` so the wire stays clean. */
+  enableAudio: boolean | null;
 }
 
 // ── Video-family detection helper used by multiple components ──────────────
@@ -333,6 +357,16 @@ export const VIDEO_FAMILIES: ReadonlyArray<string> = [
   "ltx2",
   "ltx-2",
 ];
+
+// Families with an audio decode path. Mirrors the server-side
+// `chain_limits::family_supports_audio` — the SPA gates the audio
+// toggle on this so users can't enable an audio mux for a family
+// that has no audio output. Today only LTX-2 / LTX-2.3 (`"ltx2"`).
+export const AUDIO_FAMILIES: ReadonlyArray<string> = ["ltx2", "ltx-2"];
+
+export function familySupportsAudio(family: string): boolean {
+  return AUDIO_FAMILIES.includes(family);
+}
 
 // Families whose image pipeline ignores the negative prompt.
 export const NO_CFG_FAMILIES: ReadonlyArray<string> = [
@@ -385,6 +419,17 @@ export interface DownloadsListingWire {
 }
 
 export type DownloadEventWire =
+  /// First frame of any new SSE subscription — full queue snapshot so a
+  /// fresh client paints current state without waiting for the next
+  /// delta. The reducer replaces all state with the listing payload.
+  | {
+      type: "snapshot";
+      listing: {
+        active: DownloadJobWire | null;
+        queued: DownloadJobWire[];
+        history: DownloadJobWire[];
+      };
+    }
   | { type: "enqueued"; id: string; model: string; position: number }
   | { type: "dequeued"; id: string }
   | {
@@ -403,7 +448,13 @@ export type DownloadEventWire =
   | { type: "file_done"; id: string; filename: string }
   | { type: "job_done"; id: string; model: string }
   | { type: "job_failed"; id: string; error: string }
-  | { type: "job_cancelled"; id: string };
+  | { type: "job_cancelled"; id: string }
+  /// All jobs (primary + companions) for a catalog entry have settled.
+  /// Emitted exactly once per catalog download. Listen for this instead
+  /// of `job_done` when refreshing the model list after a catalog pull —
+  /// the primary's `job_done` fires before companions are necessarily on
+  /// disk, which is the "model sometimes doesn't show up" race.
+  | { type: "catalog_ready"; id: string; ok: boolean };
 // ──────────────────────────────────────────────────────────────────────────────
 // Resource telemetry (Agent B scope). Mirror of `mold_core::ResourceSnapshot`
 // et al. `vram_used_by_mold` / `vram_used_by_other` are null on Metal hosts
@@ -486,6 +537,20 @@ export interface CatalogEntryWire {
     needs_token: "hf" | "civitai" | null;
   };
   engine_phase: number;
+  /**
+   * True when every file the entry needs is already present under the
+   * configured models_dir. Computed server-side per request from the
+   * recipe's `dest` paths (Civitai) or the resolved manifest's expected
+   * file set (HF). Drives the Download↔Repair button swap in the
+   * CatalogDetailDrawer and the "installed" chip on CatalogCard.
+   */
+  installed: boolean;
+  /**
+   * Absolute filesystem path to the primary file when installed (Civitai
+   * entries only). Null for HF entries or when not installed. Used by the
+   * web generate UI to pass `lora.path` directly to the generate request.
+   */
+  primary_path: string | null;
   created_at: number | null;
   updated_at: number | null;
   added_at: number;
@@ -495,6 +560,13 @@ export interface CatalogListResponse {
   entries: CatalogEntryWire[];
   page: number;
   page_size: number;
+  /**
+   * Total rows matching the request's WHERE clauses, ignoring pagination.
+   * Optional so older servers that don't yet emit it still parse — the
+   * SPA falls back to a "last page came back full → keep loading" heuristic
+   * when this is undefined.
+   */
+  total?: number;
 }
 
 export interface CatalogFamilyCount {
@@ -510,6 +582,7 @@ export interface CatalogFamiliesResponse {
 export interface CatalogListParams {
   family?: string;
   family_role?: "foundation" | "finetune";
+  kind?: "checkpoint" | "lora" | "vae" | "text-encoder" | "control-net";
   modality?: "image" | "video";
   source?: "hf" | "civitai";
   sub_family?: string;

@@ -26,7 +26,7 @@ pub static COMPANIONS: &[Companion] = &[
     Companion {
         canonical_name: "t5-v1_1-xxl",
         kind: Kind::TextEncoder,
-        family_scope: &[Family::Flux, Family::Flux2, Family::LtxVideo, Family::Ltx2],
+        family_scope: &[Family::Flux, Family::LtxVideo, Family::Ltx2],
         source: Source::Hf,
         repo: "city96/t5-v1_1-xxl-encoder-bf16",
         files: &["t5xxl_*.safetensors"],
@@ -35,7 +35,7 @@ pub static COMPANIONS: &[Companion] = &[
     Companion {
         canonical_name: "clip-l",
         kind: Kind::TextEncoder,
-        family_scope: &[Family::Flux, Family::Flux2, Family::Sd15, Family::Sdxl],
+        family_scope: &[Family::Flux, Family::Sd15, Family::Sdxl],
         source: Source::Hf,
         repo: "openai/clip-vit-large-patch14",
         files: &[
@@ -80,11 +80,60 @@ pub static COMPANIONS: &[Companion] = &[
     Companion {
         canonical_name: "flux-vae",
         kind: Kind::Vae,
-        family_scope: &[Family::Flux, Family::Flux2],
+        family_scope: &[Family::Flux],
         source: Source::Hf,
         repo: "black-forest-labs/FLUX.1-dev",
         files: &["ae.safetensors"],
         size_bytes: 335_000_000,
+    },
+    // Flux.2 Klein-4B text encoder + tokenizer (Qwen3 4B, two shards). The
+    // single-file Civitai Flux.2 checkpoints strip text-encoder weights to
+    // keep download size manageable, so we pull Qwen3 from the Apache-2.0
+    // Klein-4B repo. Used for sub_family=klein-4b only.
+    Companion {
+        canonical_name: "flux2-te",
+        kind: Kind::TextEncoder,
+        family_scope: &[Family::Flux2],
+        source: Source::Hf,
+        repo: "black-forest-labs/FLUX.2-klein-4B",
+        files: &[
+            "text_encoder/model-00001-of-00002.safetensors",
+            "text_encoder/model-00002-of-00002.safetensors",
+            "tokenizer/tokenizer.json",
+        ],
+        size_bytes: 8_056_404_646,
+    },
+    // Flux.2 Klein-9B text encoder + tokenizer (Qwen3 8B, four shards).
+    // Hosted in the gated Klein-9B repo — single-file Civitai Klein-9B
+    // fine-tunes need this encoder and the user must have a BFL token.
+    // Used for sub_family ∈ {klein-9b, flux2-d}.
+    Companion {
+        canonical_name: "flux2-te-9b",
+        kind: Kind::TextEncoder,
+        family_scope: &[Family::Flux2],
+        source: Source::Hf,
+        repo: "black-forest-labs/FLUX.2-klein-9B",
+        files: &[
+            "text_encoder/model-00001-of-00004.safetensors",
+            "text_encoder/model-00002-of-00004.safetensors",
+            "text_encoder/model-00003-of-00004.safetensors",
+            "text_encoder/model-00004-of-00004.safetensors",
+            "tokenizer/tokenizer.json",
+        ],
+        size_bytes: 16_392_938_478,
+    },
+    // Flux.2 Klein VAE (~168 MB). Distinct from `flux-vae` (FLUX.1's 335 MB
+    // ae.safetensors) — Flux.2 ships a smaller VAE and the engine refuses to
+    // load FLUX.1's ae as a substitute. The same VAE is used by both Klein-4B
+    // and Klein-9B; we pull from the ungated Klein-4B repo.
+    Companion {
+        canonical_name: "flux2-vae",
+        kind: Kind::Vae,
+        family_scope: &[Family::Flux2],
+        source: Source::Hf,
+        repo: "black-forest-labs/FLUX.2-klein-4B",
+        files: &["vae/diffusion_pytorch_model.safetensors"],
+        size_bytes: 168_120_878,
     },
     // Reserved canonical for Z-Image. The exact text-encoder repo is
     // finalized when phase-4 single-file loader lands; the canonical
@@ -99,25 +148,57 @@ pub static COMPANIONS: &[Companion] = &[
         files: &["text_encoder/*"],
         size_bytes: 4_400_000_000,
     },
+    // VAE for LTX-Video single-file catalog entries. Civitai LTX-Video
+    // fine-tunes are transformer-only, so the VAE must be pulled
+    // separately from the same repo mold uses for manifest-based models.
+    Companion {
+        canonical_name: "ltx-video-vae",
+        kind: Kind::Vae,
+        family_scope: &[Family::LtxVideo],
+        source: Source::Hf,
+        repo: "Lightricks/LTX-Video-0.9.5",
+        files: &["vae/diffusion_pytorch_model.safetensors"],
+        size_bytes: 2_493_855_612,
+    },
 ];
 
 pub fn companion_by_name(name: &str) -> Option<&'static Companion> {
     COMPANIONS.iter().find(|c| c.canonical_name == name)
 }
 
-/// Returns the canonical-companion names a given (family, bundling) needs.
-/// Empty for `Bundling::Separated` because diffusers HF entries are
-/// self-contained.
-pub fn companions_for(family: Family, bundling: Bundling) -> Vec<CompanionRef> {
+/// Returns the canonical-companion names a given (family, sub_family,
+/// bundling) needs. Empty for `Bundling::Separated` because diffusers HF
+/// entries are self-contained.
+///
+/// `sub_family` distinguishes encoder size for families where the same
+/// `Family` value covers multiple architectures — currently just Flux.2,
+/// where `klein-4b` uses Qwen3 4B and `klein-9b` / `flux2-d` use Qwen3 8B.
+pub fn companions_for(
+    family: Family,
+    sub_family: Option<&str>,
+    bundling: Bundling,
+) -> Vec<CompanionRef> {
     if matches!(bundling, Bundling::Separated) {
         return Vec::new();
     }
     let mut out = Vec::new();
     match family {
-        Family::Flux | Family::Flux2 => {
+        Family::Flux => {
             push(&mut out, "t5-v1_1-xxl");
             push(&mut out, "clip-l");
             push(&mut out, "flux-vae");
+        }
+        Family::Flux2 => {
+            // Flux.2 uses Qwen3 (not T5+CLIP-L) and a Klein-specific VAE.
+            // Klein-4B has a 4B Qwen3 encoder (ungated, Apache-2.0);
+            // Klein-9B and Flux.2-Dev share the gated 8B encoder. Default
+            // to the 9B encoder when sub_family is unknown — it works for
+            // the common case (most Civitai fine-tunes are Klein-9B-based).
+            match sub_family {
+                Some("klein-4b") => push(&mut out, "flux2-te"),
+                _ => push(&mut out, "flux2-te-9b"),
+            }
+            push(&mut out, "flux2-vae");
         }
         Family::Sd15 => {
             push(&mut out, "clip-l");
@@ -131,7 +212,14 @@ pub fn companions_for(family: Family, bundling: Bundling) -> Vec<CompanionRef> {
         Family::ZImage => {
             push(&mut out, "z-image-te");
         }
-        Family::LtxVideo | Family::Ltx2 => {
+        Family::LtxVideo => {
+            push(&mut out, "t5-v1_1-xxl");
+            // Civitai LTX-Video checkpoints are transformer-only; VAE
+            // comes from the companion.
+            push(&mut out, "ltx-video-vae");
+        }
+        Family::Ltx2 => {
+            // LTX-2 combined checkpoints bundle the VAE — no VAE companion.
             push(&mut out, "t5-v1_1-xxl");
         }
         // Single-file for these is `engine_phase: 99` — no companions.

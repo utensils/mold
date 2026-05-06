@@ -31,6 +31,21 @@ export type ChainRoutingDecision =
     }
   | { kind: "reject"; reason: string };
 
+/** Families that support chain rendering. Mirrors the server-side
+ * `chain_limits::family_cap` whitelist. `ltx2` has true latent-handoff chain
+ * support; `ltx-video` uses an img2vid-less fallback (independent clips
+ * stitched together) so subjects can drift between clips, but it lets users
+ * generate videos longer than the per-clip cap. */
+const CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set([
+  "ltx2",
+  "ltx-video",
+]);
+
+/** Families that have proper latent context handoff between clips. For
+ * everything else the server forces motion_tail=0 (Smooth ≡ Cut at stitch
+ * level) because there's no overlap region to trim. */
+const FAMILIES_WITH_CONTEXT_HANDOFF: ReadonlySet<string> = new Set(["ltx2"]);
+
 export function decideChainRouting(
   frames: number | null | undefined,
   family: string | null | undefined,
@@ -39,23 +54,36 @@ export function decideChainRouting(
 ): ChainRoutingDecision {
   if (!frames || frames <= 0) return { kind: "single" };
 
-  const isLtx2Distilled = family === "ltx2" && model.includes("distilled");
+  const fam = family ?? "";
+  const isChainCapable =
+    CHAIN_CAPABLE_FAMILIES.has(fam) &&
+    // ltx2 still requires a distilled checkpoint — only the distilled path
+    // implements `as_chain_renderer` on the server. ltx-video accepts any
+    // model in the family because the fallback wraps the standard t2v path.
+    (fam !== "ltx2" || model.includes("distilled"));
 
-  if (!isLtx2Distilled) {
+  if (!isChainCapable) {
     if (frames <= LTX2_DISTILLED_CLIP_CAP) return { kind: "single" };
     return {
       kind: "reject",
-      reason: `Model '${model}' does not support chained video generation (only LTX-2 distilled families do). Reduce frames to ${LTX2_DISTILLED_CLIP_CAP} or less.`,
+      reason: `Model '${model}' does not support chained video generation. Reduce frames to ${LTX2_DISTILLED_CLIP_CAP} or less.`,
     };
   }
 
   const clipFrames = LTX2_DISTILLED_CLIP_CAP;
   if (frames <= clipFrames) return { kind: "single" };
 
-  if (motionTail >= clipFrames) {
+  // For families without context handoff (ltx-video), motion_tail is forced
+  // to 0 server-side. Mirror that here so stage count math matches what the
+  // server will actually run.
+  const effectiveMotionTail = FAMILIES_WITH_CONTEXT_HANDOFF.has(fam)
+    ? motionTail
+    : 0;
+
+  if (effectiveMotionTail >= clipFrames) {
     return {
       kind: "reject",
-      reason: `motion tail (${motionTail}) must be strictly less than clip frames (${clipFrames}).`,
+      reason: `motion tail (${effectiveMotionTail}) must be strictly less than clip frames (${clipFrames}).`,
     };
   }
 
@@ -64,9 +92,14 @@ export function decideChainRouting(
   // — the first clip emits `clipFrames` frames, every continuation emits
   // `clipFrames - motionTail` new frames after the motion tail is trimmed
   // at stitch time.
-  const effective = clipFrames - motionTail;
+  const effective = clipFrames - effectiveMotionTail;
   const remainder = frames - clipFrames;
   const stageCount = 1 + Math.ceil(remainder / effective);
 
-  return { kind: "chain", clipFrames, motionTail, stageCount };
+  return {
+    kind: "chain",
+    clipFrames,
+    motionTail: effectiveMotionTail,
+    stageCount,
+  };
 }

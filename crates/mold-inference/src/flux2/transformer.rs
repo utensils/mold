@@ -11,8 +11,328 @@
 //!
 //! Loads from HuggingFace diffusers `Flux2Transformer2DModel` safetensors format.
 
-use candle_core::{DType, IndexOp, Result, Tensor, D};
-use candle_nn::{LayerNorm, Linear, RmsNorm, VarBuilder};
+use candle_core::{DType, IndexOp, Module, Result, Tensor, D};
+use candle_nn::{LayerNorm, RmsNorm, VarBuilder};
+use std::sync::{Arc, OnceLock};
+
+// ---------------------------------------------------------------------------
+// Linear (BF16 + FP8 + NVFP4 streaming)
+// ---------------------------------------------------------------------------
+
+/// Linear layer supporting BF16 (`Standard`), FP8 manual-cast (`Fp8`), and
+/// NVFP4 streaming-dequant (`Nvfp4Streaming`).
+///
+/// `Standard` mirrors `candle_nn::Linear`. `Fp8` mirrors
+/// `qwen_image::transformer::QwenLinear::Fp8` — F8E4M3 weights resident on the
+/// model device, cast to the activation dtype at forward.
+///
+/// `Nvfp4Streaming` keeps the packed FP4 + FP8 block scales mmap'd on CPU and
+/// dequantizes lazily on first forward into a BF16 weight, also cached on
+/// CPU. Subsequent forwards copy the cached BF16 weight to the activation
+/// device for matmul (no re-dequant). For sliced fused QKV the cache is shared
+/// across `to_q`/`to_k`/`to_v` via `Arc<OnceLock<Tensor>>` so the FP4 →
+/// BF16 dequant runs exactly once per fused source. Memory: ~18 GB BF16 +
+/// ~5.6 GB packed source on CPU for Klein-9B; per-forward GPU peak is one
+/// layer's BF16 weight (≈ 64-200 MB). This is what makes Klein-9B fit on
+/// a 24 GB 3090.
+///
+/// Auto-detection in `load_with_bias`:
+///   `vb.contains_tensor("weight.nvfp4_packed")` → `Nvfp4Streaming`
+///   `vb.get(...).dtype() == F8E4M3`              → `Fp8`
+///   otherwise                                     → `Standard`
+#[derive(Debug, Clone)]
+pub(crate) enum Flux2Linear {
+    Standard(candle_nn::Linear),
+    Fp8 {
+        weight: Tensor,
+        scale: Option<Tensor>,
+        bias: Option<Tensor>,
+    },
+    Nvfp4Streaming {
+        /// Packed FP4 nibbles, U8 `[N_full, K/2]` on CPU.
+        packed: Tensor,
+        /// FP8-E4M3 per-block scales `[N_full, K/16]` on CPU.
+        block_scales: Tensor,
+        /// Per-tensor F32 scalar (as `f32` to skip a per-forward host read).
+        tensor_scale: f32,
+        /// Output dim *after* slicing — what the caller's matmul expects.
+        out_dim: usize,
+        /// Input dim K (matches `block_scales.dim(1) * 16`). Stored for
+        /// post-load introspection; the forward path derives K from `packed`.
+        #[allow(dead_code)]
+        in_dim: usize,
+        /// Optional `(axis, component, num_components)` slice descriptor.
+        /// `None` for unfused layers; `Some((0, c, 3))` for sliced QKV.
+        slice: Option<(usize, usize, usize)>,
+        /// Bias on the model device (NVFP4 layers in cv:2759597 have none).
+        bias: Option<Tensor>,
+        /// Lazy CPU BF16 cache of the FULL (un-sliced) dequanted weight,
+        /// shape `[N_full, K]`. Sliced QKV variants share this cache via
+        /// `Arc<OnceLock>`, so the FP4 → BF16 dequant happens exactly once
+        /// per fused source even when three sliced linears reference it.
+        cache: Arc<OnceLock<Tensor>>,
+    },
+}
+
+impl Flux2Linear {
+    fn load_with_bias(
+        in_dim: usize,
+        out_dim: usize,
+        has_bias: bool,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        // NVFP4 streaming path: probe for the sub-key the backend emits for
+        // every NVFP4-quantised layer. If present, all three components plus
+        // the optional slice-meta marker live alongside it.
+        if vb.contains_tensor("weight.nvfp4_packed") {
+            // Explicit-dtype lookups: each NVFP4 sub-key has a native dtype
+            // distinct from the VarBuilder's default (BF16). `get_unchecked`
+            // would request the default and ask the backend to cast — which
+            // breaks for U8 (packed), F8E4M3 (block scales), F32 (tensor
+            // scale), and U32 (slice meta).
+            let packed = vb.get_unchecked_dtype("weight.nvfp4_packed", DType::U8)?;
+            let block_scales =
+                vb.get_unchecked_dtype("weight.nvfp4_block_scales", DType::F8E4M3)?;
+            let tensor_scale_t = vb.get_unchecked_dtype("weight.nvfp4_tensor_scale", DType::F32)?;
+            // The backend already returns these on CPU; defensive `to_device`
+            // keeps the contract local to this constructor in case the
+            // backend's invariant changes.
+            let cpu = candle_core::Device::Cpu;
+            let packed = packed.to_device(&cpu)?;
+            let block_scales = block_scales.to_device(&cpu)?;
+            let tensor_scale: f32 = tensor_scale_t.to_dtype(DType::F32)?.to_scalar()?;
+
+            let slice = if vb.contains_tensor("weight.nvfp4_slice_meta") {
+                let meta = vb
+                    .get_unchecked_dtype("weight.nvfp4_slice_meta", DType::U32)?
+                    .to_device(&cpu)?;
+                let v: Vec<u32> = meta.flatten_all()?.to_vec1()?;
+                if v.len() != 3 {
+                    candle_core::bail!(
+                        "NVFP4 slice meta tensor must have length 3, got {}",
+                        v.len()
+                    );
+                }
+                Some((v[0] as usize, v[1] as usize, v[2] as usize))
+            } else {
+                None
+            };
+
+            // Validate shapes against the requested (out_dim, in_dim) given
+            // any slicing — catches a bad rename table early.
+            let packed_dims = packed.dims();
+            if packed_dims.len() != 2 {
+                candle_core::bail!("NVFP4 packed weight must be rank 2, got {:?}", packed_dims,);
+            }
+            let n_full = packed_dims[0];
+            let k_half = packed_dims[1];
+            let k = k_half * 2;
+            if k != in_dim {
+                candle_core::bail!(
+                    "NVFP4: in_dim mismatch — checkpoint K={}, module expected {}",
+                    k,
+                    in_dim,
+                );
+            }
+            let expected_n_full = match slice {
+                Some((_, _, n_components)) => out_dim * n_components,
+                None => out_dim,
+            };
+            if n_full != expected_n_full {
+                candle_core::bail!(
+                    "NVFP4: out_dim mismatch — checkpoint N_full={}, module expected {} (out_dim={}, slice={:?})",
+                    n_full,
+                    expected_n_full,
+                    out_dim,
+                    slice,
+                );
+            }
+
+            let bias = if has_bias {
+                vb.get_unchecked("bias").ok()
+            } else {
+                None
+            };
+
+            return Ok(Self::Nvfp4Streaming {
+                packed,
+                block_scales,
+                tensor_scale,
+                out_dim,
+                in_dim,
+                slice,
+                bias,
+                cache: Arc::new(OnceLock::new()),
+            });
+        }
+
+        let weight = vb.get((out_dim, in_dim), "weight")?;
+        if weight.dtype() == DType::F8E4M3 {
+            let scale = vb.get_unchecked("scale_weight").ok();
+            let bias = if has_bias {
+                vb.get_unchecked("bias").ok()
+            } else {
+                None
+            };
+            Ok(Self::Fp8 {
+                weight,
+                scale,
+                bias,
+            })
+        } else {
+            let bias = if has_bias {
+                Some(vb.get(out_dim, "bias")?)
+            } else {
+                None
+            };
+            Ok(Self::Standard(candle_nn::Linear::new(weight, bias)))
+        }
+    }
+}
+
+/// Dequantize the FULL un-sliced NVFP4 weight to a BF16 tensor on CPU. Pure
+/// scalar Rust; identical math to the (now-deleted) `dequant_nvfp4` method
+/// on the backend, minus the device move.
+fn dequant_nvfp4_to_bf16_cpu(
+    packed: &Tensor,
+    block_scales: &Tensor,
+    tensor_scale: f32,
+) -> Result<Tensor> {
+    use crate::nvfp4::{dequantize_nvfp4_to_f32, unswizzle_block_scales, NVFP4_BLOCK_SIZE};
+
+    let packed_dims = packed.dims();
+    let scale_dims = block_scales.dims();
+    if packed_dims.len() != 2 || scale_dims.len() != 2 {
+        candle_core::bail!(
+            "NVFP4 streaming: rank mismatch — packed {:?}, scales {:?}",
+            packed_dims,
+            scale_dims,
+        );
+    }
+    let n_rows = packed_dims[0];
+    let n_cols = packed_dims[1] * 2;
+    let num_cols_blocks = n_cols / NVFP4_BLOCK_SIZE;
+    let packed_bytes: Vec<u8> = packed.flatten_all()?.to_vec1()?;
+    let swizzled_scales: Vec<f32> = block_scales
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1()?;
+    // ComfyUI's NVFP4 converter stores block_scales in cuBLAS SWIZZLE_32_4_4
+    // tiled layout (see comfy_kitchen.float_utils.to_blocked). Unswizzle to
+    // natural row-major before per-block dequant.
+    let scales_f32 = unswizzle_block_scales(&swizzled_scales, n_rows, num_cols_blocks)
+        .map_err(|e| candle_core::Error::Msg(format!("NVFP4 unswizzle: {e}")))?;
+    let mut dequant = dequantize_nvfp4_to_f32(&packed_bytes, &scales_f32, n_rows, n_cols)
+        .map_err(|e| candle_core::Error::Msg(format!("NVFP4 streaming dequant: {e}")))?;
+    for v in dequant.iter_mut() {
+        *v *= tensor_scale;
+    }
+    let cpu = candle_core::Device::Cpu;
+    let f32_t = Tensor::from_vec(dequant, (n_rows, n_cols), &cpu)?;
+    f32_t.to_dtype(DType::BF16)
+}
+
+impl Module for Flux2Linear {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Standard(l) => l.forward(x),
+            Self::Fp8 {
+                weight,
+                scale,
+                bias,
+            } => {
+                let dtype = x.dtype();
+                let w = weight.to_dtype(dtype)?;
+                let w = match scale {
+                    Some(s) => w.broadcast_mul(&s.to_dtype(dtype)?)?,
+                    None => w,
+                };
+                let w = w.t()?;
+                let out = match *x.dims() {
+                    [b1, b2, m, k] => {
+                        x.reshape((b1 * b2 * m, k))?
+                            .matmul(&w)?
+                            .reshape((b1, b2, m, ()))?
+                    }
+                    [bsize, m, k] => {
+                        x.reshape((bsize * m, k))?
+                            .matmul(&w)?
+                            .reshape((bsize, m, ()))?
+                    }
+                    _ => x.matmul(&w)?,
+                };
+                match bias {
+                    Some(b) => out.broadcast_add(&b.to_dtype(dtype)?),
+                    None => Ok(out),
+                }
+            }
+            Self::Nvfp4Streaming {
+                packed,
+                block_scales,
+                tensor_scale,
+                out_dim,
+                slice,
+                bias,
+                cache,
+                ..
+            } => {
+                // First forward: dequant FULL weight to BF16 on CPU and stash
+                // it. Subsequent forwards skip straight to the slice + DMA.
+                // OnceLock::get_or_try_init isn't stable yet; emulate it.
+                let bf16_full = match cache.get() {
+                    Some(t) => t,
+                    None => {
+                        let dequanted =
+                            dequant_nvfp4_to_bf16_cpu(packed, block_scales, *tensor_scale)?;
+                        // Race-safe set: if another thread won, we drop ours
+                        // and use theirs. Either way the value cached is the
+                        // same dequant of the same source.
+                        let _ = cache.set(dequanted);
+                        cache.get().expect("cache populated above")
+                    }
+                };
+
+                // Slice if needed. `bf16_full` lives on CPU; narrow is a
+                // view, no copy.
+                let bf16_sliced_cpu = match slice {
+                    Some((axis, component, _n_components)) => {
+                        bf16_full.narrow(*axis, component * out_dim, *out_dim)?
+                    }
+                    None => bf16_full.clone(),
+                };
+
+                let dtype = x.dtype();
+                let w_dev = bf16_sliced_cpu.to_device(x.device())?.to_dtype(dtype)?;
+                let w = w_dev.t()?;
+
+                let out = match *x.dims() {
+                    [b1, b2, m, k] => {
+                        x.reshape((b1 * b2 * m, k))?
+                            .matmul(&w)?
+                            .reshape((b1, b2, m, ()))?
+                    }
+                    [bsize, m, k] => {
+                        x.reshape((bsize * m, k))?
+                            .matmul(&w)?
+                            .reshape((bsize, m, ()))?
+                    }
+                    _ => x.matmul(&w)?,
+                };
+
+                match bias {
+                    Some(b) => out.broadcast_add(&b.to_dtype(dtype)?),
+                    None => Ok(out),
+                }
+            }
+        }
+    }
+}
+
+/// Convenience: load a bias-free Flux2Linear from `vb`. Matches the
+/// `candle_nn::linear_no_bias` ergonomics it replaces.
+fn flux2_linear_no_bias(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Flux2Linear> {
+    Flux2Linear::load_with_bias(in_dim, out_dim, false, vb)
+}
 
 // ---------------------------------------------------------------------------
 // Config
@@ -191,15 +511,15 @@ impl candle_core::Module for EmbedNd {
 /// MLP embedder for timestep/guidance conditioning.
 #[derive(Debug, Clone)]
 struct MlpEmbedder {
-    in_layer: Linear,
-    out_layer: Linear,
+    in_layer: Flux2Linear,
+    out_layer: Flux2Linear,
 }
 
 impl MlpEmbedder {
     fn new(in_sz: usize, h_sz: usize, vb: VarBuilder) -> Result<Self> {
         // Diffusers names: linear_1 / linear_2
-        let in_layer = candle_nn::linear_no_bias(in_sz, h_sz, vb.pp("linear_1"))?;
-        let out_layer = candle_nn::linear_no_bias(h_sz, h_sz, vb.pp("linear_2"))?;
+        let in_layer = flux2_linear_no_bias(in_sz, h_sz, vb.pp("linear_1"))?;
+        let out_layer = flux2_linear_no_bias(h_sz, h_sz, vb.pp("linear_2"))?;
         Ok(Self {
             in_layer,
             out_layer,
@@ -232,12 +552,12 @@ impl ModulationOut {
 
 #[derive(Debug, Clone)]
 struct Modulation1 {
-    lin: Linear,
+    lin: Flux2Linear,
 }
 
 impl Modulation1 {
     fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let lin = candle_nn::linear_no_bias(dim, 3 * dim, vb.pp("linear"))?;
+        let lin = flux2_linear_no_bias(dim, 3 * dim, vb.pp("linear"))?;
         Ok(Self { lin })
     }
 
@@ -260,12 +580,12 @@ impl Modulation1 {
 
 #[derive(Debug, Clone)]
 struct Modulation2 {
-    lin: Linear,
+    lin: Flux2Linear,
 }
 
 impl Modulation2 {
     fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let lin = candle_nn::linear_no_bias(dim, 6 * dim, vb.pp("linear"))?;
+        let lin = flux2_linear_no_bias(dim, 6 * dim, vb.pp("linear"))?;
         Ok(Self { lin })
     }
 
@@ -296,15 +616,15 @@ impl Modulation2 {
 /// SwiGLU MLP (double-stream blocks).
 #[derive(Debug, Clone)]
 struct Mlp {
-    lin1: Linear,
-    lin2: Linear,
+    lin1: Flux2Linear,
+    lin2: Flux2Linear,
     mlp_sz: usize,
 }
 
 impl Mlp {
     fn new(in_sz: usize, mlp_sz: usize, vb: VarBuilder) -> Result<Self> {
-        let lin1 = candle_nn::linear_no_bias(in_sz, mlp_sz * 2, vb.pp("linear_in"))?;
-        let lin2 = candle_nn::linear_no_bias(mlp_sz, in_sz, vb.pp("linear_out"))?;
+        let lin1 = flux2_linear_no_bias(in_sz, mlp_sz * 2, vb.pp("linear_in"))?;
+        let lin2 = flux2_linear_no_bias(mlp_sz, in_sz, vb.pp("linear_out"))?;
         Ok(Self { lin1, lin2, mlp_sz })
     }
 }
@@ -325,10 +645,10 @@ impl candle_core::Module for Mlp {
 /// Separate Q/K/V attention for double-stream blocks (diffusers format).
 #[derive(Debug, Clone)]
 struct DoubleAttention {
-    to_q: Linear,
-    to_k: Linear,
-    to_v: Linear,
-    to_out: Linear,
+    to_q: Flux2Linear,
+    to_k: Flux2Linear,
+    to_v: Flux2Linear,
+    to_out: Flux2Linear,
     norm_q: RmsNorm,
     norm_k: RmsNorm,
     num_heads: usize,
@@ -339,10 +659,10 @@ impl DoubleAttention {
     fn new_img(dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
         Ok(Self {
-            to_q: candle_nn::linear_no_bias(dim, dim, vb.pp("to_q"))?,
-            to_k: candle_nn::linear_no_bias(dim, dim, vb.pp("to_k"))?,
-            to_v: candle_nn::linear_no_bias(dim, dim, vb.pp("to_v"))?,
-            to_out: candle_nn::linear_no_bias(dim, dim, vb.pp("to_out").pp("0"))?,
+            to_q: flux2_linear_no_bias(dim, dim, vb.pp("to_q"))?,
+            to_k: flux2_linear_no_bias(dim, dim, vb.pp("to_k"))?,
+            to_v: flux2_linear_no_bias(dim, dim, vb.pp("to_v"))?,
+            to_out: flux2_linear_no_bias(dim, dim, vb.pp("to_out").pp("0"))?,
             norm_q: RmsNorm::new(vb.get(head_dim, "norm_q.weight")?, 1e-6),
             norm_k: RmsNorm::new(vb.get(head_dim, "norm_k.weight")?, 1e-6),
             num_heads,
@@ -353,10 +673,10 @@ impl DoubleAttention {
     fn new_txt(dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
         Ok(Self {
-            to_q: candle_nn::linear_no_bias(dim, dim, vb.pp("add_q_proj"))?,
-            to_k: candle_nn::linear_no_bias(dim, dim, vb.pp("add_k_proj"))?,
-            to_v: candle_nn::linear_no_bias(dim, dim, vb.pp("add_v_proj"))?,
-            to_out: candle_nn::linear_no_bias(dim, dim, vb.pp("to_add_out"))?,
+            to_q: flux2_linear_no_bias(dim, dim, vb.pp("add_q_proj"))?,
+            to_k: flux2_linear_no_bias(dim, dim, vb.pp("add_k_proj"))?,
+            to_v: flux2_linear_no_bias(dim, dim, vb.pp("add_v_proj"))?,
+            to_out: flux2_linear_no_bias(dim, dim, vb.pp("to_add_out"))?,
             norm_q: RmsNorm::new(vb.get(head_dim, "norm_added_q.weight")?, 1e-6),
             norm_k: RmsNorm::new(vb.get(head_dim, "norm_added_k.weight")?, 1e-6),
             num_heads,
@@ -463,8 +783,8 @@ impl DoubleStreamBlock {
 
 #[derive(Debug, Clone)]
 struct SingleStreamBlock {
-    linear1: Linear,
-    linear2: Linear,
+    linear1: Flux2Linear,
+    linear2: Flux2Linear,
     norm_q: RmsNorm,
     norm_k: RmsNorm,
     pre_norm: LayerNorm,
@@ -481,9 +801,9 @@ impl SingleStreamBlock {
         let attn_vb = vb.pp("attn");
         // Fused: QKV (3*h_sz) + SwiGLU (2*mlp_sz) → to_qkv_mlp_proj
         let linear1 =
-            candle_nn::linear_no_bias(h_sz, h_sz * 3 + mlp_sz * 2, attn_vb.pp("to_qkv_mlp_proj"))?;
+            flux2_linear_no_bias(h_sz, h_sz * 3 + mlp_sz * 2, attn_vb.pp("to_qkv_mlp_proj"))?;
         // Output: attn (h_sz) + mlp (mlp_sz) → to_out
-        let linear2 = candle_nn::linear_no_bias(h_sz + mlp_sz, h_sz, attn_vb.pp("to_out"))?;
+        let linear2 = flux2_linear_no_bias(h_sz + mlp_sz, h_sz, attn_vb.pp("to_out"))?;
         Ok(Self {
             linear1,
             linear2,
@@ -522,16 +842,16 @@ impl SingleStreamBlock {
 #[derive(Debug, Clone)]
 struct LastLayer {
     norm_final: LayerNorm,
-    linear: Linear,
-    ada_ln_modulation: Linear,
+    linear: Flux2Linear,
+    ada_ln_modulation: Flux2Linear,
 }
 
 impl LastLayer {
     fn new(h_sz: usize, out_c: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             norm_final: layer_norm(h_sz, &vb)?,
-            linear: candle_nn::linear_no_bias(h_sz, out_c, vb.pp("proj_out"))?,
-            ada_ln_modulation: candle_nn::linear_no_bias(
+            linear: flux2_linear_no_bias(h_sz, out_c, vb.pp("proj_out"))?,
+            ada_ln_modulation: flux2_linear_no_bias(
                 h_sz,
                 2 * h_sz,
                 vb.pp("norm_out").pp("linear"),
@@ -541,8 +861,11 @@ impl LastLayer {
 
     fn forward(&self, xs: &Tensor, vec: &Tensor) -> Result<Tensor> {
         let chunks = vec.silu()?.apply(&self.ada_ln_modulation)?.chunk(2, 1)?;
-        // AdaLayerNormContinuous: scale first, shift second (differs from modulation order)
-        let (scale, shift) = (&chunks[0], &chunks[1]);
+        // BFL native `final_layer.adaLN_modulation.1.weight` stores (shift, scale)
+        // along dim 0; the diffusers converter applies `swap_scale_shift` to flip
+        // it for diffusers' AdaLayerNormContinuous. mold loads the BFL weight as-is,
+        // so chunks[0]=shift, chunks[1]=scale.
+        let (shift, scale) = (&chunks[0], &chunks[1]);
         let xs = xs
             .apply(&self.norm_final)?
             .broadcast_mul(&(scale.unsqueeze(1)? + 1.0)?)?
@@ -560,8 +883,8 @@ impl LastLayer {
 /// Key difference from FLUX.1: modulation is shared across all blocks.
 #[derive(Debug, Clone)]
 pub struct Flux2Transformer {
-    img_in: Linear,
-    txt_in: Linear,
+    img_in: Flux2Linear,
+    txt_in: Flux2Linear,
     time_in: MlpEmbedder,
     vector_in: Option<MlpEmbedder>,
     guidance_in: Option<MlpEmbedder>,
@@ -577,9 +900,8 @@ pub struct Flux2Transformer {
 
 impl Flux2Transformer {
     pub fn new(cfg: &Flux2Config, vb: VarBuilder) -> Result<Self> {
-        let img_in =
-            candle_nn::linear_no_bias(cfg.in_channels, cfg.hidden_size, vb.pp("x_embedder"))?;
-        let txt_in = candle_nn::linear_no_bias(
+        let img_in = flux2_linear_no_bias(cfg.in_channels, cfg.hidden_size, vb.pp("x_embedder"))?;
+        let txt_in = flux2_linear_no_bias(
             cfg.context_in_dim,
             cfg.hidden_size,
             vb.pp("context_embedder"),
@@ -878,6 +1200,334 @@ mod tests {
             err_msg.contains("odd"),
             "error should mention 'odd', got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn flux2_linear_standard_bf16_forward() {
+        // Sanity: the BF16 (Standard) branch behaves like a stock Linear.
+        // weight = [[1.0, 2.0], [3.0, 4.0]]  → out = x @ weight.t()
+        // bias=None. Check via Module::forward.
+        let dev = candle_core::Device::Cpu;
+        let weight = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &dev).unwrap();
+        let lin = Flux2Linear::Standard(candle_nn::Linear::new(weight, None));
+        let x = Tensor::from_vec(vec![1.0f32, 0.0], (1, 2), &dev).unwrap();
+        let out = lin.forward(&x).unwrap();
+        // x[0] * weight.t() col 0 = 1*1 + 0*2 = 1; col 1 = 1*3 + 0*4 = 3
+        let v: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(v, vec![1.0, 3.0]);
+    }
+
+    #[test]
+    fn flux2_linear_fp8_forward_matches_bf16_reference() {
+        // FP8 path: stored W is FP8(2.0). Input x = [[1, 1, 1, 1]].
+        // x @ W.t() with W = ones·2 (out=2, in=4) → [[8, 8]]. No sidecar
+        // scale — community FP8 conversions without an NVFP4 ancestor.
+        // Tests run F32 → F32 because candle CPU has no BF16 matmul.
+        let dev = candle_core::Device::Cpu;
+        let weight = Tensor::from_vec(vec![2.0f32; 8], (2, 4), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let lin = Flux2Linear::Fp8 {
+            weight,
+            scale: None,
+            bias: None,
+        };
+        let x = Tensor::from_vec(vec![1.0f32; 4], (1, 4), &dev).unwrap();
+        let out = lin.forward(&x).unwrap();
+        assert_eq!(
+            out.dtype(),
+            DType::F32,
+            "FP8 forward must preserve activation dtype",
+        );
+        let v: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        for x in &v {
+            assert!((x - 8.0).abs() < 1e-3, "got {x}, want 8.0");
+        }
+    }
+
+    #[test]
+    fn flux2_linear_fp8_basic_matmul() {
+        // Simplest FP8 forward smoke test: weight [[3.0]], bias=None,
+        // x=[[2.0]]. Out = 2*3 = 6.
+        let dev = candle_core::Device::Cpu;
+        let weight = Tensor::from_vec(vec![3.0f32], (1, 1), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let lin = Flux2Linear::Fp8 {
+            weight,
+            scale: None,
+            bias: None,
+        };
+        let x = Tensor::from_vec(vec![2.0f32], (1, 1), &dev).unwrap();
+        let out = lin.forward(&x).unwrap();
+        let v: f32 = out.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
+        assert!((v - 6.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn flux2_linear_fp8_applies_bias_after_matmul() {
+        // weight = [[1.0]], bias = [10.0], x = [[3]]. x@w.t()+bias = 13.
+        let dev = candle_core::Device::Cpu;
+        let weight = Tensor::from_vec(vec![1.0f32], (1, 1), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let bias = Tensor::from_vec(vec![10.0f32], 1, &dev).unwrap();
+        let lin = Flux2Linear::Fp8 {
+            weight,
+            scale: None,
+            bias: Some(bias),
+        };
+        let x = Tensor::from_vec(vec![3.0f32], (1, 1), &dev).unwrap();
+        let out = lin.forward(&x).unwrap();
+        let v: f32 = out.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
+        assert!((v - 13.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn flux2_linear_fp8_applies_sidecar_scale_at_forward() {
+        // Verify the NVFP4 sidecar tensor_scale path: weight stored at FP8(2.0)
+        // pre-scale, scale_weight = [0.5] (1-D, length 1). Forward must
+        // broadcast-multiply every weight element by 0.5 → effective weight
+        // 1.0, so x @ W.t() with x=[1,1,1,1] and W=ones [2,4] yields [4,4].
+        let dev = candle_core::Device::Cpu;
+        let weight = Tensor::from_vec(vec![2.0f32; 8], (2, 4), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let scale = Tensor::from_vec(vec![0.5f32], 1, &dev).unwrap();
+        let lin = Flux2Linear::Fp8 {
+            weight,
+            scale: Some(scale),
+            bias: None,
+        };
+        let x = Tensor::from_vec(vec![1.0f32; 4], (1, 4), &dev).unwrap();
+        let out = lin.forward(&x).unwrap();
+        let v: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        for x in &v {
+            assert!(
+                (x - 4.0).abs() < 1e-3,
+                "got {x}, want 4.0 (sidecar scale 0.5 applied to FP8(2.0))",
+            );
+        }
+    }
+
+    /// Build the canonical 1-block NVFP4 fixture used by the streaming tests:
+    /// N rows × 16 columns of weight = +1.0 (E2M1 nibble 0b0010), one block
+    /// scale per row at E4M3 = 1.0 (byte 0x38), per-tensor scale applied at
+    /// forward time. block_scales are stored in cuBLAS SWIZZLE_32_4_4 tiled
+    /// layout to match what ComfyUI's NVFP4 converter writes: padded to
+    /// (roundup(N, 128), roundup(1, 4)) = (128, 4).
+    /// Returns (packed U8 [N, 8], block_scales F8E4M3 [128, 4]).
+    fn nvfp4_unit_fixture(n_rows: usize) -> (Tensor, Tensor) {
+        use crate::nvfp4::swizzle_block_scales;
+        use candle_core::Device;
+        let dev = Device::Cpu;
+        let packed_bytes = vec![0x22u8; n_rows * 8];
+        let packed = Tensor::from_vec(packed_bytes, (n_rows, 8), &dev).unwrap();
+        // Natural block-scale layout: [n_rows, 1], all 1.0.
+        let natural_scales: Vec<f32> = vec![1.0f32; n_rows];
+        let swizzled = swizzle_block_scales(&natural_scales, n_rows, 1).unwrap();
+        let padded_rows = n_rows.div_ceil(128) * 128;
+        let padded_cols = 4;
+        let scales_f32 = Tensor::from_vec(swizzled, (padded_rows, padded_cols), &dev).unwrap();
+        let block_scales = scales_f32.to_dtype(DType::F8E4M3).unwrap();
+        (packed, block_scales)
+    }
+
+    #[test]
+    fn flux2_linear_nvfp4_streaming_round_trip_matches_standard() {
+        // Streaming path must produce the same output as a Standard linear
+        // built from the dequanted weight. Tolerance is BF16-level (~1e-3).
+        // 4 output rows × 16 input columns. Each weight element = +1.0
+        // (FP4 1.0 × block_scale 1.0). Per-tensor scale = 0.25 → effective
+        // weight = 0.25. Input = ones. Out = sum(weights row) = 16 * 0.25 = 4.
+        let dev = candle_core::Device::Cpu;
+        let n_full = 4;
+        let k = 16;
+        let tensor_scale = 0.25f32;
+        let (packed, block_scales) = nvfp4_unit_fixture(n_full);
+
+        let streaming = Flux2Linear::Nvfp4Streaming {
+            packed: packed.clone(),
+            block_scales: block_scales.clone(),
+            tensor_scale,
+            out_dim: n_full,
+            in_dim: k,
+            slice: None,
+            bias: None,
+            cache: Arc::new(OnceLock::new()),
+        };
+
+        // Reference: full BF16 dequanted weight (all 0.25), as a Standard
+        // candle Linear.
+        let ref_w = Tensor::from_vec(vec![tensor_scale; n_full * k], (n_full, k), &dev).unwrap();
+        let ref_lin = Flux2Linear::Standard(candle_nn::Linear::new(ref_w, None));
+
+        let x = Tensor::from_vec(vec![1.0f32; k], (1, k), &dev).unwrap();
+        let out_streaming = streaming.forward(&x).unwrap();
+        let out_ref = ref_lin.forward(&x).unwrap();
+
+        let s: Vec<f32> = out_streaming
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let r: Vec<f32> = out_ref
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(s.len(), r.len());
+        for (i, (a, b)) in s.iter().zip(r.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-2,
+                "streaming[{i}]={a}, reference={b} — diverged beyond BF16 tolerance",
+            );
+            assert!(
+                (a - 4.0).abs() < 1e-2,
+                "streaming[{i}]={a}, want 4.0 (sum of 16 × 0.25)",
+            );
+        }
+    }
+
+    #[test]
+    fn flux2_linear_nvfp4_streaming_caches_bf16() {
+        // After one forward, the OnceLock cache must be populated. This
+        // ensures the second forward bypasses the f32 dequant pass.
+        let dev = candle_core::Device::Cpu;
+        let n_full = 2;
+        let k = 16;
+        let (packed, block_scales) = nvfp4_unit_fixture(n_full);
+        let cache = Arc::new(OnceLock::new());
+        let streaming = Flux2Linear::Nvfp4Streaming {
+            packed,
+            block_scales,
+            tensor_scale: 1.0,
+            out_dim: n_full,
+            in_dim: k,
+            slice: None,
+            bias: None,
+            cache: cache.clone(),
+        };
+        assert!(cache.get().is_none(), "cache empty before first forward");
+
+        let x = Tensor::from_vec(vec![1.0f32; k], (1, k), &dev).unwrap();
+        let _ = streaming.forward(&x).unwrap();
+        assert!(
+            cache.get().is_some(),
+            "cache must be populated after first forward",
+        );
+        let cached = cache.get().unwrap();
+        assert_eq!(cached.dtype(), DType::BF16);
+        assert_eq!(cached.dims(), &[n_full, k]);
+    }
+
+    #[test]
+    fn flux2_linear_nvfp4_streaming_slice_q_k_v_share_cache() {
+        // Three sliced linears (`to_q`/`to_k`/`to_v`) sharing one
+        // `Arc<OnceLock<Tensor>>` populate the cache exactly once and each
+        // produces output matching an independently-built reference Linear
+        // sliced from the same dequanted weight.
+        //
+        // Build a 3*N=6 row fused weight (Q/K/V each contribute 2 rows of
+        // 16 columns). Q rows = 0.25 (all FP4 1.0, scale 1.0, t_scale 0.25).
+        // The reference Linear is sliced from a manually-constructed BF16
+        // weight matching what dequant produces.
+        let dev = candle_core::Device::Cpu;
+        let out_dim = 2;
+        let n_full = out_dim * 3; // 6 rows for fused QKV
+        let k = 16;
+        let tensor_scale = 0.25f32;
+        let (packed, block_scales) = nvfp4_unit_fixture(n_full);
+
+        let shared_cache = Arc::new(OnceLock::new());
+        let mut linears = Vec::with_capacity(3);
+        for component in 0..3 {
+            linears.push(Flux2Linear::Nvfp4Streaming {
+                packed: packed.clone(),
+                block_scales: block_scales.clone(),
+                tensor_scale,
+                out_dim,
+                in_dim: k,
+                slice: Some((0, component, 3)),
+                bias: None,
+                cache: shared_cache.clone(),
+            });
+        }
+        assert!(
+            shared_cache.get().is_none(),
+            "shared cache empty before any forward",
+        );
+
+        let x = Tensor::from_vec(vec![1.0f32; k], (1, k), &dev).unwrap();
+        // Forward Q. After this, the shared cache is populated; K and V both
+        // hit the warm cache.
+        let out_q = linears[0].forward(&x).unwrap();
+        assert!(
+            shared_cache.get().is_some(),
+            "Q-forward must populate cache"
+        );
+        let cached_after_q = shared_cache.get().unwrap().clone();
+        let _out_k = linears[1].forward(&x).unwrap();
+        let cached_after_k = shared_cache.get().unwrap().clone();
+        // The cached pointer is identical (OnceLock::set is no-op once set).
+        // Compare via F32 round-trip to avoid pulling in the half crate.
+        let after_q_data: Vec<f32> = cached_after_q
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let after_k_data: Vec<f32> = cached_after_k
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(
+            after_q_data, after_k_data,
+            "shared cache must be unchanged after subsequent forwards",
+        );
+
+        // Per-component reference: each component is identical here (all
+        // weights = 0.25), so each Q/K/V forward must yield 16 × 0.25 = 4.0.
+        for (component, lin) in linears.iter().enumerate() {
+            let out = lin.forward(&x).unwrap();
+            let v: Vec<f32> = out
+                .to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            assert_eq!(v.len(), out_dim);
+            for (i, &x) in v.iter().enumerate() {
+                assert!(
+                    (x - 4.0).abs() < 1e-2,
+                    "component {component} out[{i}] = {x}, want 4.0",
+                );
+            }
+        }
+        // Sanity: Q output values match expectations.
+        let q_v: Vec<f32> = out_q
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        for (i, &x) in q_v.iter().enumerate() {
+            assert!((x - 4.0).abs() < 1e-2, "Q[{i}]={x}");
+        }
     }
 
     #[test]

@@ -295,6 +295,7 @@ use mold_db::catalog::{ListParams, SortBy};
 pub struct ListQuery {
     pub family: Option<String>,
     pub family_role: Option<String>,
+    pub kind: Option<String>,
     pub modality: Option<String>,
     pub source: Option<String>,
     pub sub_family: Option<String>,
@@ -322,6 +323,7 @@ pub async fn list_catalog(
     let params = ListParams {
         family: q.family,
         family_role: q.family_role,
+        kind: q.kind,
         modality: q.modality,
         source: q.source,
         sub_family: q.sub_family,
@@ -337,11 +339,23 @@ pub async fn list_catalog(
         limit: page_size,
         offset,
     };
+    let cfg_guard = state.config.read().await;
+    let models_dir = cfg_guard.resolved_models_dir();
+    // `total` is the unpaginated count for the same WHERE clauses — the SPA
+    // uses it to stop infinite-scrolling once `entries.length >= total`.
+    let total = match state.catalog_db.catalog_count(&params) {
+        Ok(n) => n,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
     match state.catalog_db.catalog_list(&params) {
         Ok(rows) => Json(serde_json::json!({
-            "entries": rows.into_iter().map(catalog_row_to_wire).collect::<Vec<_>>(),
+            "entries": rows
+                .into_iter()
+                .map(|r| catalog_row_to_wire(r, &models_dir, &cfg_guard))
+                .collect::<Vec<_>>(),
             "page": page,
             "page_size": page_size,
+            "total": total,
         }))
         .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -352,8 +366,10 @@ pub async fn get_catalog_entry(
     State(state): State<crate::state::AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let cfg_guard = state.config.read().await;
+    let models_dir = cfg_guard.resolved_models_dir();
     match state.catalog_db.catalog_get(&id) {
-        Ok(Some(row)) => Json(catalog_row_to_wire(row)).into_response(),
+        Ok(Some(row)) => Json(catalog_row_to_wire(row, &models_dir, &cfg_guard)).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -389,7 +405,85 @@ pub async fn list_families(State(state): State<crate::state::AppState>) -> impl 
     }
 }
 
-fn catalog_row_to_wire(r: mold_db::catalog::CatalogRow) -> serde_json::Value {
+fn catalog_row_to_wire(
+    r: mold_db::catalog::CatalogRow,
+    models_dir: &std::path::Path,
+    config: &mold_core::Config,
+) -> serde_json::Value {
+    let (installed, primary_path) = match r.source.as_str() {
+        // HF rows install via the manifest path. The catalog stores the
+        // HF repo path in `source_id` (e.g. "black-forest-labs/FLUX.1-dev")
+        // — mold's manifest registry is keyed on canonical names like
+        // "flux-dev:q8" instead, so we use the reverse lookup
+        // `find_manifest_by_hf_repo` to bridge them. When no manifest in
+        // this build matches the HF repo, the entry can't be installed
+        // (no canonical name to point disk-state at), so report false.
+        "hf" => match mold_core::manifest::find_manifest_by_hf_repo(&r.source_id) {
+            Some(manifest) => (config.manifest_model_is_downloaded(&manifest.name), None),
+            None => (false, None),
+        },
+        // Civitai rows go through the recipe path. Parse the stored recipe
+        // JSON, translate to RecipeFetchFile borrowed slice, and delegate
+        // to mold_core::download::catalog_entry_installed (which uses the
+        // shared recipe_file_is_placed predicate so the wire field can't
+        // disagree with the fetcher's idempotency check).
+        "civitai" => {
+            match serde_json::from_str::<mold_catalog::entry::DownloadRecipe>(&r.download_recipe) {
+                Ok(recipe) => {
+                    let (author, name) = match r.source_id.split_once('/') {
+                        Some((a, n)) => (a, n),
+                        None => ("", r.source_id.as_str()),
+                    };
+                    let rendered_dests: Vec<String> = recipe
+                        .files
+                        .iter()
+                        .map(|f| {
+                            mold_catalog::entry::render_recipe_dest(
+                                &f.dest, &r.family, author, name,
+                            )
+                        })
+                        .collect();
+                    let files: Vec<mold_core::download::RecipeFetchFile<'_>> = recipe
+                        .files
+                        .iter()
+                        .zip(rendered_dests.iter())
+                        .map(|(f, dest)| mold_core::download::RecipeFetchFile {
+                            url: f.url.as_str(),
+                            dest: dest.as_str(),
+                            sha256: f.sha256.as_deref(),
+                            size_bytes: f.size_bytes,
+                        })
+                        .collect();
+                    let is_installed =
+                        mold_core::download::catalog_entry_installed(models_dir, &r.id, &files);
+                    // For installed Civitai entries expose the absolute path of
+                    // the primary (first) recipe file so the web UI can pass it
+                    // directly as `lora.path` in a generate request.
+                    // Path layout: {models_dir}/{sanitized_id}/{rendered_dest}
+                    let path = if is_installed {
+                        let sanitized = mold_core::download::sanitize_recipe_id(&r.id);
+                        let subdir = models_dir.join(&sanitized);
+                        rendered_dests
+                            .first()
+                            .map(|dest| subdir.join(dest).to_string_lossy().into_owned())
+                    } else {
+                        None
+                    };
+                    (is_installed, path)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "catalog",
+                        catalog_id = %r.id,
+                        error = %e,
+                        "failed to parse stored download_recipe; reporting installed=false",
+                    );
+                    (false, None)
+                }
+            }
+        }
+        _ => (false, None),
+    };
     serde_json::json!({
         "id": r.id,
         "source": r.source,
@@ -416,6 +510,8 @@ fn catalog_row_to_wire(r: mold_db::catalog::CatalogRow) -> serde_json::Value {
         "companions": r.companions.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
         "download_recipe": serde_json::from_str::<serde_json::Value>(&r.download_recipe).unwrap_or(serde_json::json!({})),
         "engine_phase": r.engine_phase,
+        "installed": installed,
+        "primary_path": primary_path,
         "created_at": r.created_at,
         "updated_at": r.updated_at,
         "added_at": r.added_at,
@@ -532,11 +628,21 @@ pub(crate) async fn enqueue_missing_companions(
     companions_json: Option<&str>,
     models_dir: &std::path::Path,
     queue: &crate::downloads::DownloadQueue,
+    catalog_id: Option<&str>,
 ) -> Vec<CompanionJob> {
     let manifests = mold_core::download::missing_companions_from_json(companions_json, models_dir);
     let mut jobs = Vec::with_capacity(manifests.len());
     for manifest in manifests {
-        match queue.enqueue(manifest.name.clone()).await {
+        // When called for a catalog download, the companion job is
+        // registered in the catalog group so `CatalogReady` waits for
+        // it. Outside that context (no catalog id), fall back to the
+        // ungrouped enqueue — companions invoked from elsewhere don't
+        // synchronise on a group event.
+        let result = match catalog_id {
+            Some(id) => queue.enqueue_in_group(manifest.name.clone(), id).await,
+            None => queue.enqueue(manifest.name.clone()).await,
+        };
+        match result {
             Ok((job_id, _, _)) => jobs.push(CompanionJob {
                 name: manifest.name.clone(),
                 job_id,
@@ -563,7 +669,7 @@ pub async fn post_catalog_download(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
-    if row.engine_phase >= 3 {
+    if row.engine_phase >= 6 {
         return (
             StatusCode::CONFLICT,
             format!(
@@ -580,8 +686,13 @@ pub async fn post_catalog_download(
     // those entries. Each canonical companion has a hidden synthetic
     // manifest in `mold-core` so the queue can enqueue them by name.
     let models_dir = state.config.read().await.resolved_models_dir();
-    let companion_jobs =
-        enqueue_missing_companions(row.companions.as_deref(), &models_dir, &state.downloads).await;
+    let companion_jobs = enqueue_missing_companions(
+        row.companions.as_deref(),
+        &models_dir,
+        &state.downloads,
+        Some(&row.id),
+    )
+    .await;
 
     // Primary entry. HF rows map onto a manifest model name (best-effort —
     // diffusers entries with a recognised source_id flow through; the rest
@@ -596,7 +707,7 @@ pub async fn post_catalog_download(
             Some(m) => m.name.clone(),
             None => row.source_id.clone(),
         };
-        match state.downloads.enqueue(model).await {
+        match state.downloads.enqueue_in_group(model, &row.id).await {
             Ok((jid, _, _)) => Some(jid),
             Err(crate::downloads::EnqueueError::UnknownModel(_)) => None,
             Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -624,12 +735,16 @@ pub async fn post_catalog_download(
             }
             _ => mold_core::download::RecipeAuth::None,
         };
+        let (author, name) = match row.source_id.split_once('/') {
+            Some((a, n)) => (a.to_string(), n.to_string()),
+            None => (String::new(), row.source_id.clone()),
+        };
         let files: Vec<crate::downloads::OwnedRecipeFile> = recipe
             .files
             .into_iter()
             .map(|f| crate::downloads::OwnedRecipeFile {
                 url: f.url,
-                dest: f.dest,
+                dest: mold_catalog::entry::render_recipe_dest(&f.dest, &row.family, &author, &name),
                 sha256: f.sha256,
                 size_bytes: f.size_bytes,
             })
@@ -639,7 +754,11 @@ pub async fn post_catalog_download(
             files,
             auth,
         };
-        match state.downloads.enqueue_recipe(payload).await {
+        match state
+            .downloads
+            .enqueue_recipe_in_group(payload, &row.id)
+            .await
+        {
             Ok((jid, _, _)) => Some(jid),
             Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         }

@@ -1,11 +1,18 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { GenerateFormState, ModelInfoExtended, Scheduler } from "../types";
+import type {
+  GenerateFormState,
+  LoraSelection,
+  ModelInfoExtended,
+  Scheduler,
+} from "../types";
 import {
   NO_CFG_FAMILIES,
   UNET_SCHEDULER_FAMILIES,
   VIDEO_FAMILIES,
+  familySupportsAudio,
 } from "../types";
+import LoraPicker from "./LoraPicker.vue";
 import ModelPicker from "./ModelPicker.vue";
 import { outputFormatsForFamily } from "../composables/useGenerateForm";
 
@@ -59,6 +66,7 @@ function selectModel(m: ModelInfoExtended) {
     height: m.default_height,
     steps: m.default_steps,
     guidance: m.default_guidance,
+    lora: null, // LoRA is family-specific; clear on model change
   };
   if (VIDEO_FAMILIES.includes(m.family)) {
     next.frames ??= 25;
@@ -74,7 +82,17 @@ function selectModel(m: ModelInfoExtended) {
   if (!formats.includes(next.outputFormat)) {
     next.outputFormat = formats[0];
   }
+  // Audio toggle follows the family. AV-capable (LTX-2 / LTX-2.3) → on by
+  // default so the user gets the AV path without an extra click; anything
+  // else → null so the server's chain endpoint doesn't reject a stale
+  // `enable_audio: true` carried over from a prior AV session. Mirrors
+  // `applyModelDefaults` in useGenerateForm.
+  next.enableAudio = familySupportsAudio(m.family) ? true : null;
   emit("update:modelValue", next);
+}
+
+function onLoraChange(lora: LoraSelection | null) {
+  patch("lora", lora);
 }
 
 // frames must be 8n+1 (9, 17, 25, 33, ...)
@@ -338,6 +356,12 @@ const schedulerOptions: Scheduler[] = [
             "
           />
         </section>
+
+        <LoraPicker
+          :family="family"
+          :model-value="modelValue.lora"
+          @update:model-value="onLoraChange"
+        />
 
         <section
           v-if="showVideo"

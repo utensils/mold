@@ -377,8 +377,28 @@ fn copy_video_only_mp4(input_mp4: &Path, out_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Bytes-in / bytes-out wrapper around
+/// [`attach_aac_track_from_f32_interleaved`]. Encapsulates the tempfile
+/// dance so callers (server, CLI) don't need their own tempfile dependency
+/// just to mux a chain audio track into an in-memory MP4 buffer.
 #[cfg(feature = "mp4")]
-pub(crate) fn attach_aac_track_from_f32_interleaved(
+pub fn attach_aac_track_to_mp4_bytes(
+    video_only_mp4: &[u8],
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+) -> Result<Vec<u8>> {
+    let work_dir = tempfile::tempdir().context("attach_aac_track_to_mp4_bytes: tempdir")?;
+    let mp4_path = work_dir.path().join("video-only.mp4");
+    let muxed_path = work_dir.path().join("video-with-audio.mp4");
+    fs::write(&mp4_path, video_only_mp4)
+        .with_context(|| format!("write {}", mp4_path.display()))?;
+    attach_aac_track_from_f32_interleaved(&mp4_path, &muxed_path, samples, sample_rate, channels)?;
+    fs::read(&muxed_path).with_context(|| format!("read {}", muxed_path.display()))
+}
+
+#[cfg(feature = "mp4")]
+pub fn attach_aac_track_from_f32_interleaved(
     input_mp4: &Path,
     out_path: &Path,
     samples: &[f32],

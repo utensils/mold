@@ -82,6 +82,71 @@ impl Ltx2Engine {
         }
     }
 
+    /// Construct an LTX-2 engine from a Civitai single-file safetensors
+    /// checkpoint (phase 5).
+    ///
+    /// LTX-2 combined checkpoints (the standard Lightricks format) bundle
+    /// both the video transformer (`blocks.*`) and the VAE (`vae.*`) in a
+    /// single file. The runtime always loads both from `paths.transformer`,
+    /// so this is structurally identical to `new()`.
+    ///
+    /// Validates via `ltx_2::single_file::load` that the checkpoint has
+    /// detectable LTX-2 transformer keys and — critically — contains `vae.*`
+    /// keys. If the VAE is absent the call fails with an actionable error
+    /// message, since the LTX-2 runtime has no separate-VAE fallback.
+    pub fn from_single_file(
+        model_name: String,
+        checkpoint: PathBuf,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+    ) -> anyhow::Result<Self> {
+        if !checkpoint.exists() {
+            anyhow::bail!(
+                "single-file LTX-2 checkpoint not found: {}",
+                checkpoint.display()
+            );
+        }
+
+        let bundle = super::single_file::load(&checkpoint).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse single-file LTX-2 checkpoint {}: {e}",
+                checkpoint.display()
+            )
+        })?;
+
+        if !bundle.has_vae {
+            anyhow::bail!(
+                "LTX-2 checkpoint {} contains no VAE weights (`vae.*` keys). \
+                 This appears to be a transformer-only fine-tune. \
+                 The LTX-2 runtime requires a combined transformer+VAE checkpoint. \
+                 Phase-5 does not yet support separate-VAE loading for LTX-2.",
+                checkpoint.display()
+            );
+        }
+
+        // For LTX-2 the combined checkpoint path serves as both transformer
+        // and VAE source; paths.vae is left empty (runtime ignores it).
+        let paths = ModelPaths {
+            transformer: checkpoint.clone(),
+            transformer_shards: Vec::new(),
+            vae: PathBuf::default(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+
+        Ok(Self::new(model_name, paths, load_strategy, gpu_ordinal))
+    }
+
     #[cfg(test)]
     fn with_runtime_session(
         model_name: String,
@@ -674,6 +739,7 @@ impl Ltx2Engine {
         let rendered = render_result?;
 
         let frames = rendered.frames;
+        let audio = rendered.audio_track;
         let tail_pixel_frames = motion_tail_pixel_frames as usize;
         if frames.len() < tail_pixel_frames {
             bail!(
@@ -695,6 +761,7 @@ impl Ltx2Engine {
                 frames: motion_tail_pixel_frames,
                 tail_rgb_frames,
             },
+            audio,
             generation_time_ms,
         })
     }

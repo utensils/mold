@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use mold_catalog::entry::{
@@ -283,17 +283,32 @@ async fn post_catalog_download_no_longer_conflicts_for_engine_phase_2() {
     );
 }
 
-/// Phase 3+ (FLUX single-file, Z-Image, LTX-Video, ...) are still gated.
-/// Dropping the gate to `>= 3` keeps phases 3 and beyond rejected.
+/// Phases 3–5 (FLUX, Z-Image, LTX single-file) are now downloadable.
 #[tokio::test]
-async fn post_catalog_download_still_conflicts_for_engine_phase_3() {
-    let row = make_catalog_row("cv:phase-3-test", "civitai", "flux", 3);
+async fn post_catalog_download_no_longer_conflicts_for_engine_phase_3_to_5() {
+    for phase in [3i64, 4, 5] {
+        let id = format!("cv:phase-{phase}-test");
+        let row = make_catalog_row(&id, "civitai", "flux", phase);
+        let state = seeded_state(&[row]);
+        let resp = invoke_download(state, &id).await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "engine_phase {phase} must flow past the gate after phase 5 lands",
+        );
+    }
+}
+
+/// Phase 6+ entries are still gated.
+#[tokio::test]
+async fn post_catalog_download_still_conflicts_for_engine_phase_6() {
+    let row = make_catalog_row("cv:phase-6-test", "civitai", "flux", 6);
     let state = seeded_state(&[row]);
-    let resp = invoke_download(state, "cv:phase-3-test").await;
+    let resp = invoke_download(state, "cv:phase-6-test").await;
     assert_eq!(
         resp.status(),
         StatusCode::CONFLICT,
-        "engine_phase 3 must remain gated until phase 3 lands",
+        "engine_phase 6 must remain gated",
     );
 }
 
@@ -338,7 +353,7 @@ async fn companions_enqueued_in_declaration_order_when_none_present() {
     let queue = DownloadQueue::new_for_test();
     let companions = serde_json::to_string(&["clip-l", "clip-g", "sdxl-vae"]).unwrap();
 
-    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue, None).await;
 
     let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
     assert_eq!(names, vec!["clip-l", "clip-g", "sdxl-vae"]);
@@ -358,7 +373,7 @@ async fn companion_skipped_when_already_present_on_disk() {
     let queue = DownloadQueue::new_for_test();
     let companions = serde_json::to_string(&["clip-l", "clip-g", "sdxl-vae"]).unwrap();
 
-    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue, None).await;
 
     let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
     assert_eq!(
@@ -382,7 +397,7 @@ async fn companion_with_pulling_marker_is_re_enqueued() {
     let queue = DownloadQueue::new_for_test();
     let companions = serde_json::to_string(&["clip-l"]).unwrap();
 
-    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue, None).await;
 
     let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
     assert_eq!(
@@ -404,7 +419,7 @@ async fn unknown_companion_canonical_name_is_skipped() {
     // synthetic manifest yet, so the helper should skip it gracefully.
     let companions = serde_json::to_string(&["clip-l", "z-image-te"]).unwrap();
 
-    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue).await;
+    let jobs = enqueue_missing_companions(Some(&companions), tmp.path(), &queue, None).await;
 
     let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
     assert_eq!(
@@ -422,10 +437,10 @@ async fn empty_companions_returns_empty_job_list() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let queue = DownloadQueue::new_for_test();
 
-    let none_jobs = enqueue_missing_companions(None, tmp.path(), &queue).await;
+    let none_jobs = enqueue_missing_companions(None, tmp.path(), &queue, None).await;
     assert!(none_jobs.is_empty(), "None must yield empty list");
 
-    let empty_jobs = enqueue_missing_companions(Some("[]"), tmp.path(), &queue).await;
+    let empty_jobs = enqueue_missing_companions(Some("[]"), tmp.path(), &queue, None).await;
     assert!(empty_jobs.is_empty(), "[] must yield empty list");
 }
 
@@ -490,9 +505,13 @@ async fn civitai_phase_2_no_longer_returns_not_implemented() {
 /// the DownloadsDrawer in the same order the user sees in the UI.
 #[tokio::test]
 async fn companion_jobs_in_response_match_row_companions_in_order() {
+    let tmp = tempfile::tempdir().expect("tempdir");
     let mut row = make_catalog_row("cv:sdxl-order-test", "civitai", "sdxl", 2);
     row.companions = Some(serde_json::to_string(&["clip-l", "clip-g", "sdxl-vae"]).expect("json"));
     let state = seeded_state(&[row]);
+    // Use an empty temp dir so on-disk presence checks always return "missing"
+    // — the test should not depend on whether companions happen to be installed.
+    state.config.write().await.models_dir = tmp.path().to_string_lossy().into_owned();
     let resp = invoke_download(state, "cv:sdxl-order-test").await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let body = read_body_json(resp).await;
@@ -694,5 +713,285 @@ async fn drive_persists_scanned_entries_through_sink() {
         names,
         vec!["Test Entry One", "Test Entry Three", "Test Entry Two"],
         "rows must be the fakes we fed in",
+    );
+}
+
+// ── installed: bool wire field (catalog Repair button) ─────────────────────
+
+/// `GET /api/catalog/:id` must report `installed: true` when every recipe
+/// file is present under `models_dir` at the declared size, and
+/// `installed: false` after any of those files is removed.
+///
+/// Drives the SPA's catalog drawer Download↔Repair button swap.
+/// Currently fails: `catalog_row_to_wire` doesn't emit an `installed`
+/// field yet — that's Task 6.
+#[tokio::test]
+async fn catalog_get_emits_installed_true_when_recipe_files_on_disk() {
+    // Defensive: this test depends on `Config::resolved_models_dir` falling
+    // through to `cfg.models_dir`. If the harness env has MOLD_MODELS_DIR
+    // set, our cfg override is ignored and the assertions misfire.
+    if std::env::var_os("MOLD_MODELS_DIR").is_some() {
+        eprintln!(
+            "skipping catalog_get_emits_installed: MOLD_MODELS_DIR is set; \
+             this test requires the cfg.models_dir override path"
+        );
+        return;
+    }
+
+    let row = make_catalog_row("cv:installed1", "civitai", "sdxl", 2);
+    let state = seeded_state(std::slice::from_ref(&row));
+
+    // Point the AppState's config at a fresh tempdir so we control where
+    // the recipe files are looked up.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+
+    // Stage the recipe's only file at the declared size (1000 bytes).
+    let subdir = tmp
+        .path()
+        .join(mold_core::download::sanitize_recipe_id("cv:installed1"));
+    std::fs::create_dir_all(&subdir).expect("mkdir subdir");
+    let dest = subdir.join("primary.safetensors");
+    std::fs::write(&dest, vec![0u8; 1000]).expect("write stub");
+
+    // GET the entry and assert installed=true.
+    let resp = crate::catalog_api::get_catalog_entry(
+        State(state.clone()),
+        Path("cv:installed1".to_string()),
+    )
+    .await
+    .into_response();
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("installed").and_then(|x| x.as_bool()),
+        Some(true),
+        "expected installed=true with file staged; body={body}",
+    );
+
+    // Remove the file and assert installed=false on a fresh GET.
+    std::fs::remove_file(&dest).expect("remove dest");
+    let resp =
+        crate::catalog_api::get_catalog_entry(State(state), Path("cv:installed1".to_string()))
+            .await
+            .into_response();
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("installed").and_then(|x| x.as_bool()),
+        Some(false),
+        "expected installed=false after removal; body={body}",
+    );
+}
+
+/// `installed=true` must be reported when the recipe `dest` template is
+/// `{family}/...` and the file lives at the rendered path on disk. The bug
+/// this guards against: `catalog_row_to_wire` was forwarding the literal
+/// `{family}` string to the install probe, so files at the rendered path
+/// (e.g. `flux2/civitai/2650607/foo.safetensors`) were reported as missing.
+/// The same flaw affected `installed_catalog_models`, which is why pulled
+/// Civitai fine-tunes never appeared in `/api/models`.
+#[tokio::test]
+async fn catalog_get_renders_family_placeholder_when_probing_install_state() {
+    if std::env::var_os("MOLD_MODELS_DIR").is_some() {
+        return;
+    }
+
+    let mut row = make_catalog_row("cv:rendered1", "civitai", "flux2", 2);
+    row.download_recipe = serde_json::json!({
+        "files": [{
+            "url": "http://test.invalid/foo.safetensors",
+            "dest": "{family}/civitai/rendered1/foo.safetensors",
+            "sha256": null,
+            "size_bytes": 1000,
+        }],
+        "needs_token": null,
+    })
+    .to_string();
+    let state = seeded_state(std::slice::from_ref(&row));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+
+    let subdir = tmp
+        .path()
+        .join(mold_core::download::sanitize_recipe_id("cv:rendered1"))
+        .join("flux2/civitai/rendered1");
+    std::fs::create_dir_all(&subdir).expect("mkdir rendered subdir");
+    std::fs::write(subdir.join("foo.safetensors"), vec![0u8; 1000]).expect("write stub");
+
+    let resp =
+        crate::catalog_api::get_catalog_entry(State(state), Path("cv:rendered1".to_string()))
+            .await
+            .into_response();
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("installed").and_then(|x| x.as_bool()),
+        Some(true),
+        "expected installed=true with file at rendered {{family}}=flux2 path; body={body}",
+    );
+    let path = body
+        .get("primary_path")
+        .and_then(|x| x.as_str())
+        .expect("primary_path should be present when installed");
+    assert!(
+        path.contains("/flux2/civitai/rendered1/"),
+        "reported path should use rendered family, got {path}",
+    );
+    assert!(
+        !path.contains("{family}"),
+        "reported path must not contain literal {{family}}, got {path}",
+    );
+}
+
+// ── list_catalog: total wire field for infinite scroll ────────────────────
+
+/// Infinite scroll needs to know when to stop. The list response carries
+/// `total` (count(*) of rows matching the filter, ignoring page/page_size),
+/// alongside `entries`/`page`/`page_size`. Without `total`, the SPA can't
+/// distinguish "last page returned full" from "more rows exist", and either
+/// over-fetches or stops early.
+#[tokio::test]
+async fn list_catalog_response_includes_total_distinct_from_page_size() {
+    let rows: Vec<CatalogRow> = (0..5)
+        .map(|i| make_catalog_row(&format!("hf:test/row-{i}"), "hf", "sdxl", 1))
+        .collect();
+    let state = seeded_state(&rows);
+
+    let query = Query(crate::catalog_api::ListQuery {
+        family: None,
+        family_role: None,
+        kind: None,
+        modality: None,
+        source: None,
+        sub_family: None,
+        q: None,
+        include_nsfw: Some(true),
+        max_engine_phase: None,
+        sort: None,
+        page: Some(1),
+        page_size: Some(2),
+        limit: None,
+        offset: None,
+    });
+    let resp = crate::catalog_api::list_catalog(State(state), query)
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("page_size").and_then(|v| v.as_i64()),
+        Some(2),
+        "page_size echo missing or wrong: {body}",
+    );
+    assert_eq!(
+        body.get("entries").and_then(|v| v.as_array()).map(Vec::len),
+        Some(2),
+        "entries should be capped at page_size: {body}",
+    );
+    assert_eq!(
+        body.get("total").and_then(|v| v.as_i64()),
+        Some(5),
+        "total must reflect the unpaginated row count: {body}",
+    );
+}
+
+/// `total` must respect WHERE-clause filters, not just count every row.
+/// Filtering by family=flux on a corpus split between flux (3) and sdxl (2)
+/// must report total=3.
+#[tokio::test]
+async fn list_catalog_total_respects_filters() {
+    let mut rows = Vec::new();
+    for i in 0..3 {
+        rows.push(make_catalog_row(
+            &format!("hf:test/flux-{i}"),
+            "hf",
+            "flux",
+            1,
+        ));
+    }
+    for i in 0..2 {
+        rows.push(make_catalog_row(
+            &format!("hf:test/sdxl-{i}"),
+            "hf",
+            "sdxl",
+            1,
+        ));
+    }
+    let state = seeded_state(&rows);
+
+    let query = Query(crate::catalog_api::ListQuery {
+        family: Some("flux".into()),
+        family_role: None,
+        kind: None,
+        modality: None,
+        source: None,
+        sub_family: None,
+        q: None,
+        include_nsfw: Some(true),
+        max_engine_phase: None,
+        sort: None,
+        page: Some(1),
+        page_size: Some(48),
+        limit: None,
+        offset: None,
+    });
+    let resp = crate::catalog_api::list_catalog(State(state), query)
+        .await
+        .into_response();
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("total").and_then(|v| v.as_i64()),
+        Some(3),
+        "total must apply WHERE family=flux: {body}",
+    );
+}
+
+/// Regression: the HF arm of `catalog_row_to_wire`'s installed predicate
+/// must successfully bridge HF repo paths (e.g. "black-forest-labs/FLUX.1-dev")
+/// to their canonical manifest names via `find_manifest_by_hf_repo`. Before
+/// the fix, the HF branch silently degraded to `installed=false` for every
+/// HF entry, breaking the Repair button on the HF half of the catalog.
+#[tokio::test]
+async fn catalog_get_emits_installed_true_for_hf_row_when_manifest_is_downloaded() {
+    if std::env::var_os("MOLD_MODELS_DIR").is_some() {
+        eprintln!(
+            "skipping catalog_get_emits_installed_for_hf: MOLD_MODELS_DIR is set; \
+             this test requires the cfg.models_dir override path"
+        );
+        return;
+    }
+
+    // Build an HF row whose source_id matches a known manifest's transformer hf_repo.
+    // FLUX.1-schnell is shipped as the BF16 variant from black-forest-labs/FLUX.1-schnell
+    // (see the corresponding manifest in mold-core/src/manifest.rs).
+    let mut row = make_catalog_row("hf:black-forest-labs/FLUX.1-schnell", "hf", "flux", 1);
+    row.source_id = "black-forest-labs/FLUX.1-schnell".to_string();
+    let state = seeded_state(std::slice::from_ref(&row));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+
+    // With nothing on disk, HF row reports installed=false. This pins the
+    // negative case as a sanity check (no false positives from the new
+    // bridge logic).
+    let resp = crate::catalog_api::get_catalog_entry(
+        State(state.clone()),
+        Path("hf:black-forest-labs/FLUX.1-schnell".to_string()),
+    )
+    .await
+    .into_response();
+    let body = read_body_json(resp).await;
+    assert_eq!(
+        body.get("installed").and_then(|x| x.as_bool()),
+        Some(false),
+        "expected installed=false for HF row with nothing on disk; body={body}",
     );
 }

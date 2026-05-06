@@ -1,8 +1,40 @@
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useCatalog } from "../composables/useCatalog";
 import CatalogCard from "./CatalogCard.vue";
 
 const cat = useCatalog();
+const sentinel = ref<HTMLElement | null>(null);
+let observer: IntersectionObserver | null = null;
+
+function detach() {
+  observer?.disconnect();
+  observer = null;
+}
+
+// rootMargin lets us start loading the next page ~one screenful before the
+// sentinel actually scrolls into view, so the user rarely sees an empty
+// stretch waiting for the fetch to complete.
+function attach() {
+  detach();
+  if (!sentinel.value) return;
+  if (typeof IntersectionObserver === "undefined") return;
+  observer = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        void cat.loadMore();
+      }
+    },
+    { rootMargin: "400px" },
+  );
+  observer.observe(sentinel.value);
+}
+
+onMounted(attach);
+onBeforeUnmount(detach);
+// Re-attach when the sentinel ref changes (e.g. transitions from
+// hasMore=false → true after a filter change loads a fresh result set).
+watch(sentinel, attach);
 
 function openCard(id: string) {
   void cat.openDetail(id);
@@ -45,18 +77,37 @@ function openCard(id: string) {
     </div>
 
     <!-- Grid -->
-    <div
-      v-else
-      class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
-    >
-      <button
-        v-for="entry in cat.entries.value"
-        :key="entry.id"
-        class="rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/60"
-        @click="openCard(entry.id)"
+    <template v-else>
+      <div
+        class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
       >
-        <CatalogCard :entry="entry" />
-      </button>
-    </div>
+        <button
+          v-for="entry in cat.entries.value"
+          :key="entry.id"
+          class="rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/60"
+          @click="openCard(entry.id)"
+        >
+          <CatalogCard :entry="entry" />
+        </button>
+      </div>
+
+      <div
+        v-if="cat.loadingMore.value"
+        class="py-6 text-center text-sm text-ink-400"
+      >
+        Loading more…
+      </div>
+
+      <!-- The sentinel triggers loadMore() when scrolled into view.
+           We only render it while there's actually more to fetch so a
+           stale observer callback can't double-fetch the final page. -->
+      <div
+        v-if="cat.hasMore.value"
+        ref="sentinel"
+        data-testid="catalog-load-more-sentinel"
+        class="h-1 w-full"
+        aria-hidden="true"
+      />
+    </template>
   </div>
 </template>

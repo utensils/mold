@@ -67,6 +67,19 @@ onMounted(async () => {
     }
   }
   limits.value = await fetchChainLimits(props.model).catch(() => null);
+  // Normalise enable_audio against the resolved model on first mount.
+  // The persisted draft might carry `enable_audio: true` from a prior
+  // session that used an AV-capable model; if the current model isn't
+  // AV-capable, leaving that stale value in place would make the chain
+  // endpoint reject the submit. So: AV → default-on if unset, non-AV →
+  // hard-clear regardless of what the draft said.
+  if (limits.value?.supports_audio) {
+    if (script.value.chain.enable_audio === undefined) {
+      script.value.chain.enable_audio = true;
+    }
+  } else {
+    delete script.value.chain.enable_audio;
+  }
 });
 
 // Strip base64 image bytes before persisting to localStorage. A single 2K×2K
@@ -96,6 +109,15 @@ watch(
   async (m) => {
     script.value.chain.model = m;
     limits.value = await fetchChainLimits(m).catch(() => null);
+    // Mirror the onMounted default: switching to an AV-capable model
+    // turns audio on if the user hasn't explicitly toggled it; switching
+    // to a non-AV model clears it so the wire stays clean and the server
+    // doesn't reject the chain.
+    if (limits.value?.supports_audio) {
+      script.value.chain.enable_audio ??= true;
+    } else {
+      delete script.value.chain.enable_audio;
+    }
   },
 );
 
@@ -326,9 +348,36 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
       <span v-else class="text-slate-500">Max stages reached</span>
     </div>
 
+    <label
+      v-if="limits?.supports_audio"
+      class="flex cursor-pointer items-center gap-2 px-1 text-xs text-slate-300"
+      title="Generate per-stage audio and mux it into the stitched MP4 (LTX-2 / LTX-2.3 only). Smooth/Cut/Fade transitions stitch audio to match the visual transition."
+    >
+      <input
+        type="checkbox"
+        data-test="script-composer-enable-audio"
+        class="h-4 w-4 rounded border-slate-600 bg-slate-900 text-brand-500 focus:ring-brand-500"
+        :checked="script.chain.enable_audio === true"
+        @change="
+          script.chain.enable_audio = ($event.target as HTMLInputElement)
+            .checked
+            ? true
+            : undefined
+        "
+      />
+      Generate audio
+    </label>
+
+    <p v-if="limits === null" class="text-center text-sm text-amber-400">
+      This model doesn't support chain generation.
+    </p>
     <button
       class="w-full rounded-xl bg-brand-500 py-2 text-sm font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
-      :disabled="overCap || script.stage.every((s) => !s.prompt.trim())"
+      :disabled="
+        limits === null ||
+        overCap ||
+        script.stage.every((s) => !s.prompt.trim())
+      "
       @click="submit"
     >
       Generate

@@ -431,40 +431,107 @@ pub fn has_pulling_marker(model_name: &str) -> bool {
     pulling_marker_path(&canonical).exists()
 }
 
-/// Verify SHA-256 integrity of a downloaded file. On mismatch, deletes the
-/// corrupted file and returns `Sha256Mismatch`. Respects `skip_verify`.
+/// Filename suffix for the "this file is fully written and integrity-checked"
+/// sidecar marker: `model.safetensors` → `model.safetensors.sha256-verified`.
+///
+/// The marker is written by [`verify_file_integrity`] on a successful pull
+/// (or by the post-startup backfill sweep for pre-marker installs). Two
+/// downstream consumers depend on it:
+///
+/// 1. `cleanup_partials_in_dir` (in `mold-server`) preserves any file that
+///    has a sibling marker — those are known-good and survive cancel/retry.
+/// 2. `Config::manifest_files_exist` requires the marker before reporting a
+///    model as "downloaded" — eliminates the existence-only race that let
+///    truncated files masquerade as complete installs.
+pub const SHA256_VERIFIED_SUFFIX: &str = ".sha256-verified";
+
+/// Minimum interval between `FileProgress` events emitted by the recipe-pull
+/// path (`fetch_recipe_inner`). The manifest-pull path's `CallbackProgress`
+/// throttles to the same cadence; this constant keeps them in sync. 250ms
+/// matches a comfortable UI refresh rate (~4 Hz) without flooding SSE
+/// subscribers when downloads run at multi-MB/s chunk rates.
+pub const RECIPE_PROGRESS_THROTTLE_MS: u64 = 250;
+
+/// Build the marker path for a downloaded file. `model.safetensors` →
+/// `model.safetensors.sha256-verified` in the same directory.
+pub fn sha256_marker_path(path: &Path) -> PathBuf {
+    let mut marker = path.as_os_str().to_os_string();
+    marker.push(SHA256_VERIFIED_SUFFIX);
+    PathBuf::from(marker)
+}
+
+/// True iff `<path>.sha256-verified` exists.
+pub fn has_sha256_marker(path: &Path) -> bool {
+    sha256_marker_path(path).exists()
+}
+
+/// Atomically write the `.sha256-verified` marker for `path` recording the
+/// computed digest. Atomic via tempfile-then-rename so a crash mid-write
+/// never leaves a half-populated marker (which would otherwise read as a
+/// successfully-installed file).
+pub fn write_sha256_marker(path: &Path, digest: &str) -> std::io::Result<()> {
+    let marker = sha256_marker_path(path);
+    let tmp = marker.with_extension(format!("sha256-verified.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, format!("{digest}\n"))?;
+    std::fs::rename(&tmp, &marker)
+}
+
+/// Verify SHA-256 integrity of a downloaded file and write the
+/// `.sha256-verified` marker on success.
+///
+/// - Manifest declares `sha256`: compute, compare, on match write marker
+///   (containing the verified digest); on mismatch delete the corrupted
+///   file and return `Sha256Mismatch`.
+/// - Manifest does not declare a hash: still compute and write the marker
+///   so the file is positively attested as "fully written." This is the
+///   load-bearing change for the gallery race — `Config::manifest_files_exist`
+///   consults marker presence, so unmarked-but-present files no longer
+///   appear in the available-models list.
+/// - `skip_verify = true`: respected from the original contract — no read,
+///   no marker. The caller has explicitly asked us to trust the bytes.
 fn verify_file_integrity(
     clean_path: &std::path::Path,
     file: &ModelFile,
     model_name: &str,
     skip_verify: bool,
 ) -> Result<(), DownloadError> {
-    let expected = match file.sha256 {
-        Some(h) => h,
-        None => return Ok(()),
-    };
     if skip_verify {
         return Ok(());
     }
-    match compute_sha256(clean_path) {
-        Ok(actual) if actual.eq_ignore_ascii_case(expected) => Ok(()),
-        Ok(actual) => {
-            let _ = std::fs::remove_file(clean_path);
-            Err(DownloadError::Sha256Mismatch {
-                filename: file.hf_filename.clone(),
-                expected: expected.to_string(),
-                actual,
-                model: model_name.to_string(),
-            })
-        }
+    let actual = match compute_sha256(clean_path) {
+        Ok(d) => d,
         Err(e) => {
+            // I/O failure during hashing — log and move on without a marker.
+            // The downstream `manifest_files_exist` check will report the
+            // file incomplete, prompting a retry rather than a silent pass.
             eprintln!(
                 "warning: failed to verify SHA-256 for {}: {e}",
                 file.hf_filename
             );
-            Ok(())
+            return Ok(());
+        }
+    };
+    if let Some(expected) = file.sha256 {
+        if !actual.eq_ignore_ascii_case(expected) {
+            let _ = std::fs::remove_file(clean_path);
+            return Err(DownloadError::Sha256Mismatch {
+                filename: file.hf_filename.clone(),
+                expected: expected.to_string(),
+                actual,
+                model: model_name.to_string(),
+            });
         }
     }
+    if let Err(e) = write_sha256_marker(clean_path, &actual) {
+        // Marker-write failure isn't fatal to this attempt — the file is
+        // good. But it does mean the next `manifest_files_exist` check will
+        // report incomplete. Log loudly so users can see why.
+        eprintln!(
+            "warning: failed to write .sha256-verified marker for {}: {e}",
+            file.hf_filename
+        );
+    }
+    Ok(())
 }
 
 /// Truncate a string to fit within `max_len`, replacing the middle with "..." if needed.
@@ -1417,6 +1484,64 @@ pub fn companion_present_on_disk(
     })
 }
 
+/// True iff the recipe file at `dest` should be considered already
+/// placed — used by both the catalog API's `installed: bool` predicate
+/// AND the `fetch_recipe_inner` skip path so they cannot drift apart.
+///
+/// Acceptance rule:
+/// - `sha256` declared → `.sha256-verified` marker is the sole criterion.
+///   The marker is written only after cryptographic verification at download
+///   time, so it is more authoritative than `size_bytes` (which can be stale
+///   in the catalog DB when a model is re-uploaded under the same sha256 with
+///   a different compressed size).  A file at the exact declared size but
+///   without the marker is still rejected.
+/// - `sha256` absent, `size_bytes` known → on-disk length must equal declared.
+/// - Neither declared → marker is the only attestation; require it.
+fn recipe_file_is_placed(dest: &Path, file: &RecipeFetchFile<'_>) -> bool {
+    if !dest.exists() {
+        return false;
+    }
+    match (file.sha256, file.size_bytes) {
+        (Some(_), _) => sha256_marker_path(dest).exists(),
+        (None, Some(expected)) => std::fs::metadata(dest)
+            .map(|m| m.len() == expected)
+            .unwrap_or(false),
+        (None, None) => sha256_marker_path(dest).exists(),
+    }
+}
+
+/// True iff every file in the recipe is present at its declared size (or,
+/// when the recipe omits the size, has a `.sha256-verified` marker from
+/// a prior verified pull) AND no `.pulling` marker for the catalog id is
+/// present. Used by the catalog API to set `installed: bool` on each
+/// wire entry so the SPA can hide the Download button and show Repair
+/// instead.
+///
+/// Empty file slice returns `false` — callers (see `catalog_row_to_wire`
+/// in mold-server) use this for Civitai-style recipe rows. HF rows
+/// without a recipe go through `Config::manifest_model_is_downloaded`
+/// instead, so an empty input here means "no recipe to walk" and we
+/// refuse to claim install.
+///
+/// `id` is the catalog id (`cv:1234` / `hf:author/name`) — same string
+/// the recipe-pull path uses to derive its marker and subdir name.
+pub fn catalog_entry_installed(models_dir: &Path, id: &str, files: &[RecipeFetchFile<'_>]) -> bool {
+    if files.is_empty() {
+        return false;
+    }
+    if pulling_marker_path_in(models_dir, id).exists() {
+        return false;
+    }
+    let sanitized = sanitize_recipe_id(id);
+    let subdir_root = models_dir.join(&sanitized);
+    files.iter().all(|f| {
+        let Ok(dest) = resolve_recipe_dest(&subdir_root, f.dest) else {
+            return false;
+        };
+        recipe_file_is_placed(&dest, f)
+    })
+}
+
 /// Parse a `Vec<String>` of companion names out of `companions_json` and
 /// return the ones that (a) resolve to a known synthetic manifest and (b)
 /// aren't already fully present under `models_dir`.
@@ -1608,6 +1733,48 @@ async fn fetch_recipe_inner(
             })?;
         }
 
+        // Idempotency: skip the HTTP fetch when the file is already on disk
+        // with the declared size, or (when no size is declared) when the
+        // post-download .sha256-verified marker is present from a prior
+        // run. Mirrors `is_already_placed` from the manifest path so a
+        // recipe re-pull (Repair, double-clicked Download, retry-after-
+        // partial-companion-failure) costs zero bytes when nothing's missing.
+        //
+        // The acceptance rule is centralized in `recipe_file_is_placed` so
+        // that this skip path and `catalog_entry_installed` (the catalog
+        // API's `installed: bool` predicate) cannot drift apart — otherwise
+        // the SPA's Repair button would silently re-pull a model the
+        // predicate just claimed was installed.
+        let already_placed = recipe_file_is_placed(dest_path, file);
+        if already_placed {
+            let size_bytes = file
+                .size_bytes
+                .unwrap_or_else(|| std::fs::metadata(dest_path).map(|m| m.len()).unwrap_or(0));
+            if let Some(cb) = progress.as_deref() {
+                cb(DownloadProgressEvent::FileStart {
+                    filename: file.dest.to_string(),
+                    file_index,
+                    total_files,
+                    size_bytes,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            batch_bytes_downloaded = batch_bytes_downloaded.saturating_add(size_bytes);
+            if let Some(cb) = progress.as_deref() {
+                cb(DownloadProgressEvent::FileDone {
+                    filename: file.dest.to_string(),
+                    file_index,
+                    total_files,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            continue;
+        }
+
         let mut req = client.get(file.url);
         if let RecipeAuth::Bearer(token) = &auth {
             req = req.bearer_auth(token);
@@ -1655,6 +1822,12 @@ async fn fetch_recipe_inner(
             DownloadError::FilePlacement(format!("failed to create {}: {e}", dest_path.display()))
         })?;
         let mut resp = resp;
+        // Throttle FileProgress to once per RECIPE_PROGRESS_THROTTLE_MS so SSE
+        // subscribers and reactive UIs aren't drowned in chunk-rate events
+        // (a multi-GB Civitai pull emits hundreds of thousands of chunks).
+        // Mirrors the throttle in the manifest-pull `CallbackProgress::update`.
+        let mut last_emit = Instant::now();
+        let mut last_emit_bytes: u64 = 0;
         while let Some(chunk) = resp
             .chunk()
             .await
@@ -1672,6 +1845,29 @@ async fn fetch_recipe_inner(
             bytes_downloaded += chunk.len() as u64;
             batch_bytes_downloaded += chunk.len() as u64;
             if let Some(cb) = progress.as_deref() {
+                let now = Instant::now();
+                let elapsed = now.duration_since(last_emit).as_millis();
+                if elapsed >= RECIPE_PROGRESS_THROTTLE_MS as u128 {
+                    last_emit = now;
+                    last_emit_bytes = bytes_downloaded;
+                    cb(DownloadProgressEvent::FileProgress {
+                        filename: file.dest.to_string(),
+                        file_index,
+                        bytes_downloaded,
+                        bytes_total: size_bytes,
+                        batch_bytes_downloaded,
+                        batch_bytes_total,
+                        batch_elapsed_ms: started.elapsed().as_millis() as u64,
+                    });
+                }
+            }
+        }
+        // Final progress emit so the file's last few chunks aren't swallowed
+        // by the throttle (FileDone fires below, but it doesn't carry the
+        // intermediate bytes_downloaded value — drawers that key off
+        // FileProgress for their byte counter would otherwise stall short).
+        if let Some(cb) = progress.as_deref() {
+            if bytes_downloaded > last_emit_bytes {
                 cb(DownloadProgressEvent::FileProgress {
                     filename: file.dest.to_string(),
                     file_index,
@@ -1686,14 +1882,21 @@ async fn fetch_recipe_inner(
         // Drop file handle so the SHA-256 read sees a flushed file.
         drop(out);
 
-        if let Some(expected) = file.sha256 {
-            if !opts.skip_verify {
-                let actual = compute_sha256(dest_path).map_err(|e| {
-                    DownloadError::Other(format!(
-                        "failed to compute SHA-256 for {}: {e}",
-                        dest_path.display()
-                    ))
-                })?;
+        // Hash-and-mark on success. Mirror of the manifest-pull path: when
+        // the recipe declares an expected hash we compare and bail on
+        // mismatch; either way we end up writing the `.sha256-verified`
+        // marker so `Config::manifest_files_exist` recognises this file
+        // as a positively-attested install (not just "exists on disk").
+        // Skipped under `skip_verify` — the user has explicitly asked us
+        // not to read the file, so we have nothing to attest.
+        if !opts.skip_verify {
+            let actual = compute_sha256(dest_path).map_err(|e| {
+                DownloadError::Other(format!(
+                    "failed to compute SHA-256 for {}: {e}",
+                    dest_path.display()
+                ))
+            })?;
+            if let Some(expected) = file.sha256 {
                 if !actual.eq_ignore_ascii_case(expected) {
                     let _ = std::fs::remove_file(dest_path);
                     return Err(DownloadError::Sha256Mismatch {
@@ -1703,6 +1906,12 @@ async fn fetch_recipe_inner(
                         model: id.to_string(),
                     });
                 }
+            }
+            if let Err(e) = write_sha256_marker(dest_path, &actual) {
+                eprintln!(
+                    "warning: failed to write .sha256-verified marker for {}: {e}",
+                    file.dest
+                );
             }
         }
 
@@ -2244,6 +2453,171 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ── .sha256-verified marker helpers (B1) ─────────────────────────────
+
+    #[test]
+    fn sha256_marker_path_appends_suffix() {
+        let p = std::path::Path::new("/tmp/foo/model.safetensors");
+        let marker = sha256_marker_path(p);
+        assert_eq!(
+            marker,
+            std::path::PathBuf::from("/tmp/foo/model.safetensors.sha256-verified")
+        );
+    }
+
+    #[test]
+    fn sha256_marker_path_handles_dotted_filenames() {
+        let p = std::path::Path::new("/tmp/.hidden.bin");
+        let marker = sha256_marker_path(p);
+        assert_eq!(
+            marker,
+            std::path::PathBuf::from("/tmp/.hidden.bin.sha256-verified")
+        );
+    }
+
+    #[test]
+    fn write_sha256_marker_creates_file_with_digest() {
+        let dir = std::env::temp_dir().join("mold_test_marker_write");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let digest = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        write_sha256_marker(&path, digest).unwrap();
+
+        let marker = sha256_marker_path(&path);
+        assert!(marker.exists(), "marker should exist next to file");
+        let content = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            content.contains(digest),
+            "marker content should contain the digest, got: {content:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_sha256_marker_is_idempotent() {
+        let dir = std::env::temp_dir().join("mold_test_marker_idempotent");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.bin");
+        std::fs::write(&path, b"x").unwrap();
+        let digest = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
+        write_sha256_marker(&path, digest).unwrap();
+        // Second call must not fail.
+        write_sha256_marker(&path, digest).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn has_sha256_marker_reflects_existence() {
+        let dir = std::env::temp_dir().join("mold_test_marker_has");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.bin");
+        std::fs::write(&path, b"x").unwrap();
+        assert!(!has_sha256_marker(&path), "no marker yet");
+        write_sha256_marker(&path, "deadbeef").unwrap();
+        assert!(has_sha256_marker(&path), "marker should exist");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── verify_file_integrity now writes a marker on success (B2) ────────
+
+    #[test]
+    fn verify_file_integrity_writes_marker_on_match() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_writes_marker");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ok.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "ok.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 11,
+            gated: false,
+            sha256: Some("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"),
+        };
+        verify_file_integrity(&path, &file, "test:q8", false).unwrap();
+        assert!(
+            has_sha256_marker(&path),
+            "marker should be written after a successful verify"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_file_integrity_writes_marker_when_no_hash_declared() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_no_hash_marker");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ok.bin");
+        std::fs::write(&path, b"data").unwrap();
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "ok.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 4,
+            gated: false,
+            sha256: None,
+        };
+        verify_file_integrity(&path, &file, "test:q8", false).unwrap();
+        assert!(
+            has_sha256_marker(&path),
+            "marker must be written even when manifest declares no expected hash \
+             (the marker still proves the file finished writing)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_file_integrity_no_marker_on_mismatch() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_no_marker_on_miss");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bad.bin");
+        std::fs::write(&path, b"corrupted").unwrap();
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "bad.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 9,
+            gated: false,
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        };
+        let result = verify_file_integrity(&path, &file, "test:q8", false);
+        assert!(result.is_err(), "mismatch should error");
+        // The corrupted file is removed by verify_file_integrity, but more
+        // importantly: there must be no marker pointing at the bad bytes.
+        assert!(
+            !has_sha256_marker(&path),
+            "no marker may exist after a hash mismatch"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_file_integrity_skip_verify_does_not_write_marker() {
+        use crate::manifest::{ModelComponent, ModelFile};
+        let dir = std::env::temp_dir().join("mold_test_integrity_skip_no_marker");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.bin");
+        std::fs::write(&path, b"some data").unwrap();
+        let file = ModelFile {
+            hf_repo: "test/repo".to_string(),
+            hf_filename: "file.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 9,
+            gated: false,
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        };
+        // skip_verify = true: we don't know the file is good, so no marker.
+        verify_file_integrity(&path, &file, "test:q8", true).unwrap();
+        assert!(
+            !has_sha256_marker(&path),
+            "skip_verify must not produce a marker — we have no integrity guarantee"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn pulling_marker_roundtrip() {
         let dir = std::env::temp_dir().join("mold_test_marker_roundtrip");
@@ -2640,6 +3014,524 @@ mod tests {
             !marker.exists(),
             "marker should be removed after successful fetch"
         );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_skips_files_with_matching_size() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = b"hello world";
+        Mock::given(method("GET"))
+            .and(path("/m.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_ref()))
+            // First call serves the body; any second call is an unexpected re-fetch.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("idempotent_size");
+        let url = format!("{}/m.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(body.len() as u64),
+        }];
+
+        fetch_recipe(
+            "cv:idemp",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("first fetch ok");
+
+        // Second call must skip the HTTP fetch entirely because the file is on
+        // disk with the declared size.
+        fetch_recipe(
+            "cv:idemp",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("second fetch ok (skip path)");
+
+        // wiremock's `.expect(1)` is verified on `MockServer::drop`; explicit
+        // verify here gives a clearer failure message at the assertion site.
+        server.verify().await;
+
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_skips_files_with_sha256_marker_when_size_unknown() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/m.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"x".as_ref()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("idempotent_marker");
+        let url = format!("{}/m.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "m.safetensors",
+            sha256: None,
+            // size_bytes intentionally None — fall through to marker check.
+            size_bytes: None,
+        }];
+
+        // First call writes the marker via the existing post-download codepath.
+        fetch_recipe(
+            "cv:idemp_marker",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("first fetch ok");
+
+        // Confirm marker is in place (sanity check for the test setup).
+        let dest = models_dir.join("cv-idemp_marker").join("m.safetensors");
+        assert!(
+            sha256_marker_path(&dest).exists(),
+            "first fetch should have written the .sha256-verified marker"
+        );
+
+        fetch_recipe(
+            "cv:idemp_marker",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("second fetch ok");
+
+        server.verify().await;
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_refetches_when_sha256_declared_but_marker_missing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = b"correct";
+        // SHA-256 of "correct"
+        let expected = "15a596e3c98c407e043751ff3b21ff0358a1bdfdf3fe948b1523893a8e5de2e8";
+        Mock::given(method("GET"))
+            .and(path("/m.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_ref()))
+            // The pre-staged file has the right size but no marker, so the
+            // skip path must refuse it and re-fetch exactly once.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("idempotent_no_marker");
+        let subdir = models_dir.join("cv-idemp_no_marker");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        // Pre-stage a file at the declared size — but NO marker, and bytes
+        // don't actually match the declared sha256. A size-only skip would
+        // accept this; the tightened predicate must not.
+        std::fs::write(&dest, b"BADBYTE").unwrap();
+        assert!(!sha256_marker_path(&dest).exists());
+
+        let url = format!("{}/m.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "m.safetensors",
+            sha256: Some(expected),
+            size_bytes: Some(body.len() as u64),
+        }];
+
+        fetch_recipe(
+            "cv:idemp_no_marker",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("fetch ok");
+
+        // After re-fetch the bytes match the server response and the marker exists.
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert!(sha256_marker_path(&dest).exists());
+        server.verify().await;
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_true_for_complete_recipe() {
+        let models_dir = recipe_tmp_dir("installed_complete");
+        let subdir = models_dir.join("cv-installed_a");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        std::fs::write(&dest, b"hello").unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(5),
+        }];
+
+        assert!(catalog_entry_installed(
+            &models_dir,
+            "cv:installed_a",
+            &files
+        ));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_when_any_file_missing() {
+        let models_dir = recipe_tmp_dir("installed_partial");
+        let subdir = models_dir.join("cv-installed_b");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("a.safetensors"), b"present").unwrap();
+        // b.safetensors is intentionally missing.
+
+        let files = vec![
+            RecipeFetchFile {
+                url: "https://example.invalid/a.safetensors",
+                dest: "a.safetensors",
+                sha256: None,
+                size_bytes: Some(7),
+            },
+            RecipeFetchFile {
+                url: "https://example.invalid/b.safetensors",
+                dest: "b.safetensors",
+                sha256: None,
+                size_bytes: Some(7),
+            },
+        ];
+
+        assert!(!catalog_entry_installed(
+            &models_dir,
+            "cv:installed_b",
+            &files
+        ));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_on_size_mismatch() {
+        let models_dir = recipe_tmp_dir("installed_mismatch");
+        let subdir = models_dir.join("cv-installed_c");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("m.safetensors"), b"WRONG").unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(99),
+        }];
+
+        assert!(!catalog_entry_installed(
+            &models_dir,
+            "cv:installed_c",
+            &files
+        ));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_uses_marker_when_size_unknown() {
+        let models_dir = recipe_tmp_dir("installed_marker");
+        let subdir = models_dir.join("cv-installed_d");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        std::fs::write(&dest, b"hello").unwrap();
+        write_sha256_marker(&dest, "deadbeef").unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: None,
+        }];
+
+        assert!(catalog_entry_installed(
+            &models_dir,
+            "cv:installed_d",
+            &files
+        ));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_without_marker_and_without_size() {
+        let models_dir = recipe_tmp_dir("installed_nomarker");
+        let subdir = models_dir.join("cv-installed_e");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("m.safetensors"), b"hello").unwrap();
+        // No marker, no declared size — refuse to claim install.
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: None,
+        }];
+
+        assert!(!catalog_entry_installed(
+            &models_dir,
+            "cv:installed_e",
+            &files
+        ));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_when_pulling_marker_present() {
+        let models_dir = recipe_tmp_dir("installed_pulling");
+        let subdir = models_dir.join("cv-installed_f");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("m.safetensors"), b"hello").unwrap();
+
+        let marker = pulling_marker_path_in(&models_dir, "cv:installed_f");
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&marker, "in-progress").unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(5),
+        }];
+
+        assert!(
+            !catalog_entry_installed(&models_dir, "cv:installed_f", &files),
+            "active .pulling marker must override on-disk completeness"
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_rejects_path_traversal() {
+        let models_dir = recipe_tmp_dir("installed_traversal");
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "../escape.safetensors",
+            sha256: None,
+            size_bytes: Some(5),
+        }];
+
+        assert!(
+            !catalog_entry_installed(&models_dir, "cv:installed_g", &files),
+            "path traversal must be treated as not-installed, not as a panic"
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_for_empty_files() {
+        let models_dir = recipe_tmp_dir("installed_empty");
+        assert!(
+            !catalog_entry_installed(&models_dir, "cv:installed_h", &[]),
+            "empty file slice means no recipe to verify; must refuse to claim install"
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_true_for_multi_file_complete_recipe() {
+        let models_dir = recipe_tmp_dir("installed_multi");
+        let subdir = models_dir.join("cv-installed_i");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("a.safetensors"), b"present").unwrap();
+        std::fs::write(subdir.join("b.safetensors"), b"present_too").unwrap();
+        std::fs::write(subdir.join("c.safetensors"), b"third").unwrap();
+
+        let files = vec![
+            RecipeFetchFile {
+                url: "https://example.invalid/a.safetensors",
+                dest: "a.safetensors",
+                sha256: None,
+                size_bytes: Some(7),
+            },
+            RecipeFetchFile {
+                url: "https://example.invalid/b.safetensors",
+                dest: "b.safetensors",
+                sha256: None,
+                size_bytes: Some(11),
+            },
+            RecipeFetchFile {
+                url: "https://example.invalid/c.safetensors",
+                dest: "c.safetensors",
+                sha256: None,
+                size_bytes: Some(5),
+            },
+        ];
+
+        assert!(
+            catalog_entry_installed(&models_dir, "cv:installed_i", &files),
+            "every file present at declared size — must report installed"
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_returns_false_when_file_larger_than_declared() {
+        // Mutation guard: pins == (not >=) for the size comparison. A
+        // 99-byte file declared as 5 bytes is just as wrong as a 5-byte file
+        // declared as 99 bytes — the existing `_size_mismatch` test only
+        // exercises the file-too-small direction.
+        let models_dir = recipe_tmp_dir("installed_too_big");
+        let subdir = models_dir.join("cv-installed_j");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(
+            subdir.join("m.safetensors"),
+            b"this is much longer than five bytes",
+        )
+        .unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(5),
+        }];
+
+        assert!(!catalog_entry_installed(
+            &models_dir,
+            "cv:installed_j",
+            &files
+        ));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_requires_marker_when_sha256_declared() {
+        // Cross-consistency: catalog_entry_installed and the inline skip
+        // path inside fetch_recipe_inner must agree on what "placed" means.
+        // A file at the right size with no marker — and a declared sha256
+        // — would otherwise be reported `installed=true` by the catalog
+        // API while the fetch path re-downloads it on Repair. Pins the
+        // shared `recipe_file_is_placed` rule.
+        let models_dir = recipe_tmp_dir("installed_no_marker");
+        let subdir = models_dir.join("cv-installed_k");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("m.safetensors"), b"hello").unwrap();
+        // No marker.
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: Some("deadbeef00000000000000000000000000000000000000000000000000000000"),
+            size_bytes: Some(5),
+        }];
+
+        assert!(
+            !catalog_entry_installed(&models_dir, "cv:installed_k", &files),
+            "size matches but no marker AND sha256 declared — must refuse to claim install",
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_trusts_marker_over_stale_size_bytes() {
+        // Regression guard: catalog DB can have stale size_bytes (e.g. model
+        // re-uploaded with same sha256 but different compressed size).  When a
+        // sha256 is declared and the marker exists, the file is verified —
+        // reject it only on size would cause installed models to disappear from
+        // the settings modal.
+        let models_dir = recipe_tmp_dir("installed_stale_size");
+        let subdir = models_dir.join("cv-installed_stale");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        // File is 5 bytes, but we'll declare size as 99 (stale) in the recipe.
+        std::fs::write(&dest, b"hello").unwrap();
+        write_sha256_marker(
+            &dest,
+            "deadbeef00000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: Some("deadbeef00000000000000000000000000000000000000000000000000000000"),
+            size_bytes: Some(99), // stale — actual file is 5 bytes
+        }];
+
+        assert!(
+            catalog_entry_installed(&models_dir, "cv:installed_stale", &files),
+            "sha256 marker present → installed despite stale size_bytes",
+        );
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[tokio::test]
+    async fn recipe_fetcher_pulls_when_size_mismatch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/m.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"correct".as_ref()))
+            // Size mismatch must trigger the fetch.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let models_dir = recipe_tmp_dir("idempotent_mismatch");
+        let subdir = models_dir.join("cv-idemp_mismatch");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        // Pre-stage a wrong-size file (4 bytes vs. the recipe's declared 7).
+        std::fs::write(&dest, b"WRNG").unwrap();
+
+        let url = format!("{}/m.safetensors", server.uri());
+        let files = vec![RecipeFetchFile {
+            url: &url,
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(7),
+        }];
+
+        fetch_recipe(
+            "cv:idemp_mismatch",
+            &files,
+            RecipeAuth::None,
+            &models_dir,
+            None,
+            &PullOptions::default(),
+        )
+        .await
+        .expect("ok");
+
+        // File should now match the server response.
+        assert_eq!(std::fs::read(&dest).unwrap(), b"correct");
+        server.verify().await;
         let _ = std::fs::remove_dir_all(&models_dir);
     }
 

@@ -931,7 +931,11 @@ impl Config {
                 crate::manifest::storage_path_candidates(manifest, file)
                     .into_iter()
                     .map(|path| models_dir.join(path))
-                    .find(|path| path.exists())
+                    // Same completeness rules as `manifest_files_exist`:
+                    // marker present OR size matches manifest. Plain
+                    // `.exists()` here let truncated downloads masquerade
+                    // as installed models — the gallery race lived here.
+                    .find(|path| Self::file_is_complete(path, file.size_bytes))
                     .map(|path| (file.component, path))
             })
             .collect::<Option<Vec<_>>>()?;
@@ -962,15 +966,48 @@ impl Config {
             && !self.manifest_model_is_downloaded(&canonical)
     }
 
-    /// Check whether all files for a manifest exist on disk.
+    /// Check whether all files for a manifest are completely on disk.
+    ///
+    /// Two acceptance signals (a file is considered complete if **either** holds):
+    ///
+    /// 1. A `.sha256-verified` sidecar exists. Written by the pull path on a
+    ///    successful download — positive proof the file finished writing and,
+    ///    when the manifest declared a hash, matches it.
+    /// 2. The on-disk size matches the manifest's declared `size_bytes`.
+    ///    Covers two legitimate cases without forcing an upgrade-day rehash:
+    ///    legacy installs created before markers were written, and HF cache
+    ///    symlinks pointing at fully-downloaded blobs in `~/.cache/huggingface`.
+    ///
+    /// Truncated / partial files reject under both signals — they have no
+    /// marker (because no successful verify ever ran) and their size does not
+    /// match. That's the load-bearing change for the "downloaded model
+    /// sometimes doesn't show up" gallery race.
     fn manifest_files_exist(&self, manifest: &crate::manifest::ModelManifest) -> bool {
         let models_dir = self.resolved_models_dir();
         manifest.files.iter().all(|file| {
             crate::manifest::storage_path_candidates(manifest, file)
                 .into_iter()
                 .map(|path| models_dir.join(path))
-                .any(|path| path.exists())
+                .any(|path| Self::file_is_complete(&path, file.size_bytes))
         })
+    }
+
+    /// True when the on-disk file at `path` should be treated as a fully
+    /// downloaded artifact. See [`Self::manifest_files_exist`] for the
+    /// acceptance rules.
+    fn file_is_complete(path: &std::path::Path, expected_size: u64) -> bool {
+        if !path.exists() {
+            return false;
+        }
+        if crate::download::has_sha256_marker(path) {
+            return true;
+        }
+        // Marker missing — fall back to size match against the manifest.
+        // Symlinks (HF cache) follow through to the target's metadata.
+        match path.metadata() {
+            Ok(meta) => meta.len() == expected_size,
+            Err(_) => false,
+        }
     }
 
     /// Return true when an active `.pulling` marker should block manifest discovery.

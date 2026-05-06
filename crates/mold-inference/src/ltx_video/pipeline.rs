@@ -3,6 +3,7 @@
 //! Architecture: T5-XXL text encoder → LTXVideoTransformer3DModel → 3D Causal VAE → APNG/GIF/WebP/MP4
 //! Follows the same patterns as Flux2Engine (drop-and-reload, VRAM management, progress).
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -624,6 +625,16 @@ pub struct LtxVideoEngine {
     t5_variant: Option<String>,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// `Some(is_native_format)` when built via `from_single_file`.
+    /// - `true` → native LTX key format; `remap_official_ltx_transformer_key`
+    ///   is applied at load time regardless of the transformer file name.
+    /// - `false` → diffusers format; no remap.
+    ///
+    /// `None` for HF diffusers-layout models (filename-based detection).
+    single_file_native_format: Option<bool>,
+    /// `true` when the single-file checkpoint contains `vae.*` keys.
+    /// `load_vae` opens `paths.vae` under `vb.pp("vae")` when set.
+    vae_in_checkpoint: bool,
 }
 
 impl LtxVideoEngine {
@@ -640,7 +651,99 @@ impl LtxVideoEngine {
             t5_variant,
             shared_pool,
             pending_placement: None,
+            single_file_native_format: None,
+            vae_in_checkpoint: false,
         }
+    }
+
+    /// Construct an LTX-Video engine from a Civitai single-file safetensors
+    /// checkpoint (phase 5).
+    ///
+    /// Header-parses `checkpoint` via `ltx_video::single_file::load` to
+    /// detect the key format (native vs. diffusers) and VAE presence.
+    ///
+    /// - **Combined checkpoints** (transformer + `vae.*` keys): both
+    ///   components are loaded from `checkpoint`; `vae_path` is ignored.
+    /// - **Transformer-only checkpoints**: the `ltx-video-vae` companion
+    ///   must have been resolved and passed as `vae_path`.
+    ///
+    /// `t5_tokenizer_path` is the path to a companion-pulled T5 tokenizer
+    /// JSON (set via `populate_companion_paths` in the catalog bridge).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_single_file(
+        model_name: String,
+        checkpoint: PathBuf,
+        vae_path: Option<PathBuf>,
+        t5_encoder_path: Option<PathBuf>,
+        t5_tokenizer_path: Option<PathBuf>,
+        t5_variant: Option<String>,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<SharedPool>>>,
+    ) -> anyhow::Result<Self> {
+        if !checkpoint.exists() {
+            anyhow::bail!(
+                "single-file LTX-Video checkpoint not found: {}",
+                checkpoint.display()
+            );
+        }
+
+        let bundle = super::single_file::load(&checkpoint).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse single-file LTX-Video checkpoint {}: {e}",
+                checkpoint.display()
+            )
+        })?;
+
+        let is_native = bundle.format == super::single_file::LtxKeyFormat::Native;
+
+        // Resolve VAE: embedded in the combined checkpoint, or external companion.
+        let (resolved_vae, vae_in_checkpoint) = if bundle.has_vae {
+            (checkpoint.clone(), true)
+        } else {
+            let vae = vae_path.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LTX-Video checkpoint {} contains no VAE weights (`vae.*` keys). \
+                     Pull the `ltx-video-vae` companion first: `mold pull ltx-video-vae`",
+                    checkpoint.display()
+                )
+            })?;
+            if !vae.exists() {
+                anyhow::bail!(
+                    "ltx-video-vae companion not on disk: {}. \
+                     Run `mold pull ltx-video-vae` to download it.",
+                    vae.display()
+                );
+            }
+            (vae, false)
+        };
+
+        let paths = ModelPaths {
+            transformer: checkpoint.clone(),
+            transformer_shards: Vec::new(),
+            vae: resolved_vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: t5_encoder_path,
+            clip_encoder: None,
+            t5_tokenizer: t5_tokenizer_path,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+
+        Ok(Self {
+            base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
+            t5_variant,
+            shared_pool,
+            pending_placement: None,
+            single_file_native_format: Some(is_native),
+            vae_in_checkpoint,
+        })
     }
 }
 
@@ -731,6 +834,110 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
     fn model_paths(&self) -> Option<&ModelPaths> {
         Some(&self.base.paths)
     }
+
+    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::ltx2::ChainStageRenderer> {
+        Some(self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chain rendering (fallback for non-Ltx2 video engines)
+// ---------------------------------------------------------------------------
+// LTX-Video has no img2vid path, so it can't anchor the denoise on a previous
+// stage's last frames the way LTX-2 does. The fallback renders each stage
+// independently and relies on the stitch layer to glue clips together (Cut
+// is the natural seam; Smooth is forced to motion_tail=0 server-side which
+// makes it equivalent to Cut). Trade-off: longer videos with no temporal
+// context handoff. Subjects can drift between clips. Future work: add img2vid
+// to LtxVideoEngine and feed the carry tail's last frame as `source_image`
+// with strength~0.7.
+
+impl crate::ltx2::ChainStageRenderer for LtxVideoEngine {
+    fn render_stage(
+        &mut self,
+        stage_req: &GenerateRequest,
+        _carry: Option<&crate::ltx2::ChainTail>,
+        motion_tail_pixel_frames: u32,
+        _stage_progress: Option<&mut dyn FnMut(crate::ltx2::StageProgressEvent)>,
+    ) -> Result<crate::ltx2::StageOutcome> {
+        let start = Instant::now();
+        let frames = self.render_chain_frames_internal(stage_req)?;
+        let generation_time_ms = start.elapsed().as_millis() as u64;
+        if frames.is_empty() {
+            bail!("LtxVideoEngine.render_stage: pipeline produced zero frames");
+        }
+
+        // Tail data is unused by the next ltx-video stage (we ignore carry),
+        // but the orchestrator still threads `StageOutcome.tail` through and
+        // some `ChainTail` consumers assert `frames > 0`. Hand back the
+        // trailing frames so the type invariant holds and any future
+        // img2vid-aware fallback can use them without an interface change.
+        let tail_count = (motion_tail_pixel_frames as usize).clamp(1, frames.len());
+        let tail_frames: Vec<image::RgbImage> = frames
+            .iter()
+            .skip(frames.len() - tail_count)
+            .cloned()
+            .collect();
+
+        Ok(crate::ltx2::StageOutcome {
+            frames,
+            tail: crate::ltx2::ChainTail {
+                frames: tail_frames.len() as u32,
+                tail_rgb_frames: tail_frames,
+            },
+            // ltx-video has no audio path. Chain orchestrator validation
+            // already rejects enable_audio=true for this family.
+            audio: None,
+            generation_time_ms,
+        })
+    }
+}
+
+impl LtxVideoEngine {
+    /// Render one chain stage by piping through the standard generation
+    /// pipeline with APNG output forced, then decoding bytes back to raw
+    /// `RgbImage` frames. APNG is lossless so the round-trip preserves every
+    /// pixel; the encode/decode cost is ~tens of ms vs multi-second
+    /// inference, so it's effectively free.
+    fn render_chain_frames_internal(
+        &mut self,
+        req: &GenerateRequest,
+    ) -> Result<Vec<image::RgbImage>> {
+        let mut apng_req = req.clone();
+        apng_req.output_format = OutputFormat::Apng;
+        // gif_preview encoding doubles the encode cost; chain mode never
+        // surfaces per-stage previews so skip it.
+        apng_req.gif_preview = false;
+        let response = self.generate_inner(&apng_req)?;
+        let video = response
+            .video
+            .ok_or_else(|| anyhow::anyhow!("LtxVideoEngine.generate returned no video data"))?;
+        decode_apng_to_rgb_frames(&video.data)
+    }
+}
+
+fn decode_apng_to_rgb_frames(apng_bytes: &[u8]) -> Result<Vec<image::RgbImage>> {
+    use image::AnimationDecoder;
+    let cursor = std::io::Cursor::new(apng_bytes);
+    let decoder = image::codecs::png::PngDecoder::new(cursor)
+        .map_err(|e| anyhow::anyhow!("failed to open APNG bytes: {e}"))?;
+    let apng = decoder
+        .apng()
+        .map_err(|e| anyhow::anyhow!("decoded PNG is not animated: {e}"))?;
+    let mut out = Vec::new();
+    for frame in apng.into_frames() {
+        let frame = frame.map_err(|e| anyhow::anyhow!("APNG frame decode failed: {e}"))?;
+        let rgba = frame.into_buffer();
+        let (w, h) = rgba.dimensions();
+        let mut rgb_data = Vec::with_capacity((w as usize) * (h as usize) * 3);
+        for px in rgba.pixels() {
+            rgb_data.extend_from_slice(&px.0[..3]);
+        }
+        let rgb = image::RgbImage::from_raw(w, h, rgb_data)
+            .ok_or_else(|| anyhow::anyhow!("failed to construct RgbImage from APNG frame"))?;
+        out.push(rgb);
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -761,9 +968,17 @@ impl LtxVideoEngine {
 
         // SAFETY: mmap'd safetensors files are immutable model weights.
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&transformer_files, dtype, device)? };
-        let vb = if transformer_files.len() == 1
-            && is_official_ltx_transformer_checkpoint(&transformer_files[0])
-        {
+        // For single-file catalog entries `single_file_native_format` carries
+        // the key-based detection result so an arbitrary Civitai filename
+        // (not starting with "ltx") still gets the correct remap.
+        let use_remap = match self.single_file_native_format {
+            Some(is_native) => is_native,
+            None => {
+                transformer_files.len() == 1
+                    && is_official_ltx_transformer_checkpoint(&transformer_files[0])
+            }
+        };
+        let vb = if use_remap {
             vb.rename_f(remap_official_ltx_transformer_key)
         } else {
             vb
@@ -787,6 +1002,13 @@ impl LtxVideoEngine {
                 dtype,
                 device,
             )?
+        };
+        // Combined single-file checkpoints store VAE weights under the
+        // `vae.*` namespace; standalone VAE files use root-level keys.
+        let vb = if self.vae_in_checkpoint {
+            vb.pp("vae")
+        } else {
+            vb
         };
         Ok(AutoencoderKLLtxVideo::new(preset.vae_config.clone(), vb)?)
     }
@@ -1560,6 +1782,37 @@ mod tests {
     };
     use candle_core::{DType, Device, Tensor};
     use std::path::Path;
+
+    #[test]
+    fn decode_apng_round_trips_rgb_frames() {
+        use crate::ltx_video::video_enc::encode_apng;
+        use image::Rgb;
+
+        // Build three 4x4 frames with distinct solid colors so any axis swap
+        // or RGB ↔ BGR mistake shows up immediately.
+        let make = |r: u8, g: u8, b: u8| {
+            let mut img = image::RgbImage::new(4, 4);
+            for px in img.pixels_mut() {
+                *px = Rgb([r, g, b]);
+            }
+            img
+        };
+        let inputs = vec![make(255, 0, 0), make(0, 255, 0), make(0, 0, 255)];
+
+        let bytes = encode_apng(&inputs, 12, None).expect("encode");
+        let decoded = super::decode_apng_to_rgb_frames(&bytes).expect("decode");
+
+        assert_eq!(decoded.len(), inputs.len());
+        for (i, (a, b)) in inputs.iter().zip(decoded.iter()).enumerate() {
+            assert_eq!(a.dimensions(), b.dimensions(), "frame {i} size");
+            // Sample one pixel — APNG is lossless, so equality is exact.
+            assert_eq!(
+                a.get_pixel(0, 0),
+                b.get_pixel(0, 0),
+                "frame {i} pixel mismatch",
+            );
+        }
+    }
 
     #[test]
     fn detects_official_ltx_single_file_checkpoints() {

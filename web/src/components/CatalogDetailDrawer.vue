@@ -67,11 +67,21 @@ async function handleDownload() {
     <!-- Meta -->
     <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
       <!-- Phase badge -->
-      <div v-if="cat.detail.value.engine_phase >= 3" class="inline-flex">
+      <div v-if="cat.detail.value.engine_phase >= 6" class="inline-flex">
         <span
           class="text-[11px] px-2 py-0.5 rounded bg-amber-700/30 text-amber-200"
         >
           Coming in phase {{ cat.detail.value.engine_phase }}
+        </span>
+      </div>
+
+      <!-- Installed chip -->
+      <div v-if="cat.detail.value.installed" class="inline-flex">
+        <span
+          class="text-[11px] px-2 py-0.5 rounded bg-emerald-700/30 text-emerald-200"
+          title="Files are present under your models directory"
+        >
+          Installed
         </span>
       </div>
 
@@ -146,6 +156,23 @@ async function handleDownload() {
     <!-- Actions -->
     <div class="border-t border-zinc-800 p-4">
       <button
+        v-if="cat.detail.value.installed"
+        data-test="repair-btn"
+        type="button"
+        :disabled="!cat.canDownload(cat.detail.value)"
+        title="Re-fetch any missing or incomplete files for this model"
+        class="w-full rounded-lg px-4 py-2 text-sm font-medium transition border border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+        :class="
+          !cat.canDownload(cat.detail.value)
+            ? 'cursor-not-allowed opacity-60'
+            : ''
+        "
+        @click="handleDownload"
+      >
+        Repair
+      </button>
+      <button
+        v-else
         data-test="download-btn"
         type="button"
         :disabled="!cat.canDownload(cat.detail.value)"

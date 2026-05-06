@@ -19,6 +19,7 @@ fn script_under_test() -> ChainScript {
             strength: 1.0,
             motion_tail_frames: 25,
             output_format: OutputFormat::Mp4,
+            enable_audio: None,
         },
         stages: vec![
             ChainStage {
@@ -110,6 +111,7 @@ fn normalised_request_survives_round_trip() {
         total_frames: None,
         clip_frames: None,
         source_image: None,
+        enable_audio: None,
     };
     let normalised = req.normalise().unwrap();
     let script = ChainScript::from(&normalised);
