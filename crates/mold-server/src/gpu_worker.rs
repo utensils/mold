@@ -298,9 +298,34 @@ pub fn ensure_model_ready_sync(
 
     // Check if we have it cached but not on GPU (Parked/Unloaded).
     let has_cached = cache.contains(model_name);
+
+    // Snapshot active VRAM and the cached engine's paths (if any) for the
+    // preflight before dropping the lock. Cloning ModelPaths keeps the
+    // borrow scoped to this block.
+    let active_vram = cache.active_vram_bytes();
+    let cached_paths = if has_cached {
+        cache
+            .get(model_name)
+            .and_then(|e| e.engine.model_paths().cloned())
+    } else {
+        None
+    };
     drop(cache);
 
     if has_cached {
+        // Preflight before unloading the active model — the active model's
+        // footprint counts toward effective availability since we're about
+        // to free it.
+        if let Some(ref paths) = cached_paths {
+            crate::model_manager::preflight_memory_guard(
+                model_name,
+                paths,
+                active_vram,
+                worker.gpu.ordinal,
+            )
+            .map_err(|e| anyhow::anyhow!(e.error))?;
+        }
+
         // Unload active model first.
         {
             let mut cache = worker.model_cache.lock().unwrap();
@@ -321,26 +346,43 @@ pub fn ensure_model_ready_sync(
             model = %model_name,
             "reloading cached engine..."
         );
+        // Sample VRAM baseline before load so we can record the new model's
+        // per-load delta rather than the device-global usage.
+        let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
         engine.load()?;
 
-        let vram = device::vram_used_estimate(worker.gpu.ordinal);
-        let mut cache = worker.model_cache.lock().unwrap();
-        cache.insert_loaded(model_name.to_string(), engine, vram);
+        let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);
+        // Drop any evicted engine OUTSIDE the cache lock — `cuMemFree` and
+        // safetensor unmap during the drop can block other cache users.
+        let evicted = {
+            let mut cache = worker.model_cache.lock().unwrap();
+            cache.insert_loaded(model_name.to_string(), engine, vram)
+        };
+        drop(evicted);
         return Ok(());
     }
 
     // Not in cache — need to create from scratch.
+    // Resolve model paths.
+    let paths = ModelPaths::resolve(model_name, config).ok_or_else(|| {
+        anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
+    })?;
+
+    // Preflight before unloading the active model.
+    crate::model_manager::preflight_memory_guard(
+        model_name,
+        &paths,
+        active_vram,
+        worker.gpu.ordinal,
+    )
+    .map_err(|e| anyhow::anyhow!(e.error))?;
+
     // Unload active model first.
     {
         let mut cache = worker.model_cache.lock().unwrap();
         cache.unload_active();
     }
     device::reclaim_gpu_memory(worker.gpu.ordinal);
-
-    // Resolve model paths.
-    let paths = ModelPaths::resolve(model_name, config).ok_or_else(|| {
-        anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
-    })?;
 
     let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
     let mut engine = mold_inference::create_engine_with_pool(
@@ -358,11 +400,19 @@ pub fn ensure_model_ready_sync(
         model = %model_name,
         "loading model..."
     );
+    // Sample VRAM baseline before load so we can record the new model's
+    // per-load delta rather than the device-global usage.
+    let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
     engine.load()?;
 
-    let vram = device::vram_used_estimate(worker.gpu.ordinal);
-    let mut cache = worker.model_cache.lock().unwrap();
-    cache.insert_loaded(model_name.to_string(), engine, vram);
+    let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);
+    // Drop any evicted engine OUTSIDE the cache lock — `cuMemFree` and
+    // safetensor unmap during the drop can block other cache users.
+    let evicted = {
+        let mut cache = worker.model_cache.lock().unwrap();
+        cache.insert_loaded(model_name.to_string(), engine, vram)
+    };
+    drop(evicted);
 
     Ok(())
 }

@@ -304,6 +304,49 @@ mod tests {
         assert!(cache.contains("model-c"));
     }
 
+    /// Stronger LRU guarantee: the evicted engine returned by `insert` must
+    /// be the LRU entry (model-a here), not any other entry. Callers in
+    /// `model_manager` and `gpu_worker` drop this engine outside the cache
+    /// lock — drop ordering depends on the right entry coming back.
+    #[test]
+    fn lru_eviction_returns_lru_engine() {
+        let mut cache = ModelCache::new(2);
+        cache.insert(Box::new(MockEngine::new("model-a")), 1000);
+        cache.insert(Box::new(MockEngine::new("model-b")), 1000);
+        let evicted = cache
+            .insert(Box::new(MockEngine::new("model-c")), 1000)
+            .expect("eviction must occur at capacity");
+        assert_eq!(
+            evicted.model_name(),
+            "model-a",
+            "evicted engine must be the LRU one (model-a), not any other"
+        );
+    }
+
+    /// Same guarantee for `insert_loaded` (the GPU-worker path). When the
+    /// cache is at capacity and a new load completes, the returned engine
+    /// must be the LRU entry that was bumped — otherwise the dropped engine
+    /// in `gpu_worker.rs` would be the wrong one and the cache would silently
+    /// retain a stale entry.
+    #[test]
+    fn insert_loaded_returns_lru_engine_on_eviction() {
+        let mut cache = ModelCache::new(2);
+        cache.insert(Box::new(MockEngine::new("model-a")), 1000);
+        cache.insert(Box::new(MockEngine::new("model-b")), 1000);
+        let evicted = cache
+            .insert_loaded(
+                "model-c".to_string(),
+                Box::new(MockEngine::new("model-c")),
+                1000,
+            )
+            .expect("eviction must occur at capacity");
+        assert_eq!(
+            evicted.model_name(),
+            "model-a",
+            "insert_loaded must return the LRU engine on eviction"
+        );
+    }
+
     #[test]
     fn touch_updates_lru_order() {
         let mut cache = ModelCache::new(2);

@@ -374,46 +374,83 @@ async fn process_job(state: &AppState, job: GenerationJob) {
         }
     }
 
-    // 3. Run inference in spawn_blocking
-    let model_cache = state.model_cache.clone();
+    // 3. Take the engine out of the cache so the cache mutex stays free during
+    //    generation. Mirrors the multi-GPU `gpu_worker::process_job` pattern —
+    //    holding the cache lock through inference would block /api/models,
+    //    /api/cache, and any concurrent gallery/admin reads.
+    let taken = {
+        let mut cache = state.model_cache.lock().await;
+        cache.take(&job.request.model)
+    };
+    let Some(mut cached_engine) = taken else {
+        let err_msg = "no engine available after model readiness check".to_string();
+        if let Some(ref tx) = job.progress_tx {
+            let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                message: err_msg.clone(),
+            }));
+        }
+        let _ = job.result_tx.send(Err(err_msg));
+        return;
+    };
+
     let active_gen = state.active_generation.clone();
-    let gen_state = state.clone();
     let gen_req = job.request.clone();
     let progress_tx = job.progress_tx.clone();
 
+    set_active_generation(state, &job.request.model, &job.request.prompt);
+
+    // Install progress callback before crossing into spawn_blocking — keeps
+    // the callback installation off the blocking thread. Mirrors the pre-
+    // refactor behavior: when streaming, set the callback; when not, clear
+    // it (and only clear after generate when streaming).
+    let was_streaming = progress_tx.is_some();
+    if let Some(ref ptx) = progress_tx {
+        let ptx = ptx.clone();
+        cached_engine.engine.set_on_progress(Box::new(move |event| {
+            let _ = ptx.send(SseMessage::Progress(progress_to_sse(event)));
+        }));
+    } else {
+        cached_engine.engine.clear_on_progress();
+    }
+
     #[cfg(feature = "metrics")]
     let inference_start = Instant::now();
-    let result = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut guard = model_cache.blocking_lock();
-            let entry = guard.get_mut(&gen_req.model).ok_or_else(|| {
-                anyhow::anyhow!("no engine available after model readiness check")
-            })?;
-            let e = &mut entry.engine;
-            set_active_generation(&gen_state, &gen_req.model, &gen_req.prompt);
-
-            // Install progress callback for the generate phase
-            if let Some(ref ptx) = progress_tx {
-                let ptx = ptx.clone();
-                e.set_on_progress(Box::new(move |event| {
-                    let _ = ptx.send(SseMessage::Progress(progress_to_sse(event)));
-                }));
-            } else {
-                e.clear_on_progress();
-            }
-
-            let generate_result = e.generate(&gen_req);
-            if progress_tx.is_some() {
-                e.clear_on_progress();
-            }
-            clear_active_generation(&gen_state);
-            generate_result
-        }))
+    // Run generation on the blocking pool. Move the engine in, return it back
+    // out (alongside the result + any panic payload) so we can restore it to
+    // the cache in async context regardless of outcome.
+    let join_result = tokio::task::spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cached_engine.engine.generate(&gen_req)
+        }));
+        if was_streaming {
+            cached_engine.engine.clear_on_progress();
+        }
+        (cached_engine, result)
     })
     .await;
 
     #[cfg(feature = "metrics")]
     let inference_duration = inference_start.elapsed().as_secs_f64();
+
+    // Restore the engine to the cache as soon as the blocking task joins —
+    // even panics must restore so the cache isn't left with a hole. If the
+    // tokio task itself failed (JoinError), the engine is gone — restoration
+    // is impossible and the cache will repopulate via `ensure_model_ready`
+    // on the next request.
+    let result = match join_result {
+        Ok((cached_engine, panic_or_result)) => {
+            {
+                let mut cache = state.model_cache.lock().await;
+                cache.restore(cached_engine);
+            }
+            clear_active_generation(state);
+            Ok(panic_or_result)
+        }
+        Err(join_err) => {
+            clear_active_generation(state);
+            Err(join_err)
+        }
+    };
 
     match result {
         Ok(Ok(Ok(mut response))) => {
@@ -1204,6 +1241,51 @@ mod tests {
 
         drop(job_tx);
         dispatcher.abort();
+    }
+
+    /// Regression for the take-and-restore refactor in `process_job`: when
+    /// the engine vanishes from the cache between `ensure_model_ready` and
+    /// `cache.take()`, the take path must produce `None` (handled with a
+    /// clean error in `process_job`) rather than panicking. The pure cache
+    /// invariant — `take()` on an absent model returns `None` — is what
+    /// keeps the take-and-restore safe.
+    #[tokio::test]
+    async fn cache_take_on_vanished_engine_returns_none_not_panic() {
+        use crate::model_cache::ModelCache;
+        use mold_core::GenerateResponse;
+        use mold_inference::InferenceEngine;
+
+        struct StubEngine(&'static str);
+        impl InferenceEngine for StubEngine {
+            fn generate(&mut self, _r: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+                unimplemented!()
+            }
+            fn model_name(&self) -> &str {
+                self.0
+            }
+            fn is_loaded(&self) -> bool {
+                true
+            }
+            fn load(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut cache = ModelCache::new(3);
+        // Cache empty (engine never inserted, or evicted/removed by a
+        // concurrent admin call between `ensure_model_ready` and `take`).
+        assert!(cache.take("vanished-model").is_none());
+
+        // After a take of a present engine, a subsequent take of the same
+        // name must also return None — guards against double-take in the
+        // restore path.
+        cache.insert(Box::new(StubEngine("present-model")), 0);
+        let first = cache.take("present-model");
+        assert!(first.is_some());
+        assert!(
+            cache.take("present-model").is_none(),
+            "double-take must return None"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

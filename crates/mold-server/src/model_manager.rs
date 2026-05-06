@@ -42,31 +42,60 @@ fn check_model_memory_budget(
     Ok(())
 }
 
-/// On macOS (MPS/unified memory), check whether estimated peak memory fits
-/// before committing to a model load. No-op on CUDA or non-macOS.
+/// Pure inner: given an `available_bytes` budget and the active model's
+/// reclaimable VRAM, decide whether the new model fits. Adding
+/// `active_vram_bytes` to `available_bytes` accounts for the currently-loaded
+/// model that will be unloaded before the new one loads — without this, a
+/// swap of two near-equal-size models would be falsely rejected even though
+/// the swap is feasible.
+pub(crate) fn preflight_memory_guard_with_available(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+    available_bytes: u64,
+) -> Result<(), ApiError> {
+    let peak =
+        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager);
+    let effective_available = available_bytes.saturating_add(active_vram_bytes);
+    check_model_memory_budget(model_name, peak, effective_available)
+}
+
+/// Check whether estimated peak memory fits before committing to a model load.
+///
+/// - On CUDA: uses `free_vram_bytes(gpu_ordinal)`.
+/// - On macOS (MPS/unified memory): uses `available_system_memory_bytes()`.
+/// - On other platforms: no-op.
 ///
 /// `active_vram_bytes` is the footprint of the currently GPU-resident model
 /// that will be unloaded before loading the new one. This memory will become
 /// available, so we add it to the budget to avoid false rejections during
 /// model swaps.
-fn preflight_memory_guard(
+pub(crate) fn preflight_memory_guard(
     model_name: &str,
     paths: &ModelPaths,
     active_vram_bytes: u64,
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
 ) -> Result<(), ApiError> {
-    let available = match mold_inference::device::available_system_memory_bytes() {
-        Some(a) if a > 0 => a,
-        _ => return Ok(()), // Non-macOS or can't query — skip
-    };
+    // CUDA branch: query free VRAM on the target ordinal.
+    #[cfg(feature = "cuda")]
+    if let Some(free) = mold_inference::device::free_vram_bytes(gpu_ordinal) {
+        return preflight_memory_guard_with_available(model_name, paths, active_vram_bytes, free);
+    }
 
-    let peak =
-        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager);
+    // macOS unified memory: query system memory and add reclaimable footprint.
+    if let Some(available) = mold_inference::device::available_system_memory_bytes() {
+        if available > 0 {
+            return preflight_memory_guard_with_available(
+                model_name,
+                paths,
+                active_vram_bytes,
+                available,
+            );
+        }
+    }
 
-    // The active model will be unloaded before loading the new one,
-    // so its footprint becomes available memory.
-    let effective_available = available.saturating_add(active_vram_bytes);
-
-    check_model_memory_budget(model_name, peak, effective_available)
+    // No memory info available on this platform — skip the guard.
+    Ok(())
 }
 pub(crate) type DownloadProgressCallback =
     Arc<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>;
@@ -538,7 +567,7 @@ pub(crate) async fn ensure_model_ready(
             // MPS memory guard: check before unloading the active model.
             // Include the active model's footprint as reclaimable memory.
             if let Some(paths) = entry.engine.model_paths() {
-                preflight_memory_guard(model_name, paths, active_vram)?;
+                preflight_memory_guard(model_name, paths, active_vram, 0)?;
             }
 
             // Parked engines retain tokenizers/caches for faster reload.
@@ -576,6 +605,9 @@ pub(crate) async fn ensure_model_ready(
             let model_log = model_name.to_string();
             #[cfg(feature = "metrics")]
             let load_start = std::time::Instant::now();
+            // Sample VRAM baseline before load so we can record the new
+            // model's per-load delta rather than the device-global usage.
+            let vram_baseline = mold_inference::device::vram_in_use_bytes(0);
             let result = tokio::task::spawn_blocking(move || {
                 tracing::info!(model = %model_log, "reloading cached engine...");
                 if let Err(e) = engine.load() {
@@ -597,18 +629,33 @@ pub(crate) async fn ensure_model_ready(
                         let duration = load_start.elapsed().as_secs_f64();
                         crate::metrics::record_model_load(model_name, duration);
                         crate::metrics::set_model_loaded(model_name);
-                        let vram_est = mold_inference::device::vram_used_estimate(0);
+                        let vram_est = mold_inference::device::vram_in_use_bytes(0);
                         crate::metrics::record_gpu_memory(vram_est);
                     }
-                    let vram = mold_inference::device::vram_used_estimate(0);
-                    let mut cache = state.model_cache.lock().await;
-                    cache.insert(loaded_engine, vram);
-                    update_snapshot(state, &cache).await;
+                    let vram = mold_inference::device::vram_load_delta(0, vram_baseline);
+                    // Insert under the cache lock, but drop the evicted engine
+                    // OUTSIDE the lock — `cuMemFree` and safetensor unmap during
+                    // `Box<dyn ...>` drop can block other cache users for hundreds
+                    // of milliseconds.
+                    let evicted = {
+                        let mut cache = state.model_cache.lock().await;
+                        let evicted = cache.insert(loaded_engine, vram);
+                        update_snapshot(state, &cache).await;
+                        evicted
+                    };
+                    drop(evicted);
                 }
                 Err((api_err, unloaded_engine)) => {
-                    // Put it back as unloaded so cache isn't corrupted.
-                    let mut cache = state.model_cache.lock().await;
-                    cache.insert(unloaded_engine, 0);
+                    // Put it back as unloaded so cache isn't corrupted. The
+                    // unloaded engine has no GPU resources to free, but for
+                    // consistency with the file's invariant — never drop an
+                    // engine while holding the cache lock — bind and drop
+                    // outside.
+                    let evicted = {
+                        let mut cache = state.model_cache.lock().await;
+                        cache.insert(unloaded_engine, 0)
+                    };
+                    drop(evicted);
                     return Err(api_err);
                 }
             }
@@ -720,7 +767,7 @@ async fn create_and_load_engine(
         let cache = state.model_cache.lock().await;
         cache.active_vram_bytes()
     };
-    preflight_memory_guard(model_name, &paths, active_vram)?;
+    preflight_memory_guard(model_name, &paths, active_vram, 0)?;
 
     // Unload the current active model to free GPU memory.
     // Only reclaim GPU memory if there was an active model — calling
@@ -775,6 +822,9 @@ async fn create_and_load_engine(
     let model_log = model_name.to_string();
     #[cfg(feature = "metrics")]
     let load_start = std::time::Instant::now();
+    // Sample VRAM baseline before load so we can record the new model's
+    // per-load delta rather than the device-global usage.
+    let vram_baseline = mold_inference::device::vram_in_use_bytes(0);
     new_engine = tokio::task::spawn_blocking(move || {
         tracing::info!(model = %model_log, "loading model...");
         new_engine.load().map_err(|e| {
@@ -793,15 +843,20 @@ async fn create_and_load_engine(
         crate::metrics::set_model_loaded(model_name);
     }
 
-    let vram = mold_inference::device::vram_used_estimate(0);
+    let vram = mold_inference::device::vram_load_delta(0, vram_baseline);
     #[cfg(feature = "metrics")]
-    crate::metrics::record_gpu_memory(vram);
+    crate::metrics::record_gpu_memory(mold_inference::device::vram_in_use_bytes(0));
 
-    let mut cache = state.model_cache.lock().await;
-    // Evicted engine (if any) is dropped here, freeing its resources.
-    let _evicted = cache.insert(new_engine, vram);
-    update_snapshot(state, &cache).await;
-    drop(cache);
+    // Insert under the cache lock, but drop the evicted engine OUTSIDE the
+    // lock — `cuMemFree` and safetensor unmap during `Box<dyn ...>` drop can
+    // block other cache users for hundreds of milliseconds.
+    let evicted = {
+        let mut cache = state.model_cache.lock().await;
+        let evicted = cache.insert(new_engine, vram);
+        update_snapshot(state, &cache).await;
+        evicted
+    };
+    drop(evicted);
 
     Ok(())
 }
@@ -817,8 +872,96 @@ async fn update_snapshot(state: &AppState, cache: &crate::model_cache::ModelCach
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     const GB: u64 = 1_000_000_000;
+
+    /// Build a `ModelPaths` whose `transformer` and `vae` files exist on disk
+    /// with a combined size of `total_bytes`. `estimate_peak_memory()` reads
+    /// file sizes via `std::fs::metadata`, so the on-disk footprint is what
+    /// drives the composition under test.
+    fn test_paths_with_total_size(total_bytes: u64) -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transformer = dir.path().join("transformer.safetensors");
+        let vae = dir.path().join("vae.safetensors");
+        // Split half-and-half between the two required files so that the
+        // sum equals `total_bytes`. `set_len` creates a sparse file, which
+        // is fast and reports the requested size via `metadata().len()`.
+        let half = total_bytes / 2;
+        let rest = total_bytes - half;
+        let f1 = std::fs::File::create(&transformer).expect("create transformer");
+        f1.set_len(half).expect("set transformer len");
+        let f2 = std::fs::File::create(&vae).expect("create vae");
+        f2.set_len(rest).expect("set vae len");
+
+        let paths = ModelPaths {
+            transformer,
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
+    /// Sanity: confirm that `estimate_peak_memory` actually sees the on-disk
+    /// sizes we set via `test_paths_with_total_size`. The peak includes a
+    /// fixed headroom term added by the inference crate, so we just verify
+    /// the lower bound matches our component total.
+    #[test]
+    fn test_paths_helper_sets_file_sizes() {
+        let (_dir, paths) = test_paths_with_total_size(10 * GB);
+        let peak = mold_inference::device::estimate_peak_memory(
+            &paths,
+            mold_inference::LoadStrategy::Eager,
+        );
+        assert!(
+            peak >= 10 * GB,
+            "expected peak >= 10 GB component sum, got {peak}"
+        );
+        // The transformer and vae paths must point to real files.
+        assert!(PathBuf::from(&paths.transformer).exists());
+        assert!(PathBuf::from(&paths.vae).exists());
+    }
+
+    /// Composition test: peak fits in `(available + active)` but not in
+    /// `available` alone — the inner guard must let the swap proceed.
+    #[test]
+    fn preflight_uses_active_vram_as_reclaimable() {
+        // 10 GB on disk → peak ≈ 10 GB + headroom.
+        // Available 8 GB alone is insufficient; add 10 GB active VRAM →
+        // 18 GB effective, comfortably above peak.
+        let (_dir, paths) = test_paths_with_total_size(10 * GB);
+        let result = preflight_memory_guard_with_available("swap-test", &paths, 10 * GB, 8 * GB);
+        assert!(
+            result.is_ok(),
+            "expected swap to succeed with reclaimable VRAM, got {result:?}"
+        );
+    }
+
+    /// Composition test: peak exceeds even the post-swap budget — the inner
+    /// guard must reject.
+    #[test]
+    fn preflight_rejects_when_peak_exceeds_effective_available() {
+        // 20 GB on disk → peak ≥ 20 GB. Available 8 GB + 5 GB active =
+        // 13 GB effective < peak → reject.
+        let (_dir, paths) = test_paths_with_total_size(20 * GB);
+        let result = preflight_memory_guard_with_available("too-big", &paths, 5 * GB, 8 * GB);
+        assert!(
+            result.is_err(),
+            "expected oversized model to be rejected, got Ok"
+        );
+    }
 
     #[test]
     fn memory_guard_ok_when_plenty_of_memory() {
@@ -858,5 +1001,32 @@ mod tests {
         // Model larger than total available
         let result = check_model_memory_budget("huge-model", 30 * GB, 16 * GB);
         assert!(result.is_err());
+    }
+
+    /// CUDA branch math: when free VRAM is small but the active model can be
+    /// reclaimed, `effective_available = free + active_vram` should let the
+    /// new model load. Without the additive term, a swap of two near-
+    /// equal-size models on a fully-loaded GPU would always be rejected.
+    #[test]
+    fn memory_guard_swap_uses_active_vram_as_reclaimable() {
+        // Free VRAM is only 2 GB but the currently-loaded model occupies
+        // 18 GB which becomes available on swap → effective = 20 GB.
+        // A 15 GB peak model fits comfortably (<= 90% of 20 GB).
+        let free_vram = 2 * GB;
+        let active_vram = 18 * GB;
+        let effective = free_vram + active_vram;
+        assert!(check_model_memory_budget("swap-target", 15 * GB, effective).is_ok());
+    }
+
+    /// Verifies the swap math also rejects when the swap is genuinely
+    /// infeasible — peak exceeds even the post-swap budget.
+    #[test]
+    fn memory_guard_swap_still_rejects_when_oversized() {
+        // Free 1 GB + active 8 GB = 9 GB effective. A 15 GB model can't fit
+        // even after the active model is unloaded.
+        let free_vram = GB;
+        let active_vram = 8 * GB;
+        let effective = free_vram + active_vram;
+        assert!(check_model_memory_budget("too-large", 15 * GB, effective).is_err());
     }
 }
