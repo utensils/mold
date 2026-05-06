@@ -130,6 +130,10 @@ mod tests {
         metrics::set_model_loaded("test-model");
         metrics::record_gpu_memory(1_000_000_000);
         metrics::record_generation_error("test-model");
+        metrics::record_cache_eviction("capacity");
+        metrics::record_cache_eviction("idle-ttl");
+        metrics::set_cache_size(2);
+        metrics::record_queue_reorder();
 
         // If we got here without panicking, the metric calls are valid.
     }

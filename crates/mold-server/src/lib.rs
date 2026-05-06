@@ -81,12 +81,13 @@ pub async fn run_server(
     // retry path in `run_queue_dispatcher`.
     const PER_WORKER_CHANNEL_SIZE: usize = 2;
 
+    let max_cached = state::resolve_max_cached_models();
     for gpu in &selected {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(PER_WORKER_CHANNEL_SIZE);
         let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
             gpu: gpu.clone(),
             model_cache: std::sync::Arc::new(std::sync::Mutex::new(model_cache::ModelCache::new(
-                3,
+                max_cached,
             ))),
             active_generation: std::sync::Arc::new(std::sync::RwLock::new(None)),
             model_load_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
@@ -248,6 +249,15 @@ pub async fn run_server(
     } else {
         tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
     }
+
+    // Background idle-TTL sweeper: reclaims parked engines that haven't been
+    // touched for `MOLD_CACHE_IDLE_TTL_SECS` seconds. Abort handle bound to
+    // graceful shutdown like every other long-running task in this fn.
+    let idle_evict_handle = spawn_cache_idle_evictor(
+        state.model_cache.clone(),
+        gpu_pool.clone(),
+        std::time::Duration::from_secs(state::resolve_cache_idle_ttl_secs()),
+    );
 
     // ── Catalog: seed from embedded shards on first boot, spawn scan driver.
     {
@@ -440,11 +450,54 @@ pub async fn run_server(
     downloads_shutdown.cancel();
     downloads_driver.abort();
     catalog_driver.abort();
+    idle_evict_handle.abort();
     // Server has stopped accepting requests — stop the telemetry aggregator
     // so it doesn't outlive the server loop.
     resources_aggregator.abort();
 
     Ok(())
+}
+
+/// Spawn a tokio task that wakes every 60s and drops any cache entry whose
+/// `last_used` is older than `ttl` (and that isn't actively GPU-resident).
+/// Sweeps the legacy single-GPU cache and every per-worker cache in the
+/// multi-GPU pool. Returns the `JoinHandle` so the caller can `.abort()` on
+/// shutdown.
+fn spawn_cache_idle_evictor(
+    legacy_cache: std::sync::Arc<tokio::sync::Mutex<model_cache::ModelCache>>,
+    gpu_pool: std::sync::Arc<gpu_pool::GpuPool>,
+    ttl: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    use tokio::time::{interval, MissedTickBehavior};
+    tokio::spawn(async move {
+        let mut tick = interval(std::time::Duration::from_secs(60));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // First tick fires immediately; skip it so a freshly-loaded model
+        // doesn't get reaped on boot before it's even been used.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            // Legacy single-GPU cache: held under tokio Mutex.
+            let evicted = {
+                let mut cache = legacy_cache.lock().await;
+                cache.evict_idle(ttl)
+            };
+            // Drop engines OUTSIDE the cache lock — `cuMemFree` and
+            // safetensor unmap during drop can block other cache users.
+            drop(evicted);
+
+            // Multi-GPU per-worker caches: held under std::sync::Mutex,
+            // briefly. Match the existing gpu_worker pattern of taking the
+            // lock for the cache mutation only.
+            for worker in &gpu_pool.workers {
+                let evicted = {
+                    let mut cache = worker.model_cache.lock().unwrap_or_else(|e| e.into_inner());
+                    cache.evict_idle(ttl)
+                };
+                drop(evicted);
+            }
+        }
+    })
 }
 
 fn build_cors_layer() -> Result<CorsLayer> {

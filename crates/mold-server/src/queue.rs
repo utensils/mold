@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -310,14 +311,32 @@ pub(crate) fn build_sse_complete_event(
     }
 }
 
-/// Runs the generation queue worker loop. Processes one job at a time (FIFO).
+/// Runs the generation queue worker loop. Processes one job at a time (FIFO),
+/// but uses a small bounded lookahead buffer to prefer jobs whose model is
+/// already loaded — minimizing model swaps when the queue interleaves models.
 /// Exits when the sender half of the channel is dropped (server shutdown).
 pub async fn run_queue_worker(
     mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
 ) {
     tracing::debug!("generation queue worker started");
-    while let Some(job) = job_rx.recv().await {
+    let buffer_size = resolve_lookahead_buffer();
+    let max_deferrals = resolve_max_deferrals();
+    let mut buffer: VecDeque<BufferedJob> = VecDeque::with_capacity(buffer_size);
+
+    loop {
+        if buffer.is_empty() {
+            match job_rx.recv().await {
+                Some(j) => buffer.push_back(BufferedJob::new(j)),
+                None => break,
+            }
+        }
+        // Top up the buffer without blocking — drain the channel up to capacity.
+        top_up_buffer(&mut buffer, &mut job_rx, buffer_size);
+
+        let loaded = single_gpu_loaded_models(&state).await;
+        let job = pick_next_job(&mut buffer, &loaded, max_deferrals);
+
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
         process_job(&state, job).await;
@@ -326,6 +345,189 @@ pub async fn run_queue_worker(
         crate::metrics::record_queue_depth(state.queue.pending());
     }
     tracing::info!("generation queue worker shutting down");
+}
+
+async fn single_gpu_loaded_models(state: &AppState) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let cache = state.model_cache.lock().await;
+    if let Some(name) = cache.active_model() {
+        set.insert(name.to_string());
+    }
+    set
+}
+
+/// Build the set of "currently loaded somewhere" model names across every
+/// worker in the multi-GPU pool. A worker counts the model as loaded if
+/// either it's in the worker's cache as Gpu-resident OR it's the worker's
+/// `active_generation` (covering the take-and-restore window where the
+/// cache entry briefly disappears).
+fn multi_gpu_loaded_models(state: &AppState) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    for worker in &state.gpu_pool.workers {
+        if let Ok(active_gen) = worker.active_generation.read() {
+            if let Some(g) = active_gen.as_ref() {
+                set.insert(g.model.clone());
+            }
+        }
+        if let Ok(cache) = worker.model_cache.lock() {
+            if let Some(name) = cache.active_model() {
+                set.insert(name.to_string());
+            }
+        }
+    }
+    set
+}
+
+/// In-flight wrapper that tracks how many times the picker has skipped this
+/// job. Once the count exceeds `max_deferrals`, the picker force-dispatches
+/// it to bound starvation.
+pub(crate) struct BufferedJob {
+    pub(crate) job: GenerationJob,
+    pub(crate) deferred: usize,
+}
+
+impl BufferedJob {
+    fn new(job: GenerationJob) -> Self {
+        Self { job, deferred: 0 }
+    }
+}
+
+/// Drain the receive channel into the lookahead buffer, capped at
+/// `buffer_size`. Returns when the buffer is full or the channel has no
+/// immediately-available jobs (the receiver is unchanged on `Empty`). Pure
+/// helper extracted so tests can lock in the cap as a load-bearing invariant
+/// without spinning up the full async dispatcher.
+pub(crate) fn top_up_buffer(
+    buffer: &mut VecDeque<BufferedJob>,
+    job_rx: &mut tokio::sync::mpsc::Receiver<GenerationJob>,
+    buffer_size: usize,
+) {
+    while buffer.len() < buffer_size {
+        match job_rx.try_recv() {
+            Ok(j) => buffer.push_back(BufferedJob::new(j)),
+            Err(_) => break,
+        }
+    }
+}
+
+/// Pure picker for the lookahead buffer. Selects the buffered job whose
+/// model is already loaded somewhere in `loaded`; ties broken by arrival
+/// order (front of the deque wins). The head's `deferred` count bounds
+/// starvation: if the head has been skipped `max_deferrals` times, it wins
+/// regardless of `loaded` membership.
+///
+/// The returned job is removed from the buffer; remaining buffered jobs that
+/// were skipped have their `deferred` count incremented. Increments
+/// `mold_queue_reorders_total` whenever a non-head job is picked.
+pub(crate) fn pick_next_job(
+    buffer: &mut VecDeque<BufferedJob>,
+    loaded: &std::collections::HashSet<String>,
+    max_deferrals: usize,
+) -> GenerationJob {
+    debug_assert!(
+        !buffer.is_empty(),
+        "pick_next_job requires non-empty buffer"
+    );
+
+    // Force-dispatch the head if it's hit the starvation budget.
+    if let Some(head) = buffer.front() {
+        if head.deferred >= max_deferrals {
+            return buffer.pop_front().expect("checked non-empty").job;
+        }
+    }
+
+    // Find the front-most buffered job whose model is already loaded.
+    let pick_idx = buffer
+        .iter()
+        .position(|b| loaded.contains(&b.job.request.model))
+        .unwrap_or(0);
+
+    if pick_idx > 0 {
+        for (i, b) in buffer.iter_mut().enumerate() {
+            if i < pick_idx {
+                b.deferred += 1;
+            }
+        }
+        let model = buffer[pick_idx].job.request.model.clone();
+        tracing::debug!(
+            picked_model = %model,
+            head_model = %buffer.front().map(|b| b.job.request.model.as_str()).unwrap_or(""),
+            picked_index = pick_idx,
+            "queue reorder picked non-head job"
+        );
+        #[cfg(feature = "metrics")]
+        crate::metrics::record_queue_reorder();
+    }
+
+    buffer.remove(pick_idx).expect("pick_idx in range").job
+}
+
+pub(crate) const DEFAULT_LOOKAHEAD_BUFFER: usize = 8;
+pub(crate) const DEFAULT_MAX_DEFERRALS: usize = 3;
+pub(crate) const LOOKAHEAD_BUFFER_ENV: &str = "MOLD_QUEUE_LOOKAHEAD_BUFFER";
+pub(crate) const MAX_DEFERRALS_ENV: &str = "MOLD_QUEUE_MAX_DEFERRALS";
+const LOOKAHEAD_BUFFER_LOWER: usize = 1;
+const LOOKAHEAD_BUFFER_UPPER: usize = 64;
+const MAX_DEFERRALS_UPPER: usize = 32;
+
+/// Resolve the lookahead buffer size from env, falling back to the default.
+/// Out-of-range or unparseable values log a warning and use the default —
+/// matching the warn-then-default pattern of `resolve_max_cached_models`.
+pub(crate) fn resolve_lookahead_buffer() -> usize {
+    match std::env::var(LOOKAHEAD_BUFFER_ENV) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(n) if (LOOKAHEAD_BUFFER_LOWER..=LOOKAHEAD_BUFFER_UPPER).contains(&n) => n,
+            Ok(n) => {
+                tracing::warn!(
+                    env = LOOKAHEAD_BUFFER_ENV,
+                    value = n,
+                    lower = LOOKAHEAD_BUFFER_LOWER,
+                    upper = LOOKAHEAD_BUFFER_UPPER,
+                    "ignoring out-of-range queue lookahead buffer; using default"
+                );
+                DEFAULT_LOOKAHEAD_BUFFER
+            }
+            Err(e) => {
+                tracing::warn!(
+                    env = LOOKAHEAD_BUFFER_ENV,
+                    raw = %raw,
+                    error = %e,
+                    "ignoring unparseable queue lookahead buffer; using default"
+                );
+                DEFAULT_LOOKAHEAD_BUFFER
+            }
+        },
+        Err(_) => DEFAULT_LOOKAHEAD_BUFFER,
+    }
+}
+
+/// Resolve the max-deferrals starvation budget from env. Out-of-range or
+/// unparseable values log a warning and use the default.
+pub(crate) fn resolve_max_deferrals() -> usize {
+    match std::env::var(MAX_DEFERRALS_ENV) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(n) if n <= MAX_DEFERRALS_UPPER => n,
+            Ok(n) => {
+                tracing::warn!(
+                    env = MAX_DEFERRALS_ENV,
+                    value = n,
+                    upper = MAX_DEFERRALS_UPPER,
+                    "ignoring out-of-range queue max-deferrals; using default"
+                );
+                DEFAULT_MAX_DEFERRALS
+            }
+            Err(e) => {
+                tracing::warn!(
+                    env = MAX_DEFERRALS_ENV,
+                    raw = %raw,
+                    error = %e,
+                    "ignoring unparseable queue max-deferrals; using default"
+                );
+                DEFAULT_MAX_DEFERRALS
+            }
+        },
+        Err(_) => DEFAULT_MAX_DEFERRALS,
+    }
 }
 
 async fn process_job(state: &AppState, job: GenerationJob) {
@@ -598,6 +800,9 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 
 /// Runs the multi-GPU dispatch loop. Routes each generation job to the best
 /// GPU worker based on the placement strategy (model-loaded > idle > evict LRU).
+/// Uses a small lookahead buffer so an interleaved queue (`[A, B, A, B]`)
+/// doesn't force a sibling worker to swap models when one already has the
+/// right one warm.
 ///
 /// Exits when the sender half of the channel is dropped (server shutdown).
 pub async fn run_queue_dispatcher(
@@ -605,7 +810,22 @@ pub async fn run_queue_dispatcher(
     state: AppState,
 ) {
     tracing::debug!("multi-GPU queue dispatcher started");
-    while let Some(job) = job_rx.recv().await {
+    let buffer_size = resolve_lookahead_buffer();
+    let max_deferrals = resolve_max_deferrals();
+    let mut buffer: VecDeque<BufferedJob> = VecDeque::with_capacity(buffer_size);
+
+    loop {
+        if buffer.is_empty() {
+            match job_rx.recv().await {
+                Some(j) => buffer.push_back(BufferedJob::new(j)),
+                None => break,
+            }
+        }
+        top_up_buffer(&mut buffer, &mut job_rx, buffer_size);
+
+        let loaded = multi_gpu_loaded_models(&state);
+        let job = pick_next_job(&mut buffer, &loaded, max_deferrals);
+
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
 
@@ -1286,6 +1506,441 @@ mod tests {
             cache.take("present-model").is_none(),
             "double-take must return None"
         );
+    }
+
+    fn buf_job(model: &str) -> BufferedJob {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        BufferedJob::new(crate::state::GenerationJob {
+            request: fake_request(model),
+            progress_tx: None,
+            result_tx: tx,
+            output_dir: None,
+        })
+    }
+
+    #[test]
+    fn pick_next_job_picks_head_when_head_model_loaded() {
+        use std::collections::{HashSet, VecDeque};
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        buffer.push_back(buf_job("a"));
+        buffer.push_back(buf_job("b"));
+        buffer.push_back(buf_job("a"));
+        let loaded: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let picked = pick_next_job(&mut buffer, &loaded, 3);
+        assert_eq!(picked.request.model, "a");
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer.front().unwrap().job.request.model, "b");
+        assert_eq!(
+            buffer.front().unwrap().deferred,
+            0,
+            "head shouldn't be deferred when picker chose the head itself"
+        );
+    }
+
+    #[test]
+    fn pick_next_job_picks_non_head_when_only_non_head_model_loaded() {
+        use std::collections::{HashSet, VecDeque};
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        buffer.push_back(buf_job("a"));
+        buffer.push_back(buf_job("b"));
+        buffer.push_back(buf_job("a"));
+        let loaded: HashSet<String> = ["b".to_string()].into_iter().collect();
+        let picked = pick_next_job(&mut buffer, &loaded, 3);
+        assert_eq!(picked.request.model, "b");
+        assert_eq!(buffer.len(), 2);
+        // The head ("a") was skipped once and now sits at deferral=1.
+        assert_eq!(buffer.front().unwrap().job.request.model, "a");
+        assert_eq!(buffer.front().unwrap().deferred, 1);
+    }
+
+    #[test]
+    fn pick_next_job_force_dispatches_head_after_max_deferrals() {
+        use std::collections::{HashSet, VecDeque};
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        let mut head = buf_job("a");
+        head.deferred = 3;
+        buffer.push_back(head);
+        buffer.push_back(buf_job("b"));
+        // Even though only `b` is loaded, head ("a") has hit the budget and wins.
+        let loaded: HashSet<String> = ["b".to_string()].into_iter().collect();
+        let picked = pick_next_job(&mut buffer, &loaded, 3);
+        assert_eq!(picked.request.model, "a");
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(buffer.front().unwrap().job.request.model, "b");
+    }
+
+    #[test]
+    fn pick_next_job_falls_back_to_head_when_nothing_loaded() {
+        use std::collections::{HashSet, VecDeque};
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        buffer.push_back(buf_job("a"));
+        buffer.push_back(buf_job("b"));
+        let loaded: HashSet<String> = HashSet::new();
+        let picked = pick_next_job(&mut buffer, &loaded, 3);
+        assert_eq!(picked.request.model, "a");
+    }
+
+    /// Fix D: with `max_deferrals = 0`, every reorder would exceed the
+    /// budget on the very first skip, so the picker degenerates to FIFO —
+    /// the head wins regardless of which model is loaded.
+    #[test]
+    fn pick_next_job_max_deferrals_zero_picks_head_even_when_non_head_loaded() {
+        use std::collections::{HashSet, VecDeque};
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        buffer.push_back(buf_job("b")); // head
+        buffer.push_back(buf_job("a")); // non-head
+        let loaded: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let picked = pick_next_job(&mut buffer, &loaded, 0);
+        assert_eq!(
+            picked.request.model, "b",
+            "max_deferrals=0 must force FIFO — head must win even when only the non-head model is loaded"
+        );
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(buffer.front().unwrap().job.request.model, "a");
+    }
+
+    /// Fix D: with `max_deferrals = 0` and an empty `loaded` set, the head
+    /// is the only candidate anyway. Locks in the FIFO behaviour when
+    /// nothing is warm.
+    #[test]
+    fn pick_next_job_max_deferrals_zero_with_empty_loaded_picks_head() {
+        use std::collections::{HashSet, VecDeque};
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        buffer.push_back(buf_job("a")); // head
+        buffer.push_back(buf_job("b"));
+        let loaded: HashSet<String> = HashSet::new();
+        let picked = pick_next_job(&mut buffer, &loaded, 0);
+        assert_eq!(picked.request.model, "a");
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(buffer.front().unwrap().job.request.model, "b");
+    }
+
+    /// Fix E: when both head and a non-head match `loaded`, the picker must
+    /// pick the front-most match — i.e. the first `A` in `[A, B, A, B]`
+    /// when both `A` and `B` are loaded. Locks in arrival-order stability
+    /// across multiple matching jobs.
+    #[test]
+    fn pick_next_job_picks_front_most_match_when_multiple_loaded() {
+        use std::collections::{HashSet, VecDeque};
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        buffer.push_back(buf_job("a"));
+        buffer.push_back(buf_job("b"));
+        buffer.push_back(buf_job("a"));
+        buffer.push_back(buf_job("b"));
+        let loaded: HashSet<String> = ["a".to_string(), "b".to_string()].into_iter().collect();
+        let picked = pick_next_job(&mut buffer, &loaded, 3);
+        assert_eq!(
+            picked.request.model, "a",
+            "front-most match wins (the first `a`), not the loaded model with the most copies later in the buffer"
+        );
+        // Three jobs remain: [b, a, b]; head was the picked first `a` so the
+        // new head is the original-index-1 `b`. Nothing was deferred because
+        // the picker chose the head itself.
+        assert_eq!(buffer.len(), 3);
+        let remaining: Vec<&str> = buffer
+            .iter()
+            .map(|b| b.job.request.model.as_str())
+            .collect();
+        assert_eq!(remaining, vec!["b", "a", "b"]);
+        assert_eq!(buffer.front().unwrap().deferred, 0);
+    }
+
+    /// Integration: an interleaved `[A, B, A, B]` queue dispatched against a
+    /// single worker that has model `A` warm should reorder so both `A` jobs
+    /// run first, then both `B` jobs — minimizing model swaps from 4 → 1.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_dispatcher_reorders_interleaved_jobs_to_minimize_swaps() {
+        let (worker, worker_rx) = test_worker(0, 8);
+        // Pre-mark the worker as having model "a" loaded so the picker
+        // recognises it as warm.
+        {
+            let mut cache = worker.model_cache.lock().unwrap();
+            struct Engine(&'static str);
+            impl mold_inference::InferenceEngine for Engine {
+                fn generate(
+                    &mut self,
+                    _r: &GenerateRequest,
+                ) -> anyhow::Result<mold_core::GenerateResponse> {
+                    unimplemented!()
+                }
+                fn model_name(&self) -> &str {
+                    self.0
+                }
+                fn is_loaded(&self) -> bool {
+                    true
+                }
+                fn load(&mut self) -> anyhow::Result<()> {
+                    Ok(())
+                }
+            }
+            cache.insert(Box::new(Engine("a")), 0);
+        }
+
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(8);
+        let queue = QueueHandle::new(job_tx.clone());
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker.clone()],
+            }),
+            8,
+        );
+
+        // Submit [a, b, a, b] BEFORE the dispatcher spins up so the buffer
+        // top-up sees all four at once.
+        let mut result_rxs = Vec::new();
+        for model in ["a", "b", "a", "b"] {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let job = crate::state::GenerationJob {
+                request: fake_request(model),
+                progress_tx: None,
+                result_tx: tx,
+                output_dir: None,
+            };
+            queue.submit(job, 8).await.unwrap();
+            result_rxs.push(rx);
+        }
+
+        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
+
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            let dispatched = worker_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("worker should receive the dispatched job");
+            order.push(dispatched.model);
+        }
+        drop(job_tx);
+        dispatcher.abort();
+
+        assert_eq!(
+            order,
+            vec![
+                "a".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "b".to_string(),
+            ],
+            "lookahead reorder should batch all `a` jobs together before swapping to `b`"
+        );
+    }
+
+    /// Fix F: the `top_up_buffer` helper must never grow the buffer past
+    /// `buffer_size`, no matter how many jobs are sitting in the channel.
+    /// This is the load-bearing invariant that bounds the working set the
+    /// picker considers — without it a burst submission could let the
+    /// dispatcher reorder across the entire pending queue, defeating the
+    /// fairness guarantees the `deferred` counter is built around.
+    #[tokio::test]
+    async fn top_up_buffer_never_exceeds_capacity() {
+        use std::collections::VecDeque;
+        let (job_tx, mut job_rx) = tokio::sync::mpsc::channel::<GenerationJob>(32);
+
+        // Submit 10 jobs into the channel synchronously so the buffer's top-up
+        // call sees them all immediately available via try_recv.
+        for i in 0..10 {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let job = GenerationJob {
+                request: fake_request(&format!("model-{i}")),
+                progress_tx: None,
+                result_tx: tx,
+                output_dir: None,
+            };
+            job_tx.send(job).await.unwrap();
+        }
+
+        // buffer_size = 4 — top_up must stop at 4 even with 10 in the channel.
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::with_capacity(4);
+        top_up_buffer(&mut buffer, &mut job_rx, 4);
+        assert_eq!(
+            buffer.len(),
+            4,
+            "top_up_buffer must cap at buffer_size, leaving the rest in the channel"
+        );
+
+        // Drain the four buffered jobs, then top up again; the next call must
+        // pull only the next four from the channel (FIFO order preserved).
+        while buffer.pop_front().is_some() {}
+        top_up_buffer(&mut buffer, &mut job_rx, 4);
+        assert_eq!(buffer.len(), 4);
+        let names: Vec<&str> = buffer
+            .iter()
+            .map(|b| b.job.request.model.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["model-4", "model-5", "model-6", "model-7"],
+            "second top-up must drain the next FIFO window from the channel"
+        );
+
+        // Drop sender so the channel reports closed; remaining 2 jobs still
+        // arrive via try_recv before the channel goes dry.
+        drop(job_tx);
+        while buffer.pop_front().is_some() {}
+        top_up_buffer(&mut buffer, &mut job_rx, 4);
+        assert_eq!(
+            buffer.len(),
+            2,
+            "top_up_buffer drains the channel tail when fewer jobs than capacity remain"
+        );
+        let names: Vec<&str> = buffer
+            .iter()
+            .map(|b| b.job.request.model.as_str())
+            .collect();
+        assert_eq!(names, vec!["model-8", "model-9"]);
+    }
+
+    /// Same invariant, but reached via the dispatcher loop (integration). A
+    /// burst of N > buffer_size jobs must still dispatch in FIFO order with
+    /// no jobs lost — the buffer cap can't drop traffic, only delay it. We
+    /// drain the worker channel as fast as the dispatcher fills it, so the
+    /// test exercises buffer rotation rather than worker-channel back-pressure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_dispatcher_dispatches_all_jobs_when_submission_exceeds_buffer() {
+        let (worker, worker_rx) = test_worker(0, 4);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(32);
+        let queue = QueueHandle::new(job_tx.clone());
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker.clone()],
+            }),
+            32,
+        );
+
+        // Drain the worker channel concurrently and decrement in_flight as
+        // a real worker would, so the dispatcher's worker-selection sees the
+        // worker as idle for each subsequent send (otherwise `in_flight`
+        // grows unbounded and the worker never re-classifies as eligible
+        // when the sync-channel fills).
+        let drain_worker = worker.clone();
+        let drainer = std::thread::spawn(move || {
+            let mut order = Vec::new();
+            while order.len() < 10 {
+                match worker_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                    Ok(j) => {
+                        drain_worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                        order.push(j.model);
+                    }
+                    Err(e) => panic!("drain stalled at {:?}: {e:?}", order),
+                }
+            }
+            order
+        });
+
+        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
+
+        // Submit AFTER the dispatcher and drainer are running so we exercise
+        // the live top-up loop rather than a one-shot drain of a pre-filled
+        // channel. Hold result_rx values past the dispatch — the dispatcher
+        // skips jobs whose result_tx is closed, which would otherwise drop
+        // every job before it reaches the worker channel.
+        let mut held_rxs = Vec::new();
+        for i in 0..10 {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            held_rxs.push(rx);
+            let job = crate::state::GenerationJob {
+                request: fake_request(&format!("model-{i}")),
+                progress_tx: None,
+                result_tx: tx,
+                output_dir: None,
+            };
+            queue.submit(job, 32).await.unwrap();
+        }
+
+        let order = drainer.join().expect("drainer thread panic");
+        drop(job_tx);
+        dispatcher.abort();
+
+        let expected: Vec<String> = (0..10).map(|i| format!("model-{i}")).collect();
+        assert_eq!(
+            order, expected,
+            "10 distinct jobs must come out in FIFO across buffer rotations"
+        );
+    }
+
+    /// Serializes every test that mutates queue env vars (process-global).
+    static QUEUE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_queue_env<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _g = QUEUE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var(name).ok();
+        match value {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+        let out = f();
+        match prev {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+        out
+    }
+
+    #[test]
+    fn resolve_lookahead_buffer_uses_default_when_env_missing() {
+        let n = with_queue_env(LOOKAHEAD_BUFFER_ENV, None, resolve_lookahead_buffer);
+        assert_eq!(n, DEFAULT_LOOKAHEAD_BUFFER);
+    }
+
+    #[test]
+    fn resolve_lookahead_buffer_honors_env_within_range() {
+        let n = with_queue_env(LOOKAHEAD_BUFFER_ENV, Some("4"), resolve_lookahead_buffer);
+        assert_eq!(n, 4);
+    }
+
+    #[test]
+    fn resolve_lookahead_buffer_falls_back_when_out_of_range() {
+        // 0 is below the 1 lower bound; 999 is above the 64 upper bound.
+        let n = with_queue_env(LOOKAHEAD_BUFFER_ENV, Some("0"), resolve_lookahead_buffer);
+        assert_eq!(n, DEFAULT_LOOKAHEAD_BUFFER);
+        let n = with_queue_env(LOOKAHEAD_BUFFER_ENV, Some("999"), resolve_lookahead_buffer);
+        assert_eq!(n, DEFAULT_LOOKAHEAD_BUFFER);
+    }
+
+    #[test]
+    fn resolve_lookahead_buffer_falls_back_when_unparseable() {
+        let n = with_queue_env(
+            LOOKAHEAD_BUFFER_ENV,
+            Some("not-a-number"),
+            resolve_lookahead_buffer,
+        );
+        assert_eq!(n, DEFAULT_LOOKAHEAD_BUFFER);
+    }
+
+    #[test]
+    fn resolve_max_deferrals_uses_default_when_env_missing() {
+        let n = with_queue_env(MAX_DEFERRALS_ENV, None, resolve_max_deferrals);
+        assert_eq!(n, DEFAULT_MAX_DEFERRALS);
+    }
+
+    #[test]
+    fn resolve_max_deferrals_honors_env_within_range() {
+        // 0 is the in-range "FIFO" sentinel, 32 is the upper edge.
+        let n = with_queue_env(MAX_DEFERRALS_ENV, Some("0"), resolve_max_deferrals);
+        assert_eq!(n, 0);
+        let n = with_queue_env(MAX_DEFERRALS_ENV, Some("32"), resolve_max_deferrals);
+        assert_eq!(n, 32);
+        let n = with_queue_env(MAX_DEFERRALS_ENV, Some("5"), resolve_max_deferrals);
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn resolve_max_deferrals_falls_back_when_out_of_range() {
+        let n = with_queue_env(MAX_DEFERRALS_ENV, Some("999"), resolve_max_deferrals);
+        assert_eq!(n, DEFAULT_MAX_DEFERRALS);
+    }
+
+    #[test]
+    fn resolve_max_deferrals_falls_back_when_unparseable() {
+        let n = with_queue_env(
+            MAX_DEFERRALS_ENV,
+            Some("not-a-number"),
+            resolve_max_deferrals,
+        );
+        assert_eq!(n, DEFAULT_MAX_DEFERRALS);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
