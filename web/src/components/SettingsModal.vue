@@ -16,9 +16,10 @@ import LoraPicker from "./LoraPicker.vue";
 import ModelPicker from "./ModelPicker.vue";
 import { outputFormatsForFamily } from "../composables/useGenerateForm";
 
-// ── Model Discovery (catalog auth) ───────────────────────────────────────────
+// ── Model Discovery (catalog auth + NSFW) ────────────────────────────────────
 const hfToken = ref("");
 const civitaiToken = ref("");
+const showNsfw = ref(false);
 
 async function saveSetting(key: string, value: string): Promise<void> {
   await fetch("/api/settings/set", {
@@ -463,6 +464,15 @@ const schedulerOptions: Scheduler[] = [
               placeholder="cv_..."
               class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 w-64"
               @change="saveSetting('civitai.token', civitaiToken)"
+            />
+          </label>
+          <label class="flex items-center justify-between gap-3 text-sm">
+            <span>Show NSFW models</span>
+            <input
+              name="catalog_show_nsfw"
+              type="checkbox"
+              v-model="showNsfw"
+              @change="saveSetting('catalog.show_nsfw', String(showNsfw))"
             />
           </label>
         </section>
