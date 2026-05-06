@@ -864,7 +864,9 @@ impl Flux2Engine {
         let vae_decode_start = Instant::now();
         // DEBUG: dump pre-VAE latent (B, 32, H, W) when MOLD_FLUX2_DUMP_LATENT is set.
         if let Ok(dump_path) = std::env::var("MOLD_FLUX2_DUMP_LATENT") {
-            let latent_f32 = img.to_dtype(DType::F32)?.to_device(&candle_core::Device::Cpu)?;
+            let latent_f32 = img
+                .to_dtype(DType::F32)?
+                .to_device(&candle_core::Device::Cpu)?;
             let dims = latent_f32.dims().to_vec();
             let v: Vec<f32> = latent_f32.flatten_all()?.to_vec1()?;
             let mut bytes = Vec::with_capacity(8 * 4 + v.len() * 4);
@@ -1117,7 +1119,9 @@ impl Flux2Engine {
         let vae_decode_start = Instant::now();
         // DEBUG: dump pre-VAE latent when MOLD_FLUX2_DUMP_LATENT is set.
         if let Ok(dump_path) = std::env::var("MOLD_FLUX2_DUMP_LATENT") {
-            let latent_f32 = img.to_dtype(DType::F32)?.to_device(&candle_core::Device::Cpu)?;
+            let latent_f32 = img
+                .to_dtype(DType::F32)?
+                .to_device(&candle_core::Device::Cpu)?;
             let dims = latent_f32.dims().to_vec();
             let v: Vec<f32> = latent_f32.flatten_all()?.to_vec1()?;
             let mut bytes = Vec::with_capacity(8 * 4 + v.len() * 4);

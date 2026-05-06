@@ -300,9 +300,7 @@ describe("useGenerateForm — enableAudio (LTX-2 / LTX-2.3)", () => {
     const form = useGenerateForm();
     form.applyModelDefaults(makeModel({ name: "ltx2:fp8", family: "ltx2" }));
     expect(form.state.value.enableAudio).toBe(true);
-    form.applyModelDefaults(
-      makeModel({ name: "flux-dev:q4", family: "flux" }),
-    );
+    form.applyModelDefaults(makeModel({ name: "flux-dev:q4", family: "flux" }));
     expect(form.state.value.enableAudio).toBeNull();
     expect(form.toRequest().enable_audio).toBeUndefined();
   });

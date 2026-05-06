@@ -81,7 +81,11 @@ describe("decideChainRouting", () => {
     // ltx-video has no img2vid path on the server, so motion_tail is forced
     // to 0 — the SPA mirrors that. 241 frames @ clip=97, tail=0 →
     // effective=97, remainder=144, stageCount = 1 + ceil(144/97) = 1 + 2 = 3.
-    const d = decideChainRouting(241, "ltx-video", "ltx-video-0.9.8-13b-dev:bf16");
+    const d = decideChainRouting(
+      241,
+      "ltx-video",
+      "ltx-video-0.9.8-13b-dev:bf16",
+    );
     expect(d).toEqual({
       kind: "chain",
       clipFrames: 97,

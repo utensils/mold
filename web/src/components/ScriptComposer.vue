@@ -359,7 +359,8 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
         class="h-4 w-4 rounded border-slate-600 bg-slate-900 text-brand-500 focus:ring-brand-500"
         :checked="script.chain.enable_audio === true"
         @change="
-          script.chain.enable_audio = ($event.target as HTMLInputElement).checked
+          script.chain.enable_audio = ($event.target as HTMLInputElement)
+            .checked
             ? true
             : undefined
         "
@@ -367,15 +368,16 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
       Generate audio
     </label>
 
-    <p
-      v-if="limits === null"
-      class="text-center text-sm text-amber-400"
-    >
+    <p v-if="limits === null" class="text-center text-sm text-amber-400">
       This model doesn't support chain generation.
     </p>
     <button
       class="w-full rounded-xl bg-brand-500 py-2 text-sm font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
-      :disabled="limits === null || overCap || script.stage.every((s) => !s.prompt.trim())"
+      :disabled="
+        limits === null ||
+        overCap ||
+        script.stage.every((s) => !s.prompt.trim())
+      "
       @click="submit"
     >
       Generate

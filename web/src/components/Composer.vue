@@ -291,7 +291,9 @@ defineExpose({ scriptComposerRef });
           data-test="composer-enable-audio"
           class="h-4 w-4 rounded border-slate-600 bg-slate-900 text-brand-500 focus:ring-brand-500"
           :checked="modelValue.enableAudio === true"
-          @change="updateEnableAudio(($event.target as HTMLInputElement).checked)"
+          @change="
+            updateEnableAudio(($event.target as HTMLInputElement).checked)
+          "
         />
         Generate audio
       </label>

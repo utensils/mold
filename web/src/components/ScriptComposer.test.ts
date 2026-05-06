@@ -85,9 +85,9 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
     });
     await flushPromises();
 
-    expect(
-      w.find('[data-test="script-composer-enable-audio"]').exists(),
-    ).toBe(false);
+    expect(w.find('[data-test="script-composer-enable-audio"]').exists()).toBe(
+      false,
+    );
   });
 
   it("clears stale enable_audio from the persisted draft when the current model has no audio path", async () => {
@@ -122,9 +122,9 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
     await flushPromises();
 
     // Toggle is hidden (no audio path).
-    expect(
-      w.find('[data-test="script-composer-enable-audio"]').exists(),
-    ).toBe(false);
+    expect(w.find('[data-test="script-composer-enable-audio"]').exists()).toBe(
+      false,
+    );
     // And the persisted draft has been re-written with enable_audio gone
     // so the next submit doesn't ship it to the server.
     const persisted = JSON.parse(

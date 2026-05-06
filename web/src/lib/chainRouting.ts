@@ -36,7 +36,10 @@ export type ChainRoutingDecision =
  * support; `ltx-video` uses an img2vid-less fallback (independent clips
  * stitched together) so subjects can drift between clips, but it lets users
  * generate videos longer than the per-clip cap. */
-const CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set(["ltx2", "ltx-video"]);
+const CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set([
+  "ltx2",
+  "ltx-video",
+]);
 
 /** Families that have proper latent context handoff between clips. For
  * everything else the server forces motion_tail=0 (Smooth ≡ Cut at stitch

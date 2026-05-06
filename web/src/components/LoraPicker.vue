@@ -55,11 +55,7 @@ function onScale(event: Event) {
       @change="onSelect"
     >
       <option value="">None</option>
-      <option
-        v-for="e in loras"
-        :key="e.id"
-        :value="e.primary_path!"
-      >
+      <option v-for="e in loras" :key="e.id" :value="e.primary_path!">
         {{ e.name }}
       </option>
     </select>
