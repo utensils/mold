@@ -105,7 +105,26 @@ function build() {
   );
 
   async function openDetail(id: string) {
-    detail.value = await fetchCatalogEntry(id);
+    // The list response already carries every field the drawer needs (name,
+    // family, engine_phase, installed, download_recipe, …), so prefer the
+    // in-memory entry to avoid a wasted round-trip and to keep the drawer
+    // open even when the entry endpoint can't resolve it (live-search rows
+    // aren't in the DB-backed `/api/catalog/:id`, so the re-fetch would
+    // 404 and a `void cat.openDetail(...)` site would silently leave the
+    // drawer unmounted).
+    const cached = entries.value.find((e) => e.id === id);
+    if (cached) {
+      detail.value = cached;
+      return;
+    }
+    try {
+      detail.value = await fetchCatalogEntry(id);
+    } catch {
+      // 404 (id not in DB, deep link to a stale id) or transient network —
+      // keep `detail` null so the drawer stays closed instead of wedging on
+      // stale data.
+      detail.value = null;
+    }
   }
 
   function closeDetail() {

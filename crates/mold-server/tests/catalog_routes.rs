@@ -27,6 +27,51 @@ async fn families_endpoint_returns_counts() {
     assert!(v["families"].is_array());
 }
 
+/// The sidebar must surface every supported family — including ones with
+/// zero rows in the DB — so users can drill into a family that the
+/// live-search backend (or a future refresh) will populate on demand.
+/// Regression: with only an SDXL row seeded, FLUX must still appear
+/// (foundation=0, finetune=0).
+#[tokio::test]
+async fn families_endpoint_includes_zero_count_families() {
+    let app = TestApp::with_seeded_catalog().await;
+    let resp = app.get("/api/catalog/families").await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+    let families = v["families"].as_array().expect("families array");
+    let names: Vec<&str> = families
+        .iter()
+        .map(|row| row["family"].as_str().unwrap_or(""))
+        .collect();
+    for expected in [
+        "flux",
+        "flux2",
+        "sd15",
+        "sdxl",
+        "z-image",
+        "ltx-video",
+        "ltx2",
+        "qwen-image",
+        "wuerstchen",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "family {expected:?} missing from sidebar list, got {names:?}",
+        );
+    }
+    let flux = families
+        .iter()
+        .find(|row| row["family"].as_str() == Some("flux"))
+        .expect("flux row present");
+    assert_eq!(flux["foundation"].as_i64(), Some(0));
+    assert_eq!(flux["finetune"].as_i64(), Some(0));
+    let sdxl = families
+        .iter()
+        .find(|row| row["family"].as_str() == Some("sdxl"))
+        .expect("sdxl row present");
+    assert_eq!(sdxl["finetune"].as_i64(), Some(1));
+}
+
 #[tokio::test]
 async fn list_with_search_uses_fts() {
     let app = TestApp::with_seeded_catalog().await;

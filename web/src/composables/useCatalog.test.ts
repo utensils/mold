@@ -104,6 +104,88 @@ describe("useCatalog", () => {
     ).toBe(true);
   });
 
+  it("openDetail uses an entry already in the list without hitting /api/catalog/:id", async () => {
+    // Click → openDetail must populate `detail` from the in-memory list
+    // without a round-trip. Regression: the previous re-fetch path 404'd
+    // for ids not in the DB and the unhandled rejection (swallowed by
+    // `void cat.openDetail(...)`) used to leave the drawer unmounted.
+    const cat = useCatalog();
+    await cat.refresh();
+    const id = cat.entries.value[0].id;
+    (globalThis.fetch as any).mockClear();
+    await cat.openDetail(id);
+    expect(cat.detail.value?.id).toBe(id);
+    const detailCalls = (globalThis.fetch as any).mock.calls.filter(
+      (c: any[]) =>
+        (c[0] as string).startsWith("/api/catalog/") &&
+        !(c[0] as string).startsWith("/api/catalog/families") &&
+        !(c[0] as string).startsWith("/api/catalog/refresh"),
+    );
+    expect(detailCalls.length).toBe(0);
+  });
+
+  it("openDetail falls back to /api/catalog/:id when the entry isn't cached", async () => {
+    const cat = useCatalog();
+    await cat.refresh();
+    const fallbackId = "hf:not-in-list";
+    (globalThis.fetch as any).mockImplementationOnce(async (url: string) => {
+      if (url === `/api/catalog/${encodeURIComponent(fallbackId)}`) {
+        return {
+          ok: true,
+          json: async () => ({
+            id: fallbackId,
+            name: "Fallback",
+            family: "flux",
+            engine_phase: 1,
+            installed: false,
+            source: "hf",
+            source_id: "x",
+            author: null,
+            family_role: "foundation",
+            sub_family: null,
+            modality: "image",
+            kind: "checkpoint",
+            file_format: "safetensors",
+            bundling: "separated",
+            size_bytes: 1,
+            download_count: 0,
+            rating: null,
+            likes: 0,
+            nsfw: false,
+            thumbnail_url: null,
+            description: null,
+            license: null,
+            license_flags: null,
+            tags: [],
+            companions: [],
+            download_recipe: { files: [], needs_token: null },
+            primary_path: null,
+            created_at: null,
+            updated_at: null,
+            added_at: 0,
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    await cat.openDetail(fallbackId);
+    expect(cat.detail.value?.id).toBe(fallbackId);
+  });
+
+  it("openDetail leaves detail null when the fallback fetch 404s", async () => {
+    // The drawer's v-if guards on detail; a 404 must not crash openDetail
+    // either, since the SPA's `void cat.openDetail(id)` swallows rejections.
+    const cat = useCatalog();
+    await cat.refresh();
+    const missingId = "cv:99999999";
+    (globalThis.fetch as any).mockImplementationOnce(async () => ({
+      ok: false,
+      status: 404,
+    }));
+    await cat.openDetail(missingId);
+    expect(cat.detail.value).toBeNull();
+  });
+
   it("enables download for engine_phase 1–5, disables for engine_phase >= 6", async () => {
     const cat = useCatalog();
     expect(cat.canDownload({ engine_phase: 1 } as any)).toBe(true);

@@ -392,17 +392,36 @@ pub async fn post_catalog_dispatch(
 }
 
 pub async fn list_families(State(state): State<crate::state::AppState>) -> impl IntoResponse {
-    match state.catalog_db.catalog_family_counts() {
-        Ok(rows) => Json(serde_json::json!({ "families": rows.into_iter().map(|fc| {
+    use mold_catalog::families::{Family, ALL_FAMILIES};
+    use std::collections::HashMap;
+    let db_rows = match state.catalog_db.catalog_family_counts() {
+        Ok(rows) => rows,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    // Surface every supported family — even ones with zero DB rows — so the
+    // sidebar can drill into a family that the live-search backend (or a
+    // future refresh) will populate on demand. Without this, families whose
+    // DB shard landed empty after a partially-rate-limited scan (e.g. FLUX
+    // around Civitai page 11) silently disappear from the UI even though
+    // `/api/catalog/search?family=flux` returns plenty.
+    let by_name: HashMap<&str, &mold_db::catalog::FamilyCount> =
+        db_rows.iter().map(|r| (r.family.as_str(), r)).collect();
+    let merged: Vec<serde_json::Value> = ALL_FAMILIES
+        .iter()
+        .map(|f: &Family| {
+            let key = f.as_str();
+            let (foundation, finetune) = by_name
+                .get(key)
+                .map(|r| (r.foundation, r.finetune))
+                .unwrap_or((0, 0));
             serde_json::json!({
-                "family": fc.family,
-                "foundation": fc.foundation,
-                "finetune": fc.finetune,
+                "family": key,
+                "foundation": foundation,
+                "finetune": finetune,
             })
-        }).collect::<Vec<_>>() }))
-        .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+        })
+        .collect();
+    Json(serde_json::json!({ "families": merged })).into_response()
 }
 
 fn catalog_row_to_wire(
