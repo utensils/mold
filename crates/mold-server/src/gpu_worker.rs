@@ -278,6 +278,73 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
     }
 }
 
+/// Preflight memory check with evict-to-fit recovery.
+///
+/// Wraps `model_manager::preflight_memory_guard`. On a budget failure, drops
+/// the LRU parked entry (skipping `model_name` so a parked-reload doesn't
+/// evict its own target), reclaims the GPU's CUDA pool when no engine remains
+/// resident, and retries. Loops until the preflight passes or the cache has
+/// no parked entries left to surrender — at which point the original
+/// insufficient-memory error is returned.
+///
+/// Holds the cache lock only for the brief eviction step; the engine drop and
+/// `reclaim_gpu_memory` run outside it. The caller is expected to hold
+/// `worker.model_load_lock`, which keeps a concurrent generation from slotting
+/// a fresh load into the context between our reclaim and the actual load.
+fn preflight_memory_guard_with_eviction(
+    cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
+    model_name: &str,
+    paths: &ModelPaths,
+    ordinal: usize,
+) -> Result<(), crate::routes::ApiError> {
+    loop {
+        let active_vram = cache_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_vram_bytes();
+        let err = match crate::model_manager::preflight_memory_guard(
+            model_name,
+            paths,
+            active_vram,
+            ordinal,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+
+        let evicted = {
+            let mut cache = cache_lock.lock().unwrap_or_else(|e| e.into_inner());
+            cache.evict_lru_parked_except(Some(model_name))
+        };
+        let Some((evicted_name, engine)) = evicted else {
+            return Err(err);
+        };
+        tracing::info!(
+            gpu = ordinal,
+            target_model = %model_name,
+            evicted_model = %evicted_name,
+            "evicting LRU parked entry to fit incoming load"
+        );
+        // Drop outside the cache lock — `cuMemFree` and safetensor unmap
+        // can block other cache users during the drop.
+        drop(engine);
+
+        // Reclaim only when no GPU-resident engine remains. The parked-reload
+        // case has the active model still on GPU at preflight time, so we can
+        // free CPU caches via the eviction but must not nuke the primary
+        // context. The fresh-load case usually has no active model when this
+        // is hit, so the reclaim can run.
+        let safe_to_reclaim = cache_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_model()
+            .is_none();
+        if safe_to_reclaim {
+            device::reclaim_gpu_memory(ordinal);
+        }
+    }
+}
+
 /// Ensure a model is loaded on this worker's GPU.
 ///
 /// Holds `worker.model_load_lock` implicitly via the caller for generation
@@ -299,10 +366,10 @@ pub fn ensure_model_ready_sync(
     // Check if we have it cached but not on GPU (Parked).
     let has_cached = cache.contains(model_name);
 
-    // Snapshot active VRAM and the cached engine's paths (if any) for the
-    // preflight before dropping the lock. Cloning ModelPaths keeps the
-    // borrow scoped to this block.
-    let active_vram = cache.active_vram_bytes();
+    // Snapshot the cached engine's paths (if any) for the preflight before
+    // dropping the lock. Cloning ModelPaths keeps the borrow scoped to this
+    // block. Active-VRAM is sampled inside the preflight helper itself so
+    // each retry sees fresh state.
     let cached_paths = if has_cached {
         cache
             .get(model_name)
@@ -315,12 +382,13 @@ pub fn ensure_model_ready_sync(
     if has_cached {
         // Preflight before unloading the active model — the active model's
         // footprint counts toward effective availability since we're about
-        // to free it.
+        // to free it. On budget failure, evict-to-fit drops parked entries
+        // (other than `model_name` itself) and retries.
         if let Some(ref paths) = cached_paths {
-            crate::model_manager::preflight_memory_guard(
+            preflight_memory_guard_with_eviction(
+                &worker.model_cache,
                 model_name,
                 paths,
-                active_vram,
                 worker.gpu.ordinal,
             )
             .map_err(|e| anyhow::anyhow!(e.error))?;
@@ -368,11 +436,12 @@ pub fn ensure_model_ready_sync(
         anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
     })?;
 
-    // Preflight before unloading the active model.
-    crate::model_manager::preflight_memory_guard(
+    // Preflight before unloading the active model. Evict-to-fit drops parked
+    // entries on budget failure and retries before giving up.
+    preflight_memory_guard_with_eviction(
+        &worker.model_cache,
         model_name,
         &paths,
-        active_vram,
         worker.gpu.ordinal,
     )
     .map_err(|e| anyhow::anyhow!(e.error))?;

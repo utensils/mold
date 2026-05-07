@@ -430,6 +430,43 @@ impl ModelCache {
         out
     }
 
+    /// Evict the LRU entry that is *not* GPU-resident and (optionally) not the
+    /// named model. Returns `(name, engine)` so the caller can drop the engine
+    /// outside the cache lock and then issue any GPU reclamation.
+    ///
+    /// Used by the load-time evict-to-fit recovery path: when a fresh load's
+    /// preflight fails, we shrink the parked working set one entry at a time
+    /// and retry. The `skip` parameter exists because the parked-reload branch
+    /// must not evict the very entry it's about to reload.
+    pub fn evict_lru_parked_except(
+        &mut self,
+        skip: Option<&str>,
+    ) -> Option<(String, Box<dyn InferenceEngine>)> {
+        let victim = self.lru_order.iter().find(|name| {
+            if Some(name.as_str()) == skip {
+                return false;
+            }
+            self.entries
+                .get(name.as_str())
+                .map(|e| e.residency != ModelResidency::Gpu)
+                .unwrap_or(false)
+        })?;
+        let name = victim.clone();
+        self.lru_order.retain(|n| n != &name);
+        let entry = self.entries.remove(&name)?;
+        tracing::info!(
+            model = %name,
+            last_used_secs = entry.last_used.elapsed().as_secs(),
+            reason = "evict-to-fit",
+            "cache eviction"
+        );
+        #[cfg(feature = "metrics")]
+        crate::metrics::record_cache_eviction("evict-to-fit");
+        self.report_size();
+        self.debug_check_invariants();
+        Some((name, entry.engine))
+    }
+
     /// Move a model name to the MRU position in the LRU order.
     fn touch_order(&mut self, model_name: &str) {
         self.lru_order.retain(|n| n != model_name);
@@ -868,6 +905,97 @@ mod tests {
         assert!(!cache.contains("a"), "LRU (`a`) must be gone");
         // Caller receives the engine box so it can drop outside the cache lock.
         drop(engine);
+    }
+
+    /// `evict_lru_parked_except` returns the LRU parked entry. With three
+    /// parked entries inserted in order a → b → c, the LRU is `a` and that
+    /// must come back. The cache shrinks by one and `a` is no longer
+    /// `contains()`.
+    #[test]
+    fn evict_lru_parked_returns_lru_parked_entry() {
+        let mut cache = ModelCache::new(3);
+        cache.insert(Box::new(MockEngine::parked("a")), 100);
+        cache.insert(Box::new(MockEngine::parked("b")), 100);
+        cache.insert(Box::new(MockEngine::parked("c")), 100);
+
+        let evicted = cache.evict_lru_parked_except(None).expect("must evict");
+        assert_eq!(evicted.0, "a");
+        assert!(!cache.contains("a"));
+        assert!(cache.contains("b"));
+        assert!(cache.contains("c"));
+        assert_eq!(cache.len(), 2);
+    }
+
+    /// The `skip` argument exists so the parked-reload branch doesn't evict
+    /// the very engine it's about to reload. With LRU order [a, b, c] and
+    /// skip=Some("a"), the eviction must pick `b` (next-LRU non-skipped) and
+    /// leave `a` untouched.
+    #[test]
+    fn evict_lru_parked_respects_skip() {
+        let mut cache = ModelCache::new(3);
+        cache.insert(Box::new(MockEngine::parked("a")), 100);
+        cache.insert(Box::new(MockEngine::parked("b")), 100);
+        cache.insert(Box::new(MockEngine::parked("c")), 100);
+
+        let evicted = cache
+            .evict_lru_parked_except(Some("a"))
+            .expect("must evict next-LRU when LRU is skipped");
+        assert_eq!(evicted.0, "b", "skip(a) must skip a and pick the next LRU");
+        assert!(cache.contains("a"));
+        assert!(!cache.contains("b"));
+        assert!(cache.contains("c"));
+    }
+
+    /// Never evict a GPU-resident entry — the eviction is a budget-recovery
+    /// path before a *new* load, and the active engine is still in use until
+    /// the explicit `unload_active()` step.
+    #[test]
+    fn evict_lru_parked_never_picks_gpu_resident() {
+        let mut cache = ModelCache::new(3);
+        // `gpu` is GPU-resident (loaded), `parked` is not. Even though `gpu`
+        // is the LRU here, it must not be the victim.
+        cache.insert(Box::new(MockEngine::new("gpu")), 100);
+        cache.insert(Box::new(MockEngine::parked("parked")), 100);
+
+        let evicted = cache.evict_lru_parked_except(None).expect("must evict");
+        assert_eq!(
+            evicted.0, "parked",
+            "Gpu-resident entries must be left alone — only parked are eligible"
+        );
+        assert!(cache.contains("gpu"));
+        assert!(!cache.contains("parked"));
+    }
+
+    /// When the only candidates are skipped or GPU-resident, return `None`.
+    /// The caller (preflight loop in gpu_worker) treats `None` as "nothing
+    /// left to surrender" and surfaces the original OOM error.
+    #[test]
+    fn evict_lru_parked_returns_none_when_only_skip_or_gpu_remain() {
+        let mut cache = ModelCache::new(3);
+        cache.insert(Box::new(MockEngine::new("gpu")), 100);
+        cache.insert(Box::new(MockEngine::parked("a")), 100);
+
+        // skip=Some("a") leaves only `gpu` (ineligible) and `a` (skipped).
+        assert!(cache.evict_lru_parked_except(Some("a")).is_none());
+        // Cache is unchanged.
+        assert!(cache.contains("gpu"));
+        assert!(cache.contains("a"));
+        assert_eq!(cache.len(), 2);
+    }
+
+    /// The returned engine is the actual engine box — caller-owned and
+    /// droppable outside the cache lock. Verify the box's model_name matches
+    /// the evicted name so caller-side drop ordering can't latch onto the
+    /// wrong engine.
+    #[test]
+    fn evict_lru_parked_returns_matching_engine_box() {
+        let mut cache = ModelCache::new(3);
+        cache.insert(Box::new(MockEngine::parked("alpha")), 100);
+        cache.insert(Box::new(MockEngine::parked("beta")), 100);
+
+        let (name, engine) = cache.evict_lru_parked_except(None).unwrap();
+        assert_eq!(name, "alpha");
+        assert_eq!(engine.model_name(), "alpha");
     }
 
     /// Run a battery of legal operations in sequence and confirm none of

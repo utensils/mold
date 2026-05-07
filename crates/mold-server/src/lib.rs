@@ -255,6 +255,7 @@ pub async fn run_server(
     // graceful shutdown like every other long-running task in this fn.
     let idle_evict_handle = spawn_cache_idle_evictor(
         state.model_cache.clone(),
+        state.model_load_lock.clone(),
         gpu_pool.clone(),
         std::time::Duration::from_secs(state::resolve_cache_idle_ttl_secs()),
     );
@@ -463,8 +464,16 @@ pub async fn run_server(
 /// Sweeps the legacy single-GPU cache and every per-worker cache in the
 /// multi-GPU pool. Returns the `JoinHandle` so the caller can `.abort()` on
 /// shutdown.
+///
+/// After dropping evicted engines, calls `reclaim_gpu_memory` on a thread
+/// bound to the relevant GPU ordinal so the freed memory actually returns to
+/// the OS rather than sitting in CUDA's per-context caching allocator. Without
+/// this step, `nvidia-smi` shows VRAM as still-allocated to the process even
+/// after the engine struct is dropped, which is the proximate cause of "model
+/// B OOMs even though model A finished and the queue went idle."
 fn spawn_cache_idle_evictor(
     legacy_cache: std::sync::Arc<tokio::sync::Mutex<model_cache::ModelCache>>,
+    legacy_load_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     gpu_pool: std::sync::Arc<gpu_pool::GpuPool>,
     ttl: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
@@ -477,24 +486,78 @@ fn spawn_cache_idle_evictor(
         tick.tick().await;
         loop {
             tick.tick().await;
-            // Legacy single-GPU cache: held under tokio Mutex.
-            let evicted = {
-                let mut cache = legacy_cache.lock().await;
-                cache.evict_idle(ttl)
-            };
-            // Drop engines OUTSIDE the cache lock — `cuMemFree` and
-            // safetensor unmap during drop can block other cache users.
-            drop(evicted);
 
-            // Multi-GPU per-worker caches: held under std::sync::Mutex,
-            // briefly. Match the existing gpu_worker pattern of taking the
-            // lock for the cache mutation only.
-            for worker in &gpu_pool.workers {
+            // ── Legacy single-GPU cache ─────────────────────────────────────
+            //
+            // Take the legacy load lock for the full eviction+reclaim window
+            // so a generation request can't race in between us evicting and
+            // reclaiming, which would slot a fresh model load into a context
+            // we're about to reset.
+            {
+                let _load_guard = legacy_load_lock.lock().await;
                 let evicted = {
-                    let mut cache = worker.model_cache.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut cache = legacy_cache.lock().await;
                     cache.evict_idle(ttl)
                 };
+                let evicted_count = evicted.len();
+                // Drop engines OUTSIDE the cache lock — `cuMemFree` and
+                // safetensor unmap during drop can block other cache users.
                 drop(evicted);
+
+                // Only reclaim when something was evicted (nothing to flush
+                // otherwise) and when no GPU-resident engine remains
+                // (`cuDevicePrimaryCtxReset` would corrupt it). The load
+                // lock above guarantees no concurrent load can sneak one in
+                // between this check and the reclaim.
+                let legacy_active = legacy_cache.lock().await.active_model().is_some();
+                if evicted_count > 0 && !legacy_active {
+                    tokio::task::spawn_blocking(|| {
+                        mold_inference::reclaim_gpu_memory(0);
+                    })
+                    .await
+                    .ok();
+                }
+            }
+
+            // ── Multi-GPU per-worker caches ─────────────────────────────────
+            //
+            // Same pattern but per-worker: hold `worker.model_load_lock` for
+            // evict + drop + reclaim. Done under spawn_blocking because the
+            // worker locks are std mutexes and the reclaim itself is sync.
+            for worker in &gpu_pool.workers {
+                let worker = worker.clone();
+                let ttl = ttl;
+                tokio::task::spawn_blocking(move || {
+                    let _load_guard = match worker.model_load_lock.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    let evicted = {
+                        let mut cache =
+                            worker.model_cache.lock().unwrap_or_else(|e| e.into_inner());
+                        cache.evict_idle(ttl)
+                    };
+                    let evicted_count = evicted.len();
+                    drop(evicted);
+
+                    let active = worker
+                        .model_cache
+                        .lock()
+                        .map(|c| c.active_model().is_some())
+                        .unwrap_or(true);
+                    if evicted_count > 0 && !active {
+                        // Bind the thread to the worker's ordinal so
+                        // reclaim_gpu_memory's debug-assert is satisfied,
+                        // then clear so the spawn_blocking thread (which
+                        // returns to the tokio pool) doesn't carry a stale
+                        // binding.
+                        mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
+                        mold_inference::reclaim_gpu_memory(worker.gpu.ordinal);
+                        mold_inference::device::clear_thread_gpu_ordinal();
+                    }
+                })
+                .await
+                .ok();
             }
         }
     })
