@@ -316,7 +316,14 @@ impl SingleFileBackend {
             std::collections::BTreeSet::new()
         };
 
-        let entries = build_flux2_entries(cfg, prefix, quant, &nvfp4_bases);
+        let rms_suffix = detect_rms_norm_suffix(checkpoint, prefix).with_context(|| {
+            format!(
+                "probe RMSNorm tensor suffix in {} (header peek)",
+                checkpoint.display(),
+            )
+        })?;
+
+        let entries = build_flux2_entries(cfg, prefix, quant, &nvfp4_bases, rms_suffix);
         Self::from_entries(checkpoint, entries)
     }
 
@@ -466,6 +473,42 @@ fn collect_nvfp4_bases(path: &Path) -> Result<std::collections::BTreeSet<String>
     Ok(has_scale.intersection(&has_scale_2).cloned().collect())
 }
 
+/// Header-peek the safetensors at `path` and decide which suffix the BFL
+/// `*.norm.{query,key}_norm.*` RMSNorm tensors use.
+///
+/// Canonical BFL exports (and Civitai NVFP4 wraps such as cv:2759597) use
+/// `.scale`; some community BF16 fine-tunes (e.g. cv:2765147 prototype
+/// Klein-9B) ship the same tensors as `.weight`. We probe the first
+/// double-block's `img_attn.norm.query_norm.*` to decide. If neither is
+/// present we return `"scale"` so the canonical missing-key error surfaces
+/// downstream instead of a synthesized one.
+fn detect_rms_norm_suffix(path: &Path, prefix: &str) -> Result<&'static str> {
+    use std::fs::File;
+    use std::io::Read;
+
+    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut len_buf = [0u8; 8];
+    file.read_exact(&mut len_buf)?;
+    let header_len = u64::from_le_bytes(len_buf) as usize;
+    let mut header_buf = vec![0u8; header_len];
+    file.read_exact(&mut header_buf)?;
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_buf).with_context(|| "parse safetensors header JSON")?;
+    let obj = header
+        .as_object()
+        .ok_or_else(|| anyhow!("safetensors header is not a JSON object"))?;
+
+    let probe_scale = format!("{prefix}double_blocks.0.img_attn.norm.query_norm.scale");
+    let probe_weight = format!("{prefix}double_blocks.0.img_attn.norm.query_norm.weight");
+    if obj.contains_key(&probe_scale) {
+        Ok("scale")
+    } else if obj.contains_key(&probe_weight) {
+        Ok("weight")
+    } else {
+        Ok("scale")
+    }
+}
+
 /// Emit the three NVFP4 sub-key entries for a `diffusers_key.weight` →
 /// `source_base` (`.nvfp4_packed`, `.nvfp4_block_scales`, `.nvfp4_tensor_scale`).
 /// All three point at the same `source_base`, varying only in
@@ -578,6 +621,7 @@ fn build_flux2_entries(
     prefix: &str,
     quant: Quant,
     nvfp4_bases: &std::collections::BTreeSet<String>,
+    rms_suffix: &str,
 ) -> BTreeMap<String, BackendEntry> {
     let mut e: BTreeMap<String, BackendEntry> = BTreeMap::new();
 
@@ -662,14 +706,23 @@ fn build_flux2_entries(
                 e.insert(k, v);
             }
         }
-        // Image-side direct.
-        for (d_suffix, b_suffix) in [
-            ("attn.to_out.0.weight", "img_attn.proj.weight"),
-            ("attn.norm_q.weight", "img_attn.norm.query_norm.scale"),
-            ("attn.norm_k.weight", "img_attn.norm.key_norm.scale"),
-            ("ff.linear_in.weight", "img_mlp.0.weight"),
-            ("ff.linear_out.weight", "img_mlp.2.weight"),
-        ] {
+        // Image-side direct. RMSNorm rows use `rms_suffix` because canonical
+        // BFL exports name them `.scale` while some community BF16 fine-tunes
+        // (cv:2765147 etc.) ship the same tensors as `.weight`.
+        let img_direct: [(&str, String); 5] = [
+            ("attn.to_out.0.weight", "img_attn.proj.weight".to_string()),
+            (
+                "attn.norm_q.weight",
+                format!("img_attn.norm.query_norm.{rms_suffix}"),
+            ),
+            (
+                "attn.norm_k.weight",
+                format!("img_attn.norm.key_norm.{rms_suffix}"),
+            ),
+            ("ff.linear_in.weight", "img_mlp.0.weight".to_string()),
+            ("ff.linear_out.weight", "img_mlp.2.weight".to_string()),
+        ];
+        for (d_suffix, b_suffix) in &img_direct {
             for (k, v) in direct(
                 &format!("transformer_blocks.{i}.{d_suffix}"),
                 &format!("double_blocks.{i}.{b_suffix}"),
@@ -695,14 +748,27 @@ fn build_flux2_entries(
                 e.insert(k, v);
             }
         }
-        // Text-side direct.
-        for (d_suffix, b_suffix) in [
-            ("attn.to_add_out.weight", "txt_attn.proj.weight"),
-            ("attn.norm_added_q.weight", "txt_attn.norm.query_norm.scale"),
-            ("attn.norm_added_k.weight", "txt_attn.norm.key_norm.scale"),
-            ("ff_context.linear_in.weight", "txt_mlp.0.weight"),
-            ("ff_context.linear_out.weight", "txt_mlp.2.weight"),
-        ] {
+        // Text-side direct. See note above re: `rms_suffix`.
+        let txt_direct: [(&str, String); 5] = [
+            ("attn.to_add_out.weight", "txt_attn.proj.weight".to_string()),
+            (
+                "attn.norm_added_q.weight",
+                format!("txt_attn.norm.query_norm.{rms_suffix}"),
+            ),
+            (
+                "attn.norm_added_k.weight",
+                format!("txt_attn.norm.key_norm.{rms_suffix}"),
+            ),
+            (
+                "ff_context.linear_in.weight",
+                "txt_mlp.0.weight".to_string(),
+            ),
+            (
+                "ff_context.linear_out.weight",
+                "txt_mlp.2.weight".to_string(),
+            ),
+        ];
+        for (d_suffix, b_suffix) in &txt_direct {
             for (k, v) in direct(
                 &format!("transformer_blocks.{i}.{d_suffix}"),
                 &format!("double_blocks.{i}.{b_suffix}"),
@@ -715,14 +781,18 @@ fn build_flux2_entries(
         }
     }
 
-    // --- Per single-block ---
+    // --- Per single-block --- (RMSNorm suffix as in double-blocks above).
     for i in 0..cfg.depth_single_blocks {
-        for (d_suffix, b_suffix) in [
-            ("attn.to_qkv_mlp_proj.weight", "linear1.weight"),
-            ("attn.to_out.weight", "linear2.weight"),
-            ("attn.norm_q.weight", "norm.query_norm.scale"),
-            ("attn.norm_k.weight", "norm.key_norm.scale"),
-        ] {
+        let single_direct: [(&str, String); 4] = [
+            ("attn.to_qkv_mlp_proj.weight", "linear1.weight".to_string()),
+            ("attn.to_out.weight", "linear2.weight".to_string()),
+            (
+                "attn.norm_q.weight",
+                format!("norm.query_norm.{rms_suffix}"),
+            ),
+            ("attn.norm_k.weight", format!("norm.key_norm.{rms_suffix}")),
+        ];
+        for (d_suffix, b_suffix) in &single_direct {
             for (k, v) in direct(
                 &format!("single_transformer_blocks.{i}.{d_suffix}"),
                 &format!("single_blocks.{i}.{b_suffix}"),
@@ -1319,6 +1389,14 @@ mod tests {
     /// load (the per-head split happens inside `SingleStreamBlock::forward`,
     /// not at backend lookup time).
     fn write_flux2_bfl_fixture(cfg: &Flux2Config, override_qkv: Option<Vec<f32>>) -> PathBuf {
+        write_flux2_bfl_fixture_with_rms(cfg, override_qkv, "scale")
+    }
+
+    fn write_flux2_bfl_fixture_with_rms(
+        cfg: &Flux2Config,
+        override_qkv: Option<Vec<f32>>,
+        rms_suffix: &str,
+    ) -> PathBuf {
         let prefix = "model.diffusion_model";
         let mut tensors: Vec<(String, Vec<usize>, Vec<f32>)> = Vec::new();
 
@@ -1356,15 +1434,19 @@ mod tests {
                 push(&mut tensors, &txt_qkv_key, vec![3, 1]);
             }
 
+            let rms_q_img = format!("img_attn.norm.query_norm.{rms_suffix}");
+            let rms_k_img = format!("img_attn.norm.key_norm.{rms_suffix}");
+            let rms_q_txt = format!("txt_attn.norm.query_norm.{rms_suffix}");
+            let rms_k_txt = format!("txt_attn.norm.key_norm.{rms_suffix}");
             for suffix in [
                 "img_attn.proj.weight",
-                "img_attn.norm.query_norm.scale",
-                "img_attn.norm.key_norm.scale",
+                rms_q_img.as_str(),
+                rms_k_img.as_str(),
                 "img_mlp.0.weight",
                 "img_mlp.2.weight",
                 "txt_attn.proj.weight",
-                "txt_attn.norm.query_norm.scale",
-                "txt_attn.norm.key_norm.scale",
+                rms_q_txt.as_str(),
+                rms_k_txt.as_str(),
                 "txt_mlp.0.weight",
                 "txt_mlp.2.weight",
             ] {
@@ -1377,11 +1459,13 @@ mod tests {
         }
 
         for i in 0..cfg.depth_single_blocks {
+            let rms_q = format!("norm.query_norm.{rms_suffix}");
+            let rms_k = format!("norm.key_norm.{rms_suffix}");
             for suffix in [
                 "linear1.weight",
                 "linear2.weight",
-                "norm.query_norm.scale",
-                "norm.key_norm.scale",
+                rms_q.as_str(),
+                rms_k.as_str(),
             ] {
                 push(
                     &mut tensors,
@@ -1458,6 +1542,35 @@ mod tests {
                 flat.iter().all(|&v| v == sentinel),
                 "{key} (component {component}): values must all be {sentinel}, got {flat:?}",
             );
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn flux2_singlefile_backend_loads_rms_norm_weight_suffix() {
+        // Some community BF16 Klein-9B fine-tunes (cv:2765147 prototype) name
+        // the BFL RMSNorm tensors `*.norm.{query,key}_norm.weight` instead of
+        // the canonical `.scale`. The header probe must detect that and
+        // remap accordingly so every diffusers `attn.norm_{q,k}.weight`
+        // (and `attn.norm_added_{q,k}.weight`, plus single-block `norm_{q,k}`)
+        // resolves to the on-disk tensor without a missing-key error.
+        let cfg = flux2_test_config();
+        let path = write_flux2_bfl_fixture_with_rms(&cfg, None, "weight");
+        let backend = SingleFileBackend::from_flux2_singlefile(&path, &cfg)
+            .expect("RMSNorm `.weight`-suffix checkpoint must load");
+
+        let dev = Device::Cpu;
+        for diffusers_key in [
+            "transformer_blocks.0.attn.norm_q.weight",
+            "transformer_blocks.0.attn.norm_k.weight",
+            "transformer_blocks.0.attn.norm_added_q.weight",
+            "transformer_blocks.0.attn.norm_added_k.weight",
+            "single_transformer_blocks.0.attn.norm_q.weight",
+            "single_transformer_blocks.0.attn.norm_k.weight",
+        ] {
+            SimpleBackend::get_unchecked(&backend, diffusers_key, DType::F32, &dev)
+                .unwrap_or_else(|e| panic!("{diffusers_key}: {e}"));
         }
 
         let _ = std::fs::remove_file(path);

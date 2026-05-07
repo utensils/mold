@@ -21,12 +21,15 @@ pub const HTTP_REQUEST_DURATION: &str = "mold_http_request_duration_seconds";
 pub const GENERATION_DURATION: &str = "mold_generation_duration_seconds";
 pub const QUEUE_DEPTH: &str = "mold_queue_depth";
 pub const QUEUE_TOTAL: &str = "mold_queue_total";
+pub const QUEUE_REORDERS_TOTAL: &str = "mold_queue_reorders_total";
 pub const MODEL_LOADED: &str = "mold_model_loaded";
 pub const MODEL_LOAD_DURATION: &str = "mold_model_load_duration_seconds";
 pub const MODEL_LOADS_TOTAL: &str = "mold_model_loads_total";
 pub const GPU_MEMORY_USED: &str = "mold_gpu_memory_used_bytes";
 pub const UPTIME: &str = "mold_uptime_seconds";
 pub const GENERATION_ERRORS_TOTAL: &str = "mold_generation_errors_total";
+pub const CACHE_EVICTIONS_TOTAL: &str = "mold_cache_evictions_total";
+pub const CACHE_SIZE: &str = "mold_cache_size";
 
 // ── Recorder installation ──────────────────────────────────────────────────
 
@@ -74,7 +77,7 @@ pub async fn metrics_endpoint(
 ) -> impl IntoResponse {
     // Update point-in-time gauges right before rendering.
     record_uptime(state.start_time.elapsed().as_secs_f64());
-    record_gpu_memory(mold_inference::device::vram_used_estimate(0));
+    record_gpu_memory(mold_inference::device::vram_in_use_bytes(0));
 
     let body = state.handle.render();
     (
@@ -175,6 +178,24 @@ pub fn record_gpu_memory(bytes: u64) {
 /// Record server uptime in seconds.
 pub fn record_uptime(seconds: f64) {
     gauge!(UPTIME).set(seconds);
+}
+
+/// Increment the model-cache eviction counter, labelled by reason
+/// (`"capacity"` for LRU under `max_cached`, `"idle-ttl"` for the
+/// background sweeper).
+pub fn record_cache_eviction(reason: &str) {
+    counter!(CACHE_EVICTIONS_TOTAL, "reason" => reason.to_string()).increment(1);
+}
+
+/// Set the absolute cache-size gauge. Call after every insert/remove so
+/// scrapers can correlate evictions against cache pressure.
+pub fn set_cache_size(size: usize) {
+    gauge!(CACHE_SIZE).set(size as f64);
+}
+
+/// Increment the queue-reorder counter (lookahead picked a non-head job).
+pub fn record_queue_reorder() {
+    counter!(QUEUE_REORDERS_TOTAL).increment(1);
 }
 
 #[cfg(test)]

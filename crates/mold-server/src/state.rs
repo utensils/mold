@@ -128,7 +128,6 @@ pub struct AppState {
 
     // ── Legacy single-GPU fields (retained during migration) ────────────────
     pub model_cache: Arc<Mutex<ModelCache>>,
-    pub engine_snapshot: Arc<tokio::sync::RwLock<EngineSnapshot>>,
     /// Uses std::sync::RwLock (not tokio) because it's only accessed from
     /// synchronous contexts (inside spawn_blocking closures and brief reads).
     /// Must never be held across an .await point.
@@ -171,8 +170,86 @@ pub struct AppState {
     pub catalog_db: Arc<mold_db::MetadataDb>,
 }
 
-/// Default maximum number of cached models (loaded + unloaded engine structs).
-const DEFAULT_MAX_CACHED_MODELS: usize = 3;
+/// Default maximum number of cached models (GPU-resident + parked engine structs).
+pub const DEFAULT_MAX_CACHED_MODELS: usize = 3;
+/// Lower / upper bounds applied to env-overridden cache caps. Below 1 the
+/// cache can't hold the active engine; above 16 the OOM risk dwarfs the
+/// hit-rate gains for a typical local server.
+const MAX_CACHED_MODELS_LOWER: usize = 1;
+const MAX_CACHED_MODELS_UPPER: usize = 16;
+/// Env var that overrides `DEFAULT_MAX_CACHED_MODELS` at runtime.
+pub const MAX_CACHED_MODELS_ENV: &str = "MOLD_MAX_CACHED_MODELS";
+
+/// Default idle-TTL for parked cache entries — 30 minutes. Tuned for a
+/// local-first workflow: long enough that a user toggling between two
+/// models inside a session never pays a reload, short enough that
+/// background memory pressure doesn't accumulate overnight.
+pub const DEFAULT_CACHE_IDLE_TTL_SECS: u64 = 1800;
+const CACHE_IDLE_TTL_LOWER_SECS: u64 = 60;
+const CACHE_IDLE_TTL_UPPER_SECS: u64 = 86_400;
+/// Env var that overrides `DEFAULT_CACHE_IDLE_TTL_SECS`.
+pub const CACHE_IDLE_TTL_ENV: &str = "MOLD_CACHE_IDLE_TTL_SECS";
+
+/// Resolve the cache idle-TTL from env, falling back to the default.
+/// Out-of-range or unparseable values log a warning and use the default.
+pub fn resolve_cache_idle_ttl_secs() -> u64 {
+    match std::env::var(CACHE_IDLE_TTL_ENV) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(n) if (CACHE_IDLE_TTL_LOWER_SECS..=CACHE_IDLE_TTL_UPPER_SECS).contains(&n) => n,
+            Ok(n) => {
+                tracing::warn!(
+                    env = CACHE_IDLE_TTL_ENV,
+                    value = n,
+                    lower = CACHE_IDLE_TTL_LOWER_SECS,
+                    upper = CACHE_IDLE_TTL_UPPER_SECS,
+                    "ignoring out-of-range cache idle-TTL; using default"
+                );
+                DEFAULT_CACHE_IDLE_TTL_SECS
+            }
+            Err(e) => {
+                tracing::warn!(
+                    env = CACHE_IDLE_TTL_ENV,
+                    raw = %raw,
+                    error = %e,
+                    "ignoring unparseable cache idle-TTL; using default"
+                );
+                DEFAULT_CACHE_IDLE_TTL_SECS
+            }
+        },
+        Err(_) => DEFAULT_CACHE_IDLE_TTL_SECS,
+    }
+}
+
+/// Resolve the model-cache capacity from env, falling back to the default.
+/// Out-of-range or unparseable values log a warning and use the default so
+/// a typo in the env never silently shrinks the cache to an unusable size.
+pub fn resolve_max_cached_models() -> usize {
+    match std::env::var(MAX_CACHED_MODELS_ENV) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(n) if (MAX_CACHED_MODELS_LOWER..=MAX_CACHED_MODELS_UPPER).contains(&n) => n,
+            Ok(n) => {
+                tracing::warn!(
+                    env = MAX_CACHED_MODELS_ENV,
+                    value = n,
+                    lower = MAX_CACHED_MODELS_LOWER,
+                    upper = MAX_CACHED_MODELS_UPPER,
+                    "ignoring out-of-range cache cap; using default"
+                );
+                DEFAULT_MAX_CACHED_MODELS
+            }
+            Err(e) => {
+                tracing::warn!(
+                    env = MAX_CACHED_MODELS_ENV,
+                    raw = %raw,
+                    error = %e,
+                    "ignoring unparseable cache cap; using default"
+                );
+                DEFAULT_MAX_CACHED_MODELS
+            }
+        },
+        Err(_) => DEFAULT_MAX_CACHED_MODELS,
+    }
+}
 
 /// Open the default catalog DB, falling back to in-memory if unavailable.
 fn open_catalog_db() -> Arc<mold_db::MetadataDb> {
@@ -193,20 +270,12 @@ impl AppState {
         gpu_pool: Arc<GpuPool>,
         queue_capacity: usize,
     ) -> Self {
-        let name = engine.model_name().to_string();
-        let loaded = engine.is_loaded();
-        let mut cache = ModelCache::new(DEFAULT_MAX_CACHED_MODELS);
+        let mut cache = ModelCache::new(resolve_max_cached_models());
         cache.insert(engine, 0);
-        let snapshot = EngineSnapshot {
-            model_name: Some(name),
-            is_loaded: loaded,
-            cached_models: cache.cached_model_names(),
-        };
         Self {
             gpu_pool,
             queue_capacity,
             model_cache: Arc::new(Mutex::new(cache)),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             start_time: Instant::now(),
@@ -235,8 +304,7 @@ impl AppState {
         Self {
             gpu_pool,
             queue_capacity,
-            model_cache: Arc::new(Mutex::new(ModelCache::new(DEFAULT_MAX_CACHED_MODELS))),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot::default())),
+            model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             start_time: Instant::now(),
@@ -275,20 +343,12 @@ impl AppState {
     pub fn with_engine(engine: impl InferenceEngine + 'static) -> Self {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = QueueHandle::new(tx);
-        let name = engine.model_name().to_string();
-        let loaded = engine.is_loaded();
-        let mut cache = ModelCache::new(DEFAULT_MAX_CACHED_MODELS);
+        let mut cache = ModelCache::new(resolve_max_cached_models());
         cache.insert(Box::new(engine), 0);
-        let snapshot = EngineSnapshot {
-            model_name: Some(name),
-            is_loaded: loaded,
-            cached_models: cache.cached_model_names(),
-        };
         Self {
             gpu_pool: Self::empty_gpu_pool(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
             start_time: Instant::now(),
@@ -314,20 +374,12 @@ impl AppState {
     ) -> (Self, tokio::sync::mpsc::Receiver<GenerationJob>) {
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let queue = QueueHandle::new(tx);
-        let name = engine.model_name().to_string();
-        let loaded = engine.is_loaded();
-        let mut cache = ModelCache::new(DEFAULT_MAX_CACHED_MODELS);
+        let mut cache = ModelCache::new(resolve_max_cached_models());
         cache.insert(Box::new(engine), 0);
-        let snapshot = EngineSnapshot {
-            model_name: Some(name),
-            is_loaded: loaded,
-            cached_models: cache.cached_model_names(),
-        };
         let state = Self {
             gpu_pool: Self::empty_gpu_pool(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
             start_time: Instant::now(),
@@ -357,8 +409,7 @@ impl AppState {
                 workers: Vec::new(),
             }),
             queue_capacity: 200,
-            model_cache: Arc::new(Mutex::new(ModelCache::new(DEFAULT_MAX_CACHED_MODELS))),
-            engine_snapshot: Arc::new(tokio::sync::RwLock::new(EngineSnapshot::default())),
+            model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
             start_time: Instant::now(),
@@ -452,5 +503,107 @@ mod tests {
         assert!(state.resources.latest().is_none());
         // Subscribing must succeed (no panics).
         let _rx = state.resources.subscribe();
+    }
+
+    /// Serializes every test that touches a process-wide env var via
+    /// `std::env::set_var` — mutating env is global state, so without this
+    /// guard parallel tests would race on the env table.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Set `name` to `value` (or remove it when `value` is `None`), invoke
+    /// `f`, then restore the original value. Lock-serialized so concurrent
+    /// tests don't race on the env table.
+    fn with_env<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var(name).ok();
+        match value {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+        let out = f();
+        match prev {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+        out
+    }
+
+    #[test]
+    fn resolve_max_cached_uses_default_when_env_missing() {
+        let n = with_env(MAX_CACHED_MODELS_ENV, None, resolve_max_cached_models);
+        assert_eq!(n, DEFAULT_MAX_CACHED_MODELS);
+    }
+
+    #[test]
+    fn resolve_max_cached_honors_env_within_range() {
+        let n = with_env(MAX_CACHED_MODELS_ENV, Some("8"), resolve_max_cached_models);
+        assert_eq!(n, 8);
+    }
+
+    #[test]
+    fn resolve_max_cached_clamps_zero_back_to_default() {
+        let n = with_env(MAX_CACHED_MODELS_ENV, Some("0"), resolve_max_cached_models);
+        assert_eq!(n, DEFAULT_MAX_CACHED_MODELS);
+    }
+
+    #[test]
+    fn resolve_max_cached_clamps_overflow_back_to_default() {
+        let n = with_env(
+            MAX_CACHED_MODELS_ENV,
+            Some("999"),
+            resolve_max_cached_models,
+        );
+        assert_eq!(n, DEFAULT_MAX_CACHED_MODELS);
+    }
+
+    #[test]
+    fn resolve_max_cached_falls_back_when_env_unparseable() {
+        let n = with_env(
+            MAX_CACHED_MODELS_ENV,
+            Some("not-a-number"),
+            resolve_max_cached_models,
+        );
+        assert_eq!(n, DEFAULT_MAX_CACHED_MODELS);
+    }
+
+    #[test]
+    fn resolve_cache_idle_ttl_uses_default_when_env_missing() {
+        let n = with_env(CACHE_IDLE_TTL_ENV, None, resolve_cache_idle_ttl_secs);
+        assert_eq!(n, DEFAULT_CACHE_IDLE_TTL_SECS);
+    }
+
+    #[test]
+    fn resolve_cache_idle_ttl_honors_env_within_range() {
+        // 600s is comfortably inside [60, 86_400] — the resolver must echo it.
+        let n = with_env(CACHE_IDLE_TTL_ENV, Some("600"), resolve_cache_idle_ttl_secs);
+        assert_eq!(n, 600);
+    }
+
+    #[test]
+    fn resolve_cache_idle_ttl_clamps_zero_back_to_default() {
+        // 0 is below the 60s lower bound; falls back to the default with a warn log.
+        let n = with_env(CACHE_IDLE_TTL_ENV, Some("0"), resolve_cache_idle_ttl_secs);
+        assert_eq!(n, DEFAULT_CACHE_IDLE_TTL_SECS);
+    }
+
+    #[test]
+    fn resolve_cache_idle_ttl_clamps_overflow_back_to_default() {
+        // 100_000 is above the 86_400s upper bound; falls back to the default.
+        let n = with_env(
+            CACHE_IDLE_TTL_ENV,
+            Some("100000"),
+            resolve_cache_idle_ttl_secs,
+        );
+        assert_eq!(n, DEFAULT_CACHE_IDLE_TTL_SECS);
+    }
+
+    #[test]
+    fn resolve_cache_idle_ttl_falls_back_when_env_unparseable() {
+        let n = with_env(
+            CACHE_IDLE_TTL_ENV,
+            Some("not-a-number"),
+            resolve_cache_idle_ttl_secs,
+        );
+        assert_eq!(n, DEFAULT_CACHE_IDLE_TTL_SECS);
     }
 }

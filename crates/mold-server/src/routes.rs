@@ -1574,7 +1574,7 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
     let (models_loaded, busy, current_generation) = if has_gpus {
         (gpu_models_loaded, gpu_busy, multi_gpu_current_gen)
     } else {
-        let snapshot = state.engine_snapshot.read().await.clone();
+        let snapshot = state.model_cache.lock().await.snapshot();
         let models = match (snapshot.model_name, snapshot.is_loaded) {
             (Some(model_name), true) => vec![model_name],
             _ => vec![],

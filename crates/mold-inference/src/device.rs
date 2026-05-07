@@ -527,14 +527,18 @@ pub fn free_vram_bytes(_ordinal: usize) -> Option<u64> {
     available_system_memory_bytes().or_else(free_system_memory_bytes)
 }
 
-/// Estimate current VRAM usage (total - free) for the specified GPU ordinal.
-/// Returns 0 if unavailable. Used by the model cache to track per-model VRAM footprint.
+/// Total VRAM currently in use (`total - free`) for the specified GPU
+/// ordinal. Returns 0 if unavailable.
+///
+/// This is a **global** device measurement, not a per-model footprint. To
+/// estimate the VRAM consumed by loading a model, take the delta between a
+/// pre-load baseline and a post-load reading via [`vram_load_delta`].
 #[cfg(feature = "cuda")]
-pub fn vram_used_estimate(ordinal: usize) -> u64 {
+pub fn vram_in_use_bytes(ordinal: usize) -> u64 {
     if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
         candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
             .ok()
-            .map(|(_free, total)| total as u64 - _free as u64)
+            .map(|(free, total)| total as u64 - free as u64)
             .unwrap_or(0)
     } else {
         0
@@ -543,8 +547,18 @@ pub fn vram_used_estimate(ordinal: usize) -> u64 {
 
 /// Non-CUDA stub — no VRAM tracking available.
 #[cfg(not(feature = "cuda"))]
-pub fn vram_used_estimate(_ordinal: usize) -> u64 {
+pub fn vram_in_use_bytes(_ordinal: usize) -> u64 {
     0
+}
+
+/// Bytes loaded onto the GPU since `baseline` was sampled.
+///
+/// `baseline = vram_in_use_bytes(ordinal)` taken **before** loading a model;
+/// this returns `vram_in_use_bytes(ordinal).saturating_sub(baseline)` so the
+/// model cache records the new load's per-model footprint, not whatever the
+/// device was already using.
+pub fn vram_load_delta(ordinal: usize, baseline: u64) -> u64 {
+    vram_in_use_bytes(ordinal).saturating_sub(baseline)
 }
 
 // ── Formatting ───────────────────────────────────────────────────────────────
@@ -1350,5 +1364,22 @@ mod tests {
             select_expand_device_with_preference(&gpus, 3 * GB, false, Some(1)),
             ExpandPlacement::Gpu(0),
         );
+    }
+
+    // ── vram_load_delta ──────────────────────────────────────────────────
+
+    /// `vram_load_delta` must be a pure `saturating_sub` against the
+    /// post-load reading. When the device has no CUDA (the test environment),
+    /// `vram_in_use_bytes` returns 0, so the delta is always 0 — but the
+    /// function shape (saturating_sub, not panic on underflow) must hold
+    /// regardless of the live reading.
+    #[test]
+    fn vram_load_delta_is_saturating_sub() {
+        // Without CUDA, vram_in_use_bytes(0) == 0, and 0.saturating_sub(N) == 0
+        // for any N. This locks in the saturating semantic — a flaky reading
+        // (post < pre) must never panic or wrap.
+        assert_eq!(vram_load_delta(0, 0), 0);
+        assert_eq!(vram_load_delta(0, 1_000_000_000), 0);
+        assert_eq!(vram_load_delta(0, u64::MAX), 0);
     }
 }

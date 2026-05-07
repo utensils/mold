@@ -39,10 +39,6 @@ impl LoraDeltaCache {
     fn insert(&mut self, key: LoraCacheKey, delta: Tensor) {
         self.deltas.insert(key, delta);
     }
-
-    pub fn clear(&mut self) {
-        self.deltas.clear();
-    }
 }
 
 /// A parsed LoRA adapter: pairs of (A, B) weight matrices keyed by layer name.

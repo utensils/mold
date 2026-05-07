@@ -88,7 +88,7 @@ impl GpuWorker {
             ordinal: self.gpu.ordinal,
             name: self.gpu.name.clone(),
             vram_total_bytes: self.gpu.total_vram_bytes,
-            vram_used_bytes: mold_inference::device::vram_used_estimate(self.gpu.ordinal),
+            vram_used_bytes: mold_inference::device::vram_in_use_bytes(self.gpu.ordinal),
             loaded_model,
             state,
         }
