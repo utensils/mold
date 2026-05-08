@@ -1986,6 +1986,7 @@ impl FluxEngine {
                     width,
                     height,
                     start,
+                    self.base.gpu_ordinal,
                 );
             }
 
@@ -2026,7 +2027,11 @@ impl FluxEngine {
             // weights since they share the same physical RAM as GPU allocations.
             // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
             let is_metal = loaded.device.is_metal();
+            let mut dropped_gpu_encoder = false;
             if loaded.t5.on_gpu || is_metal {
+                if loaded.t5.on_gpu {
+                    dropped_gpu_encoder = true;
+                }
                 loaded.t5.drop_weights();
                 tracing::info!(
                     on_gpu = loaded.t5.on_gpu,
@@ -2034,11 +2039,22 @@ impl FluxEngine {
                 );
             }
             if loaded.clip.on_gpu || is_metal {
+                if loaded.clip.on_gpu {
+                    dropped_gpu_encoder = true;
+                }
                 loaded.clip.drop_weights();
                 tracing::info!(
                     on_gpu = loaded.clip.on_gpu,
                     "CLIP encoder dropped to free memory for denoising"
                 );
+            }
+            // Force CUDA to complete the encoder cuMemFreeAsync before denoising
+            // begins. Without this, the freed encoder VRAM (~5–6 GB for T5 Q8 +
+            // CLIP) may not be available when the first denoising step allocates,
+            // and on a tight 24 GB budget (Q8 transformer kept loaded + LoRAs)
+            // that pushes VAE decode past the limit later in the pipeline.
+            if dropped_gpu_encoder {
+                loaded.device.synchronize()?;
             }
 
             Self::generate_with_embeddings(
@@ -2051,6 +2067,7 @@ impl FluxEngine {
                 width,
                 height,
                 start,
+                self.base.gpu_ordinal,
             )
         })()
     }
@@ -2115,6 +2132,7 @@ impl FluxEngine {
         width: usize,
         height: usize,
         start: Instant,
+        gpu_ordinal: usize,
     ) -> Result<GenerateResponse> {
         // 3. Generate initial noise (F32 for quantized, gpu_dtype for BF16)
         let noise_dtype = if loaded.is_quantized {
@@ -2256,20 +2274,50 @@ impl FluxEngine {
         drop(t5_emb_state);
         drop(clip_emb_state);
         drop(img_state);
-        let keep_transformer = std::env::var("MOLD_FLUX_KEEP_TRANSFORMER")
+        let keep_transformer_env = std::env::var("MOLD_FLUX_KEEP_TRANSFORMER")
             .map(|v| v == "1")
             .unwrap_or(false);
-        if !keep_transformer {
+
+        // Even with KEEP_TRANSFORMER=1 the keep is conditional: VAE decode at
+        // 1024² for FLUX needs a large contiguous conv2d allocation (~2–3 GB
+        // peak). When the kept transformer + LoRA-merged tensors leave too
+        // little headroom (observed at ~3 GB free with a 2-LoRA stack on a
+        // 24 GB card), the VAE alloc OOMs even though the resident transformer
+        // size is identical to the no-LoRA case. The next request rebuilds —
+        // that's the trade-off for not OOMing here.
+        const VAE_DECODE_HEADROOM_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
+        let free_before_vae = crate::device::free_vram_bytes(gpu_ordinal).unwrap_or(0);
+        let force_drop_for_headroom = keep_transformer_env
+            && free_before_vae > 0
+            && free_before_vae < VAE_DECODE_HEADROOM_BYTES;
+
+        if !keep_transformer_env || force_drop_for_headroom {
             loaded.flux_model = None;
-            // Force CUDA to complete pending operations and release freed memory.
-            // Without this, cuMemFree is asynchronous and the freed VRAM from the
-            // transformer (~13GB) may not be available when VAE decode allocates
-            // its conv2d intermediates, causing OOM on subsequent generations.
-            loaded.device.synchronize()?;
-            tracing::info!("Transformer dropped to free VRAM for VAE decode");
+            if force_drop_for_headroom {
+                tracing::info!(
+                    free_mb = free_before_vae / 1024 / 1024,
+                    headroom_mb = VAE_DECODE_HEADROOM_BYTES / 1024 / 1024,
+                    "Transformer force-dropped before VAE decode (free VRAM below headroom; \
+                     overrides MOLD_FLUX_KEEP_TRANSFORMER=1 for this request)"
+                );
+            } else {
+                tracing::info!("Transformer dropped to free VRAM for VAE decode");
+            }
         } else {
-            tracing::info!("Transformer kept loaded (MOLD_FLUX_KEEP_TRANSFORMER=1)");
+            tracing::info!(
+                free_mb = free_before_vae / 1024 / 1024,
+                "Transformer kept loaded (MOLD_FLUX_KEEP_TRANSFORMER=1)"
+            );
         }
+        // Force CUDA to complete pending operations and release freed memory
+        // before VAE decode allocates its conv2d intermediates. cuMemFree is
+        // asynchronous, so the drops above (denoising state + embeddings, plus
+        // the optional transformer drop) may not have actually returned VRAM
+        // to the allocator yet. Without this synchronize, VAE decode at 1024²
+        // OOMs on the first conv allocation — observable on the keep-transformer
+        // path even on iteration 1 (the drop path used to synchronize here, the
+        // keep path didn't, which made the bug branch-specific).
+        loaded.device.synchronize()?;
 
         // 8. Decode with VAE — cast to VAE dtype (BF16) in case quantized model produced F32
         progress.stage_start("VAE decode");

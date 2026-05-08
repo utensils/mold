@@ -945,6 +945,18 @@ pub(crate) fn gguf_lora_var_builder(
         total_layers.saturating_sub(applied),
     ));
 
+    // Drain pending cuMemFreeAsync from the per-tensor merge loop. Each
+    // patched tensor allocates F32 A/B/B@A intermediates on GPU sized like the
+    // full weight (~150 MB for a 3072×12288 MLP); their drops queue async
+    // frees that don't actually return VRAM to the device until a sync. With
+    // 50+ LoRA-affected tensors per adapter and a stack of 2 LoRAs, the queued
+    // frees pile up to several GB. Without this sync, denoising starts with a
+    // bloated working set and VAE decode at 1024² OOMs even though the kept
+    // transformer is the same size as the no-LoRA case.
+    if on_gpu {
+        device.synchronize()?;
+    }
+
     Ok(candle_transformers::quantized_var_builder::VarBuilder::from_qtensors(data, device))
 }
 
