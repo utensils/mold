@@ -57,6 +57,17 @@ pub(crate) struct LoraLayer {
 
 impl LoraAdapter {
     /// Load a LoRA safetensors file. Tensors are loaded on CPU.
+    ///
+    /// Accepts two on-disk naming conventions:
+    /// - **diffusers / PEFT-canonical**: `<layer>.lora_A.weight` /
+    ///   `<layer>.lora_B.weight`. `<layer>` is a dot-separated module path
+    ///   like `transformer.transformer_blocks.0.attn.to_q`.
+    /// - **Kohya / sd-scripts**: `<layer>.lora_down.weight` /
+    ///   `<layer>.lora_up.weight`. `lora_down` is the (rank, in) matrix
+    ///   (== `lora_A`); `lora_up` is the (out, rank) matrix (== `lora_B`).
+    ///   `<layer>` is the Kohya-flattened module path with `.` collapsed
+    ///   to `_` and prefixed with `lora_unet_`. `map_lora_key` recognises
+    ///   both conventions downstream.
     pub fn load(path: &Path) -> Result<Self> {
         let tensors = candle_core::safetensors::load(path, &Device::Cpu)?;
         let mut a_tensors: HashMap<String, Tensor> = HashMap::new();
@@ -65,10 +76,16 @@ impl LoraAdapter {
         let mut rank = 0usize;
 
         for (name, tensor) in &tensors {
-            if let Some(layer) = name.strip_suffix(".lora_A.weight") {
+            if let Some(layer) = name
+                .strip_suffix(".lora_A.weight")
+                .or_else(|| name.strip_suffix(".lora_down.weight"))
+            {
                 rank = rank.max(tensor.dim(0)?);
                 a_tensors.insert(layer.to_string(), tensor.clone());
-            } else if let Some(layer) = name.strip_suffix(".lora_B.weight") {
+            } else if let Some(layer) = name
+                .strip_suffix(".lora_B.weight")
+                .or_else(|| name.strip_suffix(".lora_up.weight"))
+            {
                 b_tensors.insert(layer.to_string(), tensor.clone());
             } else if let Some(layer) = name.strip_suffix(".alpha") {
                 if let Ok(val) = tensor.to_scalar::<f32>() {
@@ -107,10 +124,20 @@ enum LoraTarget {
     },
 }
 
-/// Map a diffusers-format LoRA key to a candle model target.
+/// Map a LoRA layer key (diffusers- or Kohya-format) to a candle model target.
 ///
 /// Returns None for unrecognized keys (logged as warning, skipped).
 fn map_lora_key(diffusers_key: &str) -> Option<LoraTarget> {
+    // Kohya / sd-scripts naming (`lora_unet_*`) — keys carry the FLUX module
+    // path with `.` flattened to `_`. The transformer's fused tensors
+    // (`img_attn.qkv`, `txt_attn.qkv`, `single_blocks.*.linear1`) match the
+    // candle layout 1:1, so every Kohya key maps to a single Direct target —
+    // no FusedSlice splitting needed (Kohya already trains a B@A delta of
+    // the full fused output shape).
+    if let Some(rest) = diffusers_key.strip_prefix("lora_unet_") {
+        return map_kohya_unet_key(rest);
+    }
+
     // Strip the "transformer." prefix that LoRA files use
     let key = diffusers_key
         .strip_prefix("transformer.")
@@ -224,6 +251,46 @@ fn map_lora_key(diffusers_key: &str) -> Option<LoraTarget> {
         };
     }
 
+    None
+}
+
+/// Map a Kohya/sd-scripts FLUX UNet LoRA key (with the `lora_unet_` prefix
+/// already stripped) to a candle model target.
+///
+/// Kohya's flat-naming scheme is unambiguous after `lora_unet_<block>_<idx>_`
+/// — what follows is one of a small fixed set of leaves per block kind. We
+/// match on that suffix directly rather than try to reverse the
+/// `.`→`_` collapse, which is ambiguous (`img_attn` vs `img.attn`).
+fn map_kohya_unet_key(rest: &str) -> Option<LoraTarget> {
+    if let Some(after) = rest.strip_prefix("double_blocks_") {
+        let (idx_str, suffix) = after.split_once('_')?;
+        idx_str.parse::<usize>().ok()?;
+        let candle_key = match suffix {
+            "img_attn_qkv" => format!("double_blocks.{idx_str}.img_attn.qkv.weight"),
+            "img_attn_proj" => format!("double_blocks.{idx_str}.img_attn.proj.weight"),
+            "img_mlp_0" => format!("double_blocks.{idx_str}.img_mlp.0.weight"),
+            "img_mlp_2" => format!("double_blocks.{idx_str}.img_mlp.2.weight"),
+            "img_mod_lin" => format!("double_blocks.{idx_str}.img_mod.lin.weight"),
+            "txt_attn_qkv" => format!("double_blocks.{idx_str}.txt_attn.qkv.weight"),
+            "txt_attn_proj" => format!("double_blocks.{idx_str}.txt_attn.proj.weight"),
+            "txt_mlp_0" => format!("double_blocks.{idx_str}.txt_mlp.0.weight"),
+            "txt_mlp_2" => format!("double_blocks.{idx_str}.txt_mlp.2.weight"),
+            "txt_mod_lin" => format!("double_blocks.{idx_str}.txt_mod.lin.weight"),
+            _ => return None,
+        };
+        return Some(LoraTarget::Direct { candle_key });
+    }
+    if let Some(after) = rest.strip_prefix("single_blocks_") {
+        let (idx_str, suffix) = after.split_once('_')?;
+        idx_str.parse::<usize>().ok()?;
+        let candle_key = match suffix {
+            "linear1" => format!("single_blocks.{idx_str}.linear1.weight"),
+            "linear2" => format!("single_blocks.{idx_str}.linear2.weight"),
+            "modulation_lin" => format!("single_blocks.{idx_str}.modulation.lin.weight"),
+            _ => return None,
+        };
+        return Some(LoraTarget::Direct { candle_key });
+    }
     None
 }
 
@@ -1141,6 +1208,143 @@ mod tests {
             (stack[1].effective_scale - 0.25).abs() < 1e-9,
             "second patch keeps its caller-supplied scale"
         );
+    }
+
+    #[test]
+    fn map_kohya_double_block_keys() {
+        let cases = [
+            (
+                "lora_unet_double_blocks_0_img_attn_qkv",
+                "double_blocks.0.img_attn.qkv.weight",
+            ),
+            (
+                "lora_unet_double_blocks_5_img_attn_proj",
+                "double_blocks.5.img_attn.proj.weight",
+            ),
+            (
+                "lora_unet_double_blocks_10_img_mlp_0",
+                "double_blocks.10.img_mlp.0.weight",
+            ),
+            (
+                "lora_unet_double_blocks_10_img_mlp_2",
+                "double_blocks.10.img_mlp.2.weight",
+            ),
+            (
+                "lora_unet_double_blocks_3_img_mod_lin",
+                "double_blocks.3.img_mod.lin.weight",
+            ),
+            (
+                "lora_unet_double_blocks_7_txt_attn_qkv",
+                "double_blocks.7.txt_attn.qkv.weight",
+            ),
+            (
+                "lora_unet_double_blocks_7_txt_attn_proj",
+                "double_blocks.7.txt_attn.proj.weight",
+            ),
+            (
+                "lora_unet_double_blocks_2_txt_mlp_0",
+                "double_blocks.2.txt_mlp.0.weight",
+            ),
+            (
+                "lora_unet_double_blocks_2_txt_mlp_2",
+                "double_blocks.2.txt_mlp.2.weight",
+            ),
+            (
+                "lora_unet_double_blocks_18_txt_mod_lin",
+                "double_blocks.18.txt_mod.lin.weight",
+            ),
+        ];
+        for (kohya_key, expected) in cases {
+            match map_lora_key(kohya_key).unwrap() {
+                LoraTarget::Direct { candle_key } => {
+                    assert_eq!(candle_key, expected, "kohya key {kohya_key}");
+                }
+                _ => panic!("expected Direct for kohya key {kohya_key}"),
+            }
+        }
+    }
+
+    #[test]
+    fn map_kohya_single_block_keys() {
+        let cases = [
+            (
+                "lora_unet_single_blocks_0_linear1",
+                "single_blocks.0.linear1.weight",
+            ),
+            (
+                "lora_unet_single_blocks_9_linear2",
+                "single_blocks.9.linear2.weight",
+            ),
+            (
+                "lora_unet_single_blocks_37_modulation_lin",
+                "single_blocks.37.modulation.lin.weight",
+            ),
+        ];
+        for (kohya_key, expected) in cases {
+            match map_lora_key(kohya_key).unwrap() {
+                LoraTarget::Direct { candle_key } => {
+                    assert_eq!(candle_key, expected, "kohya key {kohya_key}");
+                }
+                _ => panic!("expected Direct for kohya key {kohya_key}"),
+            }
+        }
+    }
+
+    #[test]
+    fn map_kohya_unknown_leaves_returns_none() {
+        // Text-encoder LoRAs (`lora_te_*`) and unrecognized leaves are
+        // skipped (caller logs a warning) rather than panicking.
+        assert!(map_lora_key("lora_te_text_model_layer_0_attn_q").is_none());
+        assert!(map_lora_key("lora_unet_double_blocks_0_unknown_leaf").is_none());
+        assert!(map_lora_key("lora_unet_single_blocks_0_norm_query").is_none());
+        assert!(map_lora_key("lora_unet_unrelated_block_0_x").is_none());
+    }
+
+    /// Round-trip `LoraAdapter::load` against a Kohya-shaped safetensors
+    /// fixture to prove the suffix matcher accepts `lora_down`/`lora_up`/
+    /// `alpha` and pairs them up correctly. Synthetic shapes — the
+    /// numbers don't have to match a real FLUX layer, just the down/up
+    /// convention.
+    #[test]
+    fn load_accepts_kohya_lora_down_up_alpha() {
+        use safetensors::tensor::TensorView;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("kohya.safetensors");
+        let layer = "lora_unet_double_blocks_0_img_attn_qkv";
+
+        // (rank=2, in=4) for down, (out=6, rank=2) for up. f32 little-endian
+        // raw bytes — `safetensors::serialize` round-trips them as F32
+        // tensors that `candle_core::safetensors::load` then parses.
+        let down: Vec<f32> = (0..2 * 4).map(|i| i as f32 * 0.1).collect();
+        let up: Vec<f32> = (0..6 * 2).map(|i| i as f32 * 0.2).collect();
+        let alpha: Vec<f32> = vec![16.0];
+
+        let down_bytes: Vec<u8> = down.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let up_bytes: Vec<u8> = up.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let alpha_bytes: Vec<u8> = alpha.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        let down_view = TensorView::new(safetensors::Dtype::F32, vec![2, 4], &down_bytes).unwrap();
+        let up_view = TensorView::new(safetensors::Dtype::F32, vec![6, 2], &up_bytes).unwrap();
+        let alpha_view = TensorView::new(safetensors::Dtype::F32, vec![], &alpha_bytes).unwrap();
+
+        let entries: Vec<(String, TensorView)> = vec![
+            (format!("{layer}.lora_down.weight"), down_view),
+            (format!("{layer}.lora_up.weight"), up_view),
+            (format!("{layer}.alpha"), alpha_view),
+        ];
+        safetensors::serialize_to_file(entries, &None, &path).expect("write safetensors");
+
+        let adapter = LoraAdapter::load(&path).expect("kohya safetensors must load");
+        assert_eq!(
+            adapter.layers.len(),
+            1,
+            "lora_down/lora_up should be paired into one layer"
+        );
+        assert_eq!(adapter.rank, 2);
+        let lora_layer = adapter.layers.get(layer).expect("layer present");
+        assert_eq!(lora_layer.a.dims(), &[2, 4]);
+        assert_eq!(lora_layer.b.dims(), &[6, 2]);
+        assert_eq!(lora_layer.alpha, Some(16.0));
     }
 
     #[test]
