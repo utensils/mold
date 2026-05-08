@@ -13,7 +13,7 @@ use crate::cache::{
     LruCache, PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{cfg_active, rand_seed, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressEvent};
@@ -661,7 +661,7 @@ impl SDXLEngine {
         start_step: usize,
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
     ) -> Result<()> {
-        let use_cfg = guidance > 1.0;
+        let use_cfg = cfg_active(guidance);
         let mut scheduler = crate::scheduler::build_scheduler(
             sched,
             steps as usize,
@@ -822,7 +822,7 @@ impl SDXLEngine {
         let cache_key = prompt_cache_key(prompt, guidance);
         let (text_embeddings, cache_hit) =
             get_or_insert_cached_tensor(&self.prompt_cache, cache_key, device, dtype, || {
-                let use_cfg = guidance > 1.0;
+                let use_cfg = cfg_active(guidance);
 
                 self.base.progress.stage_start("Encoding prompt (CLIP-L)");
                 let encode_l_start = Instant::now();
@@ -1765,5 +1765,30 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(single_file);
+    }
+
+    // The SDXL denoise loop and prompt encoder both gate the unconditional
+    // pass on `cfg_active(guidance)`. These tests pin the predicate that
+    // those branches use so a regression to `guidance > 1.0` (which would
+    // break LCM / Lightning / Turbo at exactly cfg=1.0) is caught here.
+
+    #[test]
+    fn test_cfg_disabled_at_guidance_1_0() {
+        assert!(!cfg_active(1.0));
+    }
+
+    #[test]
+    fn test_cfg_disabled_just_below_1_0() {
+        assert!(!cfg_active(1.0 - 1e-5));
+    }
+
+    #[test]
+    fn test_cfg_enabled_at_guidance_1_5() {
+        assert!(cfg_active(1.5));
+    }
+
+    #[test]
+    fn test_cfg_enabled_at_guidance_7_5() {
+        assert!(cfg_active(7.5));
     }
 }

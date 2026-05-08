@@ -104,6 +104,27 @@ pub(crate) fn rand_seed() -> u64 {
         .as_nanos() as u64
 }
 
+/// Tolerance for treating a CFG (classifier-free guidance) scale as "1.0,
+/// disabled". When the active guidance is within this epsilon of 1.0 the
+/// uncond pass adds nothing — `cond + (cond - uncond) * 0 == cond` — so the
+/// pipeline can run a single conditional forward instead of batching
+/// `[uncond, cond]`. Used by LCM / Lightning / Turbo (guidance-distilled)
+/// workflows that ship with `cfg ≈ 1.0`.
+///
+/// Matches ComfyUI's short-circuit at `comfy/samplers.py:370`
+/// (`if math.isclose(cond_scale, 1.0): uncond_ = None`). The default
+/// `math.isclose` rel-tol is `1e-9` — ours is looser (`1e-4`) because the
+/// caller-visible knob is a user-typed `f64` like `1.0` or `1.0000`.
+pub(crate) const CFG_DISABLE_EPSILON: f64 = 1e-4;
+
+/// Returns `true` when classifier-free guidance is active for the given scale,
+/// i.e. when the unconditional forward pass meaningfully contributes to the
+/// final noise prediction. When `false`, callers should run a single
+/// conditional forward (saves ~2× denoise time).
+pub(crate) fn cfg_active(guidance: f64) -> bool {
+    (guidance - 1.0).abs() > CFG_DISABLE_EPSILON
+}
+
 /// Generate deterministic noise on a device with a given seed.
 ///
 /// This is the ONLY correct way to generate initial noise for denoising.
@@ -205,5 +226,44 @@ mod tests {
             guard.push_str("-mutated");
         }
         assert_eq!(slot.as_deref(), Some("loaded-mutated"));
+    }
+
+    #[test]
+    fn test_cfg_disabled_at_guidance_1_0() {
+        assert!(!cfg_active(1.0), "guidance=1.0 must take the fast path");
+    }
+
+    #[test]
+    fn test_cfg_disabled_just_below_1_0() {
+        // LCM / Lightning workflows often expose 1.0 as a float that round-
+        // trips with tiny noise; anything within the epsilon is "disabled".
+        assert!(
+            !cfg_active(1.0 - 1e-5),
+            "guidance just under 1.0 must take the fast path"
+        );
+        assert!(
+            !cfg_active(1.0 + 1e-5),
+            "guidance just over 1.0 must take the fast path"
+        );
+    }
+
+    #[test]
+    fn test_cfg_enabled_at_guidance_1_5() {
+        assert!(cfg_active(1.5), "guidance=1.5 must run full CFG");
+    }
+
+    #[test]
+    fn test_cfg_enabled_at_guidance_7_5() {
+        assert!(cfg_active(7.5), "guidance=7.5 must run full CFG");
+    }
+
+    #[test]
+    fn test_cfg_enabled_just_outside_epsilon() {
+        // Sanity: the boundary itself is not strictly active, but anything
+        // visibly past it must engage CFG.
+        assert!(
+            cfg_active(1.0 + 2.0 * CFG_DISABLE_EPSILON),
+            "guidance just past the epsilon must run full CFG"
+        );
     }
 }

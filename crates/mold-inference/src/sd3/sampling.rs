@@ -8,6 +8,7 @@ use candle_core::{DType, IndexOp, Tensor};
 use std::time::Instant;
 
 use super::transformer::SD3Transformer;
+use crate::engine::cfg_active;
 use crate::img_utils;
 use crate::progress::{ProgressEvent, ProgressReporter};
 
@@ -83,6 +84,18 @@ pub fn euler_sample(
 
     let total_steps = sigmas.len().saturating_sub(1);
 
+    // Fast path: at cfg ≈ 1.0 the uncond pred contributes 0 to the mix
+    // (`apply_cfg(1, .) = cond`), so skip the doubled forward entirely.
+    // Saves ~2× denoise time for distilled-CFG (Turbo) workflows.
+    // The encoder still produces `[cond, uncond]` in y/context; we slice
+    // the cond row here.
+    let use_cfg = cfg_active(cfg_scale);
+    let (y_cond_only, context_cond_only) = if use_cfg {
+        (None, None)
+    } else {
+        (Some(y.i(..1)?), Some(context.i(..1)?))
+    };
+
     for (step, window) in sigmas.windows(2).enumerate() {
         let step_start = Instant::now();
         let (s_curr, s_prev) = match window {
@@ -91,21 +104,40 @@ pub fn euler_sample(
         };
 
         let timestep = (*s_curr) * 1000.0;
-        let noise_pred = mmdit.forward(
-            &Tensor::cat(&[&x, &x], 0)?,
-            &Tensor::full(timestep as f32, (2,), x.device())?.contiguous()?,
-            y,
-            context,
-            None,
-        )?;
-        if step == 0 {
-            debug_tensor_stats("noise_pred", &noise_pred);
-        }
-
-        let mut guidance = apply_cfg(cfg_scale, &noise_pred)?;
-        if step == 0 {
-            debug_tensor_stats("guidance", &guidance);
-        }
+        // `noise_pred_full` holds the raw transformer output (batched
+        // `[cond, uncond]` under CFG, single `[cond]` otherwise). We keep
+        // it around so SLG can recover the conditional row without rerunning
+        // the transformer.
+        let (mut guidance, noise_pred_full) = if use_cfg {
+            let noise_pred = mmdit.forward(
+                &Tensor::cat(&[&x, &x], 0)?,
+                &Tensor::full(timestep as f32, (2,), x.device())?.contiguous()?,
+                y,
+                context,
+                None,
+            )?;
+            if step == 0 {
+                debug_tensor_stats("noise_pred", &noise_pred);
+            }
+            let g = apply_cfg(cfg_scale, &noise_pred)?;
+            if step == 0 {
+                debug_tensor_stats("guidance", &g);
+            }
+            (g, noise_pred)
+        } else {
+            // Single conditional forward — `cond` IS the guided prediction.
+            let noise_pred = mmdit.forward(
+                &x,
+                &Tensor::full(timestep as f32, (1,), x.device())?.contiguous()?,
+                y_cond_only.as_ref().expect("cfg-disabled cond slice"),
+                context_cond_only.as_ref().expect("cfg-disabled cond slice"),
+                None,
+            )?;
+            if step == 0 {
+                debug_tensor_stats("noise_pred (cfg=1)", &noise_pred);
+            }
+            (noise_pred.clone(), noise_pred)
+        };
 
         if let Some(slg_config) = slg_config {
             if (total_steps as f64) * slg_config.start < (step as f64)
@@ -119,7 +151,7 @@ pub fn euler_sample(
                     Some(&slg_config.layers),
                 )?;
                 guidance = (guidance
-                    + (slg_config.scale * (noise_pred.i(..1)? - slg_noise_pred.i(..1))?)?)?;
+                    + (slg_config.scale * (noise_pred_full.i(..1)? - slg_noise_pred.i(..1))?)?)?;
             }
         }
 
@@ -284,5 +316,30 @@ mod tests {
             "last sigma should be 0.0, got {}",
             sigmas[sigmas.len() - 1]
         );
+    }
+
+    // `euler_sample` gates the doubled `[cond, uncond]` forward on
+    // `cfg_active(cfg_scale)`. These tests pin the predicate so a regression
+    // to `cfg_scale > 1.0` (which would silently keep doubling the
+    // transformer at cfg=1.0 — the SD3 Turbo case) is caught here.
+
+    #[test]
+    fn test_cfg_disabled_at_guidance_1_0() {
+        assert!(!cfg_active(1.0));
+    }
+
+    #[test]
+    fn test_cfg_disabled_just_below_1_0() {
+        assert!(!cfg_active(1.0 - 1e-5));
+    }
+
+    #[test]
+    fn test_cfg_enabled_at_guidance_1_5() {
+        assert!(cfg_active(1.5));
+    }
+
+    #[test]
+    fn test_cfg_enabled_at_guidance_7_5() {
+        assert!(cfg_active(7.5));
     }
 }

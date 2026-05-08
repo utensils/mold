@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **SD1.5 / SDXL / SD3 denoise loop now skips the unconditional pass when guidance ≈ 1.0** (LCM, Lightning, SDXL Turbo, SD3 Turbo). Previously `use_cfg = guidance > 1.0` still ran the doubled `[uncond, cond]` forward at exactly `cfg = 1.0` — wasting half the per-step compute even though `apply_cfg(1.0, .)` collapses to `cond`. Replaced with `cfg_active(guidance) = (guidance - 1.0).abs() > 1e-4` (matches ComfyUI's `samplers.py:370` short-circuit). Distilled-CFG workflows now run 1× transformer forwards per step instead of 2×, halving denoise time. New shared predicate in `crates/mold-inference/src/engine.rs::cfg_active` is reused by SDXL `denoise_loop` / `encode_prompt`, SD1.5 `denoise_loop` / `encode_prompt`, and SD3 `euler_sample`. SD3 SLG (Skip Layer Guidance) behavior is preserved: when active, the path keeps the conditional pred around for the SLG offset. FLUX / Flux.2 / Z-Image / Qwen-Image are guidance-distilled (single-pass already) and unchanged.
 - Catalog `/api/catalog/families` response: dropped vestigial `foundation`/`finetune` count fields (always 0 since the bulk scrape was removed). The sidebar no longer shows the counts line.
 
 ### Removed
