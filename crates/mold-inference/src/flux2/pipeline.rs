@@ -880,7 +880,19 @@ impl Flux2Engine {
             std::fs::write(&dump_path, &bytes)?;
             tracing::info!(path = %dump_path, dims = ?dims, "dumped pre-VAE latent");
         }
-        let img = vae.decode(&img.to_dtype(gpu_dtype)?)?;
+        let img_for_vae = img.to_dtype(gpu_dtype)?;
+        let device_for_sync = device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &img_for_vae,
+            |latents| vae.decode(latents).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "FLUX2 (sequential) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
@@ -1156,7 +1168,20 @@ impl Flux2Engine {
             std::fs::write(&dump_path, &bytes)?;
             tracing::info!(path = %dump_path, dims = ?dims, "dumped pre-VAE latent (parallel)");
         }
-        let img = loaded.vae.decode(&img.to_dtype(loaded.dtype)?)?;
+        let img_for_vae = img.to_dtype(loaded.dtype)?;
+        let vae = &loaded.vae;
+        let device_for_sync = loaded.device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &img_for_vae,
+            |latents| vae.decode(latents).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "FLUX2 (parallel) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         // 8. Convert to u8 image: clamp to [-1, 1], map to [0, 255]
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;

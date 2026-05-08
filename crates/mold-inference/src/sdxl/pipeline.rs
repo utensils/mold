@@ -1174,7 +1174,19 @@ impl SDXLEngine {
             VAE_SCALE_STANDARD
         };
         let latents = (latents / vae_scale)?;
-        let img = vae.decode(&latents.to_dtype(dtype)?)?;
+        let latents_for_vae = latents.to_dtype(dtype)?;
+        let device_for_sync = device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &latents_for_vae,
+            |t| vae.decode(t).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "SDXL (sequential) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
@@ -1357,7 +1369,20 @@ impl SDXLEngine {
             VAE_SCALE_STANDARD
         };
         let latents = (latents / vae_scale)?;
-        let img = loaded.vae.decode(&latents.to_dtype(loaded.dtype)?)?;
+        let latents_for_vae = latents.to_dtype(loaded.dtype)?;
+        let vae = &loaded.vae;
+        let device_for_sync = loaded.device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &latents_for_vae,
+            |t| vae.decode(t).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "SDXL (parallel) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         // 7. Post-process: [1, 3, H, W] → clamp → u8
         let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
