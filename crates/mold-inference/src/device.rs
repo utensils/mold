@@ -717,6 +717,12 @@ pub(crate) fn fits_in_memory(
 ///
 /// For Eager: sum of all component files + headroom.
 /// For Sequential: max(encoder_total, transformer + VAE) + headroom.
+///
+/// **Single-file convention.** The catalog bridge sets
+/// `paths.transformer == paths.vae` to a single `.safetensors` (transformer
+/// and VAE keys both extracted from the same file at runtime — see
+/// `crates/mold-cli/src/catalog_bridge.rs:196`). Naive `transformer + vae`
+/// double-counts that file. We detect and elide it.
 pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrategy) -> u64 {
     let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
 
@@ -725,7 +731,17 @@ pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrateg
     } else {
         file_size(&paths.transformer)
     };
-    let vae_size = file_size(&paths.vae);
+    // Single-file: transformer & vae point at the same on-disk file. Keys are
+    // extracted from one mmap, so the file's bytes are paged in once. Don't
+    // double-count.
+    let vae_is_separate_file = paths.transformer_shards.is_empty()
+        && paths.transformer != paths.vae
+        || !paths.transformer_shards.is_empty();
+    let vae_size = if vae_is_separate_file {
+        file_size(&paths.vae)
+    } else {
+        0
+    };
 
     let t5_size = paths.t5_encoder.as_ref().map(|p| file_size(p)).unwrap_or(0);
     let clip_size = paths
@@ -1467,5 +1483,124 @@ mod tests {
         assert_eq!(vram_load_delta(0, 0), 0);
         assert_eq!(vram_load_delta(0, 1_000_000_000), 0);
         assert_eq!(vram_load_delta(0, u64::MAX), 0);
+    }
+
+    // --- estimate_peak_memory: single-file convention must not double-count ---
+
+    fn write_dummy_file(dir: &std::path::Path, name: &str, size: u64) -> std::path::PathBuf {
+        let p = dir.join(name);
+        let f = std::fs::File::create(&p).expect("create dummy");
+        f.set_len(size).expect("set_len");
+        p
+    }
+
+    #[test]
+    fn estimate_peak_memory_single_file_does_not_double_count_vae() {
+        // Civitai single-file convention: ModelPaths::transformer == ModelPaths::vae,
+        // both pointing at the primary .safetensors. Naive math would compute
+        // transformer_size + vae_size twice for the same on-disk bytes — exactly
+        // the bug behind the misleading "94 GB needed" preflight error.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let single = write_dummy_file(dir.path(), "single.safetensors", 44_000_000_000);
+        let te = write_dummy_file(dir.path(), "te.safetensors", 24_000_000_000);
+        let paths = mold_core::ModelPaths {
+            transformer: single.clone(),
+            transformer_shards: vec![],
+            vae: single, // Same file as transformer — single-file path
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![te],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let peak = estimate_peak_memory(&paths, LoadStrategy::Sequential);
+        // Sequential = max(encoders, transformer + vae[==transformer dedup'd]) + headroom
+        //            = max(24 GB, 44 GB) + 2 GB = 46 GB
+        // NOT 24 + 44 + 44 + 2 = 114 GB (the double-count bug).
+        let peak_gb = peak as f64 / 1e9;
+        assert!(
+            peak_gb < 50.0,
+            "single-file peak should be ~46 GB, got {peak_gb:.1} GB (double-count bug returned)"
+        );
+        assert!(
+            peak_gb > 45.0,
+            "single-file peak should be ~46 GB, got {peak_gb:.1} GB"
+        );
+    }
+
+    #[test]
+    fn estimate_peak_memory_separate_vae_file_still_sums() {
+        // Sanity: when transformer and vae are distinct files (e.g. FLUX with
+        // separate vae companion), both file sizes contribute as before.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transformer = write_dummy_file(dir.path(), "tx.safetensors", 4_000_000_000);
+        let vae = write_dummy_file(dir.path(), "vae.safetensors", 1_000_000_000);
+        let te = write_dummy_file(dir.path(), "te.safetensors", 9_000_000_000);
+        let paths = mold_core::ModelPaths {
+            transformer,
+            transformer_shards: vec![],
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: Some(te),
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let peak = estimate_peak_memory(&paths, LoadStrategy::Sequential);
+        // max(9, 4 + 1) + 2 = 11 GB
+        let peak_gb = peak as f64 / 1e9;
+        assert!(
+            (10.5..11.5).contains(&peak_gb),
+            "expected ~11 GB, got {peak_gb:.1} GB"
+        );
+    }
+
+    #[test]
+    fn estimate_peak_memory_sharded_transformer_with_separate_vae_sums() {
+        // Multi-shard transformer (e.g. FLUX2 diffusers): shards are listed
+        // explicitly and vae is a separate file. The single-file dedup must
+        // not fire here.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s1 = write_dummy_file(dir.path(), "tx-1.safetensors", 4_000_000_000);
+        let s2 = write_dummy_file(dir.path(), "tx-2.safetensors", 4_000_000_000);
+        let vae = write_dummy_file(dir.path(), "vae.safetensors", 1_000_000_000);
+        let paths = mold_core::ModelPaths {
+            transformer: s1.clone(), // primary shard
+            transformer_shards: vec![s1, s2],
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let peak = estimate_peak_memory(&paths, LoadStrategy::Sequential);
+        // max(0, 4+4 + 1) + 2 = 11 GB
+        let peak_gb = peak as f64 / 1e9;
+        assert!(
+            (10.5..11.5).contains(&peak_gb),
+            "sharded peak should be ~11 GB, got {peak_gb:.1} GB"
+        );
     }
 }

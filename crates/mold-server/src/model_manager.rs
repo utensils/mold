@@ -21,8 +21,11 @@ fn check_model_memory_budget(
     let hard_limit = available_bytes * 9 / 10; // 90%
     if peak_bytes > hard_limit {
         return Err(ApiError::insufficient_memory(format!(
-            "model '{}' needs ~{:.1} GB but only ~{:.1} GB available. \
-             Close other applications, unload the current model, or use a smaller variant.",
+            "model '{}' estimated peak ~{:.1} GB exceeds available ~{:.1} GB \
+             (peak = max(text-encoders, transformer + VAE) + 2 GB headroom; \
+             encoders are dropped before denoise). \
+             Try a smaller variant (e.g. ':q8' / ':q5'), enable --offload (FLUX), \
+             or close other GPU apps.",
             model_name,
             peak_bytes as f64 / 1_000_000_000.0,
             available_bytes as f64 / 1_000_000_000.0,
@@ -100,6 +103,35 @@ pub(crate) fn preflight_memory_guard(
             if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
                 return preflight_memory_guard_with_available(model_name, paths, 0, total);
             }
+        }
+        // Ghost-VRAM case: no active model in our cache, but the device
+        // reports `free` significantly below `total` because cuBLAS / cuDNN /
+        // kernel modules from a previous load are still squatting on
+        // workspace allocations. Reclaim the primary context — we have
+        // nothing live to lose — and re-query before deciding.
+        if let (Some(free), Some(total)) = (
+            mold_inference::device::free_vram_bytes(gpu_ordinal),
+            mold_inference::device::total_vram_bytes(gpu_ordinal),
+        ) {
+            const GHOST_VRAM_THRESHOLD: u64 = 1_500_000_000; // 1.5 GB
+            let mut effective_free = free;
+            if total.saturating_sub(free) > GHOST_VRAM_THRESHOLD {
+                tracing::info!(
+                    gpu = gpu_ordinal,
+                    free_gb = format_args!("{:.1}", free as f64 / 1e9),
+                    total_gb = format_args!("{:.1}", total as f64 / 1e9),
+                    "no active model on this GPU but VRAM is held — reclaiming primary context",
+                );
+                mold_inference::device::reclaim_gpu_memory(gpu_ordinal);
+                effective_free =
+                    mold_inference::device::free_vram_bytes(gpu_ordinal).unwrap_or(free);
+            }
+            return preflight_memory_guard_with_available(
+                model_name,
+                paths,
+                active_vram_bytes,
+                effective_free,
+            );
         }
         if let Some(free) = mold_inference::device::free_vram_bytes(gpu_ordinal) {
             return preflight_memory_guard_with_available(
