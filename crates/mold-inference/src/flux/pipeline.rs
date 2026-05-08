@@ -836,7 +836,10 @@ impl FluxEngine {
     /// rebuilds. Disabling forces a sub-second `B@A·scale` recompute on the
     /// next rebuild, which is cheap on GPU.
     fn lora_delta_cache_handle(&self) -> Option<Arc<Mutex<super::lora::LoraDeltaCache>>> {
-        if std::env::var("MOLD_FLUX_DELTA_CACHE").map(|v| v == "0").unwrap_or(false) {
+        if std::env::var("MOLD_FLUX_DELTA_CACHE")
+            .map(|v| v == "0")
+            .unwrap_or(false)
+        {
             None
         } else {
             Some(self.lora_delta_cache.clone())
@@ -1991,18 +1994,36 @@ impl FluxEngine {
             }
 
             if loaded.t5.model.is_none() {
-                progress.stage_start("Reloading T5 encoder (GPU)");
+                let label = if loaded.t5.is_parked() {
+                    "Unparking T5 encoder (CPU→GPU)"
+                } else {
+                    "Reloading T5 encoder (GPU)"
+                };
+                progress.stage_start(label);
                 let reload_start = Instant::now();
-                loaded.t5.reload(&t5_encoder_path, loaded_dtype, progress)?;
-                progress.stage_done("Reloading T5 encoder (GPU)", reload_start.elapsed());
+                if loaded.t5.is_parked() {
+                    loaded.t5.unpark_to_gpu(loaded_dtype, progress)?;
+                } else {
+                    loaded.t5.reload(&t5_encoder_path, loaded_dtype, progress)?;
+                }
+                progress.stage_done(label, reload_start.elapsed());
             }
             if loaded.clip.model.is_none() {
-                progress.stage_start("Reloading CLIP encoder (GPU)");
+                let label = if loaded.clip.is_parked() {
+                    "Unparking CLIP encoder (CPU→GPU)"
+                } else {
+                    "Reloading CLIP encoder (GPU)"
+                };
+                progress.stage_start(label);
                 let reload_start = Instant::now();
-                loaded
-                    .clip
-                    .reload(&clip_encoder_path, loaded_dtype, progress)?;
-                progress.stage_done("Reloading CLIP encoder (GPU)", reload_start.elapsed());
+                if loaded.clip.is_parked() {
+                    loaded.clip.unpark_to_gpu(loaded_dtype, progress)?;
+                } else {
+                    loaded
+                        .clip
+                        .reload(&clip_encoder_path, loaded_dtype, progress)?;
+                }
+                progress.stage_done(label, reload_start.elapsed());
             }
 
             progress.stage_start("Encoding prompt (T5)");
@@ -2022,31 +2043,56 @@ impl FluxEngine {
             tracing::info!("CLIP encoding complete");
             Self::store_prompt_cache(prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
 
-            // Drop encoders to free memory for denoising.
-            // Always drop on GPU. On Metal (unified memory), also drop CPU-loaded
-            // weights since they share the same physical RAM as GPU allocations.
-            // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
+            // Drop or park encoders to free GPU memory for denoising.
+            //
+            // Default (`MOLD_KEEP_TE_RAM=0`): drop weights from RAM too. The
+            // next request re-mmaps from disk (~2-4 s for T5 Q8+LoRAs).
+            //
+            // Park mode (`MOLD_KEEP_TE_RAM=1`): move parameters to CPU host
+            // RAM and drop the GPU copy. Next request only pays a CPU→GPU
+            // tensor copy (~100-300 ms vs 2-4 s) — mirrors ComfyUI's
+            // `text_encoder_offload_device()` behavior.
+            //
+            // On Metal (unified memory) parking is not a win since CPU and
+            // GPU share the same physical pool, so we still drop there.
             let is_metal = loaded.device.is_metal();
+            let park_mode = crate::device::keep_te_in_ram() && !is_metal;
             let mut dropped_gpu_encoder = false;
             if loaded.t5.on_gpu || is_metal {
                 if loaded.t5.on_gpu {
                     dropped_gpu_encoder = true;
                 }
-                loaded.t5.drop_weights();
-                tracing::info!(
-                    on_gpu = loaded.t5.on_gpu,
-                    "T5 encoder dropped to free memory for denoising"
-                );
+                if park_mode {
+                    loaded.t5.park_to_cpu()?;
+                    tracing::info!(
+                        on_gpu = loaded.t5.on_gpu,
+                        "T5 encoder parked to CPU host RAM"
+                    );
+                } else {
+                    loaded.t5.drop_weights();
+                    tracing::info!(
+                        on_gpu = loaded.t5.on_gpu,
+                        "T5 encoder dropped to free memory for denoising"
+                    );
+                }
             }
             if loaded.clip.on_gpu || is_metal {
                 if loaded.clip.on_gpu {
                     dropped_gpu_encoder = true;
                 }
-                loaded.clip.drop_weights();
-                tracing::info!(
-                    on_gpu = loaded.clip.on_gpu,
-                    "CLIP encoder dropped to free memory for denoising"
-                );
+                if park_mode {
+                    loaded.clip.park_to_cpu()?;
+                    tracing::info!(
+                        on_gpu = loaded.clip.on_gpu,
+                        "CLIP encoder parked to CPU host RAM"
+                    );
+                } else {
+                    loaded.clip.drop_weights();
+                    tracing::info!(
+                        on_gpu = loaded.clip.on_gpu,
+                        "CLIP encoder dropped to free memory for denoising"
+                    );
+                }
             }
             // Force CUDA to complete the encoder cuMemFreeAsync before denoising
             // begins. Without this, the freed encoder VRAM (~5–6 GB for T5 Q8 +

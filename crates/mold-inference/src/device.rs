@@ -453,6 +453,28 @@ pub fn available_system_memory_bytes() -> Option<u64> {
     None
 }
 
+// ── Text-encoder retention ───────────────────────────────────────────────────
+
+/// Whether to park text-encoder weights on CPU instead of dropping them after
+/// encoding finishes (opt-in via `MOLD_KEEP_TE_RAM=1`).
+///
+/// Default off for backward compatibility — the existing drop-and-reload path
+/// re-mmaps safetensors / re-dequantizes GGUF on every request, costing
+/// ~2-4 s per FLUX generation (~1 s on SD3).
+///
+/// When on, FP16/BF16 encoders survive between requests on host RAM (~9 GB
+/// for T5-XXL fp16); only the lightweight GPU↔CPU tensor copy happens between
+/// requests. Quantized GGUF encoders fall back to drop-and-reload regardless,
+/// because their `QTensor` storage is device-tied and not trivially walkable.
+///
+/// This mirrors ComfyUI's `text_encoder_offload_device()` behavior
+/// (`comfy/model_management.py:1012`).
+pub fn keep_te_in_ram() -> bool {
+    std::env::var("MOLD_KEEP_TE_RAM")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
 // ── GPU memory reclamation ───────────────────────────────────────────────────
 
 /// Reclaim GPU memory by resetting the CUDA primary context for the specified device.
@@ -1391,6 +1413,43 @@ mod tests {
             select_expand_device_with_preference(&gpus, 3 * GB, false, Some(1)),
             ExpandPlacement::Gpu(0),
         );
+    }
+
+    // ── keep_te_in_ram ───────────────────────────────────────────────────
+
+    /// `MOLD_KEEP_TE_RAM` defaults to off so the existing drop-and-reload
+    /// behavior is preserved when the env var is absent.
+    ///
+    /// All three keep_te_in_ram tests live under one `#[test]` to serialize
+    /// access to the shared process-global env var — running them as separate
+    /// tests would race when cargo's default test parallelism is in effect.
+    #[test]
+    fn test_keep_te_in_ram_env_behaviors() {
+        // SAFETY (set_var/remove_var on Rust 1.95+): mutating the process
+        // environment from multiple threads is unsound, but cargo runs each
+        // `#[test]` on its own thread and the helper itself only reads —
+        // we wrap all three behaviors in this single test to avoid racing
+        // with sibling tests.
+        unsafe { std::env::remove_var("MOLD_KEEP_TE_RAM") };
+        assert!(
+            !keep_te_in_ram(),
+            "test_keep_te_in_ram_env_default: missing var must be off"
+        );
+
+        unsafe { std::env::set_var("MOLD_KEEP_TE_RAM", "1") };
+        assert!(
+            keep_te_in_ram(),
+            "test_keep_te_in_ram_env_on: \"1\" must enable park"
+        );
+
+        for v in ["", "0", "true", "yes", "TRUE"] {
+            unsafe { std::env::set_var("MOLD_KEEP_TE_RAM", v) };
+            assert!(
+                !keep_te_in_ram(),
+                "value {v:?} must not enable park (helper is strict ==\"1\")"
+            );
+        }
+        unsafe { std::env::remove_var("MOLD_KEEP_TE_RAM") };
     }
 
     // ── vram_load_delta ──────────────────────────────────────────────────

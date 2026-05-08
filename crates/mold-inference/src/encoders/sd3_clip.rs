@@ -17,9 +17,11 @@ use candle_core::{DType, IndexOp, Module, Tensor, D};
 use candle_transformers::models::stable_diffusion::clip::{
     self, ClipTextTransformer, Config as ClipConfig,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
 
+use super::park;
 use super::t5::T5Encoder;
 
 /// Loaded CLIP encoder with tokenizer for SD3's triple encoding.
@@ -29,6 +31,9 @@ struct ClipWithTokenizer {
     tokenizer: Tokenizer,
     max_position_embeddings: usize,
     device: candle_core::Device,
+    /// Parameters parked on CPU host RAM for fast unpark. `None` when the
+    /// encoder has never been parked (or was explicitly dropped).
+    parked_tensors: Option<HashMap<String, Tensor>>,
 }
 
 impl ClipWithTokenizer {
@@ -60,6 +65,7 @@ impl ClipWithTokenizer {
             tokenizer,
             max_position_embeddings,
             device: device.clone(),
+            parked_tensors: None,
         })
     }
 
@@ -107,6 +113,7 @@ impl ClipWithTokenizer {
 
     fn drop_weights(&mut self) {
         self.model = None;
+        self.parked_tensors = None;
     }
 
     fn reload(
@@ -125,6 +132,44 @@ impl ClipWithTokenizer {
         )?;
         self.model = Some(ClipTextTransformer::new(vb, &self.config)?);
         Ok(())
+    }
+
+    /// Park to CPU: load all weights to host RAM and drop the GPU model.
+    /// No-op when already parked.
+    fn park_to_cpu(&mut self, encoder_path: &PathBuf) -> Result<()> {
+        if self.is_parked() {
+            self.model = None;
+            return Ok(());
+        }
+        let parked = park::load_tensors_to_cpu(std::slice::from_ref(encoder_path))?;
+        self.parked_tensors = Some(parked);
+        self.model = None;
+        Ok(())
+    }
+
+    /// Restore from CPU back to the encoder's primary device. Falls back to
+    /// `reload()` when there's no parked map (cold start, or after a manual
+    /// `drop_weights()`).
+    fn unpark_to_gpu(
+        &mut self,
+        encoder_path: &PathBuf,
+        dtype: DType,
+        component: &str,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<()> {
+        if self.model.is_some() {
+            return Ok(());
+        }
+        if let Some(parked) = self.parked_tensors.as_ref() {
+            let vb = park::varbuilder_from_parked(parked, dtype, &self.device);
+            self.model = Some(ClipTextTransformer::new(vb, &self.config)?);
+            return Ok(());
+        }
+        self.reload(encoder_path, dtype, component, progress)
+    }
+
+    fn is_parked(&self) -> bool {
+        self.model.is_none() && self.parked_tensors.is_some()
     }
 }
 
@@ -284,6 +329,37 @@ impl SD3TripleEncoder {
             .reload(&self.clip_g_path, dtype, "SD3 CLIP-G", progress)?;
         self.t5.reload(&self.t5_path, dtype, progress)?;
         Ok(())
+    }
+
+    /// Park all three encoders to CPU host RAM. Saves ~9 GB of VRAM (T5-XXL
+    /// fp16 is the dominant cost; CLIP-L and CLIP-G together are ~1.6 GB).
+    /// No-op for an encoder that's already parked.
+    pub fn park_to_cpu(&mut self) -> Result<()> {
+        self.clip_l.park_to_cpu(&self.clip_l_path)?;
+        self.clip_g.park_to_cpu(&self.clip_g_path)?;
+        self.t5.park_to_cpu()?;
+        Ok(())
+    }
+
+    /// Restore all three encoders from CPU to GPU. Each encoder falls back
+    /// to `reload()` if its parked map is missing.
+    pub fn unpark_to_gpu(
+        &mut self,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<()> {
+        self.clip_l
+            .unpark_to_gpu(&self.clip_l_path, dtype, "SD3 CLIP-L", progress)?;
+        self.clip_g
+            .unpark_to_gpu(&self.clip_g_path, dtype, "SD3 CLIP-G", progress)?;
+        self.t5.unpark_to_gpu(dtype, progress)?;
+        Ok(())
+    }
+
+    /// Whether all three encoders are currently parked. Mirrors
+    /// `is_loaded()` — they're inverses except during a partial transition.
+    pub fn is_parked(&self) -> bool {
+        self.clip_l.is_parked() && self.clip_g.is_parked() && self.t5.is_parked()
     }
 
     /// Check if encoder weights are currently loaded.

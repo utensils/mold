@@ -974,12 +974,22 @@ impl Flux2Engine {
             progress.cache_hit("prompt conditioning");
             tensor
         } else {
-            // Cache miss — reload encoder if it was dropped after a previous generation
+            // Cache miss — restore encoder if it was dropped or parked after
+            // a previous generation.
             if loaded.text_encoder.model.is_none() {
-                progress.stage_start("Reloading Qwen3 encoder");
+                let label = if loaded.text_encoder.is_parked() {
+                    "Unparking Qwen3 encoder (CPU→GPU)"
+                } else {
+                    "Reloading Qwen3 encoder"
+                };
+                progress.stage_start(label);
                 let reload_start = Instant::now();
-                loaded.text_encoder.reload(progress)?;
-                progress.stage_done("Reloading Qwen3 encoder", reload_start.elapsed());
+                if loaded.text_encoder.is_parked() {
+                    loaded.text_encoder.unpark_to_gpu(progress)?;
+                } else {
+                    loaded.text_encoder.reload(progress)?;
+                }
+                progress.stage_done(label, reload_start.elapsed());
             }
 
             let txt_emb = Self::encode_prompt_cached(
@@ -992,16 +1002,27 @@ impl Flux2Engine {
             )?;
             tracing::info!("Qwen3 encoding complete");
 
-            // Drop Qwen3 to free memory for denoising.
-            // Always drop on GPU. On Metal (unified memory), also drop CPU-loaded
-            // weights since they share the same physical RAM as GPU allocations.
-            // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
+            // Free GPU VRAM for denoising. With `MOLD_KEEP_TE_RAM=1` and the
+            // BF16 encoder, parameters move to host RAM instead of being
+            // released — saves ~10 s on the next request. GGUF and Metal
+            // flow through the original drop path.
             if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
-                loaded.text_encoder.drop_weights();
-                tracing::info!(
-                    on_gpu = loaded.text_encoder.on_gpu,
-                    "Qwen3 encoder dropped to free memory for denoising"
-                );
+                let park_mode = crate::device::keep_te_in_ram()
+                    && !loaded.device.is_metal()
+                    && !loaded.text_encoder.is_quantized;
+                if park_mode {
+                    loaded.text_encoder.park_to_cpu()?;
+                    tracing::info!(
+                        on_gpu = loaded.text_encoder.on_gpu,
+                        "Qwen3 encoder parked to CPU host RAM"
+                    );
+                } else {
+                    loaded.text_encoder.drop_weights();
+                    tracing::info!(
+                        on_gpu = loaded.text_encoder.on_gpu,
+                        "Qwen3 encoder dropped to free memory for denoising"
+                    );
+                }
             }
 
             txt_emb
