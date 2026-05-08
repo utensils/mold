@@ -340,32 +340,15 @@ export async function fetchResources(
   return (await res.json()) as ResourceSnapshot;
 }
 
-// ─── Catalog (sub-project A) ──────────────────────────────────────────────
+// ─── Catalog (live HF + Civitai) ──────────────────────────────────────────
 import type {
   CatalogEntryWire,
   CatalogFamiliesResponse,
   CatalogListParams,
   CatalogListResponse,
-  CatalogRefreshStatus,
 } from "./types";
 
-export async function fetchCatalog(
-  params: CatalogListParams,
-): Promise<CatalogListResponse> {
-  const sp = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) {
-    if (v === undefined || v === null) continue;
-    sp.set(k, String(v));
-  }
-  const r = await fetch(`/api/catalog?${sp.toString()}`);
-  if (!r.ok) throw new Error(`/api/catalog ${r.status}`);
-  return r.json();
-}
-
-/// Live-search backend for the catalog tab. Replaces `fetchCatalog` on
-/// the read path — the bulk-scrape DB is retained server-side until a
-/// follow-up release deprecates it. Same response shape as
-/// `/api/catalog` so the SPA's filter/pagination wiring is untouched.
+/// Live HF + Civitai search proxied through the server with a 5-min cache.
 export async function fetchCatalogSearch(
   params: CatalogListParams,
 ): Promise<CatalogListResponse> {
@@ -406,50 +389,6 @@ export async function fetchCatalogFamilies(): Promise<CatalogFamiliesResponse> {
   const r = await fetch(`/api/catalog/families`);
   if (!r.ok) throw new Error(`/api/catalog/families ${r.status}`);
   return r.json();
-}
-
-export async function postCatalogRefresh(body: {
-  family?: string;
-  min_downloads?: number;
-  no_nsfw?: boolean;
-  include_nsfw?: boolean;
-}): Promise<{ id: string }> {
-  const r = await fetch(`/api/catalog/refresh`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    // Surface the server's body (e.g. "a catalog refresh is already in
-    // progress" on 409) so the UI can show something better than a bare
-    // status code.
-    const detail = await r.text().catch(() => "");
-    throw new Error(detail || `/api/catalog/refresh ${r.status}`);
-  }
-  return r.json();
-}
-
-export async function fetchCatalogRefresh(
-  id: string,
-): Promise<CatalogRefreshStatus> {
-  const r = await fetch(`/api/catalog/refresh/${encodeURIComponent(id)}`);
-  if (!r.ok) throw new Error(`/api/catalog/refresh/${id} ${r.status}`);
-  return r.json();
-}
-
-/// Returns the in-flight scan (active or pending) so the UI can attach
-/// to scans started by other browser tabs or the CLI. Resolves to
-/// `null` when the queue is idle.
-export async function fetchActiveCatalogRefresh(): Promise<{
-  id: string;
-  status: CatalogRefreshStatus;
-} | null> {
-  const r = await fetch(`/api/catalog/refresh`);
-  if (!r.ok) throw new Error(`/api/catalog/refresh ${r.status}`);
-  const body = (await r.json()) as {
-    active: { id: string; status: CatalogRefreshStatus } | null;
-  };
-  return body.active;
 }
 
 export interface CompanionJob {

@@ -119,8 +119,7 @@ describe("useCatalog", () => {
       (c: any[]) =>
         (c[0] as string).startsWith("/api/catalog/") &&
         !(c[0] as string).startsWith("/api/catalog/search") &&
-        !(c[0] as string).startsWith("/api/catalog/families") &&
-        !(c[0] as string).startsWith("/api/catalog/refresh"),
+        !(c[0] as string).startsWith("/api/catalog/families"),
     );
     expect(detailCalls.length).toBe(0);
   });

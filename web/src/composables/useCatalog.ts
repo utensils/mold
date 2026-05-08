@@ -1,19 +1,15 @@
 import { computed, ref, watch } from "vue";
 import {
-  fetchActiveCatalogRefresh,
   fetchCatalogEntry,
   fetchCatalogFamilies,
   fetchCatalogSearch,
   postCatalogDownload,
-  postCatalogRefresh,
-  fetchCatalogRefresh,
 } from "../api";
 import { useDownloads } from "./useDownloads";
 import type {
   CatalogEntryWire,
   CatalogFamilyCount,
   CatalogListParams,
-  CatalogRefreshStatus,
 } from "../types";
 
 const DEBOUNCE_MS = 250;
@@ -36,7 +32,6 @@ function build() {
   const loadingMore = ref(false);
   const errorMsg = ref<string | null>(null);
   const detail = ref<CatalogEntryWire | null>(null);
-  const refreshStatus = ref<CatalogRefreshStatus | null>(null);
 
   // hasMore: server-reported total wins; if absent (older server), fall
   // back to "the last page came back full" so we keep fetching until a
@@ -145,63 +140,6 @@ function build() {
     return result;
   }
 
-  async function startRefresh(family?: string) {
-    refreshStatus.value = { state: "pending" };
-    let id: string;
-    try {
-      ({ id } = await postCatalogRefresh(family ? { family } : {}));
-    } catch (e: unknown) {
-      // Most common case here is the server returning 409 with body
-      // "a catalog refresh is already in progress" — bubble that into
-      // refreshStatus so the TopBar's failed-state chip shows it
-      // instead of swallowing the error in console.error.
-      const message = e instanceof Error ? e.message : String(e);
-      refreshStatus.value = { state: "failed", message };
-      throw e;
-    }
-    pollRefresh(id);
-  }
-
-  function pollRefresh(id: string) {
-    const tick = async () => {
-      try {
-        const status = await fetchCatalogRefresh(id);
-        refreshStatus.value = status;
-        if (status.state === "done" || status.state === "failed") {
-          await refresh();
-          return;
-        }
-      } catch {
-        // swallow poll errors; retry on next tick
-      }
-      setTimeout(tick, 1500);
-    };
-    void tick();
-  }
-
-  /// Discover an in-flight scan started by another tab/CLI and attach to
-  /// it so the refresh button reflects cross-client state. Safe to call
-  /// repeatedly — it short-circuits when we already have a status.
-  async function discoverActiveRefresh() {
-    const s = refreshStatus.value;
-    if (s && (s.state === "pending" || s.state === "running")) return;
-    try {
-      const active = await fetchActiveCatalogRefresh();
-      if (active) {
-        refreshStatus.value = active.status;
-        if (
-          active.status.state === "pending" ||
-          active.status.state === "running"
-        ) {
-          pollRefresh(active.id);
-        }
-      }
-    } catch {
-      // Older servers (without GET /api/catalog/refresh) just leave the
-      // chip in its default idle state — graceful degrade.
-    }
-  }
-
   return {
     filter,
     page,
@@ -213,7 +151,6 @@ function build() {
     loadingMore,
     errorMsg,
     detail,
-    refreshStatus,
     refresh,
     loadMore,
     setFilter,
@@ -221,8 +158,6 @@ function build() {
     closeDetail,
     canDownload,
     startDownload,
-    startRefresh,
-    discoverActiveRefresh,
   };
 }
 

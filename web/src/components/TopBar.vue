@@ -23,10 +23,6 @@ function openDownloadsDrawer() {
 // optional. The Generate page mounts this same TopBar without a gallery
 // underneath it, so their defaults keep the toolbar in its "no bulk
 // actions" state.
-//
-// Catalog refresh used to live in this toolbar; it now lives inside the
-// /catalog page itself (CatalogRefreshPanel) so it can render rich
-// progress beside the catalog grid instead of a tiny spinner pill.
 const props = withDefaults(
   defineProps<{
     filter: FilterKind;
