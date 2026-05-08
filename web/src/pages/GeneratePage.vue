@@ -95,19 +95,18 @@ const composerRef = ref<InstanceType<typeof Composer> | null>(null);
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 
-// Auto-dismiss the done card once the gallery feed has the new entry —
-// the preview is now visible in the GalleryFeed below, so leaving the
-// strip card up is duplicate visual noise. Errored / canceled jobs stay
-// (they have nothing in the gallery to fall back to and the user may
-// want to re-read the error).
-const stream = useGenerateStream(async (job) => {
-  try {
-    galleryEntries.value = await listGallery();
-  } catch {
-    /* leave previous */
-  }
-  if (job.state === "done") stream.remove(job.id);
-});
+// The running-strip card auto-dismisses inside the SSE singleton (see
+// `scheduleAutoRemoveOnDone` in useGenerateStream); here we only need to
+// pull in the freshly-saved gallery row when a job transitions to "done".
+//
+// We deliberately *don't* use the singleton's `onComplete` listener for
+// this — that listener is only registered while GeneratePage is mounted,
+// so a job that completes while the user is sitting on /catalog or
+// /gallery would never trigger a refresh. A watcher on `stream.jobs`
+// keyed on the set of done ids reconciles immediately on mount and
+// fires for any subsequent transitions, regardless of which route was
+// active when the SSE complete event arrived.
+const stream = useGenerateStream();
 
 async function refreshModels() {
   try {
@@ -124,6 +123,35 @@ async function refreshGallery() {
     /* ignore */
   }
 }
+
+// Computed of done ids joined into a stable string: changes only when
+// the *set* of done ids changes, not on every progress event. Avoids
+// `{ deep: true }` which would refire on every denoise tick.
+const doneJobIds = computed(() =>
+  stream.jobs.value
+    .filter((j) => j.state === "done")
+    .map((j) => j.id)
+    .join(","),
+);
+
+// Track ids we've already triggered a refresh for so the same completion
+// can't fire `refreshGallery()` twice (e.g. on remount when the job is
+// still in the "done" pre-auto-remove window).
+const seenDoneIds = new Set<string>();
+watch(
+  doneJobIds,
+  () => {
+    let added = false;
+    for (const j of stream.jobs.value) {
+      if (j.state !== "done") continue;
+      if (seenDoneIds.has(j.id)) continue;
+      seenDoneIds.add(j.id);
+      added = true;
+    }
+    if (added) void refreshGallery();
+  },
+  { immediate: true },
+);
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────
 // Gallery gets new entries whenever a job completes (via stream onComplete)
