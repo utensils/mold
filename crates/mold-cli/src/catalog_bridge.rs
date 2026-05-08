@@ -29,35 +29,48 @@
 use std::path::Path;
 
 use anyhow::Result;
+use mold_catalog::entry::{Bundling, CatalogEntry, Kind};
 use mold_core::download::sanitize_recipe_id;
 use mold_core::{Config, ModelConfig, ModelPaths};
-use mold_db::catalog::CatalogRow;
-use mold_db::MetadataDb;
 
 /// True if `input` has the structural shape of a catalog ID
 /// (`cv:<civitai-version-id>` or `hf:<author>/<name>`). Pure shape
-/// check — does not consult the catalog DB.
+/// check — does not consult any source.
 pub fn looks_like_catalog_id(input: &str) -> bool {
     input.starts_with("cv:") || input.starts_with("hf:")
 }
 
-/// Look up a catalog ID in the DB. Returns `Ok(None)` when the input
-/// isn't a catalog ID OR the row doesn't exist; bubbles real DB errors.
-pub fn lookup_catalog_row(db: &MetadataDb, id: &str) -> Result<Option<CatalogRow>> {
-    if !looks_like_catalog_id(id) {
-        return Ok(None);
+/// Live single-id lookup for a catalog ID. Routes by the prefix:
+/// `cv:` → Civitai model-version API, `hf:` → HF detail+tree.
+pub async fn lookup_catalog_entry_live(id: &str) -> Result<CatalogEntry> {
+    let civitai_base =
+        std::env::var("CIVITAI_BASE").unwrap_or_else(|_| "https://civitai.com".to_string());
+    let hf_base = std::env::var("HF_BASE").unwrap_or_else(|_| "https://huggingface.co".to_string());
+    let civitai_token = std::env::var("CIVITAI_TOKEN").ok();
+    let hf_token = std::env::var("HF_TOKEN").ok();
+
+    if let Some(version_id) = id.strip_prefix("cv:") {
+        Ok(mold_catalog::live::fetch_civitai_version(
+            &civitai_base,
+            version_id,
+            civitai_token.as_deref(),
+        )
+        .await?)
+    } else if let Some(repo_id) = id.strip_prefix("hf:") {
+        Ok(mold_catalog::live::fetch_hf_repo(&hf_base, repo_id, hf_token.as_deref()).await?)
+    } else {
+        anyhow::bail!("not a catalog id: {id}")
     }
-    db.catalog_get(id)
 }
 
-/// Synthesize a `ModelConfig` for a catalog row, mirroring the on-disk
+/// Synthesize a `ModelConfig` for a catalog entry, mirroring the on-disk
 /// layout that `mold pull <id>` writes to.
 ///
 /// For single-file Civitai checkpoints (Bundling::SingleFile) the
 /// resulting `ModelConfig` sets `transformer = vae = primary .safetensors`.
 /// That's the duck-type the inference factory uses to dispatch to the
-/// `from_single_file` constructors shipped in #271 (`is_single_file(paths)
-/// = paths.transformer == paths.vae && extension == .safetensors`).
+/// `from_single_file` constructors (`is_single_file(paths) =
+/// paths.transformer == paths.vae && extension == .safetensors`).
 ///
 /// Companion paths (clip-l tokenizer for SD1.5, clip-l + clip-g
 /// tokenizers for SDXL) come from `ModelPaths::resolve("<companion-name>",
@@ -65,29 +78,29 @@ pub fn lookup_catalog_row(db: &MetadataDb, id: &str) -> Result<Option<CatalogRow
 /// must already be on disk (the catalog pull flow guarantees this by
 /// pulling them companion-first before the primary).
 pub fn synthesize_model_config(
-    row: &CatalogRow,
+    entry: &CatalogEntry,
     models_dir: &Path,
     config: &Config,
 ) -> Result<ModelConfig> {
-    let recipe: mold_catalog::entry::DownloadRecipe = serde_json::from_str(&row.download_recipe)
-        .map_err(|e| {
-            anyhow::anyhow!("catalog row {} has malformed download_recipe: {e}", row.id)
-        })?;
-
-    let primary = recipe
+    let primary = entry
+        .download_recipe
         .files
         .first()
-        .ok_or_else(|| anyhow::anyhow!("catalog row {} has empty download_recipe", row.id))?;
+        .ok_or_else(|| anyhow::anyhow!("catalog entry {} has empty download_recipe", entry.id.0))?;
 
     // Reproduce the path computation that `fetch_recipe` wrote to disk:
     // `<models_dir>/<sanitized-id>/<rendered-dest>`.
-    let sanitized = sanitize_recipe_id(&row.id);
-    let (author, name) = match row.source_id.split_once('/') {
+    let sanitized = sanitize_recipe_id(entry.id.as_str());
+    let (author, name) = match entry.source_id.split_once('/') {
         Some((a, n)) => (a, n),
-        None => ("", row.source_id.as_str()),
+        None => ("", entry.source_id.as_str()),
     };
-    let rendered_dest =
-        mold_catalog::entry::render_recipe_dest(&primary.dest, &row.family, author, name);
+    let rendered_dest = mold_catalog::entry::render_recipe_dest(
+        &primary.dest,
+        entry.family.as_str(),
+        author,
+        name,
+    );
     let primary_path = models_dir.join(&sanitized).join(&rendered_dest);
     let primary_str = primary_path
         .to_str()
@@ -95,94 +108,55 @@ pub fn synthesize_model_config(
         .to_string();
 
     let mut cfg = ModelConfig {
-        family: Some(row.family.clone()),
+        family: Some(entry.family.as_str().to_string()),
         ..Default::default()
     };
 
     // Single-file vs. separated dispatch. Civitai checkpoints in this
     // catalog are always SingleFile (the manifest path covers separated
     // diffusers layouts under `[models]`).
-    let is_single_file = row.bundling == "single-file";
-    if is_single_file {
+    if matches!(entry.bundling, Bundling::SingleFile) {
         cfg.transformer = Some(primary_str.clone());
         cfg.vae = Some(primary_str);
     } else {
-        cfg.transformer = Some(primary_str);
-        // Separated layouts must declare their VAE via the recipe; for
-        // phase 2.5 we only validate single-file. Surface a clear error
-        // rather than silently producing a broken config.
         anyhow::bail!(
-            "catalog row {} has bundling={:?} which is not yet wired into the run bridge \
-             (phase 2.5 supports single-file only)",
-            row.id,
-            row.bundling,
+            "catalog entry {} has bundling={:?} which is not yet wired into the run bridge \
+             (single-file only)",
+            entry.id.0,
+            entry.bundling,
         );
     }
 
-    // Pull companion paths from the manifest path (each companion lives
-    // under its canonical manifest name and is populated when the catalog
-    // pull ran). The single-file SDXL/SD1.5 backends only need tokenizers;
-    // the encoder weights are bundled in the primary safetensors itself.
     populate_companion_paths(
         &mut cfg,
-        &row.family,
-        row.sub_family.as_deref(),
-        &row.kind,
+        entry.family,
+        entry.sub_family.as_deref(),
+        entry.kind,
         config,
-    )?;
+    );
 
     Ok(cfg)
 }
 
 /// For each canonical companion this family declares, look up the
 /// companion's resolved manifest paths and copy the relevant token /
-/// encoder fields onto `cfg`. Errors out if a required companion is
-/// missing, naming the companion so the user knows what to pull.
+/// encoder fields onto `cfg`. Best-effort: skip companions whose paths
+/// aren't resolvable. The single-file engine dispatch surfaces a
+/// precise error ("requires a companion-pulled clip_tokenizer") when
+/// a *required* field is still None at engine-construction time.
 fn populate_companion_paths(
     cfg: &mut ModelConfig,
-    family: &str,
+    family: mold_catalog::families::Family,
     sub_family: Option<&str>,
-    kind: &str,
+    kind: Kind,
     config: &Config,
-) -> Result<()> {
+) {
     use mold_catalog::companions::companions_for;
-    use mold_catalog::entry::{Bundling, Kind};
-    use mold_catalog::families::Family;
-
-    let fam = match family {
-        "sd15" => Family::Sd15,
-        "sdxl" => Family::Sdxl,
-        "flux" => Family::Flux,
-        "flux2" => Family::Flux2,
-        "z-image" => Family::ZImage,
-        "ltx-video" => Family::LtxVideo,
-        "ltx2" => Family::Ltx2,
-        "qwen-image" => Family::QwenImage,
-        "wuerstchen" => Family::Wuerstchen,
-        other => anyhow::bail!("catalog family {other:?} not supported by the run bridge"),
-    };
-
-    // The DB stores kind as a kebab-case string (matching `Kind`'s serde
-    // representation), so a JSON round-trip is the canonical parse. Default
-    // to Checkpoint on parse failure — historically every row was a
-    // Checkpoint and the conservative fallback keeps companion population
-    // behaviour identical for legacy rows.
-    let parsed_kind: Kind = serde_json::from_value(serde_json::Value::String(kind.to_string()))
-        .unwrap_or(Kind::Checkpoint);
-
-    // Best-effort: skip companions whose paths aren't resolvable yet. The
-    // single-file engine dispatch surfaces a precise error ("requires a
-    // companion-pulled clip_tokenizer") when a *required* field is still
-    // None at engine-construction time, so we don't need to second-guess
-    // here. This matters because the SDXL/SD1.5 VAE companions are pulled
-    // for future external-VAE support but aren't actually needed by the
-    // current single-file dispatch (the VAE is embedded in the primary).
-    for companion in companions_for(fam, sub_family, Bundling::SingleFile, parsed_kind) {
+    for companion in companions_for(family, sub_family, Bundling::SingleFile, kind) {
         if let Some(paths) = ModelPaths::resolve(&companion, config) {
             copy_companion_into_cfg(cfg, &companion, &paths);
         }
     }
-    Ok(())
 }
 
 fn copy_companion_into_cfg(cfg: &mut ModelConfig, companion_name: &str, paths: &ModelPaths) {
@@ -276,23 +250,20 @@ fn copy_companion_into_cfg(cfg: &mut ModelConfig, companion_name: &str, paths: &
     }
 }
 
-/// Top-level installer: if `id` is a known catalog row, synthesize a
-/// `ModelConfig` and insert it into `config.models` under the same key.
-/// Returns `true` when an entry was installed.
+/// Top-level installer: if `id` is a catalog ID, look it up via live
+/// HF/Civitai and synthesize a `ModelConfig` into `config.models`
+/// under the same key. Returns `true` when an entry was installed.
 ///
-/// Caller takes `&mut Config` and re-uses the same instance through the
-/// rest of the run flow so `ModelPaths::resolve(id, config)` finds the
-/// synthesized entry.
-pub fn install_catalog_model_with_db(
-    db: &MetadataDb,
-    config: &mut Config,
-    id: &str,
-) -> Result<bool> {
-    let Some(row) = lookup_catalog_row(db, id)? else {
+/// Caller takes `&mut Config` and re-uses the same instance through
+/// the rest of the run flow so `ModelPaths::resolve(id, config)` finds
+/// the synthesized entry.
+pub async fn install_catalog_model_live(config: &mut Config, id: &str) -> Result<bool> {
+    if !looks_like_catalog_id(id) {
         return Ok(false);
-    };
+    }
+    let entry = lookup_catalog_entry_live(id).await?;
     let models_dir = config.resolved_models_dir();
-    let synth = synthesize_model_config(&row, &models_dir, config)?;
+    let synth = synthesize_model_config(&entry, &models_dir, config)?;
     config.models.insert(id.to_string(), synth);
     Ok(true)
 }
@@ -344,55 +315,53 @@ mod tests {
         }
     }
 
-    /// Realistic shape of the JSON `download_recipe` column the catalog
-    /// scanner writes for a single-file Civitai SDXL row. The `dest`
-    /// template ships literal `{family}` because the catalog is
-    /// authored once per-row, then rendered per-pull.
-    fn juggernaut_recipe_json() -> &'static str {
-        r#"{
-  "files": [
-    {
-      "url": "https://civitai.com/api/download/models/1759168",
-      "dest": "{family}/civitai/1759168/juggernautXL_ragnarokBy.safetensors",
-      "sha256": "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
-      "size_bytes": 6938040788
-    }
-  ],
-  "needs_token": "civitai"
-}"#
-    }
+    use mold_catalog::entry::{
+        CatalogId, DownloadRecipe, FamilyRole, FileFormat, LicenseFlags, Modality, RecipeFile,
+        Source, TokenKind,
+    };
+    use mold_catalog::families::Family;
 
-    fn juggernaut_row() -> mold_db::catalog::CatalogRow {
-        mold_db::catalog::CatalogRow {
-            id: "cv:1759168".into(),
-            source: "civitai".into(),
+    fn juggernaut_entry() -> CatalogEntry {
+        CatalogEntry {
+            id: CatalogId::from("cv:1759168"),
+            source: Source::Civitai,
             source_id: "1759168".into(),
             name: "Juggernaut XL Ragnarok".into(),
             author: Some("RunDiffusion".into()),
-            family: "sdxl".into(),
-            family_role: "finetune".into(),
+            family: Family::Sdxl,
+            family_role: FamilyRole::Finetune,
             sub_family: None,
-            modality: "image".into(),
-            kind: "checkpoint".into(),
-            file_format: "safetensors".into(),
-            bundling: "single-file".into(),
+            modality: Modality::Image,
+            kind: Kind::Checkpoint,
+            file_format: FileFormat::Safetensors,
+            bundling: Bundling::SingleFile,
             size_bytes: Some(6_938_040_788),
             download_count: 12_345,
             rating: None,
             likes: 0,
-            nsfw: 0,
+            nsfw: false,
             thumbnail_url: None,
             description: None,
             license: None,
-            license_flags: None,
-            tags: Some("[]".into()),
-            companions: Some(r#"["clip-l","clip-g","sdxl-vae"]"#.into()),
-            download_recipe: juggernaut_recipe_json().into(),
+            license_flags: LicenseFlags::default(),
+            tags: vec![],
+            companions: vec!["clip-l".into(), "clip-g".into(), "sdxl-vae".into()],
+            download_recipe: DownloadRecipe {
+                files: vec![RecipeFile {
+                    url: "https://civitai.com/api/download/models/1759168".into(),
+                    dest: "{family}/civitai/1759168/juggernautXL_ragnarokBy.safetensors".into(),
+                    sha256: Some(
+                        "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF".into(),
+                    ),
+                    size_bytes: Some(6_938_040_788),
+                }],
+                needs_token: Some(TokenKind::Civitai),
+            },
             engine_phase: 1,
             created_at: None,
             updated_at: None,
             added_at: 0,
-            trained_words: "[]".into(),
+            trained_words: vec![],
         }
     }
 
@@ -485,9 +454,9 @@ mod tests {
         let mut config = explicit_config(models_dir);
         stub_companion_paths_no_clip_g_tokenizer(&mut config, models_dir);
 
-        let row = juggernaut_row();
+        let entry = juggernaut_entry();
         let synth =
-            synthesize_model_config(&row, std::path::Path::new(models_dir), &config).unwrap();
+            synthesize_model_config(&entry, std::path::Path::new(models_dir), &config).unwrap();
 
         let expected_tokenizer = format!("{models_dir}/clip-l/tokenizer.json");
         assert_eq!(
@@ -503,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn synthesize_model_config_for_sdxl_single_file_civitai_row() {
+    fn synthesize_model_config_for_sdxl_single_file_civitai_entry() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_models_dir_env();
 
@@ -511,9 +480,9 @@ mod tests {
         let mut config = explicit_config(models_dir);
         stub_companion_paths(&mut config, models_dir);
 
-        let row = juggernaut_row();
+        let entry = juggernaut_entry();
         let synth =
-            synthesize_model_config(&row, std::path::Path::new(models_dir), &config).unwrap();
+            synthesize_model_config(&entry, std::path::Path::new(models_dir), &config).unwrap();
 
         // family is propagated for the engine factory dispatch.
         assert_eq!(synth.family.as_deref(), Some("sdxl"));
@@ -539,160 +508,84 @@ mod tests {
     }
 
     #[test]
-    fn synthesize_model_config_rejects_unknown_family() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_models_dir_env();
-
-        let mut row = juggernaut_row();
-        row.family = "made-up-family".into();
-        let config = explicit_config("/tmp/mold-test-models");
-        let err =
-            synthesize_model_config(&row, std::path::Path::new("/tmp/mold-test-models"), &config)
-                .unwrap_err();
-        assert!(
-            err.to_string().contains("made-up-family"),
-            "should name the offending family, got: {err}",
-        );
-    }
-
-    #[test]
     fn synthesize_model_config_rejects_separated_bundling() {
-        // The bridge currently only handles single-file (phase 2.5 scope).
-        // A separated catalog row should error rather than producing a
-        // broken config that points its `vae` at the transformer file.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_models_dir_env();
 
-        let mut row = juggernaut_row();
-        row.bundling = "separated".into();
+        let mut entry = juggernaut_entry();
+        entry.bundling = Bundling::Separated;
         let config = explicit_config("/tmp/mold-test-models");
-        let err =
-            synthesize_model_config(&row, std::path::Path::new("/tmp/mold-test-models"), &config)
-                .unwrap_err();
+        let err = synthesize_model_config(
+            &entry,
+            std::path::Path::new("/tmp/mold-test-models"),
+            &config,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("single-file"),
             "should explain the supported bundling, got: {err}",
         );
     }
 
-    #[test]
-    fn lookup_catalog_row_returns_none_for_non_catalog_input() {
-        let db = mold_db::MetadataDb::open_in_memory().unwrap();
-        assert!(lookup_catalog_row(&db, "flux-dev:q4").unwrap().is_none());
-        assert!(lookup_catalog_row(&db, "a cat").unwrap().is_none());
-    }
-
-    #[test]
-    fn lookup_catalog_row_finds_row_when_present() {
-        let db = mold_db::MetadataDb::open_in_memory().unwrap();
-        db.catalog_upsert("sdxl", &[juggernaut_row()]).unwrap();
-        let found = lookup_catalog_row(&db, "cv:1759168").unwrap().unwrap();
-        assert_eq!(found.id, "cv:1759168");
-        assert_eq!(found.family, "sdxl");
-    }
-
-    #[test]
-    fn install_catalog_model_with_db_inserts_synthesized_entry() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_models_dir_env();
-
-        let models_dir = "/tmp/mold-test-models";
-        let mut config = explicit_config(models_dir);
-        stub_companion_paths(&mut config, models_dir);
-
-        let db = mold_db::MetadataDb::open_in_memory().unwrap();
-        db.catalog_upsert("sdxl", &[juggernaut_row()]).unwrap();
-
-        let installed = install_catalog_model_with_db(&db, &mut config, "cv:1759168").unwrap();
-        assert!(installed, "row was in the catalog DB");
-
-        let entry = config
-            .models
-            .get("cv:1759168")
-            .expect("config.models has the synthesized entry");
-        assert_eq!(entry.family.as_deref(), Some("sdxl"));
-        assert_eq!(
-            entry.transformer.as_deref(),
-            Some(
-                format!(
-                    "{models_dir}/cv-1759168/sdxl/civitai/1759168/juggernautXL_ragnarokBy.safetensors"
-                )
-                .as_str()
-            ),
-        );
-    }
-
-    #[test]
-    fn install_catalog_model_with_db_returns_false_for_unknown_id() {
-        let mut config = explicit_config("/tmp/mold-test-models");
-        let db = mold_db::MetadataDb::open_in_memory().unwrap();
-        let installed =
-            install_catalog_model_with_db(&db, &mut config, "cv:does-not-exist").unwrap();
-        assert!(!installed);
-        assert!(!config.models.contains_key("cv:does-not-exist"));
-    }
-
     // ── Flux.2 catalog bridge ────────────────────────────────────────────
 
-    fn flux2_recipe_json(version_id: &str, file_name: &str) -> String {
-        format!(
-            r#"{{
-  "files": [
-    {{
-      "url": "https://civitai.com/api/download/models/{version_id}",
-      "dest": "{{family}}/civitai/{version_id}/{file_name}",
-      "sha256": "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF",
-      "size_bytes": 12345678
-    }}
-  ],
-  "needs_token": "civitai"
-}}"#
-        )
+    fn flux2_recipe(version_id: &str, file_name: &str) -> DownloadRecipe {
+        DownloadRecipe {
+            files: vec![RecipeFile {
+                url: format!("https://civitai.com/api/download/models/{version_id}"),
+                dest: format!("{{family}}/civitai/{version_id}/{file_name}"),
+                sha256: Some(
+                    "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF".into(),
+                ),
+                size_bytes: Some(12_345_678),
+            }],
+            needs_token: Some(TokenKind::Civitai),
+        }
     }
 
-    fn flux2_klein_9b_row() -> mold_db::catalog::CatalogRow {
-        mold_db::catalog::CatalogRow {
-            id: "cv:2759597".into(),
-            source: "civitai".into(),
+    fn flux2_klein_9b_entry() -> CatalogEntry {
+        CatalogEntry {
+            id: CatalogId::from("cv:2759597"),
+            source: Source::Civitai,
             source_id: "2759597".into(),
             name: "Miraclein NSFW [Flux2Klein]".into(),
             author: Some("someone".into()),
-            family: "flux2".into(),
-            family_role: "finetune".into(),
+            family: Family::Flux2,
+            family_role: FamilyRole::Finetune,
             sub_family: Some("klein-9b".into()),
-            modality: "image".into(),
-            kind: "checkpoint".into(),
-            file_format: "safetensors".into(),
-            bundling: "single-file".into(),
+            modality: Modality::Image,
+            kind: Kind::Checkpoint,
+            file_format: FileFormat::Safetensors,
+            bundling: Bundling::SingleFile,
             size_bytes: Some(12_345_678),
             download_count: 0,
             rating: None,
             likes: 0,
-            nsfw: 0,
+            nsfw: false,
             thumbnail_url: None,
             description: None,
             license: None,
-            license_flags: None,
-            tags: Some("[]".into()),
-            companions: Some(r#"["flux2-te-9b","flux2-vae"]"#.into()),
-            download_recipe: flux2_recipe_json("2759597", "miraclein.safetensors"),
+            license_flags: LicenseFlags::default(),
+            tags: vec![],
+            companions: vec!["flux2-te-9b".into(), "flux2-vae".into()],
+            download_recipe: flux2_recipe("2759597", "miraclein.safetensors"),
             engine_phase: 1,
             created_at: None,
             updated_at: None,
             added_at: 0,
-            trained_words: "[]".into(),
+            trained_words: vec![],
         }
     }
 
-    fn flux2_klein_4b_row() -> mold_db::catalog::CatalogRow {
-        let mut row = flux2_klein_9b_row();
-        row.id = "cv:2612554".into();
-        row.source_id = "2612554".into();
-        row.name = "Flux.2 Klein 4B finetune".into();
-        row.sub_family = Some("klein-4b".into());
-        row.companions = Some(r#"["flux2-te","flux2-vae"]"#.into());
-        row.download_recipe = flux2_recipe_json("2612554", "klein4b.safetensors");
-        row
+    fn flux2_klein_4b_entry() -> CatalogEntry {
+        let mut entry = flux2_klein_9b_entry();
+        entry.id = CatalogId::from("cv:2612554");
+        entry.source_id = "2612554".into();
+        entry.name = "Flux.2 Klein 4B finetune".into();
+        entry.sub_family = Some("klein-4b".into());
+        entry.companions = vec!["flux2-te".into(), "flux2-vae".into()];
+        entry.download_recipe = flux2_recipe("2612554", "klein4b.safetensors");
+        entry
     }
 
     /// Stub the manifest-side companion paths for the Flux.2 9B encoder
@@ -769,9 +662,9 @@ mod tests {
         let mut config = explicit_config(models_dir);
         stub_flux2_9b_companion_paths(&mut config, models_dir);
 
-        let row = flux2_klein_9b_row();
+        let entry = flux2_klein_9b_entry();
         let synth =
-            synthesize_model_config(&row, std::path::Path::new(models_dir), &config).unwrap();
+            synthesize_model_config(&entry, std::path::Path::new(models_dir), &config).unwrap();
 
         assert_eq!(synth.family.as_deref(), Some("flux2"));
 
@@ -817,9 +710,9 @@ mod tests {
         let mut config = explicit_config(models_dir);
         stub_flux2_4b_companion_paths(&mut config, models_dir);
 
-        let row = flux2_klein_4b_row();
+        let entry = flux2_klein_4b_entry();
         let synth =
-            synthesize_model_config(&row, std::path::Path::new(models_dir), &config).unwrap();
+            synthesize_model_config(&entry, std::path::Path::new(models_dir), &config).unwrap();
 
         // Klein-4B uses the 2-shard Qwen3-4B encoder (not the 4-shard 8B).
         let shards = synth

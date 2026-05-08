@@ -1579,9 +1579,18 @@ pub fn missing_companions_from_json(
         Ok(n) => n,
         Err(_) => return Vec::new(),
     };
+    missing_companions(&names, models_dir)
+}
+
+/// `Vec<String>`-shaped variant for callers that already have a typed
+/// companion list (e.g. live-fetched `CatalogEntry::companions`).
+pub fn missing_companions(
+    names: &[String],
+    models_dir: &Path,
+) -> Vec<&'static crate::manifest::ModelManifest> {
     let mut out = Vec::with_capacity(names.len());
     for name in names {
-        let Some(manifest) = crate::manifest::find_manifest(&name) else {
+        let Some(manifest) = crate::manifest::find_manifest(name) else {
             tracing::warn!(
                 companion = %name,
                 "skipping companion with no synthetic manifest in this build",

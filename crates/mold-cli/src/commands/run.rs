@@ -29,9 +29,8 @@ pub fn complete_model_name() -> Vec<CompletionCandidate> {
 ///
 /// Rules:
 /// - If model_or_prompt matches a known model → (model, prompt_rest joined).
-/// - If model_or_prompt is a known catalog ID (`cv:<id>` / `hf:<author>/<name>`) and
-///   `catalog_db` carries a hit, synthesize a `ModelConfig` into `config.models`
-///   so the rest of the run flow treats it like any config-known model.
+/// - If model_or_prompt is a catalog ID already installed in `config.models`
+///   (the async catalog bridge runs ahead of this) → use it as the model.
 /// - If model_or_prompt looks like a model name but isn't known → error with suggestions.
 /// - Else → (config default_model, all args joined as prompt).
 /// - Empty prompt → None (error: prompt required).
@@ -39,7 +38,6 @@ fn resolve_run_args(
     model_or_prompt: Option<&str>,
     prompt_rest: &[String],
     config: &mut Config,
-    catalog_db: Option<&mold_db::MetadataDb>,
 ) -> Result<(String, Option<String>)> {
     if let Some(first) = model_or_prompt {
         if is_known_model(first, config) {
@@ -51,22 +49,20 @@ fn resolve_run_args(
             return Ok((resolve_model_name(first), prompt));
         }
 
-        // Catalog bridge: turn `cv:<id>` / `hf:<author>/<name>` inputs into
-        // synthesized `ModelConfig` entries before the looks-like-a-model
-        // shortcut bails. Catalog IDs are their own canonical name (not
-        // run through `resolve_model_name`), since they don't take tag
-        // suffixes.
-        if crate::catalog_bridge::looks_like_catalog_id(first) {
-            if let Some(db) = catalog_db {
-                if crate::catalog_bridge::install_catalog_model_with_db(db, config, first)? {
-                    let prompt = if prompt_rest.is_empty() {
-                        None
-                    } else {
-                        Some(prompt_rest.join(" "))
-                    };
-                    return Ok((first.to_string(), prompt));
-                }
-            }
+        // Catalog ID short-circuit: the async pre-pass (`install_catalog_model_live`)
+        // already inserted a synthesized ModelConfig into `config.models` for
+        // `cv:<id>` / `hf:<author>/<name>` inputs. Catalog IDs are their own
+        // canonical name (not run through `resolve_model_name`), since they
+        // don't take tag suffixes.
+        if crate::catalog_bridge::looks_like_catalog_id(first)
+            && config.models.contains_key(first)
+        {
+            let prompt = if prompt_rest.is_empty() {
+                None
+            } else {
+                Some(prompt_rest.join(" "))
+            };
+            return Ok((first.to_string(), prompt));
         }
 
         // Check if the first arg looks like it was intended as a model name
@@ -501,12 +497,17 @@ pub async fn run(
 ) -> Result<()> {
     let mut config = Config::load_or_default();
 
-    let (model, prompt) = resolve_run_args(
-        model_or_prompt.as_deref(),
-        &prompt_rest,
-        &mut config,
-        mold_db::global_db(),
-    )?;
+    // Async catalog ID pre-pass: if the user typed `cv:<id>` / `hf:<repo>`,
+    // resolve it via live HF/Civitai and inject the synthesized ModelConfig
+    // into config.models before the (sync) resolve_run_args below picks it up.
+    if let Some(first) = model_or_prompt.as_deref() {
+        if crate::catalog_bridge::looks_like_catalog_id(first) {
+            crate::catalog_bridge::install_catalog_model_live(&mut config, first).await?;
+        }
+    }
+
+    let (model, prompt) =
+        resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &mut config)?;
     let family = resolve_family(&model, &config);
 
     // Validate file-based arguments early — before expansion or inference.
@@ -1088,103 +1089,42 @@ mod tests {
         }
     }
 
-    /// Real CatalogRow shape for cv:1759168 (Juggernaut XL Ragnarok). The
-    /// `download_recipe` here matches what the scanner writes when it
-    /// classifies a single-file Civitai SDXL checkpoint, so the bridge
-    /// gets exercised against realistic input rather than a stripped-down
-    /// fixture that hides regressions.
-    fn juggernaut_catalog_row() -> mold_db::catalog::CatalogRow {
-        mold_db::catalog::CatalogRow {
-            id: "cv:1759168".into(),
-            source: "civitai".into(),
-            source_id: "1759168".into(),
-            name: "Juggernaut XL Ragnarok".into(),
-            author: Some("RunDiffusion".into()),
-            family: "sdxl".into(),
-            family_role: "finetune".into(),
-            sub_family: None,
-            modality: "image".into(),
-            kind: "checkpoint".into(),
-            file_format: "safetensors".into(),
-            bundling: "single-file".into(),
-            size_bytes: Some(6_938_040_788),
-            download_count: 12_345,
-            rating: None,
-            likes: 0,
-            nsfw: 0,
-            thumbnail_url: None,
-            description: None,
-            license: None,
-            license_flags: None,
-            tags: Some("[]".into()),
-            companions: Some(r#"["clip-l","clip-g","sdxl-vae"]"#.into()),
-            download_recipe: r#"{"files":[{"url":"https://civitai.com/api/download/models/1759168","dest":"{family}/civitai/1759168/juggernautXL_ragnarokBy.safetensors","sha256":null,"size_bytes":6938040788}],"needs_token":"civitai"}"#.into(),
-            engine_phase: 1,
-            created_at: None,
-            updated_at: None,
-            added_at: 0,
-            trained_words: "[]".into(),
-        }
-    }
-
+    /// Catalog ID short-circuit: when the async pre-pass has already
+    /// inserted a synthesized ModelConfig, `resolve_run_args` must surface
+    /// the catalog ID verbatim (no manifest tag mangling).
     #[test]
-    fn catalog_id_is_accepted_when_db_has_row() {
+    fn catalog_id_is_used_when_already_in_config() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = test_config();
-        let db = mold_db::MetadataDb::open_in_memory().unwrap();
-        db.catalog_upsert("sdxl", &[juggernaut_catalog_row()])
-            .unwrap();
+        config.models.insert(
+            "cv:1759168".into(),
+            mold_core::ModelConfig {
+                family: Some("sdxl".into()),
+                ..Default::default()
+            },
+        );
 
         let (model, prompt) = resolve_run_args(
             Some("cv:1759168"),
             &["a".to_string(), "cat".to_string()],
             &mut config,
-            Some(&db),
         )
         .unwrap();
 
-        // Catalog IDs are their own canonical name — not run through
-        // `resolve_model_name` (which would mangle them by trying to add
-        // a `:tag` suffix).
         assert_eq!(model, "cv:1759168");
         assert_eq!(prompt.unwrap(), "a cat");
-        // The synthesized ModelConfig is now in config.models so the
-        // downstream `ModelPaths::resolve` path picks it up.
-        assert!(config.models.contains_key("cv:1759168"));
     }
 
     #[test]
-    fn catalog_id_errors_when_db_has_no_row() {
+    fn catalog_id_errors_when_not_in_config() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = test_config();
-        let db = mold_db::MetadataDb::open_in_memory().unwrap();
-        // Empty DB — bridge returns false, looks_like_model_name shortcut
-        // bails with the standard "unknown model" message.
-        let err = resolve_run_args(
-            Some("cv:9999999"),
-            &["a cat".to_string()],
-            &mut config,
-            Some(&db),
-        )
-        .unwrap_err();
+        // No async pre-pass ran (or it didn't insert) → the standard
+        // "unknown model" path bails with suggestions.
+        let err =
+            resolve_run_args(Some("cv:9999999"), &["a cat".to_string()], &mut config).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown model 'cv:9999999'"), "got: {msg}");
-    }
-
-    #[test]
-    fn catalog_id_errors_when_no_db_handle() {
-        // Without a DB handle (e.g. MOLD_DB_DISABLE=1), the bridge
-        // silently skips and the standard unknown-model path runs.
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut config = test_config();
-        let err = resolve_run_args(
-            Some("cv:1759168"),
-            &["a cat".to_string()],
-            &mut config,
-            None,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("unknown model"), "got: {err}");
     }
 
     #[test]
@@ -1194,7 +1134,6 @@ mod tests {
             Some("flux-dev:q4"),
             &["a".to_string(), "cat".to_string()],
             &mut config,
-            None,
         )
         .unwrap();
         assert_eq!(model, "flux-dev:q4");
@@ -1205,7 +1144,7 @@ mod tests {
     fn model_only_no_prompt() {
         let mut config = test_config();
         let (model, prompt) =
-            resolve_run_args(Some("flux-dev:q4"), &[], &mut config, None).unwrap();
+            resolve_run_args(Some("flux-dev:q4"), &[], &mut config).unwrap();
         assert_eq!(model, "flux-dev:q4");
         assert!(prompt.is_none());
     }
@@ -1224,7 +1163,6 @@ mod tests {
                 "mountains".to_string(),
             ],
             &mut config,
-            None,
         )
         .unwrap();
         assert_eq!(model, "flux2-klein:q8");
@@ -1235,7 +1173,7 @@ mod tests {
     fn single_prompt_word() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = test_config();
-        let (model, prompt) = resolve_run_args(Some("sunset"), &[], &mut config, None).unwrap();
+        let (model, prompt) = resolve_run_args(Some("sunset"), &[], &mut config).unwrap();
         assert_eq!(model, "flux2-klein:q8");
         assert_eq!(prompt.unwrap(), "sunset");
     }
@@ -1244,7 +1182,7 @@ mod tests {
     fn no_args_returns_none_prompt() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = test_config();
-        let (model, prompt) = resolve_run_args(None, &[], &mut config, None).unwrap();
+        let (model, prompt) = resolve_run_args(None, &[], &mut config).unwrap();
         assert_eq!(model, "flux2-klein:q8");
         assert!(prompt.is_none());
     }
@@ -1256,7 +1194,6 @@ mod tests {
             Some("flux-dev"),
             &["a turtle".to_string()],
             &mut config,
-            None,
         )
         .unwrap();
         assert_eq!(model, "flux-dev:q8");
@@ -1270,7 +1207,6 @@ mod tests {
             Some("sd15"),
             &["a".to_string(), "dog".to_string()],
             &mut config,
-            None,
         )
         .unwrap();
         assert_eq!(model, "sd15:fp16");
@@ -1284,7 +1220,6 @@ mod tests {
             Some("dreamshaper-v8"),
             &["photorealistic".to_string()],
             &mut config,
-            None,
         )
         .unwrap();
         assert_eq!(model, "dreamshaper-v8:fp16");
@@ -1298,7 +1233,6 @@ mod tests {
             Some("ultrareal-v8"),
             &["a cat".to_string()],
             &mut config,
-            None,
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -1316,7 +1250,6 @@ mod tests {
             Some("flux-dev:q99"),
             &["a cat".to_string()],
             &mut config,
-            None,
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -1327,7 +1260,7 @@ mod tests {
     fn natural_language_not_flagged_as_model() {
         let mut config = test_config();
         for word in &["a", "sunset", "photorealistic", "cat", "beautiful"] {
-            let result = resolve_run_args(Some(word), &[], &mut config, None);
+            let result = resolve_run_args(Some(word), &[], &mut config);
             assert!(
                 result.is_ok(),
                 "'{word}' should not be flagged as a model name"

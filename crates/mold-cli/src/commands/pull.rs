@@ -190,24 +190,22 @@ pub async fn run(model: &str, opts: &mold_core::download::PullOptions) -> Result
 /// but doesn't try to upgrade through the manifest registry — the catalog
 /// id is the canonical identifier for this download.
 pub async fn run_recipe(
-    row: mold_db::catalog::CatalogRow,
+    entry: mold_catalog::entry::CatalogEntry,
     opts: &mold_core::download::PullOptions,
 ) -> Result<()> {
     use mold_core::download::{
-        civitai_auth_or_error, fetch_recipe, missing_companions_from_json, DownloadError,
-        RecipeAuth, RecipeFetchFile,
+        civitai_auth_or_error, fetch_recipe, missing_companions, DownloadError, RecipeAuth,
+        RecipeFetchFile,
     };
 
-    let recipe: mold_catalog::entry::DownloadRecipe = serde_json::from_str(&row.download_recipe)
-        .map_err(|e| {
-            anyhow::anyhow!("catalog row {} has malformed download_recipe: {e}", row.id)
-        })?;
+    let id_str = entry.id.as_str().to_string();
+    let recipe = &entry.download_recipe;
 
     // Resolve auth before printing anything so a missing token surfaces
     // an actionable error instead of "starting download...". The
     // mold-core helper already crafts a remediation message naming the env var.
     let auth = match recipe.needs_token {
-        Some(mold_catalog::entry::TokenKind::Civitai) => match civitai_auth_or_error(&row.id) {
+        Some(mold_catalog::entry::TokenKind::Civitai) => match civitai_auth_or_error(&id_str) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!();
@@ -223,10 +221,10 @@ pub async fn run_recipe(
     status!(
         "{} Pulling {} ({:.1}GB to download)",
         theme::icon_info(),
-        row.id.bold(),
+        id_str.bold(),
         total_gb,
     );
-    if let Some(desc) = row.description.as_deref() {
+    if let Some(desc) = entry.description.as_deref() {
         if !desc.is_empty() {
             status!("  {}", crate::output::colorize_description(desc));
         }
@@ -234,11 +232,11 @@ pub async fn run_recipe(
     status!("");
 
     // Companion-first ordering: find every canonical companion the
-    // catalog row declares that isn't already on disk, then pull each
+    // catalog entry declares that isn't already on disk, then pull each
     // through the manifest path. mold-core de-dupes against in-flight
     // pulls of the same name, so concurrent requests won't double-pull.
     let models_dir = mold_core::Config::load_or_default().resolved_models_dir();
-    let companions = missing_companions_from_json(row.companions.as_deref(), &models_dir);
+    let companions = missing_companions(&entry.companions, &models_dir);
     if !companions.is_empty() {
         status!(
             "{} {} companion file(s) needed before primary",
@@ -255,17 +253,16 @@ pub async fn run_recipe(
     // `{author}`, `{name}` placeholders; render them now so the file lands
     // under e.g. `models/sdxl/civitai/<id>/...` instead of the literal
     // `models/{family}/civitai/<id>/...` that the runner can never find.
-    // Author/name are derived from `source_id` (e.g. `RunDiffusion/Juggernaut-XL-v9`
-    // → author=`RunDiffusion`, name=`Juggernaut-XL-v9`); for Civitai the
-    // template never references them, so they default to empty.
-    let (author, name) = match row.source_id.split_once('/') {
+    let (author, name) = match entry.source_id.split_once('/') {
         Some((a, n)) => (a, n),
-        None => ("", row.source_id.as_str()),
+        None => ("", entry.source_id.as_str()),
     };
     let rendered_dests: Vec<String> = recipe
         .files
         .iter()
-        .map(|f| mold_catalog::entry::render_recipe_dest(&f.dest, &row.family, author, name))
+        .map(|f| {
+            mold_catalog::entry::render_recipe_dest(&f.dest, entry.family.as_str(), author, name)
+        })
         .collect();
     let fetch_files: Vec<RecipeFetchFile<'_>> = recipe
         .files
@@ -279,7 +276,7 @@ pub async fn run_recipe(
         })
         .collect();
 
-    fetch_recipe(&row.id, &fetch_files, auth, &models_dir, None, opts)
+    fetch_recipe(&id_str, &fetch_files, auth, &models_dir, None, opts)
         .await
         .map_err(|e| -> anyhow::Error {
             match e {
@@ -302,10 +299,7 @@ pub async fn run_recipe(
                     eprintln!("  Expected: {expected}");
                     eprintln!("  Got:      {actual}");
                     eprintln!();
-                    eprintln!(
-                        "The corrupted file has been removed. Re-run: mold pull {}",
-                        row.id
-                    );
+                    eprintln!("The corrupted file has been removed. Re-run: mold pull {id_str}");
                 }
                 DownloadError::RecipeHttp { url, status, body } => {
                     eprintln!();
@@ -327,8 +321,8 @@ pub async fn run_recipe(
         })?;
 
     status!("");
-    status!("{} {} is ready!", theme::icon_done(), row.id.bold());
-    status!("  mold run {} \"your prompt\"", row.id);
+    status!("{} {} is ready!", theme::icon_done(), id_str.bold());
+    status!("  mold run {id_str} \"your prompt\"");
     Ok(())
 }
 
