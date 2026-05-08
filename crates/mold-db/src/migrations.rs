@@ -261,6 +261,26 @@ CREATE VIRTUAL TABLE catalog_fts USING fts5(
 );
 "#;
 
+/// v8 → add `trained_words` to `catalog`. Civitai LoRA versions advertise
+/// trigger phrases (`trainedWords` on `/api/v1/models`); the web UI surfaces
+/// them as click-to-insert chips next to the LoRA picker. Stored as a JSON
+/// array of strings to avoid a separate side table for what is typically
+/// 0–8 short tokens per LoRA. Default `'[]'` keeps pre-v8 rows parseable
+/// without a backfill pass.
+const V8_CATALOG_TRAINED_WORDS: &str = r#"
+ALTER TABLE catalog ADD COLUMN trained_words TEXT NOT NULL DEFAULT '[]';
+"#;
+
+/// v9 → drop the bulk-scrape catalog. The SPA, CLI, and server all
+/// read from live HF + Civitai now (with sidecars next to each
+/// installed file as the source of truth for "downloaded"). The
+/// catalog DB and its FTS5 sidekick haven't been on the read path
+/// for several releases; v9 reclaims the space.
+const V9_DROP_CATALOG: &str = r#"
+DROP TABLE IF EXISTS catalog_fts;
+DROP TABLE IF EXISTS catalog;
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -292,11 +312,19 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 7,
         kind: MigrationKind::Sql(V7_CATALOG_TABLE),
     },
+    Migration {
+        version: 8,
+        kind: MigrationKind::Sql(V8_CATALOG_TRAINED_WORDS),
+    },
+    Migration {
+        version: 9,
+        kind: MigrationKind::Sql(V9_DROP_CATALOG),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -624,15 +652,15 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_reaches_schema_version_7() {
+    fn fresh_db_reaches_schema_version_9() {
         let mut conn = Connection::open_in_memory().unwrap();
         apply_pending(&mut conn).unwrap();
         assert_eq!(
             current_version(&conn).unwrap(),
-            7,
-            "SCHEMA_VERSION should be 7 after the v7 catalog migration"
+            SCHEMA_VERSION,
+            "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 7);
+        assert_eq!(SCHEMA_VERSION, 9);
     }
 
     /// v6: `settings` keeps every existing row under `profile = 'default'`
@@ -874,119 +902,70 @@ mod tests {
 }
 
 #[cfg(test)]
-mod v7_tests {
+mod v9_tests {
+    //! v7 + v8 added the `catalog` + `catalog_fts` tables; v9 dropped
+    //! them once the SPA, CLI, and server moved to live HF/Civitai.
+    //! These tests pin the drop so a future re-add doesn't silently
+    //! reintroduce the bulk-scrape DB.
+
     use super::*;
     use rusqlite::Connection;
 
-    fn open() -> Connection {
+    #[test]
+    fn schema_version_is_nine() {
+        assert_eq!(SCHEMA_VERSION, 9);
+    }
+
+    #[test]
+    fn fresh_db_does_not_have_catalog_tables() {
         let mut conn = Connection::open_in_memory().unwrap();
         apply_pending(&mut conn).unwrap();
-        conn
-    }
-
-    #[test]
-    fn schema_version_is_seven() {
-        assert_eq!(SCHEMA_VERSION, 7);
-    }
-
-    #[test]
-    fn catalog_table_exists_with_expected_columns() {
-        let conn = open();
-        let cols: Vec<String> = conn
-            .prepare("PRAGMA table_info(catalog)")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .filter_map(Result::ok)
-            .collect();
-        for required in [
-            "id",
-            "source",
-            "source_id",
-            "name",
-            "author",
-            "family",
-            "family_role",
-            "sub_family",
-            "modality",
-            "kind",
-            "file_format",
-            "bundling",
-            "size_bytes",
-            "download_count",
-            "rating",
-            "likes",
-            "nsfw",
-            "thumbnail_url",
-            "description",
-            "license",
-            "license_flags",
-            "tags",
-            "companions",
-            "download_recipe",
-            "engine_phase",
-            "created_at",
-            "updated_at",
-            "added_at",
-        ] {
-            assert!(
-                cols.contains(&required.to_string()),
-                "missing column: {required}"
-            );
-        }
-    }
-
-    #[test]
-    fn catalog_fts_virtual_table_exists() {
-        let conn = open();
         let tables: Vec<String> = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'catalog_fts%'")
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'catalog%'",
+            )
             .unwrap()
             .query_map([], |row| row.get::<_, String>(0))
             .unwrap()
             .filter_map(Result::ok)
             .collect();
-        assert!(tables.contains(&"catalog_fts".to_string()));
+        assert!(
+            tables.is_empty(),
+            "v9 must drop catalog* tables, found: {tables:?}"
+        );
     }
 
+    /// Forward-only migration from a pre-v9 DB: a v8 install with rows
+    /// in the catalog table must end up at v9 with the table gone.
     #[test]
-    fn catalog_indexes_exist() {
-        let conn = open();
-        let idx: Vec<String> = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='catalog'")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .filter_map(Result::ok)
-            .collect();
-        for name in [
-            "idx_catalog_family",
-            "idx_catalog_modality",
-            "idx_catalog_downloads",
-            "idx_catalog_updated",
-            "idx_catalog_rating",
-            "idx_catalog_phase",
-        ] {
-            assert!(idx.iter().any(|i| i == name), "missing index: {name}");
-        }
-    }
-
-    #[test]
-    fn unique_source_source_id_constraint() {
-        let conn = open();
+    fn v8_to_v9_drops_catalog_data() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        tx.execute_batch(V3_SETTINGS_TABLE).unwrap();
+        tx.execute_batch(V4_MODEL_PREFS_TABLE).unwrap();
+        tx.execute_batch(V5_PROMPT_HISTORY_TABLE).unwrap();
+        tx.execute_batch(V6_PROFILE_SCOPING).unwrap();
+        tx.execute_batch(V7_CATALOG_TABLE).unwrap();
+        tx.execute_batch(V8_CATALOG_TRAINED_WORDS).unwrap();
+        tx.execute_batch("PRAGMA user_version = 8;").unwrap();
+        tx.commit().unwrap();
         conn.execute(
             "INSERT INTO catalog (id, source, source_id, name, family, family_role, modality, kind, file_format, bundling, download_recipe, engine_phase, added_at)
-             VALUES ('hf:a', 'hf', 'a', 'A', 'flux', 'foundation', 'image', 'checkpoint', 'safetensors', 'separated', '{}', 1, 0)",
+             VALUES ('hf:legacy', 'hf', 'legacy', 'L', 'flux', 'foundation', 'image', 'checkpoint', 'safetensors', 'separated', '{}', 1, 0)",
             [],
         ).unwrap();
-        let dup = conn.execute(
-            "INSERT INTO catalog (id, source, source_id, name, family, family_role, modality, kind, file_format, bundling, download_recipe, engine_phase, added_at)
-             VALUES ('hf:dup', 'hf', 'a', 'A2', 'flux', 'foundation', 'image', 'checkpoint', 'safetensors', 'separated', '{}', 1, 0)",
-            [],
-        );
-        assert!(
-            dup.is_err(),
-            "duplicate (source, source_id) should violate UNIQUE"
-        );
+
+        apply_pending(&mut conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='catalog'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 0, "catalog table must be dropped after v9");
     }
 }

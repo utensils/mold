@@ -219,19 +219,18 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/downloads", get(list_downloads).post(create_download))
         .route("/api/downloads/:id", delete(delete_download))
         .route("/api/downloads/stream", get(stream_downloads))
-        // ─── Catalog (sub-project A) ─────────────────────────────────────
-        .route("/api/catalog", get(crate::catalog_api::list_catalog))
+        // ─── Catalog (live HF + Civitai proxy) ──────────────────────────
         .route(
             "/api/catalog/families",
             get(crate::catalog_api::list_families),
         )
         .route(
-            "/api/catalog/refresh",
-            post(crate::catalog_api::post_refresh).get(crate::catalog_api::get_active_refresh),
+            "/api/catalog/search",
+            get(crate::catalog_api::live_search_catalog),
         )
         .route(
-            "/api/catalog/refresh/:id",
-            get(crate::catalog_api::get_refresh_status),
+            "/api/catalog/installed",
+            get(crate::catalog_api::list_installed_catalog),
         )
         .route(
             "/api/catalog/*id",
@@ -332,7 +331,14 @@ async fn prepare_generation(
     // Expand prompt if requested (before validation, so the expanded prompt gets validated)
     maybe_expand_prompt(state, request, preferred_gpu).await?;
 
-    if let Err(e) = validate_generate_request(request) {
+    // Catalog (`cv:*` / `hf:*`) IDs aren't in the static manifest, so the
+    // pure-mold-core family lookup returns `None` for them. Run the live
+    // single-id install first so config.models has the entry; then feed
+    // its family string through as a hint so audio / keyframes / pipeline
+    // gates work for installed Civitai LTX-2 checkpoints.
+    let _ = model_manager::install_catalog_model(state, &request.model).await;
+    let family_hint = model_manager::catalog_family_for(state, &request.model).await;
+    if let Err(e) = validate_generate_request(request, family_hint.as_deref()) {
         return Err(ApiError::validation(e));
     }
 
@@ -444,6 +450,7 @@ async fn generate(
         format = %req.output_format,
         lora = ?req.lora.as_ref().map(|l| &l.path),
         lora_scale = ?req.lora.as_ref().map(|l| l.scale),
+        loras = ?req.loras.as_ref().map(|v| v.iter().map(|l| &l.path).collect::<Vec<_>>()),
         "generate request"
     );
 
@@ -552,8 +559,11 @@ async fn generate(
     }
 }
 
-fn validate_generate_request(req: &mold_core::GenerateRequest) -> Result<(), String> {
-    mold_core::validate_generate_request(req)
+fn validate_generate_request(
+    req: &mold_core::GenerateRequest,
+    family_hint: Option<&str>,
+) -> Result<(), String> {
+    mold_core::validate_generate_request_with_family(req, family_hint)
 }
 
 async fn apply_default_metadata_setting(state: &AppState, req: &mut mold_core::GenerateRequest) {

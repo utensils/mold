@@ -121,7 +121,7 @@ pub fn init_tracing_file_only(
     }
 }
 
-fn resolve_filter(config: &LoggingConfig, default_level: &str) -> String {
+pub(crate) fn resolve_filter(config: &LoggingConfig, default_level: &str) -> String {
     std::env::var("MOLD_LOG").unwrap_or_else(|_| {
         if config.level.is_empty() {
             default_level.to_string()
@@ -131,12 +131,12 @@ fn resolve_filter(config: &LoggingConfig, default_level: &str) -> String {
     })
 }
 
-fn make_filter(filter_str: &str, default_level: &str) -> EnvFilter {
+pub(crate) fn make_filter(filter_str: &str, default_level: &str) -> EnvFilter {
     EnvFilter::try_new(filter_str).unwrap_or_else(|_| EnvFilter::new(default_level))
 }
 
 /// Delete log files older than `max_days` from the log directory.
-fn cleanup_old_logs(log_dir: &Path, max_days: u32) {
+pub(crate) fn cleanup_old_logs(log_dir: &Path, max_days: u32) {
     let now = std::time::SystemTime::now();
     let max_age = std::time::Duration::from_secs(max_days as u64 * 86400);
 
@@ -171,5 +171,128 @@ fn cleanup_old_logs(log_dir: &Path, max_days: u32) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    // Process-global lock so the three resolve_filter cases below don't
+    // race each other on `MOLD_LOG` when cargo test runs them in parallel.
+    // Single bundled test walks the env→config→default precedence chain;
+    // splitting into separate tests would expose the env-var mutation to
+    // interleaving inside the same process.
+    #[test]
+    fn resolve_filter_precedence_chain() {
+        let prev = std::env::var("MOLD_LOG").ok();
+
+        // 1. MOLD_LOG env var wins over both config and default.
+        std::env::set_var("MOLD_LOG", "trace");
+        let cfg = LoggingConfig {
+            level: "warn".to_string(),
+            file: false,
+            dir: None,
+            max_days: 7,
+        };
+        assert_eq!(resolve_filter(&cfg, "info"), "trace");
+
+        // 2. With env unset, config.level is used.
+        std::env::remove_var("MOLD_LOG");
+        let cfg = LoggingConfig {
+            level: "debug".to_string(),
+            file: false,
+            dir: None,
+            max_days: 7,
+        };
+        assert_eq!(resolve_filter(&cfg, "info"), "debug");
+
+        // 3. With env unset and config.level empty, the default fires.
+        let cfg = LoggingConfig {
+            level: String::new(),
+            file: false,
+            dir: None,
+            max_days: 7,
+        };
+        assert_eq!(resolve_filter(&cfg, "info"), "info");
+
+        match prev {
+            Some(v) => std::env::set_var("MOLD_LOG", v),
+            None => std::env::remove_var("MOLD_LOG"),
+        }
+    }
+
+    #[test]
+    fn make_filter_accepts_both_valid_and_invalid_input_without_panicking() {
+        // Valid directive — try_new succeeds, no fallback.
+        let _ = make_filter("mold=trace,hyper=warn", "info");
+        // EnvFilter is forgiving, but truly malformed input still fails
+        // try_new — exercising the unwrap_or_else branch.
+        let _ = make_filter("@@@@@@", "warn");
+        let _ = make_filter("invalid=garbage=syntax", "info");
+    }
+
+    #[test]
+    fn cleanup_old_logs_deletes_aged_mold_files_and_keeps_fresh_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path();
+
+        let aged = dir_path.join("mold-server.2020-01-01");
+        let aged_with_suffix = dir_path.join("mold-tui.2020-01-01.log");
+        let fresh = dir_path.join("mold-server.fresh.log");
+        let unrelated = dir_path.join("not-our-business.log");
+
+        for path in [&aged, &aged_with_suffix, &fresh, &unrelated] {
+            fs::write(path, b"x").expect("write fixture");
+        }
+
+        // Backdate the two "old" files so they exceed max_days.
+        let ancient = SystemTime::now() - Duration::from_secs(60 * 60 * 24 * 30); // 30 days ago
+        for path in [&aged, &aged_with_suffix] {
+            let f = fs::File::open(path).expect("open fixture");
+            f.set_modified(ancient).expect("backdate fixture");
+        }
+
+        cleanup_old_logs(dir_path, 7);
+
+        assert!(!aged.exists(), "30-day-old mold-server log must be removed");
+        assert!(
+            !aged_with_suffix.exists(),
+            "30-day-old mold-tui log must be removed",
+        );
+        assert!(fresh.exists(), "fresh mold-server log must be retained");
+        assert!(
+            unrelated.exists(),
+            "unrelated *.log file must be left untouched",
+        );
+    }
+
+    #[test]
+    fn cleanup_old_logs_returns_silently_for_missing_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist");
+        // Should not panic — read_dir errors are absorbed by an early return.
+        cleanup_old_logs(&missing, 1);
+    }
+
+    #[test]
+    fn cleanup_old_logs_skips_subdirectories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path();
+        let subdir = dir_path.join("mold-server.subdir");
+        fs::create_dir(&subdir).expect("create subdir");
+        // Backdate so the age check would otherwise match.
+        let ancient = SystemTime::now() - Duration::from_secs(60 * 60 * 24 * 30);
+        let f = fs::File::open(&subdir).expect("open subdir");
+        // set_modified on a directory may fail on some filesystems — best-effort.
+        let _ = f.set_modified(ancient);
+
+        cleanup_old_logs(dir_path, 7);
+        assert!(
+            subdir.exists(),
+            "subdirectories must be skipped even when they pattern-match",
+        );
     }
 }

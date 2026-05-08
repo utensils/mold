@@ -27,7 +27,7 @@ impl CatalogId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Source {
     Hf,
@@ -48,7 +48,7 @@ pub enum Modality {
     Video,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
     Checkpoint,
@@ -151,6 +151,14 @@ pub struct CatalogEntry {
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
     pub added_at: i64,
+    /// Trigger phrases (Civitai `trainedWords`) advertised by the entry.
+    /// Empty for HF and for non-LoRA Civitai entries. Surface in the UI
+    /// as click-to-insert chips next to the LoRA picker.
+    ///
+    /// `serde(default)` means existing on-disk shards (written before v8)
+    /// keep deserializing without needing a migration pass on the JSON.
+    #[serde(default)]
+    pub trained_words: Vec<String>,
 }
 
 /// On-disk shard format. One file per family in `data/catalog/`.

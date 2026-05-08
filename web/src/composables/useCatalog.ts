@@ -1,19 +1,15 @@
 import { computed, ref, watch } from "vue";
 import {
-  fetchActiveCatalogRefresh,
-  fetchCatalog,
   fetchCatalogEntry,
   fetchCatalogFamilies,
+  fetchCatalogSearch,
   postCatalogDownload,
-  postCatalogRefresh,
-  fetchCatalogRefresh,
 } from "../api";
 import { useDownloads } from "./useDownloads";
 import type {
   CatalogEntryWire,
   CatalogFamilyCount,
   CatalogListParams,
-  CatalogRefreshStatus,
 } from "../types";
 
 const DEBOUNCE_MS = 250;
@@ -36,7 +32,6 @@ function build() {
   const loadingMore = ref(false);
   const errorMsg = ref<string | null>(null);
   const detail = ref<CatalogEntryWire | null>(null);
-  const refreshStatus = ref<CatalogRefreshStatus | null>(null);
 
   // hasMore: server-reported total wins; if absent (older server), fall
   // back to "the last page came back full" so we keep fetching until a
@@ -54,7 +49,7 @@ function build() {
     errorMsg.value = null;
     try {
       const [list, fams] = await Promise.all([
-        fetchCatalog({ ...filter.value, page: 1, page_size: PAGE_SIZE }),
+        fetchCatalogSearch({ ...filter.value, page: 1, page_size: PAGE_SIZE }),
         fetchCatalogFamilies(),
       ]);
       entries.value = list.entries;
@@ -74,7 +69,7 @@ function build() {
     loadingMore.value = true;
     try {
       const next = page.value + 1;
-      const list = await fetchCatalog({
+      const list = await fetchCatalogSearch({
         ...filter.value,
         page: next,
         page_size: PAGE_SIZE,
@@ -105,13 +100,13 @@ function build() {
   );
 
   async function openDetail(id: string) {
-    // The list response already carries every field the drawer needs (name,
-    // family, engine_phase, installed, download_recipe, …), so prefer the
-    // in-memory entry to avoid a wasted round-trip and to keep the drawer
-    // open even when the entry endpoint can't resolve it (live-search rows
-    // aren't in the DB-backed `/api/catalog/:id`, so the re-fetch would
-    // 404 and a `void cat.openDetail(...)` site would silently leave the
-    // drawer unmounted).
+    // Live-search rows aren't in the DB-backed `/api/catalog/:id` endpoint,
+    // so re-fetching would 404 and a `void cat.openDetail(...)` caller would
+    // silently leave the drawer unmounted. The list response already carries
+    // every field the drawer needs (name, family, engine_phase, installed,
+    // download_recipe, …), so prefer the in-memory entry and only fall back
+    // to the API when the user opens an id that isn't in the current page —
+    // e.g. a future deep-link path.
     const cached = entries.value.find((e) => e.id === id);
     if (cached) {
       detail.value = cached;
@@ -120,9 +115,9 @@ function build() {
     try {
       detail.value = await fetchCatalogEntry(id);
     } catch {
-      // 404 (id not in DB, deep link to a stale id) or transient network —
-      // keep `detail` null so the drawer stays closed instead of wedging on
-      // stale data.
+      // 404 (live row not in DB, deep link to a stale id) or transient
+      // network — keep `detail` null so the drawer stays closed instead of
+      // wedging on stale data.
       detail.value = null;
     }
   }
@@ -145,63 +140,6 @@ function build() {
     return result;
   }
 
-  async function startRefresh(family?: string) {
-    refreshStatus.value = { state: "pending" };
-    let id: string;
-    try {
-      ({ id } = await postCatalogRefresh(family ? { family } : {}));
-    } catch (e: unknown) {
-      // Most common case here is the server returning 409 with body
-      // "a catalog refresh is already in progress" — bubble that into
-      // refreshStatus so the TopBar's failed-state chip shows it
-      // instead of swallowing the error in console.error.
-      const message = e instanceof Error ? e.message : String(e);
-      refreshStatus.value = { state: "failed", message };
-      throw e;
-    }
-    pollRefresh(id);
-  }
-
-  function pollRefresh(id: string) {
-    const tick = async () => {
-      try {
-        const status = await fetchCatalogRefresh(id);
-        refreshStatus.value = status;
-        if (status.state === "done" || status.state === "failed") {
-          await refresh();
-          return;
-        }
-      } catch {
-        // swallow poll errors; retry on next tick
-      }
-      setTimeout(tick, 1500);
-    };
-    void tick();
-  }
-
-  /// Discover an in-flight scan started by another tab/CLI and attach to
-  /// it so the refresh button reflects cross-client state. Safe to call
-  /// repeatedly — it short-circuits when we already have a status.
-  async function discoverActiveRefresh() {
-    const s = refreshStatus.value;
-    if (s && (s.state === "pending" || s.state === "running")) return;
-    try {
-      const active = await fetchActiveCatalogRefresh();
-      if (active) {
-        refreshStatus.value = active.status;
-        if (
-          active.status.state === "pending" ||
-          active.status.state === "running"
-        ) {
-          pollRefresh(active.id);
-        }
-      }
-    } catch {
-      // Older servers (without GET /api/catalog/refresh) just leave the
-      // chip in its default idle state — graceful degrade.
-    }
-  }
-
   return {
     filter,
     page,
@@ -213,7 +151,6 @@ function build() {
     loadingMore,
     errorMsg,
     detail,
-    refreshStatus,
     refresh,
     loadMore,
     setFilter,
@@ -221,8 +158,6 @@ function build() {
     closeDetail,
     canDownload,
     startDownload,
-    startRefresh,
-    discoverActiveRefresh,
   };
 }
 

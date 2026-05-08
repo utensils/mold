@@ -9348,4 +9348,293 @@ mod tests {
         );
         assert!(app.resource_info.server_status.is_none());
     }
+
+    // ── Settings view render coverage ────────────────────────
+    //
+    // These tests exercise `crate::ui::settings::render` against real
+    // `App` fixtures so the per-row branch matrix in `build_settings_line`
+    // and the focus / scroll / save_error branches in `render_configuration`
+    // are exercised. Coverage attribution lands on `ui/settings.rs` even
+    // though the `#[test]` lives here — we need the App fixture from this
+    // module's existing helper.
+
+    #[tokio::test]
+    async fn settings_render_appearance_focus() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Appearance;
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::ui::settings::render(f, &mut app, f.area()))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_render_configuration_focus_with_selection() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Configuration;
+        // Land on a known field so the selected-line + suffix glyphs render.
+        app.settings.row_index = find_settings_row(&app, SettingsKey::DefaultWidth);
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::ui::settings::render(f, &mut app, f.area()))
+            .unwrap();
+        // Selected row stays on-screen.
+        assert!(app.settings.scroll_offset <= app.settings.row_index);
+    }
+
+    #[tokio::test]
+    async fn settings_render_text_field_selected_emits_dropdown_glyph() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Configuration;
+        // DefaultModel is a Text field — the suffix is the down-triangle.
+        app.settings.row_index = find_settings_row(&app, SettingsKey::DefaultModel);
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::ui::settings::render(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut found_glyph = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol() == "\u{25bc}" {
+                    found_glyph = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_glyph, "expected ▼ on the selected Text field's row",);
+    }
+
+    #[tokio::test]
+    async fn settings_render_with_save_error_drives_error_branch() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Configuration;
+        app.settings.save_error = Some("disk full".to_string());
+        // Make the area generous enough to fit the entire settings list
+        // plus the save_error line so the error styling branch runs end
+        // to end (the error line is the last entry in `lines` and
+        // wouldn't render in a small viewport).
+        let backend = TestBackend::new(100, 80);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::ui::settings::render(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut full_text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                full_text.push_str(buf[(x, y)].symbol());
+            }
+            full_text.push('\n');
+        }
+        assert!(
+            full_text.contains("disk full"),
+            "save_error message must appear in rendered output",
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_render_zero_height_inner_returns_early() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        // Tiny area: APPEARANCE_HEIGHT=4 plus Min(5) → inner of Configuration
+        // collapses to zero. The render path early-returns without painting.
+        let backend = TestBackend::new(40, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::ui::settings::render(f, &mut app, f.area()))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_render_tall_list_overflows_scrollbar() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Configuration;
+        // Inner height < total rows → scrollbar branch fires.
+        // Use a small window so any non-trivial settings list overflows.
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::ui::settings::render(f, &mut app, f.area()))
+            .unwrap();
+        // Drive the scroll-offset code path by selecting a far-down field.
+        let last_row_index = app.build_settings_rows().len().saturating_sub(1);
+        app.settings.row_index = last_row_index;
+        terminal
+            .draw(|f| crate::ui::settings::render(f, &mut app, f.area()))
+            .unwrap();
+        assert!(
+            app.settings.scroll_offset > 0,
+            "scrolling far down must shift the visible window",
+        );
+    }
+
+    // ── Models view render coverage ──────────────────────────
+    //
+    // Same idea as the settings tests above — we drive every branch of
+    // `crate::ui::models::render` (empty-catalog, populated-catalog,
+    // installed/available split, loaded/ready/empty status markers,
+    // zero-height inspector early returns) so that `ui/models.rs` lights
+    // up under llvm-cov. The fixture comes from `make_settings_test_app()`
+    // because every test helper here already pays the cost of building it.
+
+    fn synth_model(
+        name: &str,
+        family: &str,
+        downloaded: bool,
+        is_loaded: bool,
+    ) -> mold_core::ModelInfoExtended {
+        use mold_core::types::{ModelDefaults, ModelInfo, ModelInfoExtended};
+        ModelInfoExtended {
+            info: ModelInfo {
+                name: name.to_string(),
+                family: family.to_string(),
+                size_gb: 4.2,
+                is_loaded,
+                last_used: None,
+                hf_repo: format!("test-org/{name}"),
+            },
+            defaults: ModelDefaults {
+                default_steps: 4,
+                default_guidance: 3.5,
+                default_width: 1024,
+                default_height: 1024,
+                description: format!("synthetic {name} fixture"),
+            },
+            downloaded,
+            disk_usage_bytes: None,
+            remaining_download_bytes: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn models_render_empty_catalog_shows_no_matches_in_details() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.active_view = View::Models;
+        app.models.catalog.clear();
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::ui::models::render(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push(' ');
+        }
+        assert!(
+            text.contains("no matches"),
+            "empty catalog must surface the 'no matches' empty-state",
+        );
+    }
+
+    #[tokio::test]
+    async fn models_render_installed_section_active_with_loaded_model() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.active_view = View::Models;
+        // Two installed models — first is currently loaded.
+        app.models.catalog = vec![
+            synth_model("flux-dev:q8", "flux", true, true),
+            synth_model("sdxl-base:fp16", "sdxl", true, false),
+        ];
+        app.models.selected = 0;
+        let backend = TestBackend::new(140, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::ui::models::render(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push(' ');
+        }
+        assert!(text.contains("loaded"), "loaded status must render");
+        assert!(text.contains("FLUX"), "family is uppercased in the row");
+        assert!(
+            text.contains("flux-dev:q8"),
+            "installed model name must appear",
+        );
+        // Inspector renders the selected model's HF repo.
+        assert!(
+            text.contains("test-org/flux-dev:q8"),
+            "details panel must surface the selected model's HF repo",
+        );
+    }
+
+    #[tokio::test]
+    async fn models_render_available_section_active_with_undownloaded_model() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.active_view = View::Models;
+        // One installed, one not installed — selecting index 1 (the first
+        // entry past the installed length) flips the active section to
+        // "Available" and exercises the wrapping_sub() path.
+        app.models.catalog = vec![
+            synth_model("flux-dev:q8", "flux", true, false),
+            synth_model("z-image:fp16", "z-image", false, false),
+        ];
+        app.models.selected = 1;
+        let backend = TestBackend::new(140, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::ui::models::render(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push(' ');
+        }
+        assert!(
+            text.contains("ready"),
+            "downloaded-but-not-loaded → 'ready'"
+        );
+        assert!(
+            text.contains("z-image:fp16"),
+            "the non-installed model must list under Available",
+        );
+    }
+
+    #[tokio::test]
+    async fn models_render_zero_width_collapses_panels_without_panic() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.active_view = View::Models;
+        app.models.catalog = vec![synth_model("flux-dev:q8", "flux", true, false)];
+        // Pathological but reachable: a 1-wide window collapses the Details
+        // panel inner to zero, which must early-return rather than panic.
+        let backend = TestBackend::new(1, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| crate::ui::models::render(f, &mut app, f.area()))
+            .unwrap();
+    }
 }

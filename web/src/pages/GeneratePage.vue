@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Composer from "../components/Composer.vue";
-import SettingsModal from "../components/SettingsModal.vue";
+import GenerateParamsPanel from "../components/GenerateParamsPanel.vue";
+type GenerateParamsPanelInstance = InstanceType<typeof GenerateParamsPanel>;
+import PreferencesModal from "../components/PreferencesModal.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
 import RunningStrip from "../components/RunningStrip.vue";
@@ -66,7 +68,7 @@ const galleryEntries = ref<GalleryImage[]>([]);
 const view = ref<ViewMode>(loadViewMode());
 const muted = ref(loadMuted());
 
-const showSettings = ref(false);
+const showPreferences = ref(false);
 const showExpand = ref(false);
 const showPicker = ref(false);
 
@@ -90,24 +92,24 @@ function setComposerMode(v: ComposerMode) {
 
 const expandStageIndex = ref<number | null>(null);
 const composerRef = ref<InstanceType<typeof Composer> | null>(null);
+const paramsPanelRef = ref<GenerateParamsPanelInstance | null>(null);
 
 // Drawer state (mirrors GalleryPage).
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 
-// Auto-dismiss the done card once the gallery feed has the new entry —
-// the preview is now visible in the GalleryFeed below, so leaving the
-// strip card up is duplicate visual noise. Errored / canceled jobs stay
-// (they have nothing in the gallery to fall back to and the user may
-// want to re-read the error).
-const stream = useGenerateStream(async (job) => {
-  try {
-    galleryEntries.value = await listGallery();
-  } catch {
-    /* leave previous */
-  }
-  if (job.state === "done") stream.remove(job.id);
-});
+// The running-strip card auto-dismisses inside the SSE singleton (see
+// `scheduleAutoRemoveOnDone` in useGenerateStream); here we only need to
+// pull in the freshly-saved gallery row when a job transitions to "done".
+//
+// We deliberately *don't* use the singleton's `onComplete` listener for
+// this — that listener is only registered while GeneratePage is mounted,
+// so a job that completes while the user is sitting on /catalog or
+// /gallery would never trigger a refresh. A watcher on `stream.jobs`
+// keyed on the set of done ids reconciles immediately on mount and
+// fires for any subsequent transitions, regardless of which route was
+// active when the SSE complete event arrived.
+const stream = useGenerateStream();
 
 async function refreshModels() {
   try {
@@ -124,6 +126,35 @@ async function refreshGallery() {
     /* ignore */
   }
 }
+
+// Computed of done ids joined into a stable string: changes only when
+// the *set* of done ids changes, not on every progress event. Avoids
+// `{ deep: true }` which would refire on every denoise tick.
+const doneJobIds = computed(() =>
+  stream.jobs.value
+    .filter((j) => j.state === "done")
+    .map((j) => j.id)
+    .join(","),
+);
+
+// Track ids we've already triggered a refresh for so the same completion
+// can't fire `refreshGallery()` twice (e.g. on remount when the job is
+// still in the "done" pre-auto-remove window).
+const seenDoneIds = new Set<string>();
+watch(
+  doneJobIds,
+  () => {
+    let added = false;
+    for (const j of stream.jobs.value) {
+      if (j.state !== "done") continue;
+      if (seenDoneIds.has(j.id)) continue;
+      seenDoneIds.add(j.id);
+      added = true;
+    }
+    if (added) void refreshGallery();
+  },
+  { immediate: true },
+);
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────
 // Gallery gets new entries whenever a job completes (via stream onComplete)
@@ -155,25 +186,6 @@ function stopAutoRefresh() {
   }
 }
 
-// Faster model polling while the advanced/settings modal is open — the user
-// is likely waiting for a download to complete so they can pick the new
-// variant without hitting a manual refresh.
-let settingsModelsTimer: ReturnType<typeof setInterval> | null = null;
-watch(
-  () => showSettings.value,
-  (open) => {
-    if (settingsModelsTimer) {
-      clearInterval(settingsModelsTimer);
-      settingsModelsTimer = null;
-    }
-    if (open) {
-      settingsModelsTimer = setInterval(() => {
-        if (!document.hidden) void refreshModels();
-      }, 3_000);
-    }
-  },
-);
-
 const currentModel = computed(
   () => models.value.find((m) => m.name === form.state.value.model) ?? null,
 );
@@ -192,22 +204,6 @@ const gpuListForPlacement = computed(
       name: `GPU ${g.ordinal}`,
     })) ?? [],
 );
-
-const settingsDirty = computed(() => {
-  const s = form.state.value;
-  const m = currentModel.value;
-  if (!m) return false;
-  return (
-    s.width !== m.default_width ||
-    s.height !== m.default_height ||
-    s.steps !== m.default_steps ||
-    Math.abs(s.guidance - m.default_guidance) > 0.001 ||
-    s.batchSize !== 1 ||
-    s.seed !== null ||
-    s.negativePrompt.length > 0 ||
-    s.lora !== null
-  );
-});
 
 // Placeholder TopBar props — filters/search/mute/refresh/counts are all
 // hidden on /generate by TopBar's `v-if="$route.name === 'gallery'"`, but
@@ -229,7 +225,10 @@ const chainDecision = computed(() =>
 
 function onSubmit() {
   if (!form.state.value.model) {
-    showSettings.value = true;
+    // First-run / nothing-downloaded case. The user has to pick a model
+    // before submit can do anything; force-expand the params panel so
+    // the ModelPicker is reachable without hunting for the toggle.
+    paramsPanelRef.value?.setExpanded(true);
     return;
   }
   const decision = chainDecision.value;
@@ -369,10 +368,6 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopAutoRefresh();
-  if (settingsModelsTimer) {
-    clearInterval(settingsModelsTimer);
-    settingsModelsTimer = null;
-  }
 });
 </script>
 
@@ -403,18 +398,23 @@ onBeforeUnmount(() => {
         :queue-capacity="status?.queue_capacity ?? null"
         :gpus="gpus"
         :expand-active="form.state.value.expand.enabled"
-        :settings-dirty="settingsDirty"
         :family="currentModel?.family ?? ''"
         :placement-gpus="gpuListForPlacement"
         :chain-decision="chainDecision"
         @submit="onSubmit"
         @submit-script="onSubmitScript"
         @update:mode="setComposerMode"
-        @open-settings="showSettings = true"
+        @open-preferences="showPreferences = true"
         @open-expand="showExpand = true"
         @open-expand-stage="(idx: number, p: string) => onExpandStage(idx, p)"
         @open-image-picker="showPicker = true"
         @clear-source="onClearSource"
+      />
+
+      <GenerateParamsPanel
+        ref="paramsPanelRef"
+        v-model="form.state.value"
+        :models="models"
       />
 
       <RunningStrip
@@ -442,11 +442,9 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <SettingsModal
-      :open="showSettings"
-      v-model="form.state.value"
-      :models="models"
-      @close="showSettings = false"
+    <PreferencesModal
+      :open="showPreferences"
+      @close="showPreferences = false"
     />
     <ExpandModal
       :open="showExpand"

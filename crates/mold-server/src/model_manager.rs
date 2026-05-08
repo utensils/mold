@@ -48,38 +48,67 @@ fn check_model_memory_budget(
 /// model that will be unloaded before the new one loads — without this, a
 /// swap of two near-equal-size models would be falsely rejected even though
 /// the swap is feasible.
+///
+/// Peak is estimated under `LoadStrategy::Sequential` because every diffusion
+/// family in this repo (FLUX, SD3, Z-Image, Flux.2, Qwen-Image, LTX) drops
+/// text encoders from GPU after encoding before the transformer denoises.
+/// The Eager sum (`transformer + vae + all_encoders`) overcounts by the
+/// encoder weight on every load — enough to false-reject a quantized FLUX on
+/// a 24 GB card even when the swap would actually fit.
 pub(crate) fn preflight_memory_guard_with_available(
     model_name: &str,
     paths: &ModelPaths,
     active_vram_bytes: u64,
     available_bytes: u64,
 ) -> Result<(), ApiError> {
-    let peak =
-        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager);
+    let peak = mold_inference::device::estimate_peak_memory(
+        paths,
+        mold_inference::LoadStrategy::Sequential,
+    );
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
     check_model_memory_budget(model_name, peak, effective_available)
 }
 
 /// Check whether estimated peak memory fits before committing to a model load.
 ///
-/// - On CUDA: uses `free_vram_bytes(gpu_ordinal)`.
-/// - On macOS (MPS/unified memory): uses `available_system_memory_bytes()`.
-/// - On other platforms: no-op.
+/// Budgeting strategy on CUDA:
+/// - **No active model on this GPU** — the new load lands in whatever is
+///   currently free, so use `free_vram_bytes(gpu_ordinal)`.
+/// - **Active model present** — the call site unloads it and runs
+///   `cuDevicePrimaryCtxReset_v2`, which releases *every* allocation on the
+///   device (transformer, leftover activation buffers, fragmentation in the
+///   caching pool). The realistic post-reclaim budget is total VRAM, not
+///   `free + recorded active_vram`. Using the latter under-counts whatever
+///   the cache forgot to track (notably the encoder churn during the
+///   previous generation) and produces false rejections.
 ///
-/// `active_vram_bytes` is the footprint of the currently GPU-resident model
-/// that will be unloaded before loading the new one. This memory will become
-/// available, so we add it to the budget to avoid false rejections during
-/// model swaps.
+/// On macOS (unified memory) we keep the additive `available + active_vram`
+/// budget because Metal has no equivalent device-wide context reset; tensors
+/// freed during `unload()` simply return to the system page cache.
+/// On other platforms with no memory query available, the guard is a no-op.
 pub(crate) fn preflight_memory_guard(
     model_name: &str,
     paths: &ModelPaths,
     active_vram_bytes: u64,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
 ) -> Result<(), ApiError> {
-    // CUDA branch: query free VRAM on the target ordinal.
+    // CUDA branch: when an active model will be reclaimed via primary-context
+    // reset, the post-reclaim budget is the device total, not free+active.
     #[cfg(feature = "cuda")]
-    if let Some(free) = mold_inference::device::free_vram_bytes(gpu_ordinal) {
-        return preflight_memory_guard_with_available(model_name, paths, active_vram_bytes, free);
+    {
+        if active_vram_bytes > 0 {
+            if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
+                return preflight_memory_guard_with_available(model_name, paths, 0, total);
+            }
+        }
+        if let Some(free) = mold_inference::device::free_vram_bytes(gpu_ordinal) {
+            return preflight_memory_guard_with_available(
+                model_name,
+                paths,
+                active_vram_bytes,
+                free,
+            );
+        }
     }
 
     // macOS unified memory: query system memory and add reclaimable footprint.
@@ -188,6 +217,22 @@ fn looks_like_catalog_id(id: &str) -> bool {
     id.starts_with("cv:") || id.starts_with("hf:")
 }
 
+/// Best-effort family lookup for a catalog (`cv:*` / `hf:*`) model name,
+/// used to feed `validate_generate_request_with_family` so catalog IDs
+/// get the same family-gated feature checks as manifest-resident models.
+///
+/// Reads from `state.config.models` — callers must run
+/// `ensure_catalog_model_installed` first so the entry has been
+/// synthesized into the config. Returns `None` for non-catalog ids,
+/// uninstalled catalog ids, or entries lacking a family.
+pub(crate) async fn catalog_family_for(state: &AppState, model_name: &str) -> Option<String> {
+    if !looks_like_catalog_id(model_name) {
+        return None;
+    }
+    let config = state.config.read().await;
+    config.models.get(model_name).and_then(|m| m.family.clone())
+}
+
 fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, paths: &ModelPaths) {
     let to_str = |p: &std::path::PathBuf| p.to_str().map(str::to_owned);
     match companion {
@@ -220,30 +265,45 @@ fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, pat
                 .into();
             cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_str);
         }
+        "ltx2-te" => {
+            // Gemma 3 12B for LTX-2. The runtime calls `gemma_root` which
+            // takes the parent directory of `text_encoder_files[0]`, so
+            // populating that vec is sufficient — we don't need a separate
+            // `text_tokenizer` field (the manifest tags every Gemma file
+            // including `tokenizer.json` / `tokenizer.model` as
+            // ModelComponent::TextEncoder, so the tokenizer rides along).
+            cfg.text_encoder_files = paths
+                .text_encoder_files
+                .iter()
+                .filter_map(to_str)
+                .collect::<Vec<_>>()
+                .into();
+        }
         _ => {}
     }
 }
 
 fn synthesize_catalog_config(
-    row: &mold_db::catalog::CatalogRow,
+    entry: &mold_catalog::entry::CatalogEntry,
     models_dir: &std::path::Path,
     config: &mold_core::Config,
 ) -> anyhow::Result<mold_core::ModelConfig> {
-    let recipe = serde_json::from_str::<mold_catalog::entry::DownloadRecipe>(&row.download_recipe)
-        .map_err(|e| anyhow::anyhow!("malformed download_recipe for {}: {e}", row.id))?;
+    use mold_catalog::companions::companions_for;
+    use mold_catalog::entry::Bundling;
 
-    let primary = recipe
+    let primary = entry
+        .download_recipe
         .files
         .first()
-        .ok_or_else(|| anyhow::anyhow!("empty recipe for {}", row.id))?;
+        .ok_or_else(|| anyhow::anyhow!("empty recipe for {}", entry.id.0))?;
 
-    let sanitized = mold_core::download::sanitize_recipe_id(&row.id);
-    let (author, name) = match row.source_id.split_once('/') {
+    let sanitized = mold_core::download::sanitize_recipe_id(entry.id.as_str());
+    let (author, name) = match entry.source_id.split_once('/') {
         Some((a, n)) => (a, n),
-        None => ("", row.source_id.as_str()),
+        None => ("", entry.source_id.as_str()),
     };
     let rendered_dest =
-        mold_catalog::entry::render_recipe_dest(&primary.dest, &row.family, author, name);
+        mold_catalog::entry::render_recipe_dest(&primary.dest, entry.family.as_str(), author, name);
     let primary_path = models_dir.join(&sanitized).join(&rendered_dest);
     let primary_str = primary_path
         .to_str()
@@ -251,51 +311,43 @@ fn synthesize_catalog_config(
         .to_string();
 
     let mut cfg = mold_core::ModelConfig {
-        family: Some(row.family.clone()),
+        family: Some(entry.family.as_str().to_string()),
         ..Default::default()
     };
 
-    if row.bundling == "single-file" {
+    if matches!(entry.bundling, Bundling::SingleFile) {
         cfg.transformer = Some(primary_str.clone());
         cfg.vae = Some(primary_str);
     } else {
         anyhow::bail!(
             "bundling={:?} not supported (single-file only)",
-            row.bundling
+            entry.bundling
         );
     }
 
-    // Populate companion paths from already-resolved manifest entries.
-    use mold_catalog::companions::companions_for;
-    use mold_catalog::entry::Bundling;
-    use mold_catalog::families::Family;
-    let fam = match row.family.as_str() {
-        "sd15" => Some(Family::Sd15),
-        "sdxl" => Some(Family::Sdxl),
-        "flux" => Some(Family::Flux),
-        "flux2" => Some(Family::Flux2),
-        "z-image" => Some(Family::ZImage),
-        "ltx-video" => Some(Family::LtxVideo),
-        "ltx2" => Some(Family::Ltx2),
-        "qwen-image" => Some(Family::QwenImage),
-        "wuerstchen" => Some(Family::Wuerstchen),
-        _ => None,
-    };
-    if let Some(fam) = fam {
-        for companion in companions_for(fam, row.sub_family.as_deref(), Bundling::SingleFile) {
-            if let Some(paths) = ModelPaths::resolve(&companion, config) {
-                copy_catalog_companion(&mut cfg, &companion, &paths);
-            }
+    for companion in companions_for(
+        entry.family,
+        entry.sub_family.as_deref(),
+        Bundling::SingleFile,
+        entry.kind,
+    ) {
+        match ModelPaths::resolve(&companion, config) {
+            Some(paths) => copy_catalog_companion(&mut cfg, &companion, &paths),
+            None => tracing::warn!(
+                catalog_id = %entry.id.0,
+                companion = %companion,
+                "companion did not resolve from manifest paths — engine load may fail"
+            ),
         }
     }
 
     Ok(cfg)
 }
 
-/// If `model_name` is a catalog ID and not yet in the config, synthesize its
-/// `ModelConfig` from the catalog DB and insert it. Returns `true` when a
-/// config entry was added (or already existed).
-async fn install_catalog_model(state: &AppState, model_name: &str) -> bool {
+/// If `model_name` is a catalog ID and not yet in the config, hit live
+/// HF/Civitai for the entry and synthesize its `ModelConfig`. Returns
+/// `true` when a config entry was added (or already existed).
+pub(crate) async fn install_catalog_model(state: &AppState, model_name: &str) -> bool {
     if !looks_like_catalog_id(model_name) {
         return false;
     }
@@ -308,22 +360,45 @@ async fn install_catalog_model(state: &AppState, model_name: &str) -> bool {
         }
     }
 
-    let row = match state.catalog_db.catalog_get(model_name) {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            tracing::debug!(model = model_name, "not found in catalog DB");
-            return false;
+    // Live single-id lookup. Tokens are picked up from env so unauthenticated
+    // browsing still works.
+    let civitai_base = state.catalog_live_civitai_base.as_str();
+    let entry = if let Some(version_id) = model_name.strip_prefix("cv:") {
+        match mold_catalog::live::fetch_civitai_version(
+            civitai_base,
+            version_id,
+            std::env::var("CIVITAI_TOKEN").ok().as_deref(),
+        )
+        .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(model = model_name, error = %e, "live civitai lookup failed");
+                return false;
+            }
         }
-        Err(e) => {
-            tracing::warn!(model = model_name, error = %e, "catalog DB error");
-            return false;
+    } else if let Some(repo_id) = model_name.strip_prefix("hf:") {
+        match mold_catalog::live::fetch_hf_repo(
+            "https://huggingface.co",
+            repo_id,
+            std::env::var("HF_TOKEN").ok().as_deref(),
+        )
+        .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(model = model_name, error = %e, "live hf lookup failed");
+                return false;
+            }
         }
+    } else {
+        return false;
     };
 
     let synth = {
         let config = state.config.read().await;
         let models_dir = config.resolved_models_dir();
-        match synthesize_catalog_config(&row, &models_dir, &config) {
+        match synthesize_catalog_config(&entry, &models_dir, &config) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(model = model_name, error = %e, "synthesize failed");
@@ -337,78 +412,39 @@ async fn install_catalog_model(state: &AppState, model_name: &str) -> bool {
     true
 }
 
-/// Return `ModelInfoExtended` entries for every installed Civitai single-file
-/// checkpoint in the catalog DB that isn't already covered by a manifest.
+/// Return `ModelInfoExtended` entries for every installed catalog
+/// checkpoint discovered via per-install sidecars. Replaces the
+/// bulk-scrape DB query that used to back this surface.
 fn installed_catalog_models(
-    state: &AppState,
+    _state: &AppState,
     config: &mold_core::Config,
     models_dir: &std::path::Path,
     loaded_model: Option<&str>,
     engine_is_loaded: bool,
 ) -> Vec<ModelInfoExtended> {
-    let params = mold_db::catalog::ListParams {
-        kind: Some("checkpoint".to_string()),
-        source: Some("civitai".to_string()),
-        include_nsfw: true,
-        limit: 1000,
-        ..Default::default()
-    };
-    let rows = match state.catalog_db.catalog_list(&params) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to query catalog for installed models");
-            return vec![];
-        }
-    };
-
+    let walked = mold_catalog::sidecar::walk_sidecars(models_dir);
     let mut out = Vec::new();
-    for row in rows {
-        if row.bundling != "single-file" {
+    for (sidecar_dir, sidecar) in walked {
+        if sidecar.kind != "checkpoint" {
             continue;
         }
-        // Skip entries already in the manifest (they're covered by build_model_catalog).
-        if mold_core::manifest::find_manifest_by_hf_repo(&row.source_id).is_some() {
+        // Skip sidecars whose primary file isn't actually present —
+        // partial pulls / aborted downloads.
+        if mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar).is_none() {
             continue;
         }
-        let recipe =
-            match serde_json::from_str::<mold_catalog::entry::DownloadRecipe>(&row.download_recipe)
-            {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-        let (author, name) = match row.source_id.split_once('/') {
-            Some((a, n)) => (a, n),
-            None => ("", row.source_id.as_str()),
-        };
-        let rendered_dests: Vec<String> = recipe
-            .files
-            .iter()
-            .map(|f| mold_catalog::entry::render_recipe_dest(&f.dest, &row.family, author, name))
-            .collect();
-        let files: Vec<mold_core::download::RecipeFetchFile<'_>> = recipe
-            .files
-            .iter()
-            .zip(rendered_dests.iter())
-            .map(|(f, dest)| mold_core::download::RecipeFetchFile {
-                url: f.url.as_str(),
-                dest: dest.as_str(),
-                sha256: f.sha256.as_deref(),
-                size_bytes: f.size_bytes,
-            })
-            .collect();
-        if !mold_core::download::catalog_entry_installed(models_dir, &row.id, &files) {
+        // Skip entries already covered by a manifest.
+        if mold_core::manifest::find_manifest_by_hf_repo(&sidecar.source_id).is_some() {
             continue;
         }
 
-        let size_gb = row
+        let size_gb = sidecar
             .size_bytes
             .map(|b| b as f32 / 1_000_000_000.0)
             .unwrap_or(0.0);
 
-        // Use defaults from a visible manifest in the same family, fall back to
-        // family-specific constants.
         let (w, h, steps, guidance) = mold_core::manifest::visible_manifests()
-            .find(|m| m.family == row.family)
+            .find(|m| m.family == sidecar.family)
             .map(|m| {
                 let cfg = config.resolved_model_config(&m.name);
                 (
@@ -418,7 +454,7 @@ fn installed_catalog_models(
                     cfg.effective_guidance(),
                 )
             })
-            .unwrap_or_else(|| match row.family.as_str() {
+            .unwrap_or_else(|| match sidecar.family.as_str() {
                 "ltx-video" | "ltx2" => (768, 512, 25, 3.5),
                 "sdxl" => (1024, 1024, 20, 7.5),
                 "sd15" => (512, 512, 20, 7.5),
@@ -427,9 +463,9 @@ fn installed_catalog_models(
                 _ => (1024, 1024, 20, 3.5),
             });
 
-        let description = match &row.author {
-            Some(a) if !a.is_empty() => format!("{} by {a}", row.name),
-            _ => row.name.clone(),
+        let description = match &sidecar.author {
+            Some(a) if !a.is_empty() => format!("{} by {a}", sidecar.name),
+            _ => sidecar.name.clone(),
         };
 
         out.push(ModelInfoExtended {
@@ -442,14 +478,14 @@ fn installed_catalog_models(
                 description,
             },
             info: ModelInfo {
-                name: row.id.clone(),
-                family: row.family.clone(),
+                name: sidecar.id.clone(),
+                family: sidecar.family.clone(),
                 size_gb,
-                is_loaded: loaded_model.is_some_and(|n| engine_is_loaded && n == row.id),
+                is_loaded: loaded_model.is_some_and(|n| engine_is_loaded && n == sidecar.id),
                 last_used: None,
                 hf_repo: String::new(),
             },
-            disk_usage_bytes: row.size_bytes.map(|b| b as u64),
+            disk_usage_bytes: sidecar.size_bytes,
             remaining_download_bytes: Some(0),
         });
     }
@@ -1028,5 +1064,91 @@ mod tests {
         let active_vram = 8 * GB;
         let effective = free_vram + active_vram;
         assert!(check_model_memory_budget("too-large", 15 * GB, effective).is_err());
+    }
+
+    /// Build a `ModelPaths` whose components include text encoders, mirroring a
+    /// real FLUX-family layout. Used to verify the Sequential-strategy peak
+    /// estimate doesn't sum the encoder onto the transformer (the bug fix).
+    fn flux_shaped_paths_with_sizes(
+        transformer_gb: u64,
+        vae_gb: u64,
+        t5_gb: u64,
+        clip_gb: u64,
+    ) -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk("transformer.safetensors", transformer_gb);
+        let vae = mk("vae.safetensors", vae_gb);
+        let t5 = mk("t5.safetensors", t5_gb);
+        let clip = mk("clip.safetensors", clip_gb);
+        let paths = ModelPaths {
+            transformer,
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: Some(t5),
+            clip_encoder: Some(clip),
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
+    /// Regression: a quantized FLUX-shaped model should fit on a 24 GB card
+    /// when the sibling model is unloaded and the context reset, even though
+    /// the Eager (sum) peak would have been ~24 GB and tripped the 90 %
+    /// hard limit.
+    ///
+    /// Concrete shape: FLUX-dev:q8 → transformer ≈ 12 GB, VAE ≈ 0.3 GB,
+    /// T5 ≈ 9.5 GB, CLIP ≈ 0.25 GB. Eager peak = 12+0.3+9.5+0.25+2 ≈ 24 GB
+    /// (rejects at 90 % of 24 GB = 21.6). Sequential peak =
+    /// max(9.75, 12.3) + 2 ≈ 14.3 GB (passes comfortably).
+    #[test]
+    fn preflight_passes_for_quantized_flux_on_24gb_card_with_swap() {
+        // Use whole-GB sizes to match the helper's u64 parameters; the
+        // composition is realistic enough to exercise Eager-vs-Sequential
+        // divergence (encoder + transformer both > headroom).
+        let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
+        // Free 4 GB on a 24 GB card with an 18 GB sibling about to be
+        // reclaimed → effective_available passed in by the outer guard
+        // is total_vram = 24 GB on CUDA, but we test the inner directly with
+        // the Sequential strategy in mind.
+        let result = preflight_memory_guard_with_available("flux-dev:q8", &paths, 0, 24 * GB);
+        assert!(
+            result.is_ok(),
+            "quantized FLUX must fit on a 24 GB card under the Sequential \
+             peak estimate (drop-and-reload encoders), got {result:?}"
+        );
+    }
+
+    /// Companion: under the *old* Eager-strategy math the same model would
+    /// have been rejected. Verifying explicitly so a regression that flips
+    /// the strategy back gets caught.
+    #[test]
+    fn eager_strategy_would_have_rejected_quantized_flux_on_24gb() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
+        let eager_peak = mold_inference::device::estimate_peak_memory(
+            &paths,
+            mold_inference::LoadStrategy::Eager,
+        );
+        // 12 + 1 + 10 + 1 + 2 GB headroom = 26 GB → above 90 % of 24 GB.
+        let hard_limit = (24 * GB) * 9 / 10;
+        assert!(
+            eager_peak > hard_limit,
+            "Eager peak ({eager_peak}) should exceed hard limit ({hard_limit}) — \
+             this is the false-rejection the Sequential switch fixes"
+        );
     }
 }

@@ -130,6 +130,10 @@ export interface GenerateRequestWire {
   fps?: number | null;
   placement?: DevicePlacement | null;
   lora?: { path: string; scale: number } | null;
+  /** Multi-LoRA stack. Wins over the singular `lora` field when both are
+   * set. The server merges deltas additively so order is significant
+   * mostly for human reasoning (the math commutes). */
+  loras?: { path: string; scale: number }[] | null;
   /** AV-family (LTX-2 / LTX-2.3) audio decode toggle. `true` enables the
    * audio VAE + vocoder tail and produces an AAC track in the MP4 mux;
    * `false` skips audio decode; omit for "no preference" (server defaults
@@ -321,6 +325,27 @@ export interface ExpandFormState {
 export interface LoraSelection {
   path: string;
   scale: number;
+  /** Trigger phrases (Civitai `trainedWords`) for the chosen LoRA. Carried
+   * on the form-state row so the picker can render click-to-insert chips
+   * without a second catalog lookup. Optional — populated when the user
+   * picked the LoRA via the catalog-backed dropdown; empty otherwise. */
+  trainedWords?: string[];
+}
+
+/// Soft cap on stacked LoRAs in the web UI. The inference engine has no
+/// hard limit (the merge is `W' = W + Σ deltas`) but each adapter adds
+/// matmul work and disk I/O at build time, so 4 is a sane UX ceiling.
+export const MAX_LORA_STACK = 4;
+
+/// Families whose engines actually merge LoRA adapters today. Mirrors
+/// `crates/mold-tui/src/model_info.rs::capabilities_for_family` and the
+/// server-side gate in `mold-core/src/validation.rs`. Keep all three in
+/// sync — divergence shows up as a UI that lets the user pick a LoRA the
+/// server then rejects.
+export const LORA_CAPABLE_FAMILIES = ["flux"] as const;
+
+export function supportsLora(family: string): boolean {
+  return (LORA_CAPABLE_FAMILIES as readonly string[]).includes(family);
 }
 
 export interface GenerateFormState {
@@ -342,7 +367,10 @@ export interface GenerateFormState {
   expand: ExpandFormState;
   sourceImage: SourceImageState | null;
   placement: DevicePlacement | null;
-  lora: LoraSelection | null;
+  /** LoRA stack. Stored as an array so the UI can hold multiple
+   * selections; serialized as `loras` on the wire. Defaults to an empty
+   * array; absence-of-LoRA is `loras.length === 0`, never `null`. */
+  loras: LoraSelection[];
   /** Per-form audio toggle. `true`/`false` send the corresponding
    * `enable_audio` on the wire; `null` omits the field so the server's
    * MP4 default-on behavior takes over. Auto-set to `true` when the
@@ -554,6 +582,10 @@ export interface CatalogEntryWire {
   created_at: number | null;
   updated_at: number | null;
   added_at: number;
+  /** Trigger phrases (Civitai `trainedWords`) for LoRA entries. Empty
+   * for non-LoRA rows or when the upstream API didn't supply any. The
+   * SPA renders these as click-to-insert chips inside the LoRA picker. */
+  trained_words?: string[];
 }
 
 export interface CatalogListResponse {
@@ -571,8 +603,6 @@ export interface CatalogListResponse {
 
 export interface CatalogFamilyCount {
   family: string;
-  foundation: number;
-  finetune: number;
 }
 
 export interface CatalogFamiliesResponse {
@@ -593,23 +623,3 @@ export interface CatalogListParams {
   page?: number;
   page_size?: number;
 }
-
-export type CatalogRefreshStatus =
-  | { state: "pending" }
-  | {
-      state: "running";
-      // All optional so older servers (pre live-progress) still parse.
-      // The web UI guards with nullish-coalescing where needed.
-      families_total?: number;
-      families_done?: number;
-      current_family?: string | null;
-      current_stage?: string | null;
-      // Per-seed / per-page detail. Pre-2026-04-27 servers omit these
-      // and the panel falls back to the family-only summary.
-      current_seed?: string | null;
-      pages_done?: number;
-      entries_so_far?: number;
-      started_at_ms?: number;
-    }
-  | { state: "done"; total_entries: number; per_family: Record<string, string> }
-  | { state: "failed"; message: string };

@@ -551,6 +551,33 @@ pub fn vram_in_use_bytes(_ordinal: usize) -> u64 {
     0
 }
 
+/// Total VRAM (bytes) physically present on the specified GPU ordinal.
+///
+/// Used by the preflight memory guard to budget against the post-reclaim
+/// state: when an existing model is about to be unloaded and the CUDA
+/// primary context reset, the *entire* device returns to the OS, so the
+/// realistic upper bound is total VRAM, not `free + active_vram`.
+///
+/// Returns `None` when the device cannot be queried (CUDA disabled, ordinal
+/// out of range, driver error). Callers should fall back to a less generous
+/// budget in that case rather than treating `None` as unlimited.
+#[cfg(feature = "cuda")]
+pub fn total_vram_bytes(ordinal: usize) -> Option<u64> {
+    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
+        candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
+            .ok()
+            .map(|(_free, total)| total as u64)
+    } else {
+        None
+    }
+}
+
+/// Non-CUDA stub — no per-device total VRAM available outside CUDA.
+#[cfg(not(feature = "cuda"))]
+pub fn total_vram_bytes(_ordinal: usize) -> Option<u64> {
+    None
+}
+
 /// Bytes loaded onto the GPU since `baseline` was sampled.
 ///
 /// `baseline = vram_in_use_bytes(ordinal)` taken **before** loading a model;

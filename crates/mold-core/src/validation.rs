@@ -97,6 +97,18 @@ fn model_family(model_name: &str) -> Option<&str> {
         })
 }
 
+/// Resolve a model's family for validation, preferring an explicit hint when
+/// provided. The hint lets callers (e.g. the HTTP server) pass through a family
+/// that the manifest layer can't see — most notably catalog IDs like
+/// `cv:2781713` whose family is recorded in the catalog DB rather than the
+/// hardcoded manifest. When `family_hint` is `None` (or an empty string), the
+/// manifest fallback runs as before.
+fn resolved_family<'a>(model_name: &'a str, family_hint: Option<&'a str>) -> Option<&'a str> {
+    family_hint
+        .filter(|h| !h.is_empty())
+        .or_else(|| model_family(model_name))
+}
+
 fn validate_lora_weight(lora: &LoraWeight, field_name: &str) -> Result<(), String> {
     if lora.scale < 0.0 || lora.scale > 2.0 {
         return Err(format!(
@@ -166,6 +178,22 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
     }
 }
 
+/// LoRA support is currently FLUX-only — `mold-inference`'s `flux/lora.rs`
+/// is the only engine path that knows how to merge low-rank adapters into
+/// the base weights. Surfacing the gate at validation produces a clear
+/// 400 instead of an opaque inference-layer panic when a user picks a
+/// non-FLUX model + a LoRA. SD1.5 / SDXL LoRA support is on the roadmap;
+/// extend this match when those engines learn the LoRA path.
+fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
+    match family {
+        Some("flux") => Ok(()),
+        Some(other) => Err(format!(
+            "LoRA is currently supported only for FLUX models; got family {other:?}"
+        )),
+        None => Err("LoRA requires a known model family — pick a FLUX model first".to_string()),
+    }
+}
+
 fn validate_inline_media_size(
     bytes: &[u8],
     field_name: &str,
@@ -183,8 +211,24 @@ fn validate_inline_media_size(
 
 /// Validate a generate request. Returns `Ok(())` if valid, or an error message.
 /// Shared between the HTTP server and local CLI inference paths.
+///
+/// For models whose family can't be derived from the manifest (catalog IDs
+/// like `cv:2781713`), use [`validate_generate_request_with_family`] and pass
+/// the resolved family from the catalog DB; otherwise the family-gated
+/// features (audio, keyframes, retake, …) will fail with
+/// `unknown model family` even on legitimate LTX-2 catalog checkpoints.
 pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
-    let family = model_family(&req.model);
+    validate_generate_request_with_family(req, None)
+}
+
+/// Variant of [`validate_generate_request`] that accepts an explicit family
+/// hint. The hint takes precedence over the manifest lookup, letting the HTTP
+/// server feed in the catalog-resolved family for `cv:` / `hf:` model IDs.
+pub fn validate_generate_request_with_family(
+    req: &GenerateRequest,
+    family_hint: Option<&str>,
+) -> Result<(), String> {
+    let family = resolved_family(&req.model, family_hint);
 
     if req.prompt.trim().is_empty() {
         return Err("prompt must not be empty".to_string());
@@ -309,12 +353,14 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     // LoRA validation (format checks only — path existence is checked at the
     // inference layer, since in remote mode the path refers to the server filesystem).
     if let Some(ref lora) = req.lora {
+        require_lora_capable_family(family)?;
         validate_lora_weight(lora, "lora")?;
     }
     if let Some(ref loras) = req.loras {
         if loras.is_empty() {
             return Err("loras must not be empty when provided".to_string());
         }
+        require_lora_capable_family(family)?;
         for lora in loras {
             validate_lora_weight(lora, "loras")?;
         }
@@ -358,7 +404,12 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
         }
         validate_inline_media_size(video, "source_video", MAX_INLINE_SOURCE_VIDEO_BYTES)?;
     }
-    if req.enable_audio.is_some() {
+    // Only enforce the LTX-2 family gate when audio is actually requested
+    // (`Some(true)`). The web form serializes its tri-state checkbox as
+    // `Some(false)` when the user has explicitly turned audio off — which
+    // must NOT trip a family error for video-only families, since the user
+    // didn't ask for audio at all.
+    if req.enable_audio == Some(true) {
         require_ltx2_family(family, "enable_audio")?;
     }
     if req.retake_range.is_some() {
@@ -781,6 +832,57 @@ mod tests {
         ]);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("unknown model family"), "got: {err}");
+    }
+
+    #[test]
+    fn enable_audio_some_false_does_not_trip_family_check() {
+        // Web form serializes the audio toggle as `Some(false)` whenever the
+        // checkbox is explicitly off. That must be a no-op for any family
+        // (including the unknown-family case used by catalog `cv:*` IDs)
+        // since the user did not ask for audio.
+        let mut req = valid_req();
+        req.model = "cv:2781713".to_string();
+        req.enable_audio = Some(false);
+        // No family hint provided — exercises the unknown-family branch.
+        validate_generate_request(&req).unwrap();
+    }
+
+    #[test]
+    fn enable_audio_some_true_with_family_hint_passes_for_catalog_ltx2() {
+        // The HTTP server resolves `cv:*` IDs against the catalog DB and
+        // passes the family through as a hint. With the LTX-2 hint, audio
+        // is allowed even though the manifest layer has no entry for the
+        // catalog ID.
+        let mut req = valid_req();
+        req.model = "cv:2781713".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.enable_audio = Some(true);
+        validate_generate_request_with_family(&req, Some("ltx2")).unwrap();
+    }
+
+    #[test]
+    fn enable_audio_some_true_without_hint_still_errors_on_unknown_family() {
+        // No hint, no manifest entry — the family gate still fires so the
+        // user gets a clear 400 instead of an opaque inference-layer error.
+        let mut req = valid_req();
+        req.model = "cv:2781713".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.enable_audio = Some(true);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("unknown model family"), "got: {err}");
+        assert!(err.contains("enable_audio"), "got: {err}");
+    }
+
+    #[test]
+    fn family_hint_overrides_manifest_lookup() {
+        // Even when the manifest would resolve the model name to a different
+        // family, the explicit hint wins. This lets the server pass the
+        // catalog-resolved family through unconditionally.
+        let mut req = valid_req();
+        req.model = "private-name".to_string();
+        req.output_format = OutputFormat::Mp4;
+        req.enable_audio = Some(true);
+        validate_generate_request_with_family(&req, Some("ltx2")).unwrap();
     }
 
     #[test]
@@ -1334,6 +1436,17 @@ mod tests {
 
     // ── LoRA validation tests ──────────────────────────────────────────────
 
+    /// Build a FLUX-model request — the only family that supports LoRAs
+    /// today. Tests that exercise LoRA value-validation (scale, extension)
+    /// must use a LoRA-capable family or they fail on the upstream
+    /// family-gate before the value check can trip.
+    fn valid_flux_req() -> GenerateRequest {
+        GenerateRequest {
+            model: "flux-dev".to_string(),
+            ..valid_req()
+        }
+    }
+
     #[test]
     fn lora_none_valid() {
         let req = valid_req();
@@ -1343,7 +1456,7 @@ mod tests {
 
     #[test]
     fn lora_scale_too_low_rejected() {
-        let mut req = valid_req();
+        let mut req = valid_flux_req();
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: -0.1,
@@ -1357,7 +1470,7 @@ mod tests {
 
     #[test]
     fn lora_scale_too_high_rejected() {
-        let mut req = valid_req();
+        let mut req = valid_flux_req();
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 2.1,
@@ -1372,7 +1485,7 @@ mod tests {
     #[test]
     fn lora_scale_boundary_valid() {
         for scale in [0.0, 1.0, 2.0] {
-            let mut req = valid_req();
+            let mut req = valid_flux_req();
             req.lora = Some(crate::LoraWeight {
                 path: "adapter.safetensors".to_string(),
                 scale,
@@ -1388,7 +1501,7 @@ mod tests {
     fn lora_path_not_found_passes_validation() {
         // Path existence is checked at the inference layer, not validation,
         // so remote LoRA paths (server-side files) work correctly.
-        let mut req = valid_req();
+        let mut req = valid_flux_req();
         req.lora = Some(crate::LoraWeight {
             path: "/nonexistent/path/adapter.safetensors".to_string(),
             scale: 1.0,
@@ -1398,7 +1511,7 @@ mod tests {
 
     #[test]
     fn lora_wrong_extension_rejected() {
-        let mut req = valid_req();
+        let mut req = valid_flux_req();
         req.lora = Some(crate::LoraWeight {
             path: "/some/path/adapter.bin".to_string(),
             scale: 1.0,
@@ -1408,6 +1521,58 @@ mod tests {
             err.contains("safetensors"),
             "expected safetensors error: {err}"
         );
+    }
+
+    /// Generation with a LoRA attached on a non-FLUX model must fail at
+    /// validation with a clear error — not at the inference layer with
+    /// an opaque panic. This is the user-facing 400 the web UI will
+    /// surface when (e.g.) the picker sneaks past its family gate.
+    #[test]
+    fn lora_on_sdxl_rejected_with_family_message() {
+        let mut req = valid_req();
+        req.model = "sdxl".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("flux"),
+            "error must mention FLUX so the user knows which family is supported: {err}"
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_sdxl_rejected() {
+        let mut req = valid_req();
+        req.model = "sdxl".to_string();
+        req.loras = Some(vec![crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("flux"),
+            "loras-plural path must also family-gate: {err}"
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_flux_valid() {
+        // Multi-LoRA is supported on FLUX. The validator must not block
+        // the plural form just because the singular form already gates.
+        let mut req = valid_flux_req();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(validate_generate_request(&req).is_ok());
     }
 
     // ── dimension_warning tests ────────────────────────────────────────────

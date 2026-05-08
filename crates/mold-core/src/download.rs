@@ -1253,6 +1253,23 @@ pub fn download_single_file_sync(
     }
 }
 
+/// Check whether a file is present in mold's managed hf-hub cache
+/// (`<models_dir>/.hf-cache/`). Narrower than [`cached_file_path`] — does
+/// not consult the system-wide `~/.cache/huggingface/`, the legacy mold
+/// models cache, or any clean-path location. Used as a layout-agnostic
+/// fallback by `Config::discovered_manifest_paths` so a single shard set
+/// downloaded by a manifest install can also satisfy a catalog companion
+/// that expects the same files under a different canonical layout (e.g.
+/// the Gemma TE shared by `ltx-2.3-22b-distilled:fp8` and the catalog
+/// `ltx2-te` companion). Tests that intentionally set up a "model not
+/// downloaded" world are unaffected because they only override
+/// `MOLD_MODELS_DIR`, not the user's home HF cache.
+pub fn cached_file_path_in_mold_cache(hf_repo: &str, hf_filename: &str) -> Option<PathBuf> {
+    let cache = Cache::new(hf_cache_dir());
+    let repo = cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    repo.get(hf_filename)
+}
+
 /// Check if a file is already cached locally (no download).
 ///
 /// If `target_subdir` is provided, checks the clean path first
@@ -1562,9 +1579,18 @@ pub fn missing_companions_from_json(
         Ok(n) => n,
         Err(_) => return Vec::new(),
     };
+    missing_companions(&names, models_dir)
+}
+
+/// `Vec<String>`-shaped variant for callers that already have a typed
+/// companion list (e.g. live-fetched `CatalogEntry::companions`).
+pub fn missing_companions(
+    names: &[String],
+    models_dir: &Path,
+) -> Vec<&'static crate::manifest::ModelManifest> {
     let mut out = Vec::with_capacity(names.len());
     for name in names {
-        let Some(manifest) = crate::manifest::find_manifest(&name) else {
+        let Some(manifest) = crate::manifest::find_manifest(name) else {
             tracing::warn!(
                 companion = %name,
                 "skipping companion with no synthetic manifest in this build",

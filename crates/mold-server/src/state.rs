@@ -8,7 +8,6 @@ use tokio::sync::Mutex;
 
 use mold_inference::shared_pool::SharedPool;
 
-use crate::catalog_api::CatalogScanQueue;
 use crate::downloads::DownloadQueue;
 use crate::gpu_pool::GpuPool;
 use crate::model_cache::ModelCache;
@@ -163,11 +162,30 @@ pub struct AppState {
     pub downloads: Arc<DownloadQueue>,
     /// Always-on resource telemetry (Agent B).
     pub resources: Arc<ResourceBroadcaster>,
-    // ── Catalog (sub-project A) ─────────────────────────────────────────────
-    /// Single-writer catalog scan queue.
-    pub catalog_scan: Arc<CatalogScanQueue>,
-    /// Catalog + gallery metadata DB. Shared across catalog endpoints.
-    pub catalog_db: Arc<mold_db::MetadataDb>,
+    // ── Catalog (live HF + Civitai) ─────────────────────────────────────────
+    /// In-process TTL cache backing `/api/catalog/search`.
+    pub catalog_live_cache: mold_catalog::live::LiveCache,
+    /// Upstream base URL for live Civitai search. Production runs with
+    /// the public host; tests override via `with_civitai_base`.
+    pub catalog_live_civitai_base: Arc<String>,
+}
+
+/// Default TTL for the live-search cache. Five minutes is long enough
+/// to absorb SPA re-mounts and quick paging without serving stale
+/// rankings.
+const CATALOG_LIVE_CACHE_TTL_SECS: u64 = 300;
+/// Cap on cached query keys. The working set per user is small —
+/// caps too high just retain stale rows past their TTL.
+const CATALOG_LIVE_CACHE_MAX_KEYS: usize = 256;
+/// Production Civitai endpoint. Tests inject a wiremock URI via
+/// [`AppState::with_civitai_base`].
+pub const CATALOG_LIVE_CIVITAI_BASE: &str = "https://civitai.com";
+
+fn default_live_cache() -> mold_catalog::live::LiveCache {
+    mold_catalog::live::LiveCache::new(
+        std::time::Duration::from_secs(CATALOG_LIVE_CACHE_TTL_SECS),
+        CATALOG_LIVE_CACHE_MAX_KEYS,
+    )
 }
 
 /// Default maximum number of cached models (GPU-resident + parked engine structs).
@@ -251,16 +269,6 @@ pub fn resolve_max_cached_models() -> usize {
     }
 }
 
-/// Open the default catalog DB, falling back to in-memory if unavailable.
-fn open_catalog_db() -> Arc<mold_db::MetadataDb> {
-    // Try the real on-disk DB first (honours MOLD_DB_PATH / MOLD_HOME).
-    if let Ok(Some(db)) = mold_db::open_default() {
-        return Arc::new(db);
-    }
-    // Fall back to an ephemeral in-memory DB (tests and disabled-DB mode).
-    Arc::new(mold_db::MetadataDb::open_in_memory().expect("in-memory DB"))
-}
-
 impl AppState {
     /// Create state with a pre-loaded engine (server starts with a configured model).
     pub fn new(
@@ -289,8 +297,8 @@ impl AppState {
             metadata_db: Arc::new(None),
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
-            catalog_scan: Arc::new(CatalogScanQueue::new()),
-            catalog_db: open_catalog_db(),
+            catalog_live_cache: default_live_cache(),
+            catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
         }
     }
 
@@ -318,8 +326,8 @@ impl AppState {
             metadata_db: Arc::new(None),
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
-            catalog_scan: Arc::new(CatalogScanQueue::new()),
-            catalog_db: open_catalog_db(),
+            catalog_live_cache: default_live_cache(),
+            catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
         }
     }
 
@@ -362,8 +370,8 @@ impl AppState {
             metadata_db: Arc::new(None),
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
-            catalog_scan: Arc::new(CatalogScanQueue::new()),
-            catalog_db: Arc::new(mold_db::MetadataDb::open_in_memory().expect("in-memory DB")),
+            catalog_live_cache: default_live_cache(),
+            catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
         }
     }
 
@@ -393,15 +401,16 @@ impl AppState {
             metadata_db: Arc::new(None),
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
-            catalog_scan: Arc::new(CatalogScanQueue::new()),
-            catalog_db: Arc::new(mold_db::MetadataDb::open_in_memory().expect("in-memory DB")),
+            catalog_live_cache: default_live_cache(),
+            catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
         };
         (state, rx)
     }
 
-    /// Create state wired to a specific catalog DB — used by integration tests
-    /// that need pre-seeded catalog data.
-    pub fn for_tests(catalog_db: Arc<mold_db::MetadataDb>) -> Self {
+    /// Construct an empty AppState for integration tests. Catalog
+    /// surfaces hit live HF/Civitai (test callers point those at a
+    /// wiremock instance via `with_civitai_base`).
+    pub fn for_tests() -> Self {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = QueueHandle::new(tx);
         Self {
@@ -423,9 +432,17 @@ impl AppState {
             metadata_db: Arc::new(None),
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
-            catalog_scan: Arc::new(CatalogScanQueue::new()),
-            catalog_db,
+            catalog_live_cache: default_live_cache(),
+            catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
         }
+    }
+
+    /// Override the live-search Civitai base URL on an existing state.
+    /// Tests point this at a wiremock instance; production never calls
+    /// it (the `new` / `empty` constructors set the public host).
+    pub fn with_civitai_base(mut self, base: impl Into<String>) -> Self {
+        self.catalog_live_civitai_base = Arc::new(base.into());
+        self
     }
 }
 

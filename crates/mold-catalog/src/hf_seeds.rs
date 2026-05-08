@@ -1,6 +1,7 @@
-//! Curated HF foundation repos used as the starting point for the HF
-//! stage's `base_model:` walk. Adding a new family means: declare it in
-//! `families.rs`, then add at least one seed here.
+//! Curated HF foundation repos. Used by `family_from_hf` to mark these
+//! repos as `FamilyRole::Foundation`; everything else gets `Finetune`.
+//! Adding a new family means: declare it in `families.rs`, then add at
+//! least one seed here.
 
 use crate::families::Family;
 

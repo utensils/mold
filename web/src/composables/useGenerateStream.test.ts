@@ -1,10 +1,62 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  __testing__,
   isPrebuiltChainRequest,
   resolveChainRequest,
+  useGenerateStream,
 } from "./useGenerateStream";
-import type { ChainRequestWire, GenerateRequestWire } from "../types";
+import type {
+  ChainRequestWire,
+  GenerateRequestWire,
+  SseCompleteEvent,
+} from "../types";
 import type { ChainRoutingDecision } from "../lib/chainRouting";
+import type { ChainStreamHandlers, GenerateStreamHandlers } from "../api";
+
+// Capture the most recent handlers passed into `generateStream` /
+// `generateChainStream` so each test can drive the SSE lifecycle (complete /
+// error) deterministically without spinning up a real EventSource. The mocks
+// resolve immediately — no network.
+let lastSingleHandlers: GenerateStreamHandlers | null = null;
+let lastChainHandlers: ChainStreamHandlers | null = null;
+
+vi.mock("../api", () => ({
+  generateStream: vi.fn(
+    (
+      _req: GenerateRequestWire,
+      handlers: GenerateStreamHandlers,
+      _signal?: AbortSignal,
+    ) => {
+      lastSingleHandlers = handlers;
+      return Promise.resolve();
+    },
+  ),
+  generateChainStream: vi.fn(
+    (
+      _req: ChainRequestWire,
+      handlers: ChainStreamHandlers,
+      _signal?: AbortSignal,
+    ) => {
+      lastChainHandlers = handlers;
+      return Promise.resolve();
+    },
+  ),
+}));
+
+function fakeCompleteEvent(
+  overrides: Partial<SseCompleteEvent> = {},
+): SseCompleteEvent {
+  return {
+    image: "AAAA",
+    format: "png",
+    width: 512,
+    height: 512,
+    seed_used: 42,
+    generation_time_ms: 1234,
+    model: "flux-dev:fp16",
+    ...overrides,
+  } as SseCompleteEvent;
+}
 
 function chainDecision(
   overrides: Partial<Extract<ChainRoutingDecision, { kind: "chain" }>> = {},
@@ -125,5 +177,169 @@ describe("resolveChainRequest", () => {
     // server), not a silent success. The assertion here only verifies that
     // we took the non-passthrough branch.
     expect(resolved.stages).toBeUndefined();
+  });
+});
+
+// ── Auto-remove on completion ───────────────────────────────────────────────
+//
+// The running-strip card is supposed to vanish ~1.5 s after a successful
+// generation lands so the freshly-arrived gallery thumbnail underneath
+// becomes the focal point instead of duplicating it. These tests pin the
+// timing contract: success auto-dismisses, failure modes don't, and a
+// manual dismiss before the timer fires is harmless.
+//
+// We also clean up `localStorage` between cases — the singleton's `jobs`
+// ref is module-scoped and persists across tests in the same file, so
+// without isolation a leftover "running" job from one case would skew
+// the next case's job-count assertions.
+describe("auto-remove completed jobs", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    lastSingleHandlers = null;
+    lastChainHandlers = null;
+    // Reset module-level singleton state between tests. We can't import
+    // the underlying ref directly, so the cleanest path is wiping the
+    // persisted snapshot and clearing whatever jobs the previous test
+    // left in the live ref via clearDone()/cancel()+clearDone().
+    try {
+      localStorage.removeItem("mold.generate.jobs");
+    } catch {
+      /* ignore — happy-dom should have it */
+    }
+    const stream = useGenerateStream();
+    // Cancel anything still "running" then drop everything settled.
+    for (const j of stream.jobs.value) {
+      if (j.state === "running") stream.cancel(j.id);
+    }
+    stream.clearDone();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("auto-removes a job ~1500ms after it transitions to done", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("running");
+
+    // Fire the SSE complete callback the singleton registered.
+    expect(lastSingleHandlers).not.toBeNull();
+    lastSingleHandlers!.onComplete(fakeCompleteEvent({ seed_used: 7 }));
+
+    // Job is "done" but still on screen during the grace period.
+    const job = stream.jobs.value.find((j) => j.id === id);
+    expect(job?.state).toBe("done");
+
+    // Just before the timer — still present.
+    vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS - 1);
+    expect(stream.jobs.value.find((j) => j.id === id)).toBeDefined();
+
+    // Tick past the timer — gone.
+    vi.advanceTimersByTime(2);
+    expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
+  });
+
+  it("does NOT auto-remove a job that errors out", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    expect(lastSingleHandlers).not.toBeNull();
+    lastSingleHandlers!.onError({
+      kind: "http",
+      status: 500,
+      body: "boom",
+    });
+    const job = stream.jobs.value.find((j) => j.id === id);
+    expect(job?.state).toBe("error");
+
+    // Even well past the would-be auto-remove window, an errored card
+    // sticks around for the user to read.
+    vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS * 5);
+    expect(stream.jobs.value.find((j) => j.id === id)).toBeDefined();
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("error");
+  });
+
+  it("does NOT auto-remove a canceled job", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    stream.cancel(id);
+    const job = stream.jobs.value.find((j) => j.id === id);
+    expect(job?.state).toBe("canceled");
+
+    vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS * 5);
+    expect(stream.jobs.value.find((j) => j.id === id)).toBeDefined();
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
+  });
+
+  it("manual remove() before the auto-remove timer is harmless", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    expect(lastSingleHandlers).not.toBeNull();
+    lastSingleHandlers!.onComplete(fakeCompleteEvent());
+
+    // User dismisses early.
+    stream.remove(id);
+    expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
+
+    // The pending setTimeout still fires; removeJob filters by id so a
+    // missing id is a no-op. No throw, no resurrection, no duplicate
+    // removal effects on other jobs.
+    expect(() =>
+      vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 100),
+    ).not.toThrow();
+    expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
+  });
+
+  it("does NOT auto-remove if user cancels during the grace period (no flash)", () => {
+    // Regression: prior code unconditionally removed at +1500ms, so a
+    // cancel landing between done-flip and timer-fire would briefly show
+    // "canceled" on the card and then auto-dismiss anyway, losing the
+    // user's signal. Timer must re-check `state === "done"` at fire time.
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    expect(lastSingleHandlers).not.toBeNull();
+    lastSingleHandlers!.onComplete(fakeCompleteEvent());
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("done");
+
+    // User clicks Cancel during the 1500ms grace window.
+    vi.advanceTimersByTime(500);
+    stream.cancel(id);
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
+
+    // Timer fires; job must still be present and still in `canceled`.
+    vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 100);
+    expect(stream.jobs.value.find((j) => j.id === id)).toBeDefined();
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
+  });
+
+  it("auto-removes a chain job ~1500ms after chain complete", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 241 }), chainDecision());
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("running");
+    expect(lastChainHandlers).not.toBeNull();
+
+    // Chain complete events carry a `video` field instead of `image`.
+    lastChainHandlers!.onComplete({
+      video: "AAAA",
+      format: "mp4",
+      width: 1216,
+      height: 704,
+      frames: 241,
+      fps: 24,
+      generation_time_ms: 9876,
+      // The fields below are optional on the wire but the singleton
+      // shape-shifts them into a SseCompleteEvent with sensible defaults.
+      thumbnail: null,
+      gif_preview: null,
+      has_audio: false,
+      duration_ms: null,
+      audio_sample_rate: null,
+      audio_channels: null,
+      gpu: 0,
+    } as Parameters<ChainStreamHandlers["onComplete"]>[0]);
+
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("done");
+    vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 1);
+    expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
   });
 });

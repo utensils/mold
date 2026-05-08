@@ -45,6 +45,12 @@ pub struct Ltx2Engine {
     /// is what took down the process on <gpu-host> when LTX-2 ran alongside
     /// SD3.5 on a multi-GPU host.
     gpu_ordinal: usize,
+    /// Optional preset hint used when the model name doesn't carry a
+    /// recognisable family substring (`ltx-2.3`, `ltx-2`). Populated by
+    /// `from_single_file` from the safetensors `__metadata__.model_version`
+    /// so catalog (`cv:*` / `hf:*`) IDs select the right preset without
+    /// requiring renames.
+    preset_hint: Option<String>,
 }
 
 impl Ltx2Engine {
@@ -79,6 +85,7 @@ impl Ltx2Engine {
             on_progress: None,
             pending_placement: None,
             gpu_ordinal,
+            preset_hint: None,
         }
     }
 
@@ -86,17 +93,28 @@ impl Ltx2Engine {
     /// checkpoint (phase 5).
     ///
     /// LTX-2 combined checkpoints (the standard Lightricks format) bundle
-    /// both the video transformer (`blocks.*`) and the VAE (`vae.*`) in a
-    /// single file. The runtime always loads both from `paths.transformer`,
-    /// so this is structurally identical to `new()`.
+    /// both the video transformer (`transformer_blocks.*`) and the VAE
+    /// (`vae.*`) in a single file. The runtime always loads both from
+    /// `paths.transformer`, so on the checkpoint side this is structurally
+    /// identical to `new()`.
     ///
     /// Validates via `ltx_2::single_file::load` that the checkpoint has
     /// detectable LTX-2 transformer keys and — critically — contains `vae.*`
     /// keys. If the VAE is absent the call fails with an actionable error
     /// message, since the LTX-2 runtime has no separate-VAE fallback.
+    ///
+    /// `paths` is the full resolved companion graph (text_encoder_files,
+    /// upscalers, distilled_lora, …). `transformer` and `vae` are
+    /// overridden to point at the single checkpoint; everything else is
+    /// preserved so the Gemma TE companion (Civitai catalog entries don't
+    /// bundle the encoder) and any other resolved companions reach the
+    /// runtime intact. Discarding `paths` here is what bit cv:* LTX-2
+    /// loads in phase 5 — the runtime then bailed with `LTX-2 requires
+    /// Gemma text encoder files to be available`.
     pub fn from_single_file(
         model_name: String,
         checkpoint: PathBuf,
+        paths: ModelPaths,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
     ) -> anyhow::Result<Self> {
@@ -125,26 +143,25 @@ impl Ltx2Engine {
         }
 
         // For LTX-2 the combined checkpoint path serves as both transformer
-        // and VAE source; paths.vae is left empty (runtime ignores it).
+        // and VAE source; the runtime reads VAE under `vb.pp("vae")` from
+        // the same file, so we leave `vae` empty. Every other companion
+        // path the catalog bridge populated (most importantly
+        // `text_encoder_files` for Gemma) flows through unchanged.
         let paths = ModelPaths {
-            transformer: checkpoint.clone(),
+            transformer: checkpoint,
             transformer_shards: Vec::new(),
             vae: PathBuf::default(),
-            spatial_upscaler: None,
-            temporal_upscaler: None,
-            distilled_lora: None,
-            t5_encoder: None,
-            clip_encoder: None,
-            t5_tokenizer: None,
-            clip_tokenizer: None,
-            clip_encoder_2: None,
-            clip_tokenizer_2: None,
-            text_encoder_files: Vec::new(),
-            text_tokenizer: None,
-            decoder: None,
+            ..paths
         };
 
-        Ok(Self::new(model_name, paths, load_strategy, gpu_ordinal))
+        let mut engine = Self::new(model_name, paths, load_strategy, gpu_ordinal);
+        // Catalog (`cv:*`) IDs don't contain `ltx-2.3` / `ltx-2` substrings,
+        // so `preset_for_model` would bail. The bundled `model_version`
+        // from the safetensors `__metadata__` (e.g. `"2.3.0"`) is the
+        // authoritative source — record it as a hint that
+        // `materialize_request` consults via `preset_for_model_with_hint`.
+        engine.preset_hint = bundle.model_version;
+        Ok(engine)
     }
 
     #[cfg(test)]
@@ -161,6 +178,7 @@ impl Ltx2Engine {
             on_progress: None,
             pending_placement: None,
             gpu_ordinal: 0,
+            preset_hint: None,
         }
     }
 
@@ -218,9 +236,26 @@ impl Ltx2Engine {
             return Ok(PipelineKind::IcLora);
         }
         if self.model_name.contains("distilled") {
-            return Ok(PipelineKind::Distilled);
+            // Distilled checkpoints also require a spatial upsampler (single
+            // upscale stage instead of two denoise passes); without one,
+            // fall back to a plain one-stage denoise that runs the
+            // transformer end-to-end on the requested resolution.
+            return Ok(if self.paths.spatial_upscaler.is_some() {
+                PipelineKind::Distilled
+            } else {
+                PipelineKind::OneStage
+            });
         }
-        Ok(PipelineKind::TwoStage)
+        // TwoStage runs an upscale-and-refine pass after stage 1 and bails
+        // at runtime if `spatial_upscaler` isn't on disk. Single-file
+        // catalog (`cv:*`) checkpoints don't ship the upsampler asset, so
+        // fall back to OneStage when it's missing — the user gets a clean
+        // single-pass video instead of a 422 several stages in.
+        Ok(if self.paths.spatial_upscaler.is_some() {
+            PipelineKind::TwoStage
+        } else {
+            PipelineKind::OneStage
+        })
     }
 
     fn request_quantization(&self) -> Option<String> {
@@ -244,7 +279,8 @@ impl Ltx2Engine {
             .encode_prompt_pair(&req.prompt, req.negative_prompt.as_deref())?;
         let conditioning = conditioning::stage_conditioning(req, work_dir)?;
         let loras = lora::resolve_loras(&self.model_name, req)?;
-        let preset = preset::preset_for_model(&self.model_name)?;
+        let preset =
+            preset::preset_for_model_with_hint(&self.model_name, self.preset_hint.as_deref())?;
         let execution_graph =
             execution::build_execution_graph(req, pipeline, &conditioning, &preset, loras.len());
         let spatial_upsampler_path = assets::resolve_spatial_upscaler_path(
@@ -1166,6 +1202,86 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_falls_back_to_one_stage_when_spatial_upscaler_missing() {
+        // Catalog (`cv:*`) LTX-2 single-file checkpoints don't ship the
+        // spatial upsampler asset (it's a separate Lightricks file the
+        // companion list doesn't pull). The runtime's TwoStage / Distilled
+        // paths require it and would bail mid-generation; the engine
+        // should pick OneStage instead so the user gets a single-pass
+        // video instead of a 500 several stages in.
+        let gemma = tempfile::tempdir().unwrap();
+        let mut paths = dummy_paths_with_gemma_root(gemma.path());
+        paths.spatial_upscaler = None;
+
+        let engine_22b = Ltx2Engine::new(
+            "cv:2752735".to_string(),
+            paths.clone(),
+            LoadStrategy::Sequential,
+            0,
+        );
+        let req = bare_t2v_req("cv:2752735");
+        assert_eq!(
+            engine_22b.select_pipeline(&req).unwrap(),
+            PipelineKind::OneStage,
+            "no spatial upsampler → OneStage (catalog cv:* default)"
+        );
+
+        let engine_distilled = Ltx2Engine::new(
+            "ltx-2-19b-distilled:fp8".to_string(),
+            paths,
+            LoadStrategy::Sequential,
+            0,
+        );
+        let req_distilled = bare_t2v_req("ltx-2-19b-distilled:fp8");
+        assert_eq!(
+            engine_distilled.select_pipeline(&req_distilled).unwrap(),
+            PipelineKind::OneStage,
+            "distilled name + missing spatial upsampler → OneStage fallback"
+        );
+    }
+
+    fn bare_t2v_req(model: &str) -> GenerateRequest {
+        GenerateRequest {
+            prompt: "test".to_string(),
+            negative_prompt: None,
+            model: model.to_string(),
+            width: 768,
+            height: 512,
+            steps: 4,
+            guidance: 3.5,
+            seed: Some(42),
+            batch_size: 1,
+            output_format: OutputFormat::Mp4,
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            edit_images: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: Some(25),
+            fps: Some(24),
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: None,
+        }
+    }
+
+    #[test]
     fn pipeline_defaults_to_distilled_for_distilled_models() {
         let engine = Ltx2Engine::new(
             "ltx-2.3-22b-distilled:fp8".to_string(),
@@ -1215,6 +1331,75 @@ mod tests {
             engine.select_pipeline(&req).unwrap(),
             PipelineKind::Distilled
         );
+    }
+
+    #[test]
+    fn from_single_file_preserves_companion_paths() {
+        // Regression: phase-5 wired `cv:*` LTX-2 catalog entries into
+        // `Ltx2Engine::from_single_file` but the constructor used to build
+        // a fresh `ModelPaths` with `text_encoder_files: Vec::new()`,
+        // discarding the Gemma TE companion the catalog bridge had
+        // resolved. The runtime then bailed at `gemma_root` with
+        // `LTX-2 requires Gemma text encoder files to be available`.
+        // Pin the fix: companion fields (text_encoder_files,
+        // spatial_upscaler, temporal_upscaler, distilled_lora) survive
+        // the rebuild; only `transformer` and `vae` are overridden.
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = temp.path().join("ltx2_combined.safetensors");
+        // Build a minimal valid safetensors header with one transformer
+        // key + one vae key so `single_file::load` returns has_vae=true.
+        write_minimal_combined_ltx2_checkpoint(&checkpoint);
+
+        let mut input_paths = dummy_paths_with_gemma_root(&temp.path().join("gemma"));
+        input_paths.transformer = PathBuf::from("/wrong/path-should-be-overridden");
+        input_paths.vae = PathBuf::from("/wrong/vae-should-be-cleared");
+        let gemma_files_in = input_paths.text_encoder_files.clone();
+        let spatial_in = input_paths.spatial_upscaler.clone();
+        let temporal_in = input_paths.temporal_upscaler.clone();
+        let distilled_in = input_paths.distilled_lora.clone();
+
+        let engine = Ltx2Engine::from_single_file(
+            "cv:2752735".to_string(),
+            checkpoint.clone(),
+            input_paths,
+            LoadStrategy::Sequential,
+            0,
+        )
+        .expect("from_single_file should succeed on a valid combined checkpoint");
+
+        assert_eq!(
+            engine.paths.transformer, checkpoint,
+            "transformer must point at the single-file checkpoint"
+        );
+        assert_eq!(
+            engine.paths.vae,
+            PathBuf::default(),
+            "vae must be cleared — runtime reads it from the same checkpoint via vb.pp(\"vae\")"
+        );
+        assert_eq!(
+            engine.paths.text_encoder_files, gemma_files_in,
+            "text_encoder_files (Gemma TE) must survive the rebuild — \
+             dropping it is the cv:* loading regression"
+        );
+        assert_eq!(engine.paths.spatial_upscaler, spatial_in);
+        assert_eq!(engine.paths.temporal_upscaler, temporal_in);
+        assert_eq!(engine.paths.distilled_lora, distilled_in);
+    }
+
+    fn write_minimal_combined_ltx2_checkpoint(path: &std::path::Path) {
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+        use std::collections::HashMap;
+        let zero = 0.0f32.to_le_bytes().to_vec();
+        let mut tensors: HashMap<String, TensorView<'_>> = HashMap::new();
+        tensors.insert(
+            "transformer_blocks.0.attn1.to_q.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &zero).unwrap(),
+        );
+        tensors.insert(
+            "vae.encoder.conv_in.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &zero).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, path).unwrap();
     }
 
     #[test]

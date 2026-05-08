@@ -1270,9 +1270,12 @@ mod tests {
             metadata_db: Arc::new(None),
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
-            catalog_scan: std::sync::Arc::new(crate::catalog_api::CatalogScanQueue::new()),
-            catalog_db: std::sync::Arc::new(
-                mold_db::MetadataDb::open_in_memory().expect("in-memory catalog DB"),
+            catalog_live_cache: mold_catalog::live::LiveCache::new(
+                std::time::Duration::from_secs(300),
+                64,
+            ),
+            catalog_live_civitai_base: std::sync::Arc::new(
+                crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
             ),
         };
         let worker_state = state.clone();
@@ -1323,9 +1326,12 @@ mod tests {
             metadata_db: Arc::new(None),
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
-            catalog_scan: std::sync::Arc::new(crate::catalog_api::CatalogScanQueue::new()),
-            catalog_db: std::sync::Arc::new(
-                mold_db::MetadataDb::open_in_memory().expect("in-memory catalog DB"),
+            catalog_live_cache: mold_catalog::live::LiveCache::new(
+                std::time::Duration::from_secs(300),
+                64,
+            ),
+            catalog_live_civitai_base: std::sync::Arc::new(
+                crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
             ),
         };
         let worker_state = state.clone();
@@ -1579,9 +1585,12 @@ mod tests {
             metadata_db: Arc::new(None),
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
-            catalog_scan: std::sync::Arc::new(crate::catalog_api::CatalogScanQueue::new()),
-            catalog_db: std::sync::Arc::new(
-                mold_db::MetadataDb::open_in_memory().expect("in-memory catalog DB"),
+            catalog_live_cache: mold_catalog::live::LiveCache::new(
+                std::time::Duration::from_secs(300),
+                64,
+            ),
+            catalog_live_civitai_base: std::sync::Arc::new(
+                crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
             ),
         };
         let worker_state = state.clone();

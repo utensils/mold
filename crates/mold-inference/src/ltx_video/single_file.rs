@@ -20,8 +20,10 @@
 //! present on disk; the factory validates this before constructing the
 //! engine.
 //!
-//! LTX-2 uses `blocks.*` instead of `transformer_blocks.*` — pass those
-//! checkpoints to `ltx_2::single_file::load` instead.
+//! LTX-2 uses the same `transformer_blocks.*` prefix as LTX-Video, so this
+//! validator can't disambiguate the two on key shape alone — the call site
+//! picks the loader based on the catalog family. Use `ltx_2::single_file::load`
+//! when the resolved family is `ltx2`.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -266,10 +268,11 @@ mod tests {
 
     #[test]
     fn has_prefix_is_exact_segment_match() {
-        // "blocks" should not match "transformer_blocks"
+        // "blocks" should not match "transformer_blocks" — the segment
+        // boundary check prevents key-prefix collisions across different
+        // model families that share root segments.
         assert!(!has_prefix("transformer_blocks.0.to_q.weight", "blocks"));
-        // "model.diffusion_model.transformer_blocks" should not match ltx2's
-        // "model.diffusion_model.blocks" prefix
+        // A nested-deeper key should not match a shorter sibling prefix.
         assert!(!has_prefix(
             "model.diffusion_model.transformer_blocks.0.to_q.weight",
             "model.diffusion_model.blocks"

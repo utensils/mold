@@ -6,8 +6,13 @@
 //! LTX-2 combined checkpoints (the standard Lightricks format) embed both
 //! the video transformer and the VAE in a single file:
 //!
-//! - Transformer keys: native `blocks.*` prefix (e.g., `blocks.0.attn1.to_q.weight`)
-//!   or diffusers `model.diffusion_model.blocks.*`.
+//! - Transformer keys: native `transformer_blocks.*` prefix
+//!   (e.g., `transformer_blocks.0.attn1.to_q.weight`) or diffusers
+//!   `model.diffusion_model.transformer_blocks.*`. The runtime path
+//!   (`runtime.rs::remap_ltx2_transformer_key`) unconditionally prepends
+//!   `model.diffusion_model.` and the model code asks for
+//!   `vb.pp("transformer_blocks")`, so both layouts map to the same
+//!   on-disk keys after remap.
 //! - VAE keys: `vae.*` prefix (e.g., `vae.encoder.conv_in.weight`).
 //!
 //! Sub-family (`v2` = 19B, `v2.3` = 22B) is runtime config — this module does
@@ -17,8 +22,9 @@
 //! `Ltx2Engine::from_single_file` because the runtime always loads the
 //! VAE from the same checkpoint path via `vb.pp("vae")`.
 //!
-//! For LTX-Video (using `transformer_blocks.*`) use
-//! `ltx_video::single_file::load` instead.
+//! LTX-Video uses the same `transformer_blocks.*` segment, so this module
+//! cannot disambiguate the two families on key shape alone — the call
+//! site picks the loader by the resolved model family.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -56,6 +62,12 @@ pub struct Ltx2SingleFileBundle {
     /// checkpoints always include the VAE; transformer-only fine-tunes
     /// will have `has_vae = false` and will be rejected by `from_single_file`.
     pub has_vae: bool,
+    /// `__metadata__.model_version` from the safetensors header, when
+    /// present. Official Lightricks LTX-2 v2.3 checkpoints stamp `"2.3.0"`
+    /// here. Used by `Ltx2Engine::from_single_file` to derive a preset
+    /// hint when the model name (e.g. `cv:2752735`) lacks the
+    /// `ltx-2.3` / `ltx-2` substring `preset_for_model` looks for.
+    pub model_version: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -64,13 +76,25 @@ pub enum LoadError {
     Io(#[from] std::io::Error),
     #[error("safetensors header parse failed: {0}")]
     Header(String),
-    /// No `blocks.*` or `model.diffusion_model.blocks.*` keys found.
-    /// The file is probably not an LTX-2 checkpoint (maybe LTX-Video?).
+    /// No `transformer_blocks.*` or `model.diffusion_model.transformer_blocks.*`
+    /// keys found. The file is probably not an LTX-2 checkpoint.
     #[error(
         "no LTX-2 transformer keys found \
-         (expected `blocks.*` or `model.diffusion_model.blocks.*`)"
+         (expected `transformer_blocks.*` or `model.diffusion_model.transformer_blocks.*`)"
     )]
     NoTransformerKeys,
+    /// Checkpoint has NVFP4 quantization markers (`*.weight_scale_2`,
+    /// `*.input_scale`, `*.comfy_quant`). Mold's LTX-2 runtime supports
+    /// BF16 / FP16 / FP8 storage only — Flux.2 has NVFP4 streaming
+    /// dequant but LTX-2 does not, so loading the file would surface a
+    /// deep shape-mismatch error mid-generation.
+    #[error(
+        "LTX-2 checkpoint is NVFP4-quantized — mold's LTX-2 runtime supports \
+         BF16/FP16/FP8 storage only. Pick a non-NVFP4 fine-tune (filename usually \
+         lacks `FP4` / `nvfp4` markers, and the safetensors header has no \
+         `*.weight_scale_2` keys)"
+    )]
+    Nvfp4Unsupported,
 }
 
 /// Header-parse the safetensors at `path` and return the detected layout.
@@ -78,13 +102,30 @@ pub enum LoadError {
 /// Only reads the 8-byte length prefix + the JSON header — tensor data on
 /// disk is never touched.
 pub fn load(path: &Path) -> Result<Ltx2SingleFileBundle, LoadError> {
-    let keys = read_tensor_keys(path)?;
+    let header = read_header(path)?;
 
     let mut native_count = 0usize;
     let mut diffusers_count = 0usize;
     let mut vae_count = 0usize;
+    let mut nvfp4 = false;
 
-    for key in &keys {
+    for key in header.keys() {
+        if key == "__metadata__" {
+            continue;
+        }
+        // NVFP4 marker tensors land alongside the packed weights — any one
+        // is enough to know the file is NVFP4 (cv:2781713's transformer
+        // alone has ~3000 of them). Detect early so the user gets an
+        // actionable error before the runtime hits a shape-mismatch when
+        // packed FP4 blocks present as half-width tensors.
+        if key.ends_with(".weight_scale_2")
+            || key.ends_with(".weight_scale")
+            || key.ends_with(".input_scale")
+            || key.ends_with(".comfy_quant")
+        {
+            nvfp4 = true;
+            continue;
+        }
         if has_prefix(key, NATIVE_TRANSFORMER_KEY) {
             native_count += 1;
         } else if has_prefix(key, DIFFUSERS_TRANSFORMER_KEY) {
@@ -92,6 +133,10 @@ pub fn load(path: &Path) -> Result<Ltx2SingleFileBundle, LoadError> {
         } else if has_prefix(key, VAE_KEY) {
             vae_count += 1;
         }
+    }
+
+    if nvfp4 {
+        return Err(LoadError::Nvfp4Unsupported);
     }
 
     let (format, transformer_key_count) = if diffusers_count > 0 {
@@ -102,17 +147,29 @@ pub fn load(path: &Path) -> Result<Ltx2SingleFileBundle, LoadError> {
         return Err(LoadError::NoTransformerKeys);
     };
 
+    let model_version = header
+        .get("__metadata__")
+        .and_then(|v| v.get("model_version"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
     Ok(Ltx2SingleFileBundle {
         format,
         transformer_key_count,
         has_vae: vae_count > 0,
+        model_version,
     })
 }
 
-// `blocks.*` — native LTX-2 transformer key prefix (not `transformer_blocks.*`).
-const NATIVE_TRANSFORMER_KEY: &str = "blocks";
-// `model.diffusion_model.blocks.*` — diffusers-style LTX-2 prefix.
-const DIFFUSERS_TRANSFORMER_KEY: &str = "model.diffusion_model.blocks";
+// `transformer_blocks.*` — native LTX-2 transformer key prefix. The runtime
+// loader (`runtime.rs::remap_ltx2_transformer_key`) prepends
+// `model.diffusion_model.` before the file lookup, and the model code
+// asks for `vb.pp("transformer_blocks")`, so this matches what is
+// actually loaded from disk.
+const NATIVE_TRANSFORMER_KEY: &str = "transformer_blocks";
+// `model.diffusion_model.transformer_blocks.*` — diffusers-style LTX-2 prefix
+// (the layout used by official Lightricks LTX-2 v2.3 checkpoints).
+const DIFFUSERS_TRANSFORMER_KEY: &str = "model.diffusion_model.transformer_blocks";
 // `vae.*` — VAE present in the combined checkpoint.
 const VAE_KEY: &str = "vae";
 
@@ -127,18 +184,17 @@ fn has_prefix(key: &str, prefix: &str) -> bool {
     key.as_bytes().get(prefix.len()) == Some(&b'.') && key.starts_with(prefix)
 }
 
-/// Read just the safetensors header, returning all tensor key names
-/// except `__metadata__`. Does not mmap or read tensor data.
-fn read_tensor_keys(path: &Path) -> Result<Vec<String>, LoadError> {
+/// Read just the safetensors header (the 8-byte length prefix + JSON
+/// payload) and return the parsed map — including `__metadata__`. Does
+/// not mmap or read tensor data.
+fn read_header(path: &Path) -> Result<BTreeMap<String, Value>, LoadError> {
     let mut file = File::open(path)?;
     let mut len_buf = [0u8; 8];
     file.read_exact(&mut len_buf)?;
     let header_len = u64::from_le_bytes(len_buf) as usize;
     let mut header_buf = vec![0u8; header_len];
     file.read_exact(&mut header_buf)?;
-    let header: BTreeMap<String, Value> =
-        serde_json::from_slice(&header_buf).map_err(|e| LoadError::Header(e.to_string()))?;
-    Ok(header.into_keys().filter(|k| k != "__metadata__").collect())
+    serde_json::from_slice(&header_buf).map_err(|e| LoadError::Header(e.to_string()))
 }
 
 #[cfg(test)]
@@ -181,8 +237,8 @@ mod tests {
         write_fixture(
             &p,
             &[
-                "blocks.0.attn1.to_q.weight",
-                "blocks.0.attn1.to_k.weight",
+                "transformer_blocks.0.attn1.to_q.weight",
+                "transformer_blocks.0.attn1.to_k.weight",
                 "proj_in.weight",
                 "vae.encoder.conv_in.weight",
                 "vae.decoder.conv_out.weight",
@@ -191,7 +247,7 @@ mod tests {
 
         let bundle = load(&p).expect("native combined load");
         assert_eq!(bundle.format, LtxKeyFormat::Native);
-        assert_eq!(bundle.transformer_key_count, 2); // only blocks.* counted
+        assert_eq!(bundle.transformer_key_count, 2); // only transformer_blocks.* counted
         assert!(bundle.has_vae);
 
         let _ = std::fs::remove_file(p);
@@ -200,7 +256,10 @@ mod tests {
     #[test]
     fn native_transformer_only_rejected_by_vae_check() {
         let p = temp_path("native-no-vae");
-        write_fixture(&p, &["blocks.0.attn1.to_q.weight", "proj_in.weight"]);
+        write_fixture(
+            &p,
+            &["transformer_blocks.0.attn1.to_q.weight", "proj_in.weight"],
+        );
 
         let bundle = load(&p).expect("native transformer-only parses");
         assert_eq!(bundle.format, LtxKeyFormat::Native);
@@ -214,11 +273,15 @@ mod tests {
 
     #[test]
     fn diffusers_combined_checkpoint() {
+        // Mirrors the on-disk layout of the official Lightricks LTX-2 v2.3
+        // safetensors (e.g. `ltx23_full.safetensors`): every transformer
+        // tensor is prefixed `model.diffusion_model.transformer_blocks.*`,
+        // VAE under `vae.*`.
         let p = temp_path("diffusers-combined");
         write_fixture(
             &p,
             &[
-                "model.diffusion_model.blocks.0.attn1.to_q.weight",
+                "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight",
                 "model.diffusion_model.patchify_proj.weight",
                 "vae.encoder.conv_in.weight",
             ],
@@ -232,20 +295,24 @@ mod tests {
     }
 
     #[test]
-    fn ltx_video_keys_not_confused_with_ltx2() {
-        // LTX-Video uses transformer_blocks.*, not blocks.*
-        let p = temp_path("ltxvideo-wrong-loader");
+    fn nvfp4_checkpoint_returns_actionable_error() {
+        // cv:2781713 (`ltx23FP4_ltx23OfficialDev.safetensors`) is an
+        // NVFP4-quantized LTX-2 v2.3 fine-tune. Mold's LTX-2 runtime
+        // doesn't support NVFP4; without this check the load would
+        // proceed and surface a deep shape-mismatch error like
+        // `expected: [4096, 4096], got: [4096, 2048]` mid-generation.
+        let p = temp_path("nvfp4");
         write_fixture(
             &p,
             &[
-                "transformer_blocks.0.attn1.to_q.weight",
+                "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight",
+                "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight_scale_2",
                 "vae.encoder.conv_in.weight",
             ],
         );
-
-        // ltx_2 loader should NOT detect transformer_blocks.* as its keys
-        assert!(matches!(load(&p), Err(LoadError::NoTransformerKeys)));
-
+        let err = load(&p).expect_err("NVFP4 marker must reject");
+        assert!(matches!(err, LoadError::Nvfp4Unsupported), "got: {err:?}");
+        assert!(err.to_string().contains("NVFP4"));
         let _ = std::fs::remove_file(p);
     }
 

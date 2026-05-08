@@ -403,6 +403,33 @@ function fireComplete(job: Job) {
   }
 }
 
+/// Grace period before a successfully-completed job's running-strip card
+/// is auto-dismissed. Keeps the thumbnail on screen long enough for the
+/// user to register that "yes, the thing I asked for finished" before it
+/// quietly drops away into the gallery feed below. Errored / canceled
+/// jobs never auto-dismiss — they have nothing in the gallery to fall
+/// back to and the user may want to re-read the error.
+const AUTO_REMOVE_DONE_MS = 1500;
+
+/** Schedule auto-removal of a successfully-completed job. The timer
+ * re-checks `state` at fire time and bails if the job has since flipped
+ * to `canceled` (user clicked Cancel during the grace period) — without
+ * this, the card would briefly flash "canceled" then auto-dismiss
+ * anyway, losing the user's signal. Safe to call for jobs that have
+ * already been manually dismissed: `removeJob` filters by id, so a
+ * missing id is a no-op. */
+function scheduleAutoRemoveOnDone(id: string) {
+  setTimeout(() => {
+    const job = jobs.value.find((j) => j.id === id);
+    if (!job || job.state !== "done") return;
+    removeJob(id);
+  }, AUTO_REMOVE_DONE_MS);
+}
+
+export const __testing__ = {
+  AUTO_REMOVE_DONE_MS,
+};
+
 function submitJob(
   req: GenerateRequestWire | ChainRequestWire,
   decision: ChainRoutingDecision = { kind: "single" },
@@ -465,6 +492,7 @@ function submitJob(
           if (evt.gpu !== null && evt.gpu !== undefined)
             job.progress.gpu = evt.gpu;
           fireComplete(job);
+          scheduleAutoRemoveOnDone(id);
         },
         onError: onErrorCommon,
       },
@@ -489,6 +517,7 @@ function submitJob(
           if (evt.gpu !== null && evt.gpu !== undefined)
             job.progress.gpu = evt.gpu;
           fireComplete(job);
+          scheduleAutoRemoveOnDone(id);
         },
         onError: onErrorCommon,
       },

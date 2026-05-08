@@ -239,8 +239,11 @@ pub async fn run(
     // (via `CliContext::new`), so the synthesis must run on this side
     // too. Best-effort; failures fall through to the standard "unknown
     // model" path.
-    if let Some(db) = mold_db::global_db() {
-        let _ = crate::catalog_bridge::install_catalog_model_with_db(db, &mut config, model);
+    // For `cv:<id>` / `hf:<repo>` inputs, hit the live HF/Civitai catalog
+    // and inject a synthesized `ModelConfig` into `config.models`. Best-effort;
+    // failures fall through to the standard "unknown model" path.
+    if crate::catalog_bridge::looks_like_catalog_id(model) {
+        let _ = crate::catalog_bridge::install_catalog_model_live(&mut config, model).await;
     }
     // `--no-metadata` is an opt-out override, so we only pass `Some(false)` when set.
     // Otherwise we defer to env/config/default precedence inside Config.

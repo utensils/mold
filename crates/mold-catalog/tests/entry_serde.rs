@@ -46,6 +46,7 @@ fn sample_entry() -> CatalogEntry {
         created_at: Some(1_700_000_000),
         updated_at: Some(1_710_000_000),
         added_at: 1_720_000_000,
+        trained_words: vec!["cinematic".into(), "studio lighting".into()],
     }
 }
 

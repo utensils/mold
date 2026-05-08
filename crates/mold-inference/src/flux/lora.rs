@@ -57,6 +57,17 @@ pub(crate) struct LoraLayer {
 
 impl LoraAdapter {
     /// Load a LoRA safetensors file. Tensors are loaded on CPU.
+    ///
+    /// Accepts two on-disk naming conventions:
+    /// - **diffusers / PEFT-canonical**: `<layer>.lora_A.weight` /
+    ///   `<layer>.lora_B.weight`. `<layer>` is a dot-separated module path
+    ///   like `transformer.transformer_blocks.0.attn.to_q`.
+    /// - **Kohya / sd-scripts**: `<layer>.lora_down.weight` /
+    ///   `<layer>.lora_up.weight`. `lora_down` is the (rank, in) matrix
+    ///   (== `lora_A`); `lora_up` is the (out, rank) matrix (== `lora_B`).
+    ///   `<layer>` is the Kohya-flattened module path with `.` collapsed
+    ///   to `_` and prefixed with `lora_unet_`. `map_lora_key` recognises
+    ///   both conventions downstream.
     pub fn load(path: &Path) -> Result<Self> {
         let tensors = candle_core::safetensors::load(path, &Device::Cpu)?;
         let mut a_tensors: HashMap<String, Tensor> = HashMap::new();
@@ -65,10 +76,16 @@ impl LoraAdapter {
         let mut rank = 0usize;
 
         for (name, tensor) in &tensors {
-            if let Some(layer) = name.strip_suffix(".lora_A.weight") {
+            if let Some(layer) = name
+                .strip_suffix(".lora_A.weight")
+                .or_else(|| name.strip_suffix(".lora_down.weight"))
+            {
                 rank = rank.max(tensor.dim(0)?);
                 a_tensors.insert(layer.to_string(), tensor.clone());
-            } else if let Some(layer) = name.strip_suffix(".lora_B.weight") {
+            } else if let Some(layer) = name
+                .strip_suffix(".lora_B.weight")
+                .or_else(|| name.strip_suffix(".lora_up.weight"))
+            {
                 b_tensors.insert(layer.to_string(), tensor.clone());
             } else if let Some(layer) = name.strip_suffix(".alpha") {
                 if let Ok(val) = tensor.to_scalar::<f32>() {
@@ -107,10 +124,20 @@ enum LoraTarget {
     },
 }
 
-/// Map a diffusers-format LoRA key to a candle model target.
+/// Map a LoRA layer key (diffusers- or Kohya-format) to a candle model target.
 ///
 /// Returns None for unrecognized keys (logged as warning, skipped).
 fn map_lora_key(diffusers_key: &str) -> Option<LoraTarget> {
+    // Kohya / sd-scripts naming (`lora_unet_*`) — keys carry the FLUX module
+    // path with `.` flattened to `_`. The transformer's fused tensors
+    // (`img_attn.qkv`, `txt_attn.qkv`, `single_blocks.*.linear1`) match the
+    // candle layout 1:1, so every Kohya key maps to a single Direct target —
+    // no FusedSlice splitting needed (Kohya already trains a B@A delta of
+    // the full fused output shape).
+    if let Some(rest) = diffusers_key.strip_prefix("lora_unet_") {
+        return map_kohya_unet_key(rest);
+    }
+
     // Strip the "transformer." prefix that LoRA files use
     let key = diffusers_key
         .strip_prefix("transformer.")
@@ -224,6 +251,46 @@ fn map_lora_key(diffusers_key: &str) -> Option<LoraTarget> {
         };
     }
 
+    None
+}
+
+/// Map a Kohya/sd-scripts FLUX UNet LoRA key (with the `lora_unet_` prefix
+/// already stripped) to a candle model target.
+///
+/// Kohya's flat-naming scheme is unambiguous after `lora_unet_<block>_<idx>_`
+/// — what follows is one of a small fixed set of leaves per block kind. We
+/// match on that suffix directly rather than try to reverse the
+/// `.`→`_` collapse, which is ambiguous (`img_attn` vs `img.attn`).
+fn map_kohya_unet_key(rest: &str) -> Option<LoraTarget> {
+    if let Some(after) = rest.strip_prefix("double_blocks_") {
+        let (idx_str, suffix) = after.split_once('_')?;
+        idx_str.parse::<usize>().ok()?;
+        let candle_key = match suffix {
+            "img_attn_qkv" => format!("double_blocks.{idx_str}.img_attn.qkv.weight"),
+            "img_attn_proj" => format!("double_blocks.{idx_str}.img_attn.proj.weight"),
+            "img_mlp_0" => format!("double_blocks.{idx_str}.img_mlp.0.weight"),
+            "img_mlp_2" => format!("double_blocks.{idx_str}.img_mlp.2.weight"),
+            "img_mod_lin" => format!("double_blocks.{idx_str}.img_mod.lin.weight"),
+            "txt_attn_qkv" => format!("double_blocks.{idx_str}.txt_attn.qkv.weight"),
+            "txt_attn_proj" => format!("double_blocks.{idx_str}.txt_attn.proj.weight"),
+            "txt_mlp_0" => format!("double_blocks.{idx_str}.txt_mlp.0.weight"),
+            "txt_mlp_2" => format!("double_blocks.{idx_str}.txt_mlp.2.weight"),
+            "txt_mod_lin" => format!("double_blocks.{idx_str}.txt_mod.lin.weight"),
+            _ => return None,
+        };
+        return Some(LoraTarget::Direct { candle_key });
+    }
+    if let Some(after) = rest.strip_prefix("single_blocks_") {
+        let (idx_str, suffix) = after.split_once('_')?;
+        idx_str.parse::<usize>().ok()?;
+        let candle_key = match suffix {
+            "linear1" => format!("single_blocks.{idx_str}.linear1.weight"),
+            "linear2" => format!("single_blocks.{idx_str}.linear2.weight"),
+            "modulation_lin" => format!("single_blocks.{idx_str}.modulation.lin.weight"),
+            _ => return None,
+        };
+        return Some(LoraTarget::Direct { candle_key });
+    }
     None
 }
 
@@ -404,24 +471,78 @@ struct LoraBackend {
     st: candle_core::safetensors::MmapedSafetensors,
     /// Key prefix to strip (e.g. "model.diffusion_model.").
     prefix: String,
-    /// Pre-computed LoRA patches keyed by canonical tensor name.
-    /// Each entry has: LoRA layer ref (A, B, alpha), target type, effective scale.
+    /// Pre-computed LoRA patches keyed by canonical tensor name. With
+    /// multi-LoRA the inner `Vec` may contain patches from different
+    /// adapters; each `LoraPatch` carries its own `lora_path_hash` so
+    /// the delta-cache key stays unique per (tensor, adapter, slice).
     patches: HashMap<String, Vec<LoraPatch>>,
     /// Optional CPU-resident cache of pre-computed deltas (shared across rebuilds).
     delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
-    /// Hash of the LoRA file path (for cache key construction).
-    lora_path_hash: u64,
-    /// Scale bits (for cache key construction).
-    #[allow(dead_code)]
-    scale_bits: u64,
 }
 
-/// A single LoRA patch to apply to a base tensor.
+/// A single LoRA patch to apply to a base tensor. Multiple patches on the
+/// same tensor stack additively: `W' = W + Σ scale_i · B_i @ A_i` — and
+/// because each patch carries its own `lora_path_hash`, the delta cache
+/// can disambiguate "the cinematic LoRA's contribution to img_in.weight"
+/// from "the lighting LoRA's contribution to img_in.weight" without
+/// recomputing either.
 struct LoraPatch {
     a: Tensor,
     b: Tensor,
     effective_scale: f64,
     target: LoraTarget,
+    /// Per-LoRA hash of the source file path. Was previously stored once
+    /// on `LoraBackend` (single-LoRA only); promoted here so each patch
+    /// keys its own delta-cache slot.
+    lora_path_hash: u64,
+}
+
+/// Loaded LoRA + its scale + a stable hash of its file path. The hash is
+/// used as the cache key so a second build with the same path/scale hits
+/// `LoraDeltaCache` and skips the matmul.
+pub(crate) struct LoraSpec<'a> {
+    pub adapter: &'a LoraAdapter,
+    pub scale: f64,
+    pub path_hash: u64,
+}
+
+/// Walk every (adapter, layer) pair across `specs` and turn it into a
+/// `LoraPatch` keyed by its target candle tensor. Multiple specs that
+/// touch the same tensor accumulate into the same `Vec` so the backend
+/// applies them additively. The returned counter is the number of
+/// `lora_*` keys we couldn't map (logged by the caller as `skipped`).
+fn build_patches(specs: &[LoraSpec<'_>]) -> (HashMap<String, Vec<LoraPatch>>, usize) {
+    let mut patches: HashMap<String, Vec<LoraPatch>> = HashMap::new();
+    let mut skipped = 0usize;
+    for spec in specs {
+        for (diffusers_key, lora_layer) in &spec.adapter.layers {
+            if let Some(target) = map_lora_key(diffusers_key) {
+                let candle_key = match &target {
+                    LoraTarget::Direct { candle_key } => candle_key.clone(),
+                    LoraTarget::FusedSlice { candle_key, .. } => candle_key.clone(),
+                };
+                let layer_rank = lora_layer.a.dims()[0] as f64;
+                let effective_scale = match lora_layer.alpha {
+                    Some(alpha) => spec.scale * alpha / layer_rank,
+                    None => spec.scale,
+                };
+                patches.entry(candle_key).or_default().push(LoraPatch {
+                    a: lora_layer.a.clone(),
+                    b: lora_layer.b.clone(),
+                    effective_scale,
+                    target,
+                    lora_path_hash: spec.path_hash,
+                });
+            } else {
+                tracing::warn!(
+                    key = diffusers_key.as_str(),
+                    "unrecognized LoRA key, skipping"
+                );
+                skipped += 1;
+            }
+        }
+    }
+    (patches, skipped)
 }
 
 impl candle_nn::var_builder::SimpleBackend for LoraBackend {
@@ -457,11 +578,13 @@ impl candle_nn::var_builder::SimpleBackend for LoraBackend {
             let mut t = tensor;
             for (patch_idx, patch) in patches.iter().enumerate() {
                 // Build cache key including patch index to disambiguate fused slices
-                // (e.g., Q/K/V patches on the same qkv.weight tensor).
+                // (e.g., Q/K/V patches on the same qkv.weight tensor) AND
+                // per-LoRA path hash so a stack of two LoRAs targeting the
+                // same tensor doesn't collapse into one cache slot.
                 let cache_key = LoraCacheKey {
                     tensor_name: name.to_string(),
                     patch_index: patch_idx,
-                    lora_path_hash: self.lora_path_hash,
+                    lora_path_hash: patch.lora_path_hash,
                     scale_bits: patch.effective_scale.to_bits(),
                 };
 
@@ -557,18 +680,23 @@ impl candle_nn::var_builder::SimpleBackend for LoraBackend {
 /// during model construction.  Each tensor is loaded from mmap directly to the
 /// target device (GPU), with LoRA deltas applied inline.  Memory profile is
 /// identical to the non-LoRA mmap path — no HashMap, no pre-loading.
-#[allow(clippy::too_many_arguments)]
+///
+/// Multi-LoRA: pass multiple `LoraSpec`s and they merge additively. The
+/// per-patch cache key (tensor, patch_idx, lora_path_hash, scale_bits)
+/// keeps each adapter's delta independently cacheable.
 pub(crate) fn lora_var_builder<'a>(
     transformer_path: &Path,
-    adapter: &LoraAdapter,
-    scale: f64,
+    specs: &[LoraSpec<'_>],
     dtype: DType,
     device: &Device,
     progress: &ProgressReporter,
     delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
-    lora_path_hash: u64,
 ) -> Result<candle_nn::VarBuilder<'a>> {
     use candle_core::safetensors::MmapedSafetensors;
+
+    if specs.is_empty() {
+        bail!("lora_var_builder called with no LoraSpecs — caller must provide at least one");
+    }
 
     // Open mmap (cheap, no I/O)
     let st = unsafe { MmapedSafetensors::multi(std::slice::from_ref(&transformer_path))? };
@@ -592,40 +720,15 @@ pub(crate) fn lora_var_builder<'a>(
     };
 
     // Build patch index: for each candle key, collect all LoRA patches
-    let mut patches: HashMap<String, Vec<LoraPatch>> = HashMap::new();
-    let mut skipped = 0usize;
-    for (diffusers_key, lora_layer) in &adapter.layers {
-        if let Some(target) = map_lora_key(diffusers_key) {
-            let candle_key = match &target {
-                LoraTarget::Direct { candle_key } => candle_key.clone(),
-                LoraTarget::FusedSlice { candle_key, .. } => candle_key.clone(),
-            };
-            // Use per-layer rank (A's dim 0) for correct alpha normalization.
-            let layer_rank = lora_layer.a.dims()[0] as f64;
-            let effective_scale = match lora_layer.alpha {
-                Some(alpha) => scale * alpha / layer_rank,
-                None => scale,
-            };
-            patches.entry(candle_key).or_default().push(LoraPatch {
-                a: lora_layer.a.clone(),
-                b: lora_layer.b.clone(),
-                effective_scale,
-                target,
-            });
-        } else {
-            tracing::warn!(
-                key = diffusers_key.as_str(),
-                "unrecognized LoRA key, skipping"
-            );
-            skipped += 1;
-        }
-    }
+    // (across every adapter in `specs`).
+    let (patches, skipped) = build_patches(specs);
 
     let patched_keys = patches.len();
     let total_patches: usize = patches.values().map(|v| v.len()).sum();
+    let max_rank = specs.iter().map(|s| s.adapter.rank).max().unwrap_or(0);
     progress.info(&format!(
-        "LoRA: {total_patches} patches on {patched_keys} tensors, {skipped} skipped (rank {})",
-        adapter.rank
+        "LoRA: {n} adapter(s), {total_patches} patches on {patched_keys} tensors, {skipped} skipped (max rank {max_rank})",
+        n = specs.len(),
     ));
 
     let backend = LoraBackend {
@@ -633,8 +736,6 @@ pub(crate) fn lora_var_builder<'a>(
         prefix: prefix.to_string(),
         patches,
         delta_cache,
-        lora_path_hash,
-        scale_bits: scale.to_bits(),
     };
 
     Ok(candle_nn::VarBuilder::from_backend(
@@ -656,15 +757,17 @@ pub(crate) fn lora_var_builder<'a>(
 /// LoRA rank is small (typically 32) so the re-quantization error is negligible.
 pub(crate) fn gguf_lora_var_builder(
     transformer_path: &Path,
-    adapter: &LoraAdapter,
-    scale: f64,
+    specs: &[LoraSpec<'_>],
     device: &Device,
     progress: &ProgressReporter,
     delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
-    lora_path_hash: u64,
 ) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
     use candle_core::quantized::{gguf_file, QTensor};
     use std::sync::Arc;
+
+    if specs.is_empty() {
+        bail!("gguf_lora_var_builder called with no LoraSpecs — caller must provide at least one");
+    }
 
     // Load GGUF tensors
     let mut file = std::fs::File::open(transformer_path)?;
@@ -673,40 +776,18 @@ pub(crate) fn gguf_lora_var_builder(
     let total_tensors = content.tensor_infos.len();
     let mut data: HashMap<String, Arc<QTensor>> = HashMap::with_capacity(total_tensors);
 
-    // Build patch index (same as safetensors LoRA path)
-    let mut patches: HashMap<String, Vec<LoraPatch>> = HashMap::new();
-    let mut skipped = 0usize;
-    for (diffusers_key, lora_layer) in &adapter.layers {
-        if let Some(target) = map_lora_key(diffusers_key) {
-            let candle_key = match &target {
-                LoraTarget::Direct { candle_key } => candle_key.clone(),
-                LoraTarget::FusedSlice { candle_key, .. } => candle_key.clone(),
-            };
-            let layer_rank = lora_layer.a.dims()[0] as f64;
-            let effective_scale = match lora_layer.alpha {
-                Some(alpha) => scale * alpha / layer_rank,
-                None => scale,
-            };
-            patches.entry(candle_key).or_default().push(LoraPatch {
-                a: lora_layer.a.clone(),
-                b: lora_layer.b.clone(),
-                effective_scale,
-                target,
-            });
-        } else {
-            tracing::warn!(
-                key = diffusers_key.as_str(),
-                "unrecognized LoRA key, skipping"
-            );
-            skipped += 1;
-        }
-    }
+    // Build patch index (same as safetensors LoRA path) — accumulate
+    // patches from every adapter into the same map. The downstream
+    // dequant→merge→requant loop already iterates per-tensor patches in
+    // sequence, so multi-LoRA stacking is just additional entries.
+    let (patches, skipped) = build_patches(specs);
 
     let patched_keys = patches.len();
     let total_patches: usize = patches.values().map(|v| v.len()).sum();
+    let max_rank = specs.iter().map(|s| s.adapter.rank).max().unwrap_or(0);
     progress.info(&format!(
-        "LoRA: {total_patches} patches on {patched_keys} tensors, {skipped} skipped (rank {})",
-        adapter.rank
+        "LoRA: {n} adapter(s), {total_patches} patches on {patched_keys} tensors, {skipped} skipped (max rank {max_rank})",
+        n = specs.len(),
     ));
 
     // Phase 1: Load ALL tensors via normal GGUF path (same as from_gguf).
@@ -765,11 +846,14 @@ pub(crate) fn gguf_lora_var_builder(
         }
 
         for (patch_idx, patch) in layer_patches.iter().enumerate() {
-            // Build cache key including patch index to disambiguate fused slices.
+            // Build cache key including patch index (disambiguates fused
+            // slices on the same tensor) AND per-patch lora_path_hash
+            // (disambiguates which adapter contributed this delta in a
+            // multi-LoRA stack).
             let cache_key = LoraCacheKey {
                 tensor_name: candle_key.clone(),
                 patch_index: patch_idx,
-                lora_path_hash,
+                lora_path_hash: patch.lora_path_hash,
                 scale_bits: patch.effective_scale.to_bits(),
             };
 
@@ -855,10 +939,10 @@ pub(crate) fn gguf_lora_var_builder(
         }
     }
 
+    let total_layers: usize = specs.iter().map(|s| s.adapter.layers.len()).sum();
     progress.info(&format!(
-        "LoRA: {applied} applied, {} skipped (rank {}, {patched_keys} layers patched)",
-        adapter.layers.len() - applied,
-        adapter.rank
+        "LoRA: {applied} applied, {} skipped (max rank {max_rank}, {patched_keys} layers patched)",
+        total_layers.saturating_sub(applied),
     ));
 
     Ok(candle_transformers::quantized_var_builder::VarBuilder::from_qtensors(data, device))
@@ -1066,5 +1150,220 @@ mod tests {
         // MLP component (lora_out_dim = 12288):
         let (offset, size) = fused_slice_range(21504, 12288, 3, 0);
         assert_eq!((offset, size), (9216, 12288));
+    }
+
+    /// Build a synthetic adapter that touches one direct-mapped tensor
+    /// (`transformer_blocks.0.attn.to_out.0`). Shape is (out=4, rank=2)
+    /// for B and (rank=2, in=4) for A so the math is small but real.
+    fn synthetic_single_layer_adapter(scale_a: f32, scale_b: f32) -> LoraAdapter {
+        let device = candle_core::Device::Cpu;
+        let a = Tensor::full(scale_a, (2, 4), &device).unwrap();
+        let b = Tensor::full(scale_b, (4, 2), &device).unwrap();
+        let mut layers = HashMap::new();
+        layers.insert(
+            "transformer_blocks.0.attn.to_out.0".to_string(),
+            LoraLayer { a, b, alpha: None },
+        );
+        LoraAdapter { layers, rank: 2 }
+    }
+
+    /// Two adapters targeting the same tensor must produce two patches
+    /// in the same Vec, each carrying its own `lora_path_hash` so the
+    /// per-patch delta cache stays disambiguated.
+    #[test]
+    fn build_patches_stacks_multiple_specs_on_same_tensor() {
+        let a1 = synthetic_single_layer_adapter(1.0, 1.0);
+        let a2 = synthetic_single_layer_adapter(2.0, 3.0);
+        let specs = [
+            LoraSpec {
+                adapter: &a1,
+                scale: 0.5,
+                path_hash: 0xAA,
+            },
+            LoraSpec {
+                adapter: &a2,
+                scale: 0.25,
+                path_hash: 0xBB,
+            },
+        ];
+
+        let (patches, skipped) = build_patches(&specs);
+        assert_eq!(skipped, 0, "every test layer maps to a known target");
+        let key = "double_blocks.0.img_attn.proj.weight";
+        let stack = patches.get(key).expect("target tensor must be patched");
+        assert_eq!(
+            stack.len(),
+            2,
+            "both adapters must contribute a patch to the same tensor"
+        );
+        // Order is the order of the specs; lora_path_hash discriminates
+        // them so the delta cache can never confuse one for the other.
+        assert_eq!(stack[0].lora_path_hash, 0xAA);
+        assert_eq!(stack[1].lora_path_hash, 0xBB);
+        assert!(
+            (stack[0].effective_scale - 0.5).abs() < 1e-9,
+            "first patch keeps its caller-supplied scale (no alpha override)"
+        );
+        assert!(
+            (stack[1].effective_scale - 0.25).abs() < 1e-9,
+            "second patch keeps its caller-supplied scale"
+        );
+    }
+
+    #[test]
+    fn map_kohya_double_block_keys() {
+        let cases = [
+            (
+                "lora_unet_double_blocks_0_img_attn_qkv",
+                "double_blocks.0.img_attn.qkv.weight",
+            ),
+            (
+                "lora_unet_double_blocks_5_img_attn_proj",
+                "double_blocks.5.img_attn.proj.weight",
+            ),
+            (
+                "lora_unet_double_blocks_10_img_mlp_0",
+                "double_blocks.10.img_mlp.0.weight",
+            ),
+            (
+                "lora_unet_double_blocks_10_img_mlp_2",
+                "double_blocks.10.img_mlp.2.weight",
+            ),
+            (
+                "lora_unet_double_blocks_3_img_mod_lin",
+                "double_blocks.3.img_mod.lin.weight",
+            ),
+            (
+                "lora_unet_double_blocks_7_txt_attn_qkv",
+                "double_blocks.7.txt_attn.qkv.weight",
+            ),
+            (
+                "lora_unet_double_blocks_7_txt_attn_proj",
+                "double_blocks.7.txt_attn.proj.weight",
+            ),
+            (
+                "lora_unet_double_blocks_2_txt_mlp_0",
+                "double_blocks.2.txt_mlp.0.weight",
+            ),
+            (
+                "lora_unet_double_blocks_2_txt_mlp_2",
+                "double_blocks.2.txt_mlp.2.weight",
+            ),
+            (
+                "lora_unet_double_blocks_18_txt_mod_lin",
+                "double_blocks.18.txt_mod.lin.weight",
+            ),
+        ];
+        for (kohya_key, expected) in cases {
+            match map_lora_key(kohya_key).unwrap() {
+                LoraTarget::Direct { candle_key } => {
+                    assert_eq!(candle_key, expected, "kohya key {kohya_key}");
+                }
+                _ => panic!("expected Direct for kohya key {kohya_key}"),
+            }
+        }
+    }
+
+    #[test]
+    fn map_kohya_single_block_keys() {
+        let cases = [
+            (
+                "lora_unet_single_blocks_0_linear1",
+                "single_blocks.0.linear1.weight",
+            ),
+            (
+                "lora_unet_single_blocks_9_linear2",
+                "single_blocks.9.linear2.weight",
+            ),
+            (
+                "lora_unet_single_blocks_37_modulation_lin",
+                "single_blocks.37.modulation.lin.weight",
+            ),
+        ];
+        for (kohya_key, expected) in cases {
+            match map_lora_key(kohya_key).unwrap() {
+                LoraTarget::Direct { candle_key } => {
+                    assert_eq!(candle_key, expected, "kohya key {kohya_key}");
+                }
+                _ => panic!("expected Direct for kohya key {kohya_key}"),
+            }
+        }
+    }
+
+    #[test]
+    fn map_kohya_unknown_leaves_returns_none() {
+        // Text-encoder LoRAs (`lora_te_*`) and unrecognized leaves are
+        // skipped (caller logs a warning) rather than panicking.
+        assert!(map_lora_key("lora_te_text_model_layer_0_attn_q").is_none());
+        assert!(map_lora_key("lora_unet_double_blocks_0_unknown_leaf").is_none());
+        assert!(map_lora_key("lora_unet_single_blocks_0_norm_query").is_none());
+        assert!(map_lora_key("lora_unet_unrelated_block_0_x").is_none());
+    }
+
+    /// Round-trip `LoraAdapter::load` against a Kohya-shaped safetensors
+    /// fixture to prove the suffix matcher accepts `lora_down`/`lora_up`/
+    /// `alpha` and pairs them up correctly. Synthetic shapes — the
+    /// numbers don't have to match a real FLUX layer, just the down/up
+    /// convention.
+    #[test]
+    fn load_accepts_kohya_lora_down_up_alpha() {
+        use safetensors::tensor::TensorView;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("kohya.safetensors");
+        let layer = "lora_unet_double_blocks_0_img_attn_qkv";
+
+        // (rank=2, in=4) for down, (out=6, rank=2) for up. f32 little-endian
+        // raw bytes — `safetensors::serialize` round-trips them as F32
+        // tensors that `candle_core::safetensors::load` then parses.
+        let down: Vec<f32> = (0..2 * 4).map(|i| i as f32 * 0.1).collect();
+        let up: Vec<f32> = (0..6 * 2).map(|i| i as f32 * 0.2).collect();
+        let alpha: Vec<f32> = vec![16.0];
+
+        let down_bytes: Vec<u8> = down.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let up_bytes: Vec<u8> = up.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let alpha_bytes: Vec<u8> = alpha.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        let down_view = TensorView::new(safetensors::Dtype::F32, vec![2, 4], &down_bytes).unwrap();
+        let up_view = TensorView::new(safetensors::Dtype::F32, vec![6, 2], &up_bytes).unwrap();
+        let alpha_view = TensorView::new(safetensors::Dtype::F32, vec![], &alpha_bytes).unwrap();
+
+        let entries: Vec<(String, TensorView)> = vec![
+            (format!("{layer}.lora_down.weight"), down_view),
+            (format!("{layer}.lora_up.weight"), up_view),
+            (format!("{layer}.alpha"), alpha_view),
+        ];
+        safetensors::serialize_to_file(entries, &None, &path).expect("write safetensors");
+
+        let adapter = LoraAdapter::load(&path).expect("kohya safetensors must load");
+        assert_eq!(
+            adapter.layers.len(),
+            1,
+            "lora_down/lora_up should be paired into one layer"
+        );
+        assert_eq!(adapter.rank, 2);
+        let lora_layer = adapter.layers.get(layer).expect("layer present");
+        assert_eq!(lora_layer.a.dims(), &[2, 4]);
+        assert_eq!(lora_layer.b.dims(), &[6, 2]);
+        assert_eq!(lora_layer.alpha, Some(16.0));
+    }
+
+    #[test]
+    fn build_patches_single_spec_matches_legacy_shape() {
+        // Regression: a one-element specs slice must produce the same
+        // patch shape as the original single-LoRA path, so existing
+        // single-LoRA flows don't change behaviour.
+        let a = synthetic_single_layer_adapter(1.0, 1.0);
+        let specs = [LoraSpec {
+            adapter: &a,
+            scale: 0.75,
+            path_hash: 0xCC,
+        }];
+        let (patches, skipped) = build_patches(&specs);
+        assert_eq!(skipped, 0);
+        let stack = patches
+            .get("double_blocks.0.img_attn.proj.weight")
+            .expect("present");
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack[0].lora_path_hash, 0xCC);
     }
 }

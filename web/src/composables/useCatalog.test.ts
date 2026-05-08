@@ -48,11 +48,11 @@ function installFetchMock(opts: { total: number; pageSize: number }) {
       return {
         ok: true,
         json: async () => ({
-          families: [{ family: "flux", foundation: 1, finetune: 4 }],
+          families: [{ family: "flux" }],
         }),
       };
     }
-    if (url.startsWith("/api/catalog?")) {
+    if (url.startsWith("/api/catalog/search")) {
       const params = new URL(url, "http://localhost").searchParams;
       const page = Number(params.get("page") ?? "1");
       const pageSize = Number(params.get("page_size") ?? String(opts.pageSize));
@@ -105,10 +105,10 @@ describe("useCatalog", () => {
   });
 
   it("openDetail uses an entry already in the list without hitting /api/catalog/:id", async () => {
-    // Click → openDetail must populate `detail` from the in-memory list
-    // without a round-trip. Regression: the previous re-fetch path 404'd
-    // for ids not in the DB and the unhandled rejection (swallowed by
-    // `void cat.openDetail(...)`) used to leave the drawer unmounted.
+    // Live-search rows aren't in the DB-backed entry endpoint, so the
+    // re-fetch would 404 and the unhandled rejection used to leave the
+    // drawer unmounted. Regression test: clicking an entry must populate
+    // `detail` from the in-memory list.
     const cat = useCatalog();
     await cat.refresh();
     const id = cat.entries.value[0].id;
@@ -118,8 +118,8 @@ describe("useCatalog", () => {
     const detailCalls = (globalThis.fetch as any).mock.calls.filter(
       (c: any[]) =>
         (c[0] as string).startsWith("/api/catalog/") &&
-        !(c[0] as string).startsWith("/api/catalog/families") &&
-        !(c[0] as string).startsWith("/api/catalog/refresh"),
+        !(c[0] as string).startsWith("/api/catalog/search") &&
+        !(c[0] as string).startsWith("/api/catalog/families"),
     );
     expect(detailCalls.length).toBe(0);
   });
@@ -255,7 +255,7 @@ describe("useCatalog infinite scroll", () => {
     (globalThis.fetch as any).mockClear();
     await Promise.all([cat.loadMore(), cat.loadMore(), cat.loadMore()]);
     const listCalls = (globalThis.fetch as any).mock.calls.filter((c: any[]) =>
-      (c[0] as string).startsWith("/api/catalog?"),
+      (c[0] as string).startsWith("/api/catalog/search"),
     );
     expect(listCalls.length).toBe(1);
     expect(cat.entries.value.length).toBe(96);

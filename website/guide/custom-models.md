@@ -58,9 +58,52 @@ At runtime, CLI flags still win:
 mold run flux-dev:q4 "portrait" --lora another-style.safetensors --lora-scale 1.1
 ```
 
+## Multi-LoRA Stacking
+
+Pass `--lora` more than once to stack adapters. The deltas merge additively
+into the base weights — `W' = W + Σ scale_i · B_i @ A_i` — so the result is
+the same as composing two style edits in series, but only one transformer
+build is required:
+
+```bash
+mold run flux-dev "an epic portrait" \
+  --lora cinematic.safetensors --lora-scale 0.8 \
+  --lora moody-light.safetensors --lora-scale 0.4
+```
+
+The web UI's LoRA picker stacks up to **4** LoRAs per generation; each row
+gets its own scale slider and remove button.
+
+## Browsing & Installing LoRAs
+
+`mold catalog` indexes LoRAs from Civitai (`types=LORA`) and Hugging Face
+(detected via tag / file-name / repo-id heuristics). To find FLUX LoRAs:
+
+```bash
+# CLI: list installable FLUX LoRAs
+mold catalog refresh --family flux         # one-time scrape (or after a release)
+mold catalog list --family flux --kind lora --limit 20
+
+# Install a specific LoRA by catalog id
+mold pull cv:1234567
+```
+
+Or in the web UI: open the **Catalog** tab, click the **LoRAs** chip, then
+**Install** on the LoRA you want. Once installed, it appears in the
+**Generate → Settings → LoRA** picker.
+
+## Civitai Trigger Words
+
+LoRAs trained with explicit trigger phrases (Civitai `trainedWords`) surface
+those phrases as click-to-insert chips next to the LoRA picker in the web UI.
+Clicking a chip appends the phrase to the active prompt with sensible
+comma-separation — no more flipping back to the Civitai page to copy/paste.
+
 ## LoRA Rules
 
-- FLUX only
+- FLUX only — SD1.5 / SDXL LoRA inference is not yet implemented. The
+  server returns a 400 with "LoRA is currently supported only for FLUX
+  models" if you attach a LoRA to any other family.
 - `.safetensors` only
 - scale must be between `0.0` and `2.0`
 - the server resolves the path on the machine doing inference
