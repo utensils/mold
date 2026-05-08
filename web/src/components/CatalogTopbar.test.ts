@@ -66,9 +66,7 @@ describe("CatalogTopbar", () => {
 
   it("clicking LoRAs chip filters catalog by kind=lora", async () => {
     const w = mount(CatalogTopbar);
-    const loraBtn = w
-      .findAll("button")
-      .find((b) => b.text() === "LoRAs");
+    const loraBtn = w.findAll("button").find((b) => b.text() === "LoRAs");
     expect(loraBtn).toBeDefined();
     await loraBtn!.trigger("click");
     expect(mockSetFilter).toHaveBeenCalledWith(
@@ -78,9 +76,7 @@ describe("CatalogTopbar", () => {
 
   it("clicking Models chip filters catalog by kind=checkpoint", async () => {
     const w = mount(CatalogTopbar);
-    const modelsBtn = w
-      .findAll("button")
-      .find((b) => b.text() === "Models");
+    const modelsBtn = w.findAll("button").find((b) => b.text() === "Models");
     expect(modelsBtn).toBeDefined();
     await modelsBtn!.trigger("click");
     expect(mockSetFilter).toHaveBeenCalledWith(

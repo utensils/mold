@@ -411,13 +411,19 @@ function fireComplete(job: Job) {
 /// back to and the user may want to re-read the error.
 const AUTO_REMOVE_DONE_MS = 1500;
 
-/** Schedule auto-removal of a successfully-completed job. Exported only
- * so the constant is reachable in tests; production code calls this
- * inside the SSE complete handlers. Safe to call for jobs that the user
- * has already manually dismissed — `removeJob` filters by id, so a
+/** Schedule auto-removal of a successfully-completed job. The timer
+ * re-checks `state` at fire time and bails if the job has since flipped
+ * to `canceled` (user clicked Cancel during the grace period) — without
+ * this, the card would briefly flash "canceled" then auto-dismiss
+ * anyway, losing the user's signal. Safe to call for jobs that have
+ * already been manually dismissed: `removeJob` filters by id, so a
  * missing id is a no-op. */
 function scheduleAutoRemoveOnDone(id: string) {
-  setTimeout(() => removeJob(id), AUTO_REMOVE_DONE_MS);
+  setTimeout(() => {
+    const job = jobs.value.find((j) => j.id === id);
+    if (!job || job.state !== "done") return;
+    removeJob(id);
+  }, AUTO_REMOVE_DONE_MS);
 }
 
 export const __testing__ = {

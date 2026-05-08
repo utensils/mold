@@ -290,6 +290,28 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
   });
 
+  it("does NOT auto-remove if user cancels during the grace period (no flash)", () => {
+    // Regression: prior code unconditionally removed at +1500ms, so a
+    // cancel landing between done-flip and timer-fire would briefly show
+    // "canceled" on the card and then auto-dismiss anyway, losing the
+    // user's signal. Timer must re-check `state === "done"` at fire time.
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    expect(lastSingleHandlers).not.toBeNull();
+    lastSingleHandlers!.onComplete(fakeCompleteEvent());
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("done");
+
+    // User clicks Cancel during the 1500ms grace window.
+    vi.advanceTimersByTime(500);
+    stream.cancel(id);
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
+
+    // Timer fires; job must still be present and still in `canceled`.
+    vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 100);
+    expect(stream.jobs.value.find((j) => j.id === id)).toBeDefined();
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
+  });
+
   it("auto-removes a chain job ~1500ms after chain complete", () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 241 }), chainDecision());

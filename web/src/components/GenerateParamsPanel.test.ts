@@ -55,7 +55,7 @@ function makeForm(
     outputFormat: "png",
     expand: { enabled: false, variations: 1, familyOverride: null },
     placement: null,
-    lora: null,
+    loras: [],
     enableAudio: null,
     ...overrides,
   };
@@ -117,10 +117,10 @@ describe("GenerateParamsPanel", () => {
     dirty.unmount();
   });
 
-  it("clears LoRA when selecting a different model via ModelPicker", async () => {
+  it("clears LoRAs when selecting a different model via ModelPicker", async () => {
     const form = makeForm({
       model: "flux-dev:q4",
-      lora: { path: "/loras/foo.safetensors", scale: 1.0 },
+      loras: [{ path: "/loras/foo.safetensors", scale: 1.0 }],
     });
     const w = mountPanel(form);
     // Expand so the ModelPicker mounts.
@@ -137,7 +137,7 @@ describe("GenerateParamsPanel", () => {
     expect(events).toBeTruthy();
     const last = events![events!.length - 1][0] as GenerateFormState;
     expect(last.model).toBe("sdxl:fp16");
-    expect(last.lora).toBeNull();
+    expect(last.loras).toEqual([]);
     // Defaults from altModel are applied.
     expect(last.steps).toBe(30);
     expect(last.guidance).toBe(7.5);

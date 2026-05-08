@@ -50,9 +50,7 @@ const installed = [
     "cinematic style",
     "moody lighting",
   ]),
-  fakeEntry("cv:2", "Pixel Art", "/loras/pixel.safetensors", [
-    "pixel art",
-  ]),
+  fakeEntry("cv:2", "Pixel Art", "/loras/pixel.safetensors", ["pixel art"]),
 ];
 
 vi.mock("../api", () => ({

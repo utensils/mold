@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Composer from "../components/Composer.vue";
 import GenerateParamsPanel from "../components/GenerateParamsPanel.vue";
+type GenerateParamsPanelInstance = InstanceType<typeof GenerateParamsPanel>;
 import PreferencesModal from "../components/PreferencesModal.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
@@ -91,6 +92,7 @@ function setComposerMode(v: ComposerMode) {
 
 const expandStageIndex = ref<number | null>(null);
 const composerRef = ref<InstanceType<typeof Composer> | null>(null);
+const paramsPanelRef = ref<GenerateParamsPanelInstance | null>(null);
 
 // Drawer state (mirrors GalleryPage).
 const selected = ref<GalleryImage | null>(null);
@@ -184,25 +186,6 @@ function stopAutoRefresh() {
   }
 }
 
-// Faster model polling while the Preferences modal is open — the user
-// is likely waiting for a download to complete so they can pick the new
-// variant without hitting a manual refresh.
-let preferencesModelsTimer: ReturnType<typeof setInterval> | null = null;
-watch(
-  () => showPreferences.value,
-  (open) => {
-    if (preferencesModelsTimer) {
-      clearInterval(preferencesModelsTimer);
-      preferencesModelsTimer = null;
-    }
-    if (open) {
-      preferencesModelsTimer = setInterval(() => {
-        if (!document.hidden) void refreshModels();
-      }, 3_000);
-    }
-  },
-);
-
 const currentModel = computed(
   () => models.value.find((m) => m.name === form.state.value.model) ?? null,
 );
@@ -242,9 +225,10 @@ const chainDecision = computed(() =>
 
 function onSubmit() {
   if (!form.state.value.model) {
-    // No model selected (and none auto-applied on mount because nothing is
-    // downloaded). Nothing the Preferences modal can do — the user needs
-    // to pick a model in the inline params panel below the composer.
+    // First-run / nothing-downloaded case. The user has to pick a model
+    // before submit can do anything; force-expand the params panel so
+    // the ModelPicker is reachable without hunting for the toggle.
+    paramsPanelRef.value?.setExpanded(true);
     return;
   }
   const decision = chainDecision.value;
@@ -384,10 +368,6 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopAutoRefresh();
-  if (preferencesModelsTimer) {
-    clearInterval(preferencesModelsTimer);
-    preferencesModelsTimer = null;
-  }
 });
 </script>
 
@@ -431,7 +411,11 @@ onBeforeUnmount(() => {
         @clear-source="onClearSource"
       />
 
-      <GenerateParamsPanel v-model="form.state.value" :models="models" />
+      <GenerateParamsPanel
+        ref="paramsPanelRef"
+        v-model="form.state.value"
+        :models="models"
+      />
 
       <RunningStrip
         :jobs="stream.jobs.value"
