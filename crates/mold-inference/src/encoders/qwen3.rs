@@ -6,8 +6,10 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use super::park;
 use super::qwen3_bf16::{Bf16Qwen3Encoder, Qwen3BF16Config};
 use super::qwen3_gguf::GgufQwen3Encoder;
 
@@ -44,6 +46,10 @@ impl Qwen3Model {
 ///
 /// Holds the model weights (optionally — `None` when dropped to free VRAM),
 /// the tokenizer, and device placement info.
+///
+/// Supports park-on-CPU when `MOLD_KEEP_TE_RAM=1`: see [`Self::park_to_cpu`].
+/// BF16 path uses the HashMap-of-CPU-tensors plumbing; GGUF path falls
+/// through to drop/reload (QTensor storage is device-tied).
 pub(crate) struct Qwen3Encoder {
     pub model: Option<Qwen3Model>,
     pub tokenizer: tokenizers::Tokenizer,
@@ -55,6 +61,9 @@ pub(crate) struct Qwen3Encoder {
     dtype: DType,
     /// BF16 architecture config (Qwen3-4B vs 8B). Used for BF16 reload.
     bf16_config: Qwen3BF16Config,
+    /// BF16-only: parameters parked on CPU host RAM, ready for fast unpark.
+    /// `None` when not parked or when running the GGUF path.
+    parked_tensors: Option<HashMap<String, Tensor>>,
 }
 
 /// Format a user prompt for the Qwen3 chat template used by Z-Image.
@@ -109,6 +118,7 @@ impl Qwen3Encoder {
             encoder_paths: encoder_paths.to_vec(),
             dtype,
             bf16_config: *bf16_config,
+            parked_tensors: None,
         })
     }
 
@@ -136,6 +146,7 @@ impl Qwen3Encoder {
             encoder_paths: vec![gguf_path.to_path_buf()],
             dtype: DType::F32, // GGUF dequantizes to F32
             bf16_config: *bf16_config,
+            parked_tensors: None,
         })
     }
 
@@ -207,6 +218,7 @@ impl Qwen3Encoder {
     /// Drop model weights to free memory (e.g. GPU VRAM after encoding).
     pub fn drop_weights(&mut self) {
         self.model = None;
+        self.parked_tensors = None;
     }
 
     /// Reload model weights (e.g. for the next generation after being dropped).
@@ -230,6 +242,51 @@ impl Qwen3Encoder {
             )?));
         }
         Ok(())
+    }
+
+    /// Park weights to CPU host RAM. BF16 path: load all shards to CPU
+    /// once, drop GPU. GGUF path: falls through to `drop_weights()` —
+    /// `unpark_to_gpu()` will route to `reload()`.
+    /// No-op when already parked.
+    pub fn park_to_cpu(&mut self) -> Result<()> {
+        if self.is_parked() {
+            self.model = None;
+            return Ok(());
+        }
+        if self.is_quantized {
+            // GGUF: device-tied QTensors don't survive a CPU round-trip.
+            // Drop the GPU model; unpark will reload from disk.
+            self.drop_weights();
+            return Ok(());
+        }
+        let parked = park::load_tensors_to_cpu(&self.encoder_paths)?;
+        self.parked_tensors = Some(parked);
+        self.model = None;
+        Ok(())
+    }
+
+    /// Restore parameters from CPU back to the encoder's primary device.
+    /// Falls back to `reload()` for the GGUF path or when no parked map
+    /// is present. No-op if the model is already loaded.
+    pub fn unpark_to_gpu(&mut self, progress: &crate::progress::ProgressReporter) -> Result<()> {
+        if self.model.is_some() {
+            return Ok(());
+        }
+        if let Some(parked) = self.parked_tensors.as_ref() {
+            let vb = park::varbuilder_from_parked(parked, self.dtype, &self.device);
+            self.model = Some(Qwen3Model::BF16(Bf16Qwen3Encoder::load(
+                &self.bf16_config,
+                vb,
+            )?));
+            return Ok(());
+        }
+        self.reload(progress)
+    }
+
+    /// Whether this encoder is currently parked (CPU-resident, GPU-free).
+    /// Always `false` for the GGUF path.
+    pub fn is_parked(&self) -> bool {
+        self.model.is_none() && self.parked_tensors.is_some()
     }
 }
 

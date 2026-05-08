@@ -10,9 +10,11 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::VarBuilder;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::park;
 use super::qwen2_text_gguf::GgufQwen2TextEncoder;
 use super::qwen2_vision::{Qwen2VisionConfig, Qwen2VisionModel};
 
@@ -592,6 +594,11 @@ pub(crate) struct Qwen2TextEncoder {
     vision_encoder_paths: Vec<PathBuf>,
     dtype: DType,
     config: Qwen2TextEncoderConfig,
+    /// BF16-only: parameters parked on CPU host RAM, ready for fast unpark.
+    /// `None` when not parked or when running the GGUF path. The vision
+    /// tower's weights live alongside the text-encoder shards, so the
+    /// same parked map covers both branches when `enable_vision=true`.
+    parked_tensors: Option<HashMap<String, Tensor>>,
 }
 
 impl Qwen2TextEncoder {
@@ -646,6 +653,7 @@ impl Qwen2TextEncoder {
             },
             dtype,
             config,
+            parked_tensors: None,
         })
     }
 
@@ -670,6 +678,7 @@ impl Qwen2TextEncoder {
             vision_encoder_paths: vision_encoder_paths.to_vec(),
             dtype,
             config,
+            parked_tensors: None,
         })
     }
 
@@ -867,6 +876,7 @@ impl Qwen2TextEncoder {
     pub fn drop_weights(&mut self) {
         self.model = None;
         self.vision = None;
+        self.parked_tensors = None;
     }
 
     pub fn reload(&mut self, progress: &crate::progress::ProgressReporter) -> Result<()> {
@@ -900,6 +910,55 @@ impl Qwen2TextEncoder {
             )?);
         }
         Ok(())
+    }
+
+    /// Park parameters to CPU host RAM (BF16 path) or fall back to
+    /// `drop_weights()` (GGUF path). The vision tower's tensors share the
+    /// same shard set so a single parked map covers both submodules.
+    /// No-op when already parked.
+    pub fn park_to_cpu(&mut self) -> Result<()> {
+        if self.is_parked() {
+            self.model = None;
+            self.vision = None;
+            return Ok(());
+        }
+        if self.is_quantized {
+            // GGUF: device-tied QTensors → unpark routes to reload().
+            self.drop_weights();
+            return Ok(());
+        }
+        let parked = park::load_tensors_to_cpu(&self.encoder_paths)?;
+        self.parked_tensors = Some(parked);
+        self.model = None;
+        self.vision = None;
+        Ok(())
+    }
+
+    /// Restore from CPU back to the encoder's primary device. Falls back
+    /// to `reload()` on the GGUF path or when no parked map is present.
+    /// No-op when the model is already loaded.
+    pub fn unpark_to_gpu(&mut self, progress: &crate::progress::ProgressReporter) -> Result<()> {
+        if self.model.is_some() {
+            return Ok(());
+        }
+        if let Some(parked) = self.parked_tensors.as_ref() {
+            let vb = park::varbuilder_from_parked(parked, self.dtype, &self.device);
+            if !self.vision_encoder_paths.is_empty() {
+                self.vision = Some(Self::build_vision(vb.clone())?);
+            }
+            self.model = Some(Qwen2TextModel::Bf16(Bf16Qwen2TextModel::new(
+                &self.config,
+                vb,
+            )?));
+            return Ok(());
+        }
+        self.reload(progress)
+    }
+
+    /// Whether this encoder is currently parked. Always `false` for the
+    /// GGUF path (parks fall through to drop+reload).
+    pub fn is_parked(&self) -> bool {
+        self.model.is_none() && self.parked_tensors.is_some()
     }
 }
 

@@ -2128,10 +2128,19 @@ impl QwenImageEngine {
         );
 
         if loaded.text_encoder.model.is_none() {
-            progress.stage_start("Reloading Qwen2.5 encoder");
+            let label = if loaded.text_encoder.is_parked() {
+                "Unparking Qwen2.5 encoder (CPU→GPU)"
+            } else {
+                "Reloading Qwen2.5 encoder"
+            };
+            progress.stage_start(label);
             let reload_start = Instant::now();
-            loaded.text_encoder.reload(progress)?;
-            progress.stage_done("Reloading Qwen2.5 encoder", reload_start.elapsed());
+            if loaded.text_encoder.is_parked() {
+                loaded.text_encoder.unpark_to_gpu(progress)?;
+            } else {
+                loaded.text_encoder.reload(progress)?;
+            }
+            progress.stage_done(label, reload_start.elapsed());
         }
 
         progress.stage_start("Encoding prompt (Qwen2.5 edit)");
@@ -2170,11 +2179,22 @@ impl QwenImageEngine {
 
         let drop_text_encoder = is_edit_family || loaded.text_encoder.on_gpu;
         if drop_text_encoder {
-            loaded.text_encoder.drop_weights();
-            tracing::info!(
-                on_gpu = loaded.text_encoder.on_gpu,
-                "Qwen2.5 text encoder dropped after edit conditioning"
-            );
+            let park_mode = crate::device::keep_te_in_ram()
+                && !loaded.device.is_metal()
+                && !loaded.text_encoder.is_quantized;
+            if park_mode {
+                loaded.text_encoder.park_to_cpu()?;
+                tracing::info!(
+                    on_gpu = loaded.text_encoder.on_gpu,
+                    "Qwen2.5 text encoder parked to CPU host RAM after edit conditioning"
+                );
+            } else {
+                loaded.text_encoder.drop_weights();
+                tracing::info!(
+                    on_gpu = loaded.text_encoder.on_gpu,
+                    "Qwen2.5 text encoder dropped after edit conditioning"
+                );
+            }
         }
 
         let mut packed_input_storage = Vec::with_capacity(edit_images.len());
@@ -2493,10 +2513,19 @@ impl QwenImageEngine {
             (hs, mask, u_hs, u_mask)
         } else {
             if loaded.text_encoder.model.is_none() {
-                progress.stage_start("Reloading Qwen2.5 encoder");
+                let label = if loaded.text_encoder.is_parked() {
+                    "Unparking Qwen2.5 encoder (CPU→GPU)"
+                } else {
+                    "Reloading Qwen2.5 encoder"
+                };
+                progress.stage_start(label);
                 let reload_start = Instant::now();
-                loaded.text_encoder.reload(progress)?;
-                progress.stage_done("Reloading Qwen2.5 encoder", reload_start.elapsed());
+                if loaded.text_encoder.is_parked() {
+                    loaded.text_encoder.unpark_to_gpu(progress)?;
+                } else {
+                    loaded.text_encoder.reload(progress)?;
+                }
+                progress.stage_done(label, reload_start.elapsed());
             }
 
             let (hs, mask) = Self::encode_prompt_cached(
@@ -2542,10 +2571,18 @@ impl QwenImageEngine {
             )
         };
 
-        // Drop text encoder from GPU to free VRAM for denoising
+        // Drop or park text encoder to free VRAM for denoising.
         if loaded.text_encoder.on_gpu {
-            loaded.text_encoder.drop_weights();
-            tracing::info!("Qwen2.5 text encoder dropped from GPU");
+            let park_mode = crate::device::keep_te_in_ram()
+                && !loaded.device.is_metal()
+                && !loaded.text_encoder.is_quantized;
+            if park_mode {
+                loaded.text_encoder.park_to_cpu()?;
+                tracing::info!("Qwen2.5 text encoder parked to CPU host RAM");
+            } else {
+                loaded.text_encoder.drop_weights();
+                tracing::info!("Qwen2.5 text encoder dropped from GPU");
+            }
         }
 
         // 3. Calculate latent dimensions

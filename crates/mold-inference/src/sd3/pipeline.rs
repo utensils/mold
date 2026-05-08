@@ -790,10 +790,21 @@ impl SD3Engine {
 
         (|| -> Result<GenerateResponse> {
             if !loaded.triple_encoder.is_loaded() {
-                progress.stage_start("Reloading SD3 triple encoder");
+                let label = if loaded.triple_encoder.is_parked() {
+                    "Unparking SD3 triple encoder (CPU→GPU)"
+                } else {
+                    "Reloading SD3 triple encoder"
+                };
+                progress.stage_start(label);
                 let reload_start = Instant::now();
-                loaded.triple_encoder.reload(loaded_dtype, progress)?;
-                progress.stage_done("Reloading SD3 triple encoder", reload_start.elapsed());
+                if loaded.triple_encoder.is_parked() {
+                    loaded
+                        .triple_encoder
+                        .unpark_to_gpu(loaded_dtype, progress)?;
+                } else {
+                    loaded.triple_encoder.reload(loaded_dtype, progress)?;
+                }
+                progress.stage_done(label, reload_start.elapsed());
             }
 
             let neg = req.negative_prompt.as_deref().unwrap_or("");
@@ -809,8 +820,18 @@ impl SD3Engine {
             )?;
 
             if loaded.triple_encoder.on_gpu {
-                loaded.triple_encoder.drop_weights();
-                tracing::info!("SD3 triple encoder dropped from GPU to free VRAM for denoising");
+                // Park mode keeps the FP16 encoders alive on host RAM (~9 GB
+                // T5 + ~1.6 GB CLIPs). Disabled on Metal (unified memory).
+                let park_mode = crate::device::keep_te_in_ram() && !loaded_device.is_metal();
+                if park_mode {
+                    loaded.triple_encoder.park_to_cpu()?;
+                    tracing::info!("SD3 triple encoder parked to CPU host RAM");
+                } else {
+                    loaded.triple_encoder.drop_weights();
+                    tracing::info!(
+                        "SD3 triple encoder dropped from GPU to free VRAM for denoising"
+                    );
+                }
             }
 
             // --- img2img: build schedule and encode source image ---

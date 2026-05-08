@@ -1,9 +1,12 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor};
 use candle_transformers::models::clip;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
+
+use super::park;
 
 /// CLIP-L text config (hardcoded — this model variant is fixed for FLUX).
 /// SDXL would use a different config for CLIP-G.
@@ -25,11 +28,18 @@ pub fn config() -> clip::text_model::ClipTextConfig {
 ///
 /// Holds the model weights (optionally — `None` when dropped to free VRAM),
 /// the tokenizer, and device placement info.
+///
+/// Supports park-on-CPU when `MOLD_KEEP_TE_RAM=1`: see [`Self::park_to_cpu`].
 pub(crate) struct ClipEncoder {
     pub model: Option<clip::text_model::ClipTextTransformer>,
     pub tokenizer: Arc<Tokenizer>,
     pub device: Device,
     pub on_gpu: bool,
+    /// Encoder weights path — needed to populate `parked_tensors` on first
+    /// park and to drive the `reload()` fallback.
+    encoder_path: PathBuf,
+    /// Parameters parked on CPU host RAM, ready for fast unpark.
+    parked_tensors: Option<HashMap<String, Tensor>>,
 }
 
 impl ClipEncoder {
@@ -76,6 +86,8 @@ impl ClipEncoder {
             tokenizer,
             device: device.clone(),
             on_gpu,
+            encoder_path: encoder_path.clone(),
+            parked_tensors: None,
         })
     }
 
@@ -115,6 +127,7 @@ impl ClipEncoder {
     /// Drop model weights to free memory (e.g. GPU VRAM after encoding).
     pub fn drop_weights(&mut self) {
         self.model = None;
+        self.parked_tensors = None;
     }
 
     /// Reload model weights (e.g. for the next generation after being dropped).
@@ -136,5 +149,110 @@ impl ClipEncoder {
             &config(),
         )?);
         Ok(())
+    }
+
+    /// Move parameters from GPU to CPU host RAM, ready for fast unpark.
+    ///
+    /// Lazily populates `parked_tensors` on first call (one disk read into
+    /// CPU), then drops the GPU model. CLIP-L is small (~246 MB) so the
+    /// CPU footprint is negligible compared to T5/Qwen3.
+    ///
+    /// No-op when already parked.
+    pub fn park_to_cpu(&mut self) -> Result<()> {
+        if self.is_parked() {
+            self.model = None;
+            return Ok(());
+        }
+        let parked = park::load_tensors_to_cpu(std::slice::from_ref(&self.encoder_path))?;
+        self.parked_tensors = Some(parked);
+        self.model = None;
+        Ok(())
+    }
+
+    /// Restore parameters from CPU back to the encoder's primary device.
+    ///
+    /// No-op when the model is already loaded.
+    pub fn unpark_to_gpu(
+        &mut self,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<()> {
+        if self.model.is_some() {
+            return Ok(());
+        }
+        if let Some(parked) = self.parked_tensors.as_ref() {
+            let vb = park::varbuilder_from_parked(parked, dtype, &self.device);
+            self.model = Some(clip::text_model::ClipTextTransformer::new(
+                vb.pp("text_model"),
+                &config(),
+            )?);
+            return Ok(());
+        }
+        let path = self.encoder_path.clone();
+        self.reload(&path, dtype, progress)
+    }
+
+    /// Whether this encoder is currently parked (CPU-resident, GPU-free).
+    pub fn is_parked(&self) -> bool {
+        self.model.is_none() && self.parked_tensors.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a CPU-only CLIP encoder skeleton for state-machine tests.
+    /// `model` is `None` because constructing a real `ClipTextTransformer`
+    /// requires the full HuggingFace clip-vit-large-patch14 weight tree.
+    fn make_test_encoder() -> ClipEncoder {
+        let dummy_path = std::env::temp_dir().join("nonexistent-clip-tokenizer.json");
+        let tokenizer = Arc::new(tokenizers::Tokenizer::new(
+            tokenizers::models::wordpiece::WordPiece::default(),
+        ));
+        ClipEncoder {
+            model: None,
+            tokenizer,
+            device: Device::Cpu,
+            on_gpu: false,
+            encoder_path: dummy_path,
+            parked_tensors: None,
+        }
+    }
+
+    #[test]
+    fn test_is_parked_state_machine() {
+        let mut e = make_test_encoder();
+        assert!(!e.is_parked());
+
+        // Park-state simulation
+        e.parked_tensors = Some(HashMap::new());
+        assert!(e.is_parked());
+
+        // Drop should clear both
+        e.drop_weights();
+        assert!(!e.is_parked());
+        assert!(e.parked_tensors.is_none());
+    }
+
+    #[test]
+    fn test_park_when_already_parked_is_noop() {
+        let mut e = make_test_encoder();
+        let mut map = HashMap::new();
+        map.insert(
+            "canary".to_string(),
+            Tensor::zeros((1,), DType::F32, &Device::Cpu).unwrap(),
+        );
+        e.parked_tensors = Some(map);
+        e.model = None;
+        assert!(e.is_parked());
+
+        // Re-park is noop on the parked map (no disk read)
+        e.park_to_cpu().expect("re-park is noop");
+        assert!(e.is_parked());
+        assert!(
+            e.parked_tensors.as_ref().unwrap().contains_key("canary"),
+            "re-park preserved the existing parked map"
+        );
     }
 }
