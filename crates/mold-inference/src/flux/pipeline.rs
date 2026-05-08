@@ -702,6 +702,110 @@ fn flux_gguf_lora_var_builder(
     lora::gguf_lora_var_builder(transformer_path, &specs, device, progress, delta_cache)
 }
 
+/// Three-state opt-in for bypass-mode LoRA. `auto` uses bypass when the
+/// inference path benefits most (today: `OffloadedFluxTransformer`,
+/// where bypass avoids the 24 GB CPU-resident merge that the legacy
+/// `flux_lora_var_builder` does on top of mmap). `on` forces bypass
+/// where supported; `off` falls back to the merge paths so users can
+/// regression-check a build.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoraBypassMode {
+    Auto,
+    On,
+    Off,
+}
+
+impl LoraBypassMode {
+    fn from_env() -> Self {
+        match std::env::var("MOLD_LORA_BYPASS")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("on") | Some("1") | Some("true") => Self::On,
+            Some("off") | Some("0") | Some("false") => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// Build a [`super::lora_bypass::LoraRegistry`] for the offload path.
+///
+/// Adapters are placed on `device` at `dtype` (typically GPU + BF16) so
+/// each forward step's `block.to_device(...)` call only has to copy the
+/// tiny `Linear` weights — adapters never round-trip CPU↔GPU.
+///
+/// Returns `Ok(None)` when `loras` is empty so the offload path can
+/// keep its no-LoRA hot path.
+fn build_offload_lora_registry(
+    loras: &[mold_core::LoraWeight],
+    cfg: &flux::model::Config,
+    device: &Device,
+    dtype: DType,
+    progress: &ProgressReporter,
+) -> Result<Option<super::lora_bypass::LoraRegistry>> {
+    use super::lora;
+    use super::lora_bypass;
+
+    if loras.is_empty() {
+        return Ok(None);
+    }
+
+    let adapters: Vec<lora::LoraAdapter> = loras
+        .iter()
+        .map(|w| {
+            progress.info("Loading LoRA adapter (bypass)");
+            let adapter = lora::LoraAdapter::load(Path::new(&w.path))?;
+            progress.info(&format!(
+                "LoRA: {} layers, rank {}, scale {:.2}",
+                adapter.layers.len(),
+                adapter.rank,
+                w.scale,
+            ));
+            anyhow::Ok(adapter)
+        })
+        .collect::<Result<_>>()?;
+
+    let specs: Vec<lora::LoraSpec<'_>> = adapters
+        .iter()
+        .zip(loras.iter())
+        .map(|(adapter, w)| lora::LoraSpec {
+            adapter,
+            scale: w.scale,
+            path_hash: lora_path_hash(&w.path),
+        })
+        .collect();
+
+    // Pre-compute the fused linear out-row counts that bypass-mode
+    // needs to translate component-index targets (e.g. "Q only") into
+    // absolute slice offsets.
+    let h = cfg.hidden_size;
+    let mlp_sz = (h as f64 * cfg.mlp_ratio) as usize;
+    let mut linear_out_dims: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for idx in 0..cfg.depth {
+        // Double blocks: img_attn.qkv / txt_attn.qkv each 3*h.
+        linear_out_dims.insert(format!("double_blocks.{idx}.img_attn.qkv.weight"), 3 * h);
+        linear_out_dims.insert(format!("double_blocks.{idx}.txt_attn.qkv.weight"), 3 * h);
+    }
+    for idx in 0..cfg.depth_single_blocks {
+        // Single block linear1 fuses [Q, K, V, MLP] = 3*h + mlp_sz.
+        linear_out_dims.insert(
+            format!("single_blocks.{idx}.linear1.weight"),
+            3 * h + mlp_sz,
+        );
+    }
+
+    let registry = lora_bypass::build_registry(&specs, &linear_out_dims, device, dtype)?;
+    progress.info(&format!(
+        "LoRA bypass: {} target tensors, adapters resident on {device:?}",
+        registry.len()
+    ));
+    Ok(Some(registry))
+}
+
 /// Resolve the effective LoRA list for a request.
 ///
 /// Wire format intentionally accepts both `lora` (single) and `loras`
@@ -1543,11 +1647,21 @@ impl FluxEngine {
         self.base.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
 
+        let bypass_mode = LoraBypassMode::from_env();
+        // For the offloaded path, bypass is the obvious win whenever
+        // LoRAs are active: the legacy merge path runs `B@A·scale` on
+        // every targeted CPU-resident BF16 tensor and rebuilds the
+        // ~24 GB block buffer on every LoRA swap. Bypass keeps adapters
+        // GPU-resident, so a swap is just a registry replace.
+        let use_offload_bypass = use_offload && has_lora && bypass_mode != LoraBypassMode::Off;
+
         let flux_model = if use_offload {
-            // Load transformer blocks on CPU (with LoRAs merged in if any),
-            // move stem to GPU. Blocks stream CPU→GPU one at a time during forward.
-            let cpu_vb: VarBuilder = if has_lora {
-                // LoRA backend: loads from mmap to CPU, patches inline
+            // Load transformer blocks on CPU. With bypass enabled the
+            // base weights are loaded *unmodified* (LoRA contributions
+            // are added at forward time); without bypass we fall back
+            // to the merge-on-load path.
+            let cpu_vb: VarBuilder = if has_lora && !use_offload_bypass {
+                // Legacy LoRA backend: loads from mmap to CPU, patches inline
                 flux_lora_var_builder(
                     &transformer_path,
                     &active_loras,
@@ -1565,12 +1679,23 @@ impl FluxEngine {
                     &self.base.progress,
                 )?)
             };
-            FluxTransformer::Offloaded(crate::flux::offload::OffloadedFluxTransformer::load(
+            let mut offloaded = crate::flux::offload::OffloadedFluxTransformer::load(
                 cpu_vb,
                 &flux_cfg,
                 &device,
                 &self.base.progress,
-            )?)
+            )?;
+            if use_offload_bypass {
+                let registry = build_offload_lora_registry(
+                    &active_loras,
+                    &flux_cfg,
+                    &device,
+                    gpu_dtype,
+                    &self.base.progress,
+                )?;
+                offloaded.set_lora_registry(registry);
+            }
+            FluxTransformer::Offloaded(offloaded)
         } else if is_quantized && has_lora {
             // GGUF + LoRA: dequantize LoRA-affected layers, keep rest quantized
             let vb = flux_gguf_lora_var_builder(
@@ -2434,10 +2559,44 @@ impl FluxEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{flux_runtime_dtype, flux_transformer_var_builder};
+    use super::{flux_runtime_dtype, flux_transformer_var_builder, LoraBypassMode};
     use candle_core::{DType, Device, Result, Tensor};
     use candle_nn::VarBuilder;
     use std::collections::HashMap;
+
+    /// `MOLD_LORA_BYPASS=on` and `=off` are the two boundaries we
+    /// document. Any other value (including unset) must collapse to
+    /// `Auto` so we never silently change behaviour because of
+    /// stale `MOLD_*` env vars in a developer's shell.
+    #[test]
+    fn lora_bypass_mode_env_parsing() {
+        // Use a closure to keep the env mutation localised. Tests run
+        // in parallel by default, so reset the var on every branch.
+        let with_env = |val: Option<&str>| -> LoraBypassMode {
+            // SAFETY: cfg(test) only; serial enough because each call
+            // sets and clears in the same thread before from_env runs.
+            // TODO if we ever have a flaky run, switch to `serial_test`.
+            unsafe {
+                match val {
+                    Some(v) => std::env::set_var("MOLD_LORA_BYPASS", v),
+                    None => std::env::remove_var("MOLD_LORA_BYPASS"),
+                }
+            }
+            let mode = LoraBypassMode::from_env();
+            unsafe {
+                std::env::remove_var("MOLD_LORA_BYPASS");
+            }
+            mode
+        };
+        assert_eq!(with_env(Some("on")), LoraBypassMode::On);
+        assert_eq!(with_env(Some("ON")), LoraBypassMode::On);
+        assert_eq!(with_env(Some("1")), LoraBypassMode::On);
+        assert_eq!(with_env(Some("off")), LoraBypassMode::Off);
+        assert_eq!(with_env(Some("0")), LoraBypassMode::Off);
+        assert_eq!(with_env(Some("auto")), LoraBypassMode::Auto);
+        assert_eq!(with_env(Some("garbage")), LoraBypassMode::Auto);
+        assert_eq!(with_env(None), LoraBypassMode::Auto);
+    }
 
     #[test]
     fn flux_var_builder_uses_root_tensors_when_present() -> Result<()> {

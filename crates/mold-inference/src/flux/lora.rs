@@ -111,7 +111,7 @@ impl LoraAdapter {
 }
 
 /// Describes how a diffusers-format LoRA key maps to a candle model tensor.
-enum LoraTarget {
+pub(crate) enum LoraTarget {
     /// Direct 1:1 mapping: LoRA delta applies to the entire candle tensor.
     Direct { candle_key: String },
     /// Fused mapping: LoRA delta applies to a row slice of the candle tensor.
@@ -127,7 +127,7 @@ enum LoraTarget {
 /// Map a LoRA layer key (diffusers- or Kohya-format) to a candle model target.
 ///
 /// Returns None for unrecognized keys (logged as warning, skipped).
-fn map_lora_key(diffusers_key: &str) -> Option<LoraTarget> {
+pub(crate) fn map_lora_key(diffusers_key: &str) -> Option<LoraTarget> {
     // Kohya / sd-scripts naming (`lora_unet_*`) — keys carry the FLUX module
     // path with `.` flattened to `_`. The transformer's fused tensors
     // (`img_attn.qkv`, `txt_attn.qkv`, `single_blocks.*.linear1`) match the
@@ -297,7 +297,7 @@ fn map_kohya_unet_key(rest: &str) -> Option<LoraTarget> {
 /// Compute the row offset and size for a fused slice, handling both
 /// equal-split (QKV with num_components=3) and single-block linear1
 /// (Q,K,V each h_sz, then MLP is the remainder).
-fn fused_slice_range(
+pub(crate) fn fused_slice_range(
     base_rows: usize,
     lora_out_dim: usize,
     component: usize,

@@ -11,6 +11,7 @@ use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::{LayerNorm, Linear, RmsNorm, VarBuilder};
 
+use crate::flux::lora_bypass::{LoraLinear, LoraRegistry};
 use crate::progress::ProgressReporter;
 
 // Re-export Config and EmbedNd — these are public types with public constructors.
@@ -74,6 +75,27 @@ fn linear_to_device(l: &Linear, dev: &Device) -> Result<Linear> {
     Ok(Linear::new(w, b))
 }
 
+/// Move a `Linear`'s weights to `dev`, then look up bypass-mode LoRA
+/// adapters for `key` in `registry` and attach them. The adapters
+/// already live on the runtime device (see `LoraRegistry::build`),
+/// so attaching is a clone of small `Tensor` handles — no copy.
+fn lora_linear_to_device(
+    l: &Linear,
+    dev: &Device,
+    registry: Option<&LoraRegistry>,
+    key: &str,
+) -> Result<LoraLinear> {
+    let inner = linear_to_device(l, dev)?;
+    let adapters = registry
+        .map(|r| r.adapters_for(key).to_vec())
+        .unwrap_or_default();
+    if adapters.is_empty() {
+        Ok(LoraLinear::Plain(inner))
+    } else {
+        Ok(LoraLinear::WithAdapters { inner, adapters })
+    }
+}
+
 fn layer_norm_to_device(ln: &LayerNorm, dev: &Device) -> Result<LayerNorm> {
     let w = ln.weight().to_device(dev)?;
     match ln.bias() {
@@ -99,17 +121,33 @@ impl Modulation1 {
             lin: candle_nn::linear(dim, 3 * dim, vb.pp("lin"))?,
         })
     }
-    fn to_device(&self, dev: &Device) -> Result<Self> {
-        Ok(Self {
-            lin: linear_to_device(&self.lin, dev)?,
+    /// Move to `dev` and attach bypass-mode LoRA adapters keyed at
+    /// `<base>.lin.weight` (e.g. `single_blocks.7.modulation.lin.weight`).
+    fn to_device(
+        &self,
+        dev: &Device,
+        registry: Option<&LoraRegistry>,
+        base_key: &str,
+    ) -> Result<GpuModulation1> {
+        Ok(GpuModulation1 {
+            lin: lora_linear_to_device(
+                &self.lin,
+                dev,
+                registry,
+                &format!("{base_key}.lin.weight"),
+            )?,
         })
     }
+}
+
+struct GpuModulation1 {
+    lin: LoraLinear,
+}
+
+impl GpuModulation1 {
     fn forward(&self, vec_: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
-        let ys = vec_
-            .silu()?
-            .apply(&self.lin)?
-            .unsqueeze(1)?
-            .chunk(3, D::Minus1)?;
+        let pre = vec_.silu()?;
+        let ys = self.lin.forward(&pre)?.unsqueeze(1)?.chunk(3, D::Minus1)?;
         Ok((ys[0].clone(), ys[1].clone(), ys[2].clone()))
     }
 }
@@ -124,21 +162,35 @@ impl Modulation2 {
             lin: candle_nn::linear(dim, 6 * dim, vb.pp("lin"))?,
         })
     }
-    fn to_device(&self, dev: &Device) -> Result<Self> {
-        Ok(Self {
-            lin: linear_to_device(&self.lin, dev)?,
+    fn to_device(
+        &self,
+        dev: &Device,
+        registry: Option<&LoraRegistry>,
+        base_key: &str,
+    ) -> Result<GpuModulation2> {
+        Ok(GpuModulation2 {
+            lin: lora_linear_to_device(
+                &self.lin,
+                dev,
+                registry,
+                &format!("{base_key}.lin.weight"),
+            )?,
         })
     }
+}
+
+struct GpuModulation2 {
+    lin: LoraLinear,
+}
+
+impl GpuModulation2 {
     #[allow(clippy::type_complexity)]
     fn forward(
         &self,
         vec_: &Tensor,
     ) -> Result<((Tensor, Tensor, Tensor), (Tensor, Tensor, Tensor))> {
-        let ys = vec_
-            .silu()?
-            .apply(&self.lin)?
-            .unsqueeze(1)?
-            .chunk(6, D::Minus1)?;
+        let pre = vec_.silu()?;
+        let ys = self.lin.forward(&pre)?.unsqueeze(1)?.chunk(6, D::Minus1)?;
         Ok((
             (ys[0].clone(), ys[1].clone(), ys[2].clone()),
             (ys[3].clone(), ys[4].clone(), ys[5].clone()),
@@ -169,17 +221,43 @@ impl SelfAttention {
             num_heads,
         })
     }
-    fn to_device(&self, dev: &Device) -> Result<Self> {
-        Ok(Self {
-            qkv: linear_to_device(&self.qkv, dev)?,
+    fn to_device(
+        &self,
+        dev: &Device,
+        registry: Option<&LoraRegistry>,
+        base_key: &str,
+    ) -> Result<GpuSelfAttention> {
+        Ok(GpuSelfAttention {
+            qkv: lora_linear_to_device(
+                &self.qkv,
+                dev,
+                registry,
+                &format!("{base_key}.qkv.weight"),
+            )?,
             query_norm: rms_norm_to_device(&self.query_norm, dev)?,
             key_norm: rms_norm_to_device(&self.key_norm, dev)?,
-            proj: linear_to_device(&self.proj, dev)?,
+            proj: lora_linear_to_device(
+                &self.proj,
+                dev,
+                registry,
+                &format!("{base_key}.proj.weight"),
+            )?,
             num_heads: self.num_heads,
         })
     }
-    fn qkv(&self, xs: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
-        let qkv = xs.apply(&self.qkv)?;
+}
+
+struct GpuSelfAttention {
+    qkv: LoraLinear,
+    query_norm: RmsNorm,
+    key_norm: RmsNorm,
+    proj: LoraLinear,
+    num_heads: usize,
+}
+
+impl GpuSelfAttention {
+    fn qkv_split(&self, xs: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        let qkv = self.qkv.forward(xs)?;
         let (b, l, _khd) = qkv.dims3()?;
         let qkv = qkv.reshape((b, l, 3, self.num_heads, ()))?;
         let q = qkv.i((.., .., 0))?.transpose(1, 2)?;
@@ -203,14 +281,38 @@ impl Mlp {
             lin2: candle_nn::linear(mlp_sz, in_sz, vb.pp("2"))?,
         })
     }
-    fn to_device(&self, dev: &Device) -> Result<Self> {
-        Ok(Self {
-            lin1: linear_to_device(&self.lin1, dev)?,
-            lin2: linear_to_device(&self.lin2, dev)?,
+    fn to_device(
+        &self,
+        dev: &Device,
+        registry: Option<&LoraRegistry>,
+        base_key: &str,
+    ) -> Result<GpuMlp> {
+        Ok(GpuMlp {
+            lin1: lora_linear_to_device(
+                &self.lin1,
+                dev,
+                registry,
+                &format!("{base_key}.0.weight"),
+            )?,
+            lin2: lora_linear_to_device(
+                &self.lin2,
+                dev,
+                registry,
+                &format!("{base_key}.2.weight"),
+            )?,
         })
     }
+}
+
+struct GpuMlp {
+    lin1: LoraLinear,
+    lin2: LoraLinear,
+}
+
+impl GpuMlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        Ok(xs.apply(&self.lin1)?.gelu()?.apply(&self.lin2)?)
+        let h = self.lin1.forward(xs)?.gelu()?;
+        self.lin2.forward(&h)
     }
 }
 
@@ -247,21 +349,59 @@ impl DoubleBlock {
         })
     }
 
-    fn to_device(&self, dev: &Device) -> Result<Self> {
-        Ok(Self {
-            img_mod: self.img_mod.to_device(dev)?,
+    /// Stream this block onto `dev` and bind any bypass-mode LoRA
+    /// adapters keyed under `double_blocks.{idx}.…`.
+    fn to_device(
+        &self,
+        dev: &Device,
+        registry: Option<&LoraRegistry>,
+        idx: usize,
+    ) -> Result<GpuDoubleBlock> {
+        let base = format!("double_blocks.{idx}");
+        Ok(GpuDoubleBlock {
+            img_mod: self
+                .img_mod
+                .to_device(dev, registry, &format!("{base}.img_mod"))?,
             img_norm1: layer_norm_to_device(&self.img_norm1, dev)?,
-            img_attn: self.img_attn.to_device(dev)?,
+            img_attn: self
+                .img_attn
+                .to_device(dev, registry, &format!("{base}.img_attn"))?,
             img_norm2: layer_norm_to_device(&self.img_norm2, dev)?,
-            img_mlp: self.img_mlp.to_device(dev)?,
-            txt_mod: self.txt_mod.to_device(dev)?,
+            img_mlp: self
+                .img_mlp
+                .to_device(dev, registry, &format!("{base}.img_mlp"))?,
+            txt_mod: self
+                .txt_mod
+                .to_device(dev, registry, &format!("{base}.txt_mod"))?,
             txt_norm1: layer_norm_to_device(&self.txt_norm1, dev)?,
-            txt_attn: self.txt_attn.to_device(dev)?,
+            txt_attn: self
+                .txt_attn
+                .to_device(dev, registry, &format!("{base}.txt_attn"))?,
             txt_norm2: layer_norm_to_device(&self.txt_norm2, dev)?,
-            txt_mlp: self.txt_mlp.to_device(dev)?,
+            txt_mlp: self
+                .txt_mlp
+                .to_device(dev, registry, &format!("{base}.txt_mlp"))?,
         })
     }
+}
 
+/// GPU-resident, LoRA-aware double-stream block. Built fresh each step
+/// from a CPU [`DoubleBlock`] via `to_device`; lives only for the
+/// duration of one block forward.
+struct GpuDoubleBlock {
+    img_mod: GpuModulation2,
+    img_norm1: LayerNorm,
+    img_attn: GpuSelfAttention,
+    img_norm2: LayerNorm,
+    img_mlp: GpuMlp,
+    txt_mod: GpuModulation2,
+    txt_norm1: LayerNorm,
+    txt_attn: GpuSelfAttention,
+    txt_norm2: LayerNorm,
+    txt_mlp: GpuMlp,
+}
+
+impl GpuDoubleBlock {
     fn forward(
         &self,
         img: &Tensor,
@@ -277,13 +417,13 @@ impl DoubleBlock {
             .apply(&self.img_norm1)?
             .broadcast_mul(&(&img_sc1 + 1.)?)?
             .broadcast_add(&img_s1)?;
-        let (img_q, img_k, img_v) = self.img_attn.qkv(&img_modulated)?;
+        let (img_q, img_k, img_v) = self.img_attn.qkv_split(&img_modulated)?;
 
         let txt_modulated = txt
             .apply(&self.txt_norm1)?
             .broadcast_mul(&(&txt_sc1 + 1.)?)?
             .broadcast_add(&txt_s1)?;
-        let (txt_q, txt_k, txt_v) = self.txt_attn.qkv(&txt_modulated)?;
+        let (txt_q, txt_k, txt_v) = self.txt_attn.qkv_split(&txt_modulated)?;
 
         // Cross-attention
         let q = Tensor::cat(&[txt_q, img_q], 2)?;
@@ -294,7 +434,7 @@ impl DoubleBlock {
         let img_attn_out = attn.narrow(1, txt.dim(1)?, attn.dim(1)? - txt.dim(1)?)?;
 
         // Image residual
-        let img = (img + img_g1.broadcast_mul(&img_attn_out.apply(&self.img_attn.proj)?)?)?;
+        let img = (img + img_g1.broadcast_mul(&self.img_attn.proj.forward(&img_attn_out)?)?)?;
         let img_ff = img
             .apply(&self.img_norm2)?
             .broadcast_mul(&(&img_sc2 + 1.)?)?
@@ -302,7 +442,7 @@ impl DoubleBlock {
         let img = (&img + img_g2.broadcast_mul(&self.img_mlp.forward(&img_ff)?)?)?;
 
         // Text residual
-        let txt = (txt + txt_g1.broadcast_mul(&txt_attn_out.apply(&self.txt_attn.proj)?)?)?;
+        let txt = (txt + txt_g1.broadcast_mul(&self.txt_attn.proj.forward(&txt_attn_out)?)?)?;
         let txt_ff = txt
             .apply(&self.txt_norm2)?
             .broadcast_mul(&(&txt_sc2 + 1.)?)?
@@ -350,27 +490,60 @@ impl SingleBlock {
         })
     }
 
-    fn to_device(&self, dev: &Device) -> Result<Self> {
-        Ok(Self {
-            linear1: linear_to_device(&self.linear1, dev)?,
-            linear2: linear_to_device(&self.linear2, dev)?,
+    fn to_device(
+        &self,
+        dev: &Device,
+        registry: Option<&LoraRegistry>,
+        idx: usize,
+    ) -> Result<GpuSingleBlock> {
+        let base = format!("single_blocks.{idx}");
+        Ok(GpuSingleBlock {
+            linear1: lora_linear_to_device(
+                &self.linear1,
+                dev,
+                registry,
+                &format!("{base}.linear1.weight"),
+            )?,
+            linear2: lora_linear_to_device(
+                &self.linear2,
+                dev,
+                registry,
+                &format!("{base}.linear2.weight"),
+            )?,
             query_norm: rms_norm_to_device(&self.query_norm, dev)?,
             key_norm: rms_norm_to_device(&self.key_norm, dev)?,
             pre_norm: layer_norm_to_device(&self.pre_norm, dev)?,
-            modulation: self.modulation.to_device(dev)?,
+            modulation: self
+                .modulation
+                .to_device(dev, registry, &format!("{base}.modulation"))?,
             h_sz: self.h_sz,
             mlp_sz: self.mlp_sz,
             num_heads: self.num_heads,
         })
     }
+}
 
+/// GPU-resident, LoRA-aware single-stream block.
+struct GpuSingleBlock {
+    linear1: LoraLinear,
+    linear2: LoraLinear,
+    query_norm: RmsNorm,
+    key_norm: RmsNorm,
+    pre_norm: LayerNorm,
+    modulation: GpuModulation1,
+    h_sz: usize,
+    mlp_sz: usize,
+    num_heads: usize,
+}
+
+impl GpuSingleBlock {
     fn forward(&self, xs: &Tensor, vec_: &Tensor, pe: &Tensor) -> Result<Tensor> {
         let (shift, scale, gate) = self.modulation.forward(vec_)?;
         let x_mod = xs
             .apply(&self.pre_norm)?
             .broadcast_mul(&(&scale + 1.)?)?
             .broadcast_add(&shift)?;
-        let x_mod = x_mod.apply(&self.linear1)?;
+        let x_mod = self.linear1.forward(&x_mod)?;
         let qkv = x_mod.narrow(D::Minus1, 0, 3 * self.h_sz)?;
         let (b, l, _khd) = qkv.dims3()?;
         let qkv = qkv.reshape((b, l, 3, self.num_heads, ()))?;
@@ -381,7 +554,8 @@ impl SingleBlock {
         let q = q.apply(&self.query_norm)?;
         let k = k.apply(&self.key_norm)?;
         let attn = attention(&q, &k, &v, pe)?;
-        let output = Tensor::cat(&[attn, mlp.gelu()?], 2)?.apply(&self.linear2)?;
+        let output_in = Tensor::cat(&[attn, mlp.gelu()?], 2)?;
+        let output = self.linear2.forward(&output_in)?;
         Ok((xs + gate.broadcast_mul(&output)?)?)
     }
 }
@@ -423,7 +597,10 @@ impl FinalLayer {
 
 /// BF16 FLUX transformer with blocks on CPU, streamed to GPU one at a time.
 pub(crate) struct OffloadedFluxTransformer {
-    // Stem layers on GPU permanently (~50MB)
+    // Stem layers on GPU permanently (~50MB). Stem isn't a typical LoRA
+    // target so we leave them as raw `Linear`. If a future FLUX LoRA
+    // does target `img_in` / `txt_in`, promote these to `LoraLinear` and
+    // extend `map_lora_key` to recognise them.
     img_in: Linear,
     txt_in: Linear,
     time_in: StemMlpEmbedder,
@@ -435,6 +612,10 @@ pub(crate) struct OffloadedFluxTransformer {
     double_blocks: Vec<DoubleBlock>,
     single_blocks: Vec<SingleBlock>,
     gpu_device: Device,
+    /// Bypass-mode LoRA stack. None when no LoRAs are active. Adapters
+    /// already live on `gpu_device` so block-stream cycles never have
+    /// to copy them — only the base `Linear` weights move.
+    lora_registry: Option<LoraRegistry>,
 }
 
 impl OffloadedFluxTransformer {
@@ -507,7 +688,28 @@ impl OffloadedFluxTransformer {
             double_blocks,
             single_blocks,
             gpu_device: gpu_device.clone(),
+            lora_registry: None,
         })
+    }
+
+    /// Install a bypass-mode LoRA stack. Adapters fire each block-step
+    /// on top of the base matmul output — no base-weight rebuild, no
+    /// CPU-side dequant→merge→requant. Pass `None` to clear.
+    ///
+    /// Cheap: just stashes the registry handle. The actual binding to
+    /// each `LoraLinear` happens lazily on the next `forward()` when
+    /// blocks stream onto the GPU.
+    pub(crate) fn set_lora_registry(&mut self, registry: Option<LoraRegistry>) {
+        self.lora_registry = registry;
+    }
+
+    /// True when at least one bypass-mode adapter is installed.
+    #[allow(dead_code)]
+    pub(crate) fn has_loras(&self) -> bool {
+        self.lora_registry
+            .as_ref()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false)
     }
 
     /// Run the full FLUX forward pass with block-level streaming.
@@ -523,6 +725,7 @@ impl OffloadedFluxTransformer {
         guidance: Option<&Tensor>,
     ) -> Result<Tensor> {
         let dtype = img.dtype();
+        let registry = self.lora_registry.as_ref();
 
         // Positional encoding
         let pe = {
@@ -544,9 +747,11 @@ impl OffloadedFluxTransformer {
         };
         let vec_ = (vec_ + y.apply(&self.vector_in))?;
 
-        // Double blocks: stream each from CPU → GPU
+        // Double blocks: stream each from CPU → GPU. LoRA adapters are
+        // already GPU-resident (in `lora_registry`); streaming a block
+        // copies only the base Linear weights.
         for (i, block) in self.double_blocks.iter().enumerate() {
-            let gpu_block = block.to_device(&self.gpu_device)?;
+            let gpu_block = block.to_device(&self.gpu_device, registry, i)?;
             (img, txt) = gpu_block.forward(&img, &txt, &vec_, &pe)?;
             self.gpu_device.synchronize()?;
             drop(gpu_block);
@@ -557,7 +762,7 @@ impl OffloadedFluxTransformer {
         let mut img = Tensor::cat(&[&txt, &img], 1)?;
         let txt_len = txt.dim(1)?;
         for (i, block) in self.single_blocks.iter().enumerate() {
-            let gpu_block = block.to_device(&self.gpu_device)?;
+            let gpu_block = block.to_device(&self.gpu_device, registry, i)?;
             img = gpu_block.forward(&img, &vec_, &pe)?;
             self.gpu_device.synchronize()?;
             drop(gpu_block);
