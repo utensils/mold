@@ -207,13 +207,19 @@ impl T5Encoder {
         Ok(())
     }
 
-    /// Move parameters from GPU to CPU host RAM, keeping them ready for a
-    /// fast unpark on the next request.
+    /// Park encoder parameters into a CPU-resident HashMap of named tensors.
     ///
-    /// FP16 path: lazily populates `parked_tensors` on the first call (one-
-    /// time disk read into CPU), then drops the GPU model. Subsequent
-    /// `park_to_cpu()` after an unpark is a no-op apart from dropping the
-    /// GPU copy — the CPU HashMap is already populated.
+    /// The first call after a `reload()` reads the safetensors fresh from
+    /// disk into CPU RAM (so the on-disk file is paged in once, not avoided);
+    /// subsequent park/unpark cycles reuse the existing CPU tensors and
+    /// avoid disk I/O. The GPU model is dropped after the CPU map is
+    /// populated. Subsequent `unpark_to_gpu()` calls are CPU→GPU tensor
+    /// copies (~100-300 ms typical).
+    ///
+    /// FP16 path: lazily populates `parked_tensors` on the first call,
+    /// then drops the GPU model. Subsequent `park_to_cpu()` after an
+    /// unpark is a no-op apart from dropping the GPU copy — the CPU
+    /// HashMap is already populated.
     ///
     /// GGUF path: falls back to `drop_weights()`. The next `unpark_to_gpu()`
     /// detects the missing parked map and routes to `reload()`. This keeps

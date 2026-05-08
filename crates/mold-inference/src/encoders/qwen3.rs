@@ -244,9 +244,18 @@ impl Qwen3Encoder {
         Ok(())
     }
 
-    /// Park weights to CPU host RAM. BF16 path: load all shards to CPU
-    /// once, drop GPU. GGUF path: falls through to `drop_weights()` —
-    /// `unpark_to_gpu()` will route to `reload()`.
+    /// Park encoder parameters into a CPU-resident HashMap of named tensors.
+    ///
+    /// The first call after a `reload()` reads the safetensors fresh from
+    /// disk into CPU RAM (so the on-disk file is paged in once, not avoided);
+    /// subsequent park/unpark cycles reuse the existing CPU tensors and
+    /// avoid disk I/O. The GPU model is dropped after the CPU map is
+    /// populated. Subsequent `unpark_to_gpu()` calls are CPU→GPU tensor
+    /// copies (~100-300 ms typical).
+    ///
+    /// BF16 path: load all shards to CPU once, drop GPU. GGUF path: falls
+    /// through to `drop_weights()` — `unpark_to_gpu()` will route to
+    /// `reload()`.
     /// No-op when already parked.
     pub fn park_to_cpu(&mut self) -> Result<()> {
         if self.is_parked() {

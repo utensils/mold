@@ -1,18 +1,17 @@
 //! Pluggable attention backend for FLUX-family transformers.
 //!
-//! Three implementations live behind a single dispatch helper:
+//! Two implementations live behind a single dispatch helper:
 //!
 //! * `Math`  — the historical hand-rolled `q.matmul(k.t()) * scale → softmax → matmul(v)`.
 //!   Materialises the full `B·H·N·N` attention matrix; fine on CPU/Metal,
 //!   the dominant VRAM cost on CUDA at FLUX 1024^2.
-//! * `Sdpa`  — a numerically-equivalent rewrite that flattens to 3D before the
-//!   matmul. Provided as a safety net so users on GGUF/exotic dtypes can opt
-//!   into a slightly different code path without enabling flash-attn.
 //! * `Flash` — `candle-flash-attn` (flash-attention v2). Only available with
-//!   `--features flash-attn` AND a CUDA tensor in fp16/bf16. Falls through to
-//!   `Math` for any tensor that doesn't satisfy those constraints.
+//!   `--features cuda,flash-attn` AND `RUSTFLAGS='--cfg mold_flash_attn_real'`
+//!   AND a CUDA tensor in fp16/bf16. Falls through to `Math` (with a one-shot
+//!   warning) for any tensor that doesn't satisfy those constraints, or when
+//!   the FFI gate is closed.
 //!
-//! Selection is env-driven via `MOLD_ATTN={flash,sdpa,math}` and cached in a
+//! Selection is env-driven via `MOLD_ATTN={flash,math}` and cached in a
 //! `OnceLock` so we don't re-read the environment on every block.
 //!
 //! ComfyUI does the same thing in `ldm/modules/attention.py:495-540`.
@@ -25,17 +24,20 @@ use std::sync::OnceLock;
 pub enum AttentionBackend {
     /// Hand-rolled QK^T softmax V — current default everywhere.
     Math,
-    /// Same arithmetic, 3D-flattened. Useful as a sanity-check baseline.
-    Sdpa,
     /// `candle-flash-attn` (flash-attention v2). CUDA + fp16/bf16 only.
     Flash,
 }
+
+/// Tracks whether we've already emitted the "flash requested but unavailable"
+/// warning for this process. The dispatcher prints it at most once so a
+/// 50-step diffusion run doesn't spam the operator log with the same line.
+static FLASH_FALLBACK_WARNED: OnceLock<()> = OnceLock::new();
 
 impl AttentionBackend {
     /// Resolve the backend once, cache forever.
     ///
     /// Precedence:
-    /// 1. `MOLD_ATTN` env (`flash` / `sdpa` / `math`, case-insensitive).
+    /// 1. `MOLD_ATTN` env (`flash` / `math`, case-insensitive).
     /// 2. `flash-attn` cargo feature → default `Flash`.
     /// 3. Otherwise → `Math`.
     pub fn resolve() -> AttentionBackend {
@@ -54,17 +56,47 @@ fn parse_backend_env(raw: Option<&str>) -> AttentionBackend {
     if let Some(value) = raw {
         match value.trim().to_ascii_lowercase().as_str() {
             "flash" => return AttentionBackend::Flash,
-            "sdpa" => return AttentionBackend::Sdpa,
             "math" => return AttentionBackend::Math,
+            // `sdpa` was removed in the Tier 1 review followup — it was a
+            // no-op alias for `math` with no signal to the user. Anyone
+            // still setting it gets the math path with a one-time warning.
+            "sdpa" => {
+                tracing::warn!(
+                    "MOLD_ATTN=sdpa was removed (it was a no-op alias for math); using math"
+                );
+                return AttentionBackend::Math;
+            }
             other if !other.is_empty() => {
                 tracing::warn!(
-                    "MOLD_ATTN={other} is not one of flash/sdpa/math; falling back to default"
+                    "MOLD_ATTN={other} is not one of flash/math; falling back to default"
                 );
             }
             _ => {}
         }
     }
     default_backend()
+}
+
+/// Emit the "flash requested but FFI gate closed" warning at most once per
+/// process. Returns `true` if this call was the one that fired the warning.
+/// Exposed at `pub(crate)` so the unit tests can assert the OnceLock state.
+pub(crate) fn warn_flash_fallback_once() -> bool {
+    let mut fired = false;
+    FLASH_FALLBACK_WARNED.get_or_init(|| {
+        tracing::warn!(
+            "attention backend 'flash' requested but FlashAttention FFI is gated off \
+             (build with --features cuda,flash-attn AND RUSTFLAGS='--cfg mold_flash_attn_real'); \
+             falling back to math"
+        );
+        fired = true;
+    });
+    fired
+}
+
+/// Whether the flash-fallback warning has fired this process. Test helper.
+#[cfg(test)]
+pub(crate) fn flash_fallback_warned() -> bool {
+    FLASH_FALLBACK_WARNED.get().is_some()
 }
 
 #[cfg(feature = "flash-attn")]
@@ -88,7 +120,6 @@ fn default_backend() -> AttentionBackend {
 pub fn attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
     match AttentionBackend::resolve() {
         AttentionBackend::Flash => flash_attention(q, k, v, scale),
-        AttentionBackend::Sdpa => sdpa_attention(q, k, v, scale),
         AttentionBackend::Math => math_attention(q, k, v, scale),
     }
 }
@@ -116,22 +147,16 @@ pub fn math_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<
     attn.reshape(batch_dims)
 }
 
-/// Same arithmetic as `math_attention` but expressed against the original 4D
-/// shape. Kept distinct so users can A/B test if a backend is faster with one
-/// matmul layout vs. another.
-pub fn sdpa_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
-    // Identical mathematical result; we deliberately reuse the math impl so we
-    // can't drift. The split exists for future divergence (e.g. cuDNN SDPA).
-    math_attention(q, k, v, scale)
-}
-
 /// Flash-attention v2 path.
 ///
 /// When the `flash-attn` feature is on AND the tensors are CUDA + fp16/bf16
 /// AND the build was configured against a `candle-core` that matches the one
 /// `candle-flash-attn` was compiled against (the `mold_flash_attn_real` cfg),
 /// this calls `candle_flash_attn::flash_attn`. Otherwise it falls back to
-/// `math_attention` — same numerical answer, just slower.
+/// `math_attention` — same numerical answer, just slower. The first
+/// fall-through caused by an FFI gate (rather than tensor ineligibility)
+/// fires a one-shot `tracing::warn!` so operators see exactly why their
+/// `MOLD_ATTN=flash` request didn't take effect.
 ///
 /// Why two gates? `candle-flash-attn` 0.9.x links upstream `candle-core`
 /// while mold pulls `candle-core-mold`, so the two `Tensor` types don't
@@ -142,6 +167,9 @@ pub fn sdpa_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<
 /// builds cleanly so users can opt into the dispatcher's plumbing.
 pub fn flash_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
     if !flash_is_eligible(q) {
+        // CPU/Metal tensors or wrong dtype — fall back without the
+        // FFI-gate warning. Hitting the math path on these devices is the
+        // expected behavior, not a misconfiguration.
         return math_attention(q, k, v, scale);
     }
 
@@ -157,6 +185,13 @@ pub fn flash_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result
     }
 
     // Either the cargo feature is off, or the FFI gate hasn't been opened.
+    // Tensor was eligible (CUDA + fp16/bf16) so the user genuinely asked for
+    // flash and didn't get it — fire the one-shot warning before falling
+    // through to math.
+    #[cfg(not(all(feature = "flash-attn", mold_flash_attn_real)))]
+    {
+        warn_flash_fallback_once();
+    }
     math_attention(q, k, v, scale)
 }
 
@@ -219,18 +254,11 @@ mod tests {
     }
 
     #[test]
-    fn test_sdpa_matches_math() {
-        let (q, k, v) = rand_qkv((1, 2, 8, 16));
-        let scale = 1.0 / (16f32).sqrt();
-        let math = math_attention(&q, &k, &v, scale).unwrap();
-        let sdpa = sdpa_attention(&q, &k, &v, scale).unwrap();
-        assert!(max_abs_diff(&math, &sdpa) < 1e-4);
-    }
-
-    #[test]
     fn test_flash_falls_back_on_cpu() {
         // CPU tensors are not flash-eligible, so flash_attention must fall
-        // through to math regardless of the cargo feature.
+        // through to math regardless of the cargo feature. This path does
+        // NOT fire the one-shot warning (CPU is the expected fallback
+        // surface, not a misconfiguration).
         let (q, k, v) = rand_qkv((1, 2, 8, 16));
         let scale = 1.0 / (16f32).sqrt();
         let math = math_attention(&q, &k, &v, scale).unwrap();
@@ -253,12 +281,72 @@ mod tests {
         // OnceLock-free parser: covers the env contract exhaustively.
         assert_eq!(parse_backend_env(Some("flash")), AttentionBackend::Flash);
         assert_eq!(parse_backend_env(Some("FLASH")), AttentionBackend::Flash);
-        assert_eq!(parse_backend_env(Some(" sdpa ")), AttentionBackend::Sdpa);
         assert_eq!(parse_backend_env(Some("math")), AttentionBackend::Math);
         // Unknown values warn and fall back.
         assert_eq!(parse_backend_env(Some("xformers")), default_backend());
         assert_eq!(parse_backend_env(Some("")), default_backend());
         assert_eq!(parse_backend_env(None), default_backend());
+    }
+
+    /// `Sdpa` is gone from the public enum (T1.5 review followup): it was a
+    /// no-op alias for `Math` whose presence misled users into thinking
+    /// they'd selected a real second backend. The parser now warns and
+    /// returns `Math` so the same env stays functional, but no
+    /// `AttentionBackend::Sdpa` variant exists for callers to match on.
+    #[test]
+    fn resolve_returns_only_known_backends() {
+        assert_eq!(parse_backend_env(Some("sdpa")), AttentionBackend::Math);
+        assert_eq!(parse_backend_env(Some("SDPA")), AttentionBackend::Math);
+        assert_eq!(parse_backend_env(Some(" sdpa ")), AttentionBackend::Math);
+        // Spot-check that the supported set is the documented two:
+        for value in ["flash", "math"] {
+            let backend = parse_backend_env(Some(value));
+            assert!(matches!(
+                backend,
+                AttentionBackend::Flash | AttentionBackend::Math
+            ));
+        }
+    }
+
+    /// When `MOLD_ATTN=flash` is requested but the FFI gate is closed, the
+    /// dispatcher must fire a `tracing::warn!` exactly once per process —
+    /// not on every block of every step. We assert the OnceLock state
+    /// directly because tracing-test introduces a heavy dep for what is
+    /// fundamentally a single-bit observation.
+    ///
+    /// Note: this test only meaningfully exercises the warning path when
+    /// the FFI gate is closed (the common case — `mold_flash_attn_real`
+    /// requires an explicit RUSTFLAGS opt-in). In a build that has both
+    /// the cargo feature and the cfg gate enabled the warning function
+    /// is never reached on eligible tensors; we still assert the helper
+    /// is idempotent because the OnceLock semantics are the contract.
+    #[test]
+    fn flash_fallback_warns_once() {
+        // First call fires the warning; subsequent calls are no-ops.
+        let first = warn_flash_fallback_once();
+        let second = warn_flash_fallback_once();
+        let third = warn_flash_fallback_once();
+        // Either the first call we ever made in this process fired (and
+        // subsequent calls did not), or some earlier test in the same
+        // process already fired it — in which case none of our calls
+        // should have fired. Both are valid outcomes.
+        assert!(
+            !(second || third),
+            "warn_flash_fallback_once must not re-fire after the first call"
+        );
+        if first {
+            // We were the first call in this process — verify the latch
+            // is now sticky.
+            assert!(
+                flash_fallback_warned(),
+                "OnceLock state must reflect that the warning fired"
+            );
+        }
+        // Either way, the OnceLock must now be set.
+        assert!(
+            flash_fallback_warned(),
+            "warn_flash_fallback_once must always leave the latch set"
+        );
     }
 
     #[test]

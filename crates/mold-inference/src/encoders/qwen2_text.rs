@@ -912,9 +912,19 @@ impl Qwen2TextEncoder {
         Ok(())
     }
 
-    /// Park parameters to CPU host RAM (BF16 path) or fall back to
-    /// `drop_weights()` (GGUF path). The vision tower's tensors share the
-    /// same shard set so a single parked map covers both submodules.
+    /// Park encoder parameters into a CPU-resident HashMap of named tensors.
+    ///
+    /// The first call after a `reload()` reads the safetensors fresh from
+    /// disk into CPU RAM (so the on-disk file is paged in once, not avoided);
+    /// subsequent park/unpark cycles reuse the existing CPU tensors and
+    /// avoid disk I/O. The GPU model is dropped after the CPU map is
+    /// populated. Subsequent `unpark_to_gpu()` calls are CPU→GPU tensor
+    /// copies (~100-300 ms typical).
+    ///
+    /// BF16 path: populates `parked_tensors` from the encoder shards.
+    /// GGUF path: falls back to `drop_weights()`. The vision tower's
+    /// tensors share the same shard set so a single parked map covers
+    /// both submodules.
     /// No-op when already parked.
     pub fn park_to_cpu(&mut self) -> Result<()> {
         if self.is_parked() {

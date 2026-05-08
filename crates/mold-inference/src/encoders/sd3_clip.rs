@@ -134,7 +134,14 @@ impl ClipWithTokenizer {
         Ok(())
     }
 
-    /// Park to CPU: load all weights to host RAM and drop the GPU model.
+    /// Park encoder parameters into a CPU-resident HashMap of named tensors.
+    ///
+    /// The first call after a `reload()` reads the safetensors fresh from
+    /// disk into CPU RAM (so the on-disk file is paged in once, not avoided);
+    /// subsequent park/unpark cycles reuse the existing CPU tensors and
+    /// avoid disk I/O. The GPU model is dropped after the CPU map is
+    /// populated. Subsequent `unpark_to_gpu()` calls are CPU→GPU tensor
+    /// copies (~100-300 ms typical).
     /// No-op when already parked.
     fn park_to_cpu(&mut self, encoder_path: &PathBuf) -> Result<()> {
         if self.is_parked() {

@@ -151,10 +151,14 @@ impl ClipEncoder {
         Ok(())
     }
 
-    /// Move parameters from GPU to CPU host RAM, ready for fast unpark.
+    /// Park encoder parameters into a CPU-resident HashMap of named tensors.
     ///
-    /// Lazily populates `parked_tensors` on first call (one disk read into
-    /// CPU), then drops the GPU model. CLIP-L is small (~246 MB) so the
+    /// The first call after a `reload()` reads the safetensors fresh from
+    /// disk into CPU RAM (so the on-disk file is paged in once, not avoided);
+    /// subsequent park/unpark cycles reuse the existing CPU tensors and
+    /// avoid disk I/O. The GPU model is dropped after the CPU map is
+    /// populated. Subsequent `unpark_to_gpu()` calls are CPU→GPU tensor
+    /// copies (~100-300 ms typical). CLIP-L is small (~246 MB) so the
     /// CPU footprint is negligible compared to T5/Qwen3.
     ///
     /// No-op when already parked.
