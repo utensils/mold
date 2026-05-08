@@ -290,6 +290,28 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     if is_model_specific_component(file.component) {
         PathBuf::from(&sanitized_name).join(&file.hf_filename)
     } else {
+        // Companion manifests (`t5-v1_1-xxl`, `clip-l`, etc.) route their
+        // shared components to the canonical owning family's bucket so an
+        // already-installed FLUX/SDXL/SD1.5 model's encoders/tokenizers are
+        // found by `ModelPaths::resolve(<companion>, config)` without a
+        // duplicate download. Without this routing, t5-v1_1-xxl's tokenizer
+        // would land at `shared/companion/...` and the catalog bridge's
+        // synthesized `cfg.t5_tokenizer` would stay None even when the file
+        // exists at `shared/flux/...` from a prior FLUX install.
+        if manifest.family == "companion" {
+            let canonical_family = match manifest.name.as_str() {
+                "t5-v1_1-xxl" | "clip-l" | "flux-vae" => "flux",
+                "clip-g" | "sdxl-vae" => "sdxl",
+                "sd-vae-ft-mse" => "sd15",
+                "ltx-video-vae" => "ltx-video",
+                "flux2-vae" | "flux2-te" | "flux2-te-9b" => "flux2",
+                "ltx2-te" => "ltx2",
+                _ => "companion",
+            };
+            return PathBuf::from("shared")
+                .join(canonical_family)
+                .join(&file.hf_filename);
+        }
         if manifest.family == "ltx-video" {
             return match file.component {
                 // LTX reuses the shared FLUX T5 assets. Keep them under the
@@ -4565,14 +4587,29 @@ fn companion_manifests() -> Vec<ModelManifest> {
             family: "companion".to_string(),
             description: "T5-XXL bf16 companion (single-file FLUX / Flux.2 / LTX-Video)"
                 .to_string(),
-            files: vec![ModelFile {
-                hf_repo: "city96/t5-v1_1-xxl-encoder-bf16".to_string(),
-                hf_filename: "model.safetensors".to_string(),
-                component: ModelComponent::Transformer,
-                size_bytes: 9_787_841_024,
-                gated: false,
-                sha256: None,
-            }],
+            files: vec![
+                ModelFile {
+                    hf_repo: "city96/t5-v1_1-xxl-encoder-bf16".to_string(),
+                    hf_filename: "model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 9_787_841_024,
+                    gated: false,
+                    sha256: None,
+                },
+                // Tokenizer must ride along: the catalog bridge resolves a
+                // companion's ModelPaths and copies `paths.t5_tokenizer` into
+                // the synthesized `cfg.t5_tokenizer`. Without this entry,
+                // `cfg.t5_tokenizer` would stay None and FLUX/SD3/Flux.2
+                // single-file loads bomb with "T5 tokenizer path required".
+                ModelFile {
+                    hf_repo: "lmz/mt5-tokenizers".to_string(),
+                    hf_filename: "t5-v1_1-xxl.tokenizer.json".to_string(),
+                    component: ModelComponent::T5Tokenizer,
+                    size_bytes: 2_424_257,
+                    gated: false,
+                    sha256: None,
+                },
+            ],
             defaults: defaults.clone(),
             hidden: true,
         },
@@ -4908,6 +4945,67 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn companion_shared_components_route_to_canonical_owning_family() {
+        // Catalog single-file flows resolve a companion's ModelPaths and
+        // copy `paths.t5_tokenizer` / `paths.clip_tokenizer` into the
+        // synthesized config. Companions must route their *shared* (non
+        // model-specific) components to the same on-disk bucket the owning
+        // family uses, so an already-installed flux-schnell's tokenizer is
+        // found by ModelPaths::resolve("t5-v1_1-xxl", config) without a
+        // re-download. The companion's primary weight (Transformer) still
+        // lives under <companion>/<file> per is_model_specific_component
+        // (intentional and preserved).
+        // t5-v1_1-xxl ships the tokenizer; clip-l ships its tokenizer.
+        // clip-g/sdxl-vae/etc are Transformer-only companions — the
+        // routing branch they take is is_model_specific_component, so they
+        // don't exercise this path. Cover only companions with at least
+        // one shared file.
+        let cases = [("t5-v1_1-xxl", "shared/flux"), ("clip-l", "shared/flux")];
+        for (companion, expected_prefix) in cases {
+            let manifest = find_manifest(companion)
+                .unwrap_or_else(|| panic!("companion manifest '{companion}' not registered"));
+            let mut shared_files = 0;
+            for file in &manifest.files {
+                if is_model_specific_component(file.component) {
+                    continue;
+                }
+                shared_files += 1;
+                let path = storage_path(manifest, file);
+                assert!(
+                    path.starts_with(expected_prefix),
+                    "companion '{}' shared file '{}' routed to '{}', expected '{}'",
+                    companion,
+                    file.hf_filename,
+                    path.display(),
+                    expected_prefix
+                );
+            }
+            assert!(
+                shared_files > 0,
+                "companion '{companion}' has no shared (non-Transformer) files — \
+                 the canonical-routing test is meaningless for it"
+            );
+        }
+    }
+
+    #[test]
+    fn t5_companion_includes_tokenizer_so_catalog_bridge_finds_it() {
+        // Regression: cv:* FLUX single-file loads bombed with "T5 tokenizer
+        // path required for FLUX models" because the t5-v1_1-xxl companion
+        // declared only the encoder weights — copy_catalog_companion saw
+        // paths.t5_tokenizer == None and never set cfg.t5_tokenizer.
+        let manifest = find_manifest("t5-v1_1-xxl").unwrap();
+        let has_tokenizer = manifest
+            .files
+            .iter()
+            .any(|f| f.component == ModelComponent::T5Tokenizer);
+        assert!(
+            has_tokenizer,
+            "t5-v1_1-xxl companion must declare a T5Tokenizer file"
+        );
     }
 
     #[test]
