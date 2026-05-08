@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Composer from "../components/Composer.vue";
-import SettingsModal from "../components/SettingsModal.vue";
+import GenerateParamsPanel from "../components/GenerateParamsPanel.vue";
+import PreferencesModal from "../components/PreferencesModal.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
 import RunningStrip from "../components/RunningStrip.vue";
@@ -66,7 +67,7 @@ const galleryEntries = ref<GalleryImage[]>([]);
 const view = ref<ViewMode>(loadViewMode());
 const muted = ref(loadMuted());
 
-const showSettings = ref(false);
+const showPreferences = ref(false);
 const showExpand = ref(false);
 const showPicker = ref(false);
 
@@ -183,19 +184,19 @@ function stopAutoRefresh() {
   }
 }
 
-// Faster model polling while the advanced/settings modal is open — the user
+// Faster model polling while the Preferences modal is open — the user
 // is likely waiting for a download to complete so they can pick the new
 // variant without hitting a manual refresh.
-let settingsModelsTimer: ReturnType<typeof setInterval> | null = null;
+let preferencesModelsTimer: ReturnType<typeof setInterval> | null = null;
 watch(
-  () => showSettings.value,
+  () => showPreferences.value,
   (open) => {
-    if (settingsModelsTimer) {
-      clearInterval(settingsModelsTimer);
-      settingsModelsTimer = null;
+    if (preferencesModelsTimer) {
+      clearInterval(preferencesModelsTimer);
+      preferencesModelsTimer = null;
     }
     if (open) {
-      settingsModelsTimer = setInterval(() => {
+      preferencesModelsTimer = setInterval(() => {
         if (!document.hidden) void refreshModels();
       }, 3_000);
     }
@@ -221,22 +222,6 @@ const gpuListForPlacement = computed(
     })) ?? [],
 );
 
-const settingsDirty = computed(() => {
-  const s = form.state.value;
-  const m = currentModel.value;
-  if (!m) return false;
-  return (
-    s.width !== m.default_width ||
-    s.height !== m.default_height ||
-    s.steps !== m.default_steps ||
-    Math.abs(s.guidance - m.default_guidance) > 0.001 ||
-    s.batchSize !== 1 ||
-    s.seed !== null ||
-    s.negativePrompt.length > 0 ||
-    s.loras.length > 0
-  );
-});
-
 // Placeholder TopBar props — filters/search/mute/refresh/counts are all
 // hidden on /generate by TopBar's `v-if="$route.name === 'gallery'"`, but
 // the props are still declared required on the component.
@@ -257,7 +242,9 @@ const chainDecision = computed(() =>
 
 function onSubmit() {
   if (!form.state.value.model) {
-    showSettings.value = true;
+    // No model selected (and none auto-applied on mount because nothing is
+    // downloaded). Nothing the Preferences modal can do — the user needs
+    // to pick a model in the inline params panel below the composer.
     return;
   }
   const decision = chainDecision.value;
@@ -397,9 +384,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopAutoRefresh();
-  if (settingsModelsTimer) {
-    clearInterval(settingsModelsTimer);
-    settingsModelsTimer = null;
+  if (preferencesModelsTimer) {
+    clearInterval(preferencesModelsTimer);
+    preferencesModelsTimer = null;
   }
 });
 </script>
@@ -431,19 +418,20 @@ onBeforeUnmount(() => {
         :queue-capacity="status?.queue_capacity ?? null"
         :gpus="gpus"
         :expand-active="form.state.value.expand.enabled"
-        :settings-dirty="settingsDirty"
         :family="currentModel?.family ?? ''"
         :placement-gpus="gpuListForPlacement"
         :chain-decision="chainDecision"
         @submit="onSubmit"
         @submit-script="onSubmitScript"
         @update:mode="setComposerMode"
-        @open-settings="showSettings = true"
+        @open-preferences="showPreferences = true"
         @open-expand="showExpand = true"
         @open-expand-stage="(idx: number, p: string) => onExpandStage(idx, p)"
         @open-image-picker="showPicker = true"
         @clear-source="onClearSource"
       />
+
+      <GenerateParamsPanel v-model="form.state.value" :models="models" />
 
       <RunningStrip
         :jobs="stream.jobs.value"
@@ -470,11 +458,9 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <SettingsModal
-      :open="showSettings"
-      v-model="form.state.value"
-      :models="models"
-      @close="showSettings = false"
+    <PreferencesModal
+      :open="showPreferences"
+      @close="showPreferences = false"
     />
     <ExpandModal
       :open="showExpand"

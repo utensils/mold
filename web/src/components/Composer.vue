@@ -22,7 +22,6 @@ const props = defineProps<{
   queueCapacity: number | null;
   gpus: { ordinal: number; state: string }[] | null;
   expandActive: boolean;
-  settingsDirty: boolean;
   // Agent C (model-ui-overhaul §3) ────────────────────────────────────
   family: string; // family of the currently-selected model
   placementGpus: { ordinal: number; name: string }[];
@@ -38,7 +37,7 @@ const emit = defineEmits<{
   (e: "update:mode", v: ComposerMode): void;
   (e: "submit"): void;
   (e: "submit-script", script: ChainScriptToml): void;
-  (e: "open-settings"): void;
+  (e: "open-preferences"): void;
   (e: "open-expand"): void;
   (e: "open-expand-stage", stageIndex: number, prompt: string): void;
   (e: "open-image-picker"): void;
@@ -115,9 +114,9 @@ function updateEnableAudio(v: boolean) {
 // FLUX after generating with LTX-2.3), force enableAudio back to null so
 // the wire payload doesn't carry a stale `enable_audio: true` into a
 // chain auto-promotion that the server would reject. This is the last
-// line of defence — SettingsModal.selectModel + useGenerateForm both
-// already do this on their own paths, but watching family here covers
-// any future model-set path we might add.
+// line of defence — GenerateParamsPanel.selectModel + useGenerateForm
+// both already do this on their own paths, but watching family here
+// covers any future model-set path we might add.
 watch(
   supportsAudio,
   (sa) => {
@@ -172,11 +171,12 @@ defineExpose({ scriptComposerRef });
       </div>
 
       <!-- Global icon toolbar. Always rendered so users find the image
-           picker and settings in the same place regardless of mode. The
-           per-stage prompt enhancer (✨) and per-stage image pickers in
-           Script mode remain the primary affordances inside each stage;
-           these toolbar buttons exist so users can act on the first
-           stage without scrolling, and so Single/Script feel symmetric. -->
+           picker and preferences in the same place regardless of mode.
+           The per-stage prompt enhancer (✨) and per-stage image pickers
+           in Script mode remain the primary affordances inside each
+           stage; these toolbar buttons exist so users can act on the
+           first stage without scrolling, and so Single/Script feel
+           symmetric. -->
       <div class="ml-auto flex gap-1">
         <button
           type="button"
@@ -193,16 +193,12 @@ defineExpose({ scriptComposerRef });
         </button>
         <button
           type="button"
-          class="icon-btn relative"
-          aria-label="Settings"
-          title="Settings"
-          @click="emit('open-settings')"
+          class="icon-btn"
+          aria-label="Preferences"
+          title="Preferences"
+          @click="emit('open-preferences')"
         >
           ⚙
-          <span
-            v-if="settingsDirty"
-            class="absolute right-1 top-1 h-2 w-2 rounded-full bg-brand-400"
-          ></span>
         </button>
       </div>
     </div>
