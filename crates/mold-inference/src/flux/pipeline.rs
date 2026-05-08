@@ -619,11 +619,11 @@ fn flux_lora_var_builder<'a>(
 ) -> Result<VarBuilder<'a>> {
     use super::lora;
 
-    let adapters: Vec<lora::LoraAdapter> = loras
+    let adapters: Vec<std::sync::Arc<lora::LoraAdapter>> = loras
         .iter()
         .map(|w| {
             progress.info("Loading LoRA adapter");
-            let adapter = lora::LoraAdapter::load(Path::new(&w.path))?;
+            let adapter = lora::get_or_load_adapter(Path::new(&w.path))?;
             progress.info(&format!(
                 "LoRA: {} layers, rank {}, scale {:.2}",
                 adapter.layers.len(),
@@ -638,7 +638,7 @@ fn flux_lora_var_builder<'a>(
         .iter()
         .zip(loras.iter())
         .map(|(adapter, w)| lora::LoraSpec {
-            adapter,
+            adapter: adapter.as_ref(),
             scale: w.scale,
             path_hash: lora_path_hash(&w.path),
         })
@@ -674,11 +674,11 @@ fn flux_gguf_lora_var_builder(
 ) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
     use super::lora;
 
-    let adapters: Vec<lora::LoraAdapter> = loras
+    let adapters: Vec<std::sync::Arc<lora::LoraAdapter>> = loras
         .iter()
         .map(|w| {
             progress.info("Loading LoRA adapter");
-            let adapter = lora::LoraAdapter::load(Path::new(&w.path))?;
+            let adapter = lora::get_or_load_adapter(Path::new(&w.path))?;
             progress.info(&format!(
                 "LoRA: {} layers, rank {}, scale {:.2}",
                 adapter.layers.len(),
@@ -693,7 +693,7 @@ fn flux_gguf_lora_var_builder(
         .iter()
         .zip(loras.iter())
         .map(|(adapter, w)| lora::LoraSpec {
-            adapter,
+            adapter: adapter.as_ref(),
             scale: w.scale,
             path_hash: lora_path_hash(&w.path),
         })
@@ -708,13 +708,42 @@ fn flux_gguf_lora_var_builder(
 /// (plural) for back-compat with older clients. When both are set,
 /// `loras` wins — single-form callers haven't been updated yet but
 /// new clients always populate the plural shape.
+///
+/// Entries whose `scale.abs() < ZERO_SCALE_EPS` are dropped: a slider
+/// pinned to zero is a no-op patch and forcing the transformer to
+/// rebuild for it is pure overhead. A `tracing::debug!` records each
+/// drop so a user wondering "why didn't my LoRA apply" can spot it
+/// in `RUST_LOG=debug` output.
 pub(crate) fn effective_loras(req: &mold_core::GenerateRequest) -> Vec<mold_core::LoraWeight> {
-    if let Some(plural) = &req.loras {
+    /// Threshold below which a LoRA scale is treated as off. Matches
+    /// the precision of an f64 scrubbed by a UI slider — anything
+    /// closer to zero than this is the user nudging the slider, not
+    /// a deliberate negative weight.
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+
+    let raw: Vec<mold_core::LoraWeight> = if let Some(plural) = &req.loras {
         if !plural.is_empty() {
-            return plural.clone();
+            plural.clone()
+        } else {
+            req.lora.iter().cloned().collect()
         }
-    }
-    req.lora.iter().cloned().collect()
+    } else {
+        req.lora.iter().cloned().collect()
+    };
+
+    raw.into_iter()
+        .filter(|w| {
+            let keep = w.scale.abs() > ZERO_SCALE_EPS;
+            if !keep {
+                tracing::debug!(
+                    path = w.path.as_str(),
+                    scale = w.scale,
+                    "dropping zero-scale LoRA from effective stack"
+                );
+            }
+            keep
+        })
+        .collect()
 }
 
 /// Loaded FLUX model components, ready for inference.
@@ -2285,10 +2314,126 @@ impl FluxEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{flux_runtime_dtype, flux_transformer_var_builder};
+    use super::{effective_loras, flux_runtime_dtype, flux_transformer_var_builder};
     use candle_core::{DType, Device, Result, Tensor};
     use candle_nn::VarBuilder;
+    use mold_core::{GenerateRequest, LoraWeight, OutputFormat};
     use std::collections::HashMap;
+
+    /// Minimal `GenerateRequest` carrying only the fields `effective_loras`
+    /// touches (`lora`, `loras`). Every other field is set to a benign
+    /// default so the tests don't drift when unrelated request shapes
+    /// change.
+    fn req_with_loras(
+        single: Option<LoraWeight>,
+        plural: Option<Vec<LoraWeight>>,
+    ) -> GenerateRequest {
+        GenerateRequest {
+            prompt: String::new(),
+            negative_prompt: None,
+            model: "flux-dev".to_string(),
+            width: 1024,
+            height: 1024,
+            steps: 4,
+            guidance: 0.0,
+            seed: None,
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            edit_images: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: single,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: plural,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: None,
+        }
+    }
+
+    /// A slider scrubbed to zero on one of three stacked LoRAs must
+    /// drop ONLY that entry from the effective stack — the other two
+    /// must pass through unchanged so we don't silently drop a real
+    /// patch.
+    #[test]
+    fn effective_loras_drops_zero_scale() {
+        let req = req_with_loras(
+            None,
+            Some(vec![
+                LoraWeight {
+                    path: "p1".into(),
+                    scale: 0.8,
+                },
+                LoraWeight {
+                    path: "p2".into(),
+                    scale: 0.0,
+                },
+                LoraWeight {
+                    path: "p3".into(),
+                    scale: 0.5,
+                },
+            ]),
+        );
+        let stack = effective_loras(&req);
+        let paths: Vec<&str> = stack.iter().map(|w| w.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["p1", "p3"],
+            "p2 (scale=0.0) must be dropped from the effective stack"
+        );
+        assert!((stack[0].scale - 0.8).abs() < 1e-9);
+        assert!((stack[1].scale - 0.5).abs() < 1e-9);
+    }
+
+    /// Negative scales are a legitimate "anti-style" use case (subtract
+    /// the LoRA's effect from the base). They differ from zero by more
+    /// than `ZERO_SCALE_EPS`, so they must NOT be filtered.
+    #[test]
+    fn effective_loras_keeps_negative_scales() {
+        let req = req_with_loras(
+            None,
+            Some(vec![LoraWeight {
+                path: "p1".into(),
+                scale: -0.3,
+            }]),
+        );
+        let stack = effective_loras(&req);
+        assert_eq!(stack.len(), 1);
+        assert!((stack[0].scale - (-0.3)).abs() < 1e-9);
+    }
+
+    /// A `loras: Some(vec![])` should still fall through to the
+    /// single `lora` field, and a single `LoraWeight { scale: 0.0, .. }`
+    /// should be dropped — proving the filter runs on whichever
+    /// shape was actually populated.
+    #[test]
+    fn effective_loras_drops_zero_scale_on_single_form() {
+        let req = req_with_loras(
+            Some(LoraWeight {
+                path: "p1".into(),
+                scale: 0.0,
+            }),
+            None,
+        );
+        assert!(effective_loras(&req).is_empty());
+    }
 
     #[test]
     fn flux_var_builder_uses_root_tensors_when_present() -> Result<()> {
