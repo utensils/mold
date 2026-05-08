@@ -106,36 +106,6 @@ fn chrono_now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// Build a sidecar from a [`mold_db::catalog::CatalogRow`] — the path
-/// the install handler and the legacy-DB backfill share. The row's
-/// `trained_words` column is JSON; on parse error we fall back to an
-/// empty list (the picker just shows no chips for that row).
-pub fn sidecar_from_row(
-    row: &mold_db::catalog::CatalogRow,
-    primary_filename_rel: String,
-) -> CatalogSidecar {
-    let trained_words: Vec<String> = serde_json::from_str(&row.trained_words).unwrap_or_default();
-    CatalogSidecar {
-        schema: SIDECAR_SCHEMA,
-        id: row.id.clone(),
-        source: row.source.clone(),
-        source_id: row.source_id.clone(),
-        name: row.name.clone(),
-        author: row.author.clone(),
-        family: row.family.clone(),
-        family_role: row.family_role.clone(),
-        sub_family: row.sub_family.clone(),
-        kind: row.kind.clone(),
-        modality: row.modality.clone(),
-        thumbnail_url: row.thumbnail_url.clone(),
-        size_bytes: row.size_bytes.and_then(|v| u64::try_from(v).ok()),
-        engine_phase: u8::try_from(row.engine_phase).unwrap_or(99),
-        trained_words,
-        primary_filename_rel,
-        written_at: chrono_now_unix(),
-    }
-}
-
 /// Where a Civitai sidecar lives, given the catalog id (e.g. `cv:8001`).
 /// The dir is the sanitized recipe subdir under `models_dir`, mirroring
 /// the layout `mold_core::download::fetch_recipe` uses.

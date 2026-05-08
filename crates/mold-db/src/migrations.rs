@@ -266,9 +266,19 @@ CREATE VIRTUAL TABLE catalog_fts USING fts5(
 /// them as click-to-insert chips next to the LoRA picker. Stored as a JSON
 /// array of strings to avoid a separate side table for what is typically
 /// 0–8 short tokens per LoRA. Default `'[]'` keeps pre-v8 rows parseable
-/// without a backfill pass (the next `mold catalog refresh` repopulates them).
+/// without a backfill pass.
 const V8_CATALOG_TRAINED_WORDS: &str = r#"
 ALTER TABLE catalog ADD COLUMN trained_words TEXT NOT NULL DEFAULT '[]';
+"#;
+
+/// v9 → drop the bulk-scrape catalog. The SPA, CLI, and server all
+/// read from live HF + Civitai now (with sidecars next to each
+/// installed file as the source of truth for "downloaded"). The
+/// catalog DB and its FTS5 sidekick haven't been on the read path
+/// for several releases; v9 reclaims the space.
+const V9_DROP_CATALOG: &str = r#"
+DROP TABLE IF EXISTS catalog_fts;
+DROP TABLE IF EXISTS catalog;
 "#;
 
 /// Ordered list of schema migrations. Version numbers must be strictly
@@ -306,11 +316,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 8,
         kind: MigrationKind::Sql(V8_CATALOG_TRAINED_WORDS),
     },
+    Migration {
+        version: 9,
+        kind: MigrationKind::Sql(V9_DROP_CATALOG),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep

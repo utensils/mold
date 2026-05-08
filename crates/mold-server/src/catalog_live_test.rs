@@ -5,7 +5,6 @@
 //! fixtures. Both go through the real axum router so the route wiring
 //! and JSON shape are tested end-to-end.
 
-use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -53,8 +52,7 @@ async fn build_state() -> (AppState, MockServer, tempfile::TempDir) {
         .await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let db = mold_db::MetadataDb::open_in_memory().expect("in-memory DB");
-    let mut state = AppState::for_tests(Arc::new(db)).with_civitai_base(server.uri());
+    let mut state = AppState::for_tests().with_civitai_base(server.uri());
     {
         let mut cfg = state.config.write().await;
         cfg.models_dir = tmp.path().to_string_lossy().into_owned();

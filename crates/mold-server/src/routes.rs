@@ -219,8 +219,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/downloads", get(list_downloads).post(create_download))
         .route("/api/downloads/:id", delete(delete_download))
         .route("/api/downloads/stream", get(stream_downloads))
-        // ─── Catalog (sub-project A) ─────────────────────────────────────
-        .route("/api/catalog", get(crate::catalog_api::list_catalog))
+        // ─── Catalog (live HF + Civitai proxy) ──────────────────────────
         .route(
             "/api/catalog/families",
             get(crate::catalog_api::list_families),
@@ -232,14 +231,6 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/catalog/installed",
             get(crate::catalog_api::list_installed_catalog),
-        )
-        .route(
-            "/api/catalog/refresh",
-            post(crate::catalog_api::post_refresh).get(crate::catalog_api::get_active_refresh),
-        )
-        .route(
-            "/api/catalog/refresh/:id",
-            get(crate::catalog_api::get_refresh_status),
         )
         .route(
             "/api/catalog/*id",

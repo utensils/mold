@@ -1,8 +1,6 @@
 //! Lightweight in-process test client for catalog route integration tests.
 //! Avoids the full hyper boot — uses `tower::ServiceExt::oneshot` directly.
 
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
@@ -17,50 +15,11 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    /// Build an in-memory DB, seed a couple of fixture rows, and wire up the
-    /// full router so integration tests can exercise the catalog endpoints.
+    /// Build an empty AppState (catalog endpoints proxy live HF/Civitai;
+    /// tests that exercise live behaviour point catalog_live_civitai_base
+    /// at a wiremock instance via `with_civitai_base`).
     pub async fn with_seeded_catalog() -> Self {
-        let db =
-            mold_db::MetadataDb::open_in_memory().expect("open in-memory catalog DB for tests");
-
-        // Seed a Juggernaut XL row so the FTS and family tests have data.
-        db.catalog_upsert(
-            "sdxl",
-            &[mold_db::catalog::CatalogRow {
-                id: "hf:RunDiffusion/Juggernaut-XL".into(),
-                source: "hf".into(),
-                source_id: "RunDiffusion/Juggernaut-XL".into(),
-                name: "Juggernaut XL".into(),
-                author: Some("RunDiffusion".into()),
-                family: "sdxl".into(),
-                family_role: "finetune".into(),
-                sub_family: None,
-                modality: "image".into(),
-                kind: "checkpoint".into(),
-                file_format: "safetensors".into(),
-                bundling: "separated".into(),
-                size_bytes: Some(1),
-                download_count: 100,
-                rating: Some(4.7),
-                likes: 0,
-                nsfw: 0,
-                thumbnail_url: None,
-                description: None,
-                license: None,
-                license_flags: None,
-                tags: Some("[]".into()),
-                companions: Some("[]".into()),
-                download_recipe: r#"{"files":[],"needs_token":null}"#.into(),
-                engine_phase: 1,
-                created_at: None,
-                updated_at: None,
-                added_at: 0,
-                trained_words: "[]".into(),
-            }],
-        )
-        .expect("seed catalog fixture");
-
-        let state = crate::state::AppState::for_tests(Arc::new(db));
+        let state = crate::state::AppState::for_tests();
         let router = crate::routes::create_router(state);
         Self { router }
     }

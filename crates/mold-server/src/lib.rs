@@ -1,6 +1,5 @@
 pub mod auth;
 pub mod catalog_api;
-pub mod catalog_sidecar_backfill;
 pub mod chain_limits;
 pub mod test_support;
 // Agent A (downloads)
@@ -261,40 +260,6 @@ pub async fn run_server(
         std::time::Duration::from_secs(state::resolve_cache_idle_ttl_secs()),
     );
 
-    // ── Catalog: seed from embedded shards on first boot, spawn scan driver.
-    {
-        let res = state.catalog_db.with_conn(|conn| {
-            mold_catalog::shards::seed_db_from_embedded_if_empty(conn, None)
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        });
-        if let Err(e) = res {
-            tracing::warn!(target: "catalog", "seed failed: {e}");
-        }
-    }
-    let catalog_driver = {
-        let queue = (*state.catalog_scan).clone();
-        let catalog_db = state.catalog_db.clone();
-        tokio::spawn(async move {
-            queue
-                .drive(
-                    std::sync::Arc::new(crate::catalog_api::LiveScanDriver),
-                    catalog_db,
-                )
-                .await;
-        })
-    };
-
-    // ── Sidecar backfill ────────────────────────────────────────────────────
-    // First-boot-after-upgrade users have installed catalog rows from the
-    // bulk-scrape era; the LoRA picker now reads sidecars next to the
-    // primary file, so we drop one for each pre-existing install whose
-    // catalog row is still in the DB. Steady-state cost is one stat per
-    // `cv-*` subdir per boot.
-    crate::catalog_sidecar_backfill::spawn(
-        state.config.read().await.resolved_models_dir(),
-        state.catalog_db.clone(),
-    );
-
     // ── Downloads UI (Agent A) ──────────────────────────────────────────────
     // Single-writer download queue driver. Bind the `JoinHandle` so we can
     // `.abort()` it when `axum::serve` returns — same pattern as the resource
@@ -462,7 +427,6 @@ pub async fn run_server(
     // Matches the aggregator handle pattern from commit 5e43886.
     downloads_shutdown.cancel();
     downloads_driver.abort();
-    catalog_driver.abort();
     idle_evict_handle.abort();
     // Server has stopped accepting requests — stop the telemetry aggregator
     // so it doesn't outlive the server loop.

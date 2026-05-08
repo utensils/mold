@@ -7,7 +7,6 @@
 //! Set `MOLD_DB_DISABLE=1` to opt out entirely (CLI and server fall back to
 //! the previous filesystem-only behavior).
 
-pub mod catalog;
 pub mod config_sync;
 mod db;
 mod metadata_io;
