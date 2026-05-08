@@ -28,14 +28,14 @@ async fn families_endpoint_returns_static_taxonomy() {
             "family {expected:?} missing from sidebar list, got {names:?}",
         );
     }
-    // Counts are zero now — live search doesn't carry per-family
-    // counts, the SPA's sidebar works fine without them.
+    // Per-family counts are gone from the wire — live search hits one
+    // family at a time, so the SPA's sidebar shows just the family name.
     let flux = families
         .iter()
         .find(|row| row["family"].as_str() == Some("flux"))
         .expect("flux row present");
-    assert_eq!(flux["foundation"].as_i64(), Some(0));
-    assert_eq!(flux["finetune"].as_i64(), Some(0));
+    assert!(flux.get("foundation").is_none());
+    assert!(flux.get("finetune").is_none());
 }
 
 #[tokio::test]

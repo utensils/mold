@@ -69,19 +69,13 @@ pub async fn post_catalog_dispatch(
 }
 
 pub async fn list_families(State(_state): State<crate::state::AppState>) -> impl IntoResponse {
-    // Live search doesn't carry per-family counts (each request hits one
-    // family at a time), so the sidebar gets the static taxonomy with
-    // zero counts. The wire shape is preserved for SPA compatibility.
+    // Live search hits one family per request, so the sidebar just gets
+    // the static taxonomy. No per-family counts — that line is gone from
+    // the SPA too.
     use mold_catalog::families::{Family, ALL_FAMILIES};
     let merged: Vec<serde_json::Value> = ALL_FAMILIES
         .iter()
-        .map(|f: &Family| {
-            serde_json::json!({
-                "family": f.as_str(),
-                "foundation": 0,
-                "finetune": 0,
-            })
-        })
+        .map(|f: &Family| serde_json::json!({ "family": f.as_str() }))
         .collect();
     Json(serde_json::json!({ "families": merged })).into_response()
 }

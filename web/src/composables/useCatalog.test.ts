@@ -48,7 +48,7 @@ function installFetchMock(opts: { total: number; pageSize: number }) {
       return {
         ok: true,
         json: async () => ({
-          families: [{ family: "flux", foundation: 1, finetune: 4 }],
+          families: [{ family: "flux" }],
         }),
       };
     }

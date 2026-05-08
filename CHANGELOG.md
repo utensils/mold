@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Catalog `/api/catalog/families` response: dropped vestigial `foundation`/`finetune` count fields (always 0 since the bulk scrape was removed). The sidebar no longer shows the counts line.
+
 ### Removed
 
 - **Bulk-scrape catalog DB, scanner, refresh endpoints, embedded shards, and `mold catalog` CLI subcommand.** Every read path is now live HF + Civitai with sidecars next to each install for "what's downloaded." The previous walker hit Civitai page-by-page until rate-limited, persisted 1000+ rows the user never saw, and required a 30–60 min `mold catalog refresh` before `mold run cv:<id>` would work. Removed in this release: the `catalog` and `catalog_fts` SQLite tables (DB migration v9 drops them forward-only), the `mold-catalog::scanner` / `sink` / `shards` / `stages` / `filter` modules, the embedded JSON shards under `mold-catalog/data/catalog/`, the `mold-db::catalog` repo, the entire `mold catalog` CLI subcommand tree (`list`, `show`, `refresh`, `where`), the server's `POST/GET /api/catalog/refresh*` endpoints, the `RefreshTracker` queue and scan-driver task, and the `CatalogRefreshPanel` web component plus all `useCatalog.refreshStatus` plumbing. **New live additions** that replace what was removed: `mold_catalog::live::fetch_civitai_version(id)` and `fetch_hf_repo(repo_id)` for single-id resolution (used by `mold run cv:<id>` / `hf:<repo>`, the SPA's drawer fetch, and `POST /api/catalog/:id/download`); `live::search` now branches on `source` (Civitai-only, HF-only, or both — HF errors don't nuke Civitai results); HF live search proxies `https://huggingface.co/api/models?search=…` and drops repos that don't map to a supported mold family via a substring + tag heuristic. The DB-backed `/api/catalog` list endpoint is gone — the SPA was already using `/api/catalog/search` (live) on its read path. Operators upgrading get a one-shot v9 migration that drops the catalog tables and reclaims the space; the next CLI / server boot reads from live.

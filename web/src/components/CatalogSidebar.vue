@@ -40,9 +40,6 @@ function clearFamily() {
         @click="cat.setFilter({ family: row.family })"
       >
         <div class="font-medium">{{ row.family }}</div>
-        <div class="text-[11px] text-ink-400">
-          {{ row.foundation }} foundation · {{ row.finetune }} fine-tunes
-        </div>
       </li>
     </ul>
   </aside>

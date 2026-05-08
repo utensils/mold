@@ -603,8 +603,6 @@ export interface CatalogListResponse {
 
 export interface CatalogFamilyCount {
   family: string;
-  foundation: number;
-  finetune: number;
 }
 
 export interface CatalogFamiliesResponse {

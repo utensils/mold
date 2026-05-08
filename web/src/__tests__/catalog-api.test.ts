@@ -47,7 +47,7 @@ describe("catalog api", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,
       json: async () => ({
-        families: [{ family: "flux", foundation: 2, finetune: 3 }],
+        families: [{ family: "flux" }],
       }),
     });
     const out = await fetchCatalogFamilies();

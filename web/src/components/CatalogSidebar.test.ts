@@ -6,10 +6,7 @@ import CatalogSidebar from "./CatalogSidebar.vue";
 // Mock useCatalog so we control the reactive state
 vi.mock("../composables/useCatalog", () => {
   const setFilter = vi.fn();
-  const families = ref([
-    { family: "flux", foundation: 2, finetune: 5 },
-    { family: "sdxl", foundation: 1, finetune: 3 },
-  ]);
+  const families = ref([{ family: "flux" }, { family: "sdxl" }]);
   const filter = ref<{ family?: string }>({});
   return {
     useCatalog: () => ({ families, filter, setFilter }),
@@ -29,8 +26,8 @@ describe("CatalogSidebar", () => {
     const w = mount(CatalogSidebar);
     expect(w.text()).toContain("flux");
     expect(w.text()).toContain("sdxl");
-    expect(w.text()).toContain("2");
-    expect(w.text()).toContain("5");
+    expect(w.text()).not.toContain("foundation");
+    expect(w.text()).not.toContain("fine-tunes");
   });
 
   it("clicking a family row calls setFilter({ family })", async () => {
