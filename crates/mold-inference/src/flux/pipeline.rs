@@ -829,6 +829,20 @@ impl FluxEngine {
         }
     }
 
+    /// Return the LoRA delta cache handle, or `None` when disabled via
+    /// `MOLD_FLUX_DELTA_CACHE=0`. The cache stores CPU-resident F32 delta
+    /// tensors for every LoRA-touched layer; on a typical FLUX LoRA that's
+    /// ~25 GB of standing memory which dominates host RAM use during Q8+LoRA
+    /// rebuilds. Disabling forces a sub-second `B@A·scale` recompute on the
+    /// next rebuild, which is cheap on GPU.
+    fn lora_delta_cache_handle(&self) -> Option<Arc<Mutex<super::lora::LoraDeltaCache>>> {
+        if std::env::var("MOLD_FLUX_DELTA_CACHE").map(|v| v == "0").unwrap_or(false) {
+            None
+        } else {
+            Some(self.lora_delta_cache.clone())
+        }
+    }
+
     /// Try to get a cached tokenizer from the shared pool.
     fn get_cached_tokenizer(&self, path: &std::path::Path) -> Option<Arc<tokenizers::Tokenizer>> {
         let pool = self.shared_pool.as_ref()?;
@@ -1537,7 +1551,7 @@ impl FluxEngine {
                     gpu_dtype,
                     &Device::Cpu,
                     &self.base.progress,
-                    Some(self.lora_delta_cache.clone()),
+                    self.lora_delta_cache_handle(),
                 )?
             } else {
                 flux_transformer_var_builder(flux_safetensors_var_builder(
@@ -1561,7 +1575,7 @@ impl FluxEngine {
                 &active_loras,
                 &device,
                 &self.base.progress,
-                Some(self.lora_delta_cache.clone()),
+                self.lora_delta_cache_handle(),
             )?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else if is_quantized {
@@ -1575,7 +1589,7 @@ impl FluxEngine {
                 gpu_dtype,
                 &device,
                 &self.base.progress,
-                Some(self.lora_delta_cache.clone()),
+                self.lora_delta_cache_handle(),
             )?;
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         } else {
@@ -1856,6 +1870,11 @@ impl FluxEngine {
             .map(|l| l.transformer_path.clone())
             .unwrap_or_else(|| self.base.paths.transformer.clone());
 
+        // Captured before we mutably borrow `self.base.loaded` via the
+        // OptionRestoreGuard below — once that borrow is live, calling
+        // `self.lora_delta_cache_handle()` would conflict.
+        let cache_handle = self.lora_delta_cache_handle();
+
         let mut loaded = OptionRestoreGuard::take(&mut self.base.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
 
@@ -1917,7 +1936,7 @@ impl FluxEngine {
                         &active_loras,
                         &loaded.device,
                         progress,
-                        Some(self.lora_delta_cache.clone()),
+                        cache_handle.clone(),
                     )?;
                     FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
                 } else if loaded.is_quantized {
@@ -1934,7 +1953,7 @@ impl FluxEngine {
                         loaded.dtype,
                         &loaded.device,
                         progress,
-                        Some(self.lora_delta_cache.clone()),
+                        cache_handle.clone(),
                     )?;
                     FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
                 } else {
@@ -2227,19 +2246,30 @@ impl FluxEngine {
         tracing::info!("denoising complete, decoding VAE...");
 
         // Free denoising intermediates and transformer before VAE decode.
-        // On discrete GPUs (CUDA), the Q8 transformer alone is ~13GB — VAE decode
-        // needs that VRAM for conv2d intermediates. Transformer is reloaded next generate.
+        // On discrete GPUs (CUDA), the BF16 transformer alone is ~24GB — VAE
+        // decode needs that VRAM for conv2d intermediates. For Q8 (~12GB) on a
+        // 24GB GPU, the transformer can stay resident; dropping forces a full
+        // `gguf_lora_var_builder` rebuild on the next generation, which peaks
+        // at ~95GB CPU when LoRAs are applied. `MOLD_FLUX_KEEP_TRANSFORMER=1`
+        // opts into keeping it loaded across same-LoRA generations.
         drop(state);
         drop(t5_emb_state);
         drop(clip_emb_state);
         drop(img_state);
-        loaded.flux_model = None;
-        // Force CUDA to complete pending operations and release freed memory.
-        // Without this, cuMemFree is asynchronous and the freed VRAM from the
-        // transformer (~13GB) may not be available when VAE decode allocates
-        // its conv2d intermediates, causing OOM on subsequent generations.
-        loaded.device.synchronize()?;
-        tracing::info!("Transformer dropped to free VRAM for VAE decode");
+        let keep_transformer = std::env::var("MOLD_FLUX_KEEP_TRANSFORMER")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if !keep_transformer {
+            loaded.flux_model = None;
+            // Force CUDA to complete pending operations and release freed memory.
+            // Without this, cuMemFree is asynchronous and the freed VRAM from the
+            // transformer (~13GB) may not be available when VAE decode allocates
+            // its conv2d intermediates, causing OOM on subsequent generations.
+            loaded.device.synchronize()?;
+            tracing::info!("Transformer dropped to free VRAM for VAE decode");
+        } else {
+            tracing::info!("Transformer kept loaded (MOLD_FLUX_KEEP_TRANSFORMER=1)");
+        }
 
         // 8. Decode with VAE — cast to VAE dtype (BF16) in case quantized model produced F32
         progress.stage_start("VAE decode");

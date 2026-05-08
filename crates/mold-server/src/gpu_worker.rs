@@ -138,10 +138,78 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         }));
     }
 
+    // RSS sample taken just before inference; the post-inference sample below
+    // logs the per-job delta so RAM growth can be attributed to a specific
+    // generation rather than tracked at process granularity.
+    let rss_before = crate::resources::ram_snapshot().used_by_mold;
+
+    // Watchdog: log RSS every 1s while inference runs so we can see RAM
+    // growth as it happens. The post-inference summary log can't fire when
+    // a runaway allocation crosses the OOM threshold mid-generation, so we
+    // need a heartbeat to attribute the explosion to a specific phase.
+    let watchdog_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog_handle = {
+        let stop = watchdog_stop.clone();
+        let model = model_name.clone();
+        std::thread::Builder::new()
+            .name(format!("rss-watchdog-{ordinal}"))
+            .spawn(move || {
+                let start = Instant::now();
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1000));
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let rss = crate::resources::ram_snapshot().used_by_mold;
+                    tracing::info!(
+                        gpu = ordinal,
+                        model = %model,
+                        elapsed_s = start.elapsed().as_secs(),
+                        rss_mb = rss / 1_000_000,
+                        "rss watchdog"
+                    );
+                }
+            })
+            .expect("failed to spawn RSS watchdog")
+    };
+
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         cached_engine.engine.generate(&job.request)
     }));
+
+    watchdog_stop.store(true, Ordering::SeqCst);
+    let _ = watchdog_handle.join();
+
+    // glibc keeps freed pages in per-arena heaps even after the allocations
+    // are dropped — large transient buffers from GGUF+LoRA rebuilds can leave
+    // tens of GB of unreclaimed RSS. `malloc_trim(0)` walks the arenas and
+    // returns idle pages to the OS via madvise(MADV_DONTNEED). Cheap (~ms),
+    // glibc-only, gated so we can A/B with `MOLD_MALLOC_TRIM=0`.
+    let trim_enabled = std::env::var("MOLD_MALLOC_TRIM")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let rss_pre_trim = if trim_enabled {
+        let v = crate::resources::ram_snapshot().used_by_mold;
+        unsafe {
+            libc::malloc_trim(0);
+        }
+        Some(v)
+    } else {
+        None
+    };
+
+    let rss_after = crate::resources::ram_snapshot().used_by_mold;
+    let rss_delta = rss_after as i64 - rss_before as i64;
+    tracing::info!(
+        gpu = ordinal,
+        model = %model_name,
+        rss_before_mb = rss_before / 1_000_000,
+        rss_after_mb = rss_after / 1_000_000,
+        rss_delta_mb = rss_delta / 1_000_000,
+        rss_pre_trim_mb = rss_pre_trim.map(|v| v / 1_000_000).unwrap_or(0),
+        "generation memory delta"
+    );
 
     // Clear progress callback.
     cached_engine.engine.clear_on_progress();

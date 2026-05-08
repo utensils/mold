@@ -3137,6 +3137,7 @@ dependencies = [
  "governor",
  "hostname",
  "image",
+ "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "mime_guess",
