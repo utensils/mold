@@ -707,7 +707,18 @@ impl SD3Engine {
         // SD3 VAE scaling: x / 1.5305 + 0.0609
         // Cast to VAE dtype (quantized path outputs F32, VAE is F16/BF16)
         let x = ((x / 1.5305)? + 0.0609)?.to_dtype(gpu_dtype)?;
-        let img = autoencoder.decode(&x)?;
+        let device_for_sync = device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &x,
+            |t| autoencoder.decode(t).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "SD3 (sequential) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
@@ -994,7 +1005,18 @@ impl SD3Engine {
             let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
 
             let x = ((x / 1.5305)? + 0.0609)?.to_dtype(loaded.dtype)?;
-            let img = autoencoder.decode(&x)?;
+            let device_for_sync = loaded.device.clone();
+            let img = crate::vae_tiling::decode_with_oom_fallback(
+                &x,
+                |t| autoencoder.decode(t).map_err(Into::into),
+                || {
+                    if let Err(e) = device_for_sync.synchronize() {
+                        tracing::warn!(
+                            "SD3 (parallel) device.synchronize() after VAE OOM failed: {e}"
+                        );
+                    }
+                },
+            )?;
 
             let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
             let img = img.i(0)?;
