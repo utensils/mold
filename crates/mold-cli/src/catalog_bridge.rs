@@ -82,11 +82,10 @@ pub fn synthesize_model_config(
     models_dir: &Path,
     config: &Config,
 ) -> Result<ModelConfig> {
-    let primary = entry
-        .download_recipe
-        .files
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("catalog entry {} has empty download_recipe", entry.id.0))?;
+    let primary =
+        entry.download_recipe.files.first().ok_or_else(|| {
+            anyhow::anyhow!("catalog entry {} has empty download_recipe", entry.id.0)
+        })?;
 
     // Reproduce the path computation that `fetch_recipe` wrote to disk:
     // `<models_dir>/<sanitized-id>/<rendered-dest>`.
@@ -95,12 +94,8 @@ pub fn synthesize_model_config(
         Some((a, n)) => (a, n),
         None => ("", entry.source_id.as_str()),
     };
-    let rendered_dest = mold_catalog::entry::render_recipe_dest(
-        &primary.dest,
-        entry.family.as_str(),
-        author,
-        name,
-    );
+    let rendered_dest =
+        mold_catalog::entry::render_recipe_dest(&primary.dest, entry.family.as_str(), author, name);
     let primary_path = models_dir.join(&sanitized).join(&rendered_dest);
     let primary_str = primary_path
         .to_str()

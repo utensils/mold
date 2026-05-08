@@ -230,10 +230,7 @@ pub(crate) async fn catalog_family_for(state: &AppState, model_name: &str) -> Op
         return None;
     }
     let config = state.config.read().await;
-    config
-        .models
-        .get(model_name)
-        .and_then(|m| m.family.clone())
+    config.models.get(model_name).and_then(|m| m.family.clone())
 }
 
 fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, paths: &ModelPaths) {
@@ -305,12 +302,8 @@ fn synthesize_catalog_config(
         Some((a, n)) => (a, n),
         None => ("", entry.source_id.as_str()),
     };
-    let rendered_dest = mold_catalog::entry::render_recipe_dest(
-        &primary.dest,
-        entry.family.as_str(),
-        author,
-        name,
-    );
+    let rendered_dest =
+        mold_catalog::entry::render_recipe_dest(&primary.dest, entry.family.as_str(), author, name);
     let primary_path = models_dir.join(&sanitized).join(&rendered_dest);
     let primary_str = primary_path
         .to_str()

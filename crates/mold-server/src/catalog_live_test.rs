@@ -5,7 +5,6 @@
 //! fixtures. Both go through the real axum router so the route wiring
 //! and JSON shape are tested end-to-end.
 
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mold_catalog::sidecar::{sidecar_from_entry, write_sidecar, CatalogSidecar, SIDECAR_FILENAME};
@@ -79,7 +78,11 @@ async fn live_search_returns_normalized_civitai_rows() {
     let (state, _server, _tmp) = build_state().await;
     let router = create_router(state);
 
-    let (status, body) = get(router, "/api/catalog/search?q=test&family=flux&kind=lora").await;
+    let (status, body) = get(
+        router,
+        "/api/catalog/search?q=test&family=flux&kind=lora&source=civitai",
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -146,7 +149,11 @@ async fn live_search_marks_installed_when_sidecar_and_file_present() {
     std::fs::write(cv_dir.join("x.safetensors"), b"fake-weights").unwrap();
 
     let router = create_router(state);
-    let (status, body) = get(router, "/api/catalog/search?q=test&family=flux&kind=lora").await;
+    let (status, body) = get(
+        router,
+        "/api/catalog/search?q=test&family=flux&kind=lora&source=civitai",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
     let entry0 = &parsed["entries"][0];

@@ -42,7 +42,11 @@ pub async fn get_catalog_entry(
             Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
         }
     } else {
-        return (StatusCode::BAD_REQUEST, "id must be `cv:` or `hf:` prefixed").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "id must be `cv:` or `hf:` prefixed",
+        )
+            .into_response();
     };
 
     Json(live_entry_to_wire(&entry, &models_dir)).into_response()
@@ -64,9 +68,7 @@ pub async fn post_catalog_dispatch(
     }
 }
 
-pub async fn list_families(
-    State(_state): State<crate::state::AppState>,
-) -> impl IntoResponse {
+pub async fn list_families(State(_state): State<crate::state::AppState>) -> impl IntoResponse {
     // Live search doesn't carry per-family counts (each request hits one
     // family at a time), so the sidebar gets the static taxonomy with
     // zero counts. The wire shape is preserved for SPA compatibility.
@@ -178,7 +180,11 @@ pub async fn post_catalog_download(
             Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
         }
     } else {
-        return (StatusCode::BAD_REQUEST, "id must be `cv:` or `hf:` prefixed").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "id must be `cv:` or `hf:` prefixed",
+        )
+            .into_response();
     };
 
     if entry.engine_phase >= 6 {
@@ -261,7 +267,8 @@ pub async fn post_catalog_download(
             // the entry as soon as the file lands without re-querying
             // the live catalog. Failure is not fatal.
             if let Some(primary) = files.first() {
-                let sidecar = mold_catalog::sidecar::sidecar_from_entry(&entry, primary.dest.clone());
+                let sidecar =
+                    mold_catalog::sidecar::sidecar_from_entry(&entry, primary.dest.clone());
                 let sc_path = mold_catalog::sidecar::civitai_sidecar_path(&models_dir, &entry_id);
                 if let Err(e) = mold_catalog::sidecar::write_sidecar(&sc_path, &sidecar) {
                     tracing::warn!(

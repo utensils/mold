@@ -360,13 +360,9 @@ async fn hf_search(
         .timeout(Duration::from_secs(20))
         .build()?;
 
-    let mut url = reqwest::Url::parse(&format!("{base}/api/models"))
-        .expect("hf base URL must be valid");
-    let trimmed_q = opts
-        .q
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let mut url =
+        reqwest::Url::parse(&format!("{base}/api/models")).expect("hf base URL must be valid");
+    let trimmed_q = opts.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("limit", &opts.page_size.clamp(1, 100).to_string());
@@ -434,14 +430,8 @@ async fn hf_search(
 /// Build a recipe-less `CatalogEntry` from an HF search hit. The recipe
 /// is left empty: the search/list view doesn't need it, and download
 /// flow re-fetches detail+tree via `fetch_hf_repo` to compute file URLs.
-fn hf_summary_to_entry(
-    hit: HfSearchHit,
-    family: Family,
-    family_role: FamilyRole,
-) -> CatalogEntry {
-    use crate::entry::{
-        Bundling, CatalogId, DownloadRecipe, FileFormat, LicenseFlags, Modality,
-    };
+fn hf_summary_to_entry(hit: HfSearchHit, family: Family, family_role: FamilyRole) -> CatalogEntry {
+    use crate::entry::{Bundling, CatalogId, DownloadRecipe, FileFormat, LicenseFlags, Modality};
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -461,12 +451,7 @@ fn hf_summary_to_entry(
     } else {
         Kind::Checkpoint
     };
-    let name = hit
-        .id
-        .split('/')
-        .next_back()
-        .unwrap_or(&hit.id)
-        .to_string();
+    let name = hit.id.split('/').next_back().unwrap_or(&hit.id).to_string();
 
     CatalogEntry {
         id: CatalogId::from(format!("hf:{}", hit.id)),
@@ -527,10 +512,7 @@ pub fn family_from_hf(
     let id_lower = repo_id.to_ascii_lowercase();
     let role_for = |id: &str, family: Family| -> FamilyRole {
         let seeds = crate::hf_seeds::seeds_for(family);
-        if seeds
-            .iter()
-            .any(|seed| seed.eq_ignore_ascii_case(id))
-        {
+        if seeds.iter().any(|seed| seed.eq_ignore_ascii_case(id)) {
             FamilyRole::Foundation
         } else {
             FamilyRole::Finetune
@@ -542,9 +524,15 @@ pub fn family_from_hf(
     // seed list is the cleanest signal.
     let family = if id_lower.contains("flux.2") || id_lower.contains("flux-2") {
         Family::Flux2
-    } else if id_lower.contains("flux.1") || id_lower.contains("flux-1") || id_lower.contains("/flux") {
+    } else if id_lower.contains("flux.1")
+        || id_lower.contains("flux-1")
+        || id_lower.contains("/flux")
+    {
         Family::Flux
-    } else if id_lower.contains("ltx-video-2") || id_lower.contains("ltx-2") || id_lower.contains("ltx2") {
+    } else if id_lower.contains("ltx-video-2")
+        || id_lower.contains("ltx-2")
+        || id_lower.contains("ltx2")
+    {
         Family::Ltx2
     } else if id_lower.contains("ltx-video") {
         Family::LtxVideo
@@ -556,7 +544,10 @@ pub fn family_from_hf(
         Family::Wuerstchen
     } else if id_lower.contains("stable-diffusion-xl") || id_lower.contains("sdxl") {
         Family::Sdxl
-    } else if id_lower.contains("stable-diffusion-v1") || id_lower.contains("sd-v1") || id_lower.contains("/sd1") {
+    } else if id_lower.contains("stable-diffusion-v1")
+        || id_lower.contains("sd-v1")
+        || id_lower.contains("/sd1")
+    {
         Family::Sd15
     } else {
         // Tag-based fallback for anything that doesn't match the id heuristic.
@@ -700,16 +691,14 @@ pub async fn fetch_hf_repo(
     }
     let tree: Vec<HfTreeEntry> = serde_json::from_str(&tree_body)?;
 
-    let (family, family_role) = family_from_hf(
-        &detail.id,
-        &detail.tags,
-        detail.pipeline_tag.as_deref(),
-    )
-    .ok_or_else(|| LiveSearchError::Upstream {
-        host: "huggingface.co",
-        status: 422,
-        body: format!("repo {repo_id} doesn't map to a supported mold family"),
-    })?;
+    let (family, family_role) =
+        family_from_hf(&detail.id, &detail.tags, detail.pipeline_tag.as_deref()).ok_or_else(
+            || LiveSearchError::Upstream {
+                host: "huggingface.co",
+                status: 422,
+                body: format!("repo {repo_id} doesn't map to a supported mold family"),
+            },
+        )?;
 
     from_hf(detail, tree, family, family_role).map_err(|e| LiveSearchError::Upstream {
         host: "huggingface.co",

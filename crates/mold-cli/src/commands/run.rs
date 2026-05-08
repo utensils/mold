@@ -54,8 +54,7 @@ fn resolve_run_args(
         // `cv:<id>` / `hf:<author>/<name>` inputs. Catalog IDs are their own
         // canonical name (not run through `resolve_model_name`), since they
         // don't take tag suffixes.
-        if crate::catalog_bridge::looks_like_catalog_id(first)
-            && config.models.contains_key(first)
+        if crate::catalog_bridge::looks_like_catalog_id(first) && config.models.contains_key(first)
         {
             let prompt = if prompt_rest.is_empty() {
                 None
@@ -506,8 +505,7 @@ pub async fn run(
         }
     }
 
-    let (model, prompt) =
-        resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &mut config)?;
+    let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &mut config)?;
     let family = resolve_family(&model, &config);
 
     // Validate file-based arguments early — before expansion or inference.
@@ -1143,8 +1141,7 @@ mod tests {
     #[test]
     fn model_only_no_prompt() {
         let mut config = test_config();
-        let (model, prompt) =
-            resolve_run_args(Some("flux-dev:q4"), &[], &mut config).unwrap();
+        let (model, prompt) = resolve_run_args(Some("flux-dev:q4"), &[], &mut config).unwrap();
         assert_eq!(model, "flux-dev:q4");
         assert!(prompt.is_none());
     }
@@ -1190,12 +1187,8 @@ mod tests {
     #[test]
     fn bare_model_name_resolves() {
         let mut config = test_config();
-        let (model, prompt) = resolve_run_args(
-            Some("flux-dev"),
-            &["a turtle".to_string()],
-            &mut config,
-        )
-        .unwrap();
+        let (model, prompt) =
+            resolve_run_args(Some("flux-dev"), &["a turtle".to_string()], &mut config).unwrap();
         assert_eq!(model, "flux-dev:q8");
         assert_eq!(prompt.unwrap(), "a turtle");
     }
@@ -1229,12 +1222,8 @@ mod tests {
     #[test]
     fn unknown_model_with_known_family_errors() {
         let mut config = test_config();
-        let err = resolve_run_args(
-            Some("ultrareal-v8"),
-            &["a cat".to_string()],
-            &mut config,
-        )
-        .unwrap_err();
+        let err = resolve_run_args(Some("ultrareal-v8"), &["a cat".to_string()], &mut config)
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown model 'ultrareal-v8'"), "got: {msg}");
         assert!(
@@ -1246,12 +1235,8 @@ mod tests {
     #[test]
     fn unknown_model_with_colon_tag_errors() {
         let mut config = test_config();
-        let err = resolve_run_args(
-            Some("flux-dev:q99"),
-            &["a cat".to_string()],
-            &mut config,
-        )
-        .unwrap_err();
+        let err = resolve_run_args(Some("flux-dev:q99"), &["a cat".to_string()], &mut config)
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown model 'flux-dev:q99'"), "got: {msg}");
     }

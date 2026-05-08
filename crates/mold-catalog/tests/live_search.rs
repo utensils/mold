@@ -456,8 +456,8 @@ fn family_from_hf_id_substring() {
         ("Tongyi-MAI/Z-Image-Turbo", Family::ZImage),
     ];
     for (id, want) in cases {
-        let (got, _role) = family_from_hf(id, &[], None)
-            .unwrap_or_else(|| panic!("expected family for {id}"));
+        let (got, _role) =
+            family_from_hf(id, &[], None).unwrap_or_else(|| panic!("expected family for {id}"));
         assert_eq!(got, *want, "id {id}");
     }
     assert!(
@@ -502,7 +502,9 @@ async fn fetch_hf_repo_returns_full_recipe() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path_regex(r"^/api/models/black-forest-labs/FLUX\.1-dev/tree/main$"))
+        .and(path_regex(
+            r"^/api/models/black-forest-labs/FLUX\.1-dev/tree/main$",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_string(HF_TREE))
         .mount(&server)
         .await;

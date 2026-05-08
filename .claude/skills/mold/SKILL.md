@@ -117,10 +117,12 @@ mold run flux-dev:bf16 "epic shot" \
   --lora dramatic-lighting.safetensors --lora-scale 0.4
 ```
 
-**Catalog browse:** `mold catalog list --kind lora --family flux` shows installable
-FLUX LoRAs from Civitai / HF. Install via `mold pull cv:<id>` or the web UI's
-catalog tab (filter by **LoRAs**). Once installed, the LoRA appears in the
-**Generate → Settings → LoRA** dropdown for any FLUX model.
+**Catalog browse:** the web UI's catalog tab proxies live HF + Civitai
+searches (filter by **LoRAs** to narrow). Install with `mold pull cv:<id>`
+/ `mold pull hf:<author>/<repo>` or the catalog tab's Download button.
+Once installed, the LoRA appears in the **Generate → Settings → LoRA**
+dropdown for any FLUX model. The CLI no longer ships a `mold catalog`
+subcommand — every read is live, no scan to run.
 
 **Web UI multi-LoRA + trigger words:** the LoRA picker stacks up to 4 adapters
 per generation (each with its own scale slider). Civitai LoRAs ship trigger
@@ -420,23 +422,35 @@ mold rm flux-dev:q4          # Remove a downloaded model
 mold rm flux-dev:q4 --force  # Remove without confirmation
 ```
 
-## Model discovery catalog (sub-project A)
+## Model discovery catalog
 
-**Browse:** `mold catalog list [--family flux] [--q juggernaut] [--json]` reads the local `mold.db` `catalog` table and prints rows.
+**Browse:** web UI `/catalog` route — sidebar, topbar, card grid, detail
+drawer. Every read is a live HF + Civitai proxy through `GET /api/catalog/search`
+with a 5-min in-process cache (no SQLite catalog table, no scanner, no scrape).
 
-**Inspect:** `mold catalog show hf:black-forest-labs/FLUX.1-dev` (or `cv:618692`) prints a single entry; `--json` for machine-readable.
+**Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692`
+hit the upstream APIs directly for the recipe. Phase-1 supports HF
+separated-bundling entries; phases 2 (SD1.5/SDXL), 3 (FLUX 1.x), 4
+(Z-Image), and 5 (LTX-Video / LTX-2 / LTX-2.3) single-file Civitai
+checkpoints are supported — downloaded with companions and runnable
+via `mold run cv:<id>`. Flux.2 fine-tunes pull `flux2-vae` (168 MB
+Klein VAE, ungated) and either `flux2-te` (Qwen3-4B, ungated, for
+`sub_family=klein-4b`) or `flux2-te-9b` (Qwen3-8B, **HF_TOKEN required**,
+for `klein-9b` / `flux2-d`). Phase-5 LTX-Video entries pull
+`ltx-video-vae` as a companion (Civitai fine-tunes are transformer-only);
+LTX-2/2.3 entries require a combined checkpoint with bundled VAE.
+Single-file format detection is key-based (reads safetensors header only).
 
-**Refresh:** `mold catalog refresh [--family flux] [--no-nsfw] [--dry-run]` re-runs the scanner against Hugging Face + Civitai, writes shards into `$MOLD_HOME/catalog/`, reseeds the DB. Maintainer-only `--commit-to-repo` writes into `crates/mold-catalog/data/catalog/`.
+**Auth:** `HF_TOKEN` for gated HF repos; `CIVITAI_TOKEN` for early-access
+/ NSFW Civitai. Web Settings persists these to `mold.db` `settings`
+(`huggingface.token`, `civitai.token`).
 
-**Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692` route through the catalog. Phase-1 supports HF separated-bundling entries (`engine_phase=1`) and Flux.2 single-file Civitai fine-tunes. Phases 2 (SD1.5/SDXL), 3 (FLUX 1.x), 4 (Z-Image), and 5 (LTX-Video / LTX-2 / LTX-2.3) single-file Civitai checkpoints are supported — downloaded with companions and runnable via `mold run cv:<id>`. Flux.2 fine-tunes pull `flux2-vae` (168 MB Klein VAE, ungated) and either `flux2-te` (Qwen3-4B, ungated, for `sub_family=klein-4b`) or `flux2-te-9b` (Qwen3-8B, **HF_TOKEN required**, for `klein-9b` / `flux2-d`). Phase-5 LTX-Video entries pull `ltx-video-vae` as a companion (Civitai fine-tunes are transformer-only); LTX-2/2.3 entries require a combined checkpoint with bundled VAE (no companion). Single-file format detection is key-based (reads safetensors header only): `transformer_blocks.*` → LTX-Video, `blocks.*` → LTX-2, native vs diffusers prefix handled transparently.
-
-**Auth:** `HF_TOKEN` for gated Hugging Face repos; `CIVITAI_TOKEN` for early-access / NSFW Civitai. Web Settings persists these to `mold.db` `settings` (`huggingface.token`, `civitai.token`).
-
-**Web:** `/catalog` route in the SPA — sidebar, topbar, card grid, detail drawer.
-
-**Internals:** scanner / shards / FTS5 search live in `mold-catalog`. Catalog rows persist in the SQLite `catalog` table; FTS5 mirrors `name + author + description + tags`.
-
-**`MOLD_CATALOG_DISABLE=1`** flags the catalog as unavailable in `/api/capabilities`.
+**Internals:** `mold-catalog::live` is the proxy + cache; `live::fetch_civitai_version`
+and `live::fetch_hf_repo` resolve single ids to a `CatalogEntry` with a
+fully-rendered `DownloadRecipe`. Per-install **`mold-catalog.json`
+sidecars** sit next to each downloaded primary file and back the LoRA
+picker's "what's installed" list — sidecars travel with the model
+file, so a copy to another mold install retains trigger words.
 
 ## Configuration Management
 
