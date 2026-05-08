@@ -1,3 +1,4 @@
+pub mod attention;
 mod cache;
 pub mod controlnet;
 pub mod device;

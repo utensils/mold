@@ -17,6 +17,8 @@ path = "src/main.rs"
 default = []
 cuda = ["mold-server/cuda", "mold-inference/cuda", "mold-tui?/cuda"]
 metal = ["mold-server/metal", "mold-inference/metal", "mold-tui?/metal"]
+# FlashAttention v2 path for FLUX/FLUX2. Implies `cuda` via mold-inference.
+flash-attn = ["mold-inference/flash-attn"]
 preview = ["viuer"]
 discord = ["mold-discord"]
 expand = ["mold-inference/expand", "mold-server/expand", "mold-tui?/expand"]

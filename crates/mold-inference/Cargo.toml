@@ -17,6 +17,11 @@ name = "mold_inference"
 default = []
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+# FlashAttention v2 dispatch path. Implies `cuda` (flash-attn is CUDA-only).
+# Off by default — pulls in the candle-flash-attn build, which requires the
+# CUDA toolkit. Tensors that aren't CUDA + fp16/bf16 transparently fall back
+# to the math path inside `crate::attention`.
+flash-attn = ["dep:candle-flash-attn", "cuda"]
 expand = []
 webp = ["webp-animation"]
 mp4 = ["dep:fdk-aac"]
@@ -49,6 +54,18 @@ anyhow = "1"
 candle-core = { package = "candle-core-mold", version = "0.9.10" }
 candle-nn = { package = "candle-nn-mold", version = "0.9.10" }
 candle-transformers = { package = "candle-transformers-mold", version = "0.9.12" }
+# Optional flash-attention v2. Pulled in only by the `flash-attn` feature.
+#
+# NOTE: candle-flash-attn 0.9.2 transitively requires upstream `candle-core
+# ^0.9`, but mold uses the `candle-core-mold` fork (Metal-quantized matmul
+# precision + seed-buffer fixes). Linking both yields two distinct `Tensor`
+# types in the dep graph and the `flash_attention` call site won't typecheck.
+# Until a companion `candle-flash-attn-mold` is published (or a workspace-
+# level `[patch.crates-io]` lands that can unify the fork's `candle-core-mold`
+# package name with upstream's `candle-core`), enabling this feature requires
+# the upstream candle, not the fork. Dispatch + math/sdpa fallbacks (and
+# the env contract) compile and test cleanly regardless of feature state.
+candle-flash-attn = { version = "0.9.2", optional = true }
 gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
 image = "0.25"
@@ -68,3 +85,9 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 fdk-aac = { version = "0.8", optional = true }
+
+# `mold_flash_attn_real` is a build-time cfg flag (set via `RUSTFLAGS`)
+# that, when paired with `--features flash-attn`, enables the actual
+# `candle-flash-attn` FFI call. See `src/attention.rs::flash_attention`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mold_flash_attn_real)'] }

@@ -38,19 +38,9 @@ fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
 }
 
 fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
-    let dim = q.dim(D::Minus1)?;
-    let scale_factor = 1.0 / (dim as f64).sqrt();
-    let mut batch_dims = q.dims().to_vec();
-    batch_dims.pop();
-    batch_dims.pop();
-    let q = q.flatten_to(batch_dims.len() - 1)?;
-    let k = k.flatten_to(batch_dims.len() - 1)?;
-    let v = v.flatten_to(batch_dims.len() - 1)?;
-    let attn_weights = (q.matmul(&k.t()?)? * scale_factor)?;
-    let attn_scores = candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(&v)?;
-    batch_dims.push(attn_scores.dim(D::Minus2)?);
-    batch_dims.push(attn_scores.dim(D::Minus1)?);
-    Ok(attn_scores.reshape(batch_dims)?)
+    // Single dispatch point — FlashAttention / SDPA / math is selected at
+    // process start via `MOLD_ATTN` and the `flash-attn` cargo feature.
+    Ok(crate::attention::attention_default_scale(q, k, v)?)
 }
 
 fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
