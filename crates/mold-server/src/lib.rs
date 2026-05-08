@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod catalog_api;
+pub mod catalog_sidecar_backfill;
 pub mod chain_limits;
 pub mod test_support;
 // Agent A (downloads)
@@ -282,6 +283,17 @@ pub async fn run_server(
                 .await;
         })
     };
+
+    // ── Sidecar backfill ────────────────────────────────────────────────────
+    // First-boot-after-upgrade users have installed catalog rows from the
+    // bulk-scrape era; the LoRA picker now reads sidecars next to the
+    // primary file, so we drop one for each pre-existing install whose
+    // catalog row is still in the DB. Steady-state cost is one stat per
+    // `cv-*` subdir per boot.
+    crate::catalog_sidecar_backfill::spawn(
+        state.config.read().await.resolved_models_dir(),
+        state.catalog_db.clone(),
+    );
 
     // ── Downloads UI (Agent A) ──────────────────────────────────────────────
     // Single-writer download queue driver. Bind the `JoinHandle` so we can

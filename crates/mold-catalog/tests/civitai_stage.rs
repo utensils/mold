@@ -51,6 +51,36 @@ const RESPONSE: &str = r#"{
     "metadata": { "totalPages": 1 }
 }"#;
 
+/// Civitai scanner must request both Checkpoint and LORA types — otherwise
+/// the catalog can't surface FLUX LoRAs and the web UI's `LoraPicker` stays
+/// hidden because no `kind=lora` rows ever land in the DB.
+#[tokio::test]
+async fn scan_requests_both_checkpoint_and_lora_types() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("baseModels", "Flux.1 D"))
+        .and(query_param("types", "Checkpoint"))
+        .and(query_param("types", "LORA"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"items":[],"metadata":{"totalPages":1}}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let opts = ScanOptions {
+        hf_request_delay: std::time::Duration::ZERO,
+        civitai_request_delay: std::time::Duration::ZERO,
+        max_429_retries: 0,
+        ..ScanOptions::default()
+    };
+    let (entries, err) = civitai::scan(&server.uri(), &opts, &["Flux.1 D"]).await;
+    assert!(err.is_none(), "URL with both types should match: {err:?}");
+    assert!(entries.is_empty());
+}
+
 #[tokio::test]
 async fn scan_drops_pickle_files_and_keeps_safetensors() {
     let server = MockServer::start().await;

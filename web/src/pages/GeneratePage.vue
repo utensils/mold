@@ -205,7 +205,7 @@ const settingsDirty = computed(() => {
     s.batchSize !== 1 ||
     s.seed !== null ||
     s.negativePrompt.length > 0 ||
-    s.lora !== null
+    s.loras.length > 0
   );
 });
 

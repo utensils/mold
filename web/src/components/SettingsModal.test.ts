@@ -21,7 +21,7 @@ const defaultModelValue = {
   outputFormat: "png" as const,
   expand: { enabled: false, variations: 1 as const, familyOverride: null },
   placement: null,
-  lora: null,
+  loras: [],
   enableAudio: null,
 };
 

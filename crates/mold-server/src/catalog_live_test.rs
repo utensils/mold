@@ -1,0 +1,252 @@
+//! Integration tests for the live-search and installed catalog routes.
+//!
+//! `live_search_catalog` is exercised against a wiremock-backed Civitai;
+//! `list_installed_catalog` is exercised against tempdir sidecar
+//! fixtures. Both go through the real axum router so the route wiring
+//! and JSON shape are tested end-to-end.
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use mold_catalog::sidecar::{sidecar_from_entry, write_sidecar, CatalogSidecar, SIDECAR_FILENAME};
+use tower::ServiceExt;
+use wiremock::matchers::{method, path as wm_path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use crate::routes::create_router;
+use crate::state::AppState;
+
+const FLUX_LORA_FIXTURE: &str = r#"{
+    "items": [{
+        "id": 9001,
+        "name": "Live Flux LoRA",
+        "type": "LORA",
+        "nsfw": false,
+        "creator": { "username": "alice" },
+        "stats": { "downloadCount": 4242, "rating": 4.6, "favoriteCount": 1 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 8001,
+            "name": "v1",
+            "baseModel": "Flux.1 D",
+            "baseModelType": "Standard",
+            "trainedWords": ["live trigger"],
+            "files": [{
+                "id": 1, "name": "x.safetensors", "sizeKB": 100,
+                "downloadCount": 1, "metadata": { "format": "SafeTensor" },
+                "downloadUrl": "https://civitai.example/x.safetensors",
+                "hashes": { "SHA256": "deadbeef" }
+            }],
+            "images": []
+        }]
+    }],
+    "metadata": { "totalPages": 1 }
+}"#;
+
+async fn build_state() -> (AppState, MockServer, tempfile::TempDir) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(FLUX_LORA_FIXTURE))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = mold_db::MetadataDb::open_in_memory().expect("in-memory DB");
+    let mut state = AppState::for_tests(Arc::new(db)).with_civitai_base(server.uri());
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+    // Wire the SPA build-state so the router constructs cleanly even
+    // without an embedded web bundle. (`build_state` here just sets up
+    // the catalog-only fields the test needs.)
+    let _ = &mut state;
+    (state, server, tmp)
+}
+
+async fn get(router: axum::Router, uri: &str) -> (StatusCode, String) {
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn live_search_returns_normalized_civitai_rows() {
+    let (state, _server, _tmp) = build_state().await;
+    let router = create_router(state);
+
+    let (status, body) = get(router, "/api/catalog/search?q=test&family=flux&kind=lora").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "live search returned non-200: {body}"
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let entries = parsed["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], "cv:8001");
+    assert_eq!(entries[0]["family"], "flux");
+    assert_eq!(entries[0]["kind"], "lora");
+    assert_eq!(
+        entries[0]["installed"], false,
+        "no sidecar yet → not installed"
+    );
+    assert_eq!(entries[0]["trained_words"][0], "live trigger");
+}
+
+#[tokio::test]
+async fn live_search_marks_installed_when_sidecar_and_file_present() {
+    let (state, _server, tmp) = build_state().await;
+
+    // Fabricate the post-install state: a sanitized subdir under
+    // models_dir containing a sidecar AND the primary file.
+    let cv_dir = tmp.path().join("cv-8001");
+    std::fs::create_dir_all(&cv_dir).unwrap();
+    let entry = mold_catalog::entry::CatalogEntry {
+        id: mold_catalog::entry::CatalogId::from("cv:8001"),
+        source: mold_catalog::entry::Source::Civitai,
+        source_id: "8001".into(),
+        name: "Live Flux LoRA".into(),
+        author: Some("alice".into()),
+        family: mold_catalog::families::Family::Flux,
+        family_role: mold_catalog::entry::FamilyRole::Finetune,
+        sub_family: Some("flux1-d".into()),
+        modality: mold_catalog::entry::Modality::Image,
+        kind: mold_catalog::entry::Kind::Lora,
+        file_format: mold_catalog::entry::FileFormat::Safetensors,
+        bundling: mold_catalog::entry::Bundling::SingleFile,
+        size_bytes: Some(100_000),
+        download_count: 0,
+        rating: None,
+        likes: 0,
+        nsfw: false,
+        thumbnail_url: None,
+        description: None,
+        license: None,
+        license_flags: mold_catalog::entry::LicenseFlags::default(),
+        tags: vec![],
+        companions: vec![],
+        download_recipe: mold_catalog::entry::DownloadRecipe {
+            files: vec![],
+            needs_token: Some(mold_catalog::entry::TokenKind::Civitai),
+        },
+        engine_phase: 3,
+        created_at: None,
+        updated_at: None,
+        added_at: 0,
+        trained_words: vec!["live trigger".into()],
+    };
+    let sidecar = sidecar_from_entry(&entry, "x.safetensors".into());
+    write_sidecar(&cv_dir.join(SIDECAR_FILENAME), &sidecar).unwrap();
+    std::fs::write(cv_dir.join("x.safetensors"), b"fake-weights").unwrap();
+
+    let router = create_router(state);
+    let (status, body) = get(router, "/api/catalog/search?q=test&family=flux&kind=lora").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entry0 = &parsed["entries"][0];
+    assert_eq!(entry0["installed"], true);
+    assert!(entry0["primary_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("cv-8001/x.safetensors"));
+}
+
+#[tokio::test]
+async fn installed_endpoint_returns_only_kind_filtered_sidecars() {
+    let (state, _server, tmp) = build_state().await;
+
+    // Drop two sidecars: one LoRA, one Checkpoint. The picker query
+    // filters to kind=lora — the checkpoint MUST NOT appear.
+    let lora_dir = tmp.path().join("cv-1");
+    let ckpt_dir = tmp.path().join("cv-2");
+    std::fs::create_dir_all(&lora_dir).unwrap();
+    std::fs::create_dir_all(&ckpt_dir).unwrap();
+
+    let lora_sc = CatalogSidecar {
+        schema: 1,
+        id: "cv:1".into(),
+        source: "civitai".into(),
+        source_id: "1".into(),
+        name: "Lora A".into(),
+        author: Some("alice".into()),
+        family: "flux".into(),
+        family_role: "finetune".into(),
+        sub_family: None,
+        kind: "lora".into(),
+        modality: "image".into(),
+        thumbnail_url: None,
+        size_bytes: None,
+        engine_phase: 3,
+        trained_words: vec!["trigger-A".into()],
+        primary_filename_rel: "lora.safetensors".into(),
+        written_at: 0,
+    };
+    let ckpt_sc = CatalogSidecar {
+        kind: "checkpoint".into(),
+        primary_filename_rel: "ckpt.safetensors".into(),
+        ..lora_sc.clone()
+    };
+    write_sidecar(&lora_dir.join(SIDECAR_FILENAME), &lora_sc).unwrap();
+    std::fs::write(lora_dir.join("lora.safetensors"), b"x").unwrap();
+    write_sidecar(&ckpt_dir.join(SIDECAR_FILENAME), &ckpt_sc).unwrap();
+    std::fs::write(ckpt_dir.join("ckpt.safetensors"), b"x").unwrap();
+
+    let router = create_router(state);
+    let (status, body) = get(router, "/api/catalog/installed?kind=lora&family=flux").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entries = parsed["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], "cv:1");
+    assert_eq!(entries[0]["installed"], true);
+    assert_eq!(entries[0]["trained_words"][0], "trigger-A");
+}
+
+#[tokio::test]
+async fn installed_endpoint_marks_uninstalled_when_primary_missing() {
+    let (state, _server, tmp) = build_state().await;
+
+    // Sidecar is present, but the primary file was removed (e.g. user
+    // deleted it manually). The endpoint MUST surface installed=false
+    // instead of pointing at a non-existent path.
+    let dir = tmp.path().join("cv-7");
+    std::fs::create_dir_all(&dir).unwrap();
+    let sc = CatalogSidecar {
+        schema: 1,
+        id: "cv:7".into(),
+        source: "civitai".into(),
+        source_id: "7".into(),
+        name: "Stale".into(),
+        author: None,
+        family: "flux".into(),
+        family_role: "finetune".into(),
+        sub_family: None,
+        kind: "lora".into(),
+        modality: "image".into(),
+        thumbnail_url: None,
+        size_bytes: None,
+        engine_phase: 3,
+        trained_words: vec![],
+        primary_filename_rel: "missing.safetensors".into(),
+        written_at: 0,
+    };
+    write_sidecar(&dir.join(SIDECAR_FILENAME), &sc).unwrap();
+    // Deliberately do NOT write missing.safetensors.
+
+    let router = create_router(state);
+    let (status, body) = get(router, "/api/catalog/installed").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entries = parsed["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["installed"], false);
+    assert!(entries[0]["primary_path"].is_null());
+}

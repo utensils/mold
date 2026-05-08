@@ -3183,6 +3183,7 @@ dependencies = [
  "utoipa",
  "uuid",
  "walkdir",
+ "wiremock",
 ]
 
 [[package]]

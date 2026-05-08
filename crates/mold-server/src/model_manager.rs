@@ -48,38 +48,67 @@ fn check_model_memory_budget(
 /// model that will be unloaded before the new one loads — without this, a
 /// swap of two near-equal-size models would be falsely rejected even though
 /// the swap is feasible.
+///
+/// Peak is estimated under `LoadStrategy::Sequential` because every diffusion
+/// family in this repo (FLUX, SD3, Z-Image, Flux.2, Qwen-Image, LTX) drops
+/// text encoders from GPU after encoding before the transformer denoises.
+/// The Eager sum (`transformer + vae + all_encoders`) overcounts by the
+/// encoder weight on every load — enough to false-reject a quantized FLUX on
+/// a 24 GB card even when the swap would actually fit.
 pub(crate) fn preflight_memory_guard_with_available(
     model_name: &str,
     paths: &ModelPaths,
     active_vram_bytes: u64,
     available_bytes: u64,
 ) -> Result<(), ApiError> {
-    let peak =
-        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager);
+    let peak = mold_inference::device::estimate_peak_memory(
+        paths,
+        mold_inference::LoadStrategy::Sequential,
+    );
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
     check_model_memory_budget(model_name, peak, effective_available)
 }
 
 /// Check whether estimated peak memory fits before committing to a model load.
 ///
-/// - On CUDA: uses `free_vram_bytes(gpu_ordinal)`.
-/// - On macOS (MPS/unified memory): uses `available_system_memory_bytes()`.
-/// - On other platforms: no-op.
+/// Budgeting strategy on CUDA:
+/// - **No active model on this GPU** — the new load lands in whatever is
+///   currently free, so use `free_vram_bytes(gpu_ordinal)`.
+/// - **Active model present** — the call site unloads it and runs
+///   `cuDevicePrimaryCtxReset_v2`, which releases *every* allocation on the
+///   device (transformer, leftover activation buffers, fragmentation in the
+///   caching pool). The realistic post-reclaim budget is total VRAM, not
+///   `free + recorded active_vram`. Using the latter under-counts whatever
+///   the cache forgot to track (notably the encoder churn during the
+///   previous generation) and produces false rejections.
 ///
-/// `active_vram_bytes` is the footprint of the currently GPU-resident model
-/// that will be unloaded before loading the new one. This memory will become
-/// available, so we add it to the budget to avoid false rejections during
-/// model swaps.
+/// On macOS (unified memory) we keep the additive `available + active_vram`
+/// budget because Metal has no equivalent device-wide context reset; tensors
+/// freed during `unload()` simply return to the system page cache.
+/// On other platforms with no memory query available, the guard is a no-op.
 pub(crate) fn preflight_memory_guard(
     model_name: &str,
     paths: &ModelPaths,
     active_vram_bytes: u64,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
 ) -> Result<(), ApiError> {
-    // CUDA branch: query free VRAM on the target ordinal.
+    // CUDA branch: when an active model will be reclaimed via primary-context
+    // reset, the post-reclaim budget is the device total, not free+active.
     #[cfg(feature = "cuda")]
-    if let Some(free) = mold_inference::device::free_vram_bytes(gpu_ordinal) {
-        return preflight_memory_guard_with_available(model_name, paths, active_vram_bytes, free);
+    {
+        if active_vram_bytes > 0 {
+            if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
+                return preflight_memory_guard_with_available(model_name, paths, 0, total);
+            }
+        }
+        if let Some(free) = mold_inference::device::free_vram_bytes(gpu_ordinal) {
+            return preflight_memory_guard_with_available(
+                model_name,
+                paths,
+                active_vram_bytes,
+                free,
+            );
+        }
     }
 
     // macOS unified memory: query system memory and add reclaimable footprint.
@@ -188,6 +217,30 @@ fn looks_like_catalog_id(id: &str) -> bool {
     id.starts_with("cv:") || id.starts_with("hf:")
 }
 
+/// Best-effort family lookup for a model name, used to feed
+/// `validate_generate_request_with_family` so catalog (`cv:*` / `hf:*`) IDs
+/// get the same family-gated feature checks as manifest-resident models.
+///
+/// Returns the catalog DB's family string (`"ltx2"`, `"sdxl"`, …) for an
+/// installed catalog entry, or `None` for manifest-resident or unknown
+/// model names — in which case validation falls back to its own
+/// manifest-aware lookup. Errors are swallowed and returned as `None` so a
+/// flaky DB read can't block a generate request that doesn't actually need
+/// the family hint (e.g. plain image generation against a manifest model).
+pub(crate) fn catalog_family_for(state: &AppState, model_name: &str) -> Option<String> {
+    if !looks_like_catalog_id(model_name) {
+        return None;
+    }
+    match state.catalog_db.catalog_get(model_name) {
+        Ok(Some(row)) => Some(row.family),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::debug!(model = model_name, error = %e, "catalog_family_for: DB lookup failed");
+            None
+        }
+    }
+}
+
 fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, paths: &ModelPaths) {
     let to_str = |p: &std::path::PathBuf| p.to_str().map(str::to_owned);
     match companion {
@@ -219,6 +272,20 @@ fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, pat
                 .collect::<Vec<_>>()
                 .into();
             cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_str);
+        }
+        "ltx2-te" => {
+            // Gemma 3 12B for LTX-2. The runtime calls `gemma_root` which
+            // takes the parent directory of `text_encoder_files[0]`, so
+            // populating that vec is sufficient — we don't need a separate
+            // `text_tokenizer` field (the manifest tags every Gemma file
+            // including `tokenizer.json` / `tokenizer.model` as
+            // ModelComponent::TextEncoder, so the tokenizer rides along).
+            cfg.text_encoder_files = paths
+                .text_encoder_files
+                .iter()
+                .filter_map(to_str)
+                .collect::<Vec<_>>()
+                .into();
         }
         _ => {}
     }
@@ -267,7 +334,7 @@ fn synthesize_catalog_config(
 
     // Populate companion paths from already-resolved manifest entries.
     use mold_catalog::companions::companions_for;
-    use mold_catalog::entry::Bundling;
+    use mold_catalog::entry::{Bundling, Kind};
     use mold_catalog::families::Family;
     let fam = match row.family.as_str() {
         "sd15" => Some(Family::Sd15),
@@ -281,10 +348,21 @@ fn synthesize_catalog_config(
         "wuerstchen" => Some(Family::Wuerstchen),
         _ => None,
     };
+    // The row stores kind as a kebab-case string ("checkpoint", "lora", ...);
+    // parse it back so `companions_for` can short-circuit for LoRAs and other
+    // adapter-shaped entries that don't pull T5/CLIP/VAE companions.
+    let kind: Kind = serde_json::from_value(serde_json::Value::String(row.kind.clone()))
+        .unwrap_or(Kind::Checkpoint);
     if let Some(fam) = fam {
-        for companion in companions_for(fam, row.sub_family.as_deref(), Bundling::SingleFile) {
-            if let Some(paths) = ModelPaths::resolve(&companion, config) {
-                copy_catalog_companion(&mut cfg, &companion, &paths);
+        for companion in companions_for(fam, row.sub_family.as_deref(), Bundling::SingleFile, kind)
+        {
+            match ModelPaths::resolve(&companion, config) {
+                Some(paths) => copy_catalog_companion(&mut cfg, &companion, &paths),
+                None => tracing::warn!(
+                    catalog_id = %row.id,
+                    companion = %companion,
+                    "companion did not resolve from manifest paths — engine load may fail"
+                ),
             }
         }
     }
@@ -1028,5 +1106,91 @@ mod tests {
         let active_vram = 8 * GB;
         let effective = free_vram + active_vram;
         assert!(check_model_memory_budget("too-large", 15 * GB, effective).is_err());
+    }
+
+    /// Build a `ModelPaths` whose components include text encoders, mirroring a
+    /// real FLUX-family layout. Used to verify the Sequential-strategy peak
+    /// estimate doesn't sum the encoder onto the transformer (the bug fix).
+    fn flux_shaped_paths_with_sizes(
+        transformer_gb: u64,
+        vae_gb: u64,
+        t5_gb: u64,
+        clip_gb: u64,
+    ) -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk("transformer.safetensors", transformer_gb);
+        let vae = mk("vae.safetensors", vae_gb);
+        let t5 = mk("t5.safetensors", t5_gb);
+        let clip = mk("clip.safetensors", clip_gb);
+        let paths = ModelPaths {
+            transformer,
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: Some(t5),
+            clip_encoder: Some(clip),
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
+    /// Regression: a quantized FLUX-shaped model should fit on a 24 GB card
+    /// when the sibling model is unloaded and the context reset, even though
+    /// the Eager (sum) peak would have been ~24 GB and tripped the 90 %
+    /// hard limit.
+    ///
+    /// Concrete shape: FLUX-dev:q8 → transformer ≈ 12 GB, VAE ≈ 0.3 GB,
+    /// T5 ≈ 9.5 GB, CLIP ≈ 0.25 GB. Eager peak = 12+0.3+9.5+0.25+2 ≈ 24 GB
+    /// (rejects at 90 % of 24 GB = 21.6). Sequential peak =
+    /// max(9.75, 12.3) + 2 ≈ 14.3 GB (passes comfortably).
+    #[test]
+    fn preflight_passes_for_quantized_flux_on_24gb_card_with_swap() {
+        // Use whole-GB sizes to match the helper's u64 parameters; the
+        // composition is realistic enough to exercise Eager-vs-Sequential
+        // divergence (encoder + transformer both > headroom).
+        let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
+        // Free 4 GB on a 24 GB card with an 18 GB sibling about to be
+        // reclaimed → effective_available passed in by the outer guard
+        // is total_vram = 24 GB on CUDA, but we test the inner directly with
+        // the Sequential strategy in mind.
+        let result = preflight_memory_guard_with_available("flux-dev:q8", &paths, 0, 24 * GB);
+        assert!(
+            result.is_ok(),
+            "quantized FLUX must fit on a 24 GB card under the Sequential \
+             peak estimate (drop-and-reload encoders), got {result:?}"
+        );
+    }
+
+    /// Companion: under the *old* Eager-strategy math the same model would
+    /// have been rejected. Verifying explicitly so a regression that flips
+    /// the strategy back gets caught.
+    #[test]
+    fn eager_strategy_would_have_rejected_quantized_flux_on_24gb() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
+        let eager_peak = mold_inference::device::estimate_peak_memory(
+            &paths,
+            mold_inference::LoadStrategy::Eager,
+        );
+        // 12 + 1 + 10 + 1 + 2 GB headroom = 26 GB → above 90 % of 24 GB.
+        let hard_limit = (24 * GB) * 9 / 10;
+        assert!(
+            eager_peak > hard_limit,
+            "Eager peak ({eager_peak}) should exceed hard limit ({hard_limit}) — \
+             this is the false-rejection the Sequential switch fixes"
+        );
     }
 }

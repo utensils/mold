@@ -11,6 +11,7 @@ import {
   UNET_SCHEDULER_FAMILIES,
   VIDEO_FAMILIES,
   familySupportsAudio,
+  supportsLora,
 } from "../types";
 import LoraPicker from "./LoraPicker.vue";
 import ModelPicker from "./ModelPicker.vue";
@@ -66,7 +67,11 @@ function selectModel(m: ModelInfoExtended) {
     height: m.default_height,
     steps: m.default_steps,
     guidance: m.default_guidance,
-    lora: null, // LoRA is family-specific; clear on model change
+    // Clear the LoRA stack on every model change. LoRAs target a
+    // specific tensor layout; even FLUX → FLUX swaps may not be
+    // compatible (different finetune shapes), so the safest default is
+    // to start from empty and let the user re-pick deliberately.
+    loras: [],
   };
   if (VIDEO_FAMILIES.includes(m.family)) {
     next.frames ??= 25;
@@ -91,9 +96,23 @@ function selectModel(m: ModelInfoExtended) {
   emit("update:modelValue", next);
 }
 
-function onLoraChange(lora: LoraSelection | null) {
-  patch("lora", lora);
+function onLorasChange(loras: LoraSelection[]) {
+  patch("loras", loras);
 }
+
+/// Append a trigger phrase to the active prompt with comma-separation
+/// when the prompt is non-empty. Mirrors `useGenerateForm.appendPromptPhrase`
+/// — duplicated here because the modal owns the form value via v-model
+/// rather than calling into the composable directly.
+function onAppendPromptPhrase(phrase: string) {
+  const trimmed = phrase.trim();
+  if (!trimmed) return;
+  const current = props.modelValue.prompt;
+  const next = current.trim() ? `${current.trimEnd()}, ${trimmed}` : trimmed;
+  patch("prompt", next);
+}
+
+const familySupportsLora = computed(() => supportsLora(family.value));
 
 // frames must be 8n+1 (9, 17, 25, 33, ...)
 function clampFrames(n: number): number {
@@ -358,9 +377,11 @@ const schedulerOptions: Scheduler[] = [
         </section>
 
         <LoraPicker
+          v-if="familySupportsLora"
           :family="family"
-          :model-value="modelValue.lora"
-          @update:model-value="onLoraChange"
+          :model-value="modelValue.loras"
+          @update:model-value="onLorasChange"
+          @append-prompt="onAppendPromptPhrase"
         />
 
         <section

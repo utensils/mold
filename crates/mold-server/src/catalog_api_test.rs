@@ -241,6 +241,7 @@ fn make_catalog_row(id: &str, source: &str, family: &str, engine_phase: i64) -> 
         created_at: None,
         updated_at: None,
         added_at: 0,
+        trained_words: "[]".into(),
     }
 }
 
@@ -649,6 +650,7 @@ fn make_catalog_entry(id: &str, name: &str) -> CatalogEntry {
         created_at: None,
         updated_at: None,
         added_at: 0,
+        trained_words: Vec::new(),
     }
 }
 

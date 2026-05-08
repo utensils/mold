@@ -362,6 +362,40 @@ export async function fetchCatalog(
   return r.json();
 }
 
+/// Live-search backend for the catalog tab. Replaces `fetchCatalog` on
+/// the read path — the bulk-scrape DB is retained server-side until a
+/// follow-up release deprecates it. Same response shape as
+/// `/api/catalog` so the SPA's filter/pagination wiring is untouched.
+export async function fetchCatalogSearch(
+  params: CatalogListParams,
+): Promise<CatalogListResponse> {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null) continue;
+    sp.set(k, String(v));
+  }
+  const r = await fetch(`/api/catalog/search?${sp.toString()}`);
+  if (!r.ok) throw new Error(`/api/catalog/search ${r.status}`);
+  return r.json();
+}
+
+/// Enumerate installed catalog entries from per-install sidecar files.
+/// Used by the LoRA picker (and any future "show what's downloaded"
+/// surfaces). Family/kind are server-side filters.
+export async function fetchCatalogInstalled(params: {
+  family?: string;
+  kind?: string;
+}): Promise<CatalogListResponse> {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null) continue;
+    sp.set(k, String(v));
+  }
+  const r = await fetch(`/api/catalog/installed?${sp.toString()}`);
+  if (!r.ok) throw new Error(`/api/catalog/installed ${r.status}`);
+  return r.json();
+}
+
 export async function fetchCatalogEntry(id: string): Promise<CatalogEntryWire> {
   const r = await fetch(`/api/catalog/${encodeURIComponent(id)}`);
   if (!r.ok) throw new Error(`/api/catalog/${id} ${r.status}`);

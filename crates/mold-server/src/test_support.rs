@@ -55,6 +55,7 @@ impl TestApp {
                 created_at: None,
                 updated_at: None,
                 added_at: 0,
+                trained_words: "[]".into(),
             }],
         )
         .expect("seed catalog fixture");

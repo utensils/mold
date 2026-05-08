@@ -53,6 +53,7 @@ fn make_entry() -> CatalogEntry {
         created_at: None,
         updated_at: None,
         added_at: 0,
+        trained_words: Vec::new(),
     }
 }
 

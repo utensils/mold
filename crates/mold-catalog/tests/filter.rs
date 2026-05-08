@@ -48,6 +48,7 @@ fn entry(source: Source, downloads: u64, nsfw: bool, with_files: bool) -> Catalo
         created_at: None,
         updated_at: None,
         added_at: 0,
+        trained_words: Vec::new(),
     }
 }
 

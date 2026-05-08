@@ -4720,6 +4720,23 @@ fn companion_manifests() -> Vec<ModelManifest> {
                 gated: false,
                 sha256: None,
             }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        // Gemma 3 12B text encoder + tokenizer companion for LTX-2 / LTX-2.3
+        // single-file Civitai checkpoints. The combined LTX-2 .safetensors
+        // bundles transformer + VAE only; the runtime (`ltx2/assets.rs`)
+        // requires the Gemma TE separately and reads its directory off the
+        // first entry in `paths.text_encoder_files`. Same gated repo + file
+        // set the manifest LTX-2 models pull, so a user with the Gemma TE
+        // already installed for `ltx-2-19b-distilled:fp8` (etc.) gets cv:*
+        // installs essentially for free via the HF cache.
+        ModelManifest {
+            name: "ltx2-te".to_string(),
+            family: "companion".to_string(),
+            description: "LTX-2 Gemma-3-12B text encoder + tokenizer companion (single-file LTX-2)"
+                .to_string(),
+            files: shared_ltx2_files(),
             defaults,
             hidden: true,
         },
@@ -5285,10 +5302,12 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 10 Companion = 107
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 11 Companion = 108
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
-        // catalog bridge (single-file Civitai Flux.2 fine-tunes).
-        assert_eq!(known_manifests().len(), 107);
+        // catalog bridge (single-file Civitai Flux.2 fine-tunes); +ltx2-te
+        // for the catalog bridge (single-file Civitai LTX-2 / LTX-2.3
+        // fine-tunes — Gemma 3 12B text encoder).
+        assert_eq!(known_manifests().len(), 108);
     }
 
     #[test]
@@ -6546,12 +6565,12 @@ mod tests {
     #[test]
     fn all_utility_models_identified_by_is_utility() {
         let utility_count = known_manifests().iter().filter(|m| m.is_utility()).count();
-        // Currently 12: 2 qwen3-expand variants + 10 catalog companions
+        // Currently 13: 2 qwen3-expand variants + 11 catalog companions
         // (clip-l, clip-g, sdxl-vae, sd-vae-ft-mse, t5-v1_1-xxl, flux-vae,
-        // ltx-video-vae, flux2-te, flux2-te-9b, flux2-vae).
+        // ltx-video-vae, flux2-te, flux2-te-9b, flux2-vae, ltx2-te).
         assert_eq!(
-            utility_count, 12,
-            "expected exactly 12 utility models, got {utility_count}"
+            utility_count, 13,
+            "expected exactly 13 utility models, got {utility_count}"
         );
     }
 
@@ -6593,6 +6612,7 @@ mod tests {
         "flux2-te-9b",
         "flux2-vae",
         "ltx-video-vae",
+        "ltx2-te",
     ];
 
     #[test]

@@ -318,10 +318,15 @@ pub fn create_engine_with_pool(
         "ltx2" | "ltx-2" => {
             if is_single_file(&paths) {
                 // Civitai single-file dispatch (phase 5). The combined
-                // LTX-2 checkpoint includes the VAE under `vae.*`.
+                // LTX-2 checkpoint includes the VAE under `vae.*`. Pass the
+                // full `paths` so `text_encoder_files` (Gemma TE companion,
+                // resolved by the catalog bridge) survives the
+                // ModelPaths rebuild — the runtime's `gemma_root` reads it.
+                let checkpoint = paths.transformer.clone();
                 Ok(Box::new(Ltx2Engine::from_single_file(
                     model_name,
-                    paths.transformer.clone(),
+                    checkpoint,
+                    paths,
                     load_strategy,
                     gpu_ordinal,
                 )?))

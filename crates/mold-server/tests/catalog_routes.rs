@@ -29,9 +29,8 @@ async fn families_endpoint_returns_counts() {
 
 /// The sidebar must surface every supported family — including ones with
 /// zero rows in the DB — so users can drill into a family that the
-/// live-search backend (or a future refresh) will populate on demand.
-/// Regression: with only an SDXL row seeded, FLUX must still appear
-/// (foundation=0, finetune=0).
+/// live-search backend will populate on demand. Regression: with only an
+/// SDXL row seeded, FLUX must still appear (foundation=0, finetune=0).
 #[tokio::test]
 async fn families_endpoint_includes_zero_count_families() {
     let app = TestApp::with_seeded_catalog().await;

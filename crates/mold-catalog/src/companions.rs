@@ -160,6 +160,41 @@ pub static COMPANIONS: &[Companion] = &[
         files: &["vae/diffusion_pytorch_model.safetensors"],
         size_bytes: 2_493_855_612,
     },
+    // Gemma 3 12B text encoder for LTX-2 single-file catalog entries.
+    // Civitai LTX-2 fine-tunes (e.g. cv:2752735, cv:2781713) bundle the
+    // transformer + VAE but not the Gemma TE — without this companion the
+    // runtime bails with `LTX-2 requires Gemma text encoder files to be
+    // available`. Same gated repo + file set the manifest LTX-2 models use,
+    // so a user with the Gemma TE already installed for a manifest LTX-2
+    // model gets cv:* installs essentially for free (HF cache hits).
+    Companion {
+        canonical_name: "ltx2-te",
+        kind: Kind::TextEncoder,
+        family_scope: &[Family::Ltx2],
+        source: Source::Hf,
+        repo: "google/gemma-3-12b-it-qat-q4_0-unquantized",
+        files: &[
+            "config.json",
+            "generation_config.json",
+            "model-00001-of-00005.safetensors",
+            "model-00002-of-00005.safetensors",
+            "model-00003-of-00005.safetensors",
+            "model-00004-of-00005.safetensors",
+            "model-00005-of-00005.safetensors",
+            "model.safetensors.index.json",
+            "added_tokens.json",
+            "chat_template.json",
+            "preprocessor_config.json",
+            "processor_config.json",
+            "special_tokens_map.json",
+            "tokenizer.json",
+            "tokenizer.model",
+            "tokenizer_config.json",
+        ],
+        // Sum of the five .safetensors shards (24_374_793_024 B); the JSON /
+        // tokenizer files round to ~38 MB combined and don't move the needle.
+        size_bytes: 24_374_793_024,
+    },
 ];
 
 pub fn companion_by_name(name: &str) -> Option<&'static Companion> {
@@ -167,8 +202,10 @@ pub fn companion_by_name(name: &str) -> Option<&'static Companion> {
 }
 
 /// Returns the canonical-companion names a given (family, sub_family,
-/// bundling) needs. Empty for `Bundling::Separated` because diffusers HF
-/// entries are self-contained.
+/// bundling, kind) needs. Empty for `Bundling::Separated` because diffusers HF
+/// entries are self-contained, and empty for `Kind::Lora` regardless of
+/// bundling because LoRAs are self-contained patches that ride on whatever
+/// base model is already loaded.
 ///
 /// `sub_family` distinguishes encoder size for families where the same
 /// `Family` value covers multiple architectures — currently just Flux.2,
@@ -177,7 +214,14 @@ pub fn companions_for(
     family: Family,
     sub_family: Option<&str>,
     bundling: Bundling,
+    kind: Kind,
 ) -> Vec<CompanionRef> {
+    // LoRAs, ControlNets, and standalone VAEs/text-encoders never pull
+    // companions — they slot into an existing pipeline rather than booting
+    // their own. Only Kind::Checkpoint participates in the companion graph.
+    if !matches!(kind, Kind::Checkpoint) {
+        return Vec::new();
+    }
     if matches!(bundling, Bundling::Separated) {
         return Vec::new();
     }
@@ -220,7 +264,12 @@ pub fn companions_for(
         }
         Family::Ltx2 => {
             // LTX-2 combined checkpoints bundle the VAE — no VAE companion.
-            push(&mut out, "t5-v1_1-xxl");
+            // The text encoder is Gemma 3 12B (gated), not T5: the LTX-2
+            // runtime in `mold-inference` reads `paths.text_encoder_files`
+            // and rejects the load if it's empty (`gemma_root` in
+            // `ltx2/assets.rs`). Pulling t5-v1_1-xxl here would download
+            // ~9.5 GB of unused weights and still fail the runtime check.
+            push(&mut out, "ltx2-te");
         }
         // Single-file for these is `engine_phase: 99` — no companions.
         Family::QwenImage | Family::Wuerstchen => {}

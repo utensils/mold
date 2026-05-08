@@ -131,6 +131,7 @@ pub fn entry_to_row(e: &CatalogEntry) -> Result<CatalogRow, SinkError> {
         created_at: e.created_at,
         updated_at: e.updated_at,
         added_at: e.added_at,
+        trained_words: serde_json::to_string(&e.trained_words)?,
     })
 }
 

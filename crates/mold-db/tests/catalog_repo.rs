@@ -40,6 +40,7 @@ fn row(id: &str, source: &str, family: &str, name: &str, downloads: i64) -> Cata
         created_at: None,
         updated_at: None,
         added_at: 0,
+        trained_words: "[]".into(),
     }
 }
 

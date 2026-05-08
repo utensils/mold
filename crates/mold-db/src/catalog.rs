@@ -38,6 +38,10 @@ pub struct CatalogRow {
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
     pub added_at: i64,
+    /// JSON-encoded `Vec<String>` of trigger phrases, populated from
+    /// Civitai `trainedWords` for LoRA versions. Schema-defaulted to `'[]'`,
+    /// so legacy v7 rows that were never re-scanned still parse cleanly.
+    pub trained_words: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -75,7 +79,7 @@ pub struct FamilyCount {
 const COLUMNS: &str = "id, source, source_id, name, author, family, family_role, sub_family, \
     modality, kind, file_format, bundling, size_bytes, download_count, rating, likes, nsfw, \
     thumbnail_url, description, license, license_flags, tags, companions, download_recipe, \
-    engine_phase, created_at, updated_at, added_at";
+    engine_phase, created_at, updated_at, added_at, trained_words";
 
 /// Same columns but table-qualified for queries that JOIN catalog_fts,
 /// where both tables expose `name`, `author`, `description`, and `tags`.
@@ -86,7 +90,7 @@ const QUALIFIED_COLUMNS: &str =
      catalog.rating, catalog.likes, catalog.nsfw, catalog.thumbnail_url, catalog.description, \
      catalog.license, catalog.license_flags, catalog.tags, catalog.companions, \
      catalog.download_recipe, catalog.engine_phase, catalog.created_at, catalog.updated_at, \
-     catalog.added_at";
+     catalog.added_at, catalog.trained_words";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<CatalogRow> {
     Ok(CatalogRow {
@@ -118,6 +122,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<CatalogRow> {
         created_at: row.get(25)?,
         updated_at: row.get(26)?,
         added_at: row.get(27)?,
+        trained_words: row.get(28)?,
     })
 }
 
@@ -139,14 +144,14 @@ pub fn upsert_entries(
     for r in rows {
         tx.execute(
             &format!(
-                "INSERT OR REPLACE INTO catalog ({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)",
+                "INSERT OR REPLACE INTO catalog ({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)",
             ),
             params![
                 r.id, r.source, r.source_id, r.name, r.author, r.family, r.family_role,
                 r.sub_family, r.modality, r.kind, r.file_format, r.bundling, r.size_bytes,
                 r.download_count, r.rating, r.likes, r.nsfw, r.thumbnail_url, r.description,
                 r.license, r.license_flags, r.tags, r.companions, r.download_recipe,
-                r.engine_phase, r.created_at, r.updated_at, r.added_at,
+                r.engine_phase, r.created_at, r.updated_at, r.added_at, r.trained_words,
             ],
         )?;
     }

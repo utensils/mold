@@ -79,3 +79,192 @@ fn civitai_unknown_base_model_is_dropped() {
     let item: CivitaiItem = serde_json::from_str(json).unwrap();
     assert!(from_civitai(item).is_none());
 }
+
+fn civitai_lora_json(model_type: &str, base_model: &str) -> String {
+    format!(
+        r#"{{
+            "id": 42,
+            "name": "Cinematic Lora",
+            "type": "{model_type}",
+            "nsfw": false,
+            "creator": {{ "username": "alice" }},
+            "stats": {{ "downloadCount": 500, "favoriteCount": 8 }},
+            "tags": [],
+            "modelVersions": [{{
+                "id": 99,
+                "name": "v1",
+                "baseModel": "{base_model}",
+                "baseModelType": "Standard",
+                "files": [{{ "id": 7, "name": "cinematic-lora.safetensors",
+                           "sizeKB": 150000, "downloadCount": 1,
+                           "metadata": {{ "format": "SafeTensor" }},
+                           "downloadUrl": "u", "hashes": {{}} }}],
+                "images": []
+            }}]
+        }}"#
+    )
+}
+
+#[test]
+fn civitai_lora_classifies_as_kind_lora() {
+    let item: CivitaiItem =
+        serde_json::from_str(&civitai_lora_json("LORA", "Flux.1 D")).expect("parse");
+    let entry = from_civitai(item).expect("LORA must round-trip");
+    assert_eq!(entry.kind, Kind::Lora);
+    // LoRAs are self-contained — no T5/CLIP-L/flux-vae companions or the
+    // installer wastes ~12 GB and the install-status check fails forever.
+    assert!(
+        entry.companions.is_empty(),
+        "LoRA must have no companions: {:?}",
+        entry.companions
+    );
+}
+
+#[test]
+fn civitai_locon_grouped_with_lora() {
+    // LoCon adapters share the LoRA inference path (low-rank merge into
+    // base weights). Catalog them as Kind::Lora so the FLUX backend can
+    // load them via the same code path.
+    let item: CivitaiItem =
+        serde_json::from_str(&civitai_lora_json("LoCon", "Flux.1 D")).expect("parse");
+    let entry = from_civitai(item).expect("LoCon must round-trip");
+    assert_eq!(entry.kind, Kind::Lora);
+}
+
+#[test]
+fn civitai_textual_inversion_is_dropped() {
+    // The catalog has no slot for TI embeddings; misclassifying as
+    // Checkpoint would mislead users into trying to generate from them.
+    let item: CivitaiItem =
+        serde_json::from_str(&civitai_lora_json("TextualInversion", "SDXL 1.0")).expect("parse");
+    assert!(from_civitai(item).is_none());
+}
+
+#[test]
+fn civitai_checkpoint_still_classifies_correctly() {
+    // Regression: changing the kind classifier must not flip checkpoints
+    // the catalog already serves.
+    let item: CivitaiItem = serde_json::from_str(&load("civitai_juggernaut.json")).unwrap();
+    let entry = from_civitai(item).expect("mapped");
+    assert_eq!(entry.kind, Kind::Checkpoint);
+}
+
+fn hf_detail_with_tags(id: &str, tags: Vec<&str>) -> HfDetail {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "author": id.split('/').next().unwrap_or("anon"),
+        "downloads": 100,
+        "likes": 5,
+        "tags": tags,
+        "pipeline_tag": null,
+        "library_name": null,
+        "createdAt": null,
+        "lastModified": null,
+        "cardData": null,
+    }))
+    .expect("synthesize HfDetail")
+}
+
+fn single_file_tree() -> Vec<HfTreeEntry> {
+    serde_json::from_value(serde_json::json!([
+        { "type": "file", "path": "lora.safetensors", "size": 150_000_000 }
+    ]))
+    .expect("synthesize tree")
+}
+
+#[test]
+fn hf_lora_tag_is_classified_as_lora() {
+    // The most reliable HF signal: curators tag LoRA repos with "lora".
+    let detail = hf_detail_with_tags("ostris/face-helper-sdxl-lora", vec!["lora", "diffusers"]);
+    let entry = from_hf(
+        detail,
+        single_file_tree(),
+        Family::Sdxl,
+        FamilyRole::Finetune,
+    )
+    .expect("normalizes");
+    assert_eq!(entry.kind, Kind::Lora);
+    assert!(entry.companions.is_empty(), "LoRA pulls no companions");
+}
+
+#[test]
+fn hf_id_substring_classifies_as_lora() {
+    // Repo-id substring is the fallback when the curator forgot tags.
+    let detail = hf_detail_with_tags("ntc-ai/SDXL-LoRA-slider.cinematic-lighting", vec![]);
+    let entry = from_hf(
+        detail,
+        single_file_tree(),
+        Family::Sdxl,
+        FamilyRole::Finetune,
+    )
+    .expect("normalizes");
+    assert_eq!(entry.kind, Kind::Lora);
+}
+
+#[test]
+fn hf_filename_signal_classifies_as_lora() {
+    let detail = hf_detail_with_tags("anon/sdxl-fancy-style", vec![]);
+    let tree: Vec<HfTreeEntry> = serde_json::from_value(serde_json::json!([
+        { "type": "file", "path": "pytorch_lora_weights.safetensors", "size": 80_000_000 }
+    ]))
+    .unwrap();
+    let entry = from_hf(detail, tree, Family::Sdxl, FamilyRole::Finetune).expect("normalizes");
+    assert_eq!(entry.kind, Kind::Lora);
+}
+
+#[test]
+fn hf_plain_checkpoint_stays_checkpoint() {
+    // Regression: the heuristic must not over-match. A boring repo without
+    // any LoRA signal stays a Checkpoint.
+    let detail = hf_detail_with_tags("black-forest-labs/FLUX.1-dev", vec!["diffusers", "flux"]);
+    let entry = from_hf(
+        detail,
+        single_file_tree(),
+        Family::Flux,
+        FamilyRole::Foundation,
+    )
+    .expect("normalizes");
+    assert_eq!(entry.kind, Kind::Checkpoint);
+}
+
+#[test]
+fn civitai_lora_carries_trained_words_through() {
+    // The web UI surfaces trigger phrases as click-to-insert chips. The
+    // catalog has to capture them at scrape time — Civitai's
+    // `trainedWords` lives on the model version, not the model itself.
+    let json = r#"{
+        "id": 1,
+        "name": "Trigger LoRA",
+        "type": "LORA",
+        "nsfw": false,
+        "creator": { "username": "alice" },
+        "stats": { "downloadCount": 10, "favoriteCount": 0 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 2,
+            "name": "v1",
+            "baseModel": "Flux.1 D",
+            "baseModelType": "Standard",
+            "trainedWords": ["cinematic style", "dramatic lighting"],
+            "files": [{ "id": 3, "name": "x.safetensors", "sizeKB": 1, "downloadCount": 0,
+                       "metadata": { "format": "SafeTensor" }, "downloadUrl": "u", "hashes": {} }],
+            "images": []
+        }]
+    }"#;
+    let item: CivitaiItem = serde_json::from_str(json).unwrap();
+    let entry = from_civitai(item).expect("LORA must round-trip");
+    assert_eq!(entry.kind, Kind::Lora);
+    assert_eq!(
+        entry.trained_words,
+        vec!["cinematic style".to_string(), "dramatic lighting".into()]
+    );
+}
+
+#[test]
+fn civitai_checkpoint_with_no_trigger_words_yields_empty() {
+    // Regression: the field must default to empty (not error) when the
+    // upstream API omits or empties `trainedWords`.
+    let item: CivitaiItem = serde_json::from_str(&load("civitai_juggernaut.json")).unwrap();
+    let entry = from_civitai(item).expect("mapped");
+    assert!(entry.trained_words.is_empty());
+}

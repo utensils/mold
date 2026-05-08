@@ -185,20 +185,100 @@ const PRESET_22B: Ltx2ModelPreset = Ltx2ModelPreset {
     streaming_prefetch_count: 2,
 };
 
+/// Convenience wrapper around [`preset_for_model_with_hint`] used by
+/// tests and call sites that don't have a metadata hint to forward.
+#[cfg(test)]
 pub(crate) fn preset_for_model(model_name: &str) -> Result<Ltx2ModelPreset> {
+    preset_for_model_with_hint(model_name, None)
+}
+
+/// Resolve a preset for the given model name, consulting `hint`
+/// (typically the safetensors `__metadata__.model_version` from a
+/// single-file checkpoint) when the model name itself doesn't carry a
+/// recognisable family marker. Catalog (`cv:*` / `hf:*`) IDs flow in
+/// here — `cv:2752735` looks nothing like `ltx-2.3-22b-distilled:fp8`
+/// to substring matching, but the underlying file's metadata stamps
+/// `model_version: "2.3.0"`, which is enough to pick the 22B preset
+/// deterministically.
+pub(crate) fn preset_for_model_with_hint(
+    model_name: &str,
+    hint: Option<&str>,
+) -> Result<Ltx2ModelPreset> {
     if model_name.contains("ltx-2.3") {
-        Ok(PRESET_22B)
-    } else if model_name.contains("ltx-2") {
-        Ok(PRESET_19B)
-    } else {
-        bail!("unsupported LTX-2 preset for model '{model_name}'");
+        return Ok(PRESET_22B);
     }
+    if model_name.contains("ltx-2") {
+        return Ok(PRESET_19B);
+    }
+    if let Some(version) = hint {
+        // `model_version` strings observed in official Lightricks LTX-2
+        // safetensors: `"2.3.0"` → 22B preset; `"2.0.x"` → 19B preset.
+        // Be liberal in what we accept — match the major.minor prefix so
+        // a future `2.3.1` patch ships transparently.
+        if version.starts_with("2.3") {
+            return Ok(PRESET_22B);
+        }
+        if version.starts_with("2.") {
+            return Ok(PRESET_19B);
+        }
+    }
+    bail!(
+        "unsupported LTX-2 preset for model '{model_name}'{}",
+        match hint {
+            Some(h) => format!(" (header hint: model_version={h:?})"),
+            None => String::new(),
+        }
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{preset_for_model, CaptionProjectionPlacement, GemmaFeatureExtractorKind};
+    use super::{
+        preset_for_model, preset_for_model_with_hint, CaptionProjectionPlacement,
+        GemmaFeatureExtractorKind,
+    };
     use crate::ltx2::model::LtxRopeType;
+
+    #[test]
+    fn preset_hint_picks_22b_for_v2_3_metadata_when_name_has_no_marker() {
+        // Catalog (`cv:*`) IDs land here at materialize time. Without a
+        // hint they would error `unsupported LTX-2 preset`. The
+        // safetensors `__metadata__.model_version: "2.3.0"` from official
+        // Lightricks LTX-2 v2.3 checkpoints (e.g. cv:2752735) is enough
+        // to deterministically select PRESET_22B.
+        let preset = preset_for_model_with_hint("cv:2752735", Some("2.3.0")).unwrap();
+        assert_eq!(preset.name, "ltx-2.3-22b");
+    }
+
+    #[test]
+    fn preset_hint_picks_19b_for_v2_metadata_when_name_has_no_marker() {
+        // LTX-2 v2.0.x checkpoints get the 19B preset.
+        let preset = preset_for_model_with_hint("cv:9999", Some("2.0.0")).unwrap();
+        assert_eq!(preset.name, "ltx-2-19b");
+    }
+
+    #[test]
+    fn name_substring_match_wins_over_hint() {
+        // Name match is authoritative; hint is only consulted when the
+        // name doesn't carry the family substring.
+        let preset = preset_for_model_with_hint("ltx-2-19b-distilled:fp8", Some("2.3.0")).unwrap();
+        assert_eq!(preset.name, "ltx-2-19b");
+    }
+
+    #[test]
+    fn unknown_model_with_no_hint_errors_with_actionable_message() {
+        let err = preset_for_model_with_hint("cv:2752735", None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsupported LTX-2 preset"), "got: {msg}");
+        assert!(msg.contains("cv:2752735"), "got: {msg}");
+    }
+
+    #[test]
+    fn unknown_model_with_unrecognised_hint_includes_hint_in_error() {
+        let err = preset_for_model_with_hint("cv:42", Some("3.0.0")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("model_version=\"3.0.0\""), "got: {msg}");
+    }
 
     #[test]
     fn preset_selection_distinguishes_19b_and_22b_profiles() {

@@ -7,6 +7,7 @@ const cat = useCatalog();
 
 type Modality = "image" | "video";
 type SortOption = CatalogListParams["sort"];
+type KindFilter = "checkpoint" | "lora";
 
 const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: "downloads", label: "Downloads" },
@@ -42,6 +43,15 @@ function setSort(s: SortOption) {
 
 function setSource(s: "hf" | "civitai" | undefined) {
   cat.setFilter({ source: s });
+}
+
+/// Three-state kind filter: "all" (undefined) → checkpoints + LoRAs;
+/// "checkpoint" → base models only; "lora" → adapters only. We don't
+/// surface VAE / TextEncoder / ControlNet here because the catalog
+/// scanner doesn't currently produce those rows; a four-button group
+/// for two real values would be visual noise.
+function setKind(k: KindFilter | undefined) {
+  cat.setFilter({ kind: k });
 }
 
 function toggleNsfw() {
@@ -95,6 +105,46 @@ function clearSearch() {
         @click="setModality('video')"
       >
         Video
+      </button>
+    </nav>
+
+    <!-- Kind chips: All / Models (checkpoints) / LoRAs -->
+    <nav
+      class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-200"
+      aria-label="Kind filter"
+    >
+      <button
+        class="rounded-full px-3 py-1.5 transition"
+        :class="
+          !cat.filter.value.kind
+            ? 'bg-brand-500 text-white shadow-sm'
+            : 'hover:text-white'
+        "
+        @click="setKind(undefined)"
+      >
+        All
+      </button>
+      <button
+        class="rounded-full px-3 py-1.5 transition"
+        :class="
+          cat.filter.value.kind === 'checkpoint'
+            ? 'bg-brand-500 text-white shadow-sm'
+            : 'hover:text-white'
+        "
+        @click="setKind('checkpoint')"
+      >
+        Models
+      </button>
+      <button
+        class="rounded-full px-3 py-1.5 transition"
+        :class="
+          cat.filter.value.kind === 'lora'
+            ? 'bg-brand-500 text-white shadow-sm'
+            : 'hover:text-white'
+        "
+        @click="setKind('lora')"
+      >
+        LoRAs
       </button>
     </nav>
 

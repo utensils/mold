@@ -8,10 +8,12 @@ import type {
   Scheduler,
 } from "../types";
 import {
+  MAX_LORA_STACK,
   NO_CFG_FAMILIES,
   UNET_SCHEDULER_FAMILIES,
   VIDEO_FAMILIES,
   familySupportsAudio,
+  supportsLora,
 } from "../types";
 
 /** Output-format options for a given model family, ordered by preference.
@@ -49,18 +51,32 @@ function defaultForm(): GenerateFormState {
     expand: { enabled: false, variations: 1, familyOverride: null },
     sourceImage: null,
     placement: null,
-    lora: null,
+    loras: [],
     enableAudio: null,
   };
+}
+
+/// Drops users with pre-multi-LoRA persisted forms onto the new shape
+/// without re-prompting them for everything else. The old `lora` field
+/// (singular, nullable) becomes a 1- or 0-element `loras` array.
+type LegacyFormState = Partial<GenerateFormState> & {
+  lora?: LoraSelection | null;
+};
+
+function migrateLegacy(parsed: LegacyFormState): Partial<GenerateFormState> {
+  const { lora, ...rest } = parsed;
+  if (Array.isArray(rest.loras)) return rest;
+  if (lora) return { ...rest, loras: [lora] };
+  return { ...rest, loras: [] };
 }
 
 function load(): GenerateFormState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultForm();
-    const parsed = JSON.parse(raw) as Partial<GenerateFormState>;
+    const parsed = JSON.parse(raw) as LegacyFormState;
     if (parsed.version !== 1) return defaultForm();
-    return { ...defaultForm(), ...parsed, sourceImage: null };
+    return { ...defaultForm(), ...migrateLegacy(parsed), sourceImage: null };
   } catch {
     return defaultForm();
   }
@@ -81,11 +97,25 @@ export interface UseGenerateForm {
   state: Ref<GenerateFormState>;
   reset: () => void;
   applyModelDefaults: (model: ModelInfoExtended) => void;
-  setLora: (lora: LoraSelection | null) => void;
+  /** Replace the entire LoRA stack. Pass `[]` to clear. */
+  setLoras: (loras: LoraSelection[]) => void;
+  /** Append a LoRA to the stack, capped by `MAX_LORA_STACK`. No-op if
+   * the cap is already reached. */
+  addLora: (lora: LoraSelection) => void;
+  /** Update a single LoRA's scale in place by index. */
+  updateLoraScale: (index: number, scale: number) => void;
+  /** Drop the LoRA at `index`. Out-of-range indices are no-ops. */
+  removeLora: (index: number) => void;
+  /** Append `phrase` to the active prompt with sensible whitespace. */
+  appendPromptPhrase: (phrase: string) => void;
   toRequest: () => GenerateRequestWire;
   isVideoFamily: (family: string) => boolean;
   supportsNegativePrompt: (family: string) => boolean;
   supportsScheduler: (family: string) => boolean;
+  /** Mirrors `mold-tui/src/model_info.rs::capabilities_for_family.supports_lora`
+   * and the server-side `require_lora_capable_family` gate. Drives the
+   * conditional render of `<LoraPicker>` in the SettingsModal. */
+  supportsLora: (family: string) => boolean;
 }
 
 export function useGenerateForm(): UseGenerateForm {
@@ -106,8 +136,37 @@ export function useGenerateForm(): UseGenerateForm {
     reset: () => {
       state.value = defaultForm();
     },
-    setLora: (lora) => {
-      state.value.lora = lora;
+    setLoras: (loras) => {
+      state.value.loras = loras.slice(0, MAX_LORA_STACK);
+    },
+    addLora: (lora) => {
+      if (state.value.loras.length >= MAX_LORA_STACK) return;
+      state.value.loras = [...state.value.loras, lora];
+    },
+    updateLoraScale: (index, scale) => {
+      const next = state.value.loras.slice();
+      const row = next[index];
+      if (!row) return;
+      next[index] = { ...row, scale };
+      state.value.loras = next;
+    },
+    removeLora: (index) => {
+      if (index < 0 || index >= state.value.loras.length) return;
+      const next = state.value.loras.slice();
+      next.splice(index, 1);
+      state.value.loras = next;
+    },
+    appendPromptPhrase: (phrase: string) => {
+      const trimmed = phrase.trim();
+      if (!trimmed) return;
+      const current = state.value.prompt;
+      // Reuse comma+space if the prompt is non-empty so trigger phrases
+      // chain naturally ("a cat, cinematic, dramatic lighting") rather
+      // than concatenating into a wall of text. Avoid the comma when the
+      // prompt is empty to keep simple cases clean.
+      state.value.prompt = current.trim()
+        ? `${current.trimEnd()}, ${trimmed}`
+        : trimmed;
     },
     applyModelDefaults: (m) => {
       state.value.model = m.name;
@@ -115,7 +174,10 @@ export function useGenerateForm(): UseGenerateForm {
       state.value.height = m.default_height;
       state.value.steps = m.default_steps;
       state.value.guidance = m.default_guidance;
-      state.value.lora = null; // LoRA is family-specific; clear on model change
+      // LoRA support is family-specific. Clear the stack on every model
+      // change — even FLUX→FLUX swaps because the LoRA might not target
+      // the new variant's tensor layout.
+      state.value.loras = [];
       // Video families need sensible frame/fps defaults.
       if (VIDEO_FAMILIES.includes(m.family)) {
         state.value.frames ??= 25; // 8n+1
@@ -140,6 +202,13 @@ export function useGenerateForm(): UseGenerateForm {
     },
     toRequest: () => {
       const s = state.value;
+      // The wire format strips per-row metadata (trigger phrases) — only
+      // path + scale travel to the server. We send `loras` (plural) so
+      // multi-LoRA stacks reach the FLUX engine; older single-LoRA
+      // clients still set `lora`, which the server coalesces.
+      const loras = s.loras.length
+        ? s.loras.map((l) => ({ path: l.path, scale: l.scale }))
+        : undefined;
       return {
         prompt: s.prompt,
         negative_prompt: s.negativePrompt || null,
@@ -158,7 +227,7 @@ export function useGenerateForm(): UseGenerateForm {
         frames: s.frames,
         fps: s.fps,
         placement: s.placement ?? undefined,
-        lora: s.lora ?? undefined,
+        loras,
         enable_audio: s.enableAudio ?? undefined,
       };
     },
@@ -167,6 +236,7 @@ export function useGenerateForm(): UseGenerateForm {
       !NO_CFG_FAMILIES.includes(family),
     supportsScheduler: (family: string) =>
       UNET_SCHEDULER_FAMILIES.includes(family),
+    supportsLora,
   };
 }
 

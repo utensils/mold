@@ -604,9 +604,14 @@ fn flux_safetensors_var_builder<'a>(
 /// Uses a custom `SimpleBackend` that intercepts every `vb.get()` call during
 /// model construction.  Each tensor loads from mmap directly to GPU with LoRA
 /// deltas applied inline — identical memory profile to the non-LoRA mmap path.
+///
+/// Multi-LoRA: pass a slice with more than one weight and the deltas merge
+/// additively. Each adapter's contribution is independently cached (per
+/// path + scale) so a stack of (cinematic, dramatic-light) reuses both
+/// matmuls when the user toggles either back on later.
 fn flux_lora_var_builder<'a>(
     transformer_path: &Path,
-    lora: &mold_core::LoraWeight,
+    loras: &[mold_core::LoraWeight],
     dtype: DType,
     device: &Device,
     progress: &ProgressReporter,
@@ -614,32 +619,102 @@ fn flux_lora_var_builder<'a>(
 ) -> Result<VarBuilder<'a>> {
     use super::lora;
 
-    progress.info("Loading LoRA adapter");
-    let adapter = lora::LoraAdapter::load(Path::new(&lora.path))?;
-    progress.info(&format!(
-        "LoRA: {} layers, rank {}, scale {:.2}",
-        adapter.layers.len(),
-        adapter.rank,
-        lora.scale
-    ));
+    let adapters: Vec<lora::LoraAdapter> = loras
+        .iter()
+        .map(|w| {
+            progress.info("Loading LoRA adapter");
+            let adapter = lora::LoraAdapter::load(Path::new(&w.path))?;
+            progress.info(&format!(
+                "LoRA: {} layers, rank {}, scale {:.2}",
+                adapter.layers.len(),
+                adapter.rank,
+                w.scale,
+            ));
+            anyhow::Ok(adapter)
+        })
+        .collect::<Result<_>>()?;
 
-    let lora_path_hash = {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        lora.path.hash(&mut hasher);
-        hasher.finish()
-    };
+    let specs: Vec<lora::LoraSpec<'_>> = adapters
+        .iter()
+        .zip(loras.iter())
+        .map(|(adapter, w)| lora::LoraSpec {
+            adapter,
+            scale: w.scale,
+            path_hash: lora_path_hash(&w.path),
+        })
+        .collect();
 
     lora::lora_var_builder(
         transformer_path,
-        &adapter,
-        lora.scale,
+        &specs,
         dtype,
         device,
         progress,
         delta_cache,
-        lora_path_hash,
     )
+}
+
+/// Stable hash for a LoRA file path. Used as the per-LoRA cache-key
+/// component so the delta cache survives transformer rebuilds and
+/// disambiguates adapters in a multi-LoRA stack.
+fn lora_path_hash(path: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Same wrapper for the GGUF (quantized) path.
+fn flux_gguf_lora_var_builder(
+    transformer_path: &Path,
+    loras: &[mold_core::LoraWeight],
+    device: &Device,
+    progress: &ProgressReporter,
+    delta_cache: Option<std::sync::Arc<std::sync::Mutex<super::lora::LoraDeltaCache>>>,
+) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
+    use super::lora;
+
+    let adapters: Vec<lora::LoraAdapter> = loras
+        .iter()
+        .map(|w| {
+            progress.info("Loading LoRA adapter");
+            let adapter = lora::LoraAdapter::load(Path::new(&w.path))?;
+            progress.info(&format!(
+                "LoRA: {} layers, rank {}, scale {:.2}",
+                adapter.layers.len(),
+                adapter.rank,
+                w.scale,
+            ));
+            anyhow::Ok(adapter)
+        })
+        .collect::<Result<_>>()?;
+
+    let specs: Vec<lora::LoraSpec<'_>> = adapters
+        .iter()
+        .zip(loras.iter())
+        .map(|(adapter, w)| lora::LoraSpec {
+            adapter,
+            scale: w.scale,
+            path_hash: lora_path_hash(&w.path),
+        })
+        .collect();
+
+    lora::gguf_lora_var_builder(transformer_path, &specs, device, progress, delta_cache)
+}
+
+/// Resolve the effective LoRA list for a request.
+///
+/// Wire format intentionally accepts both `lora` (single) and `loras`
+/// (plural) for back-compat with older clients. When both are set,
+/// `loras` wins — single-form callers haven't been updated yet but
+/// new clients always populate the plural shape.
+pub(crate) fn effective_loras(req: &mold_core::GenerateRequest) -> Vec<mold_core::LoraWeight> {
+    if let Some(plural) = &req.loras {
+        if !plural.is_empty() {
+            return plural.clone();
+        }
+    }
+    req.lora.iter().cloned().collect()
 }
 
 /// Loaded FLUX model components, ready for inference.
@@ -665,7 +740,9 @@ struct LoadedFlux {
     t5_encoder_path: std::path::PathBuf,
 }
 
-/// Fingerprint of a LoRA adapter (path + scale) used to skip redundant transformer rebuilds.
+/// Fingerprint of a single LoRA adapter (path + scale). Used to detect
+/// when the active LoRA stack has changed so we know to rebuild the
+/// transformer; an unchanged stack reuses the previously merged weights.
 #[derive(Clone, PartialEq, Eq)]
 struct LoraFingerprint {
     path_hash: u64,
@@ -674,14 +751,23 @@ struct LoraFingerprint {
 
 impl LoraFingerprint {
     fn from_lora_weight(lora: &mold_core::LoraWeight) -> Self {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        lora.path.hash(&mut hasher);
         Self {
-            path_hash: hasher.finish(),
+            path_hash: lora_path_hash(&lora.path),
             scale_bits: lora.scale.to_bits(),
         }
     }
+}
+
+/// Fingerprint of an ordered LoRA stack. Equality is order-sensitive —
+/// `[A, B]` and `[B, A]` produce identical numerical results in theory
+/// (delta sums commute) but the wrapper still considers them distinct
+/// because the user-facing intent is order-driven (e.g. style vs
+/// override) and the cost of one redundant rebuild is small.
+fn fingerprint_stack(loras: &[mold_core::LoraWeight]) -> Vec<LoraFingerprint> {
+    loras
+        .iter()
+        .map(LoraFingerprint::from_lora_weight)
+        .collect()
 }
 
 /// FLUX inference engine backed by candle.
@@ -700,7 +786,9 @@ pub struct FluxEngine {
     /// Force block-level offloading (--offload / MOLD_OFFLOAD=1).
     offload: bool,
     /// Fingerprint of the currently applied LoRA (None = no LoRA baked in).
-    active_lora: Option<LoraFingerprint>,
+    /// Empty when no LoRAs are active. Order-sensitive: changing the
+    /// stack triggers a transformer rebuild on the next generate.
+    active_lora: Vec<LoraFingerprint>,
     /// CPU-resident cache of pre-computed LoRA deltas, shared across transformer rebuilds.
     lora_delta_cache: Arc<Mutex<super::lora::LoraDeltaCache>>,
     /// Optional shared tokenizer pool for cross-engine caching.
@@ -734,7 +822,7 @@ impl FluxEngine {
             transformer_is_fp8: None,
             cached_transformer_path: None,
             offload,
-            active_lora: None,
+            active_lora: Vec::new(),
             lora_delta_cache: Arc::new(Mutex::new(super::lora::LoraDeltaCache::new())),
             shared_pool,
             pending_placement: None,
@@ -884,7 +972,7 @@ impl FluxEngine {
     /// local variables and only stored in `self.base.loaded` on success, so partial loads
     /// cannot leave the engine in an inconsistent state.
     pub fn load(&mut self) -> Result<()> {
-        self.active_lora = None;
+        self.active_lora = Vec::new();
         if self.base.loaded.is_some() {
             return Ok(());
         }
@@ -1420,7 +1508,8 @@ impl FluxEngine {
             flux::model::Config::dev()
         };
 
-        let has_lora = req.lora.is_some();
+        let active_loras = effective_loras(req);
+        let has_lora = !active_loras.is_empty();
         let xformer_label = if has_lora && use_offload {
             "Loading FLUX transformer + LoRA (offloaded)"
         } else if has_lora && is_quantized {
@@ -1438,13 +1527,13 @@ impl FluxEngine {
         let xformer_stage = Instant::now();
 
         let flux_model = if use_offload {
-            // Load transformer blocks on CPU (with LoRA merged in if active),
+            // Load transformer blocks on CPU (with LoRAs merged in if any),
             // move stem to GPU. Blocks stream CPU→GPU one at a time during forward.
-            let cpu_vb: VarBuilder = if let Some(ref lora) = req.lora {
+            let cpu_vb: VarBuilder = if has_lora {
                 // LoRA backend: loads from mmap to CPU, patches inline
                 flux_lora_var_builder(
                     &transformer_path,
-                    lora,
+                    &active_loras,
                     gpu_dtype,
                     &Device::Cpu,
                     &self.base.progress,
@@ -1465,40 +1554,24 @@ impl FluxEngine {
                 &device,
                 &self.base.progress,
             )?)
-        } else if is_quantized && req.lora.is_some() {
+        } else if is_quantized && has_lora {
             // GGUF + LoRA: dequantize LoRA-affected layers, keep rest quantized
-            let lora = req.lora.as_ref().unwrap();
-            let adapter = super::lora::LoraAdapter::load(Path::new(&lora.path))?;
-            self.base.progress.info(&format!(
-                "LoRA: {} layers, rank {}, scale {:.2}",
-                adapter.layers.len(),
-                adapter.rank,
-                lora.scale
-            ));
-            let lora_path_hash = {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                lora.path.hash(&mut hasher);
-                hasher.finish()
-            };
-            let vb = super::lora::gguf_lora_var_builder(
+            let vb = flux_gguf_lora_var_builder(
                 &transformer_path,
-                &adapter,
-                lora.scale,
+                &active_loras,
                 &device,
                 &self.base.progress,
                 Some(self.lora_delta_cache.clone()),
-                lora_path_hash,
             )?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else if is_quantized {
             let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
-        } else if let Some(ref lora) = req.lora {
+        } else if has_lora {
             // LoRA without offload (GPU has enough VRAM for full model)
             let flux_vb = flux_lora_var_builder(
                 &transformer_path,
-                lora,
+                &active_loras,
                 gpu_dtype,
                 &device,
                 &self.base.progress,
@@ -1804,19 +1877,20 @@ impl FluxEngine {
         );
 
         (|| -> Result<GenerateResponse> {
-            // Only rebuild the transformer when the LoRA fingerprint changes
-            // (different adapter, different scale, or switching between LoRA/no-LoRA).
-            let requested_lora = req.lora.as_ref().map(LoraFingerprint::from_lora_weight);
-            if requested_lora != self.active_lora {
+            // Only rebuild the transformer when the LoRA stack changes
+            // (any adapter swap, scale change, add, remove, or reorder).
+            let active_loras = effective_loras(req);
+            let requested_stack = fingerprint_stack(&active_loras);
+            if requested_stack != self.active_lora {
                 if loaded.flux_model.is_some() {
                     loaded.flux_model = None;
                     loaded.device.synchronize()?;
                 }
-                self.active_lora = requested_lora;
+                self.active_lora = requested_stack;
             }
 
             if loaded.flux_model.is_none() {
-                let has_lora = req.lora.is_some();
+                let has_lora = !active_loras.is_empty();
                 let xformer_label = match (loaded.is_quantized, has_lora) {
                     (true, true) => "Reloading FLUX transformer (GPU, quantized + LoRA)",
                     (true, false) => "Reloading FLUX transformer (GPU, quantized)",
@@ -1837,23 +1911,13 @@ impl FluxEngine {
                     flux::model::Config::dev()
                 };
                 loaded.flux_model = Some(if loaded.is_quantized && has_lora {
-                    // Quantized + LoRA: merge LoRA deltas during construction
-                    let lora = req.lora.as_ref().unwrap();
-                    let adapter = super::lora::LoraAdapter::load(std::path::Path::new(&lora.path))?;
-                    let lora_path_hash = {
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        lora.path.hash(&mut hasher);
-                        hasher.finish()
-                    };
-                    let vb = super::lora::gguf_lora_var_builder(
+                    // Quantized + LoRA stack: merge all deltas during construction
+                    let vb = flux_gguf_lora_var_builder(
                         &transformer_path,
-                        &adapter,
-                        lora.scale,
+                        &active_loras,
                         &loaded.device,
                         progress,
                         Some(self.lora_delta_cache.clone()),
-                        lora_path_hash,
                     )?;
                     FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
                 } else if loaded.is_quantized {
@@ -1863,11 +1927,10 @@ impl FluxEngine {
                     )?;
                     FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
                 } else if has_lora {
-                    // BF16 + LoRA: merge LoRA deltas during construction
-                    let lora = req.lora.as_ref().unwrap();
+                    // BF16 + LoRA stack: merge all deltas during construction
                     let flux_vb = flux_lora_var_builder(
                         &transformer_path,
-                        lora,
+                        &active_loras,
                         loaded.dtype,
                         &loaded.device,
                         progress,
@@ -2003,7 +2066,7 @@ impl InferenceEngine for FluxEngine {
         // active_lora reflects the LoRA currently merged into the loaded
         // transformer. After unload there is no transformer, so clear the
         // marker — the next reload re-applies whatever is in the request.
-        self.active_lora = None;
+        self.active_lora = Vec::new();
         // lora_delta_cache lives on CPU and survives park so the next reload
         // can skip the B @ A · scale recompute. It dies with the engine on Drop.
     }

@@ -59,6 +59,66 @@ pub enum NormalizeError {
 
 const HF_RAW: &str = "https://huggingface.co";
 
+/// Map Civitai's `type` string (per `/api/v1/models` schema) to the
+/// catalog's `Kind`. Returning `None` drops the entry entirely — used for
+/// types mold doesn't yet model (TextualInversion, Hypernetwork, Poses,
+/// AestheticGradient). LoCon is grouped with Lora since their inference
+/// path is the same patch-on-base-weights merge.
+pub(crate) fn civitai_kind_to_catalog_kind(s: &str) -> Option<Kind> {
+    match s {
+        "Checkpoint" => Some(Kind::Checkpoint),
+        "LORA" | "LoCon" | "DoRA" => Some(Kind::Lora),
+        "VAE" => Some(Kind::Vae),
+        "Controlnet" | "ControlNet" => Some(Kind::ControlNet),
+        // TextualInversion / Hypernetwork / Poses / AestheticGradient / Other
+        // — drop. The catalog has no slot for these and dropping is safer
+        // than misclassifying as Checkpoint (which would let users try to
+        // generate from them and fail mysteriously at load time).
+        _ => None,
+    }
+}
+
+/// Heuristic Kind detection for HF entries. HF has no canonical type
+/// field, so we read tags, file names, and the repo id in priority order.
+///
+/// The heuristic is permissive (false negatives are fine — the entry just
+/// stays a Checkpoint and the LoRA loader on the engine side won't
+/// recognize it for what it is) but correctness matters when LoRA = true,
+/// because misclassifying a checkpoint AS a LoRA would skip the companion
+/// graph and leave the user with a download that can't run.
+fn classify_hf_kind(detail: &HfDetail, files: &[RecipeFile]) -> Kind {
+    // Tag-driven: HF curators tag LoRA repos with "lora" or "adapter".
+    if detail
+        .tags
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case("lora") || t.eq_ignore_ascii_case("adapter"))
+    {
+        return Kind::Lora;
+    }
+    // File-name signal: the HF diffusers convention writes
+    // `pytorch_lora_weights.safetensors` for LoRA repos.
+    let any_file_is_lora = files.iter().any(|f| {
+        let url_lower = f.url.to_ascii_lowercase();
+        url_lower.contains("pytorch_lora_weights")
+            || url_lower.contains("/lora/")
+            || url_lower.ends_with("_lora.safetensors")
+            || url_lower.ends_with("-lora.safetensors")
+    });
+    if any_file_is_lora {
+        return Kind::Lora;
+    }
+    // Repo-id substring: `*-lora`, `lora-*`, `*_lora` are nearly always LoRAs.
+    let id_lower = detail.id.to_ascii_lowercase();
+    if id_lower.contains("-lora")
+        || id_lower.contains("lora-")
+        || id_lower.contains("_lora")
+        || id_lower.contains("/lora")
+    {
+        return Kind::Lora;
+    }
+    Kind::Checkpoint
+}
+
 pub fn from_hf(
     detail: HfDetail,
     tree: Vec<HfTreeEntry>,
@@ -139,11 +199,12 @@ pub fn from_hf(
         _ => Modality::Image,
     };
 
+    let kind = classify_hf_kind(&detail, &files);
     let companions = match bundling {
         // HF entries don't currently carry a sub_family — pass None and let
         // `companions_for` use its default branch. Single-file HF Flux.2
         // entries are rare; the Civitai path is the load-bearing one.
-        Bundling::SingleFile => companions_for(family, None, bundling),
+        Bundling::SingleFile => companions_for(family, None, bundling, kind),
         Bundling::Separated => Vec::new(),
     };
     let phase = engine_phase_for(family, bundling);
@@ -165,7 +226,7 @@ pub fn from_hf(
         family_role,
         sub_family: None,
         modality,
-        kind: Kind::Checkpoint,
+        kind,
         file_format,
         bundling,
         size_bytes: if total_size > 0 {
@@ -188,6 +249,11 @@ pub fn from_hf(
         created_at: parse_iso(&detail.created_at),
         updated_at: parse_iso(&detail.last_modified),
         added_at: now,
+        // HF doesn't surface a trigger-words equivalent — the metadata
+        // varies per repo (cardData, README, etc.) and isn't worth a
+        // brittle scrape. Empty here is the right default; civitai is
+        // where 99% of LoRA trigger phrases live anyway.
+        trained_words: Vec::new(),
     })
 }
 
@@ -255,6 +321,11 @@ pub struct CivitaiVersion {
     pub files: Vec<CivitaiFile>,
     #[serde(default)]
     pub images: Vec<CivitaiImage>,
+    /// Trigger phrases the LoRA was trained on (Civitai's `trainedWords`).
+    /// Empty for non-LoRA entries; the catalog wire format passes them
+    /// through to the web UI which renders click-to-insert chips.
+    #[serde(default, rename = "trainedWords")]
+    pub trained_words: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -289,12 +360,15 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
     let version = item.model_versions.first()?;
     let (family, family_role, sub_family) = map_base_model(&version.base_model)?;
     let file = pick_safetensors(&version.files)?;
+    // Drop entries whose Civitai type isn't representable in the catalog
+    // (TextualInversion, Hypernetwork, etc.) before doing any further work.
+    let kind = civitai_kind_to_catalog_kind(&item.kind)?;
     let bundling = if version.base_model_type.as_deref() == Some("Standard") {
         Bundling::SingleFile
     } else {
         Bundling::Separated
     };
-    let companions = companions_for(family, sub_family.as_deref(), bundling);
+    let companions = companions_for(family, sub_family.as_deref(), bundling, kind);
     let phase = engine_phase_for(family, bundling);
     let modality = match family {
         Family::LtxVideo | Family::Ltx2 => Modality::Video,
@@ -322,6 +396,8 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
     let stats = item.stats.unwrap_or_default();
     let now = chrono_now_unix();
 
+    let trained_words = version.trained_words.clone();
+
     Some(CatalogEntry {
         id: CatalogId::from(format!("cv:{}", version.id)),
         source: Source::Civitai,
@@ -332,7 +408,7 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
         family_role,
         sub_family,
         modality,
-        kind: Kind::Checkpoint,
+        kind,
         file_format: FileFormat::Safetensors,
         bundling,
         size_bytes: file.size_kb.map(|kb| (kb * 1000.0) as u64),
@@ -351,6 +427,7 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
         created_at: None,
         updated_at: None,
         added_at: now,
+        trained_words,
     })
 }
 

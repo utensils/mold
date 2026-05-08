@@ -62,8 +62,15 @@ pub async fn scan(
     'outer: for base_model in base_models {
         let mut page = 1u32;
         loop {
+            // `types=` is repeated to fetch both base checkpoints and
+            // LoRA adapters in a single page walk. Civitai accepts the
+            // repetition and merges results into one paginated response;
+            // the per-item `type` field then drives `civitai_kind_to_catalog_kind`.
+            // We deliberately don't request TextualInversion / Hypernetwork
+            // / etc. — the normalizer would drop them anyway, and asking
+            // for fewer types saves a meaningful chunk of the page budget.
             let url = format!(
-                "{base}/api/v1/models?baseModels={bm}&types=Checkpoint&sort=Most+Downloaded&limit=100&page={page}",
+                "{base}/api/v1/models?baseModels={bm}&types=Checkpoint&types=LORA&sort=Most+Downloaded&limit=100&page={page}",
                 bm = urlencoding::encode(base_model),
             );
             let resp = match http_get(&client, options, &url).await {

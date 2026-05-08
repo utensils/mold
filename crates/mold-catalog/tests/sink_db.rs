@@ -51,6 +51,7 @@ fn entry(id: &str, family: Family, downloads: u64) -> CatalogEntry {
         created_at: None,
         updated_at: None,
         added_at: 0,
+        trained_words: Vec::new(),
     }
 }
 

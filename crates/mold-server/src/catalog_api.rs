@@ -399,11 +399,11 @@ pub async fn list_families(State(state): State<crate::state::AppState>) -> impl 
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     // Surface every supported family — even ones with zero DB rows — so the
-    // sidebar can drill into a family that the live-search backend (or a
-    // future refresh) will populate on demand. Without this, families whose
-    // DB shard landed empty after a partially-rate-limited scan (e.g. FLUX
-    // around Civitai page 11) silently disappear from the UI even though
-    // `/api/catalog/search?family=flux` returns plenty.
+    // sidebar can drill into a family that the live-search backend will
+    // populate on demand. Without this, families whose DB shard is empty
+    // (e.g. FLUX after a partially-rate-limited refresh) silently disappear
+    // from the UI even though `/api/catalog/search?family=flux` returns
+    // results.
     let by_name: HashMap<&str, &mold_db::catalog::FamilyCount> =
         db_rows.iter().map(|r| (r.family.as_str(), r)).collect();
     let merged: Vec<serde_json::Value> = ALL_FAMILIES
@@ -534,6 +534,11 @@ fn catalog_row_to_wire(
         "created_at": r.created_at,
         "updated_at": r.updated_at,
         "added_at": r.added_at,
+        // Trigger phrases for Civitai LoRAs; the picker renders these as
+        // click-to-insert chips next to the LoRA selection. JSON-decoded
+        // here so the client doesn't need a second pass.
+        "trained_words": serde_json::from_str::<serde_json::Value>(&r.trained_words)
+            .unwrap_or(serde_json::json!([])),
     })
 }
 
@@ -768,6 +773,23 @@ pub async fn post_catalog_download(
                 size_bytes: f.size_bytes,
             })
             .collect();
+        // Sidecar write is best-effort: it lets the LoRA picker see the
+        // entry as soon as the file lands without re-querying the live
+        // catalog. Failure is not fatal — install proceeds either way,
+        // and the next install of the same id (or a startup backfill)
+        // would heal the missing sidecar.
+        if let Some(primary) = files.first() {
+            let sidecar = mold_catalog::sidecar::sidecar_from_row(&row, primary.dest.clone());
+            let sc_path = mold_catalog::sidecar::civitai_sidecar_path(&models_dir, &row.id);
+            if let Err(e) = mold_catalog::sidecar::write_sidecar(&sc_path, &sidecar) {
+                tracing::warn!(
+                    target: "catalog.sidecar",
+                    catalog_id = %row.id,
+                    error = %e,
+                    "sidecar write failed; picker will need a backfill or reinstall to surface this row",
+                );
+            }
+        }
         let payload = crate::downloads::RecipePayload {
             catalog_id: row.id.clone(),
             files,
@@ -795,6 +817,271 @@ pub async fn post_catalog_download(
         .into_response()
 }
 
+// ── Live search + installed (replaces the bulk-scrape DB) ──────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct LiveSearchQuery {
+    pub q: Option<String>,
+    pub family: Option<String>,
+    pub kind: Option<String>,
+    pub source: Option<String>,
+    pub include_nsfw: Option<bool>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
+/// `GET /api/catalog/search` — live proxy to upstream catalog APIs with
+/// a 5-min in-process cache. Replaces `/api/catalog` on the read path
+/// for the SPA's catalog tab. The bulk-scrape DB is retained until a
+/// follow-up release.
+pub async fn live_search_catalog(
+    State(state): State<crate::state::AppState>,
+    Query(q): Query<LiveSearchQuery>,
+) -> impl IntoResponse {
+    let family = match q.family.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => match mold_catalog::families::Family::from_str(s) {
+            Ok(f) => Some(f),
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, format!("unknown family: {s}")).into_response()
+            }
+        },
+        None => None,
+    };
+    let kind = match q.kind.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => match parse_kind(s) {
+            Some(k) => Some(k),
+            None => return (StatusCode::BAD_REQUEST, format!("unknown kind: {s}")).into_response(),
+        },
+        None => None,
+    };
+    let source = match q.source.as_deref().filter(|s| !s.is_empty()) {
+        Some("hf") => Some(mold_catalog::entry::Source::Hf),
+        Some("civitai") => Some(mold_catalog::entry::Source::Civitai),
+        Some(other) => {
+            return (StatusCode::BAD_REQUEST, format!("unknown source: {other}")).into_response()
+        }
+        None => None,
+    };
+
+    let opts = mold_catalog::live::LiveSearchOpts {
+        q: q.q.clone(),
+        family,
+        kind,
+        source,
+        page: q.page.unwrap_or(1).max(1),
+        page_size: q.page_size.unwrap_or(20).clamp(1, 100),
+        include_nsfw: q.include_nsfw.unwrap_or(false),
+        civitai_token: std::env::var("CIVITAI_TOKEN").ok(),
+        hf_token: std::env::var("HF_TOKEN").ok(),
+    };
+
+    let cfg = state.config.read().await;
+    let models_dir = cfg.resolved_models_dir();
+    drop(cfg);
+
+    let entries = match mold_catalog::live::search(
+        state.catalog_live_civitai_base.as_str(),
+        "https://huggingface.co",
+        &state.catalog_live_cache,
+        &opts,
+    )
+    .await
+    {
+        Ok(es) => es,
+        Err(e) => {
+            tracing::warn!(target: "catalog.live", error = %e, "live search failed");
+            return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response();
+        }
+    };
+
+    let wire: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| live_entry_to_wire(e, &models_dir))
+        .collect();
+    let total = wire.len() as i64;
+    Json(serde_json::json!({
+        "entries": wire,
+        "page": opts.page,
+        "page_size": opts.page_size,
+        "total": total,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct InstalledQuery {
+    pub kind: Option<String>,
+    pub family: Option<String>,
+}
+
+/// `GET /api/catalog/installed` — enumerate installed catalog entries
+/// from the per-install sidecar files under `models_dir`. The LoRA
+/// picker uses this as its primary data source.
+pub async fn list_installed_catalog(
+    State(state): State<crate::state::AppState>,
+    Query(q): Query<InstalledQuery>,
+) -> impl IntoResponse {
+    let kind_filter = q.kind.as_deref().map(|s| s.to_string());
+    let family_filter = q.family.as_deref().map(|s| s.to_string());
+
+    let cfg = state.config.read().await;
+    let models_dir = cfg.resolved_models_dir();
+    drop(cfg);
+
+    let walked = mold_catalog::sidecar::walk_sidecars(&models_dir);
+    let mut wire = Vec::with_capacity(walked.len());
+    for (dir, sidecar) in walked {
+        if let Some(k) = kind_filter.as_deref() {
+            if sidecar.kind != k {
+                continue;
+            }
+        }
+        if let Some(f) = family_filter.as_deref() {
+            if sidecar.family != f {
+                continue;
+            }
+        }
+        let abs = mold_catalog::sidecar::primary_path_if_present(&dir, &sidecar);
+        let installed = abs.is_some();
+        let primary_path = abs.map(|p| p.to_string_lossy().into_owned());
+        wire.push(sidecar_to_wire(sidecar, installed, primary_path));
+    }
+    let total = wire.len() as i64;
+    Json(serde_json::json!({
+        "entries": wire,
+        "page": 1,
+        "page_size": total,
+        "total": total,
+    }))
+    .into_response()
+}
+
+fn parse_kind(s: &str) -> Option<mold_catalog::entry::Kind> {
+    use mold_catalog::entry::Kind::*;
+    Some(match s {
+        "checkpoint" => Checkpoint,
+        "lora" => Lora,
+        "vae" => Vae,
+        "text-encoder" => TextEncoder,
+        "control-net" => ControlNet,
+        _ => return None,
+    })
+}
+
+fn live_entry_to_wire(
+    entry: &mold_catalog::entry::CatalogEntry,
+    models_dir: &std::path::Path,
+) -> serde_json::Value {
+    // Installed-detection for live rows hangs off the sidecar layout: a
+    // sidecar at `{models_dir}/{sanitized}/mold-catalog.json` whose
+    // primary file actually exists on disk → installed=true. We
+    // intentionally do NOT re-walk the recipe here: that path is a
+    // legacy fallback for rows the catalog DB returned, and live rows
+    // by definition pre-date their sidecar (which gets written at
+    // download time).
+    let (installed, primary_path) = if matches!(entry.source, mold_catalog::entry::Source::Civitai)
+    {
+        let sc_path = mold_catalog::sidecar::civitai_sidecar_path(models_dir, entry.id.as_str());
+        match mold_catalog::sidecar::read_sidecar(&sc_path) {
+            Ok(sidecar) => match sc_path.parent() {
+                Some(parent) => {
+                    match mold_catalog::sidecar::primary_path_if_present(parent, &sidecar) {
+                        Some(abs) => (true, Some(abs.to_string_lossy().into_owned())),
+                        None => (false, None),
+                    }
+                }
+                None => (false, None),
+            },
+            Err(_) => (false, None),
+        }
+    } else {
+        (false, None)
+    };
+    serde_json::json!({
+        "id": entry.id.as_str(),
+        "source": entry.source,
+        "source_id": entry.source_id,
+        "name": entry.name,
+        "author": entry.author,
+        "family": entry.family.as_str(),
+        "family_role": entry.family_role,
+        "sub_family": entry.sub_family,
+        "modality": entry.modality,
+        "kind": entry.kind,
+        "file_format": entry.file_format,
+        "bundling": entry.bundling,
+        "size_bytes": entry.size_bytes,
+        "download_count": entry.download_count,
+        "rating": entry.rating,
+        "likes": entry.likes,
+        "nsfw": entry.nsfw,
+        "thumbnail_url": entry.thumbnail_url,
+        "description": entry.description,
+        "license": entry.license,
+        "license_flags": entry.license_flags,
+        "tags": entry.tags,
+        "companions": entry.companions,
+        "download_recipe": entry.download_recipe,
+        "engine_phase": entry.engine_phase,
+        "installed": installed,
+        "primary_path": primary_path,
+        "created_at": entry.created_at,
+        "updated_at": entry.updated_at,
+        "added_at": entry.added_at,
+        "trained_words": entry.trained_words,
+    })
+}
+
+fn sidecar_to_wire(
+    sc: mold_catalog::sidecar::CatalogSidecar,
+    installed: bool,
+    primary_path: Option<String>,
+) -> serde_json::Value {
+    // The sidecar carries fewer fields than a full CatalogEntryWire on
+    // purpose — the picker only needs id/name/family/kind/trained_words/
+    // primary_path. Empty defaults are returned for fields the SPA
+    // ignores in this code path; this keeps the wire shape uniform with
+    // `/api/catalog/search` so a single TypeScript interface works for
+    // both.
+    serde_json::json!({
+        "id": sc.id,
+        "source": sc.source,
+        "source_id": sc.source_id,
+        "name": sc.name,
+        "author": sc.author,
+        "family": sc.family,
+        "family_role": sc.family_role,
+        "sub_family": sc.sub_family,
+        "modality": sc.modality,
+        "kind": sc.kind,
+        "file_format": "safetensors",
+        "bundling": "single-file",
+        "size_bytes": sc.size_bytes,
+        "download_count": 0,
+        "rating": null,
+        "likes": 0,
+        "nsfw": false,
+        "thumbnail_url": sc.thumbnail_url,
+        "description": null,
+        "license": null,
+        "license_flags": null,
+        "tags": [],
+        "companions": [],
+        "download_recipe": { "files": [], "needs_token": null },
+        "engine_phase": sc.engine_phase,
+        "installed": installed,
+        "primary_path": primary_path,
+        "created_at": null,
+        "updated_at": null,
+        "added_at": sc.written_at,
+        "trained_words": sc.trained_words,
+    })
+}
+
 #[cfg(test)]
 #[path = "catalog_api_test.rs"]
 mod catalog_api_test;
+
+#[cfg(test)]
+#[path = "catalog_live_test.rs"]
+mod catalog_live_test;

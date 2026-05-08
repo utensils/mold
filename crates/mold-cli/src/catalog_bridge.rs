@@ -123,7 +123,13 @@ pub fn synthesize_model_config(
     // under its canonical manifest name and is populated when the catalog
     // pull ran). The single-file SDXL/SD1.5 backends only need tokenizers;
     // the encoder weights are bundled in the primary safetensors itself.
-    populate_companion_paths(&mut cfg, &row.family, row.sub_family.as_deref(), config)?;
+    populate_companion_paths(
+        &mut cfg,
+        &row.family,
+        row.sub_family.as_deref(),
+        &row.kind,
+        config,
+    )?;
 
     Ok(cfg)
 }
@@ -136,10 +142,11 @@ fn populate_companion_paths(
     cfg: &mut ModelConfig,
     family: &str,
     sub_family: Option<&str>,
+    kind: &str,
     config: &Config,
 ) -> Result<()> {
     use mold_catalog::companions::companions_for;
-    use mold_catalog::entry::Bundling;
+    use mold_catalog::entry::{Bundling, Kind};
     use mold_catalog::families::Family;
 
     let fam = match family {
@@ -155,6 +162,14 @@ fn populate_companion_paths(
         other => anyhow::bail!("catalog family {other:?} not supported by the run bridge"),
     };
 
+    // The DB stores kind as a kebab-case string (matching `Kind`'s serde
+    // representation), so a JSON round-trip is the canonical parse. Default
+    // to Checkpoint on parse failure — historically every row was a
+    // Checkpoint and the conservative fallback keeps companion population
+    // behaviour identical for legacy rows.
+    let parsed_kind: Kind = serde_json::from_value(serde_json::Value::String(kind.to_string()))
+        .unwrap_or(Kind::Checkpoint);
+
     // Best-effort: skip companions whose paths aren't resolvable yet. The
     // single-file engine dispatch surfaces a precise error ("requires a
     // companion-pulled clip_tokenizer") when a *required* field is still
@@ -162,7 +177,7 @@ fn populate_companion_paths(
     // here. This matters because the SDXL/SD1.5 VAE companions are pulled
     // for future external-VAE support but aren't actually needed by the
     // current single-file dispatch (the VAE is embedded in the primary).
-    for companion in companions_for(fam, sub_family, Bundling::SingleFile) {
+    for companion in companions_for(fam, sub_family, Bundling::SingleFile, parsed_kind) {
         if let Some(paths) = ModelPaths::resolve(&companion, config) {
             copy_companion_into_cfg(cfg, &companion, &paths);
         }
@@ -243,6 +258,19 @@ fn copy_companion_into_cfg(cfg: &mut ModelConfig, companion_name: &str, paths: &
                 .collect::<Vec<_>>()
                 .into();
             cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_string);
+        }
+        "ltx2-te" => {
+            // Gemma 3 12B for LTX-2. The runtime (`gemma_root` in
+            // `ltx2/assets.rs`) only needs the parent directory of the
+            // first text-encoder file, so populating the vec is enough —
+            // tokenizer files are tagged TextEncoder in the manifest and
+            // ride along in the same directory.
+            cfg.text_encoder_files = paths
+                .text_encoder_files
+                .iter()
+                .filter_map(to_string)
+                .collect::<Vec<_>>()
+                .into();
         }
         _ => {}
     }
@@ -364,6 +392,7 @@ mod tests {
             created_at: None,
             updated_at: None,
             added_at: 0,
+            trained_words: "[]".into(),
         }
     }
 
@@ -651,6 +680,7 @@ mod tests {
             created_at: None,
             updated_at: None,
             added_at: 0,
+            trained_words: "[]".into(),
         }
     }
 

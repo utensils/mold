@@ -928,14 +928,36 @@ impl Config {
             .files
             .iter()
             .map(|file| {
-                crate::manifest::storage_path_candidates(manifest, file)
+                // Prefer a canonical clean-path hit (or a documented legacy
+                // path) under the models dir.
+                let local = crate::manifest::storage_path_candidates(manifest, file)
                     .into_iter()
                     .map(|path| models_dir.join(path))
                     // Same completeness rules as `manifest_files_exist`:
                     // marker present OR size matches manifest. Plain
                     // `.exists()` here let truncated downloads masquerade
                     // as installed models — the gallery race lived here.
-                    .find(|path| Self::file_is_complete(path, file.size_bytes))
+                    .find(|path| Self::file_is_complete(path, file.size_bytes));
+                if let Some(path) = local {
+                    return Some((file.component, path));
+                }
+                // Fallback (companion manifests only): walk mold's managed
+                // `<models_dir>/.hf-cache/` for the same file. A previous
+                // mold install may have placed companion files under a
+                // different canonical layout — e.g. Gemma TE under
+                // `shared/ltx2/...` from a manifest LTX-2 model install
+                // vs the catalog `ltx2-te` companion expecting
+                // `shared/companion/...`. Letting the layout-agnostic
+                // hf-hub cache view satisfy either keeps a single Gemma
+                // download serving both. Restricted to `family ==
+                // "companion"` so non-companion manifests still require
+                // their files at the canonical clean-path location with
+                // the proper completeness guard above — that preserves
+                // the "model not downloaded" branch the tests rely on.
+                if manifest.family != "companion" {
+                    return None;
+                }
+                crate::download::cached_file_path_in_mold_cache(&file.hf_repo, &file.hf_filename)
                     .map(|path| (file.component, path))
             })
             .collect::<Option<Vec<_>>>()?;

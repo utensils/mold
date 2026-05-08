@@ -110,11 +110,29 @@ mold run flux-dev:bf16 "anime style" --lora style.safetensors --lora-scale 0.7
 
 # LoRA with other options (img2img, seed, etc.)
 mold run flux-dev:bf16 "oil painting" --lora art.safetensors --image photo.png --strength 0.6
+
+# Stack multiple LoRAs (deltas merge additively: W' = W + Σ scale_i · B_i @ A_i)
+mold run flux-dev:bf16 "epic shot" \
+  --lora cinematic.safetensors --lora-scale 0.8 \
+  --lora dramatic-lighting.safetensors --lora-scale 0.4
 ```
+
+**Catalog browse:** `mold catalog list --kind lora --family flux` shows installable
+FLUX LoRAs from Civitai / HF. Install via `mold pull cv:<id>` or the web UI's
+catalog tab (filter by **LoRAs**). Once installed, the LoRA appears in the
+**Generate → Settings → LoRA** dropdown for any FLUX model.
+
+**Web UI multi-LoRA + trigger words:** the LoRA picker stacks up to 4 adapters
+per generation (each with its own scale slider). Civitai LoRAs ship trigger
+phrases (`trainedWords`); they render as click-to-insert chips beside the
+selected LoRA — clicking a chip appends the phrase to the active prompt.
 
 **Requirements:**
 
-- FLUX models only (BF16 or GGUF quantized)
+- FLUX models only (BF16 or GGUF quantized) — SD1.5 / SDXL LoRA inference is
+  not yet implemented. The server returns a 400 with a clear "LoRA is currently
+  supported only for FLUX models" message if a LoRA is sent for any other
+  family.
 - LoRA file must be `.safetensors` format (diffusers-format keys)
 - BF16 models on 24GB cards auto-use block-level offloading (3-5x slower but fits in VRAM)
 - GGUF Q4/Q6 work at 1024x1024; Q8 works at 512x512 (Q8 + LoRA at 1024x1024 is tight on 24GB, see #95)
