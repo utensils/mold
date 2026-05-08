@@ -341,10 +341,12 @@ async fn prepare_generation(
     maybe_expand_prompt(state, request, preferred_gpu).await?;
 
     // Catalog (`cv:*` / `hf:*`) IDs aren't in the static manifest, so the
-    // pure-mold-core family lookup returns `None` for them. Feed the
-    // catalog DB's family through as a hint so audio / keyframes / pipeline
+    // pure-mold-core family lookup returns `None` for them. Run the live
+    // single-id install first so config.models has the entry; then feed
+    // its family string through as a hint so audio / keyframes / pipeline
     // gates work for installed Civitai LTX-2 checkpoints.
-    let family_hint = model_manager::catalog_family_for(state, &request.model);
+    let _ = model_manager::install_catalog_model(state, &request.model).await;
+    let family_hint = model_manager::catalog_family_for(state, &request.model).await;
     if let Err(e) = validate_generate_request(request, family_hint.as_deref()) {
         return Err(ApiError::validation(e));
     }

@@ -368,11 +368,41 @@ pub async fn get_catalog_entry(
 ) -> impl IntoResponse {
     let cfg_guard = state.config.read().await;
     let models_dir = cfg_guard.resolved_models_dir();
-    match state.catalog_db.catalog_get(&id) {
-        Ok(Some(row)) => Json(catalog_row_to_wire(row, &models_dir, &cfg_guard)).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    drop(cfg_guard);
+
+    let entry = if let Some(version_id) = id.strip_prefix("cv:") {
+        match mold_catalog::live::fetch_civitai_version(
+            state.catalog_live_civitai_base.as_str(),
+            version_id,
+            std::env::var("CIVITAI_TOKEN").ok().as_deref(),
+        )
+        .await
+        {
+            Ok(e) => e,
+            Err(mold_catalog::live::LiveSearchError::Upstream { status: 404, .. }) => {
+                return (StatusCode::NOT_FOUND, "not found").into_response();
+            }
+            Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+        }
+    } else if let Some(repo_id) = id.strip_prefix("hf:") {
+        match mold_catalog::live::fetch_hf_repo(
+            "https://huggingface.co",
+            repo_id,
+            std::env::var("HF_TOKEN").ok().as_deref(),
+        )
+        .await
+        {
+            Ok(e) => e,
+            Err(mold_catalog::live::LiveSearchError::Upstream { status: 404, .. }) => {
+                return (StatusCode::NOT_FOUND, "not found").into_response();
+            }
+            Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+        }
+    } else {
+        return (StatusCode::BAD_REQUEST, "id must be `cv:` or `hf:` prefixed").into_response();
+    };
+
+    Json(live_entry_to_wire(&entry, &models_dir)).into_response()
 }
 
 /// POST dispatcher for `/api/catalog/*id` — routes sub-actions based on the
@@ -391,33 +421,20 @@ pub async fn post_catalog_dispatch(
     }
 }
 
-pub async fn list_families(State(state): State<crate::state::AppState>) -> impl IntoResponse {
+pub async fn list_families(
+    State(_state): State<crate::state::AppState>,
+) -> impl IntoResponse {
+    // Live search doesn't carry per-family counts (each request hits one
+    // family at a time), so the sidebar gets the static taxonomy with
+    // zero counts. The wire shape is preserved for SPA compatibility.
     use mold_catalog::families::{Family, ALL_FAMILIES};
-    use std::collections::HashMap;
-    let db_rows = match state.catalog_db.catalog_family_counts() {
-        Ok(rows) => rows,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    // Surface every supported family — even ones with zero DB rows — so the
-    // sidebar can drill into a family that the live-search backend will
-    // populate on demand. Without this, families whose DB shard is empty
-    // (e.g. FLUX after a partially-rate-limited refresh) silently disappear
-    // from the UI even though `/api/catalog/search?family=flux` returns
-    // results.
-    let by_name: HashMap<&str, &mold_db::catalog::FamilyCount> =
-        db_rows.iter().map(|r| (r.family.as_str(), r)).collect();
     let merged: Vec<serde_json::Value> = ALL_FAMILIES
         .iter()
         .map(|f: &Family| {
-            let key = f.as_str();
-            let (foundation, finetune) = by_name
-                .get(key)
-                .map(|r| (r.foundation, r.finetune))
-                .unwrap_or((0, 0));
             serde_json::json!({
-                "family": key,
-                "foundation": foundation,
-                "finetune": finetune,
+                "family": f.as_str(),
+                "foundation": 0,
+                "finetune": 0,
             })
         })
         .collect();
@@ -631,16 +648,12 @@ pub struct CompanionJob {
     pub job_id: String,
 }
 
-/// Enqueue any companions referenced by `companions_json` that are not
-/// already fully present under `models_dir`. Returns the per-companion job
-/// ids in the order they appear in the catalog row.
-///
-/// `companions_json` is the raw value from `CatalogRow::companions` — a
-/// JSON-encoded `Vec<String>` of canonical companion names. Phase-1 HF
-/// diffusers entries pass `None` here because they don't strip components.
+/// Enqueue any companions in `companion_names` that are not already
+/// fully present under `models_dir`. Returns the per-companion job ids
+/// in the order they appear in the catalog entry.
 ///
 /// On-disk presence + name resolution are delegated to
-/// `mold_core::download::missing_companions_from_json`, which the CLI also
+/// `mold_core::download::missing_companions`, which the CLI also
 /// consumes for `mold pull cv:<id>`'s companion-first ordering.
 ///
 /// `DownloadQueue::enqueue` is idempotent against canonical manifest
@@ -649,12 +662,12 @@ pub struct CompanionJob {
 /// the on-disk presence check fall back on "missing → enqueue" without a
 /// race condition.
 pub(crate) async fn enqueue_missing_companions(
-    companions_json: Option<&str>,
+    companion_names: &[String],
     models_dir: &std::path::Path,
     queue: &crate::downloads::DownloadQueue,
     catalog_id: Option<&str>,
 ) -> Vec<CompanionJob> {
-    let manifests = mold_core::download::missing_companions_from_json(companions_json, models_dir);
+    let manifests = mold_core::download::missing_companions(companion_names, models_dir);
     let mut jobs = Vec::with_capacity(manifests.len());
     for manifest in manifests {
         // When called for a catalog download, the companion job is
@@ -687,18 +700,45 @@ pub async fn post_catalog_download(
     State(state): State<crate::state::AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let row = match state.catalog_db.catalog_get(&id) {
-        Ok(Some(r)) => r,
-        Ok(None) => return (StatusCode::NOT_FOUND, "unknown catalog id").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    // Live single-id lookup — replaces the bulk-scrape DB read.
+    let entry = if let Some(version_id) = id.strip_prefix("cv:") {
+        match mold_catalog::live::fetch_civitai_version(
+            state.catalog_live_civitai_base.as_str(),
+            version_id,
+            std::env::var("CIVITAI_TOKEN").ok().as_deref(),
+        )
+        .await
+        {
+            Ok(e) => e,
+            Err(mold_catalog::live::LiveSearchError::Upstream { status: 404, .. }) => {
+                return (StatusCode::NOT_FOUND, "unknown catalog id").into_response();
+            }
+            Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+        }
+    } else if let Some(repo_id) = id.strip_prefix("hf:") {
+        match mold_catalog::live::fetch_hf_repo(
+            "https://huggingface.co",
+            repo_id,
+            std::env::var("HF_TOKEN").ok().as_deref(),
+        )
+        .await
+        {
+            Ok(e) => e,
+            Err(mold_catalog::live::LiveSearchError::Upstream { status: 404, .. }) => {
+                return (StatusCode::NOT_FOUND, "unknown catalog id").into_response();
+            }
+            Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+        }
+    } else {
+        return (StatusCode::BAD_REQUEST, "id must be `cv:` or `hf:` prefixed").into_response();
     };
 
-    if row.engine_phase >= 6 {
+    if entry.engine_phase >= 6 {
         return (
             StatusCode::CONFLICT,
             format!(
                 "engine_phase {} not yet supported by this build — see release notes",
-                row.engine_phase
+                entry.engine_phase
             ),
         )
             .into_response();
@@ -706,105 +746,98 @@ pub async fn post_catalog_download(
 
     // Phase 2: companions auto-pull before the primary entry. Civitai
     // single-file checkpoints commonly strip their text encoders + VAE,
-    // so the catalog scanner records `companions: ["clip-l", ...]` on
-    // those entries. Each canonical companion has a hidden synthetic
-    // manifest in `mold-core` so the queue can enqueue them by name.
+    // so the catalog records `companions: ["clip-l", ...]` on those
+    // entries. Each canonical companion has a hidden synthetic manifest
+    // in `mold-core` so the queue can enqueue them by name.
     let models_dir = state.config.read().await.resolved_models_dir();
+    let entry_id = entry.id.as_str().to_string();
     let companion_jobs = enqueue_missing_companions(
-        row.companions.as_deref(),
+        &entry.companions,
         &models_dir,
         &state.downloads,
-        Some(&row.id),
+        Some(&entry_id),
     )
     .await;
 
     // Primary entry. HF rows map onto a manifest model name (best-effort —
     // diffusers entries with a recognised source_id flow through; the rest
     // surface a `null` primary while companion downloads still run). `cv:`
-    // rows go through the recipe path: parse `download_recipe`, resolve
-    // `CIVITAI_TOKEN` if `needs_token: Civitai`, and call
-    // `DownloadQueue::enqueue_recipe`. The job id surfaces in
-    // `primary_job_id` so the SPA's downloads drawer can poll it like any
-    // other job.
-    let primary_job_id: Option<String> = if row.source == "hf" {
-        let model = match mold_core::manifest::find_manifest(&row.source_id) {
-            Some(m) => m.name.clone(),
-            None => row.source_id.clone(),
-        };
-        match state.downloads.enqueue_in_group(model, &row.id).await {
-            Ok((jid, _, _)) => Some(jid),
-            Err(crate::downloads::EnqueueError::UnknownModel(_)) => None,
-            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        }
-    } else if row.source == "civitai" {
-        let recipe: mold_catalog::entry::DownloadRecipe =
-            match serde_json::from_str(&row.download_recipe) {
-                Ok(r) => r,
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("catalog row {} has malformed download_recipe: {e}", row.id),
-                    )
-                        .into_response();
-                }
+    // rows go through the recipe path: resolve `CIVITAI_TOKEN` if
+    // `needs_token: Civitai`, and call `DownloadQueue::enqueue_recipe`.
+    use mold_catalog::entry::Source;
+    let primary_job_id: Option<String> = match entry.source {
+        Source::Hf => {
+            let model = match mold_core::manifest::find_manifest(&entry.source_id) {
+                Some(m) => m.name.clone(),
+                None => entry.source_id.clone(),
             };
-        let auth = match recipe.needs_token {
-            Some(mold_catalog::entry::TokenKind::Civitai) => {
-                match mold_core::download::civitai_auth_or_error(&row.id) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        return (StatusCode::UNAUTHORIZED, e.to_string()).into_response();
+            match state.downloads.enqueue_in_group(model, &entry_id).await {
+                Ok((jid, _, _)) => Some(jid),
+                Err(crate::downloads::EnqueueError::UnknownModel(_)) => None,
+                Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            }
+        }
+        Source::Civitai => {
+            let auth = match entry.download_recipe.needs_token {
+                Some(mold_catalog::entry::TokenKind::Civitai) => {
+                    match mold_core::download::civitai_auth_or_error(&entry_id) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            return (StatusCode::UNAUTHORIZED, e.to_string()).into_response();
+                        }
                     }
                 }
+                _ => mold_core::download::RecipeAuth::None,
+            };
+            let (author, name) = match entry.source_id.split_once('/') {
+                Some((a, n)) => (a.to_string(), n.to_string()),
+                None => (String::new(), entry.source_id.clone()),
+            };
+            let files: Vec<crate::downloads::OwnedRecipeFile> = entry
+                .download_recipe
+                .files
+                .iter()
+                .map(|f| crate::downloads::OwnedRecipeFile {
+                    url: f.url.clone(),
+                    dest: mold_catalog::entry::render_recipe_dest(
+                        &f.dest,
+                        entry.family.as_str(),
+                        &author,
+                        &name,
+                    ),
+                    sha256: f.sha256.clone(),
+                    size_bytes: f.size_bytes,
+                })
+                .collect();
+            // Sidecar write is best-effort: it lets the LoRA picker see
+            // the entry as soon as the file lands without re-querying
+            // the live catalog. Failure is not fatal.
+            if let Some(primary) = files.first() {
+                let sidecar = mold_catalog::sidecar::sidecar_from_entry(&entry, primary.dest.clone());
+                let sc_path = mold_catalog::sidecar::civitai_sidecar_path(&models_dir, &entry_id);
+                if let Err(e) = mold_catalog::sidecar::write_sidecar(&sc_path, &sidecar) {
+                    tracing::warn!(
+                        target: "catalog.sidecar",
+                        catalog_id = %entry_id,
+                        error = %e,
+                        "sidecar write failed; picker will need a reinstall to surface this row",
+                    );
+                }
             }
-            _ => mold_core::download::RecipeAuth::None,
-        };
-        let (author, name) = match row.source_id.split_once('/') {
-            Some((a, n)) => (a.to_string(), n.to_string()),
-            None => (String::new(), row.source_id.clone()),
-        };
-        let files: Vec<crate::downloads::OwnedRecipeFile> = recipe
-            .files
-            .into_iter()
-            .map(|f| crate::downloads::OwnedRecipeFile {
-                url: f.url,
-                dest: mold_catalog::entry::render_recipe_dest(&f.dest, &row.family, &author, &name),
-                sha256: f.sha256,
-                size_bytes: f.size_bytes,
-            })
-            .collect();
-        // Sidecar write is best-effort: it lets the LoRA picker see the
-        // entry as soon as the file lands without re-querying the live
-        // catalog. Failure is not fatal — install proceeds either way,
-        // and the next install of the same id (or a startup backfill)
-        // would heal the missing sidecar.
-        if let Some(primary) = files.first() {
-            let sidecar = mold_catalog::sidecar::sidecar_from_row(&row, primary.dest.clone());
-            let sc_path = mold_catalog::sidecar::civitai_sidecar_path(&models_dir, &row.id);
-            if let Err(e) = mold_catalog::sidecar::write_sidecar(&sc_path, &sidecar) {
-                tracing::warn!(
-                    target: "catalog.sidecar",
-                    catalog_id = %row.id,
-                    error = %e,
-                    "sidecar write failed; picker will need a backfill or reinstall to surface this row",
-                );
+            let payload = crate::downloads::RecipePayload {
+                catalog_id: entry_id.clone(),
+                files,
+                auth,
+            };
+            match state
+                .downloads
+                .enqueue_recipe_in_group(payload, &entry_id)
+                .await
+            {
+                Ok((jid, _, _)) => Some(jid),
+                Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
             }
         }
-        let payload = crate::downloads::RecipePayload {
-            catalog_id: row.id.clone(),
-            files,
-            auth,
-        };
-        match state
-            .downloads
-            .enqueue_recipe_in_group(payload, &row.id)
-            .await
-        {
-            Ok((jid, _, _)) => Some(jid),
-            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        }
-    } else {
-        None
     };
 
     (
