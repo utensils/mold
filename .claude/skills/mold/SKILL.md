@@ -659,6 +659,10 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_LOG`                  | `warn`                  | Log level (trace/debug/info/warn/error)                                    |
 | `MOLD_EAGER`                | unset                   | Set `1` to keep all components loaded                                      |
 | `MOLD_OFFLOAD`              | unset                   | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower)           |
+| `MOLD_KEEP_TE_RAM`          | unset                   | Set `1` to park text encoders on CPU between requests instead of dropping them (FP16/BF16 only; GGUF falls through to drop+reload). Disabled on Metal. |
+| `MOLD_LORA_BYPASS`          | `auto`                  | FLUX LoRA application path on the offload route: `auto` (bypass when LoRAs present), `on` (always bypass), `off` (legacy merge-into-base) |
+| `MOLD_VAE_TILED`            | `auto`                  | Tiled VAE decode for FLUX/FLUX2/SDXL/SD3: `auto` (retry on OOM), `force` (always tile), `off` (disable). Saves VRAM when transformer + LoRAs are still resident. |
+| `MOLD_ATTN`                 | `math`                  | Attention backend: `math` (hand-rolled SDP, default) or `flash` (candle-flash-attn v2; needs `--features cuda,flash-attn` + `RUSTFLAGS='--cfg mold_flash_attn_real'` — falls back to math otherwise) |
 | `MOLD_EMBED_METADATA`       | `1`                     | Set `0` to disable PNG metadata                                            |
 | `MOLD_PREVIEW`              | unset                   | Set `1` to display generated images inline in the terminal                 |
 | `MOLD_T5_VARIANT`           | `auto`                  | T5 encoder: auto/fp16/q8/q6/q5/q4/q3                                       |

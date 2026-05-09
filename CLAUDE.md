@@ -75,6 +75,7 @@ Most are in `mold-inference`. When touching engines, these are the rules that ma
 - **CPU-based noise** — `seeded_randn()` in `engine.rs` generates initial noise on CPU via `StdRng`/ChaCha20, then moves to GPU. This is load-bearing for cross-backend seed determinism (CUDA/Metal/CPU produce identical images).
 - **Z-Image has a bespoke quantized transformer** — `zimage/quantized_transformer.rs` lives here (not candle); GGUF tensor naming differs from BF16 (`attention.qkv` vs split Q/K/V, etc.).
 - **LTX-2 is CUDA-only for real generation.** CPU is correctness-only; Metal is unsupported. Native runtime lives in `ltx2/` with its own media pipeline (MP4 first, real AAC).
+- **Tier 1 perf knobs** (`MOLD_KEEP_TE_RAM`, `MOLD_LORA_BYPASS`, `MOLD_VAE_TILED`, `MOLD_ATTN`) are documented in `website/guide/configuration.md` and `.claude/skills/mold/SKILL.md`. Don't repeat their semantics here — they're opt-in / auto-on knobs that surface in those tables and in `[Unreleased]` of `CHANGELOG.md`.
 
 ## Inference modes (`mold run`)
 
