@@ -412,7 +412,19 @@ fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, pat
                 .and_then(to_str)
                 .or_else(|| cfg.clip_tokenizer.clone());
         }
-        "sdxl-vae" | "sd-vae-ft-mse" | "flux-vae" => {}
+        "sdxl-vae" | "sd-vae-ft-mse" => {}
+        // Civitai FLUX fine-tune convention is split: some bundle the
+        // VAE in the same .safetensors as the transformer, some are
+        // transformer-only. `synthesize_catalog_config` peeks the
+        // header and clears cfg.vae for the transformer-only case;
+        // here we populate it from the companion's resolved path.
+        // When the bundle DID include a VAE, cfg.vae is already set
+        // to the primary checkpoint and we leave it alone — the
+        // bundled VAE wins, so the guarded arm doesn't fire and the
+        // catch-all (no-op) handles it.
+        "flux-vae" if cfg.vae.is_none() => {
+            cfg.vae = to_str(&paths.transformer);
+        }
         "ltx-video-vae" | "flux2-vae" => {
             cfg.vae = to_str(&paths.transformer);
         }
@@ -454,6 +466,7 @@ fn synthesize_catalog_config(
 ) -> anyhow::Result<mold_core::ModelConfig> {
     use mold_catalog::companions::companions_for;
     use mold_catalog::entry::Bundling;
+    use mold_catalog::families::Family;
 
     let primary = entry
         .download_recipe
@@ -481,7 +494,29 @@ fn synthesize_catalog_config(
 
     if matches!(entry.bundling, Bundling::SingleFile) {
         cfg.transformer = Some(primary_str.clone());
-        cfg.vae = Some(primary_str);
+        // Civitai FLUX fine-tunes are split: some bundle the VAE under
+        // `first_stage_model.*` keys, some (e.g. cv:994561 — the
+        // *_realHornyProV3Unet.safetensors file) are transformer-only.
+        // For SDXL/SD1.5 the convention is consistent (VAE bundled), but
+        // for FLUX we have to peek the safetensors header. When the bundle
+        // lacks a VAE, defer cfg.vae and let the flux-vae companion populate
+        // it below — copy_catalog_companion only writes to flux-vae's slot
+        // when cfg.vae is None, so a bundled VAE always wins.
+        if entry.family == Family::Flux
+            && primary_path.exists()
+            && !mold_inference::loader::flux_single_file_bundles_vae(&primary_path).map_err(
+                |e| {
+                    anyhow::anyhow!(
+                        "probe FLUX checkpoint {} for bundled VAE: {e}",
+                        primary_path.display()
+                    )
+                },
+            )?
+        {
+            // Transformer-only FLUX checkpoint — flux-vae companion is required.
+        } else {
+            cfg.vae = Some(primary_str);
+        }
     } else {
         anyhow::bail!(
             "bundling={:?} not supported (single-file only)",
@@ -704,11 +739,23 @@ pub(crate) async fn check_model_available(
     // Catalog bridge: synthesize config for installed cv:* / hf:* entries so
     // the web UI can generate with models downloaded from the catalog.
     if looks_like_catalog_id(model_name) {
-        if install_catalog_model(state, model_name).await {
+        let synth_ok = install_catalog_model(state, model_name).await;
+        if synth_ok {
             let config = state.config.read().await;
             if let Some(paths) = ModelPaths::resolve(model_name, &config) {
                 return Ok(Some(paths));
             }
+            // Synthesis succeeded (entry was found and config built) but
+            // ModelPaths::resolve failed — the catalog config is missing
+            // a required field (transformer or vae). For a transformer-only
+            // FLUX checkpoint that's the flux-vae companion not being on
+            // disk. Surface that specifically rather than the misleading
+            // "not installed" generic.
+            return Err(ApiError::not_found(format!(
+                "catalog model '{model_name}' is missing required components. \
+                 Re-pull the entry from the catalog so its companions \
+                 (CLIP-L / T5 / VAE) are fetched alongside the primary checkpoint."
+            )));
         }
         return Err(ApiError::not_found(format!(
             "catalog model '{model_name}' is not installed. Download it from the catalog first."
@@ -1441,5 +1488,305 @@ mod tests {
         // Unknown family slug falls through to FluxDit.
         let hint_unknown = ActivationHint::from_request(&req, "totally-bogus");
         assert_eq!(hint_unknown.family, ActivationFamily::FluxDit);
+    }
+
+    // ── FLUX catalog bridge: VAE-bundle probe + flux-vae companion wiring ──
+
+    /// Direct-unit test of `copy_catalog_companion("flux-vae", _)`: when
+    /// `cfg.vae` is unset (transformer-only checkpoint) the handler must
+    /// populate it from the companion's resolved `paths.transformer`.
+    /// The same handler must NOT clobber a bundled-VAE cfg.vae.
+    #[test]
+    fn copy_catalog_companion_flux_vae_populates_when_unset() {
+        let mut cfg = mold_core::ModelConfig {
+            family: Some("flux".into()),
+            transformer: Some("/m/cv-x/flux/civitai/x/unet.safetensors".into()),
+            vae: None,
+            ..Default::default()
+        };
+        let paths = ModelPaths {
+            transformer: PathBuf::from("/m/flux-vae/ae.safetensors"),
+            transformer_shards: Vec::new(),
+            vae: PathBuf::from("/m/flux-vae/ae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        copy_catalog_companion(&mut cfg, "flux-vae", &paths);
+        assert_eq!(
+            cfg.vae.as_deref(),
+            Some("/m/flux-vae/ae.safetensors"),
+            "transformer-only cfg.vae must be populated from the flux-vae companion path"
+        );
+    }
+
+    #[test]
+    fn copy_catalog_companion_flux_vae_does_not_override_bundled() {
+        let mut cfg = mold_core::ModelConfig {
+            family: Some("flux".into()),
+            transformer: Some("/m/cv-x/flux/civitai/x/full.safetensors".into()),
+            vae: Some("/m/cv-x/flux/civitai/x/full.safetensors".into()),
+            ..Default::default()
+        };
+        let paths = ModelPaths {
+            transformer: PathBuf::from("/m/flux-vae/ae.safetensors"),
+            transformer_shards: Vec::new(),
+            vae: PathBuf::from("/m/flux-vae/ae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        copy_catalog_companion(&mut cfg, "flux-vae", &paths);
+        assert_eq!(
+            cfg.vae.as_deref(),
+            Some("/m/cv-x/flux/civitai/x/full.safetensors"),
+            "bundled cfg.vae must survive the flux-vae companion pass"
+        );
+    }
+
+    /// Synthesize a minimal safetensors at `path` that lists the given
+    /// keys in the JSON header (each as a 1-element F32 tensor sharing the
+    /// same 4-byte zero blob). Sufficient for the header-peek probe; no
+    /// dep on the `safetensors` crate.
+    fn write_safetensors_with_keys(path: &std::path::Path, keys: &[&str]) {
+        use std::io::Write;
+        let mut header = serde_json::Map::new();
+        for key in keys {
+            header.insert(
+                (*key).to_string(),
+                serde_json::json!({
+                    "dtype": "F32",
+                    "shape": [1],
+                    "data_offsets": [0, 4],
+                }),
+            );
+        }
+        let header_json = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        let mut f = std::fs::File::create(path).expect("create fixture");
+        f.write_all(&(header_json.len() as u64).to_le_bytes())
+            .unwrap();
+        f.write_all(&header_json).unwrap();
+        f.write_all(&[0u8; 4]).unwrap();
+    }
+
+    fn flux_unet_only_catalog_entry(
+        version_id: &str,
+        file_name: &str,
+    ) -> mold_catalog::entry::CatalogEntry {
+        use mold_catalog::entry::{
+            CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat, LicenseFlags,
+            Modality, RecipeFile, Source, TokenKind,
+        };
+        use mold_catalog::families::Family;
+
+        CatalogEntry {
+            id: CatalogId::from(format!("cv:{version_id}")),
+            source: Source::Civitai,
+            source_id: version_id.to_string(),
+            name: "FLUX Unet-only fine-tune".into(),
+            author: Some("someone".into()),
+            family: Family::Flux,
+            family_role: FamilyRole::Finetune,
+            sub_family: None,
+            modality: Modality::Image,
+            kind: mold_catalog::entry::Kind::Checkpoint,
+            file_format: FileFormat::Safetensors,
+            bundling: mold_catalog::entry::Bundling::SingleFile,
+            size_bytes: Some(12_000_000_000),
+            download_count: 0,
+            rating: None,
+            likes: 0,
+            nsfw: false,
+            thumbnail_url: None,
+            description: None,
+            license: None,
+            license_flags: LicenseFlags::default(),
+            tags: vec![],
+            companions: vec!["t5-v1_1-xxl".into(), "clip-l".into(), "flux-vae".into()],
+            download_recipe: DownloadRecipe {
+                files: vec![RecipeFile {
+                    url: format!("https://civitai.com/api/download/models/{version_id}"),
+                    dest: format!("{{family}}/civitai/{version_id}/{file_name}"),
+                    sha256: Some("DEAD".repeat(16)),
+                    size_bytes: Some(12_000_000_000),
+                }],
+                needs_token: Some(TokenKind::Civitai),
+            },
+            engine_phase: 1,
+            created_at: None,
+            updated_at: None,
+            added_at: 0,
+            trained_words: vec![],
+        }
+    }
+
+    /// Transformer-only FLUX checkpoint: synth must defer cfg.vae and the
+    /// flux-vae companion path must populate it (when present in config).
+    ///
+    /// Sets MOLD_HOME to the tempdir so `ModelPaths::resolve` doesn't walk
+    /// the developer's real `~/.mold/models/.hf-cache/` (which on this
+    /// machine has a real flux-vae shipped from a manifest install).
+    #[test]
+    fn synthesize_catalog_config_uses_flux_vae_companion_when_bundle_lacks_vae() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        // SAFETY: env mutation is racy with other tests; this is the only
+        // test in this module that touches MOLD_HOME and the suite serializes
+        // env-var tests by combining them into one #[test].
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        // Place a transformer-only safetensors fixture at the path that
+        // the recipe-rendering will produce for `cv:994561`.
+        let primary_path = models_dir
+            .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &primary_path,
+            &[
+                "double_blocks.0.img_attn.proj.weight",
+                "single_blocks.0.linear1.weight",
+                "img_in.weight",
+            ],
+        );
+
+        // Stub flux-vae's manifest config so `ModelPaths::resolve("flux-vae", _)`
+        // returns a path WITHOUT walking the dev machine's real HF cache.
+        let vae_path = models_dir.join("flux-vae/ae.safetensors");
+        std::fs::create_dir_all(vae_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&vae_path).unwrap();
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.models.insert(
+            "flux-vae".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(vae_path.to_string_lossy().into_owned()),
+                vae: Some(vae_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+        // Stub clip-l + t5 so their absence doesn't blow up the loop —
+        // they're declared in `companions_for(Family::Flux, _)` and
+        // unresolved entries log a warning rather than failing, but we set
+        // them anyway to verify they don't interfere.
+        config.models.insert(
+            "clip-l".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!("{}/clip-l/model.safetensors", models_dir.display())),
+                vae: Some(format!("{}/clip-l/model.safetensors", models_dir.display())),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "t5-v1_1-xxl".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!(
+                    "{}/t5-v1_1-xxl/t5xxl_fp16.safetensors",
+                    models_dir.display()
+                )),
+                vae: Some(format!(
+                    "{}/t5-v1_1-xxl/t5xxl_fp16.safetensors",
+                    models_dir.display()
+                )),
+                ..Default::default()
+            },
+        );
+
+        let entry =
+            flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");
+        let synth = synthesize_catalog_config(&entry, models_dir, &config).unwrap();
+
+        // cfg.transformer points at the recipe-rendered primary path.
+        assert_eq!(
+            synth.transformer.as_deref(),
+            primary_path.to_str(),
+            "transformer must point at the on-disk primary checkpoint"
+        );
+        // cfg.vae was populated from the flux-vae companion's resolved
+        // path — NOT from the transformer-only primary.
+        assert_eq!(
+            synth.vae.as_deref(),
+            vae_path.to_str(),
+            "flux-vae companion must populate cfg.vae for transformer-only checkpoints",
+        );
+
+        // Restore env for sibling tests.
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    /// Bundled-VAE FLUX checkpoint: synth must keep cfg.vae == primary;
+    /// flux-vae companion is a no-op.
+    #[test]
+    fn synthesize_catalog_config_uses_bundled_vae_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+
+        let primary_path = models_dir.join("cv-101010/flux/civitai/101010/flux_full.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        // Bundled-VAE: A1111 prefix on the encoder.
+        write_safetensors_with_keys(
+            &primary_path,
+            &[
+                "model.diffusion_model.double_blocks.0.img_attn.proj.weight",
+                "first_stage_model.encoder.conv_in.weight",
+            ],
+        );
+
+        // Even with flux-vae stubbed, cfg.vae must remain pointing at the
+        // primary checkpoint — bundled VAE wins.
+        let vae_path = models_dir.join("flux-vae/ae.safetensors");
+        std::fs::create_dir_all(vae_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&vae_path).unwrap();
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.models.insert(
+            "flux-vae".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(vae_path.to_string_lossy().into_owned()),
+                vae: Some(vae_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+
+        let entry = flux_unet_only_catalog_entry("101010", "flux_full.safetensors");
+        let synth = synthesize_catalog_config(&entry, models_dir, &config).unwrap();
+
+        assert_eq!(synth.transformer.as_deref(), primary_path.to_str());
+        assert_eq!(
+            synth.vae.as_deref(),
+            primary_path.to_str(),
+            "bundled-VAE checkpoint must keep cfg.vae == primary; flux-vae companion is a no-op",
+        );
     }
 }

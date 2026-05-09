@@ -53,14 +53,29 @@ pub struct GpuPool {
 
 impl GpuWorker {
     /// Check if this worker is in a degraded state (3+ consecutive failures, within cooldown).
+    ///
+    /// When the cooldown has expired we clear the failure counter and the
+    /// `degraded_until` timestamp so the next single failure doesn't
+    /// immediately re-degrade the GPU. Without this lazy reset, a worker
+    /// that has 3 historical failures followed by a long idle period would
+    /// flip back to Degraded on the very first post-cooldown failure
+    /// (because `consecutive_failures` is still >= 3 from before).
     pub fn is_degraded(&self) -> bool {
         if self.consecutive_failures.load(Ordering::SeqCst) < 3 {
             return false;
         }
-        match *self.degraded_until.read().unwrap() {
+        let cooldown_active = match *self.degraded_until.read().unwrap() {
             Some(until) => Instant::now() < until,
             None => false,
+        };
+        if !cooldown_active {
+            // Lazy clear: cooldown elapsed, treat the worker as healthy
+            // again. A new failure burst still has to reach 3 consecutive
+            // failures before re-degrading.
+            self.consecutive_failures.store(0, Ordering::SeqCst);
+            *self.degraded_until.write().unwrap() = None;
         }
+        cooldown_active
     }
 
     /// Build a status snapshot for this worker.
@@ -531,5 +546,53 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("gpu:0"), "{err}");
         assert!(err.contains("[1]"), "{err}");
+    }
+
+    /// `is_degraded()` lazily resets the failure counter when the cooldown
+    /// has expired. Without this, a worker that took 3 historical failures
+    /// would re-degrade on the very first post-cooldown failure (because
+    /// `consecutive_failures` was still ≥ 3 from before, even though the
+    /// time-based gate had already opened back up).
+    #[test]
+    fn is_degraded_clears_counter_when_cooldown_has_expired() {
+        let (worker, _rx) = test_worker(0, 24_000_000_000);
+        worker.consecutive_failures.store(3, Ordering::SeqCst);
+        // Simulate "cooldown expired 1 second ago".
+        *worker.degraded_until.write().unwrap() =
+            Some(Instant::now() - std::time::Duration::from_secs(1));
+
+        assert!(
+            !worker.is_degraded(),
+            "expired cooldown must mark the worker as healthy again",
+        );
+        assert_eq!(
+            worker.consecutive_failures.load(Ordering::SeqCst),
+            0,
+            "expired cooldown must lazy-reset the failure counter so a \
+             single post-cooldown failure doesn't immediately re-degrade",
+        );
+        assert!(
+            worker.degraded_until.read().unwrap().is_none(),
+            "expired cooldown must clear the timestamp",
+        );
+    }
+
+    #[test]
+    fn is_degraded_respects_active_cooldown() {
+        let (worker, _rx) = test_worker(0, 24_000_000_000);
+        worker.consecutive_failures.store(3, Ordering::SeqCst);
+        // Cooldown still active for another 60s.
+        *worker.degraded_until.write().unwrap() =
+            Some(Instant::now() + std::time::Duration::from_secs(60));
+
+        assert!(
+            worker.is_degraded(),
+            "active cooldown must keep the worker degraded",
+        );
+        assert_eq!(
+            worker.consecutive_failures.load(Ordering::SeqCst),
+            3,
+            "active cooldown must NOT reset the counter",
+        );
     }
 }
