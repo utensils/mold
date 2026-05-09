@@ -59,6 +59,7 @@ name; otherwise it is the prompt. Prompt can also be piped via stdin.
 | `--qwen2-variant <TAG>`            | Qwen2.5-VL text encoder variant for the Qwen family                                                             |
 | `--qwen2-text-encoder-mode <MODE>` | Qwen2.5-VL placement/staging mode for the Qwen family                                                           |
 | `--scheduler <SCHED>`              | Noise scheduler (ddim, euler-ancestral, uni-pc)                                                                 |
+| `--cfg-plus`                       | Enable CFG++ (manifold-projection guidance) on SD3. Drops usable CFG to ~1.5–2.5; ignored at cfg ≈ 1.0          |
 | `--host <URL>`                     | Override MOLD_HOST                                                                                              |
 
 ### Qwen Family Encoder Controls

@@ -101,6 +101,7 @@ fn generate_request_placement_round_trips() {
         output_format: super::OutputFormat::Png,
         embed_metadata: None,
         scheduler: None,
+        cfg_plus: None,
         source_image: None,
         edit_images: None,
         strength: 0.75,

@@ -41,6 +41,10 @@ fn debug_tensor_stats(name: &str, tensor: &Tensor) {
 /// - `y`: Concatenated [y_cond, y_uncond] vector conditioning (batch=2)
 /// - `context`: Concatenated [context_cond, context_uncond] text embeddings (batch=2)
 /// - `cfg_scale`: Classifier-free guidance scale (1.0 = no guidance, e.g. turbo)
+/// - `cfg_plus`: When true, take the CFG++ step (x_0 from guided velocity,
+///   renoise with the unconditional velocity). Falls back to the standard
+///   Euler step when CFG is inactive (cfg ≈ 1.0) since there is no uncond
+///   row to read from. See `cfg_plus_step` for the math derivation.
 /// - `time_shift`: Alpha for resolution-dependent timestep shifting (typically 3.0)
 /// - `is_quantized`: If true, use F32 dtype for noise (GGUF dequantizes to F32)
 /// - `progress`: Progress reporter for per-step denoising updates
@@ -51,6 +55,7 @@ pub fn euler_sample(
     context: &Tensor,
     num_inference_steps: usize,
     cfg_scale: f64,
+    cfg_plus: bool,
     time_shift: f64,
     height: usize,
     width: usize,
@@ -95,6 +100,19 @@ pub fn euler_sample(
     } else {
         (Some(y.i(..1)?), Some(context.i(..1)?))
     };
+
+    // CFG++ requires the doubled `[cond, uncond]` forward so we can read the
+    // unconditional row at integration time. When CFG is disabled (cfg ≈ 1.0)
+    // the loop runs a single conditional forward and there's no uncond row to
+    // use — degrade to the standard step and warn once. Loud enough to catch
+    // misconfiguration but doesn't fail the request.
+    let cfg_plus_active = cfg_plus && use_cfg;
+    if cfg_plus && !use_cfg {
+        tracing::warn!(
+            cfg_scale,
+            "cfg_plus requested but cfg_scale ≈ 1.0 — falling back to standard step (no uncond available)"
+        );
+    }
 
     for (step, window) in sigmas.windows(2).enumerate() {
         let step_start = Instant::now();
@@ -155,7 +173,19 @@ pub fn euler_sample(
             }
         }
 
-        x = (x + (guidance * (*s_prev - *s_curr))?)?;
+        x = if cfg_plus_active {
+            // CFG++ Euler step: x_0 estimate from CFG-guided velocity, but
+            // re-noise using the unconditional velocity (keeps the trajectory
+            // on the data manifold for high-CFG runs and unlocks lower CFG
+            // scales — see Chung et al. 2024 §3 and the rectified-flow
+            // extension noted in the diffusers cfg_pp PR).
+            //
+            //   x_{i+1} = x_i - σ_i · v_guided + σ_{i+1} · v_uncond
+            //          = (x_0_estimate)        + (re-noise w/ uncond)
+            cfg_plus_step(&x, &guidance, &noise_pred_full, *s_curr, *s_prev)?
+        } else {
+            (x + (&guidance * (*s_prev - *s_curr))?)?
+        };
 
         // Inpainting: blend preserved regions back at current noise level
         if let Some(ctx) = inpaint_ctx {
@@ -187,6 +217,29 @@ pub fn time_snr_shift(alpha: f64, t: f64) -> f64 {
 fn apply_cfg(cfg_scale: f64, noise_pred: &Tensor) -> Result<Tensor> {
     Ok(((cfg_scale * noise_pred.narrow(0, 0, 1)?)?
         - ((cfg_scale - 1.0) * noise_pred.narrow(0, 1, 1)?)?)?)
+}
+
+/// CFG++ Euler step for rectified-flow models.
+///
+/// Replaces the standard Euler integration `x_{i+1} = x_i + (s_{i+1}-s_i)·v_guided`
+/// with the manifold-projection form `x_{i+1} = x_i - s_i·v_guided + s_{i+1}·v_uncond`.
+/// Equivalent to: estimate x_0 from the CFG-guided velocity, then re-noise back
+/// to sigma=s_{i+1} using the *unconditional* velocity. The two forms collapse
+/// to the same value when v_uncond = v_guided (i.e. cfg=1.0); the CFG++ form
+/// only matters when guidance is active.
+///
+/// `noise_pred_full` carries the doubled `[cond, uncond]` transformer output;
+/// the uncond row is at index 1.
+fn cfg_plus_step(
+    x: &Tensor,
+    guidance: &Tensor,
+    noise_pred_full: &Tensor,
+    s_curr: f64,
+    s_prev: f64,
+) -> Result<Tensor> {
+    let v_uncond = noise_pred_full.narrow(0, 1, 1)?;
+    let x0_estimate = (x - (guidance * s_curr)?)?;
+    Ok((x0_estimate + (v_uncond * s_prev)?)?)
 }
 
 #[cfg(test)]
@@ -341,5 +394,104 @@ mod tests {
     #[test]
     fn test_cfg_enabled_at_guidance_7_5() {
         assert!(cfg_active(7.5));
+    }
+
+    // CFG++ tests pin the step math against analytic ground truth on toy
+    // tensors. The transformer / SLG path stays GPU-only, but the integration
+    // arithmetic runs on CPU so we can verify it without GPU resources.
+
+    /// Build a `[cond, uncond]` noise tensor of shape (2, n) and the matching
+    /// CFG-guided velocity for the given scale. Returns (noise_pred_full, guidance).
+    fn toy_noise_pair(cond: &[f32], uncond: &[f32], cfg_scale: f64) -> (Tensor, Tensor) {
+        assert_eq!(cond.len(), uncond.len(), "cond/uncond shapes must match");
+        let n = cond.len();
+        let dev = Device::Cpu;
+        let cond_t = Tensor::from_slice(cond, (1, n), &dev).unwrap();
+        let uncond_t = Tensor::from_slice(uncond, (1, n), &dev).unwrap();
+        let noise_pred = Tensor::cat(&[&cond_t, &uncond_t], 0).unwrap();
+        let guidance = apply_cfg(cfg_scale, &noise_pred).unwrap();
+        (noise_pred, guidance)
+    }
+
+    #[test]
+    fn cfg_plus_step_matches_manifold_formula() {
+        // Verify x_{i+1} = x_i - σ_i·v_guided + σ_{i+1}·v_uncond against an
+        // analytic computation with concrete numbers.
+        let dev = Device::Cpu;
+        let x = Tensor::new(&[[10.0f32, 20.0, 30.0]], &dev).unwrap();
+        let (noise_pred, guidance) = toy_noise_pair(&[2.0, 4.0, 6.0], &[1.0, 1.0, 1.0], 7.5);
+
+        let s_curr = 0.8;
+        let s_prev = 0.6;
+        let result = cfg_plus_step(&x, &guidance, &noise_pred, s_curr, s_prev).unwrap();
+        let result_vec: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
+
+        // guidance = 7.5*[2,4,6] - 6.5*[1,1,1] = [8.5, 23.5, 38.5]
+        // expected[i] = x[i] - σ_curr·guidance[i] + σ_prev·v_uncond[i]
+        //            = x[i] - 0.8·guidance[i] + 0.6·1.0
+        let expected = [
+            10.0 - 0.8 * 8.5 + 0.6 * 1.0,
+            20.0 - 0.8 * 23.5 + 0.6 * 1.0,
+            30.0 - 0.8 * 38.5 + 0.6 * 1.0,
+        ];
+        for (got, exp) in result_vec.iter().zip(expected.iter()) {
+            assert!(
+                (got - exp).abs() < 1e-4,
+                "cfg++ step mismatch: got {got}, expected {exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn cfg_plus_step_collapses_to_standard_when_cond_eq_uncond() {
+        // When v_cond == v_uncond, guidance == v_uncond regardless of scale,
+        // and the CFG++ step must equal the standard Euler step (no manifold
+        // correction needed because guidance contributes nothing extra).
+        let dev = Device::Cpu;
+        let x = Tensor::new(&[[5.0f32, 7.0]], &dev).unwrap();
+        let (noise_pred, guidance) = toy_noise_pair(&[3.0, 4.0], &[3.0, 4.0], 7.5);
+
+        let s_curr = 0.5;
+        let s_prev = 0.25;
+        let cfg_pp = cfg_plus_step(&x, &guidance, &noise_pred, s_curr, s_prev).unwrap();
+        let standard = (&x + (&guidance * (s_prev - s_curr)).unwrap()).unwrap();
+
+        let cfg_pp_vec: Vec<f32> = cfg_pp.flatten_all().unwrap().to_vec1().unwrap();
+        let std_vec: Vec<f32> = standard.flatten_all().unwrap().to_vec1().unwrap();
+        for (a, b) in cfg_pp_vec.iter().zip(std_vec.iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "cfg++ ≠ standard when v_cond=v_uncond: got {a}, expected {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn cfg_plus_step_diverges_from_standard_under_high_cfg() {
+        // Sanity: at cfg=7.5 with v_cond ≠ v_uncond, the two formulas must
+        // produce *different* outputs. Catches accidental no-op
+        // implementations (e.g. forgetting to swap in v_uncond).
+        let dev = Device::Cpu;
+        let x = Tensor::new(&[[0.0f32, 0.0, 0.0]], &dev).unwrap();
+        let (noise_pred, guidance) = toy_noise_pair(&[2.0, 4.0, 6.0], &[1.0, 1.0, 1.0], 7.5);
+
+        let s_curr = 0.9;
+        let s_prev = 0.7;
+        let cfg_pp = cfg_plus_step(&x, &guidance, &noise_pred, s_curr, s_prev).unwrap();
+        let standard = (&x + (&guidance * (s_prev - s_curr)).unwrap()).unwrap();
+
+        let cfg_pp_vec: Vec<f32> = cfg_pp.flatten_all().unwrap().to_vec1().unwrap();
+        let std_vec: Vec<f32> = standard.flatten_all().unwrap().to_vec1().unwrap();
+        // At least one element must differ noticeably — guards against any
+        // future refactor that silently makes CFG++ a no-op.
+        let max_diff = cfg_pp_vec
+            .iter()
+            .zip(std_vec.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff > 0.1,
+            "cfg++ should differ from standard at cfg=7.5 with v_cond≠v_uncond, max_diff={max_diff}"
+        );
     }
 }

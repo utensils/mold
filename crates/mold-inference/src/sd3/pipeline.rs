@@ -27,6 +27,20 @@ use super::sampling::{self, SkipLayerGuidanceConfig};
 use super::transformer::SD3Transformer;
 use super::vae::{build_sd3_vae_autoencoder, sd3_vae_vb_rename};
 
+/// Resolve the effective `cfg_plus` flag for a request.
+///
+/// Precedence: explicit request field > MOLD_CFG_PLUS env var > false.
+/// Mirrors the precedence pattern used by MOLD_OFFLOAD / MOLD_KEEP_TE_RAM.
+fn resolve_cfg_plus(req: &GenerateRequest) -> bool {
+    if let Some(explicit) = req.cfg_plus {
+        return explicit;
+    }
+    matches!(
+        std::env::var("MOLD_CFG_PLUS").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
 /// Loaded SD3 model components, ready for inference.
 struct LoadedSD3 {
     /// None after being dropped for VAE decode VRAM; reloaded on next generate.
@@ -694,6 +708,7 @@ impl SD3Engine {
             &context,
             num_steps,
             req.guidance,
+            resolve_cfg_plus(req),
             time_shift,
             height,
             width,
@@ -1023,6 +1038,7 @@ impl SD3Engine {
                 &context,
                 num_steps,
                 req.guidance,
+                resolve_cfg_plus(req),
                 time_shift,
                 height,
                 width,
@@ -1367,5 +1383,74 @@ mod tests {
         assert!(!engine.detect_is_quantized());
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_cfg_plus precedence: explicit request field beats env var,
+    // env var beats default-off. MOLD_CFG_PLUS is process-global so these
+    // tests serialize via a static mutex.
+    // -----------------------------------------------------------------------
+
+    fn cfg_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn req_with_cfg_plus(cfg_plus: Option<bool>) -> GenerateRequest {
+        // Build a minimal SD3-shaped request via JSON to avoid maintaining a
+        // by-hand list of every GenerateRequest field across schema changes.
+        let mut req: GenerateRequest = serde_json::from_str(
+            r#"{
+                "prompt":"x",
+                "model":"sd3.5-large:fp16",
+                "width":1024,
+                "height":1024,
+                "steps":28,
+                "guidance":4.5
+            }"#,
+        )
+        .unwrap();
+        req.cfg_plus = cfg_plus;
+        req
+    }
+
+    #[test]
+    fn resolve_cfg_plus_defaults_off() {
+        let _guard = cfg_env_lock();
+        // SAFETY: serialized via cfg_env_lock to avoid racing parallel tests.
+        unsafe { std::env::remove_var("MOLD_CFG_PLUS") };
+        assert!(!resolve_cfg_plus(&req_with_cfg_plus(None)));
+    }
+
+    #[test]
+    fn resolve_cfg_plus_env_enables() {
+        let _guard = cfg_env_lock();
+        unsafe { std::env::set_var("MOLD_CFG_PLUS", "1") };
+        let on = resolve_cfg_plus(&req_with_cfg_plus(None));
+        unsafe { std::env::remove_var("MOLD_CFG_PLUS") };
+        assert!(on, "MOLD_CFG_PLUS=1 must enable cfg++");
+    }
+
+    #[test]
+    fn resolve_cfg_plus_request_field_wins_over_env() {
+        let _guard = cfg_env_lock();
+        // Env says on, request explicitly says off → request wins. Without
+        // this precedence a server with a global env default could not be
+        // overridden per-request, which is the whole point of having a
+        // request field.
+        unsafe { std::env::set_var("MOLD_CFG_PLUS", "1") };
+        let off = resolve_cfg_plus(&req_with_cfg_plus(Some(false)));
+        unsafe { std::env::remove_var("MOLD_CFG_PLUS") };
+        assert!(!off, "explicit Some(false) must override env=on");
+    }
+
+    #[test]
+    fn resolve_cfg_plus_request_true_without_env() {
+        let _guard = cfg_env_lock();
+        unsafe { std::env::remove_var("MOLD_CFG_PLUS") };
+        assert!(resolve_cfg_plus(&req_with_cfg_plus(Some(true))));
     }
 }

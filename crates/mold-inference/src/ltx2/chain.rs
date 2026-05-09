@@ -419,6 +419,7 @@ fn build_stage_generate_request(
         output_format: OutputFormat::Mp4,
         embed_metadata: None,
         scheduler: None,
+        cfg_plus: None,
         // Every stage carries the starting image. Stage 0 uses it as the
         // i2v replacement at frame 0; continuation stages have their
         // frame-0 slot pinned by the motion-tail carryover latent, so

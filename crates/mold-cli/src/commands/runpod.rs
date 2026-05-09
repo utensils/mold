@@ -1354,6 +1354,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         output_format,
         embed_metadata: None,
         scheduler: None,
+        cfg_plus: None,
         source_image: None,
         edit_images: None,
         strength: 0.75,

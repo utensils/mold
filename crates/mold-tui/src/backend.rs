@@ -477,6 +477,7 @@ fn build_request(
         output_format: params.format,
         embed_metadata: Some(mold_core::Config::load_or_default().effective_embed_metadata(None)),
         scheduler: params.scheduler,
+        cfg_plus: None,
         edit_images,
         source_image,
         strength,

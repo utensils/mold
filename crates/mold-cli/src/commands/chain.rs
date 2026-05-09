@@ -703,6 +703,7 @@ fn synth_generate_request(req: &ChainRequest, video: &VideoData) -> mold_core::G
         output_format: video.format,
         embed_metadata: Some(false),
         scheduler: None,
+        cfg_plus: None,
         edit_images: None,
         source_image: first.source_image.clone(),
         strength: req.strength,
