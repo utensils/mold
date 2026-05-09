@@ -22,6 +22,7 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::Linear;
+use candle_transformers::quantized_nn::Linear as QuantizedLinear;
 use std::collections::HashMap;
 
 /// Slice a [`LinearLoraAdapter`]'s contribution into a fused output.
@@ -88,17 +89,29 @@ impl LinearLoraAdapter {
     }
 }
 
-/// A `Linear` that may carry zero or more LoRA adapters.
+/// A `Linear` (BF16 / F32) or `quantized_nn::Linear` (GGUF) that may
+/// carry zero or more LoRA adapters.
 ///
-/// `Plain` is bit-identical to `candle_nn::Linear`. `WithAdapters` runs
-/// the inner forward, then layers each adapter on top. The split exists
-/// so callers don't pay any forward overhead when no LoRA is active —
-/// the common case.
+/// `Plain` / `Quantized` are bit-identical to the underlying inner
+/// linear. `WithAdapters*` runs the inner forward, then layers each
+/// adapter on top. The split exists so callers don't pay any forward
+/// overhead when no LoRA is active — the common case.
+///
+/// The Plain↔Quantized split lets the offload path keep using the BF16
+/// `candle_nn::Linear` (it streams base weights CPU↔GPU each step) while
+/// the GGUF path stores `quantized_nn::Linear` permanently on GPU. Both
+/// share the same `LinearLoraAdapter` math because adapter weights are
+/// always small dense BF16/F32 tensors regardless of the base.
 #[derive(Clone, Debug)]
 pub enum LoraLinear {
     Plain(Linear),
     WithAdapters {
         inner: Linear,
+        adapters: Vec<LinearLoraAdapter>,
+    },
+    Quantized(QuantizedLinear),
+    WithAdaptersQuantized {
+        inner: QuantizedLinear,
         adapters: Vec<LinearLoraAdapter>,
     },
 }
@@ -110,25 +123,59 @@ impl LoraLinear {
         Self::Plain(inner)
     }
 
-    /// Read-only access to the underlying `Linear` (e.g. for moving the
-    /// weight to a different device, as the offload path needs).
+    /// Wrap a `quantized_nn::Linear` in the no-adapter variant.
+    pub fn quantized(inner: QuantizedLinear) -> Self {
+        Self::Quantized(inner)
+    }
+
+    /// Read-only access to the underlying BF16/F32 `Linear`. Panics if
+    /// called on a quantized variant — those use [`Self::inner_quantized`]
+    /// instead. Legacy callers (e.g. the offload path's `to_device` copy)
+    /// only ever hold the BF16 variant so this contract preserves their
+    /// existing return-type ergonomics without `.unwrap()` noise at every
+    /// call site.
     pub fn inner(&self) -> &Linear {
         match self {
             Self::Plain(l) => l,
             Self::WithAdapters { inner, .. } => inner,
+            Self::Quantized(_) | Self::WithAdaptersQuantized { .. } => {
+                panic!("LoraLinear::inner() called on a Quantized variant — use inner_quantized()")
+            }
         }
     }
 
-    /// Replace the adapter stack. Empty `adapters` collapses to `Plain`
-    /// so future forward calls skip the per-adapter loop entirely.
+    /// Read-only access to the underlying quantized linear, or `None`
+    /// for BF16/F32 variants.
+    pub fn inner_quantized(&self) -> Option<&QuantizedLinear> {
+        match self {
+            Self::Quantized(q) => Some(q),
+            Self::WithAdaptersQuantized { inner, .. } => Some(inner),
+            Self::Plain(_) | Self::WithAdapters { .. } => None,
+        }
+    }
+
+    /// Replace the adapter stack. Empty `adapters` collapses to the
+    /// no-adapter variant so future forward calls skip the per-adapter
+    /// loop entirely. Preserves the Plain/Quantized kind of the inner.
     pub fn set_adapters(&mut self, adapters: Vec<LinearLoraAdapter>) {
-        if adapters.is_empty() {
-            *self = Self::Plain(self.inner().clone());
+        let is_quantized = matches!(
+            self,
+            Self::Quantized(_) | Self::WithAdaptersQuantized { .. }
+        );
+        if is_quantized {
+            let inner = self.inner_quantized().unwrap().clone();
+            if adapters.is_empty() {
+                *self = Self::Quantized(inner);
+            } else {
+                *self = Self::WithAdaptersQuantized { inner, adapters };
+            }
         } else {
-            *self = Self::WithAdapters {
-                inner: self.inner().clone(),
-                adapters,
-            };
+            let inner = self.inner().clone();
+            if adapters.is_empty() {
+                *self = Self::Plain(inner);
+            } else {
+                *self = Self::WithAdapters { inner, adapters };
+            }
         }
     }
 
@@ -143,6 +190,14 @@ impl LoraLinear {
             Self::Plain(l) => Ok(<Linear as candle_core::Module>::forward(l, x)?),
             Self::WithAdapters { inner, adapters } => {
                 let mut out = <Linear as candle_core::Module>::forward(inner, x)?;
+                for adapter in adapters {
+                    out = adapter.apply(x, &out)?;
+                }
+                Ok(out)
+            }
+            Self::Quantized(q) => Ok(<QuantizedLinear as candle_core::Module>::forward(q, x)?),
+            Self::WithAdaptersQuantized { inner, adapters } => {
+                let mut out = <QuantizedLinear as candle_core::Module>::forward(inner, x)?;
                 for adapter in adapters {
                     out = adapter.apply(x, &out)?;
                 }
@@ -204,7 +259,7 @@ fn matmul_through_lora(x: &Tensor, down: &Tensor, up: &Tensor) -> Result<Tensor>
 /// All `down`/`up` tensors live on the runtime device — typically GPU —
 /// because they're tiny (rank-32 LoRAs are a few MB total per adapter)
 /// and we don't want a CPU↔GPU round-trip in the per-step path.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub(crate) struct LoraRegistry {
     by_key: HashMap<String, Vec<LinearLoraAdapter>>,
 }
