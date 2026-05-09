@@ -7,11 +7,13 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor_pair, prompt_text_key, restore_cached_tensor_pair,
-    CachedTensorPair, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
+    cfg_prompt_cache_key, clear_cache, get_or_insert_cached_tensor_pair,
+    restore_cached_tensor_pair, CachedTensorPair, CfgPromptCacheKey, LruCache,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
+    usable_free_vram_bytes,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
@@ -48,7 +50,7 @@ pub struct SD3Engine {
     is_turbo: bool,
     is_medium: bool,
     t5_variant: Option<String>,
-    prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
+    prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensorPair>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
@@ -76,15 +78,20 @@ impl SD3Engine {
     #[allow(clippy::too_many_arguments)]
     fn encode_conditioning(
         progress: &ProgressReporter,
-        prompt_cache: &Mutex<LruCache<String, CachedTensorPair>>,
+        prompt_cache: &Mutex<LruCache<CfgPromptCacheKey, CachedTensorPair>>,
         triple_encoder: &mut encoders::sd3_clip::SD3TripleEncoder,
         prompt: &str,
         negative_prompt: &str,
+        guidance: f64,
         device: &Device,
         dtype: DType,
         is_quantized: bool,
     ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
-        let cache_key = prompt_text_key(prompt);
+        // SD3 always concatenates `(cond, uncond)` for CFG, so the cache key
+        // must include the negative prompt and guidance — keying only on the
+        // positive prompt returned a stale `(cond, uncond_old)` pair when the
+        // user changed only the negative.
+        let cache_key = cfg_prompt_cache_key(prompt, negative_prompt, guidance);
         let ((context, y), cache_hit) = get_or_insert_cached_tensor_pair(
             prompt_cache,
             cache_key,
@@ -295,11 +302,15 @@ impl SD3Engine {
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // --- Decide encoder placement based on remaining VRAM ---
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-        if free > 0 {
-            self.base
-                .progress
-                .info(&format!("Free VRAM after transformer: {}", fmt_gb(free)));
+        // Log the raw driver reading; pass the reserve-adjusted budget to
+        // variant resolution below.
+        let free_raw = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        if free_raw > 0 {
+            self.base.progress.info(&format!(
+                "Free VRAM after transformer: {}",
+                fmt_gb(free_raw)
+            ));
         }
 
         // --- Load triple encoder (CLIP-L + CLIP-G + T5) ---
@@ -429,14 +440,15 @@ impl SD3Engine {
 
         // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
         let neg = req.negative_prompt.as_deref().unwrap_or("");
-        let cache_key = prompt_text_key(&req.prompt);
+        let cache_key = cfg_prompt_cache_key(&req.prompt, neg, req.guidance);
         let (context, y) = if let Some((context, y)) =
             restore_cached_tensor_pair(&self.prompt_cache, &cache_key, &device, gpu_dtype)?
         {
             self.base.progress.cache_hit("prompt conditioning");
             (context, y)
         } else {
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading drives the T5 variant selection.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting T5 encoder");
             let t5_resolve_start = Instant::now();
             let t5_preference = self.t5_variant.as_deref();
@@ -501,6 +513,7 @@ impl SD3Engine {
                 &mut triple_encoder,
                 &req.prompt,
                 neg,
+                req.guidance,
                 &device,
                 gpu_dtype,
                 is_quantized,
@@ -825,6 +838,7 @@ impl SD3Engine {
                 &mut loaded.triple_encoder,
                 &req.prompt,
                 neg,
+                req.guidance,
                 &loaded_device,
                 loaded_dtype,
                 is_quantized,
@@ -1266,6 +1280,44 @@ mod tests {
         assert!(engine.detect_is_quantized());
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    /// Regression test for the SD3 prompt-cache key bug: when the cache is
+    /// keyed only on the positive prompt, a follow-up request that changes
+    /// just the negative prompt returns the previous `(cond, uncond_old)`
+    /// pair — silently producing wrong output.
+    ///
+    /// Drives the cache through `restore_cached_tensor_pair` directly because
+    /// the surrounding `encode_conditioning` requires loaded T5/CLIP weights;
+    /// the contract under test is the keying, not the encoder forward pass.
+    #[test]
+    fn sd3_prompt_cache_distinguishes_negative_prompt_changes() {
+        use crate::cache::{cfg_prompt_cache_key, store_cached_tensor_pair};
+
+        let cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensorPair>> =
+            Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY));
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let context = candle_core::Tensor::zeros((1, 4), dtype, &device).unwrap();
+        let y = candle_core::Tensor::zeros((1, 4), dtype, &device).unwrap();
+
+        let key_a = cfg_prompt_cache_key("a cat", "blurry", 7.0);
+        store_cached_tensor_pair(&cache, key_a.clone(), &context, &y).unwrap();
+
+        // Same positive + same guidance, different negative → MUST miss.
+        let key_b = cfg_prompt_cache_key("a cat", "low quality", 7.0);
+        let restored = restore_cached_tensor_pair(&cache, &key_b, &device, dtype).unwrap();
+        assert!(
+            restored.is_none(),
+            "different negative prompt must miss the cache (was the silent-wrong-output bug)"
+        );
+
+        // Same key as the insert → MUST hit.
+        let restored = restore_cached_tensor_pair(&cache, &key_a, &device, dtype).unwrap();
+        assert!(
+            restored.is_some(),
+            "identical (pos, neg, guidance) must still hit"
+        );
     }
 
     #[test]

@@ -14,7 +14,8 @@ use crate::cache::{
 };
 use crate::device::{
     check_memory_budget, effective_device_ref, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, should_offload, should_use_gpu, CLIP_VRAM_THRESHOLD, MIN_OFFLOAD_VRAM,
+    preflight_memory_check, should_offload, should_use_gpu, usable_free_vram_bytes,
+    CLIP_VRAM_THRESHOLD, MIN_OFFLOAD_VRAM,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
@@ -1018,7 +1019,24 @@ impl FluxEngine {
     ) -> Result<()> {
         store_cached_tensor_pair(prompt_cache, prompt_text_key(prompt), t5_emb, clip_emb)
     }
+}
 
+/// Move a conditioning tensor to host RAM if it currently lives on GPU.
+///
+/// ComfyUI keeps text-encoder outputs on CPU between encode and denoise so the
+/// transformer load and LoRA merge see ~50–200 MB more headroom. mirroring
+/// that here: after `t5.encode(...)` / `clip.encode(...)` we call this, then
+/// move the tensor back to GPU only at `State::new` time inside the denoise
+/// loop. Idempotent — when the encoder already produced a CPU tensor (the
+/// GGUF / Q8 dequant path) this is a cheap pass-through with no copy.
+pub(crate) fn park_cond_to_cpu(tensor: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+    if tensor.device().is_cpu() {
+        return Ok(tensor.clone());
+    }
+    Ok(tensor.to_device(&Device::Cpu)?)
+}
+
+impl FluxEngine {
     /// Detect is_schnell from override, model name, or transformer filename.
     fn detect_is_schnell(&self) -> bool {
         self.is_schnell_override.unwrap_or_else(|| {
@@ -1180,7 +1198,9 @@ impl FluxEngine {
             let xformer_size = std::fs::metadata(&transformer_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Budget decision: subtract the OS / cuBLAS reserve so we don't
+            // promise space the next allocator call cannot deliver.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             if free > 0 && xformer_size > free {
                 bail!(
                     "transformer ({:.1} GB) exceeds available VRAM ({:.1} GB) — \
@@ -1255,14 +1275,20 @@ impl FluxEngine {
         tracing::info!("VAE loaded on GPU");
 
         // --- Decide where to place T5 and CLIP based on remaining VRAM ---
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-        if free > 0 {
+        // Log the raw driver reading (matches `nvidia-smi`) but pass the
+        // reserve-adjusted budget to variant resolution so quantized
+        // encoders aren't picked when their footprint would push past the
+        // OS / cuBLAS workspace headroom.
+        let free_raw = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        if free_raw > 0 {
             self.base.progress.info(&format!(
                 "Free VRAM after transformer+VAE: {}",
-                fmt_gb(free)
+                fmt_gb(free_raw)
             ));
             tracing::info!(
-                free_vram = free,
+                free_vram = free_raw,
+                free_vram_usable = free,
                 "free VRAM after loading transformer + VAE"
             );
         }
@@ -1320,8 +1346,9 @@ impl FluxEngine {
             .stage_done(&t5_stage_label, t5_stage.elapsed());
         tracing::info!(device = %t5_device_label, "T5 encoder loaded");
 
-        // Re-check VRAM after T5 (it may have consumed GPU memory)
-        let free_after_t5 = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // Re-check VRAM after T5 (it may have consumed GPU memory). Budget
+        // decision → reserve-adjusted reading.
+        let free_after_t5 = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let clip_on_gpu = should_use_gpu(
             device.is_cuda(),
             device.is_metal(),
@@ -1472,7 +1499,8 @@ impl FluxEngine {
             (t5_emb, clip_emb)
         } else {
             // --- Phase 1: T5 encoding ---
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading drives the variant choice.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting T5 encoder");
             let t5_resolve_start = Instant::now();
             let t5_preference = self.t5_variant.as_deref();
@@ -1528,7 +1556,11 @@ impl FluxEngine {
 
             self.base.progress.stage_start("Encoding prompt (T5)");
             let encode_t5 = Instant::now();
-            let t5_emb = t5.encode(&req.prompt, &device, gpu_dtype)?;
+            // Park to CPU immediately so the transformer load + LoRA merge
+            // window (next 200–500 ms) doesn't have to budget for ~12 MB of
+            // T5 output sitting on GPU. Idempotent on the GGUF path where T5
+            // already produces CPU tensors.
+            let t5_emb = park_cond_to_cpu(&t5.encode(&req.prompt, &device, gpu_dtype)?)?;
             self.base
                 .progress
                 .stage_done("Encoding prompt (T5)", encode_t5.elapsed());
@@ -1538,7 +1570,9 @@ impl FluxEngine {
             tracing::info!("T5 encoder dropped (sequential mode)");
 
             // --- Phase 2: CLIP encoding ---
-            let free_for_clip = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading — should_use_gpu must respect the
+            // same OS / cuBLAS workspace headroom as the T5 placement above.
+            let free_for_clip = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             let clip_on_gpu = should_use_gpu(
                 device.is_cuda(),
                 device.is_metal(),
@@ -1578,9 +1612,12 @@ impl FluxEngine {
 
             self.base.progress.stage_start("Encoding prompt (CLIP)");
             let encode_clip = Instant::now();
+            // Park to CPU for the same reason as T5 above — keeps the
+            // TE→transformer transition window from carrying GPU residency
+            // we don't need.
             let clip_emb = {
                 let mut clip = clip;
-                clip.encode(&req.prompt, &device, gpu_dtype)?
+                park_cond_to_cpu(&clip.encode(&req.prompt, &device, gpu_dtype)?)?
             };
             self.base
                 .progress
@@ -1589,6 +1626,9 @@ impl FluxEngine {
             self.base.progress.info("Freed CLIP encoder");
             tracing::info!("CLIP encoder dropped (sequential mode)");
 
+            // Cache stores via `CachedTensor::from_tensor`, which itself
+            // moves to CPU; passing CPU tensors here avoids an unnecessary
+            // round-trip on the GGUF path.
             Self::store_prompt_cache(&self.prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
             (t5_emb, clip_emb)
         };
@@ -1612,7 +1652,11 @@ impl FluxEngine {
 
         // Determine if block-level offloading should be used.
         let use_offload = if !is_quantized {
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading: `should_offload` budgets the
+            // transformer + activation headroom against this number, so
+            // promising the OS reserve here is what causes the OOMs we're
+            // trying to avoid.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             if self.offload || should_offload(xformer_size, free) {
                 if free > 0 && free < MIN_OFFLOAD_VRAM {
                     bail!(
@@ -1880,6 +1924,12 @@ impl FluxEngine {
             (img, None, None)
         };
 
+        // Migrate the parked conditioning tensors back to GPU now that the
+        // transformer load + LoRA merge phase is over. `to_device` on a
+        // tensor already on `device` is a no-op clone, so the cache-restore
+        // path (which returns GPU tensors) costs nothing here.
+        let t5_emb = t5_emb.to_device(&device)?;
+        let clip_emb = clip_emb.to_device(&device)?;
         let (t5_emb_state, clip_emb_state, img_state) = if is_quantized {
             (
                 t5_emb.to_dtype(DType::F32)?,
@@ -2194,19 +2244,28 @@ impl FluxEngine {
 
             progress.stage_start("Encoding prompt (T5)");
             let encode_t5 = Instant::now();
-            let t5_emb = loaded
-                .t5
-                .encode(&req.prompt, &loaded_device, loaded_dtype)?;
+            // Park to CPU between encode and denoise so the transformer
+            // load + LoRA merge window (next ~200–500 ms) doesn't have to
+            // budget for this tensor sitting on GPU. Idempotent on GGUF.
+            let t5_emb = park_cond_to_cpu(&loaded.t5.encode(
+                &req.prompt,
+                &loaded_device,
+                loaded_dtype,
+            )?)?;
             progress.stage_done("Encoding prompt (T5)", encode_t5.elapsed());
             tracing::info!("T5 encoding complete");
 
             progress.stage_start("Encoding prompt (CLIP)");
             let encode_clip = Instant::now();
-            let clip_emb = loaded
-                .clip
-                .encode(&req.prompt, &loaded_device, loaded_dtype)?;
+            let clip_emb = park_cond_to_cpu(&loaded.clip.encode(
+                &req.prompt,
+                &loaded_device,
+                loaded_dtype,
+            )?)?;
             progress.stage_done("Encoding prompt (CLIP)", encode_clip.elapsed());
             tracing::info!("CLIP encoding complete");
+            // CachedTensor::from_tensor already moves to CPU — passing CPU
+            // tensors here avoids the round-trip on the GGUF path.
             Self::store_prompt_cache(prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
 
             // Drop or park encoders to free GPU memory for denoising.
@@ -2430,6 +2489,12 @@ impl FluxEngine {
             (img, None)
         };
 
+        // Migrate parked conditioning tensors back to GPU now that the
+        // transformer load + LoRA merge phase is over. `to_device` on a
+        // tensor already on `loaded.device` is a no-op clone, so the
+        // cache-restore path costs nothing here.
+        let t5_emb = t5_emb.to_device(&loaded.device)?;
+        let clip_emb = clip_emb.to_device(&loaded.device)?;
         // For quantized model, state tensors must be F32
         let (t5_emb_state, clip_emb_state, img_state) = if loaded.is_quantized {
             (
@@ -2588,7 +2653,10 @@ impl FluxEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_loras, flux_runtime_dtype, flux_transformer_var_builder, LoraBypassMode};
+    use super::{
+        effective_loras, flux_runtime_dtype, flux_transformer_var_builder, park_cond_to_cpu,
+        LoraBypassMode,
+    };
     use candle_core::{DType, Device, Result, Tensor};
     use candle_nn::VarBuilder;
     use mold_core::{GenerateRequest, LoraWeight, OutputFormat};
@@ -2729,6 +2797,27 @@ mod tests {
             None,
         );
         assert!(effective_loras(&req).is_empty());
+    }
+
+    /// Idempotency: a tensor already on CPU comes back on CPU and equals the
+    /// input — `park_cond_to_cpu` must not pay for a redundant copy on the
+    /// GGUF / Q8 path where T5 already produces CPU tensors.
+    #[test]
+    fn park_cond_to_cpu_is_idempotent_for_cpu_tensors() {
+        let cpu_tensor = Tensor::zeros((2, 4), DType::F32, &Device::Cpu).unwrap();
+        let parked = park_cond_to_cpu(&cpu_tensor).unwrap();
+        assert!(parked.device().is_cpu(), "CPU input must stay on CPU");
+        assert_eq!(parked.shape(), cpu_tensor.shape());
+    }
+
+    /// `park_cond_to_cpu` output is on CPU regardless of input device.
+    #[test]
+    fn park_cond_to_cpu_returns_cpu_tensor_for_any_input() {
+        let input = Tensor::ones((1, 3), DType::F32, &Device::Cpu).unwrap();
+        let parked = park_cond_to_cpu(&input).unwrap();
+        assert!(parked.device().is_cpu(), "output must be on CPU");
+        assert_eq!(parked.shape(), input.shape());
+        assert_eq!(parked.dtype(), input.dtype());
     }
 
     #[test]

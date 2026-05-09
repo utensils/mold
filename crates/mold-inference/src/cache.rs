@@ -14,6 +14,22 @@ pub(crate) struct PromptCacheKey {
     guidance_bits: u64,
 }
 
+/// Cache key for CFG-based pipelines that cache the **concatenated**
+/// `(uncond, cond)` conditioning tensor produced from `(prompt, negative_prompt)`.
+///
+/// Keying only on the positive prompt is a silent-wrong-output bug: changing
+/// just the negative prompt returns the cached tensor built with the *previous*
+/// negative, which the denoise loop then uses as the "unconditional" branch.
+/// The result is plausible but not what the user asked for. This key fixes that
+/// by including the negative prompt and the guidance scale that decides whether
+/// the uncond branch is computed at all.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct CfgPromptCacheKey {
+    prompt: String,
+    negative_prompt: String,
+    guidance_bits: u64,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct ImageSizeCacheKey {
     image_hash: u64,
@@ -40,6 +56,18 @@ pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
 pub(crate) fn prompt_cache_key(prompt: &str, guidance: f64) -> PromptCacheKey {
     PromptCacheKey {
         prompt: prompt.to_string(),
+        guidance_bits: guidance.to_bits(),
+    }
+}
+
+pub(crate) fn cfg_prompt_cache_key(
+    prompt: &str,
+    negative_prompt: &str,
+    guidance: f64,
+) -> CfgPromptCacheKey {
+    CfgPromptCacheKey {
+        prompt: prompt.to_string(),
+        negative_prompt: negative_prompt.to_string(),
         guidance_bits: guidance.to_bits(),
     }
 }
@@ -330,6 +358,33 @@ mod tests {
             prompt_cache_key("hello", 1.0),
             prompt_cache_key("hello", 7.5)
         );
+    }
+
+    #[test]
+    fn cfg_prompt_cache_key_distinguishes_negative_prompt() {
+        // Same positive prompt + same guidance + different negative prompt must
+        // produce a different cache key — otherwise the (uncond, cond) tensor
+        // pair built with the previous negative would silently override the new
+        // user intent.
+        let a = cfg_prompt_cache_key("a cat", "blurry", 7.0);
+        let b = cfg_prompt_cache_key("a cat", "low quality", 7.0);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn cfg_prompt_cache_key_distinguishes_guidance() {
+        // Guidance flips CFG on/off (cfg_active(1.0) == false), so it changes
+        // whether the cached tensor is `(uncond, cond)` or just `cond`.
+        let a = cfg_prompt_cache_key("a cat", "blurry", 1.0);
+        let b = cfg_prompt_cache_key("a cat", "blurry", 7.0);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn cfg_prompt_cache_key_stable_for_identical_inputs() {
+        let a = cfg_prompt_cache_key("a cat", "blurry", 7.0);
+        let b = cfg_prompt_cache_key("a cat", "blurry", 7.0);
+        assert_eq!(a, b);
     }
 
     #[test]

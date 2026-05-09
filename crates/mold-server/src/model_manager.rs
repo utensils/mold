@@ -108,13 +108,14 @@ pub(crate) fn preflight_memory_guard(
         // reports `free` significantly below `total` because cuBLAS / cuDNN /
         // kernel modules from a previous load are still squatting on
         // workspace allocations. Reclaim the primary context — we have
-        // nothing live to lose — and re-query before deciding.
+        // nothing live to lose — and re-query before deciding. After reclaim,
+        // re-query through `usable_free_vram_bytes` so the OS reserve
+        // (T2-B) is respected on the post-reclaim reading too.
         if let (Some(free), Some(total)) = (
             mold_inference::device::free_vram_bytes(gpu_ordinal),
             mold_inference::device::total_vram_bytes(gpu_ordinal),
         ) {
             const GHOST_VRAM_THRESHOLD: u64 = 1_500_000_000; // 1.5 GB
-            let mut effective_free = free;
             if total.saturating_sub(free) > GHOST_VRAM_THRESHOLD {
                 tracing::info!(
                     gpu = gpu_ordinal,
@@ -123,9 +124,9 @@ pub(crate) fn preflight_memory_guard(
                     "no active model on this GPU but VRAM is held — reclaiming primary context",
                 );
                 mold_inference::device::reclaim_gpu_memory(gpu_ordinal);
-                effective_free =
-                    mold_inference::device::free_vram_bytes(gpu_ordinal).unwrap_or(free);
             }
+            let effective_free = mold_inference::device::usable_free_vram_bytes(gpu_ordinal)
+                .unwrap_or_else(|| free.saturating_sub(mold_inference::device::reserved_vram_bytes()));
             return preflight_memory_guard_with_available(
                 model_name,
                 paths,
@@ -133,7 +134,9 @@ pub(crate) fn preflight_memory_guard(
                 effective_free,
             );
         }
-        if let Some(free) = mold_inference::device::free_vram_bytes(gpu_ordinal) {
+        // Fallback if total_vram is unavailable: still go through the
+        // reserve-adjusted reading.
+        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
             return preflight_memory_guard_with_available(
                 model_name,
                 paths,

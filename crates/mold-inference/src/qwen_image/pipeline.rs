@@ -32,7 +32,7 @@ use crate::cache::{
 };
 use crate::device::{
     effective_device_ref, fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, qwen2_vram_threshold, should_use_gpu,
+    preflight_memory_check, qwen2_vram_threshold, should_use_gpu, usable_free_vram_bytes,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -908,7 +908,8 @@ impl QwenImageEngine {
             let transformer_size = std::fs::metadata(&self.base.paths.transformer)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading: split-CFG is a budget decision.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             let split_cfg_for_memory = device.is_cuda()
                 && (self.offload
                     || Self::should_split_cfg_quantized_cuda(
@@ -952,7 +953,8 @@ impl QwenImageEngine {
                 .filter_map(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .sum();
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading: should_offload budgets against this.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             let use_offload = self.offload || crate::device::should_offload(mem_size, free);
 
             if is_fp8 {
@@ -1374,14 +1376,17 @@ impl QwenImageEngine {
             .stage_done(&xformer_label, xformer_start.elapsed());
         tracing::info!("Qwen-Image transformer loaded");
 
-        // Decide device placement for VAE and text encoder
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // Decide device placement for VAE and text encoder.
+        // Log raw, budget against the reserve-adjusted reading.
+        let free_raw = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let is_cuda = device.is_cuda();
         let is_metal = device.is_metal();
-        if free > 0 {
-            self.base
-                .progress
-                .info(&format!("Free VRAM after transformer: {}", fmt_gb(free)));
+        if free_raw > 0 {
+            self.base.progress.info(&format!(
+                "Free VRAM after transformer: {}",
+                fmt_gb(free_raw)
+            ));
         }
 
         let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_DECODE_VRAM_THRESHOLD);
@@ -1528,7 +1533,9 @@ impl QwenImageEngine {
 
         let width = req.width as usize;
         let height = req.height as usize;
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // Reserve-adjusted reading: text-encoder source / placement is a
+        // budget decision.
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let resolved_text_encoder =
             self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Sequential)?;
         let (plan, _device_label) =
@@ -1763,7 +1770,8 @@ impl QwenImageEngine {
         let (prepared_img2img_latents, inpaint_ctx) = if let Some(ref source_bytes) =
             req.source_image
         {
-            let free_for_encode = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading drives the encode-device decision.
+            let free_for_encode = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             let encode_on_gpu = should_use_gpu(
                 device.is_cuda(),
                 device.is_metal(),
@@ -1991,7 +1999,8 @@ impl QwenImageEngine {
             self.base.progress.info(&status);
         }
 
-        let free_for_vae = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // Reserve-adjusted reading: VAE placement is a budget decision.
+        let free_for_vae = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let vae_on_gpu = should_use_gpu(
             device.is_cuda(),
             device.is_metal(),

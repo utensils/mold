@@ -30,7 +30,7 @@ use crate::cache::{
 };
 use crate::device::{
     check_memory_budget, effective_device_ref, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check,
+    preflight_memory_check, usable_free_vram_bytes,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -519,11 +519,14 @@ impl Flux2Engine {
         tracing::info!("VAE loaded on GPU");
 
         // --- Resolve and load Qwen3 text encoder ---
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-        if free > 0 {
+        // Log the raw reading (matches `nvidia-smi`); budget the variant
+        // selection against the reserve-adjusted value.
+        let free_raw = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        if free_raw > 0 {
             self.base.progress.info(&format!(
                 "Free VRAM after transformer+VAE: {}",
-                fmt_gb(free)
+                fmt_gb(free_raw)
             ));
         }
 
@@ -640,7 +643,8 @@ impl Flux2Engine {
             self.base.progress.cache_hit("prompt conditioning");
             tensor
         } else {
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading drives the Qwen3 variant selection.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting Qwen3 encoder");
             let resolve_start = Instant::now();
             let qwen3_size = self.qwen3_size();
