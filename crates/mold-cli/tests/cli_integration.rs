@@ -222,6 +222,26 @@ fn stats_with_populated_model() {
         .stdout(predicate::str::contains("1 model"));
 }
 
+/// Regression: hidden companion manifests (e.g. `flux2-te`) share text
+/// encoder + tokenizer files with their parent FLUX.2 models. Populating a
+/// parent like `flux2-klein:q4` makes those shared paths exist on disk, so
+/// `manifest_model_is_downloaded` returns true for `flux2-te` too. Stats
+/// must filter to `visible_manifests()` so the companion isn't double-
+/// counted as a separately-installed model.
+#[test]
+fn stats_does_not_double_count_hidden_companions() {
+    let env = TestEnv::new();
+    env.populate_manifest_model("flux2-klein:q4");
+
+    env.cmd()
+        .arg("stats")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("flux2-klein:q4"))
+        .stdout(predicate::str::contains("(1 models)").or(predicate::str::contains("(1 model)")))
+        .stdout(predicate::str::contains("flux2-te").not());
+}
+
 // ── mold list ─────────────────────────────────────────────────────────────
 
 #[test]
