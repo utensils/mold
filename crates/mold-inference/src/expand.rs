@@ -156,7 +156,14 @@ impl LocalExpander {
                 // either way. Pure CUDA allocation doesn't touch RAM and is
                 // already bounded by the VRAM threshold check above.
                 if dev.is_cpu() || dev.is_metal() {
-                    preflight_memory_check("Expand LLM", model_size)?;
+                    // Expand LLMs generate ≤ 512 tokens; the existing
+                    // `EXPAND_ACTIVATION_HEADROOM` (2 GB) covers KV cache +
+                    // residuals on the worst-case prompt.
+                    preflight_memory_check(
+                        "Expand LLM",
+                        model_size,
+                        crate::device::EXPAND_ACTIVATION_HEADROOM,
+                    )?;
                 }
                 dev
             }
@@ -172,7 +179,11 @@ impl LocalExpander {
                 }
                 // Final guard: if system RAM can't hold the model, fail fast
                 // with a clear message rather than OOM mid-load.
-                preflight_memory_check("Expand LLM", model_size)?;
+                preflight_memory_check(
+                    "Expand LLM",
+                    model_size,
+                    crate::device::EXPAND_ACTIVATION_HEADROOM,
+                )?;
                 Device::Cpu
             }
         };

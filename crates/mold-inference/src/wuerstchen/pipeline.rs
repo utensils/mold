@@ -1042,7 +1042,14 @@ impl WuerstchenEngine {
                 let prior_size = std::fs::metadata(&self.base.paths.transformer)
                     .map(|m| m.len())
                     .unwrap_or(0);
-                preflight_memory_check("Prior (Stage C)", prior_size)?;
+                let prior_activation_budget = crate::device::activation_bytes(
+                    req.width,
+                    req.height,
+                    if req.guidance > 1.0 { 2 } else { 1 },
+                    crate::device::dtype_bytes(dtype),
+                    crate::device::ActivationFamily::Wuerstchen,
+                );
+                preflight_memory_check("Prior (Stage C)", prior_size, prior_activation_budget)?;
                 if let Some(status) = memory_status_string() {
                     self.base.progress.info(&status);
                 }
@@ -1116,7 +1123,14 @@ impl WuerstchenEngine {
         let decoder_size = std::fs::metadata(&decoder_path)
             .map(|m| m.len())
             .unwrap_or(0);
-        preflight_memory_check("Decoder (Stage B)", decoder_size)?;
+        let decoder_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            if req.guidance > 1.0 { 2 } else { 1 },
+            crate::device::dtype_bytes(DType::F32),
+            crate::device::ActivationFamily::Wuerstchen,
+        );
+        preflight_memory_check("Decoder (Stage B)", decoder_size, decoder_activation_budget)?;
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }

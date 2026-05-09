@@ -555,7 +555,14 @@ impl ZImageEngine {
                 .filter_map(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .sum();
-            preflight_memory_check("Qwen3 text encoder", te_size)?;
+            let te_activation_budget = crate::device::activation_bytes(
+                req.width,
+                req.height,
+                1,
+                crate::device::dtype_bytes(te_dtype),
+                crate::device::ActivationFamily::SmallTransformer,
+            );
+            preflight_memory_check("Qwen3 text encoder", te_size, te_activation_budget)?;
 
             if let Some(status) = memory_status_string() {
                 self.base.progress.info(&status);
@@ -702,7 +709,18 @@ impl ZImageEngine {
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum();
-        preflight_memory_check("Z-Image transformer", xformer_size)?;
+        let xformer_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            1,
+            crate::device::dtype_bytes(dtype),
+            crate::device::ActivationFamily::ZImageDit,
+        );
+        preflight_memory_check(
+            "Z-Image transformer",
+            xformer_size,
+            xformer_activation_budget,
+        )?;
 
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);

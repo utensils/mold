@@ -836,7 +836,10 @@ impl FluxEngine {
     /// rebuilds. Disabling forces a sub-second `B@A·scale` recompute on the
     /// next rebuild, which is cheap on GPU.
     fn lora_delta_cache_handle(&self) -> Option<Arc<Mutex<super::lora::LoraDeltaCache>>> {
-        if std::env::var("MOLD_FLUX_DELTA_CACHE").map(|v| v == "0").unwrap_or(false) {
+        if std::env::var("MOLD_FLUX_DELTA_CACHE")
+            .map(|v| v == "0")
+            .unwrap_or(false)
+        {
             None
         } else {
             Some(self.lora_delta_cache.clone())
@@ -1368,7 +1371,16 @@ impl FluxEngine {
             let t5_size = std::fs::metadata(&resolved_t5_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            preflight_memory_check("T5 encoder", t5_size)?;
+            // T5 activations: ~256 MB workspace (floor) — small relative to
+            // the 9 GB encoder weights and only resident during encoding.
+            let t5_activation_budget = crate::device::activation_bytes(
+                req.width,
+                req.height,
+                1,
+                crate::device::dtype_bytes(t5_dtype),
+                crate::device::ActivationFamily::SmallTransformer,
+            );
+            preflight_memory_check("T5 encoder", t5_size, t5_activation_budget)?;
             if let Some(status) = memory_status_string() {
                 self.base.progress.info(&status);
             }
@@ -1474,10 +1486,22 @@ impl FluxEngine {
         // re-quantized back to the original GGML dtype. Non-LoRA tensors are
         // left quantized and untouched.
 
+        // Per-request activation budget — replaces the fixed 3 GB
+        // INFERENCE_HEADROOM. Scales with resolution and dtype, so a 768²
+        // generation isn't false-offloaded on a 16 GB card while a 2048²
+        // generation isn't under-budgeted.
+        let activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            1, // FLUX is guidance-distilled — single forward per step.
+            crate::device::dtype_bytes(gpu_dtype),
+            crate::device::ActivationFamily::FluxDit,
+        );
+
         // Determine if block-level offloading should be used.
         let use_offload = if !is_quantized {
             let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-            if self.offload || should_offload(xformer_size, free) {
+            if self.offload || should_offload(xformer_size, free, activation_budget) {
                 if free > 0 && free < MIN_OFFLOAD_VRAM {
                     bail!(
                         "GPU only has {:.1} GB free — at least {:.1} GB is required \
@@ -1510,7 +1534,11 @@ impl FluxEngine {
         // Even when offloading, blocks must still fit in system RAM on unified-memory
         // (Metal) hosts — preflight catches machines with insufficient total memory.
         if !use_offload || device.is_metal() {
-            preflight_memory_check("FLUX transformer + VAE", xformer_size + vae_file_size)?;
+            preflight_memory_check(
+                "FLUX transformer + VAE",
+                xformer_size + vae_file_size,
+                activation_budget,
+            )?;
         }
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
@@ -2278,27 +2306,40 @@ impl FluxEngine {
             .map(|v| v == "1")
             .unwrap_or(false);
 
-        // Even with KEEP_TRANSFORMER=1 the keep is conditional: VAE decode at
-        // 1024² for FLUX needs a large contiguous conv2d allocation (~2–3 GB
-        // peak). When the kept transformer + LoRA-merged tensors leave too
-        // little headroom (observed at ~3 GB free with a 2-LoRA stack on a
-        // 24 GB card), the VAE alloc OOMs even though the resident transformer
-        // size is identical to the no-LoRA case. The next request rebuilds —
-        // that's the trade-off for not OOMing here.
-        const VAE_DECODE_HEADROOM_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
+        // Even with KEEP_TRANSFORMER=1 the keep is conditional: VAE decode
+        // needs a large contiguous conv2d allocation (~2–3 GB peak at 1024²,
+        // ~10–12 GB at 2048²). When the kept transformer + LoRA-merged
+        // tensors leave too little headroom (observed at ~3 GB free with a
+        // 2-LoRA stack on a 24 GB card), the VAE alloc OOMs even though the
+        // resident transformer size is identical to the no-LoRA case. The
+        // next request rebuilds — that's the trade-off for not OOMing here.
+        //
+        // The headroom budget scales with output resolution via
+        // [`activation_bytes`] instead of a fixed 5 GB magic — at 1024² the
+        // budget is the FluxDit floor (~256 MB, the previous 5 GB was wildly
+        // over-conservative on a busy 24 GB card with KEEP_TRANSFORMER=1)
+        // while at 2048² it grows past 1 GB, catching what fixed 5 GB only
+        // approximated.
+        let vae_headroom_bytes = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            1,
+            crate::device::dtype_bytes(loaded.dtype),
+            crate::device::ActivationFamily::FluxDit,
+        );
         let free_before_vae = crate::device::free_vram_bytes(gpu_ordinal).unwrap_or(0);
-        let force_drop_for_headroom = keep_transformer_env
-            && free_before_vae > 0
-            && free_before_vae < VAE_DECODE_HEADROOM_BYTES;
+        let force_drop_for_headroom =
+            keep_transformer_env && free_before_vae > 0 && free_before_vae < vae_headroom_bytes;
 
         if !keep_transformer_env || force_drop_for_headroom {
             loaded.flux_model = None;
             if force_drop_for_headroom {
                 tracing::info!(
                     free_mb = free_before_vae / 1024 / 1024,
-                    headroom_mb = VAE_DECODE_HEADROOM_BYTES / 1024 / 1024,
-                    "Transformer force-dropped before VAE decode (free VRAM below headroom; \
-                     overrides MOLD_FLUX_KEEP_TRANSFORMER=1 for this request)"
+                    headroom_mb = vae_headroom_bytes / 1024 / 1024,
+                    "Transformer force-dropped before VAE decode (free VRAM below \
+                     resolution-scaled headroom; overrides MOLD_FLUX_KEEP_TRANSFORMER=1 \
+                     for this request)"
                 );
             } else {
                 tracing::info!("Transformer dropped to free VRAM for VAE decode");

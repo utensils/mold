@@ -72,7 +72,10 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
 
     // Ensure model is loaded on this GPU.
     let config_snapshot = job.config.blocking_read().clone();
-    if let Err(e) = ensure_model_ready_sync(worker, &model_name, &config_snapshot) {
+    let activation_hint =
+        crate::model_manager::activation_hint_for_request_sync(&config_snapshot, &job.request);
+    if let Err(e) = ensure_model_ready_sync(worker, &model_name, &config_snapshot, activation_hint)
+    {
         tracing::error!(gpu = ordinal, model = %model_name, "Failed to load model: {e}");
         let err_msg = format!("model load error: {}", clean_error_message(&e));
         if let Some(ref tx) = job.progress_tx {
@@ -364,6 +367,7 @@ fn preflight_memory_guard_with_eviction(
     model_name: &str,
     paths: &ModelPaths,
     ordinal: usize,
+    hint: Option<crate::model_manager::ActivationHint>,
 ) -> Result<(), crate::routes::ApiError> {
     loop {
         let active_vram = cache_lock
@@ -375,6 +379,7 @@ fn preflight_memory_guard_with_eviction(
             paths,
             active_vram,
             ordinal,
+            hint,
         ) {
             Ok(()) => return Ok(()),
             Err(e) => e,
@@ -417,10 +422,14 @@ fn preflight_memory_guard_with_eviction(
 ///
 /// Holds `worker.model_load_lock` implicitly via the caller for generation
 /// jobs; the admin API path acquires it explicitly via `load_blocking`.
+///
+/// `hint` carries the per-request activation budget (resolution + family).
+/// Pass `None` for admin / cache-prewarm loads with no resolution context.
 pub fn ensure_model_ready_sync(
     worker: &GpuWorker,
     model_name: &str,
     config: &Config,
+    hint: Option<crate::model_manager::ActivationHint>,
 ) -> anyhow::Result<()> {
     let cache = worker.model_cache.lock().unwrap();
 
@@ -458,6 +467,7 @@ pub fn ensure_model_ready_sync(
                 model_name,
                 paths,
                 worker.gpu.ordinal,
+                hint,
             )
             .map_err(|e| anyhow::anyhow!(e.error))?;
         }
@@ -511,6 +521,7 @@ pub fn ensure_model_ready_sync(
         model_name,
         &paths,
         worker.gpu.ordinal,
+        hint,
     )
     .map_err(|e| anyhow::anyhow!(e.error))?;
 
@@ -557,10 +568,12 @@ pub fn ensure_model_ready_sync(
 /// Synchronously load a model on this GPU worker for the admin API.
 ///
 /// Acquires the per-GPU load lock, then delegates to `ensure_model_ready_sync`.
-/// Intended to be called inside `tokio::task::spawn_blocking`.
+/// Intended to be called inside `tokio::task::spawn_blocking`. Uses the
+/// size-only peak (no resolution context) for the preflight — admin loads
+/// don't carry a request shape.
 pub fn load_blocking(worker: &GpuWorker, model_name: &str, config: &Config) -> anyhow::Result<()> {
     let _lock = worker.model_load_lock.lock().unwrap();
-    ensure_model_ready_sync(worker, model_name, config)
+    ensure_model_ready_sync(worker, model_name, config, None)
 }
 
 /// Synchronously unload the currently active model on this GPU worker.
@@ -626,6 +639,7 @@ pub fn run_chain_blocking<T, E>(
     worker: &GpuWorker,
     model_name: &str,
     config: &mold_core::Config,
+    hint: Option<crate::model_manager::ActivationHint>,
     with_engine: impl FnOnce(&mut dyn mold_inference::InferenceEngine) -> Result<T, E>,
 ) -> ChainPrep<T, E> {
     // Bind the thread to this worker's ordinal for the duration of the call.
@@ -650,7 +664,7 @@ pub fn run_chain_blocking<T, E>(
 
     // Ensure the model is GPU-resident on this worker. Handles load-from-disk,
     // parked-reload, and the reclaim-on-swap path using worker.gpu.ordinal.
-    ensure_model_ready_sync(worker, model_name, config)?;
+    ensure_model_ready_sync(worker, model_name, config, hint)?;
 
     // Take the engine out of the worker's cache so the closure can mutate it.
     let cached = {
@@ -800,7 +814,7 @@ mod tests {
         let a = active.clone();
         let m = max_concurrent.clone();
         let t_a = std::thread::spawn(move || {
-            run_chain_blocking(&worker_a, "fake-model", &config_a, instrumented(a, m))
+            run_chain_blocking(&worker_a, "fake-model", &config_a, None, instrumented(a, m))
                 .expect("prep ok")
                 .expect("closure ok");
         });
@@ -810,7 +824,7 @@ mod tests {
         let a = active.clone();
         let m = max_concurrent.clone();
         let t_b = std::thread::spawn(move || {
-            run_chain_blocking(&worker_b, "fake-model", &config_b, instrumented(a, m))
+            run_chain_blocking(&worker_b, "fake-model", &config_b, None, instrumented(a, m))
                 .expect("prep ok")
                 .expect("closure ok");
         });

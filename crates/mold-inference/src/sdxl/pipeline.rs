@@ -1054,7 +1054,16 @@ impl SDXLEngine {
         let unet_size = std::fs::metadata(&self.base.paths.transformer)
             .map(|m| m.len())
             .unwrap_or(0);
-        preflight_memory_check("UNet", unet_size)?;
+        // SDXL runs CFG by default → batch=2 unless guidance ≈ 1 (LCM/Turbo).
+        let unet_batch = if req.guidance > 1.0 { 2 } else { 1 };
+        let unet_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            unet_batch,
+            crate::device::dtype_bytes(dtype),
+            crate::device::ActivationFamily::SdxlUnet,
+        );
+        preflight_memory_check("UNet", unet_size, unet_activation_budget)?;
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }
