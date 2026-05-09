@@ -138,9 +138,11 @@ Environment variables take precedence over config file values.
 | `MOLD_OFFLOAD`            | —             | `1` to force CPU↔GPU block streaming                                     |
 | `MOLD_OFFLOAD_PREFETCH`   | `on`          | FLUX offload async H2D prefetch stream — set `off` to revert to synchronous |
 | `MOLD_PINNED_VRAM_MAX_GB` | RAM × 0.5     | Cap on pinned host memory used by the FLUX offload path                  |
+| `MOLD_RESERVE_VRAM_MB`    | 400 (Linux) / 600 (Windows) / 0 (macOS) | OS / cuBLAS workspace reserve subtracted from `free_vram_bytes` before any budget decision. Set explicitly to override the platform default; `0` disables |
 | `MOLD_KEEP_TE_RAM`        | —             | `1` to park text encoders on CPU between requests. FP16/BF16 only (GGUF falls through to drop+reload). Disabled on Metal (unified memory). |
-| `MOLD_LORA_BYPASS`        | `auto`        | FLUX LoRA application path on the offload route: `auto` enables bypass when LoRAs are present, `on` always bypasses, `off` uses legacy merge-into-base |
+| `MOLD_LORA_BYPASS`        | `auto`        | FLUX LoRA application path: `auto` enables bypass-mode when LoRAs are present (covers offload AND the GGUF/quantized path via `quantized_transformer.rs`), `on` always bypasses, `off` reverts to legacy merge-into-base / `gguf_lora_var_builder` |
 | `MOLD_VAE_TILED`          | `auto`        | Tiled VAE decode for FLUX/FLUX2/SDXL/SD3: `auto` retries with tiling on OOM, `force` always tiles, `off` disables                |
+| `MOLD_LONG_PROMPTS`       | —             | `1` enables ComfyUI-style chunked CLIP encoding (75-token windows, BOS/EOS framing, pooled outputs averaged into the FLUX `vector_in` 768-dim conditioning). Default off — pre-Tier-2 hard truncation at 77 preserved. |
 | `MOLD_ATTN`               | `math`        | Attention backend: `math` (default) or `flash` (needs `--features cuda,flash-attn` AND `RUSTFLAGS='--cfg mold_flash_attn_real'`; falls back to math with a one-shot warning otherwise) |
 | `MOLD_EMBED_METADATA`     | `1`           | `0` to disable PNG metadata                                              |
 | `MOLD_PREVIEW`            | —             | `1` to display images inline in terminal                                 |

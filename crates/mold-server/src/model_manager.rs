@@ -213,6 +213,7 @@ pub(crate) fn preflight_memory_guard(
                 paths,
                 active_vram_bytes,
                 effective_free,
+                hint,
             );
         }
         // Fallback if total_vram is unavailable: still go through the
