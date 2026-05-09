@@ -702,12 +702,13 @@ fn flux_gguf_lora_var_builder(
     lora::gguf_lora_var_builder(transformer_path, &specs, device, progress, delta_cache)
 }
 
-/// Three-state opt-in for bypass-mode LoRA. `auto` uses bypass when the
-/// inference path benefits most (today: `OffloadedFluxTransformer`,
-/// where bypass avoids the 24 GB CPU-resident merge that the legacy
-/// `flux_lora_var_builder` does on top of mmap). `on` forces bypass
-/// where supported; `off` falls back to the merge paths so users can
-/// regression-check a build.
+/// Three-state opt-in for bypass-mode LoRA. `auto` enables bypass on
+/// every supported path: the offload transformer (avoids the ~24 GB
+/// CPU-resident BF16 merge) and the GGUF transformer (avoids the
+/// minutes-long, ~95 GB peak dequant→merge→requant cycle on Q8 with
+/// a stack of LoRAs). `on` forces bypass; `off` reverts to the
+/// legacy `flux_lora_var_builder` / `gguf_lora_var_builder` so users
+/// can regression-check a build.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LoraBypassMode {
     Auto,
@@ -731,15 +732,17 @@ impl LoraBypassMode {
     }
 }
 
-/// Build a [`super::lora_bypass::LoraRegistry`] for the offload path.
+/// Build a [`super::lora_bypass::LoraRegistry`] for any bypass-capable
+/// path (offload or GGUF/quantized).
 ///
 /// Adapters are placed on `device` at `dtype` (typically GPU + BF16) so
-/// each forward step's `block.to_device(...)` call only has to copy the
-/// tiny `Linear` weights — adapters never round-trip CPU↔GPU.
+/// the per-step path never round-trips them CPU↔GPU. Both paths use the
+/// same registry shape: keys are FLUX candle tensor names, values are
+/// the bypass adapters that fire each time that Linear runs forward.
 ///
-/// Returns `Ok(None)` when `loras` is empty so the offload path can
-/// keep its no-LoRA hot path.
-fn build_offload_lora_registry(
+/// Returns `Ok(None)` when `loras` is empty so callers keep their
+/// no-LoRA hot path.
+fn build_lora_registry(
     loras: &[mold_core::LoraWeight],
     cfg: &flux::model::Config,
     device: &Device,
@@ -1686,7 +1689,7 @@ impl FluxEngine {
                 &self.base.progress,
             )?;
             if use_offload_bypass {
-                let registry = build_offload_lora_registry(
+                let registry = build_lora_registry(
                     &active_loras,
                     &flux_cfg,
                     &device,
@@ -1697,15 +1700,39 @@ impl FluxEngine {
             }
             FluxTransformer::Offloaded(offloaded)
         } else if is_quantized && has_lora {
-            // GGUF + LoRA: dequantize LoRA-affected layers, keep rest quantized
-            let vb = flux_gguf_lora_var_builder(
-                &transformer_path,
-                &active_loras,
-                &device,
-                &self.base.progress,
-                self.lora_delta_cache_handle(),
-            )?;
-            FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+            // GGUF + LoRA: bypass-mode keeps base weights untouched and
+            // applies LoRA deltas at forward time. Saves the
+            // dequant→merge→requant cycle that previously cost minutes
+            // and ~95 GB CPU peak per LoRA load on Q8.
+            let bypass_quantized = bypass_mode != LoraBypassMode::Off;
+            if bypass_quantized {
+                let registry = build_lora_registry(
+                    &active_loras,
+                    &flux_cfg,
+                    &device,
+                    gpu_dtype,
+                    &self.base.progress,
+                )?;
+                let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
+                FluxTransformer::QuantizedBypass(
+                    crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
+                        &flux_cfg,
+                        vb,
+                        registry.as_ref(),
+                        &self.base.progress,
+                    )?,
+                )
+            } else {
+                // Legacy fallback: dequantize LoRA-affected layers, keep rest quantized.
+                let vb = flux_gguf_lora_var_builder(
+                    &transformer_path,
+                    &active_loras,
+                    &device,
+                    &self.base.progress,
+                    self.lora_delta_cache_handle(),
+                )?;
+                FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+            }
         } else if is_quantized {
             let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
@@ -2069,16 +2096,44 @@ impl FluxEngine {
                 } else {
                     flux::model::Config::dev()
                 };
+                let bypass_mode = LoraBypassMode::from_env();
                 loaded.flux_model = Some(if loaded.is_quantized && has_lora {
-                    // Quantized + LoRA stack: merge all deltas during construction
-                    let vb = flux_gguf_lora_var_builder(
-                        &transformer_path,
-                        &active_loras,
-                        &loaded.device,
-                        progress,
-                        cache_handle.clone(),
-                    )?;
-                    FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+                    // Quantized + LoRA stack. Bypass-mode (default `auto`)
+                    // installs the LoRA at forward time on top of the
+                    // quantized base — no dequant→merge→requant. Legacy
+                    // fallback (MOLD_LORA_BYPASS=off) goes through
+                    // `gguf_lora_var_builder`.
+                    let bypass_quantized = bypass_mode != LoraBypassMode::Off;
+                    if bypass_quantized {
+                        let registry = build_lora_registry(
+                            &active_loras,
+                            &flux_cfg,
+                            &loaded.device,
+                            loaded.dtype,
+                            progress,
+                        )?;
+                        let vb = quantized_var_builder::VarBuilder::from_gguf(
+                            &transformer_path,
+                            &loaded.device,
+                        )?;
+                        FluxTransformer::QuantizedBypass(
+                            crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
+                                &flux_cfg,
+                                vb,
+                                registry.as_ref(),
+                                progress,
+                            )?,
+                        )
+                    } else {
+                        let vb = flux_gguf_lora_var_builder(
+                            &transformer_path,
+                            &active_loras,
+                            &loaded.device,
+                            progress,
+                            cache_handle.clone(),
+                        )?;
+                        FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+                    }
                 } else if loaded.is_quantized {
                     let vb = quantized_var_builder::VarBuilder::from_gguf(
                         &transformer_path,
