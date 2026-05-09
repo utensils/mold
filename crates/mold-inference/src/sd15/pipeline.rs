@@ -8,9 +8,10 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor, image_size_cache_key, latent_size_cache_key,
-    prompt_cache_key, restore_cached_tensor, CachedTensor, ImageSizeCacheKey, LatentSizeCacheKey,
-    LruCache, PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
+    cfg_prompt_cache_key, clear_cache, get_or_insert_cached_tensor, image_size_cache_key,
+    latent_size_cache_key, restore_cached_tensor, CachedTensor, CfgPromptCacheKey,
+    ImageSizeCacheKey, LatentSizeCacheKey, LruCache, DEFAULT_IMAGE_CACHE_CAPACITY,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::cfg_plus_ddim::DdimAlphaSchedule;
 use crate::controlnet::ControlNetModel;
@@ -54,7 +55,7 @@ struct LoadedSD15 {
 pub struct SD15Engine {
     base: EngineBase<LoadedSD15>,
     scheduler: Scheduler,
-    prompt_cache: Mutex<LruCache<PromptCacheKey, CachedTensor>>,
+    prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensor>>,
     source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
     control_tensor_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
@@ -785,7 +786,12 @@ impl SD15Engine {
         dtype: DType,
         guidance: f64,
     ) -> Result<Tensor> {
-        let cache_key = prompt_cache_key(prompt, guidance);
+        // SD1.5 caches the **concatenated** `(uncond, cond)` tensor when CFG is
+        // active, so the cache key must include the negative prompt and the
+        // guidance scale. Keying on the positive prompt + guidance alone
+        // returned a stale uncond branch when the user changed only the
+        // negative prompt — silent wrong output. Mirrors the SD3 / SDXL fix.
+        let cache_key = cfg_prompt_cache_key(prompt, negative_prompt, guidance);
         let (text_embeddings, cache_hit) =
             get_or_insert_cached_tensor(&self.prompt_cache, cache_key, device, dtype, || {
                 let use_cfg = cfg_active(guidance);
@@ -968,7 +974,7 @@ impl SD15Engine {
 
         // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
         let neg = req.negative_prompt.as_deref().unwrap_or("");
-        let cache_key = prompt_cache_key(&req.prompt, guidance);
+        let cache_key = cfg_prompt_cache_key(&req.prompt, neg, guidance);
         let text_embeddings = if let Some(tensor) =
             restore_cached_tensor(&self.prompt_cache, &cache_key, &device, dtype)?
         {
@@ -1704,5 +1710,38 @@ mod tests {
     #[test]
     fn test_cfg_enabled_at_guidance_7_5() {
         assert!(cfg_active(7.5));
+    }
+
+    /// Regression test for the SD1.5 prompt-cache key bug: keying only on the
+    /// positive prompt + guidance (as the original code did) returns stale
+    /// `(uncond_old, cond)` when the user changes just the negative prompt.
+    /// Mirrors the SD3 / SDXL regression tests in their respective pipelines.
+    #[test]
+    fn sd15_prompt_cache_distinguishes_negative_prompt_changes() {
+        use crate::cache::{cfg_prompt_cache_key, store_cached_tensor};
+
+        let cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensor>> =
+            Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY));
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let embeddings = candle_core::Tensor::zeros((1, 4), dtype, &device).unwrap();
+
+        let key_a = cfg_prompt_cache_key("a cat", "blurry", 7.0);
+        store_cached_tensor(&cache, key_a.clone(), &embeddings).unwrap();
+
+        // Same positive + same guidance, different negative → MUST miss.
+        let key_b = cfg_prompt_cache_key("a cat", "low quality", 7.0);
+        let restored = restore_cached_tensor(&cache, &key_b, &device, dtype).unwrap();
+        assert!(
+            restored.is_none(),
+            "different negative prompt must miss the cache (silent-wrong-output bug)",
+        );
+
+        // Same key as the insert → MUST hit.
+        let restored = restore_cached_tensor(&cache, &key_a, &device, dtype).unwrap();
+        assert!(
+            restored.is_some(),
+            "identical (pos, neg, guidance) must hit",
+        );
     }
 }
