@@ -17,7 +17,7 @@ use crate::cache::{
 };
 use crate::device::{
     check_memory_budget, effective_device_ref, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, should_use_gpu,
+    preflight_memory_check, should_use_gpu, usable_free_vram_bytes,
 };
 // Re-exported for tests (test harness is disabled via `test = false` in Cargo.toml,
 // but tests reference this constant via `super::*`).
@@ -313,14 +313,22 @@ impl ZImageEngine {
         tracing::info!(quantized = is_gguf, "Z-Image transformer loaded");
 
         // --- Decide where to place VAE and Qwen3 text encoder based on remaining VRAM ---
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // Log the raw driver reading; budget the placement decisions
+        // against the reserve-adjusted value below.
+        let free_raw = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let is_cuda = device.is_cuda();
         let is_metal = device.is_metal();
-        if free > 0 {
-            self.base
-                .progress
-                .info(&format!("Free VRAM after transformer: {}", fmt_gb(free)));
-            tracing::info!(free_vram = free, "free VRAM after loading transformer");
+        if free_raw > 0 {
+            self.base.progress.info(&format!(
+                "Free VRAM after transformer: {}",
+                fmt_gb(free_raw)
+            ));
+            tracing::info!(
+                free_vram = free_raw,
+                free_vram_usable = free,
+                "free VRAM after loading transformer"
+            );
         }
 
         // VAE decode at 1024x1024 needs ~6GB workspace for conv2d im2col.
@@ -505,7 +513,8 @@ impl ZImageEngine {
             let cap_mask = Tensor::ones((1, token_count), DType::U8, &device)?;
             (cap_feats, cap_mask)
         } else {
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading drives the Qwen3 variant selection.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting Qwen3 encoder");
             let qwen3_resolve_start = Instant::now();
             let qwen3_preference = self.qwen3_variant.as_deref();
@@ -800,8 +809,9 @@ impl ZImageEngine {
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }
-        // With sequential loading, we can always try GPU for VAE since transformer is freed
-        let free_for_vae = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // With sequential loading, we can always try GPU for VAE since transformer is freed.
+        // Reserve-adjusted reading: should_use_gpu must respect the OS reserve.
+        let free_for_vae = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let vae_on_gpu = should_use_gpu(
             device.is_cuda(),
             device.is_metal(),

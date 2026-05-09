@@ -101,7 +101,11 @@ pub(crate) fn preflight_memory_guard(
                 return preflight_memory_guard_with_available(model_name, paths, 0, total);
             }
         }
-        if let Some(free) = mold_inference::device::free_vram_bytes(gpu_ordinal) {
+        // Reserve-adjusted reading: the budget that decides whether the
+        // model fits must respect the OS / cuBLAS workspace reserve, or the
+        // first allocation past `free` will OOM despite the guard saying
+        // we had room.
+        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
             return preflight_memory_guard_with_available(
                 model_name,
                 paths,

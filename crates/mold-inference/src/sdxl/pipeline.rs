@@ -8,9 +8,10 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor, image_size_cache_key, latent_size_cache_key,
-    prompt_cache_key, restore_cached_tensor, CachedTensor, ImageSizeCacheKey, LatentSizeCacheKey,
-    LruCache, PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
+    cfg_prompt_cache_key, clear_cache, get_or_insert_cached_tensor, image_size_cache_key,
+    latent_size_cache_key, restore_cached_tensor, CachedTensor, CfgPromptCacheKey,
+    ImageSizeCacheKey, LatentSizeCacheKey, LruCache, DEFAULT_IMAGE_CACHE_CAPACITY,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -39,7 +40,7 @@ pub struct SDXLEngine {
     base: EngineBase<LoadedSDXL>,
     scheduler: Scheduler,
     is_turbo: bool,
-    prompt_cache: Mutex<LruCache<PromptCacheKey, CachedTensor>>,
+    prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensor>>,
     source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
@@ -819,7 +820,12 @@ impl SDXLEngine {
         dtype: DType,
         guidance: f64,
     ) -> Result<Tensor> {
-        let cache_key = prompt_cache_key(prompt, guidance);
+        // SDXL caches the **concatenated** `(uncond, cond)` tensor when CFG is
+        // active, so the cache key must include the negative prompt and the
+        // guidance scale. Keying on the positive prompt + guidance alone
+        // returned a stale uncond branch when the user changed only the
+        // negative prompt — silent wrong output.
+        let cache_key = cfg_prompt_cache_key(prompt, negative_prompt, guidance);
         let (text_embeddings, cache_hit) =
             get_or_insert_cached_tensor(&self.prompt_cache, cache_key, device, dtype, || {
                 let use_cfg = guidance > 1.0;
@@ -933,7 +939,7 @@ impl SDXLEngine {
 
         // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
         let neg = req.negative_prompt.as_deref().unwrap_or("");
-        let cache_key = prompt_cache_key(&req.prompt, guidance);
+        let cache_key = cfg_prompt_cache_key(&req.prompt, neg, guidance);
         let text_embeddings = if let Some(tensor) =
             restore_cached_tensor(&self.prompt_cache, &cache_key, &device, dtype)?
         {
@@ -1765,5 +1771,43 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(single_file);
+    }
+
+    /// Regression test for the SDXL prompt-cache key bug: when the cache is
+    /// keyed only on the positive prompt + guidance, a follow-up request that
+    /// changes just the negative prompt returns the previous
+    /// `(uncond_old, cond)` tensor — silently producing wrong output because
+    /// the denoise loop blends the stale uncond with `guidance`.
+    ///
+    /// Drives the cache through `restore_cached_tensor` directly because the
+    /// surrounding `encode_prompt` requires loaded CLIP weights; the contract
+    /// under test is the keying, not the encoder forward pass.
+    #[test]
+    fn sdxl_prompt_cache_distinguishes_negative_prompt_changes() {
+        use crate::cache::{cfg_prompt_cache_key, store_cached_tensor};
+
+        let cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensor>> =
+            Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY));
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let embeddings = candle_core::Tensor::zeros((1, 4), dtype, &device).unwrap();
+
+        let key_a = cfg_prompt_cache_key("a cat", "blurry", 7.0);
+        store_cached_tensor(&cache, key_a.clone(), &embeddings).unwrap();
+
+        // Same positive + same guidance, different negative → MUST miss.
+        let key_b = cfg_prompt_cache_key("a cat", "low quality", 7.0);
+        let restored = restore_cached_tensor(&cache, &key_b, &device, dtype).unwrap();
+        assert!(
+            restored.is_none(),
+            "different negative prompt must miss the cache (was the silent-wrong-output bug)"
+        );
+
+        // Same key as the insert → MUST hit.
+        let restored = restore_cached_tensor(&cache, &key_a, &device, dtype).unwrap();
+        assert!(
+            restored.is_some(),
+            "identical (pos, neg, guidance) must still hit"
+        );
     }
 }

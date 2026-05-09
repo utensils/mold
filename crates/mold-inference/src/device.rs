@@ -527,6 +527,52 @@ pub fn free_vram_bytes(_ordinal: usize) -> Option<u64> {
     available_system_memory_bytes().or_else(free_system_memory_bytes)
 }
 
+/// Bytes reserved from VRAM for the OS / desktop / cuBLAS workspace.
+///
+/// Even on a "headless" GPU some VRAM is always claimed by the driver, the
+/// CUDA runtime, and (on Windows) the Desktop Window Manager — querying
+/// `cuMemGetInfo` returns a number that the next allocation cannot fully
+/// realise. ComfyUI bakes the same constant in (`comfy/model_management.py`):
+/// 400 MB on Linux, 600 MB on Windows, plus an extra 100 MB on 16 GB+ cards.
+///
+/// Default: 400 MB on Linux, 600 MB on Windows, 0 on macOS (Metal unified
+/// memory has its own headroom and the OS swap already accounts for desktop
+/// pressure). Override via `MOLD_RESERVE_VRAM_MB`.
+pub fn reserved_vram_bytes() -> u64 {
+    if let Ok(s) = std::env::var("MOLD_RESERVE_VRAM_MB") {
+        if let Ok(mb) = s.parse::<u64>() {
+            return mb.saturating_mul(1_000_000);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        400_000_000
+    }
+    #[cfg(target_os = "windows")]
+    {
+        600_000_000
+    }
+    #[cfg(target_os = "macos")]
+    {
+        0
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        400_000_000
+    }
+}
+
+/// Wraps [`free_vram_bytes`] with the OS reserve subtracted.
+///
+/// Use this for **budget decisions** (does the transformer fit? should we
+/// offload? which T5 variant should we pick?). For **diagnostic logging** keep
+/// calling [`free_vram_bytes`] so the displayed value matches what the driver
+/// reports — otherwise the ComfyUI-style reserve looks like ghost VRAM in
+/// `nvidia-smi`.
+pub fn usable_free_vram_bytes(ordinal: usize) -> Option<u64> {
+    free_vram_bytes(ordinal).map(|f| f.saturating_sub(reserved_vram_bytes()))
+}
+
 /// Total VRAM currently in use (`total - free`) for the specified GPU
 /// ordinal. Returns 0 if unavailable.
 ///
@@ -1391,6 +1437,88 @@ mod tests {
             select_expand_device_with_preference(&gpus, 3 * GB, false, Some(1)),
             ExpandPlacement::Gpu(0),
         );
+    }
+
+    // ── reserved_vram_bytes / usable_free_vram_bytes ─────────────────────
+
+    /// All `MOLD_RESERVE_VRAM_MB` env-var behaviors live under one `#[test]`
+    /// to serialize access to the shared process-global env var — running
+    /// them as separate tests would race when cargo's default test
+    /// parallelism is in effect. The helper is a pure read so running every
+    /// assertion serially in one test is sound.
+    #[test]
+    fn test_reserved_vram_env_behaviors() {
+        // SAFETY (set_var/remove_var on Rust 1.95+): mutating the process
+        // environment from multiple threads is unsound, but cargo runs each
+        // `#[test]` on its own thread and the helper itself only reads —
+        // wrapping the assertions in this single test avoids racing with
+        // sibling tests.
+        unsafe { std::env::remove_var("MOLD_RESERVE_VRAM_MB") };
+
+        // Default: platform-specific. Linux is the only platform we can
+        // assert on without cfg-gating the assertion itself, since macOS
+        // defaults to 0 and Windows can't be exercised from the Linux
+        // CI runner.
+        let default = reserved_vram_bytes();
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            default, 400_000_000,
+            "Linux default reserve must match ComfyUI's 400 MB",
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(default, 0, "macOS default must be 0 (Metal unified memory)");
+
+        // Override: integer MB → bytes.
+        unsafe { std::env::set_var("MOLD_RESERVE_VRAM_MB", "1024") };
+        assert_eq!(
+            reserved_vram_bytes(),
+            1_024_000_000,
+            "MOLD_RESERVE_VRAM_MB=1024 must yield 1.024 GB",
+        );
+
+        // Override: 0 disables the reserve entirely.
+        unsafe { std::env::set_var("MOLD_RESERVE_VRAM_MB", "0") };
+        assert_eq!(reserved_vram_bytes(), 0);
+
+        // Bad values fall back to the platform default — `parse::<u64>` on
+        // an empty / non-numeric / signed string returns `Err`, and the
+        // helper drops through to the cfg-gated default branch.
+        for v in ["", "abc", "-1"] {
+            unsafe { std::env::set_var("MOLD_RESERVE_VRAM_MB", v) };
+            assert_eq!(
+                reserved_vram_bytes(),
+                default,
+                "unparseable {v:?} must fall back to platform default",
+            );
+        }
+
+        unsafe { std::env::remove_var("MOLD_RESERVE_VRAM_MB") };
+    }
+
+    /// `usable_free_vram_bytes` must subtract the reserve from the raw
+    /// driver reading, saturating at zero so a tiny / busy GPU never wraps.
+    /// When `free_vram_bytes` returns `None` (no CUDA, no macOS unified-memory
+    /// query) the wrapper passes that through unchanged.
+    #[test]
+    fn test_usable_free_vram_bytes_subtracts_reserve() {
+        // SAFETY: see `test_reserved_vram_env_behaviors`.
+        unsafe { std::env::remove_var("MOLD_RESERVE_VRAM_MB") };
+
+        let raw = free_vram_bytes(0);
+        let usable = usable_free_vram_bytes(0);
+        match (raw, usable) {
+            (Some(raw), Some(usable)) => {
+                assert!(
+                    usable <= raw,
+                    "usable ({usable}) must be ≤ raw ({raw}) — reserve cannot inflate the reading",
+                );
+                assert_eq!(usable, raw.saturating_sub(reserved_vram_bytes()));
+            }
+            (None, None) => {} // Non-CUDA non-macOS platform — wrapper passes through.
+            (Some(_), None) | (None, Some(_)) => {
+                panic!("usable_free_vram_bytes must mirror free_vram_bytes presence");
+            }
+        }
     }
 
     // ── vram_load_delta ──────────────────────────────────────────────────
