@@ -12,10 +12,19 @@
 //! ## Tile units
 //!
 //! `TileConfig::tile_size` and `TileConfig::overlap` are in **latent**
-//! coordinates. A 128×128 latent tile decodes to a 1024×1024 image tile when
-//! the VAE upsamples 8× (FLUX, FLUX.2, SDXL, SD3 all use 8×). Override the
+//! coordinates. A 64×64 latent tile decodes to a 512×512 image tile when the
+//! VAE upsamples 8× (FLUX, FLUX.2, SDXL, SD3 all use 8×). Override the
 //! upsample factor with `decode_tiled_with_scale` when wiring against a VAE
 //! that uses a different ratio.
+//!
+//! The default tile size is intentionally smaller than typical generation
+//! latents (128² for a 1024² image) so the tiled fallback genuinely
+//! subdivides — earlier defaults of `tile_size = 128` produced a single tile
+//! covering the full latent at 1024², which made the OOM retry a no-op. If a
+//! caller supplies a config where `tile_size` is still ≥ the smaller latent
+//! axis, [`decode_with_oom_fallback`] shrinks it to half the smaller axis on
+//! the fallback path so the retry always uses less memory than the full
+//! decode that just failed.
 //!
 //! ## Three-offset averaging
 //!
@@ -30,14 +39,16 @@ use candle_core::{DType, Device, Tensor};
 
 /// Configuration for tiled VAE decode.
 ///
-/// Sizes are in **latent** coordinates. Default is 128 latent-px tile with
-/// 32 latent-px overlap and 3-offset averaging — these values mirror
-/// ComfyUI's `tiled_scale_multidim` defaults for VAE decode and produce a
-/// 1024×1024 image tile through an 8× VAE.
+/// Sizes are in **latent** coordinates. Default is 64 latent-px tile with
+/// 16 latent-px overlap and 3-offset averaging — matches ComfyUI's
+/// `VAE.decode_tiled` defaults (`comfy/sd.py`) and produces a 512×512 image
+/// tile through an 8× VAE. At 1024² generation (latent 128²) this gives a
+/// 3×3 grid per offset pass, which is the smallest grid that genuinely
+/// reduces VRAM pressure relative to a full decode.
 #[derive(Debug, Clone, Copy)]
 pub struct TileConfig {
     /// Tile edge length in latent space. The VAE upsample factor multiplies
-    /// this to get the image-space tile (e.g. 128 latent → 1024 image at 8×).
+    /// this to get the image-space tile (e.g. 64 latent → 512 image at 8×).
     pub tile_size: usize,
     /// Overlap between adjacent tiles in latent space. Larger values produce
     /// smoother seams at the cost of more redundant work.
@@ -51,8 +62,8 @@ pub struct TileConfig {
 impl Default for TileConfig {
     fn default() -> Self {
         Self {
-            tile_size: 128,
-            overlap: 32,
+            tile_size: 64,
+            overlap: 16,
             offsets: 3,
         }
     }
@@ -201,6 +212,53 @@ where
 /// produced when no fallback was triggered. When tiling is used the result
 /// lives on CPU (`f32`); callers that need GPU/BF16 must `to_device` /
 /// `to_dtype` after.
+/// Defense-in-depth: ensure the tiled fallback config genuinely subdivides
+/// the input latent.
+///
+/// When `cfg.tile_size` is ≥ the smaller latent axis the tile grid collapses
+/// to a single tile covering the whole input, so the "tiled retry" runs the
+/// exact same allocation as the full decode that just OOM'd. This helper
+/// shrinks `tile_size` to roughly half the smaller axis (rounded down to a
+/// multiple of 8) and adjusts `overlap` proportionally so the retry actually
+/// produces multiple smaller decodes. The minimum tile size is `MIN_TILE`
+/// to keep the decode count bounded — for very small latents (sub-256² gen)
+/// the full decode shouldn't OOM in the first place, so this floor is
+/// preferred over collapsing to micro-tiles.
+pub(crate) fn shrink_tile_for_latent(
+    mut cfg: TileConfig,
+    lat_h: usize,
+    lat_w: usize,
+) -> TileConfig {
+    /// Minimum subdivided tile size in latent space. 32 latent → 256 image at
+    /// 8× — small enough to relieve VRAM pressure from a 1024–2048² full
+    /// decode, large enough to keep tile-count overhead bounded.
+    const MIN_TILE: usize = 32;
+    let min_axis = lat_h.min(lat_w);
+    if min_axis == 0 || cfg.tile_size < min_axis {
+        return cfg;
+    }
+    let half = (min_axis / 2) & !7;
+    let shrunk = half.max(MIN_TILE);
+    if shrunk >= min_axis {
+        // Latent is already at or below the floor — single tile is the only
+        // option. Leave cfg as-is; the failed full decode will surface the
+        // OOM rather than retrying redundantly.
+        return cfg;
+    }
+    tracing::debug!(
+        requested_tile = cfg.tile_size,
+        shrunk_tile = shrunk,
+        latent_h = lat_h,
+        latent_w = lat_w,
+        "tile_size ≥ latent axis — shrinking so tiled fallback subdivides"
+    );
+    cfg.tile_size = shrunk;
+    if cfg.overlap >= cfg.tile_size {
+        cfg.overlap = cfg.tile_size / 4;
+    }
+    cfg
+}
+
 pub fn decode_with_oom_fallback<F, R>(
     latents: &Tensor,
     decode_fn: F,
@@ -211,7 +269,11 @@ where
     R: FnOnce(),
 {
     let mode = resolve_mode();
-    let cfg = TileConfig::default();
+    let mut cfg = TileConfig::default();
+
+    if let Ok((_, _, lat_h, lat_w)) = latents.dims4() {
+        cfg = shrink_tile_for_latent(cfg, lat_h, lat_w);
+    }
 
     if matches!(mode, TiledMode::Force) {
         tracing::info!(
@@ -494,9 +556,85 @@ mod tests {
     #[test]
     fn test_tile_config_default() {
         let cfg = TileConfig::default();
-        assert_eq!(cfg.tile_size, 128);
-        assert_eq!(cfg.overlap, 32);
+        assert_eq!(cfg.tile_size, 64);
+        assert_eq!(cfg.overlap, 16);
         assert_eq!(cfg.offsets, 3);
+    }
+
+    /// Regression: at 1024² generation the latent is 128×128. If the default
+    /// tile_size is ≥ 128 the tiled fallback emits a single tile covering the
+    /// whole latent and the OOM retry just re-runs the same full decode that
+    /// already failed. The default must subdivide a 128×128 latent.
+    #[test]
+    fn test_default_tile_size_subdivides_1024_latent() {
+        let cfg = TileConfig::default();
+        assert!(
+            cfg.tile_size < 128,
+            "default tile_size ({}) must be < 128 so the OOM fallback actually \
+             tiles a 1024² latent (128×128). With tile_size ≥ 128, axis_starts \
+             returns a single tile and the retry equals the failed full decode.",
+            cfg.tile_size,
+        );
+    }
+
+    /// At the typical 1024² latent (128×128) the new default tile_size of 64
+    /// already subdivides — shrink should leave the config untouched.
+    #[test]
+    fn test_shrink_tile_no_op_when_default_already_subdivides_1024() {
+        let cfg = TileConfig::default();
+        let out = shrink_tile_for_latent(cfg, 128, 128);
+        assert_eq!(out.tile_size, cfg.tile_size);
+        assert_eq!(out.overlap, cfg.overlap);
+    }
+
+    /// Defense in depth: a config with tile_size ≥ the smaller latent axis
+    /// (e.g. a hand-tuned 128 against a 1024² latent, or a future default
+    /// regression) must shrink so the tiled retry actually subdivides.
+    #[test]
+    fn test_shrink_tile_subdivides_when_tile_ge_latent() {
+        let cfg = TileConfig {
+            tile_size: 128,
+            overlap: 32,
+            offsets: 3,
+        };
+        let out = shrink_tile_for_latent(cfg, 128, 128);
+        assert!(
+            out.tile_size < 128,
+            "shrunk tile_size ({}) must be < latent dim 128 so the retry \
+             produces multiple tiles",
+            out.tile_size,
+        );
+        assert!(
+            out.overlap < out.tile_size,
+            "overlap ({}) must remain < tile_size ({})",
+            out.overlap,
+            out.tile_size,
+        );
+        // Sanity: shrunk tile must be a sane multiple-of-8 size.
+        assert_eq!(out.tile_size % 8, 0);
+    }
+
+    /// For tiny latents (smaller than the floor), shrink is a no-op — the
+    /// full decode shouldn't OOM here in practice, so leaving cfg untouched
+    /// surfaces any underlying error rather than redundantly re-running.
+    #[test]
+    fn test_shrink_tile_no_op_when_latent_below_floor() {
+        let cfg = TileConfig::default();
+        let out = shrink_tile_for_latent(cfg, 16, 16);
+        assert_eq!(out.tile_size, cfg.tile_size);
+    }
+
+    /// Asymmetric latents (e.g. 1024×768 → 128×96) shrink based on the
+    /// smaller axis.
+    #[test]
+    fn test_shrink_tile_uses_smaller_axis() {
+        let cfg = TileConfig {
+            tile_size: 128,
+            overlap: 32,
+            offsets: 3,
+        };
+        let out = shrink_tile_for_latent(cfg, 96, 128);
+        assert!(out.tile_size < 96);
     }
 
     #[test]
