@@ -558,6 +558,12 @@ Examples:
         #[arg(long, env = "MOLD_SCHEDULER", help_heading = "Advanced")]
         scheduler: Option<Scheduler>,
 
+        /// Enable CFG++ (manifold-projection guidance, Chung et al. 2024).
+        /// Lowers usable CFG to ~1.5–2 and reduces guidance artifacts.
+        /// SD3 only in this release; ignored by other families and at cfg ≈ 1.0.
+        #[arg(long, env = "MOLD_CFG_PLUS", help_heading = "Advanced")]
+        cfg_plus: bool,
+
         /// Keep all model components loaded simultaneously (faster but uses more memory).
         /// By default, components are loaded and unloaded sequentially to reduce peak memory.
         #[arg(long, help_heading = "Advanced")]
@@ -1274,6 +1280,7 @@ async fn run() -> anyhow::Result<()> {
             qwen2_variant,
             qwen2_text_encoder_mode,
             scheduler,
+            cfg_plus,
             eager,
             offload,
             device_text_encoders,
@@ -1406,6 +1413,7 @@ async fn run() -> anyhow::Result<()> {
                 qwen2_variant,
                 qwen2_text_encoder_mode,
                 scheduler,
+                cfg_plus,
                 eager,
                 offload,
                 commands::run::PlacementFlags {

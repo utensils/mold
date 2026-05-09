@@ -476,6 +476,7 @@ pub async fn run(
     qwen2_variant: Option<String>,
     qwen2_text_encoder_mode: Option<String>,
     scheduler: Option<Scheduler>,
+    cfg_plus: bool,
     eager: bool,
     offload: bool,
     placement_flags: PlacementFlags,
@@ -882,6 +883,10 @@ pub async fn run(
         qwen2_variant,
         qwen2_text_encoder_mode,
         scheduler,
+        // CLI bool → wire-format Option<bool>: only forward an explicit `true`
+        // so the server-side `MOLD_CFG_PLUS` env fallback still wins when the
+        // user didn't pass the flag.
+        if cfg_plus { Some(true) } else { None },
         eager,
         offload,
         placement,

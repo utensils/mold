@@ -182,6 +182,7 @@ mod tests {
             output_format: OutputFormat::Mp4,
             embed_metadata: None,
             scheduler: None,
+            cfg_plus: None,
             source_image: None,
             edit_images: None,
             strength: 0.75,

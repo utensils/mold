@@ -149,6 +149,7 @@ Environment variables take precedence over config file values.
 | `MOLD_T5_VARIANT`         | `auto`                                  | T5 encoder: auto/fp16/q8/q6/q5/q4/q3                                                                                                                                                                                                               |
 | `MOLD_QWEN3_VARIANT`      | `auto`                                  | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3                                                                                                                                                                                                              |
 | `MOLD_SCHEDULER`          | —                                       | SD1.5/SDXL: ddim/euler-ancestral/uni-pc                                                                                                                                                                                                            |
+| `MOLD_CFG_PLUS`           | —                                       | `1` to enable CFG++ (manifold-projection guidance, Chung et al. 2024) on SD3. Drops usable CFG to ~1.5–2.5 and removes guidance artifacts. Per-request `--cfg-plus` overrides. SD3 only; ignored by other families and at cfg ≈ 1.0.               |
 
 ### Prompt Expansion
 

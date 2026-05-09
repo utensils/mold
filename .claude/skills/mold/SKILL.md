@@ -672,6 +672,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_T5_VARIANT`           | `auto`                  | T5 encoder: auto/fp16/q8/q6/q5/q4/q3                                       |
 | `MOLD_QWEN3_VARIANT`        | `auto`                  | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3                                      |
 | `MOLD_SCHEDULER`            | unset                   | SD1.5/SDXL: ddim/euler-ancestral/uni-pc                                    |
+| `MOLD_CFG_PLUS`             | unset                   | Set `1` to enable CFG++ (manifold-projection guidance) on SD3. Drops usable CFG to ~1.5–2.5, removes guidance artifacts. Per-request `--cfg-plus` overrides. SD3 only; ignored by other families and at cfg ≈ 1.0. |
 | `MOLD_API_KEY`              | unset                   | API key for server auth (single, comma-separated, or `@/path/to/keys.txt`) |
 | `MOLD_RATE_LIMIT`           | unset                   | Per-IP rate limit for generation endpoints (e.g., `10/min`)                |
 | `MOLD_RATE_LIMIT_BURST`     | unset                   | Burst allowance override (defaults to 2x rate)                             |
