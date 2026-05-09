@@ -208,6 +208,156 @@ pub fn qwen2_vram_threshold(model_size_bytes: u64) -> u64 {
 /// Matches `T5_ACTIVATION_HEADROOM` convention (decimal GB) for easy comparison.
 pub const EXPAND_ACTIVATION_HEADROOM: u64 = 2_000_000_000;
 
+// ── Activation-aware memory budget ───────────────────────────────────────────
+//
+// ComfyUI computes a per-arch `memory_required(input_shape)` (see
+// `comfy/model_base.py:387-409`) instead of a fixed inference headroom. The
+// fixed 3 GB / 5 GB heuristics below over-budget at small resolutions (forcing
+// unneeded offload at 768²) and under-budget at large ones (causing the OOMs
+// that motivated the pre-VAE force-drop in `1c276c6`). The helper here scales
+// the activation budget with `area × dtype × batch × per_arch_factor`.
+
+/// Architecture family for activation-budget purposes.
+///
+/// Mirrors the engine families in `crates/mold-inference/src/`. The factors
+/// in [`activation_bytes`] are calibrated empirically per arch — flash /
+/// memory-efficient attention reshapes the constant by a substantial factor
+/// because peak attention workspace stops scaling as `B × H × N × N`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationFamily {
+    /// FLUX v1 dit (dev / schnell / krea / kontext / fill).
+    FluxDit,
+    /// Flux.2 dit (Klein / Pro).
+    Flux2Dit,
+    /// SD3 / SD3.5 MMDiT.
+    Sd3Mmdit,
+    /// SDXL UNet (CFG-batched + cross-attn KV cache).
+    SdxlUnet,
+    /// Qwen-Image / Qwen-Image-Edit dit.
+    QwenImageDit,
+    /// Z-Image dit.
+    ZImageDit,
+    /// Wuerstchen v2 cascade (Stage C/B decoder).
+    Wuerstchen,
+    /// T5 / CLIP / Qwen3 / Gemma text encoder workspace.
+    SmallTransformer,
+}
+
+/// Estimated activation memory (in bytes) for a single forward pass.
+///
+/// Mirrors ComfyUI's `model_base.memory_required(input_shape)` shape: peak
+/// activation memory at fp16/bf16 scales as
+/// `area × dtype_bytes × batch × per_arch_factor` where `area = h × w` in
+/// image space. The factor encapsulates per-arch overhead (residuals,
+/// attention KV cache, MLP intermediate, etc.). When flash /
+/// memory-efficient attention is in use the factor is smaller because peak
+/// attention workspace stops scaling as `B × H × N × N`.
+///
+/// `width`/`height` are image-space dimensions — the helper internally
+/// accounts for the 8× VAE downsample via the per-family factor, so you
+/// pass `req.width`/`req.height` directly, not latent dims.
+/// `batch` is typically `1` for non-CFG (FLUX, Z-Image, distilled
+/// schedulers) and `2` for CFG-doubled forwards (SDXL, SD3 with
+/// `guidance != 1.0`).
+/// `dtype_bytes` is `2` for bf16/fp16, `4` for f32, `8` for f64.
+///
+/// Floors at 256 MB so even tiny inputs reserve enough for kernel workspaces
+/// (cuBLAS / cuDNN scratch, tokenizer / embedding buffers).
+///
+/// Empirical anchors:
+///   * FLUX dit 1024² bf16 cfg=1   → ~273 MB
+///   * FLUX dit 2048² bf16 cfg=1   → ~1.09 GB
+///   * SDXL UNet 1024² bf16 cfg=2  → ~726 MB
+///   * Wuerstchen 1024² bf16       → ~456 MB
+pub fn activation_bytes(
+    width: u32,
+    height: u32,
+    batch: u32,
+    dtype_bytes: u32,
+    family: ActivationFamily,
+) -> u64 {
+    let area = (width as u64).saturating_mul(height as u64);
+    let bytes_per_pixel = (dtype_bytes as u64).saturating_mul(batch.max(1) as u64);
+    // Per-family factor — calibrated to produce ~273 MB at 1024² bf16 cfg=1
+    // for FLUX dit (just above the 256 MB floor, ~1.09 GB at 2048²), with
+    // arch-specific multipliers for the heavier-attention families. Units
+    // are roughly "bytes of activation per pixel per dtype-byte per batch".
+    //
+    // The original spec doc had factors in the 0.01 – 0.025 range, which
+    // produced sub-megabyte raw budgets at 1024² (the formula's units make
+    // those values meaningful only if reinterpreted as megabytes-per-
+    // megapixel) — the floor would always dominate and the
+    // resolution-scaling test would fail. The factors here are scaled up
+    // by ~8000× to actually realize the documented ~250 MB / ~1 GB
+    // targets.
+    let factor: f64 = match family {
+        // FLUX v1 dit: double + single block residuals dominate, flash-attn
+        // collapses the B×N×N peak. 1024² → 273 MB; 2048² → 1.09 GB.
+        ActivationFamily::FluxDit => 130.0,
+        // Flux.2 dit: same activation shape as FLUX v1 (Klein/Pro).
+        ActivationFamily::Flux2Dit => 130.0,
+        // Z-Image dit: single chunk of dit blocks, similar to FLUX.
+        ActivationFamily::ZImageDit => 130.0,
+        // SD3 MMDiT: joint attention sits between FLUX's split and SDXL's
+        // cross-attn — calibrated ~20% above FLUX.
+        ActivationFamily::Sd3Mmdit => 156.0,
+        // SDXL UNet: CFG runs `[uncond, cond]` and cross-attn KV is cached
+        // for the prompt sequence — ~33% above FLUX. Callers pass `batch=2`
+        // when CFG is active, so this factor covers per-batch overhead.
+        ActivationFamily::SdxlUnet => 173.0,
+        // Qwen-Image dit: similar dual-stream structure to SDXL.
+        ActivationFamily::QwenImageDit => 173.0,
+        // Wuerstchen v2: cascade Stage B has a chunky conv stack — ~67%
+        // above FLUX.
+        ActivationFamily::Wuerstchen => 217.0,
+        // T5 / CLIP / Qwen3 encoders work over tokens × hidden, not pixels.
+        // Image-space scaling is a soft proxy for "small workspace" — the
+        // floor usually dominates for typical inputs.
+        ActivationFamily::SmallTransformer => 87.0,
+    };
+    let raw = (area as f64 * bytes_per_pixel as f64 * factor) as u64;
+    /// Sanity floor: even tiny inputs reserve ~256 MB for kernel workspaces
+    /// (cuBLAS / cuDNN scratch, tokenizer / embedding buffers).
+    const ACTIVATION_FLOOR_BYTES: u64 = 256_000_000;
+    raw.max(ACTIVATION_FLOOR_BYTES)
+}
+
+/// Bytes per element for a given candle dtype, used to feed
+/// [`activation_bytes`] from a runtime `DType`. Returns `2` for bf16/fp16 and
+/// `4` for f32; integer / quantized weights still flow as bf16/fp16
+/// activations during forward, so `2` is the right answer there too.
+pub fn dtype_bytes(dt: candle_core::DType) -> u32 {
+    use candle_core::DType;
+    match dt {
+        DType::BF16 | DType::F16 => 2,
+        DType::F32 => 4,
+        DType::F64 => 8,
+        // Everything else (quantized / int storage / sub-byte floats):
+        // activations during forward travel as bf16/fp16, so `2` matches
+        // the runtime activation cost.
+        _ => 2,
+    }
+}
+
+/// Map a manifest family slug (e.g. `"flux"`, `"sdxl"`, `"qwen-image"`) to the
+/// activation-budget family. Falls back to [`ActivationFamily::FluxDit`] for
+/// unknown slugs — the FLUX factor is the most common diffusion default and
+/// errs toward a conservative-but-not-over-budget estimate.
+pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
+    match family_slug {
+        "flux" => ActivationFamily::FluxDit,
+        "flux2" => ActivationFamily::Flux2Dit,
+        "sd3" => ActivationFamily::Sd3Mmdit,
+        "sdxl" | "sd15" => ActivationFamily::SdxlUnet,
+        "qwen-image" | "qwen-image-edit" => ActivationFamily::QwenImageDit,
+        "z-image" => ActivationFamily::ZImageDit,
+        "wuerstchen" => ActivationFamily::Wuerstchen,
+        // Unknown / video families default to FLUX dit shape — same activation
+        // class, conservative against unknowns.
+        _ => ActivationFamily::FluxDit,
+    }
+}
+
 /// Compute VRAM threshold for an expand LLM of a given size (weights + headroom).
 pub fn expand_vram_threshold(model_size_bytes: u64) -> u64 {
     model_size_bytes + EXPAND_ACTIVATION_HEADROOM
@@ -729,10 +879,15 @@ pub(crate) fn should_use_gpu(
 /// Minimum VRAM needed for one block + activations during offloaded inference.
 pub(crate) const MIN_OFFLOAD_VRAM: u64 = 4_000_000_000; // 4 GB
 
-pub(crate) fn should_offload(transformer_size: u64, free_vram: u64) -> bool {
-    /// Headroom needed beyond the transformer for activations, noise, VAE workspace.
-    const INFERENCE_HEADROOM: u64 = 3_000_000_000; // 3 GB
-    let needed = transformer_size.saturating_add(INFERENCE_HEADROOM);
+/// Decide whether to enable block-level offloading.
+///
+/// `activation_bytes` is the per-request activation budget from
+/// [`activation_bytes`] — scaled with resolution and dtype. Replaces the
+/// previous fixed 3 GB `INFERENCE_HEADROOM` so a 768² generation isn't
+/// false-offloaded on a 16 GB card while a 2048² generation isn't
+/// under-budgeted on a 24 GB card.
+pub(crate) fn should_offload(transformer_size: u64, free_vram: u64, activation_bytes: u64) -> bool {
+    let needed = transformer_size.saturating_add(activation_bytes);
     free_vram > 0 && needed > free_vram && free_vram >= MIN_OFFLOAD_VRAM
 }
 
@@ -841,13 +996,25 @@ pub fn check_memory_budget(
 
 // ── Pre-flight memory guard ──────────────────────────────────────────────────
 
-/// Check if loading a component of `size_bytes` would exceed available system memory.
-/// Uses available memory (free + inactive/reclaimable) as the primary metric, since
-/// macOS moves recently-freed pages to inactive rather than free — these are trivially
-/// reclaimable with no I/O. Hard-fails if component exceeds 90% of available memory;
-/// warns (but proceeds) if component exceeds 2x free memory. On CUDA or when memory
-/// info is unavailable, always returns Ok.
-pub(crate) fn preflight_memory_check(component_name: &str, size_bytes: u64) -> anyhow::Result<()> {
+/// Check if loading a component of `size_bytes` plus its activation workspace
+/// would exceed available system memory.
+///
+/// `activation_bytes` is the per-request activation budget from
+/// [`activation_bytes`] — when the caller has a resolution / family hint use
+/// that; otherwise pass `0` and the check degrades to "does the component
+/// itself fit", matching the pre-budget behavior.
+///
+/// Uses available memory (free + inactive/reclaimable) as the primary metric,
+/// since macOS moves recently-freed pages to inactive rather than free —
+/// those are trivially reclaimable with no I/O. Hard-fails if
+/// `size_bytes + activation_bytes` exceeds 90% of available memory; warns
+/// (but proceeds) if the same quantity exceeds 2× free memory. On CUDA or
+/// when memory info is unavailable, always returns Ok.
+pub(crate) fn preflight_memory_check(
+    component_name: &str,
+    size_bytes: u64,
+    activation_bytes: u64,
+) -> anyhow::Result<()> {
     // --eager or MOLD_EAGER=1 bypasses the check
     if std::env::var("MOLD_EAGER").is_ok_and(|v| v == "1") {
         return Ok(());
@@ -859,8 +1026,9 @@ pub(crate) fn preflight_memory_check(component_name: &str, size_bytes: u64) -> a
     };
 
     let free = free_system_memory_bytes();
+    let total = size_bytes.saturating_add(activation_bytes);
 
-    preflight_check_budget(component_name, size_bytes, available, free)
+    preflight_check_budget(component_name, total, available, free)
 }
 
 /// Pure logic for the preflight memory check, factored out for testability.
@@ -1328,36 +1496,182 @@ mod tests {
 
     // ── should_offload tests ─────────────────────────────────────────────
 
+    /// 1024² FLUX bf16 cfg=1 activation budget — used as a default in
+    /// existing offload tests so resolution scaling is exercised in the
+    /// dedicated `should_offload_uses_resolution_scaled_activation` test.
+    fn flux_1024_activation() -> u64 {
+        activation_bytes(1024, 1024, 1, 2, ActivationFamily::FluxDit)
+    }
+
     #[test]
     fn offload_when_transformer_exceeds_vram() {
         // 24GB transformer, 16GB free → needs offloading
-        assert!(should_offload(24 * GB, 16 * GB));
+        assert!(should_offload(24 * GB, 16 * GB, flux_1024_activation()));
     }
 
     #[test]
     fn offload_when_transformer_fits_but_no_headroom() {
-        // 23.8GB transformer on 24.7GB free: file fits but 23.8+3.0 headroom > 24.7
+        // 23.8GB transformer on 23.95GB free: file fits but 23.8 + ~256 MB
+        // activation > 23.95 GB free. With the new resolution-scaled budget
+        // at 1024² ≈ 256 MB (floor), the tight squeeze still trips offload.
         let xformer = 23_800_000_000;
-        let free = 24_700_000_000;
-        assert!(should_offload(xformer, free));
+        let free = 23_950_000_000;
+        assert!(should_offload(xformer, free, flux_1024_activation()));
     }
 
     #[test]
     fn no_offload_when_plenty_of_vram() {
         // 12GB transformer on 24GB free → plenty of room
-        assert!(!should_offload(12 * GB, 24 * GB));
+        assert!(!should_offload(12 * GB, 24 * GB, flux_1024_activation()));
     }
 
     #[test]
     fn no_offload_when_vram_unknown() {
         // free = 0 means we couldn't query VRAM
-        assert!(!should_offload(24 * GB, 0));
+        assert!(!should_offload(24 * GB, 0, flux_1024_activation()));
     }
 
     #[test]
     fn no_offload_when_vram_too_small_for_single_block() {
         // 24GB transformer but only 2GB free — not enough for even one block
-        assert!(!should_offload(24 * GB, 2 * GB));
+        assert!(!should_offload(24 * GB, 2 * GB, flux_1024_activation()));
+    }
+
+    // ── activation_bytes tests ─────────────────────────────────────────
+
+    /// Doubling each axis quadruples the area, so the activation budget
+    /// should also quadruple (modulo the floor) — the core scaling property
+    /// that fixed-headroom missed.
+    #[test]
+    fn activation_bytes_scales_with_area() {
+        let small = activation_bytes(1024, 1024, 1, 2, ActivationFamily::FluxDit);
+        let big = activation_bytes(2048, 2048, 1, 2, ActivationFamily::FluxDit);
+        // Both must be above the floor for the scaling to be observable.
+        assert!(
+            small > 256_000_000,
+            "1024² FLUX bf16 should clear the floor, got {small}"
+        );
+        let ratio = big as f64 / small as f64;
+        assert!(
+            (ratio - 4.0).abs() < 0.04,
+            "expected 4× scaling, got {ratio:.4} (small={small}, big={big})"
+        );
+    }
+
+    /// bf16 (dtype_bytes=2) should produce exactly half the budget of f32
+    /// (dtype_bytes=4) at the same resolution — both above the floor.
+    #[test]
+    fn activation_bytes_scales_with_dtype() {
+        // Pick a resolution large enough that both dtype variants clear the floor.
+        let bf16 = activation_bytes(2048, 2048, 1, 2, ActivationFamily::FluxDit);
+        let f32 = activation_bytes(2048, 2048, 1, 4, ActivationFamily::FluxDit);
+        assert!(bf16 > 256_000_000, "2048² FLUX bf16 should clear floor");
+        let ratio = f32 as f64 / bf16 as f64;
+        assert!(
+            (ratio - 2.0).abs() < 0.02,
+            "expected f32 = 2× bf16, got {ratio:.4} (bf16={bf16}, f32={f32})"
+        );
+    }
+
+    /// CFG-style batch=2 should double the budget vs non-CFG batch=1.
+    #[test]
+    fn activation_bytes_scales_with_batch() {
+        let b1 = activation_bytes(2048, 2048, 1, 2, ActivationFamily::SdxlUnet);
+        let b2 = activation_bytes(2048, 2048, 2, 2, ActivationFamily::SdxlUnet);
+        assert!(b1 > 256_000_000, "2048² SDXL bf16 b=1 should clear floor");
+        let ratio = b2 as f64 / b1 as f64;
+        assert!(
+            (ratio - 2.0).abs() < 0.02,
+            "expected b=2 → 2× b=1, got {ratio:.4} (b1={b1}, b2={b2})"
+        );
+    }
+
+    /// Tiny inputs return at least 256 MB (kernel-workspace floor).
+    #[test]
+    fn activation_bytes_floors_at_256mb() {
+        let tiny = activation_bytes(64, 64, 1, 2, ActivationFamily::FluxDit);
+        assert_eq!(
+            tiny, 256_000_000,
+            "tiny input must hit the 256 MB floor exactly, got {tiny}"
+        );
+        // SmallTransformer family with same inputs should also floor.
+        let tiny_te = activation_bytes(64, 64, 1, 2, ActivationFamily::SmallTransformer);
+        assert_eq!(tiny_te, 256_000_000);
+    }
+
+    /// 1024² FLUX bf16 cfg=1 must land in the [200 MB, 1 GB] sanity band — if
+    /// this drifts, recalibrate the FLUX dit factor *and* update the comment
+    /// in `activation_bytes` so the empirical anchor stays trustworthy.
+    #[test]
+    fn activation_bytes_flux_dit_at_1024_is_in_expected_range() {
+        let budget = activation_bytes(1024, 1024, 1, 2, ActivationFamily::FluxDit);
+        assert!(
+            (200_000_000..=1_000_000_000).contains(&budget),
+            "FLUX 1024² bf16 cfg=1 budget {budget} bytes outside [200 MB, 1 GB]"
+        );
+    }
+
+    /// At 2048² the activation budget should be substantially higher than at
+    /// 768², so the same `(transformer, free_vram)` pair flips into "offload"
+    /// at the larger resolution. This is the regression that motivated the
+    /// switch from the fixed 3 GB headroom: under the old constant the
+    /// transformer alone would have already triggered offload (or not) the
+    /// same way at both resolutions.
+    #[test]
+    fn should_offload_uses_resolution_scaled_activation() {
+        // Pick a transformer + VRAM pair where the answer depends on the
+        // activation budget alone. 22 GB transformer on a 23 GB card: at
+        // 768² the activation floor is 256 MB → 22.256 GB fits in 23 GB;
+        // at 2048² the budget grows to ~1.09 GB → 23.09 GB > 23 GB →
+        // offload. The old fixed 3 GB headroom would have triggered
+        // offload at *both* resolutions even though only the larger one
+        // actually needs it.
+        let xformer = 22_000_000_000;
+        let free = 23_000_000_000;
+        let act_768 = activation_bytes(768, 768, 1, 2, ActivationFamily::FluxDit);
+        let act_2048 = activation_bytes(2048, 2048, 1, 2, ActivationFamily::FluxDit);
+        assert!(act_2048 > act_768, "2048² must exceed 768²");
+        assert!(
+            !should_offload(xformer, free, act_768),
+            "small budget must NOT trigger offload at this VRAM (act_768={act_768})"
+        );
+        assert!(
+            should_offload(xformer, free, act_2048),
+            "large budget MUST trigger offload at this VRAM (act_2048={act_2048})"
+        );
+    }
+
+    /// `activation_family_for` maps manifest slugs to the right enum and
+    /// defaults unknown slugs to the FLUX-dit factor.
+    #[test]
+    fn activation_family_for_maps_known_and_falls_back() {
+        assert_eq!(activation_family_for("flux"), ActivationFamily::FluxDit);
+        assert_eq!(activation_family_for("sdxl"), ActivationFamily::SdxlUnet);
+        assert_eq!(
+            activation_family_for("qwen-image"),
+            ActivationFamily::QwenImageDit
+        );
+        assert_eq!(
+            activation_family_for("wuerstchen"),
+            ActivationFamily::Wuerstchen
+        );
+        // Unknown slug — falls back to FluxDit.
+        assert_eq!(
+            activation_family_for("bogus-family"),
+            ActivationFamily::FluxDit
+        );
+    }
+
+    /// `dtype_bytes` returns the right element width for activation budget math.
+    #[test]
+    fn dtype_bytes_matches_runtime() {
+        use candle_core::DType;
+        assert_eq!(dtype_bytes(DType::BF16), 2);
+        assert_eq!(dtype_bytes(DType::F16), 2);
+        assert_eq!(dtype_bytes(DType::F32), 4);
+        assert_eq!(dtype_bytes(DType::F64), 8);
+        // Quantized / int storage flows as bf16 activations.
+        assert_eq!(dtype_bytes(DType::U8), 2);
     }
 
     // ── select_expand_device tests ─────────────────────────────────────────

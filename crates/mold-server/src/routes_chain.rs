@@ -430,6 +430,18 @@ async fn run_chain_pooled(
 
     // ── Run the chain inside spawn_blocking ─────────────────────────
     let config_snapshot = state.config.read().await.clone();
+    // Activation hint for the per-stage shape — every stage runs at
+    // (req.width, req.height) under chain mode.
+    let chain_hint =
+        model_manager::family_for_model_sync(&req.model, &config_snapshot).map(|family| {
+            model_manager::ActivationHint {
+                width: req.width,
+                height: req.height,
+                batch: 1,
+                dtype_bytes: 2,
+                family: mold_inference::device::activation_family_for(&family),
+            }
+        });
     let worker_task = worker.clone();
     let req_task = req.clone();
     let progress_cb_task = progress_cb;
@@ -441,6 +453,7 @@ async fn run_chain_pooled(
             &worker_task,
             &model_name,
             &config_snapshot,
+            chain_hint,
             move |engine| -> Result<mold_inference::ltx2::ChainRunOutput, ClosureError> {
                 let renderer = engine.as_chain_renderer().ok_or_else(|| {
                     ClosureError::Unsupported(format!(
@@ -679,7 +692,24 @@ async fn run_chain_legacy(
     // load-time events go through the model manager's own tracing. Chain
     // stage events (StageStart/DenoiseStep/StageDone/Stitching) come from
     // the orchestrator during the blocking task below.
-    model_manager::ensure_model_ready(state, &req.model, None)
+    //
+    // Activation hint reuses the chain's per-stage shape (every stage runs
+    // the same width/height for now). Family lookup goes through the same
+    // helper used by single-clip generation so cv:* / hf:* IDs resolve.
+    let chain_hint = if let Some(family) = model_manager::family_for_model(state, &req.model).await
+    {
+        let family = mold_inference::device::activation_family_for(&family);
+        Some(model_manager::ActivationHint {
+            width: req.width,
+            height: req.height,
+            batch: 1, // chain is video; transformer batches per frame, not per CFG
+            dtype_bytes: 2,
+            family,
+        })
+    } else {
+        None
+    };
+    model_manager::ensure_model_ready(state, &req.model, None, chain_hint)
         .await
         .map_err(|e| ChainRunError::CacheMiss(e.error))?;
 

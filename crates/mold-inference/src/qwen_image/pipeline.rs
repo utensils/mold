@@ -955,7 +955,17 @@ impl QwenImageEngine {
                 .sum();
             // Reserve-adjusted reading: should_offload budgets against this.
             let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-            let use_offload = self.offload || crate::device::should_offload(mem_size, free);
+            // Qwen-Image runs CFG by default; activation budget scales with
+            // resolution to replace the previous fixed 3 GB heuristic.
+            let activation_budget = crate::device::activation_bytes(
+                width as u32,
+                height as u32,
+                2,
+                crate::device::dtype_bytes(dtype),
+                crate::device::ActivationFamily::QwenImageDit,
+            );
+            let use_offload =
+                self.offload || crate::device::should_offload(mem_size, free, activation_budget);
 
             if is_fp8 {
                 self.base
@@ -1627,9 +1637,17 @@ impl QwenImageEngine {
                         "Skipping hard preflight for Qwen2.5 text encoder on Metal; sequential mode spills prompt conditioning to CPU after encoding",
                     );
                 } else {
+                    let te_activation_budget = crate::device::activation_bytes(
+                        req.width,
+                        req.height,
+                        1,
+                        crate::device::dtype_bytes(te_dtype),
+                        crate::device::ActivationFamily::SmallTransformer,
+                    );
                     preflight_memory_check(
                         "Qwen2.5 text encoder",
                         resolved_text_encoder.size_bytes,
+                        te_activation_budget,
                     )?;
                 }
 
@@ -1719,7 +1737,18 @@ impl QwenImageEngine {
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum();
-        preflight_memory_check("Qwen-Image transformer", xformer_size)?;
+        let xformer_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            if req.guidance > 1.0 { 2 } else { 1 },
+            crate::device::dtype_bytes(dtype),
+            crate::device::ActivationFamily::QwenImageDit,
+        );
+        preflight_memory_check(
+            "Qwen-Image transformer",
+            xformer_size,
+            xformer_activation_budget,
+        )?;
 
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);

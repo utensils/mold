@@ -1,11 +1,76 @@
 use std::sync::Arc;
 
-use mold_core::{build_model_catalog, ModelDefaults, ModelInfo, ModelInfoExtended, ModelPaths};
+use mold_core::{
+    build_model_catalog, GenerateRequest, ModelDefaults, ModelInfo, ModelInfoExtended, ModelPaths,
+};
+use mold_inference::device::{activation_bytes, activation_family_for, ActivationFamily};
 
 use crate::model_cache::ModelResidency;
 use crate::{routes::ApiError, state::AppState};
 
 pub(crate) type EngineProgressCallback = Arc<dyn Fn(mold_inference::ProgressEvent) + Send + Sync>;
+
+/// Per-request shape hint passed into [`preflight_memory_guard`] so the
+/// activation budget can scale with resolution / dtype / arch. `None`
+/// degrades to the previous fixed-headroom approximation (the
+/// `MEMORY_BUDGET_HEADROOM` baked into `estimate_peak_memory`'s 2 GB
+/// constant), which keeps behavior identical for callers that don't yet
+/// have a request in scope (e.g. admin-API model loads with no resolution
+/// context).
+///
+/// Public because `gpu_worker::ensure_model_ready_sync` and
+/// `gpu_worker::run_chain_blocking` (both `pub`) take it as a parameter.
+#[derive(Debug, Clone, Copy)]
+pub struct ActivationHint {
+    /// Image-space width.
+    pub width: u32,
+    /// Image-space height.
+    pub height: u32,
+    /// CFG-doubled forwards typically pass `2`; non-CFG passes `1`.
+    pub batch: u32,
+    /// Bytes per element (`2` for bf16/fp16, `4` for f32).
+    pub dtype_bytes: u32,
+    /// Architecture family — drives the per-arch factor in
+    /// `mold_inference::device::activation_bytes`.
+    pub family: ActivationFamily,
+}
+
+impl ActivationHint {
+    /// Build a hint from a [`GenerateRequest`] and the manifest family slug
+    /// (e.g. `"flux"`, `"sdxl"`). The family slug is what
+    /// [`activation_family_for`] expects — when the caller doesn't have a
+    /// strong family signal (catalog ID without an installed manifest, etc.)
+    /// passing the empty string falls back to `ActivationFamily::FluxDit`.
+    pub fn from_request(req: &GenerateRequest, family_slug: &str) -> Self {
+        // CFG-doubled forwards: SDXL/SD3 batch=2 when guidance ≈/> 1.0; FLUX,
+        // Z-Image, Flux.2 are guidance-distilled and run a single forward.
+        let family = activation_family_for(family_slug);
+        let batch = match family {
+            ActivationFamily::SdxlUnet | ActivationFamily::Sd3Mmdit if req.guidance > 1.0 => 2,
+            _ => 1,
+        };
+        Self {
+            width: req.width,
+            height: req.height,
+            batch,
+            // Server-side preflight assumes bf16/fp16 activations — every
+            // diffusion family in this repo runs in bf16/fp16 on GPU.
+            dtype_bytes: 2,
+            family,
+        }
+    }
+
+    /// Compute the activation budget bytes from this hint.
+    pub fn budget_bytes(&self) -> u64 {
+        activation_bytes(
+            self.width,
+            self.height,
+            self.batch,
+            self.dtype_bytes,
+            self.family,
+        )
+    }
+}
 
 // ── MPS memory guard ────────────────────────────────────────────────────────
 
@@ -58,18 +123,31 @@ fn check_model_memory_budget(
 /// The Eager sum (`transformer + vae + all_encoders`) overcounts by the
 /// encoder weight on every load — enough to false-reject a quantized FLUX on
 /// a 24 GB card even when the swap would actually fit.
+///
+/// `hint` adds a resolution-scaled activation budget on top of the
+/// component-size peak so a 2048² generation isn't under-budgeted. When
+/// `None` the inner peak retains the existing 2 GB
+/// `MEMORY_BUDGET_HEADROOM` constant from `estimate_peak_memory` and no
+/// extra is added — equivalent to the pre-Tier-2.3 behavior.
 pub(crate) fn preflight_memory_guard_with_available(
     model_name: &str,
     paths: &ModelPaths,
     active_vram_bytes: u64,
     available_bytes: u64,
+    hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
     let peak = mold_inference::device::estimate_peak_memory(
         paths,
         mold_inference::LoadStrategy::Sequential,
     );
+    // Add the per-request activation budget on top of the file-size peak.
+    // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
+    // is a generic "kernels + small state" constant that doesn't scale; the
+    // hint is the resolution/dtype/arch-aware delta on top.
+    let activation = hint.map(|h| h.budget_bytes()).unwrap_or(0);
+    let peak_with_activation = peak.saturating_add(activation);
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
-    check_model_memory_budget(model_name, peak, effective_available)
+    check_model_memory_budget(model_name, peak_with_activation, effective_available)
 }
 
 /// Check whether estimated peak memory fits before committing to a model load.
@@ -94,6 +172,7 @@ pub(crate) fn preflight_memory_guard(
     paths: &ModelPaths,
     active_vram_bytes: u64,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
     // CUDA branch: when an active model will be reclaimed via primary-context
     // reset, the post-reclaim budget is the device total, not free+active.
@@ -101,7 +180,7 @@ pub(crate) fn preflight_memory_guard(
     {
         if active_vram_bytes > 0 {
             if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
-                return preflight_memory_guard_with_available(model_name, paths, 0, total);
+                return preflight_memory_guard_with_available(model_name, paths, 0, total, hint);
             }
         }
         // Ghost-VRAM case: no active model in our cache, but the device
@@ -142,6 +221,7 @@ pub(crate) fn preflight_memory_guard(
                 paths,
                 active_vram_bytes,
                 free,
+                hint,
             );
         }
     }
@@ -154,6 +234,7 @@ pub(crate) fn preflight_memory_guard(
                 paths,
                 active_vram_bytes,
                 available,
+                hint,
             );
         }
     }
@@ -266,6 +347,51 @@ pub(crate) async fn catalog_family_for(state: &AppState, model_name: &str) -> Op
     }
     let config = state.config.read().await;
     config.models.get(model_name).and_then(|m| m.family.clone())
+}
+
+/// Resolve the family slug for any model name — checks the static manifest
+/// first (covers `flux-dev:q8` and friends), then falls back to the catalog
+/// config entry (covers `cv:*` / `hf:*`). Used by the activation-budget
+/// preflight to dispatch to the right [`ActivationFamily`].
+pub(crate) async fn family_for_model(state: &AppState, model_name: &str) -> Option<String> {
+    if let Some(manifest) = mold_core::manifest::find_manifest(model_name) {
+        return Some(manifest.family.clone());
+    }
+    catalog_family_for(state, model_name).await
+}
+
+/// Sync variant of [`family_for_model`] for the GPU-worker hot path which
+/// runs inside `spawn_blocking` and only has a `&Config` snapshot to work
+/// with. Falls through to manifest-then-config in the same order.
+pub(crate) fn family_for_model_sync(
+    model_name: &str,
+    config: &mold_core::Config,
+) -> Option<String> {
+    if let Some(manifest) = mold_core::manifest::find_manifest(model_name) {
+        return Some(manifest.family.clone());
+    }
+    config.models.get(model_name).and_then(|m| m.family.clone())
+}
+
+/// Sync variant of [`activation_hint_for_request`] for the GPU-worker hot
+/// path. Returns `None` when the family slug can't be resolved.
+pub(crate) fn activation_hint_for_request_sync(
+    config: &mold_core::Config,
+    req: &GenerateRequest,
+) -> Option<ActivationHint> {
+    let family = family_for_model_sync(&req.model, config)?;
+    Some(ActivationHint::from_request(req, &family))
+}
+
+/// Build an [`ActivationHint`] for the given request using the resolved
+/// model family (manifest or catalog). Returns `None` when the family slug
+/// can't be resolved — the preflight then falls back to the size-only peak.
+pub(crate) async fn activation_hint_for_request(
+    state: &AppState,
+    req: &GenerateRequest,
+) -> Option<ActivationHint> {
+    let family = family_for_model(state, &req.model).await?;
+    Some(ActivationHint::from_request(req, &family))
 }
 
 fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, paths: &ModelPaths) {
@@ -600,10 +726,16 @@ pub(crate) async fn check_model_available(
 ///
 /// Checks the model cache: if already loaded, just touches the LRU order.
 /// If cached but unloaded, reloads it. If not in cache, creates a new engine.
+///
+/// `hint` carries the per-request resolution / family used by the activation
+/// budget. `None` falls back to the previous fixed-headroom approximation —
+/// admin-API loads with no resolution context (cache prewarm, etc.) take
+/// this path.
 pub(crate) async fn ensure_model_ready(
     state: &AppState,
     model_name: &str,
     progress: Option<EngineProgressCallback>,
+    hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
     let _guard = state.model_load_lock.lock().await;
 
@@ -629,7 +761,7 @@ pub(crate) async fn ensure_model_ready(
             // MPS memory guard: check before unloading the active model.
             // Include the active model's footprint as reclaimable memory.
             if let Some(paths) = entry.engine.model_paths() {
-                preflight_memory_guard(model_name, paths, active_vram, 0)?;
+                preflight_memory_guard(model_name, paths, active_vram, 0, hint)?;
             }
 
             // Parked engines retain tokenizers/caches for faster reload.
@@ -748,7 +880,7 @@ pub(crate) async fn ensure_model_ready(
 
     // Not in cache — check if model is available on disk.
     match check_model_available(state, model_name).await? {
-        Some(paths) => create_and_load_engine(state, model_name, paths, progress).await,
+        Some(paths) => create_and_load_engine(state, model_name, paths, progress, hint).await,
         None => Ok(()),
     }
 }
@@ -842,6 +974,7 @@ async fn create_and_load_engine(
     model_name: &str,
     paths: ModelPaths,
     progress: Option<EngineProgressCallback>,
+    hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
     // MPS memory guard: reject before unloading current model so it stays operational.
     // Include the active model's footprint as reclaimable memory.
@@ -849,7 +982,7 @@ async fn create_and_load_engine(
         let cache = state.model_cache.lock().await;
         cache.active_vram_bytes()
     };
-    preflight_memory_guard(model_name, &paths, active_vram, 0)?;
+    preflight_memory_guard(model_name, &paths, active_vram, 0, hint)?;
 
     // Unload the current active model to free GPU memory.
     // Only reclaim GPU memory if there was an active model — calling
@@ -1013,7 +1146,8 @@ mod tests {
         // Available 8 GB alone is insufficient; add 10 GB active VRAM →
         // 18 GB effective, comfortably above peak.
         let (_dir, paths) = test_paths_with_total_size(10 * GB);
-        let result = preflight_memory_guard_with_available("swap-test", &paths, 10 * GB, 8 * GB);
+        let result =
+            preflight_memory_guard_with_available("swap-test", &paths, 10 * GB, 8 * GB, None);
         assert!(
             result.is_ok(),
             "expected swap to succeed with reclaimable VRAM, got {result:?}"
@@ -1027,7 +1161,7 @@ mod tests {
         // 20 GB on disk → peak ≥ 20 GB. Available 8 GB + 5 GB active =
         // 13 GB effective < peak → reject.
         let (_dir, paths) = test_paths_with_total_size(20 * GB);
-        let result = preflight_memory_guard_with_available("too-big", &paths, 5 * GB, 8 * GB);
+        let result = preflight_memory_guard_with_available("too-big", &paths, 5 * GB, 8 * GB, None);
         assert!(
             result.is_err(),
             "expected oversized model to be rejected, got Ok"
@@ -1160,7 +1294,7 @@ mod tests {
         // reclaimed → effective_available passed in by the outer guard
         // is total_vram = 24 GB on CUDA, but we test the inner directly with
         // the Sequential strategy in mind.
-        let result = preflight_memory_guard_with_available("flux-dev:q8", &paths, 0, 24 * GB);
+        let result = preflight_memory_guard_with_available("flux-dev:q8", &paths, 0, 24 * GB, None);
         assert!(
             result.is_ok(),
             "quantized FLUX must fit on a 24 GB card under the Sequential \
@@ -1185,5 +1319,124 @@ mod tests {
             "Eager peak ({eager_peak}) should exceed hard limit ({hard_limit}) — \
              this is the false-rejection the Sequential switch fixes"
         );
+    }
+
+    /// Tier 2.3: the server-side preflight must consume the
+    /// resolution-scaled activation budget. A model that fits at 768²
+    /// (where the activation budget is the 256 MB floor) must be rejected
+    /// at 2048² (where the budget grows past 1 GB) on the same card.
+    #[test]
+    fn preflight_memory_guard_accepts_resolution_for_activation_budget() {
+        // Shape: 23 GB transformer, 1 GB VAE, 9 GB T5, 1 GB CLIP. Sequential
+        // peak = max(10, 24) + 2 GB headroom = 26 GB. On a 30 GB card the
+        // 90 % hard limit is 27 GB:
+        //   * 768²:  26 + 0.256 (floor) = 26.256 ≤ 27  → accept
+        //   * 2048²: 26 + 1.09          = 27.09  > 27  → reject
+        // Without the activation hint both would land at 26 GB and accept.
+        let (_dir, paths) = flux_shaped_paths_with_sizes(23, 1, 9, 1);
+
+        let hint_768 = ActivationHint {
+            width: 768,
+            height: 768,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+        let hint_2048 = ActivationHint {
+            width: 2048,
+            height: 2048,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+
+        let card_total = 30 * GB;
+        let result_768 = preflight_memory_guard_with_available(
+            "flux-dev",
+            &paths,
+            0,
+            card_total,
+            Some(hint_768),
+        );
+        let result_2048 = preflight_memory_guard_with_available(
+            "flux-dev",
+            &paths,
+            0,
+            card_total,
+            Some(hint_2048),
+        );
+
+        assert!(
+            result_768.is_ok(),
+            "768² FLUX should fit on 30 GB (small activation budget), got {result_768:?}"
+        );
+        assert!(
+            result_2048.is_err(),
+            "2048² FLUX must be rejected on 30 GB (large activation budget pushes \
+             peak past 90 % cap), got {result_2048:?}"
+        );
+    }
+
+    /// `ActivationHint::from_request` picks the right family + batch for a
+    /// real-shaped GenerateRequest.
+    #[test]
+    fn activation_hint_from_request_classifies_correctly() {
+        let mut req = GenerateRequest {
+            prompt: "test".into(),
+            negative_prompt: None,
+            model: "flux-dev:bf16".into(),
+            width: 1024,
+            height: 1024,
+            steps: 20,
+            guidance: 3.5,
+            seed: None,
+            batch_size: 1,
+            output_format: Default::default(),
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            edit_images: None,
+            strength: 1.0,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: None,
+        };
+
+        // FLUX is guidance-distilled → batch=1 even with guidance > 1.
+        let hint_flux = ActivationHint::from_request(&req, "flux");
+        assert_eq!(hint_flux.family, ActivationFamily::FluxDit);
+        assert_eq!(hint_flux.batch, 1);
+
+        // SDXL with CFG → batch=2.
+        let hint_sdxl = ActivationHint::from_request(&req, "sdxl");
+        assert_eq!(hint_sdxl.family, ActivationFamily::SdxlUnet);
+        assert_eq!(hint_sdxl.batch, 2);
+
+        // SDXL with no CFG (LCM/Turbo) → batch=1.
+        req.guidance = 1.0;
+        let hint_sdxl_lcm = ActivationHint::from_request(&req, "sdxl");
+        assert_eq!(hint_sdxl_lcm.batch, 1);
+
+        // Unknown family slug falls through to FluxDit.
+        let hint_unknown = ActivationHint::from_request(&req, "totally-bogus");
+        assert_eq!(hint_unknown.family, ActivationFamily::FluxDit);
     }
 }

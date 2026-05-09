@@ -484,7 +484,14 @@ impl SD3Engine {
             let t5_size = std::fs::metadata(&resolved_t5_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            preflight_memory_check("SD3 triple encoder", t5_size)?;
+            let te_activation_budget = crate::device::activation_bytes(
+                req.width,
+                req.height,
+                1,
+                crate::device::dtype_bytes(encoder_dtype),
+                crate::device::ActivationFamily::SmallTransformer,
+            );
+            preflight_memory_check("SD3 triple encoder", t5_size, te_activation_budget)?;
             if let Some(status) = memory_status_string() {
                 self.base.progress.info(&status);
             }
@@ -622,7 +629,20 @@ impl SD3Engine {
         let xformer_size = std::fs::metadata(&self.base.paths.transformer)
             .map(|m| m.len())
             .unwrap_or(0);
-        preflight_memory_check("SD3 MMDiT transformer", xformer_size)?;
+        // SD3 runs CFG by default → batch=2 if guidance > 1, else batch=1.
+        let xformer_batch = if req.guidance > 1.0 { 2 } else { 1 };
+        let xformer_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            xformer_batch,
+            crate::device::dtype_bytes(gpu_dtype),
+            crate::device::ActivationFamily::Sd3Mmdit,
+        );
+        preflight_memory_check(
+            "SD3 MMDiT transformer",
+            xformer_size,
+            xformer_activation_budget,
+        )?;
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }

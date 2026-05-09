@@ -552,8 +552,14 @@ async fn process_job(state: &AppState, job: GenerationJob) {
         }) as model_manager::EngineProgressCallback
     });
 
-    if let Err(api_err) =
-        model_manager::ensure_model_ready(state, &job.request.model, progress_callback).await
+    let activation_hint = model_manager::activation_hint_for_request(state, &job.request).await;
+    if let Err(api_err) = model_manager::ensure_model_ready(
+        state,
+        &job.request.model,
+        progress_callback,
+        activation_hint,
+    )
+    .await
     {
         let err_msg = api_err.error.clone();
         if let Some(ref tx) = job.progress_tx {
