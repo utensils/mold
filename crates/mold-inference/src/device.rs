@@ -241,6 +241,24 @@ pub enum ActivationFamily {
     Wuerstchen,
     /// T5 / CLIP / Qwen3 / Gemma text encoder workspace.
     SmallTransformer,
+    /// LTX-Video / LTX-2 (19B / 22B) video transformer. Always loaded via
+    /// the streaming block source (`new_streaming` in
+    /// `crates/mold-inference/src/ltx2/model/video_transformer.rs`) — only
+    /// `streaming_prefetch_count` blocks are GPU-resident at any one time,
+    /// so the file size on disk (~46 GB at BF16 for the 22B preset)
+    /// massively over-estimates GPU residency.
+    Ltx2Video,
+}
+
+impl ActivationFamily {
+    /// Whether this family loads its transformer in a block-streaming mode
+    /// (only a few blocks GPU-resident at a time, the rest mmap'd / paged).
+    /// The preflight uses this to bypass the file-size-based transformer
+    /// budget, which would otherwise reject 22B LTX-2 on a 24 GB card even
+    /// though only ~2 GB of transformer weights are co-resident at peak.
+    pub fn streaming_transformer(self) -> bool {
+        matches!(self, ActivationFamily::Ltx2Video)
+    }
 }
 
 /// Estimated activation memory (in bytes) for a single forward pass.
@@ -314,6 +332,15 @@ pub fn activation_bytes(
         // Image-space scaling is a soft proxy for "small workspace" — the
         // floor usually dominates for typical inputs.
         ActivationFamily::SmallTransformer => 87.0,
+        // LTX-Video / LTX-2: video latents are temporally compressed (8× spatial
+        // + 8× temporal in the LTX VAE), but each forward operates on the full
+        // [B, C, T, H/8, W/8] latent. Per-frame activation is similar to FLUX dit
+        // (split blocks, RMSNorm, no CFG-batched workspace), so we use the FLUX
+        // factor as a starting point — the factor is the per-pixel multiplier,
+        // and `activation_bytes` only sees image-space (H, W). Frame-count
+        // overhead is absorbed by the headroom buffer; the dominant cost on a
+        // 24 GB card is encoder + 1-2 streaming blocks, not activations.
+        ActivationFamily::Ltx2Video => 130.0,
     };
     let raw = (area as f64 * bytes_per_pixel as f64 * factor) as u64;
     /// Sanity floor: even tiny inputs reserve ~256 MB for kernel workspaces
@@ -352,7 +379,13 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         "qwen-image" | "qwen-image-edit" => ActivationFamily::QwenImageDit,
         "z-image" => ActivationFamily::ZImageDit,
         "wuerstchen" => ActivationFamily::Wuerstchen,
-        // Unknown / video families default to FLUX dit shape — same activation
+        // LTX-Video / LTX-2: streaming-loaded transformer (see
+        // `ActivationFamily::Ltx2Video::streaming_transformer`). The
+        // preflight uses this hint to skip the transformer file-size
+        // budget — at full BF16 the 22B file is 46 GB but only a couple
+        // of blocks are co-resident on GPU at peak.
+        "ltx-video" | "ltx2" | "ltx-2" | "ltx-2.3" => ActivationFamily::Ltx2Video,
+        // Unknown families default to FLUX dit shape — same activation
         // class, conservative against unknowns.
         _ => ActivationFamily::FluxDit,
     }

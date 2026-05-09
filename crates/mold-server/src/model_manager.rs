@@ -136,10 +136,24 @@ pub(crate) fn preflight_memory_guard_with_available(
     available_bytes: u64,
     hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
-    let peak = mold_inference::device::estimate_peak_memory(
-        paths,
-        mold_inference::LoadStrategy::Sequential,
-    );
+    // Streaming-transformer families (LTX-Video / LTX-2) load only a couple
+    // of transformer blocks onto GPU at a time via `new_streaming` — the
+    // file-size-based estimate (which assumes the whole transformer becomes
+    // GPU-resident) over-counts by ~40+ GB for the 22B LTX-2 preset and
+    // false-rejects on 24 GB cards. When the hint marks the family as
+    // streaming, we replace the file-size transformer component with a
+    // generous fixed cap that covers `streaming_prefetch_count` blocks
+    // plus the always-resident top-level weights (proj_in / proj_out /
+    // time_embed / caption_projection / scale_shift_table / norms).
+    let streaming = hint.is_some_and(|h| h.family.streaming_transformer());
+    let peak = if streaming {
+        streaming_transformer_peak(paths)
+    } else {
+        mold_inference::device::estimate_peak_memory(
+            paths,
+            mold_inference::LoadStrategy::Sequential,
+        )
+    };
     // Add the per-request activation budget on top of the file-size peak.
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
     // is a generic "kernels + small state" constant that doesn't scale; the
@@ -148,6 +162,40 @@ pub(crate) fn preflight_memory_guard_with_available(
     let peak_with_activation = peak.saturating_add(activation);
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
     check_model_memory_budget(model_name, peak_with_activation, effective_available)
+}
+
+/// Peak GPU residency for streaming-transformer families. Mirrors the
+/// Sequential strategy in `device::estimate_peak_memory` but replaces the
+/// `transformer_size + vae_size` term with a `STREAMING_TRANSFORMER_CAP`
+/// that bounds "block-streaming overhead, fully-resident top-level weights,
+/// and VAE." Encoder phase still pays full encoder_total because text
+/// encoders (Gemma, T5, CLIP) load whole.
+///
+/// The cap is conservative: at 22B BF16 with `streaming_prefetch_count=2`,
+/// two blocks ≈ 1.83 GB + non-block fragments ≈ 200 MB + VAE ≈ 200 MB
+/// ≈ 2.3 GB. The 6 GB cap leaves room for activation workspace, OS
+/// fragmentation, and future LTX presets without revisiting this file.
+fn streaming_transformer_peak(paths: &ModelPaths) -> u64 {
+    const STREAMING_TRANSFORMER_CAP: u64 = 6_000_000_000; // 6 GB
+    const HEADROOM: u64 = 2_000_000_000; // 2 GB, mirrors device::MEMORY_BUDGET_HEADROOM
+
+    let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let t5_size = paths.t5_encoder.as_ref().map(|p| file_size(p)).unwrap_or(0);
+    let clip_size = paths
+        .clip_encoder
+        .as_ref()
+        .map(|p| file_size(p))
+        .unwrap_or(0);
+    let clip2_size = paths
+        .clip_encoder_2
+        .as_ref()
+        .map(|p| file_size(p))
+        .unwrap_or(0);
+    let text_encoder_size: u64 = paths.text_encoder_files.iter().map(|p| file_size(p)).sum();
+    let encoder_total = t5_size + clip_size + clip2_size + text_encoder_size;
+
+    let inference_phase = STREAMING_TRANSFORMER_CAP;
+    std::cmp::max(encoder_total, inference_phase) + HEADROOM
 }
 
 /// Check whether estimated peak memory fits before committing to a model load.
@@ -1424,6 +1472,120 @@ mod tests {
             result_2048.is_err(),
             "2048² FLUX must be rejected on 30 GB (large activation budget pushes \
              peak past 90 % cap), got {result_2048:?}"
+        );
+    }
+
+    /// Build LTX-2-shaped paths: a single 46 GB single-file checkpoint
+    /// (transformer == vae) and a 25 GB Gemma TE in `text_encoder_files`.
+    /// Mirrors cv:2752735 on disk.
+    fn ltx2_shaped_paths_with_sizes(
+        transformer_gb: u64,
+        gemma_te_gb: u64,
+    ) -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk("ltx2_full.safetensors", transformer_gb);
+        let gemma = mk("gemma_te.safetensors", gemma_te_gb);
+        // LTX-2 catalog bridge sets vae == transformer (single-file
+        // convention). The peak estimator detects this and avoids
+        // double-counting.
+        let paths = ModelPaths {
+            transformer: transformer.clone(),
+            transformer_shards: Vec::new(),
+            vae: transformer,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![gemma],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
+    /// LTX-2 22B (cv:2752735) on a 24 GB 3090 must NOT be falsely rejected
+    /// by the file-size-based preflight. The transformer streams blocks
+    /// (`Ltx2AvTransformer3DModel::new_streaming`); only ~2 GB of weights
+    /// are co-resident at peak. The activation hint marks the family as
+    /// `Ltx2Video`, which routes through `streaming_transformer_peak`.
+    #[test]
+    fn preflight_accepts_ltx2_22b_on_24gb_card_via_streaming_peak() {
+        let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 0);
+        let hint = ActivationHint {
+            width: 768,
+            height: 512,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Ltx2Video,
+        };
+        let result =
+            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        assert!(
+            result.is_ok(),
+            "22B LTX-2 must fit on a 24 GB card under streaming-aware peak \
+             (only ~2 blocks co-resident; runtime handles its own memory), \
+             got {result:?}",
+        );
+    }
+
+    /// Without the streaming hint the same paths land on the file-size
+    /// peak and reject — pinning the previous behavior so a regression
+    /// that flips the hint plumbing back is caught.
+    #[test]
+    fn preflight_rejects_ltx2_22b_when_hint_marks_non_streaming() {
+        let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 0);
+        // Use FluxDit family — same shape, no streaming flag — so the
+        // preflight falls through to the file-size estimator and rejects
+        // at 90 % of 24 GB.
+        let hint = ActivationHint {
+            width: 768,
+            height: 512,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+        let result =
+            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        assert!(
+            result.is_err(),
+            "without the LTX-2 streaming hint the file-size peak must reject \
+             a 46 GB transformer on a 24 GB card — this anchors the regression \
+             that landed before the streaming-aware path",
+        );
+    }
+
+    /// Encoder phase for LTX-2 still pays full encoder_total. With a 25 GB
+    /// Gemma TE on a 24 GB card the encoder phase trips the 90 % cap even
+    /// when the transformer is streamed — a real OOM the user should see
+    /// from the runtime, but the preflight captures it up-front.
+    #[test]
+    fn preflight_rejects_ltx2_when_encoder_phase_exceeds_card() {
+        let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 25);
+        let hint = ActivationHint {
+            width: 768,
+            height: 512,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Ltx2Video,
+        };
+        let result =
+            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        assert!(
+            result.is_err(),
+            "25 GB Gemma TE alone exceeds 90 %% of 24 GB during the encoder \
+             phase — preflight must surface this even when the transformer \
+             is streamed, got {result:?}",
         );
     }
 
