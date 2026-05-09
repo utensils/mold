@@ -433,7 +433,22 @@ pub fn ensure_model_ready_sync(
     // Not in cache — need to create from scratch.
     // Resolve model paths.
     let paths = ModelPaths::resolve(model_name, config).ok_or_else(|| {
-        anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
+        // Catalog IDs (cv:/hf:) reach this path through the bridge in
+        // `model_manager::install_catalog_model`, which can synthesize a
+        // ModelConfig that's missing a required field (notably `vae`)
+        // when a canonical companion was never pulled. The legacy
+        // "Run: mold pull <id>" message is misleading there because the
+        // primary checkpoint IS on disk — the companion is what's
+        // missing. Surface the catalog-specific guidance instead.
+        if model_name.starts_with("cv:") || model_name.starts_with("hf:") {
+            anyhow::anyhow!(
+                "catalog model '{model_name}' has missing required components. \
+                 Re-pull the entry from the catalog so its companions \
+                 (CLIP-L / T5 / VAE) are fetched alongside the primary checkpoint."
+            )
+        } else {
+            anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
+        }
     })?;
 
     // Preflight before unloading the active model. Evict-to-fit drops parked
