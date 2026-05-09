@@ -30,7 +30,7 @@ use crate::cache::{
 };
 use crate::device::{
     check_memory_budget, effective_device_ref, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check,
+    preflight_memory_check, usable_free_vram_bytes,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -519,11 +519,14 @@ impl Flux2Engine {
         tracing::info!("VAE loaded on GPU");
 
         // --- Resolve and load Qwen3 text encoder ---
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-        if free > 0 {
+        // Log the raw reading (matches `nvidia-smi`); budget the variant
+        // selection against the reserve-adjusted value.
+        let free_raw = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        if free_raw > 0 {
             self.base.progress.info(&format!(
                 "Free VRAM after transformer+VAE: {}",
-                fmt_gb(free)
+                fmt_gb(free_raw)
             ));
         }
 
@@ -640,7 +643,8 @@ impl Flux2Engine {
             self.base.progress.cache_hit("prompt conditioning");
             tensor
         } else {
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading drives the Qwen3 variant selection.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting Qwen3 encoder");
             let resolve_start = Instant::now();
             let qwen3_size = self.qwen3_size();
@@ -677,7 +681,14 @@ impl Flux2Engine {
                 .iter()
                 .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
                 .sum();
-            preflight_memory_check("Qwen3 encoder", enc_size)?;
+            let enc_activation_budget = crate::device::activation_bytes(
+                req.width,
+                req.height,
+                1,
+                crate::device::dtype_bytes(enc_dtype),
+                crate::device::ActivationFamily::SmallTransformer,
+            );
+            preflight_memory_check("Qwen3 encoder", enc_size, enc_activation_budget)?;
             if let Some(status) = memory_status_string() {
                 self.base.progress.info(&status);
             }
@@ -731,7 +742,18 @@ impl Flux2Engine {
         let vae_file_size = std::fs::metadata(&self.base.paths.vae)
             .map(|m| m.len())
             .unwrap_or(0);
-        preflight_memory_check("Flux.2 transformer + VAE", xformer_size + vae_file_size)?;
+        let xformer_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            1,
+            crate::device::dtype_bytes(gpu_dtype),
+            crate::device::ActivationFamily::Flux2Dit,
+        );
+        preflight_memory_check(
+            "Flux.2 transformer + VAE",
+            xformer_size + vae_file_size,
+            xformer_activation_budget,
+        )?;
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }
@@ -880,7 +902,19 @@ impl Flux2Engine {
             std::fs::write(&dump_path, &bytes)?;
             tracing::info!(path = %dump_path, dims = ?dims, "dumped pre-VAE latent");
         }
-        let img = vae.decode(&img.to_dtype(gpu_dtype)?)?;
+        let img_for_vae = img.to_dtype(gpu_dtype)?;
+        let device_for_sync = device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &img_for_vae,
+            |latents| vae.decode(latents).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "FLUX2 (sequential) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
@@ -974,12 +1008,22 @@ impl Flux2Engine {
             progress.cache_hit("prompt conditioning");
             tensor
         } else {
-            // Cache miss — reload encoder if it was dropped after a previous generation
+            // Cache miss — restore encoder if it was dropped or parked after
+            // a previous generation.
             if loaded.text_encoder.model.is_none() {
-                progress.stage_start("Reloading Qwen3 encoder");
+                let label = if loaded.text_encoder.is_parked() {
+                    "Unparking Qwen3 encoder (CPU→GPU)"
+                } else {
+                    "Reloading Qwen3 encoder"
+                };
+                progress.stage_start(label);
                 let reload_start = Instant::now();
-                loaded.text_encoder.reload(progress)?;
-                progress.stage_done("Reloading Qwen3 encoder", reload_start.elapsed());
+                if loaded.text_encoder.is_parked() {
+                    loaded.text_encoder.unpark_to_gpu(progress)?;
+                } else {
+                    loaded.text_encoder.reload(progress)?;
+                }
+                progress.stage_done(label, reload_start.elapsed());
             }
 
             let txt_emb = Self::encode_prompt_cached(
@@ -992,16 +1036,27 @@ impl Flux2Engine {
             )?;
             tracing::info!("Qwen3 encoding complete");
 
-            // Drop Qwen3 to free memory for denoising.
-            // Always drop on GPU. On Metal (unified memory), also drop CPU-loaded
-            // weights since they share the same physical RAM as GPU allocations.
-            // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
+            // Free GPU VRAM for denoising. With `MOLD_KEEP_TE_RAM=1` and the
+            // BF16 encoder, parameters move to host RAM instead of being
+            // released — saves ~10 s on the next request. GGUF and Metal
+            // flow through the original drop path.
             if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
-                loaded.text_encoder.drop_weights();
-                tracing::info!(
-                    on_gpu = loaded.text_encoder.on_gpu,
-                    "Qwen3 encoder dropped to free memory for denoising"
-                );
+                let park_mode = crate::device::keep_te_in_ram()
+                    && !loaded.device.is_metal()
+                    && !loaded.text_encoder.is_quantized;
+                if park_mode {
+                    loaded.text_encoder.park_to_cpu()?;
+                    tracing::info!(
+                        on_gpu = loaded.text_encoder.on_gpu,
+                        "Qwen3 encoder parked to CPU host RAM"
+                    );
+                } else {
+                    loaded.text_encoder.drop_weights();
+                    tracing::info!(
+                        on_gpu = loaded.text_encoder.on_gpu,
+                        "Qwen3 encoder dropped to free memory for denoising"
+                    );
+                }
             }
 
             txt_emb
@@ -1135,7 +1190,20 @@ impl Flux2Engine {
             std::fs::write(&dump_path, &bytes)?;
             tracing::info!(path = %dump_path, dims = ?dims, "dumped pre-VAE latent (parallel)");
         }
-        let img = loaded.vae.decode(&img.to_dtype(loaded.dtype)?)?;
+        let img_for_vae = img.to_dtype(loaded.dtype)?;
+        let vae = &loaded.vae;
+        let device_for_sync = loaded.device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &img_for_vae,
+            |latents| vae.decode(latents).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "FLUX2 (parallel) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         // 8. Convert to u8 image: clamp to [-1, 1], map to [0, 255]
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;

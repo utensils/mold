@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use colored::Colorize;
-use mold_core::manifest::known_manifests;
+use mold_core::manifest::visible_manifests;
 use mold_core::Config;
 use serde_json::json;
 
@@ -58,9 +58,13 @@ fn collect_model_stats(config: &Config) -> (Vec<ModelStats>, u64) {
     let mut shared_bytes = 0u64;
     let mut shared_paths: HashSet<String> = HashSet::new();
 
-    // Collect all installed model names (config + manifest-discovered)
+    // Collect all installed model names (config + manifest-discovered).
+    // visible_manifests() excludes hidden companion manifests (e.g.
+    // flux2-te / flux-vae) — their files are a subset of a parent model's
+    // files, so populating the parent would otherwise double-count them as
+    // separately-installed models.
     let mut model_names: Vec<String> = config.models.keys().cloned().collect();
-    for manifest in known_manifests() {
+    for manifest in visible_manifests() {
         if !seen_names.contains(&manifest.name)
             && !config.models.contains_key(&manifest.name)
             && config.manifest_model_is_downloaded(&manifest.name)

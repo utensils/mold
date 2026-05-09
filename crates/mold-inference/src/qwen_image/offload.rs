@@ -520,9 +520,12 @@ impl OffloadedQwenImageTransformer {
             DType::F32,
         )?;
 
-        // Measure free VRAM after stem layers and decide how many blocks fit
+        // Measure free VRAM after stem layers and decide how many blocks fit.
+        // Reserve-adjusted reading: this is the budget that decides how
+        // many blocks fit on GPU; the OS reserve is unreachable at allocate
+        // time so leaving it in the budget over-promises VRAM.
         gpu_device.synchronize()?;
-        let free_vram = crate::device::free_vram_bytes(gpu_ordinal).unwrap_or(0);
+        let free_vram = crate::device::usable_free_vram_bytes(gpu_ordinal).unwrap_or(0);
         const VRAM_HEADROOM: u64 = 4_500_000_000; // 4.5GB for attention + activations + CUDA overhead
         let vram_budget = free_vram.saturating_sub(VRAM_HEADROOM);
 

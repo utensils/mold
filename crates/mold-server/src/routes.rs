@@ -1282,8 +1282,9 @@ async fn load_model(
         return Ok(StatusCode::OK);
     }
 
-    // Legacy single-GPU path (no workers discovered).
-    model_manager::ensure_model_ready(&state, &body.model, None).await?;
+    // Legacy single-GPU path (no workers discovered). No resolution context
+    // here — admin load uses size-only peak via the `None` hint.
+    model_manager::ensure_model_ready(&state, &body.model, None, None).await?;
     tracing::info!(model = %body.model, gpu = ?body.gpu, "model loaded via API (legacy)");
     Ok(StatusCode::OK)
 }

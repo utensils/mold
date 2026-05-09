@@ -14,7 +14,7 @@ use crate::cache::{
 };
 use crate::controlnet::ControlNetModel;
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{cfg_active, rand_seed, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressEvent};
@@ -555,7 +555,7 @@ impl SD15Engine {
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
         controlnet_ctx: Option<&ControlNetContext>,
     ) -> Result<()> {
-        let use_cfg = guidance > 1.0;
+        let use_cfg = cfg_active(guidance);
         let mut scheduler = crate::scheduler::build_scheduler(
             sched,
             steps as usize,
@@ -732,7 +732,7 @@ impl SD15Engine {
         let cache_key = prompt_cache_key(prompt, guidance);
         let (text_embeddings, cache_hit) =
             get_or_insert_cached_tensor(&self.prompt_cache, cache_key, device, dtype, || {
-                let use_cfg = guidance > 1.0;
+                let use_cfg = cfg_active(guidance);
 
                 self.base.progress.stage_start("Encoding prompt (CLIP-L)");
                 let encode_start = Instant::now();
@@ -991,7 +991,16 @@ impl SD15Engine {
         let unet_size = std::fs::metadata(&self.base.paths.transformer)
             .map(|m| m.len())
             .unwrap_or(0);
-        preflight_memory_check("UNet", unet_size)?;
+        // SD1.5 runs CFG by default → batch=2 unless guidance ≈ 1 (LCM).
+        let unet_batch = if req.guidance > 1.0 { 2 } else { 1 };
+        let unet_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            unet_batch,
+            crate::device::dtype_bytes(dtype),
+            crate::device::ActivationFamily::SdxlUnet,
+        );
+        preflight_memory_check("UNet", unet_size, unet_activation_budget)?;
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }
@@ -1608,5 +1617,30 @@ mod tests {
             result.is_err(),
             "constructor must surface a missing-file error before deeper parsing",
         );
+    }
+
+    // The SD1.5 denoise loop and prompt encoder both gate the unconditional
+    // pass on `cfg_active(guidance)`. These tests pin the predicate that
+    // those branches use so a regression to `guidance > 1.0` (which would
+    // break LCM / Lightning at exactly cfg=1.0) is caught here.
+
+    #[test]
+    fn test_cfg_disabled_at_guidance_1_0() {
+        assert!(!cfg_active(1.0));
+    }
+
+    #[test]
+    fn test_cfg_disabled_just_below_1_0() {
+        assert!(!cfg_active(1.0 - 1e-5));
+    }
+
+    #[test]
+    fn test_cfg_enabled_at_guidance_1_5() {
+        assert!(cfg_active(1.5));
+    }
+
+    #[test]
+    fn test_cfg_enabled_at_guidance_7_5() {
+        assert!(cfg_active(7.5));
     }
 }

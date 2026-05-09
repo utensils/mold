@@ -552,8 +552,14 @@ async fn process_job(state: &AppState, job: GenerationJob) {
         }) as model_manager::EngineProgressCallback
     });
 
-    if let Err(api_err) =
-        model_manager::ensure_model_ready(state, &job.request.model, progress_callback).await
+    let activation_hint = model_manager::activation_hint_for_request(state, &job.request).await;
+    if let Err(api_err) = model_manager::ensure_model_ready(
+        state,
+        &job.request.model,
+        progress_callback,
+        activation_hint,
+    )
+    .await
     {
         let err_msg = api_err.error.clone();
         if let Some(ref tx) = job.progress_tx {
@@ -617,6 +623,10 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 
     #[cfg(feature = "metrics")]
     let inference_start = Instant::now();
+    // RSS sample taken just before inference; the post-inference sample below
+    // logs the per-job delta so RAM growth can be attributed to a specific
+    // generation rather than tracked at process granularity.
+    let rss_before = crate::resources::ram_snapshot().used_by_mold;
     // Run generation on the blocking pool. Move the engine in, return it back
     // out (alongside the result + any panic payload) so we can restore it to
     // the cache in async context regardless of outcome.
@@ -630,6 +640,16 @@ async fn process_job(state: &AppState, job: GenerationJob) {
         (cached_engine, result)
     })
     .await;
+
+    let rss_after = crate::resources::ram_snapshot().used_by_mold;
+    let rss_delta = rss_after as i64 - rss_before as i64;
+    tracing::info!(
+        model = %job.request.model,
+        rss_before_mb = rss_before / 1_000_000,
+        rss_after_mb = rss_after / 1_000_000,
+        rss_delta_mb = rss_delta / 1_000_000,
+        "generation memory delta"
+    );
 
     #[cfg(feature = "metrics")]
     let inference_duration = inference_start.elapsed().as_secs_f64();

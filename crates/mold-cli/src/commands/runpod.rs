@@ -2301,6 +2301,254 @@ mod tests {
         };
     }
 
+    #[test]
+    fn human_bytes_picks_the_right_unit_at_each_threshold() {
+        // Sub-KiB → bare bytes.
+        assert_eq!(human_bytes(0), "0B");
+        assert_eq!(human_bytes(1), "1B");
+        assert_eq!(human_bytes(1023), "1023B");
+        // KiB.
+        assert_eq!(human_bytes(1024), "1.0K");
+        assert_eq!(human_bytes(1536), "1.5K");
+        // MiB.
+        assert_eq!(human_bytes(1024 * 1024), "1.0M");
+        assert_eq!(human_bytes(5 * 1024 * 1024), "5.0M");
+        // GiB.
+        assert_eq!(human_bytes(1024u64.pow(3)), "1.0G");
+        assert_eq!(human_bytes(5_368_709_120), "5.0G");
+    }
+
+    #[test]
+    fn extension_for_video_covers_every_format() {
+        assert_eq!(extension_for_video(mold_core::OutputFormat::Mp4), "mp4");
+        assert_eq!(extension_for_video(mold_core::OutputFormat::Gif), "gif");
+        assert_eq!(extension_for_video(mold_core::OutputFormat::Apng), "apng");
+        assert_eq!(extension_for_video(mold_core::OutputFormat::Webp), "webp");
+        // Image formats fall through to the generic bin extension — the helper
+        // is only meaningful for video formats but must not panic on others.
+        assert_eq!(extension_for_video(mold_core::OutputFormat::Png), "bin");
+        assert_eq!(extension_for_video(mold_core::OutputFormat::Jpeg), "bin");
+    }
+
+    #[test]
+    fn is_interesting_gpu_matches_the_curated_list() {
+        for name in [
+            "NVIDIA GeForce RTX 4090",
+            "NVIDIA GeForce RTX 5090",
+            "NVIDIA GeForce RTX 3090",
+            "NVIDIA L40S",
+            "NVIDIA L40",
+            "NVIDIA A100 80GB PCIe",
+            "NVIDIA H100 NVL",
+            "NVIDIA RTX A6000",
+        ] {
+            assert!(is_interesting_gpu(name), "{name} should be interesting");
+        }
+        for name in ["NVIDIA T4", "NVIDIA RTX 2060", "NVIDIA V100"] {
+            assert!(!is_interesting_gpu(name), "{name} should be filtered");
+        }
+    }
+
+    #[test]
+    fn cloud_type_str_roundtrip_is_case_insensitive_and_exhaustive() {
+        use std::str::FromStr;
+        assert!(matches!(
+            CloudType::from_str("secure").unwrap(),
+            CloudType::Secure
+        ));
+        assert!(matches!(
+            CloudType::from_str("SECURE").unwrap(),
+            CloudType::Secure
+        ));
+        assert!(matches!(
+            CloudType::from_str("Community").unwrap(),
+            CloudType::Community
+        ));
+        assert_eq!(CloudType::Secure.as_str(), "SECURE");
+        assert_eq!(CloudType::Community.as_str(), "COMMUNITY");
+        assert!(CloudType::from_str("hybrid").is_err());
+        assert!(CloudType::from_str("").is_err());
+    }
+
+    #[test]
+    fn since_to_epoch_supports_every_unit_and_rejects_garbage() {
+        let now = now_epoch();
+        // Each unit subtracts a known amount; allow 2s of test-runtime slop.
+        let approx = |actual: u64, expected_offset: u64| {
+            let want = now.saturating_sub(expected_offset);
+            actual <= want && actual >= want.saturating_sub(2)
+        };
+        assert!(approx(since_to_epoch(Some("30s")).unwrap(), 30));
+        assert!(approx(since_to_epoch(Some("5m")).unwrap(), 300));
+        assert!(approx(since_to_epoch(Some("2h")).unwrap(), 7200));
+        assert!(approx(since_to_epoch(Some("3d")).unwrap(), 3 * 86400));
+        assert!(approx(since_to_epoch(Some("1w")).unwrap(), 7 * 86400));
+        // Unknown unit and unparseable number both error.
+        assert!(since_to_epoch(Some("12x")).is_err());
+        assert!(since_to_epoch(Some("abch")).is_err());
+    }
+
+    #[test]
+    fn runpod_state_serde_roundtrip_preserves_optional_fields() {
+        let state = RunPodState {
+            last_pod_id: Some("abc123".into()),
+            last_pod_created_at: Some(1_700_000_000),
+            last_pod_last_used_at: Some(1_700_000_500),
+            last_pod_gpu: Some("RTX 4090".into()),
+            last_pod_cost_per_hr: Some(0.34),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let back: RunPodState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.last_pod_id.as_deref(), Some("abc123"));
+        assert_eq!(back.last_pod_cost_per_hr, Some(0.34));
+
+        // Empty default round-trips and an empty file decodes to default.
+        let default = RunPodState::default();
+        let blob = serde_json::to_string(&default).unwrap();
+        let back: RunPodState = serde_json::from_str(&blob).unwrap();
+        assert!(back.last_pod_id.is_none());
+        assert!(back.last_pod_cost_per_hr.is_none());
+    }
+
+    #[test]
+    fn history_entry_serde_handles_legacy_rows_without_model_or_prompt() {
+        // New-format entry with model/prompt populated — round-trips cleanly.
+        let entry = HistoryEntry {
+            pod_id: "pod-1".into(),
+            created_at: 100,
+            deleted_at: Some(900),
+            cost_per_hr: 1.25,
+            gpu: "RTX 4090".into(),
+            model: Some("flux-dev:q8".into()),
+            prompt: Some("a cat".into()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: HistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pod_id, "pod-1");
+        assert_eq!(back.deleted_at, Some(900));
+        assert_eq!(back.model.as_deref(), Some("flux-dev:q8"));
+
+        // Legacy row predating model/prompt fields still decodes thanks to
+        // serde(default). Pre-T2 logs have these as null/missing.
+        let legacy = r#"{"pod_id":"pod-old","created_at":1,"deleted_at":null,"cost_per_hr":0.69,"gpu":"RTX 3090"}"#;
+        let back: HistoryEntry = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.pod_id, "pod-old");
+        assert!(back.model.is_none());
+        assert!(back.prompt.is_none());
+    }
+
+    #[test]
+    fn format_progress_event_renders_every_sse_variant() {
+        use mold_core::types::SseProgressEvent as E;
+
+        assert_eq!(
+            format_progress_event(&E::StageStart {
+                name: "denoise".into()
+            }),
+            "stage: denoise"
+        );
+        assert_eq!(
+            format_progress_event(&E::StageDone {
+                name: "vae".into(),
+                elapsed_ms: 42
+            }),
+            "done: vae (42ms)"
+        );
+        assert_eq!(
+            format_progress_event(&E::Info {
+                message: "hello".into()
+            }),
+            "hello"
+        );
+        assert_eq!(
+            format_progress_event(&E::CacheHit {
+                resource: "t5".into()
+            }),
+            "cached: t5"
+        );
+        assert_eq!(
+            format_progress_event(&E::DenoiseStep {
+                step: 5,
+                total: 20,
+                elapsed_ms: 100
+            }),
+            "denoise 5/20"
+        );
+        assert_eq!(
+            format_progress_event(&E::PullComplete {
+                model: "flux-dev:q8".into()
+            }),
+            "pull complete: flux-dev:q8"
+        );
+        assert_eq!(
+            format_progress_event(&E::Queued { position: 3 }),
+            "queued (#3)"
+        );
+
+        // Multi-field variants — assert key substrings rather than full
+        // strings so unrelated formatting tweaks (units, separators) don't
+        // break the test.
+        let dl = format_progress_event(&E::DownloadProgress {
+            filename: "model.safetensors".into(),
+            file_index: 1,
+            total_files: 3,
+            bytes_downloaded: 1024 * 1024,
+            bytes_total: 4 * 1024 * 1024,
+            batch_bytes_downloaded: 1024 * 1024,
+            batch_bytes_total: 4 * 1024 * 1024,
+            batch_elapsed_ms: 500,
+        });
+        assert!(dl.contains("[1/3]"), "got: {dl}");
+        assert!(dl.contains("model.safetensors"), "got: {dl}");
+        assert!(dl.contains("1.0M"), "got: {dl}");
+        assert!(dl.contains("4.0M"), "got: {dl}");
+
+        let done = format_progress_event(&E::DownloadDone {
+            filename: "tokenizer.json".into(),
+            file_index: 2,
+            total_files: 3,
+            batch_bytes_downloaded: 1024,
+            batch_bytes_total: 1024,
+            batch_elapsed_ms: 50,
+        });
+        assert!(done.contains("✓"), "got: {done}");
+        assert!(done.contains("[2/3]"), "got: {done}");
+        assert!(done.contains("tokenizer.json"), "got: {done}");
+
+        let load = format_progress_event(&E::WeightLoad {
+            component: "transformer".into(),
+            bytes_loaded: 512 * 1024 * 1024,
+            bytes_total: 4 * 1024 * 1024 * 1024,
+        });
+        assert!(load.contains("loading transformer"), "got: {load}");
+        assert!(load.contains("512.0M"), "got: {load}");
+        assert!(load.contains("4.0G"), "got: {load}");
+    }
+
+    #[test]
+    fn friendly_to_gpu_id_falls_back_to_input_for_unknown() {
+        // Known mappings are already covered by `friendly_gpu_roundtrip`.
+        // Anything we don't recognise must pass through unchanged so users
+        // can still pin GPUs we haven't listed yet.
+        assert_eq!(
+            friendly_to_gpu_id("NVIDIA Mystery GPU"),
+            "NVIDIA Mystery GPU"
+        );
+        assert_eq!(friendly_to_gpu_id(""), "");
+    }
+
+    #[test]
+    fn normalize_gpu_id_passes_through_unrecognised_aliases() {
+        // Unknown shorthands fall through unchanged — better than guessing.
+        assert_eq!(normalize_gpu_id("v100"), "v100");
+        assert_eq!(normalize_gpu_id("rtx 2060"), "rtx 2060");
+        // Anything containing "NVIDIA" is treated as the canonical id.
+        assert_eq!(
+            normalize_gpu_id("NVIDIA GeForce RTX 6090"),
+            "NVIDIA GeForce RTX 6090"
+        );
+    }
+
     // Silence unused-import warnings when tests compile but don't use every import.
     #[allow(dead_code)]
     fn _use_imports(_: GpuType) {}

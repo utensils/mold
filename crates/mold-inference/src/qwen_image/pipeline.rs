@@ -32,7 +32,7 @@ use crate::cache::{
 };
 use crate::device::{
     effective_device_ref, fits_in_memory, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, qwen2_vram_threshold, should_use_gpu,
+    preflight_memory_check, qwen2_vram_threshold, should_use_gpu, usable_free_vram_bytes,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
@@ -908,7 +908,8 @@ impl QwenImageEngine {
             let transformer_size = std::fs::metadata(&self.base.paths.transformer)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading: split-CFG is a budget decision.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             let split_cfg_for_memory = device.is_cuda()
                 && (self.offload
                     || Self::should_split_cfg_quantized_cuda(
@@ -952,8 +953,19 @@ impl QwenImageEngine {
                 .filter_map(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .sum();
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-            let use_offload = self.offload || crate::device::should_offload(mem_size, free);
+            // Reserve-adjusted reading: should_offload budgets against this.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Qwen-Image runs CFG by default; activation budget scales with
+            // resolution to replace the previous fixed 3 GB heuristic.
+            let activation_budget = crate::device::activation_bytes(
+                width as u32,
+                height as u32,
+                2,
+                crate::device::dtype_bytes(dtype),
+                crate::device::ActivationFamily::QwenImageDit,
+            );
+            let use_offload =
+                self.offload || crate::device::should_offload(mem_size, free, activation_budget);
 
             if is_fp8 {
                 self.base
@@ -1374,14 +1386,17 @@ impl QwenImageEngine {
             .stage_done(&xformer_label, xformer_start.elapsed());
         tracing::info!("Qwen-Image transformer loaded");
 
-        // Decide device placement for VAE and text encoder
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // Decide device placement for VAE and text encoder.
+        // Log raw, budget against the reserve-adjusted reading.
+        let free_raw = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let is_cuda = device.is_cuda();
         let is_metal = device.is_metal();
-        if free > 0 {
-            self.base
-                .progress
-                .info(&format!("Free VRAM after transformer: {}", fmt_gb(free)));
+        if free_raw > 0 {
+            self.base.progress.info(&format!(
+                "Free VRAM after transformer: {}",
+                fmt_gb(free_raw)
+            ));
         }
 
         let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_DECODE_VRAM_THRESHOLD);
@@ -1528,7 +1543,9 @@ impl QwenImageEngine {
 
         let width = req.width as usize;
         let height = req.height as usize;
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // Reserve-adjusted reading: text-encoder source / placement is a
+        // budget decision.
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let resolved_text_encoder =
             self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Sequential)?;
         let (plan, _device_label) =
@@ -1620,9 +1637,17 @@ impl QwenImageEngine {
                         "Skipping hard preflight for Qwen2.5 text encoder on Metal; sequential mode spills prompt conditioning to CPU after encoding",
                     );
                 } else {
+                    let te_activation_budget = crate::device::activation_bytes(
+                        req.width,
+                        req.height,
+                        1,
+                        crate::device::dtype_bytes(te_dtype),
+                        crate::device::ActivationFamily::SmallTransformer,
+                    );
                     preflight_memory_check(
                         "Qwen2.5 text encoder",
                         resolved_text_encoder.size_bytes,
+                        te_activation_budget,
                     )?;
                 }
 
@@ -1712,7 +1737,18 @@ impl QwenImageEngine {
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum();
-        preflight_memory_check("Qwen-Image transformer", xformer_size)?;
+        let xformer_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            if req.guidance > 1.0 { 2 } else { 1 },
+            crate::device::dtype_bytes(dtype),
+            crate::device::ActivationFamily::QwenImageDit,
+        );
+        preflight_memory_check(
+            "Qwen-Image transformer",
+            xformer_size,
+            xformer_activation_budget,
+        )?;
 
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
@@ -1763,7 +1799,8 @@ impl QwenImageEngine {
         let (prepared_img2img_latents, inpaint_ctx) = if let Some(ref source_bytes) =
             req.source_image
         {
-            let free_for_encode = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading drives the encode-device decision.
+            let free_for_encode = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             let encode_on_gpu = should_use_gpu(
                 device.is_cuda(),
                 device.is_metal(),
@@ -1991,7 +2028,8 @@ impl QwenImageEngine {
             self.base.progress.info(&status);
         }
 
-        let free_for_vae = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // Reserve-adjusted reading: VAE placement is a budget decision.
+        let free_for_vae = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let vae_on_gpu = should_use_gpu(
             device.is_cuda(),
             device.is_metal(),
@@ -2128,10 +2166,19 @@ impl QwenImageEngine {
         );
 
         if loaded.text_encoder.model.is_none() {
-            progress.stage_start("Reloading Qwen2.5 encoder");
+            let label = if loaded.text_encoder.is_parked() {
+                "Unparking Qwen2.5 encoder (CPU→GPU)"
+            } else {
+                "Reloading Qwen2.5 encoder"
+            };
+            progress.stage_start(label);
             let reload_start = Instant::now();
-            loaded.text_encoder.reload(progress)?;
-            progress.stage_done("Reloading Qwen2.5 encoder", reload_start.elapsed());
+            if loaded.text_encoder.is_parked() {
+                loaded.text_encoder.unpark_to_gpu(progress)?;
+            } else {
+                loaded.text_encoder.reload(progress)?;
+            }
+            progress.stage_done(label, reload_start.elapsed());
         }
 
         progress.stage_start("Encoding prompt (Qwen2.5 edit)");
@@ -2170,11 +2217,22 @@ impl QwenImageEngine {
 
         let drop_text_encoder = is_edit_family || loaded.text_encoder.on_gpu;
         if drop_text_encoder {
-            loaded.text_encoder.drop_weights();
-            tracing::info!(
-                on_gpu = loaded.text_encoder.on_gpu,
-                "Qwen2.5 text encoder dropped after edit conditioning"
-            );
+            let park_mode = crate::device::keep_te_in_ram()
+                && !loaded.device.is_metal()
+                && !loaded.text_encoder.is_quantized;
+            if park_mode {
+                loaded.text_encoder.park_to_cpu()?;
+                tracing::info!(
+                    on_gpu = loaded.text_encoder.on_gpu,
+                    "Qwen2.5 text encoder parked to CPU host RAM after edit conditioning"
+                );
+            } else {
+                loaded.text_encoder.drop_weights();
+                tracing::info!(
+                    on_gpu = loaded.text_encoder.on_gpu,
+                    "Qwen2.5 text encoder dropped after edit conditioning"
+                );
+            }
         }
 
         let mut packed_input_storage = Vec::with_capacity(edit_images.len());
@@ -2493,10 +2551,19 @@ impl QwenImageEngine {
             (hs, mask, u_hs, u_mask)
         } else {
             if loaded.text_encoder.model.is_none() {
-                progress.stage_start("Reloading Qwen2.5 encoder");
+                let label = if loaded.text_encoder.is_parked() {
+                    "Unparking Qwen2.5 encoder (CPU→GPU)"
+                } else {
+                    "Reloading Qwen2.5 encoder"
+                };
+                progress.stage_start(label);
                 let reload_start = Instant::now();
-                loaded.text_encoder.reload(progress)?;
-                progress.stage_done("Reloading Qwen2.5 encoder", reload_start.elapsed());
+                if loaded.text_encoder.is_parked() {
+                    loaded.text_encoder.unpark_to_gpu(progress)?;
+                } else {
+                    loaded.text_encoder.reload(progress)?;
+                }
+                progress.stage_done(label, reload_start.elapsed());
             }
 
             let (hs, mask) = Self::encode_prompt_cached(
@@ -2542,10 +2609,18 @@ impl QwenImageEngine {
             )
         };
 
-        // Drop text encoder from GPU to free VRAM for denoising
+        // Drop or park text encoder to free VRAM for denoising.
         if loaded.text_encoder.on_gpu {
-            loaded.text_encoder.drop_weights();
-            tracing::info!("Qwen2.5 text encoder dropped from GPU");
+            let park_mode = crate::device::keep_te_in_ram()
+                && !loaded.device.is_metal()
+                && !loaded.text_encoder.is_quantized;
+            if park_mode {
+                loaded.text_encoder.park_to_cpu()?;
+                tracing::info!("Qwen2.5 text encoder parked to CPU host RAM");
+            } else {
+                loaded.text_encoder.drop_weights();
+                tracing::info!("Qwen2.5 text encoder dropped from GPU");
+            }
         }
 
         // 3. Calculate latent dimensions

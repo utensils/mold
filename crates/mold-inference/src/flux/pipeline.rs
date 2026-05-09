@@ -14,7 +14,8 @@ use crate::cache::{
 };
 use crate::device::{
     check_memory_budget, effective_device_ref, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, should_offload, should_use_gpu, CLIP_VRAM_THRESHOLD, MIN_OFFLOAD_VRAM,
+    preflight_memory_check, should_offload, should_use_gpu, usable_free_vram_bytes,
+    CLIP_VRAM_THRESHOLD, MIN_OFFLOAD_VRAM,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
@@ -619,11 +620,11 @@ fn flux_lora_var_builder<'a>(
 ) -> Result<VarBuilder<'a>> {
     use super::lora;
 
-    let adapters: Vec<lora::LoraAdapter> = loras
+    let adapters: Vec<std::sync::Arc<lora::LoraAdapter>> = loras
         .iter()
         .map(|w| {
             progress.info("Loading LoRA adapter");
-            let adapter = lora::LoraAdapter::load(Path::new(&w.path))?;
+            let adapter = lora::get_or_load_adapter(Path::new(&w.path))?;
             progress.info(&format!(
                 "LoRA: {} layers, rank {}, scale {:.2}",
                 adapter.layers.len(),
@@ -638,7 +639,7 @@ fn flux_lora_var_builder<'a>(
         .iter()
         .zip(loras.iter())
         .map(|(adapter, w)| lora::LoraSpec {
-            adapter,
+            adapter: adapter.as_ref(),
             scale: w.scale,
             path_hash: lora_path_hash(&w.path),
         })
@@ -674,10 +675,92 @@ fn flux_gguf_lora_var_builder(
 ) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
     use super::lora;
 
-    let adapters: Vec<lora::LoraAdapter> = loras
+    let adapters: Vec<std::sync::Arc<lora::LoraAdapter>> = loras
         .iter()
         .map(|w| {
             progress.info("Loading LoRA adapter");
+            let adapter = lora::get_or_load_adapter(Path::new(&w.path))?;
+            progress.info(&format!(
+                "LoRA: {} layers, rank {}, scale {:.2}",
+                adapter.layers.len(),
+                adapter.rank,
+                w.scale,
+            ));
+            anyhow::Ok(adapter)
+        })
+        .collect::<Result<_>>()?;
+
+    let specs: Vec<lora::LoraSpec<'_>> = adapters
+        .iter()
+        .zip(loras.iter())
+        .map(|(adapter, w)| lora::LoraSpec {
+            adapter: adapter.as_ref(),
+            scale: w.scale,
+            path_hash: lora_path_hash(&w.path),
+        })
+        .collect();
+
+    lora::gguf_lora_var_builder(transformer_path, &specs, device, progress, delta_cache)
+}
+
+/// Three-state opt-in for bypass-mode LoRA. `auto` enables bypass on
+/// every supported path: the offload transformer (avoids the ~24 GB
+/// CPU-resident BF16 merge) and the GGUF transformer (avoids the
+/// minutes-long, ~95 GB peak dequant→merge→requant cycle on Q8 with
+/// a stack of LoRAs). `on` forces bypass; `off` reverts to the
+/// legacy `flux_lora_var_builder` / `gguf_lora_var_builder` so users
+/// can regression-check a build.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoraBypassMode {
+    Auto,
+    On,
+    Off,
+}
+
+impl LoraBypassMode {
+    fn from_env() -> Self {
+        match std::env::var("MOLD_LORA_BYPASS")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("on") | Some("1") | Some("true") => Self::On,
+            Some("off") | Some("0") | Some("false") => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// Build a [`super::lora_bypass::LoraRegistry`] for any bypass-capable
+/// path (offload or GGUF/quantized).
+///
+/// Adapters are placed on `device` at `dtype` (typically GPU + BF16) so
+/// the per-step path never round-trips them CPU↔GPU. Both paths use the
+/// same registry shape: keys are FLUX candle tensor names, values are
+/// the bypass adapters that fire each time that Linear runs forward.
+///
+/// Returns `Ok(None)` when `loras` is empty so callers keep their
+/// no-LoRA hot path.
+fn build_lora_registry(
+    loras: &[mold_core::LoraWeight],
+    cfg: &flux::model::Config,
+    device: &Device,
+    dtype: DType,
+    progress: &ProgressReporter,
+) -> Result<Option<super::lora_bypass::LoraRegistry>> {
+    use super::lora;
+    use super::lora_bypass;
+
+    if loras.is_empty() {
+        return Ok(None);
+    }
+
+    let adapters: Vec<lora::LoraAdapter> = loras
+        .iter()
+        .map(|w| {
+            progress.info("Loading LoRA adapter (bypass)");
             let adapter = lora::LoraAdapter::load(Path::new(&w.path))?;
             progress.info(&format!(
                 "LoRA: {} layers, rank {}, scale {:.2}",
@@ -699,7 +782,32 @@ fn flux_gguf_lora_var_builder(
         })
         .collect();
 
-    lora::gguf_lora_var_builder(transformer_path, &specs, device, progress, delta_cache)
+    // Pre-compute the fused linear out-row counts that bypass-mode
+    // needs to translate component-index targets (e.g. "Q only") into
+    // absolute slice offsets.
+    let h = cfg.hidden_size;
+    let mlp_sz = (h as f64 * cfg.mlp_ratio) as usize;
+    let mut linear_out_dims: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for idx in 0..cfg.depth {
+        // Double blocks: img_attn.qkv / txt_attn.qkv each 3*h.
+        linear_out_dims.insert(format!("double_blocks.{idx}.img_attn.qkv.weight"), 3 * h);
+        linear_out_dims.insert(format!("double_blocks.{idx}.txt_attn.qkv.weight"), 3 * h);
+    }
+    for idx in 0..cfg.depth_single_blocks {
+        // Single block linear1 fuses [Q, K, V, MLP] = 3*h + mlp_sz.
+        linear_out_dims.insert(
+            format!("single_blocks.{idx}.linear1.weight"),
+            3 * h + mlp_sz,
+        );
+    }
+
+    let registry = lora_bypass::build_registry(&specs, &linear_out_dims, device, dtype)?;
+    progress.info(&format!(
+        "LoRA bypass: {} target tensors, adapters resident on {device:?}",
+        registry.len()
+    ));
+    Ok(Some(registry))
 }
 
 /// Resolve the effective LoRA list for a request.
@@ -708,13 +816,42 @@ fn flux_gguf_lora_var_builder(
 /// (plural) for back-compat with older clients. When both are set,
 /// `loras` wins — single-form callers haven't been updated yet but
 /// new clients always populate the plural shape.
+///
+/// Entries whose `scale.abs() < ZERO_SCALE_EPS` are dropped: a slider
+/// pinned to zero is a no-op patch and forcing the transformer to
+/// rebuild for it is pure overhead. A `tracing::debug!` records each
+/// drop so a user wondering "why didn't my LoRA apply" can spot it
+/// in `RUST_LOG=debug` output.
 pub(crate) fn effective_loras(req: &mold_core::GenerateRequest) -> Vec<mold_core::LoraWeight> {
-    if let Some(plural) = &req.loras {
+    /// Threshold below which a LoRA scale is treated as off. Matches
+    /// the precision of an f64 scrubbed by a UI slider — anything
+    /// closer to zero than this is the user nudging the slider, not
+    /// a deliberate negative weight.
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+
+    let raw: Vec<mold_core::LoraWeight> = if let Some(plural) = &req.loras {
         if !plural.is_empty() {
-            return plural.clone();
+            plural.clone()
+        } else {
+            req.lora.iter().cloned().collect()
         }
-    }
-    req.lora.iter().cloned().collect()
+    } else {
+        req.lora.iter().cloned().collect()
+    };
+
+    raw.into_iter()
+        .filter(|w| {
+            let keep = w.scale.abs() > ZERO_SCALE_EPS;
+            if !keep {
+                tracing::debug!(
+                    path = w.path.as_str(),
+                    scale = w.scale,
+                    "dropping zero-scale LoRA from effective stack"
+                );
+            }
+            keep
+        })
+        .collect()
 }
 
 /// Loaded FLUX model components, ready for inference.
@@ -829,6 +966,23 @@ impl FluxEngine {
         }
     }
 
+    /// Return the LoRA delta cache handle, or `None` when disabled via
+    /// `MOLD_FLUX_DELTA_CACHE=0`. The cache stores CPU-resident F32 delta
+    /// tensors for every LoRA-touched layer; on a typical FLUX LoRA that's
+    /// ~25 GB of standing memory which dominates host RAM use during Q8+LoRA
+    /// rebuilds. Disabling forces a sub-second `B@A·scale` recompute on the
+    /// next rebuild, which is cheap on GPU.
+    fn lora_delta_cache_handle(&self) -> Option<Arc<Mutex<super::lora::LoraDeltaCache>>> {
+        if std::env::var("MOLD_FLUX_DELTA_CACHE")
+            .map(|v| v == "0")
+            .unwrap_or(false)
+        {
+            None
+        } else {
+            Some(self.lora_delta_cache.clone())
+        }
+    }
+
     /// Try to get a cached tokenizer from the shared pool.
     fn get_cached_tokenizer(&self, path: &std::path::Path) -> Option<Arc<tokenizers::Tokenizer>> {
         let pool = self.shared_pool.as_ref()?;
@@ -868,7 +1022,24 @@ impl FluxEngine {
     ) -> Result<()> {
         store_cached_tensor_pair(prompt_cache, prompt_text_key(prompt), t5_emb, clip_emb)
     }
+}
 
+/// Move a conditioning tensor to host RAM if it currently lives on GPU.
+///
+/// ComfyUI keeps text-encoder outputs on CPU between encode and denoise so the
+/// transformer load and LoRA merge see ~50–200 MB more headroom. mirroring
+/// that here: after `t5.encode(...)` / `clip.encode(...)` we call this, then
+/// move the tensor back to GPU only at `State::new` time inside the denoise
+/// loop. Idempotent — when the encoder already produced a CPU tensor (the
+/// GGUF / Q8 dequant path) this is a cheap pass-through with no copy.
+pub(crate) fn park_cond_to_cpu(tensor: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+    if tensor.device().is_cpu() {
+        return Ok(tensor.clone());
+    }
+    Ok(tensor.to_device(&Device::Cpu)?)
+}
+
+impl FluxEngine {
     /// Detect is_schnell from override, model name, or transformer filename.
     fn detect_is_schnell(&self) -> bool {
         self.is_schnell_override.unwrap_or_else(|| {
@@ -1030,7 +1201,9 @@ impl FluxEngine {
             let xformer_size = std::fs::metadata(&transformer_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Budget decision: subtract the OS / cuBLAS reserve so we don't
+            // promise space the next allocator call cannot deliver.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             if free > 0 && xformer_size > free {
                 bail!(
                     "transformer ({:.1} GB) exceeds available VRAM ({:.1} GB) — \
@@ -1105,14 +1278,20 @@ impl FluxEngine {
         tracing::info!("VAE loaded on GPU");
 
         // --- Decide where to place T5 and CLIP based on remaining VRAM ---
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-        if free > 0 {
+        // Log the raw driver reading (matches `nvidia-smi`) but pass the
+        // reserve-adjusted budget to variant resolution so quantized
+        // encoders aren't picked when their footprint would push past the
+        // OS / cuBLAS workspace headroom.
+        let free_raw = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        if free_raw > 0 {
             self.base.progress.info(&format!(
                 "Free VRAM after transformer+VAE: {}",
-                fmt_gb(free)
+                fmt_gb(free_raw)
             ));
             tracing::info!(
-                free_vram = free,
+                free_vram = free_raw,
+                free_vram_usable = free,
                 "free VRAM after loading transformer + VAE"
             );
         }
@@ -1170,8 +1349,9 @@ impl FluxEngine {
             .stage_done(&t5_stage_label, t5_stage.elapsed());
         tracing::info!(device = %t5_device_label, "T5 encoder loaded");
 
-        // Re-check VRAM after T5 (it may have consumed GPU memory)
-        let free_after_t5 = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // Re-check VRAM after T5 (it may have consumed GPU memory). Budget
+        // decision → reserve-adjusted reading.
+        let free_after_t5 = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let clip_on_gpu = should_use_gpu(
             device.is_cuda(),
             device.is_metal(),
@@ -1322,7 +1502,8 @@ impl FluxEngine {
             (t5_emb, clip_emb)
         } else {
             // --- Phase 1: T5 encoding ---
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading drives the variant choice.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting T5 encoder");
             let t5_resolve_start = Instant::now();
             let t5_preference = self.t5_variant.as_deref();
@@ -1354,7 +1535,16 @@ impl FluxEngine {
             let t5_size = std::fs::metadata(&resolved_t5_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            preflight_memory_check("T5 encoder", t5_size)?;
+            // T5 activations: ~256 MB workspace (floor) — small relative to
+            // the 9 GB encoder weights and only resident during encoding.
+            let t5_activation_budget = crate::device::activation_bytes(
+                req.width,
+                req.height,
+                1,
+                crate::device::dtype_bytes(t5_dtype),
+                crate::device::ActivationFamily::SmallTransformer,
+            );
+            preflight_memory_check("T5 encoder", t5_size, t5_activation_budget)?;
             if let Some(status) = memory_status_string() {
                 self.base.progress.info(&status);
             }
@@ -1378,7 +1568,11 @@ impl FluxEngine {
 
             self.base.progress.stage_start("Encoding prompt (T5)");
             let encode_t5 = Instant::now();
-            let t5_emb = t5.encode(&req.prompt, &device, gpu_dtype)?;
+            // Park to CPU immediately so the transformer load + LoRA merge
+            // window (next 200–500 ms) doesn't have to budget for ~12 MB of
+            // T5 output sitting on GPU. Idempotent on the GGUF path where T5
+            // already produces CPU tensors.
+            let t5_emb = park_cond_to_cpu(&t5.encode(&req.prompt, &device, gpu_dtype)?)?;
             self.base
                 .progress
                 .stage_done("Encoding prompt (T5)", encode_t5.elapsed());
@@ -1388,7 +1582,9 @@ impl FluxEngine {
             tracing::info!("T5 encoder dropped (sequential mode)");
 
             // --- Phase 2: CLIP encoding ---
-            let free_for_clip = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading — should_use_gpu must respect the
+            // same OS / cuBLAS workspace headroom as the T5 placement above.
+            let free_for_clip = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             let clip_on_gpu = should_use_gpu(
                 device.is_cuda(),
                 device.is_metal(),
@@ -1428,9 +1624,12 @@ impl FluxEngine {
 
             self.base.progress.stage_start("Encoding prompt (CLIP)");
             let encode_clip = Instant::now();
+            // Park to CPU for the same reason as T5 above — keeps the
+            // TE→transformer transition window from carrying GPU residency
+            // we don't need.
             let clip_emb = {
                 let mut clip = clip;
-                clip.encode(&req.prompt, &device, gpu_dtype)?
+                park_cond_to_cpu(&clip.encode(&req.prompt, &device, gpu_dtype)?)?
             };
             self.base
                 .progress
@@ -1439,6 +1638,9 @@ impl FluxEngine {
             self.base.progress.info("Freed CLIP encoder");
             tracing::info!("CLIP encoder dropped (sequential mode)");
 
+            // Cache stores via `CachedTensor::from_tensor`, which itself
+            // moves to CPU; passing CPU tensors here avoids an unnecessary
+            // round-trip on the GGUF path.
             Self::store_prompt_cache(&self.prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
             (t5_emb, clip_emb)
         };
@@ -1460,10 +1662,25 @@ impl FluxEngine {
         // re-quantized back to the original GGML dtype. Non-LoRA tensors are
         // left quantized and untouched.
 
+        // Per-request activation budget — replaces the fixed 3 GB
+        // INFERENCE_HEADROOM. Scales with resolution and dtype, so a 768²
+        // generation isn't false-offloaded on a 16 GB card while a 2048²
+        // generation isn't under-budgeted.
+        let activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            1, // FLUX is guidance-distilled — single forward per step.
+            crate::device::dtype_bytes(gpu_dtype),
+            crate::device::ActivationFamily::FluxDit,
+        );
+
         // Determine if block-level offloading should be used.
         let use_offload = if !is_quantized {
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-            if self.offload || should_offload(xformer_size, free) {
+            // Reserve-adjusted reading: subtract the OS reserve before passing
+            // to `should_offload`, which budgets transformer + activation
+            // headroom against this number.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            if self.offload || should_offload(xformer_size, free, activation_budget) {
                 if free > 0 && free < MIN_OFFLOAD_VRAM {
                     bail!(
                         "GPU only has {:.1} GB free — at least {:.1} GB is required \
@@ -1496,7 +1713,11 @@ impl FluxEngine {
         // Even when offloading, blocks must still fit in system RAM on unified-memory
         // (Metal) hosts — preflight catches machines with insufficient total memory.
         if !use_offload || device.is_metal() {
-            preflight_memory_check("FLUX transformer + VAE", xformer_size + vae_file_size)?;
+            preflight_memory_check(
+                "FLUX transformer + VAE",
+                xformer_size + vae_file_size,
+                activation_budget,
+            )?;
         }
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
@@ -1526,18 +1747,28 @@ impl FluxEngine {
         self.base.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
 
+        let bypass_mode = LoraBypassMode::from_env();
+        // For the offloaded path, bypass is the obvious win whenever
+        // LoRAs are active: the legacy merge path runs `B@A·scale` on
+        // every targeted CPU-resident BF16 tensor and rebuilds the
+        // ~24 GB block buffer on every LoRA swap. Bypass keeps adapters
+        // GPU-resident, so a swap is just a registry replace.
+        let use_offload_bypass = use_offload && has_lora && bypass_mode != LoraBypassMode::Off;
+
         let flux_model = if use_offload {
-            // Load transformer blocks on CPU (with LoRAs merged in if any),
-            // move stem to GPU. Blocks stream CPU→GPU one at a time during forward.
-            let cpu_vb: VarBuilder = if has_lora {
-                // LoRA backend: loads from mmap to CPU, patches inline
+            // Load transformer blocks on CPU. With bypass enabled the
+            // base weights are loaded *unmodified* (LoRA contributions
+            // are added at forward time); without bypass we fall back
+            // to the merge-on-load path.
+            let cpu_vb: VarBuilder = if has_lora && !use_offload_bypass {
+                // Legacy LoRA backend: loads from mmap to CPU, patches inline
                 flux_lora_var_builder(
                     &transformer_path,
                     &active_loras,
                     gpu_dtype,
                     &Device::Cpu,
                     &self.base.progress,
-                    Some(self.lora_delta_cache.clone()),
+                    self.lora_delta_cache_handle(),
                 )?
             } else {
                 flux_transformer_var_builder(flux_safetensors_var_builder(
@@ -1548,22 +1779,57 @@ impl FluxEngine {
                     &self.base.progress,
                 )?)
             };
-            FluxTransformer::Offloaded(crate::flux::offload::OffloadedFluxTransformer::load(
+            let mut offloaded = crate::flux::offload::OffloadedFluxTransformer::load(
                 cpu_vb,
                 &flux_cfg,
                 &device,
                 &self.base.progress,
-            )?)
-        } else if is_quantized && has_lora {
-            // GGUF + LoRA: dequantize LoRA-affected layers, keep rest quantized
-            let vb = flux_gguf_lora_var_builder(
-                &transformer_path,
-                &active_loras,
-                &device,
-                &self.base.progress,
-                Some(self.lora_delta_cache.clone()),
             )?;
-            FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+            if use_offload_bypass {
+                let registry = build_lora_registry(
+                    &active_loras,
+                    &flux_cfg,
+                    &device,
+                    gpu_dtype,
+                    &self.base.progress,
+                )?;
+                offloaded.set_lora_registry(registry);
+            }
+            FluxTransformer::Offloaded(offloaded)
+        } else if is_quantized && has_lora {
+            // GGUF + LoRA: bypass-mode keeps base weights untouched and
+            // applies LoRA deltas at forward time. Saves the
+            // dequant→merge→requant cycle that previously cost minutes
+            // and ~95 GB CPU peak per LoRA load on Q8.
+            let bypass_quantized = bypass_mode != LoraBypassMode::Off;
+            if bypass_quantized {
+                let registry = build_lora_registry(
+                    &active_loras,
+                    &flux_cfg,
+                    &device,
+                    gpu_dtype,
+                    &self.base.progress,
+                )?;
+                let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
+                FluxTransformer::QuantizedBypass(
+                    crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
+                        &flux_cfg,
+                        vb,
+                        registry.as_ref(),
+                        &self.base.progress,
+                    )?,
+                )
+            } else {
+                // Legacy fallback: dequantize LoRA-affected layers, keep rest quantized.
+                let vb = flux_gguf_lora_var_builder(
+                    &transformer_path,
+                    &active_loras,
+                    &device,
+                    &self.base.progress,
+                    self.lora_delta_cache_handle(),
+                )?;
+                FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+            }
         } else if is_quantized {
             let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
@@ -1575,7 +1841,7 @@ impl FluxEngine {
                 gpu_dtype,
                 &device,
                 &self.base.progress,
-                Some(self.lora_delta_cache.clone()),
+                self.lora_delta_cache_handle(),
             )?;
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         } else {
@@ -1709,6 +1975,12 @@ impl FluxEngine {
             (img, None, None)
         };
 
+        // Migrate the parked conditioning tensors back to GPU now that the
+        // transformer load + LoRA merge phase is over. `to_device` on a
+        // tensor already on `device` is a no-op clone, so the cache-restore
+        // path (which returns GPU tensors) costs nothing here.
+        let t5_emb = t5_emb.to_device(&device)?;
+        let clip_emb = clip_emb.to_device(&device)?;
         let (t5_emb_state, clip_emb_state, img_state) = if is_quantized {
             (
                 t5_emb.to_dtype(DType::F32)?,
@@ -1777,7 +2049,19 @@ impl FluxEngine {
         };
         self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
-        let img = vae.decode(&img.to_dtype(gpu_dtype)?)?;
+        let img_for_vae = img.to_dtype(gpu_dtype)?;
+        let device_for_sync = device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &img_for_vae,
+            |latents| vae.decode(latents).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "FLUX (sequential) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
@@ -1856,6 +2140,11 @@ impl FluxEngine {
             .map(|l| l.transformer_path.clone())
             .unwrap_or_else(|| self.base.paths.transformer.clone());
 
+        // Captured before we mutably borrow `self.base.loaded` via the
+        // OptionRestoreGuard below — once that borrow is live, calling
+        // `self.lora_delta_cache_handle()` would conflict.
+        let cache_handle = self.lora_delta_cache_handle();
+
         let mut loaded = OptionRestoreGuard::take(&mut self.base.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
 
@@ -1910,16 +2199,44 @@ impl FluxEngine {
                 } else {
                     flux::model::Config::dev()
                 };
+                let bypass_mode = LoraBypassMode::from_env();
                 loaded.flux_model = Some(if loaded.is_quantized && has_lora {
-                    // Quantized + LoRA stack: merge all deltas during construction
-                    let vb = flux_gguf_lora_var_builder(
-                        &transformer_path,
-                        &active_loras,
-                        &loaded.device,
-                        progress,
-                        Some(self.lora_delta_cache.clone()),
-                    )?;
-                    FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+                    // Quantized + LoRA stack. Bypass-mode (default `auto`)
+                    // installs the LoRA at forward time on top of the
+                    // quantized base — no dequant→merge→requant. Legacy
+                    // fallback (MOLD_LORA_BYPASS=off) goes through
+                    // `gguf_lora_var_builder`.
+                    let bypass_quantized = bypass_mode != LoraBypassMode::Off;
+                    if bypass_quantized {
+                        let registry = build_lora_registry(
+                            &active_loras,
+                            &flux_cfg,
+                            &loaded.device,
+                            loaded.dtype,
+                            progress,
+                        )?;
+                        let vb = quantized_var_builder::VarBuilder::from_gguf(
+                            &transformer_path,
+                            &loaded.device,
+                        )?;
+                        FluxTransformer::QuantizedBypass(
+                            crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
+                                &flux_cfg,
+                                vb,
+                                registry.as_ref(),
+                                progress,
+                            )?,
+                        )
+                    } else {
+                        let vb = flux_gguf_lora_var_builder(
+                            &transformer_path,
+                            &active_loras,
+                            &loaded.device,
+                            progress,
+                            cache_handle.clone(),
+                        )?;
+                        FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+                    }
                 } else if loaded.is_quantized {
                     let vb = quantized_var_builder::VarBuilder::from_gguf(
                         &transformer_path,
@@ -1934,7 +2251,7 @@ impl FluxEngine {
                         loaded.dtype,
                         &loaded.device,
                         progress,
-                        Some(self.lora_delta_cache.clone()),
+                        cache_handle.clone(),
                     )?;
                     FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
                 } else {
@@ -1967,59 +2284,127 @@ impl FluxEngine {
                     width,
                     height,
                     start,
+                    self.base.gpu_ordinal,
                 );
             }
 
             if loaded.t5.model.is_none() {
-                progress.stage_start("Reloading T5 encoder (GPU)");
+                let label = if loaded.t5.is_parked() {
+                    "Unparking T5 encoder (CPU→GPU)"
+                } else {
+                    "Reloading T5 encoder (GPU)"
+                };
+                progress.stage_start(label);
                 let reload_start = Instant::now();
-                loaded.t5.reload(&t5_encoder_path, loaded_dtype, progress)?;
-                progress.stage_done("Reloading T5 encoder (GPU)", reload_start.elapsed());
+                if loaded.t5.is_parked() {
+                    loaded.t5.unpark_to_gpu(loaded_dtype, progress)?;
+                } else {
+                    loaded.t5.reload(&t5_encoder_path, loaded_dtype, progress)?;
+                }
+                progress.stage_done(label, reload_start.elapsed());
             }
             if loaded.clip.model.is_none() {
-                progress.stage_start("Reloading CLIP encoder (GPU)");
+                let label = if loaded.clip.is_parked() {
+                    "Unparking CLIP encoder (CPU→GPU)"
+                } else {
+                    "Reloading CLIP encoder (GPU)"
+                };
+                progress.stage_start(label);
                 let reload_start = Instant::now();
-                loaded
-                    .clip
-                    .reload(&clip_encoder_path, loaded_dtype, progress)?;
-                progress.stage_done("Reloading CLIP encoder (GPU)", reload_start.elapsed());
+                if loaded.clip.is_parked() {
+                    loaded.clip.unpark_to_gpu(loaded_dtype, progress)?;
+                } else {
+                    loaded
+                        .clip
+                        .reload(&clip_encoder_path, loaded_dtype, progress)?;
+                }
+                progress.stage_done(label, reload_start.elapsed());
             }
 
             progress.stage_start("Encoding prompt (T5)");
             let encode_t5 = Instant::now();
-            let t5_emb = loaded
-                .t5
-                .encode(&req.prompt, &loaded_device, loaded_dtype)?;
+            // Park to CPU between encode and denoise so the transformer
+            // load + LoRA merge window (next ~200–500 ms) doesn't have to
+            // budget for this tensor sitting on GPU. Idempotent on GGUF.
+            let t5_emb = park_cond_to_cpu(&loaded.t5.encode(
+                &req.prompt,
+                &loaded_device,
+                loaded_dtype,
+            )?)?;
             progress.stage_done("Encoding prompt (T5)", encode_t5.elapsed());
             tracing::info!("T5 encoding complete");
 
             progress.stage_start("Encoding prompt (CLIP)");
             let encode_clip = Instant::now();
-            let clip_emb = loaded
-                .clip
-                .encode(&req.prompt, &loaded_device, loaded_dtype)?;
+            let clip_emb = park_cond_to_cpu(&loaded.clip.encode(
+                &req.prompt,
+                &loaded_device,
+                loaded_dtype,
+            )?)?;
             progress.stage_done("Encoding prompt (CLIP)", encode_clip.elapsed());
             tracing::info!("CLIP encoding complete");
+            // CachedTensor::from_tensor already moves to CPU — passing CPU
+            // tensors here avoids the round-trip on the GGUF path.
             Self::store_prompt_cache(prompt_cache, &req.prompt, &t5_emb, &clip_emb)?;
 
-            // Drop encoders to free memory for denoising.
-            // Always drop on GPU. On Metal (unified memory), also drop CPU-loaded
-            // weights since they share the same physical RAM as GPU allocations.
-            // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
+            // Drop or park encoders to free GPU memory for denoising.
+            //
+            // Default (`MOLD_KEEP_TE_RAM=0`): drop weights from RAM too. The
+            // next request re-mmaps from disk (~2-4 s for T5 Q8+LoRAs).
+            //
+            // Park mode (`MOLD_KEEP_TE_RAM=1`): move parameters to CPU host
+            // RAM and drop the GPU copy. Next request only pays a CPU→GPU
+            // tensor copy (~100-300 ms vs 2-4 s) — mirrors ComfyUI's
+            // `text_encoder_offload_device()` behavior.
+            //
+            // On Metal (unified memory) parking is not a win since CPU and
+            // GPU share the same physical pool, so we still drop there.
             let is_metal = loaded.device.is_metal();
+            let park_mode = crate::device::keep_te_in_ram() && !is_metal;
+            let mut dropped_gpu_encoder = false;
             if loaded.t5.on_gpu || is_metal {
-                loaded.t5.drop_weights();
-                tracing::info!(
-                    on_gpu = loaded.t5.on_gpu,
-                    "T5 encoder dropped to free memory for denoising"
-                );
+                if loaded.t5.on_gpu {
+                    dropped_gpu_encoder = true;
+                }
+                if park_mode {
+                    loaded.t5.park_to_cpu()?;
+                    tracing::info!(
+                        on_gpu = loaded.t5.on_gpu,
+                        "T5 encoder parked to CPU host RAM"
+                    );
+                } else {
+                    loaded.t5.drop_weights();
+                    tracing::info!(
+                        on_gpu = loaded.t5.on_gpu,
+                        "T5 encoder dropped to free memory for denoising"
+                    );
+                }
             }
             if loaded.clip.on_gpu || is_metal {
-                loaded.clip.drop_weights();
-                tracing::info!(
-                    on_gpu = loaded.clip.on_gpu,
-                    "CLIP encoder dropped to free memory for denoising"
-                );
+                if loaded.clip.on_gpu {
+                    dropped_gpu_encoder = true;
+                }
+                if park_mode {
+                    loaded.clip.park_to_cpu()?;
+                    tracing::info!(
+                        on_gpu = loaded.clip.on_gpu,
+                        "CLIP encoder parked to CPU host RAM"
+                    );
+                } else {
+                    loaded.clip.drop_weights();
+                    tracing::info!(
+                        on_gpu = loaded.clip.on_gpu,
+                        "CLIP encoder dropped to free memory for denoising"
+                    );
+                }
+            }
+            // Force CUDA to complete the encoder cuMemFreeAsync before denoising
+            // begins. Without this, the freed encoder VRAM (~5–6 GB for T5 Q8 +
+            // CLIP) may not be available when the first denoising step allocates,
+            // and on a tight 24 GB budget (Q8 transformer kept loaded + LoRAs)
+            // that pushes VAE decode past the limit later in the pipeline.
+            if dropped_gpu_encoder {
+                loaded.device.synchronize()?;
             }
 
             Self::generate_with_embeddings(
@@ -2032,6 +2417,7 @@ impl FluxEngine {
                 width,
                 height,
                 start,
+                self.base.gpu_ordinal,
             )
         })()
     }
@@ -2096,6 +2482,7 @@ impl FluxEngine {
         width: usize,
         height: usize,
         start: Instant,
+        gpu_ordinal: usize,
     ) -> Result<GenerateResponse> {
         // 3. Generate initial noise (F32 for quantized, gpu_dtype for BF16)
         let noise_dtype = if loaded.is_quantized {
@@ -2181,6 +2568,12 @@ impl FluxEngine {
             (img, None)
         };
 
+        // Migrate parked conditioning tensors back to GPU now that the
+        // transformer load + LoRA merge phase is over. `to_device` on a
+        // tensor already on `loaded.device` is a no-op clone, so the
+        // cache-restore path costs nothing here.
+        let t5_emb = t5_emb.to_device(&loaded.device)?;
+        let clip_emb = clip_emb.to_device(&loaded.device)?;
         // For quantized model, state tensors must be F32
         let (t5_emb_state, clip_emb_state, img_state) = if loaded.is_quantized {
             (
@@ -2227,24 +2620,91 @@ impl FluxEngine {
         tracing::info!("denoising complete, decoding VAE...");
 
         // Free denoising intermediates and transformer before VAE decode.
-        // On discrete GPUs (CUDA), the Q8 transformer alone is ~13GB — VAE decode
-        // needs that VRAM for conv2d intermediates. Transformer is reloaded next generate.
+        // On discrete GPUs (CUDA), the BF16 transformer alone is ~24GB — VAE
+        // decode needs that VRAM for conv2d intermediates. For Q8 (~12GB) on a
+        // 24GB GPU, the transformer can stay resident; dropping forces a full
+        // `gguf_lora_var_builder` rebuild on the next generation, which peaks
+        // at ~95GB CPU when LoRAs are applied. `MOLD_FLUX_KEEP_TRANSFORMER=1`
+        // opts into keeping it loaded across same-LoRA generations.
         drop(state);
         drop(t5_emb_state);
         drop(clip_emb_state);
         drop(img_state);
-        loaded.flux_model = None;
-        // Force CUDA to complete pending operations and release freed memory.
-        // Without this, cuMemFree is asynchronous and the freed VRAM from the
-        // transformer (~13GB) may not be available when VAE decode allocates
-        // its conv2d intermediates, causing OOM on subsequent generations.
+        let keep_transformer_env = std::env::var("MOLD_FLUX_KEEP_TRANSFORMER")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        // Even with KEEP_TRANSFORMER=1 the keep is conditional: VAE decode
+        // needs a large contiguous conv2d allocation (~2–3 GB peak at 1024²,
+        // ~10–12 GB at 2048²). When the kept transformer + LoRA-merged
+        // tensors leave too little headroom (observed at ~3 GB free with a
+        // 2-LoRA stack on a 24 GB card), the VAE alloc OOMs even though the
+        // resident transformer size is identical to the no-LoRA case. The
+        // next request rebuilds — that's the trade-off for not OOMing here.
+        //
+        // The headroom budget scales with output resolution via
+        // [`activation_bytes`] instead of a fixed 5 GB magic — at 1024² the
+        // budget is the FluxDit floor (~256 MB, the previous 5 GB was wildly
+        // over-conservative on a busy 24 GB card with KEEP_TRANSFORMER=1)
+        // while at 2048² it grows past 1 GB, catching what fixed 5 GB only
+        // approximated.
+        let vae_headroom_bytes = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            1,
+            crate::device::dtype_bytes(loaded.dtype),
+            crate::device::ActivationFamily::FluxDit,
+        );
+        let free_before_vae = crate::device::free_vram_bytes(gpu_ordinal).unwrap_or(0);
+        let force_drop_for_headroom =
+            keep_transformer_env && free_before_vae > 0 && free_before_vae < vae_headroom_bytes;
+
+        if !keep_transformer_env || force_drop_for_headroom {
+            loaded.flux_model = None;
+            if force_drop_for_headroom {
+                tracing::info!(
+                    free_mb = free_before_vae / 1024 / 1024,
+                    headroom_mb = vae_headroom_bytes / 1024 / 1024,
+                    "Transformer force-dropped before VAE decode (free VRAM below \
+                     resolution-scaled headroom; overrides MOLD_FLUX_KEEP_TRANSFORMER=1 \
+                     for this request)"
+                );
+            } else {
+                tracing::info!("Transformer dropped to free VRAM for VAE decode");
+            }
+        } else {
+            tracing::info!(
+                free_mb = free_before_vae / 1024 / 1024,
+                "Transformer kept loaded (MOLD_FLUX_KEEP_TRANSFORMER=1)"
+            );
+        }
+        // Force CUDA to complete pending operations and release freed memory
+        // before VAE decode allocates its conv2d intermediates. cuMemFree is
+        // asynchronous, so the drops above (denoising state + embeddings, plus
+        // the optional transformer drop) may not have actually returned VRAM
+        // to the allocator yet. Without this synchronize, VAE decode at 1024²
+        // OOMs on the first conv allocation — observable on the keep-transformer
+        // path even on iteration 1 (the drop path used to synchronize here, the
+        // keep path didn't, which made the bug branch-specific).
         loaded.device.synchronize()?;
-        tracing::info!("Transformer dropped to free VRAM for VAE decode");
 
         // 8. Decode with VAE — cast to VAE dtype (BF16) in case quantized model produced F32
         progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
-        let img = loaded.vae.decode(&img.to_dtype(loaded.dtype)?)?;
+        let img_for_vae = img.to_dtype(loaded.dtype)?;
+        let vae = &loaded.vae;
+        let device_for_sync = loaded.device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &img_for_vae,
+            |latents| vae.decode(latents).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "FLUX (parallel) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         // 9. Convert to u8 image: clamp to [-1, 1], map to [0, 255]
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
@@ -2285,10 +2745,172 @@ impl FluxEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{flux_runtime_dtype, flux_transformer_var_builder};
+    use super::{
+        effective_loras, flux_runtime_dtype, flux_transformer_var_builder, park_cond_to_cpu,
+        LoraBypassMode,
+    };
     use candle_core::{DType, Device, Result, Tensor};
     use candle_nn::VarBuilder;
+    use mold_core::{GenerateRequest, LoraWeight, OutputFormat};
     use std::collections::HashMap;
+
+    /// `MOLD_LORA_BYPASS=on` and `=off` are the two boundaries we
+    /// document. Any other value (including unset) must collapse to
+    /// `Auto` so we never silently change behaviour because of
+    /// stale `MOLD_*` env vars in a developer's shell.
+    #[test]
+    fn lora_bypass_mode_env_parsing() {
+        let with_env = |val: Option<&str>| -> LoraBypassMode {
+            unsafe {
+                match val {
+                    Some(v) => std::env::set_var("MOLD_LORA_BYPASS", v),
+                    None => std::env::remove_var("MOLD_LORA_BYPASS"),
+                }
+            }
+            let mode = LoraBypassMode::from_env();
+            unsafe {
+                std::env::remove_var("MOLD_LORA_BYPASS");
+            }
+            mode
+        };
+        assert_eq!(with_env(Some("on")), LoraBypassMode::On);
+        assert_eq!(with_env(Some("ON")), LoraBypassMode::On);
+        assert_eq!(with_env(Some("1")), LoraBypassMode::On);
+        assert_eq!(with_env(Some("off")), LoraBypassMode::Off);
+        assert_eq!(with_env(Some("0")), LoraBypassMode::Off);
+        assert_eq!(with_env(Some("auto")), LoraBypassMode::Auto);
+        assert_eq!(with_env(Some("garbage")), LoraBypassMode::Auto);
+        assert_eq!(with_env(None), LoraBypassMode::Auto);
+    }
+
+    /// Minimal `GenerateRequest` carrying only the fields `effective_loras`
+    /// touches (`lora`, `loras`). Every other field is set to a benign
+    /// default so the tests don't drift when unrelated request shapes
+    /// change.
+    fn req_with_loras(
+        single: Option<LoraWeight>,
+        plural: Option<Vec<LoraWeight>>,
+    ) -> GenerateRequest {
+        GenerateRequest {
+            prompt: String::new(),
+            negative_prompt: None,
+            model: "flux-dev".to_string(),
+            width: 1024,
+            height: 1024,
+            steps: 4,
+            guidance: 0.0,
+            seed: None,
+            batch_size: 1,
+            output_format: OutputFormat::Png,
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            edit_images: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: single,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: plural,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: None,
+        }
+    }
+
+    /// A slider scrubbed to zero on one of three stacked LoRAs must
+    /// drop ONLY that entry from the effective stack.
+    #[test]
+    fn effective_loras_drops_zero_scale() {
+        let req = req_with_loras(
+            None,
+            Some(vec![
+                LoraWeight {
+                    path: "p1".into(),
+                    scale: 0.8,
+                },
+                LoraWeight {
+                    path: "p2".into(),
+                    scale: 0.0,
+                },
+                LoraWeight {
+                    path: "p3".into(),
+                    scale: 0.5,
+                },
+            ]),
+        );
+        let stack = effective_loras(&req);
+        let paths: Vec<&str> = stack.iter().map(|w| w.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["p1", "p3"],
+            "p2 (scale=0.0) must be dropped from the effective stack"
+        );
+        assert!((stack[0].scale - 0.8).abs() < 1e-9);
+        assert!((stack[1].scale - 0.5).abs() < 1e-9);
+    }
+
+    /// Negative scales are a legitimate "anti-style" use case.
+    #[test]
+    fn effective_loras_keeps_negative_scales() {
+        let req = req_with_loras(
+            None,
+            Some(vec![LoraWeight {
+                path: "p1".into(),
+                scale: -0.3,
+            }]),
+        );
+        let stack = effective_loras(&req);
+        assert_eq!(stack.len(), 1);
+        assert!((stack[0].scale - (-0.3)).abs() < 1e-9);
+    }
+
+    /// Single `lora` form: `scale: 0.0` should be dropped too.
+    #[test]
+    fn effective_loras_drops_zero_scale_on_single_form() {
+        let req = req_with_loras(
+            Some(LoraWeight {
+                path: "p1".into(),
+                scale: 0.0,
+            }),
+            None,
+        );
+        assert!(effective_loras(&req).is_empty());
+    }
+
+    /// Idempotency: a tensor already on CPU comes back on CPU and equals the
+    /// input — `park_cond_to_cpu` must not pay for a redundant copy on the
+    /// GGUF / Q8 path where T5 already produces CPU tensors.
+    #[test]
+    fn park_cond_to_cpu_is_idempotent_for_cpu_tensors() {
+        let cpu_tensor = Tensor::zeros((2, 4), DType::F32, &Device::Cpu).unwrap();
+        let parked = park_cond_to_cpu(&cpu_tensor).unwrap();
+        assert!(parked.device().is_cpu(), "CPU input must stay on CPU");
+        assert_eq!(parked.shape(), cpu_tensor.shape());
+    }
+
+    /// `park_cond_to_cpu` output is on CPU regardless of input device.
+    #[test]
+    fn park_cond_to_cpu_returns_cpu_tensor_for_any_input() {
+        let input = Tensor::ones((1, 3), DType::F32, &Device::Cpu).unwrap();
+        let parked = park_cond_to_cpu(&input).unwrap();
+        assert!(parked.device().is_cpu(), "output must be on CPU");
+        assert_eq!(parked.shape(), input.shape());
+        assert_eq!(parked.dtype(), input.dtype());
+    }
 
     #[test]
     fn flux_var_builder_uses_root_tensors_when_present() -> Result<()> {

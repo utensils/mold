@@ -72,7 +72,10 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
 
     // Ensure model is loaded on this GPU.
     let config_snapshot = job.config.blocking_read().clone();
-    if let Err(e) = ensure_model_ready_sync(worker, &model_name, &config_snapshot) {
+    let activation_hint =
+        crate::model_manager::activation_hint_for_request_sync(&config_snapshot, &job.request);
+    if let Err(e) = ensure_model_ready_sync(worker, &model_name, &config_snapshot, activation_hint)
+    {
         tracing::error!(gpu = ordinal, model = %model_name, "Failed to load model: {e}");
         let err_msg = format!("model load error: {}", clean_error_message(&e));
         if let Some(ref tx) = job.progress_tx {
@@ -138,10 +141,78 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         }));
     }
 
+    // RSS sample taken just before inference; the post-inference sample below
+    // logs the per-job delta so RAM growth can be attributed to a specific
+    // generation rather than tracked at process granularity.
+    let rss_before = crate::resources::ram_snapshot().used_by_mold;
+
+    // Watchdog: log RSS every 1s while inference runs so we can see RAM
+    // growth as it happens. The post-inference summary log can't fire when
+    // a runaway allocation crosses the OOM threshold mid-generation, so we
+    // need a heartbeat to attribute the explosion to a specific phase.
+    let watchdog_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog_handle = {
+        let stop = watchdog_stop.clone();
+        let model = model_name.clone();
+        std::thread::Builder::new()
+            .name(format!("rss-watchdog-{ordinal}"))
+            .spawn(move || {
+                let start = Instant::now();
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1000));
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let rss = crate::resources::ram_snapshot().used_by_mold;
+                    tracing::info!(
+                        gpu = ordinal,
+                        model = %model,
+                        elapsed_s = start.elapsed().as_secs(),
+                        rss_mb = rss / 1_000_000,
+                        "rss watchdog"
+                    );
+                }
+            })
+            .expect("failed to spawn RSS watchdog")
+    };
+
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         cached_engine.engine.generate(&job.request)
     }));
+
+    watchdog_stop.store(true, Ordering::SeqCst);
+    let _ = watchdog_handle.join();
+
+    // glibc keeps freed pages in per-arena heaps even after the allocations
+    // are dropped — large transient buffers from GGUF+LoRA rebuilds can leave
+    // tens of GB of unreclaimed RSS. `malloc_trim(0)` walks the arenas and
+    // returns idle pages to the OS via madvise(MADV_DONTNEED). Cheap (~ms),
+    // glibc-only, gated so we can A/B with `MOLD_MALLOC_TRIM=0`.
+    let trim_enabled = std::env::var("MOLD_MALLOC_TRIM")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let rss_pre_trim = if trim_enabled {
+        let v = crate::resources::ram_snapshot().used_by_mold;
+        unsafe {
+            libc::malloc_trim(0);
+        }
+        Some(v)
+    } else {
+        None
+    };
+
+    let rss_after = crate::resources::ram_snapshot().used_by_mold;
+    let rss_delta = rss_after as i64 - rss_before as i64;
+    tracing::info!(
+        gpu = ordinal,
+        model = %model_name,
+        rss_before_mb = rss_before / 1_000_000,
+        rss_after_mb = rss_after / 1_000_000,
+        rss_delta_mb = rss_delta / 1_000_000,
+        rss_pre_trim_mb = rss_pre_trim.map(|v| v / 1_000_000).unwrap_or(0),
+        "generation memory delta"
+    );
 
     // Clear progress callback.
     cached_engine.engine.clear_on_progress();
@@ -296,6 +367,7 @@ fn preflight_memory_guard_with_eviction(
     model_name: &str,
     paths: &ModelPaths,
     ordinal: usize,
+    hint: Option<crate::model_manager::ActivationHint>,
 ) -> Result<(), crate::routes::ApiError> {
     loop {
         let active_vram = cache_lock
@@ -307,6 +379,7 @@ fn preflight_memory_guard_with_eviction(
             paths,
             active_vram,
             ordinal,
+            hint,
         ) {
             Ok(()) => return Ok(()),
             Err(e) => e,
@@ -349,10 +422,14 @@ fn preflight_memory_guard_with_eviction(
 ///
 /// Holds `worker.model_load_lock` implicitly via the caller for generation
 /// jobs; the admin API path acquires it explicitly via `load_blocking`.
+///
+/// `hint` carries the per-request activation budget (resolution + family).
+/// Pass `None` for admin / cache-prewarm loads with no resolution context.
 pub fn ensure_model_ready_sync(
     worker: &GpuWorker,
     model_name: &str,
     config: &Config,
+    hint: Option<crate::model_manager::ActivationHint>,
 ) -> anyhow::Result<()> {
     let cache = worker.model_cache.lock().unwrap();
 
@@ -390,6 +467,7 @@ pub fn ensure_model_ready_sync(
                 model_name,
                 paths,
                 worker.gpu.ordinal,
+                hint,
             )
             .map_err(|e| anyhow::anyhow!(e.error))?;
         }
@@ -433,7 +511,22 @@ pub fn ensure_model_ready_sync(
     // Not in cache — need to create from scratch.
     // Resolve model paths.
     let paths = ModelPaths::resolve(model_name, config).ok_or_else(|| {
-        anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
+        // Catalog IDs (cv:/hf:) reach this path through the bridge in
+        // `model_manager::install_catalog_model`, which can synthesize a
+        // ModelConfig that's missing a required field (notably `vae`)
+        // when a canonical companion was never pulled. The legacy
+        // "Run: mold pull <id>" message is misleading there because the
+        // primary checkpoint IS on disk — the companion is what's
+        // missing. Surface the catalog-specific guidance instead.
+        if model_name.starts_with("cv:") || model_name.starts_with("hf:") {
+            anyhow::anyhow!(
+                "catalog model '{model_name}' has missing required components. \
+                 Re-pull the entry from the catalog so its companions \
+                 (CLIP-L / T5 / VAE) are fetched alongside the primary checkpoint."
+            )
+        } else {
+            anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
+        }
     })?;
 
     // Preflight before unloading the active model. Evict-to-fit drops parked
@@ -443,6 +536,7 @@ pub fn ensure_model_ready_sync(
         model_name,
         &paths,
         worker.gpu.ordinal,
+        hint,
     )
     .map_err(|e| anyhow::anyhow!(e.error))?;
 
@@ -489,10 +583,12 @@ pub fn ensure_model_ready_sync(
 /// Synchronously load a model on this GPU worker for the admin API.
 ///
 /// Acquires the per-GPU load lock, then delegates to `ensure_model_ready_sync`.
-/// Intended to be called inside `tokio::task::spawn_blocking`.
+/// Intended to be called inside `tokio::task::spawn_blocking`. Uses the
+/// size-only peak (no resolution context) for the preflight — admin loads
+/// don't carry a request shape.
 pub fn load_blocking(worker: &GpuWorker, model_name: &str, config: &Config) -> anyhow::Result<()> {
     let _lock = worker.model_load_lock.lock().unwrap();
-    ensure_model_ready_sync(worker, model_name, config)
+    ensure_model_ready_sync(worker, model_name, config, None)
 }
 
 /// Synchronously unload the currently active model on this GPU worker.
@@ -558,6 +654,7 @@ pub fn run_chain_blocking<T, E>(
     worker: &GpuWorker,
     model_name: &str,
     config: &mold_core::Config,
+    hint: Option<crate::model_manager::ActivationHint>,
     with_engine: impl FnOnce(&mut dyn mold_inference::InferenceEngine) -> Result<T, E>,
 ) -> ChainPrep<T, E> {
     // Bind the thread to this worker's ordinal for the duration of the call.
@@ -582,7 +679,7 @@ pub fn run_chain_blocking<T, E>(
 
     // Ensure the model is GPU-resident on this worker. Handles load-from-disk,
     // parked-reload, and the reclaim-on-swap path using worker.gpu.ordinal.
-    ensure_model_ready_sync(worker, model_name, config)?;
+    ensure_model_ready_sync(worker, model_name, config, hint)?;
 
     // Take the engine out of the worker's cache so the closure can mutate it.
     let cached = {
@@ -732,7 +829,7 @@ mod tests {
         let a = active.clone();
         let m = max_concurrent.clone();
         let t_a = std::thread::spawn(move || {
-            run_chain_blocking(&worker_a, "fake-model", &config_a, instrumented(a, m))
+            run_chain_blocking(&worker_a, "fake-model", &config_a, None, instrumented(a, m))
                 .expect("prep ok")
                 .expect("closure ok");
         });
@@ -742,7 +839,7 @@ mod tests {
         let a = active.clone();
         let m = max_concurrent.clone();
         let t_b = std::thread::spawn(move || {
-            run_chain_blocking(&worker_b, "fake-model", &config_b, instrumented(a, m))
+            run_chain_blocking(&worker_b, "fake-model", &config_b, None, instrumented(a, m))
                 .expect("prep ok")
                 .expect("closure ok");
         });

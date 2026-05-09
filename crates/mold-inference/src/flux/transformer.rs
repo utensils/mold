@@ -4,14 +4,22 @@ use candle_transformers::models::flux::{self, WithForward};
 use std::time::Instant;
 
 use crate::flux::offload::OffloadedFluxTransformer;
+use crate::flux::quantized_transformer::QuantizedFluxTransformer;
 use crate::img_utils::InpaintContext;
 use crate::progress::{ProgressEvent, ProgressReporter};
 
 /// BF16, quantized (GGUF), or offloaded FLUX transformer.
+///
+/// `QuantizedBypass` is the mold-owned GGUF path that supports
+/// bypass-mode LoRA — it never touches base weights, applying LoRA
+/// deltas at forward time instead. The legacy `Quantized` variant
+/// (upstream `candle_transformers::flux::quantized_model`) is the
+/// `MOLD_LORA_BYPASS=off` fallback.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum FluxTransformer {
     BF16(flux::model::Flux),
     Quantized(flux::quantized_model::Flux),
+    QuantizedBypass(QuantizedFluxTransformer),
     /// Block-level offloading: blocks on CPU, streamed to GPU one at a time.
     Offloaded(OffloadedFluxTransformer),
 }
@@ -58,6 +66,15 @@ impl FluxTransformer {
                     Some(&guidance_tensor),
                 )?,
                 Self::Quantized(m) => m.forward(
+                    &img,
+                    img_ids,
+                    txt,
+                    txt_ids,
+                    &t_vec,
+                    vec_,
+                    Some(&guidance_tensor),
+                )?,
+                Self::QuantizedBypass(m) => m.forward(
                     &img,
                     img_ids,
                     txt,

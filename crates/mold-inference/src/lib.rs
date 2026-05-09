@@ -1,3 +1,4 @@
+pub mod attention;
 mod cache;
 pub mod controlnet;
 pub mod device;
@@ -26,6 +27,7 @@ pub mod sd3;
 pub mod sdxl;
 pub mod shared_pool;
 pub mod upscaler;
+pub mod vae_tiling;
 pub(crate) mod weight_loader;
 pub mod wuerstchen;
 pub mod zimage;

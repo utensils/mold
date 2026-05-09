@@ -7,11 +7,13 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor_pair, prompt_text_key, restore_cached_tensor_pair,
-    CachedTensorPair, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
+    cfg_prompt_cache_key, clear_cache, get_or_insert_cached_tensor_pair,
+    restore_cached_tensor_pair, CachedTensorPair, CfgPromptCacheKey, LruCache,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{
     check_memory_budget, fmt_gb, free_vram_bytes, memory_status_string, preflight_memory_check,
+    usable_free_vram_bytes,
 };
 use crate::encoders;
 use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
@@ -48,7 +50,7 @@ pub struct SD3Engine {
     is_turbo: bool,
     is_medium: bool,
     t5_variant: Option<String>,
-    prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
+    prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensorPair>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
 }
 
@@ -76,15 +78,20 @@ impl SD3Engine {
     #[allow(clippy::too_many_arguments)]
     fn encode_conditioning(
         progress: &ProgressReporter,
-        prompt_cache: &Mutex<LruCache<String, CachedTensorPair>>,
+        prompt_cache: &Mutex<LruCache<CfgPromptCacheKey, CachedTensorPair>>,
         triple_encoder: &mut encoders::sd3_clip::SD3TripleEncoder,
         prompt: &str,
         negative_prompt: &str,
+        guidance: f64,
         device: &Device,
         dtype: DType,
         is_quantized: bool,
     ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
-        let cache_key = prompt_text_key(prompt);
+        // SD3 always concatenates `(cond, uncond)` for CFG, so the cache key
+        // must include the negative prompt and guidance — keying only on the
+        // positive prompt returned a stale `(cond, uncond_old)` pair when the
+        // user changed only the negative.
+        let cache_key = cfg_prompt_cache_key(prompt, negative_prompt, guidance);
         let ((context, y), cache_hit) = get_or_insert_cached_tensor_pair(
             prompt_cache,
             cache_key,
@@ -295,11 +302,15 @@ impl SD3Engine {
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // --- Decide encoder placement based on remaining VRAM ---
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-        if free > 0 {
-            self.base
-                .progress
-                .info(&format!("Free VRAM after transformer: {}", fmt_gb(free)));
+        // Log the raw driver reading; pass the reserve-adjusted budget to
+        // variant resolution below.
+        let free_raw = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        if free_raw > 0 {
+            self.base.progress.info(&format!(
+                "Free VRAM after transformer: {}",
+                fmt_gb(free_raw)
+            ));
         }
 
         // --- Load triple encoder (CLIP-L + CLIP-G + T5) ---
@@ -429,14 +440,15 @@ impl SD3Engine {
 
         // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
         let neg = req.negative_prompt.as_deref().unwrap_or("");
-        let cache_key = prompt_text_key(&req.prompt);
+        let cache_key = cfg_prompt_cache_key(&req.prompt, neg, req.guidance);
         let (context, y) = if let Some((context, y)) =
             restore_cached_tensor_pair(&self.prompt_cache, &cache_key, &device, gpu_dtype)?
         {
             self.base.progress.cache_hit("prompt conditioning");
             (context, y)
         } else {
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading drives the T5 variant selection.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting T5 encoder");
             let t5_resolve_start = Instant::now();
             let t5_preference = self.t5_variant.as_deref();
@@ -472,7 +484,14 @@ impl SD3Engine {
             let t5_size = std::fs::metadata(&resolved_t5_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            preflight_memory_check("SD3 triple encoder", t5_size)?;
+            let te_activation_budget = crate::device::activation_bytes(
+                req.width,
+                req.height,
+                1,
+                crate::device::dtype_bytes(encoder_dtype),
+                crate::device::ActivationFamily::SmallTransformer,
+            );
+            preflight_memory_check("SD3 triple encoder", t5_size, te_activation_budget)?;
             if let Some(status) = memory_status_string() {
                 self.base.progress.info(&status);
             }
@@ -501,6 +520,7 @@ impl SD3Engine {
                 &mut triple_encoder,
                 &req.prompt,
                 neg,
+                req.guidance,
                 &device,
                 gpu_dtype,
                 is_quantized,
@@ -609,7 +629,20 @@ impl SD3Engine {
         let xformer_size = std::fs::metadata(&self.base.paths.transformer)
             .map(|m| m.len())
             .unwrap_or(0);
-        preflight_memory_check("SD3 MMDiT transformer", xformer_size)?;
+        // SD3 runs CFG by default → batch=2 if guidance > 1, else batch=1.
+        let xformer_batch = if req.guidance > 1.0 { 2 } else { 1 };
+        let xformer_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            xformer_batch,
+            crate::device::dtype_bytes(gpu_dtype),
+            crate::device::ActivationFamily::Sd3Mmdit,
+        );
+        preflight_memory_check(
+            "SD3 MMDiT transformer",
+            xformer_size,
+            xformer_activation_budget,
+        )?;
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }
@@ -707,7 +740,18 @@ impl SD3Engine {
         // SD3 VAE scaling: x / 1.5305 + 0.0609
         // Cast to VAE dtype (quantized path outputs F32, VAE is F16/BF16)
         let x = ((x / 1.5305)? + 0.0609)?.to_dtype(gpu_dtype)?;
-        let img = autoencoder.decode(&x)?;
+        let device_for_sync = device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &x,
+            |t| autoencoder.decode(t).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "SD3 (sequential) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
@@ -790,10 +834,21 @@ impl SD3Engine {
 
         (|| -> Result<GenerateResponse> {
             if !loaded.triple_encoder.is_loaded() {
-                progress.stage_start("Reloading SD3 triple encoder");
+                let label = if loaded.triple_encoder.is_parked() {
+                    "Unparking SD3 triple encoder (CPU→GPU)"
+                } else {
+                    "Reloading SD3 triple encoder"
+                };
+                progress.stage_start(label);
                 let reload_start = Instant::now();
-                loaded.triple_encoder.reload(loaded_dtype, progress)?;
-                progress.stage_done("Reloading SD3 triple encoder", reload_start.elapsed());
+                if loaded.triple_encoder.is_parked() {
+                    loaded
+                        .triple_encoder
+                        .unpark_to_gpu(loaded_dtype, progress)?;
+                } else {
+                    loaded.triple_encoder.reload(loaded_dtype, progress)?;
+                }
+                progress.stage_done(label, reload_start.elapsed());
             }
 
             let neg = req.negative_prompt.as_deref().unwrap_or("");
@@ -803,14 +858,25 @@ impl SD3Engine {
                 &mut loaded.triple_encoder,
                 &req.prompt,
                 neg,
+                req.guidance,
                 &loaded_device,
                 loaded_dtype,
                 is_quantized,
             )?;
 
             if loaded.triple_encoder.on_gpu {
-                loaded.triple_encoder.drop_weights();
-                tracing::info!("SD3 triple encoder dropped from GPU to free VRAM for denoising");
+                // Park mode keeps the FP16 encoders alive on host RAM (~9 GB
+                // T5 + ~1.6 GB CLIPs). Disabled on Metal (unified memory).
+                let park_mode = crate::device::keep_te_in_ram() && !loaded_device.is_metal();
+                if park_mode {
+                    loaded.triple_encoder.park_to_cpu()?;
+                    tracing::info!("SD3 triple encoder parked to CPU host RAM");
+                } else {
+                    loaded.triple_encoder.drop_weights();
+                    tracing::info!(
+                        "SD3 triple encoder dropped from GPU to free VRAM for denoising"
+                    );
+                }
             }
 
             // --- img2img: build schedule and encode source image ---
@@ -994,7 +1060,18 @@ impl SD3Engine {
             let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
 
             let x = ((x / 1.5305)? + 0.0609)?.to_dtype(loaded.dtype)?;
-            let img = autoencoder.decode(&x)?;
+            let device_for_sync = loaded.device.clone();
+            let img = crate::vae_tiling::decode_with_oom_fallback(
+                &x,
+                |t| autoencoder.decode(t).map_err(Into::into),
+                || {
+                    if let Err(e) = device_for_sync.synchronize() {
+                        tracing::warn!(
+                            "SD3 (parallel) device.synchronize() after VAE OOM failed: {e}"
+                        );
+                    }
+                },
+            )?;
 
             let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
             let img = img.i(0)?;
@@ -1223,6 +1300,44 @@ mod tests {
         assert!(engine.detect_is_quantized());
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    /// Regression test for the SD3 prompt-cache key bug: when the cache is
+    /// keyed only on the positive prompt, a follow-up request that changes
+    /// just the negative prompt returns the previous `(cond, uncond_old)`
+    /// pair — silently producing wrong output.
+    ///
+    /// Drives the cache through `restore_cached_tensor_pair` directly because
+    /// the surrounding `encode_conditioning` requires loaded T5/CLIP weights;
+    /// the contract under test is the keying, not the encoder forward pass.
+    #[test]
+    fn sd3_prompt_cache_distinguishes_negative_prompt_changes() {
+        use crate::cache::{cfg_prompt_cache_key, store_cached_tensor_pair};
+
+        let cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensorPair>> =
+            Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY));
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let context = candle_core::Tensor::zeros((1, 4), dtype, &device).unwrap();
+        let y = candle_core::Tensor::zeros((1, 4), dtype, &device).unwrap();
+
+        let key_a = cfg_prompt_cache_key("a cat", "blurry", 7.0);
+        store_cached_tensor_pair(&cache, key_a.clone(), &context, &y).unwrap();
+
+        // Same positive + same guidance, different negative → MUST miss.
+        let key_b = cfg_prompt_cache_key("a cat", "low quality", 7.0);
+        let restored = restore_cached_tensor_pair(&cache, &key_b, &device, dtype).unwrap();
+        assert!(
+            restored.is_none(),
+            "different negative prompt must miss the cache (was the silent-wrong-output bug)"
+        );
+
+        // Same key as the insert → MUST hit.
+        let restored = restore_cached_tensor_pair(&cache, &key_a, &device, dtype).unwrap();
+        assert!(
+            restored.is_some(),
+            "identical (pos, neg, guidance) must still hit"
+        );
     }
 
     #[test]

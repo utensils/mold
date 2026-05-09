@@ -1,11 +1,76 @@
 use std::sync::Arc;
 
-use mold_core::{build_model_catalog, ModelDefaults, ModelInfo, ModelInfoExtended, ModelPaths};
+use mold_core::{
+    build_model_catalog, GenerateRequest, ModelDefaults, ModelInfo, ModelInfoExtended, ModelPaths,
+};
+use mold_inference::device::{activation_bytes, activation_family_for, ActivationFamily};
 
 use crate::model_cache::ModelResidency;
 use crate::{routes::ApiError, state::AppState};
 
 pub(crate) type EngineProgressCallback = Arc<dyn Fn(mold_inference::ProgressEvent) + Send + Sync>;
+
+/// Per-request shape hint passed into [`preflight_memory_guard`] so the
+/// activation budget can scale with resolution / dtype / arch. `None`
+/// degrades to the previous fixed-headroom approximation (the
+/// `MEMORY_BUDGET_HEADROOM` baked into `estimate_peak_memory`'s 2 GB
+/// constant), which keeps behavior identical for callers that don't yet
+/// have a request in scope (e.g. admin-API model loads with no resolution
+/// context).
+///
+/// Public because `gpu_worker::ensure_model_ready_sync` and
+/// `gpu_worker::run_chain_blocking` (both `pub`) take it as a parameter.
+#[derive(Debug, Clone, Copy)]
+pub struct ActivationHint {
+    /// Image-space width.
+    pub width: u32,
+    /// Image-space height.
+    pub height: u32,
+    /// CFG-doubled forwards typically pass `2`; non-CFG passes `1`.
+    pub batch: u32,
+    /// Bytes per element (`2` for bf16/fp16, `4` for f32).
+    pub dtype_bytes: u32,
+    /// Architecture family — drives the per-arch factor in
+    /// `mold_inference::device::activation_bytes`.
+    pub family: ActivationFamily,
+}
+
+impl ActivationHint {
+    /// Build a hint from a [`GenerateRequest`] and the manifest family slug
+    /// (e.g. `"flux"`, `"sdxl"`). The family slug is what
+    /// [`activation_family_for`] expects — when the caller doesn't have a
+    /// strong family signal (catalog ID without an installed manifest, etc.)
+    /// passing the empty string falls back to `ActivationFamily::FluxDit`.
+    pub fn from_request(req: &GenerateRequest, family_slug: &str) -> Self {
+        // CFG-doubled forwards: SDXL/SD3 batch=2 when guidance ≈/> 1.0; FLUX,
+        // Z-Image, Flux.2 are guidance-distilled and run a single forward.
+        let family = activation_family_for(family_slug);
+        let batch = match family {
+            ActivationFamily::SdxlUnet | ActivationFamily::Sd3Mmdit if req.guidance > 1.0 => 2,
+            _ => 1,
+        };
+        Self {
+            width: req.width,
+            height: req.height,
+            batch,
+            // Server-side preflight assumes bf16/fp16 activations — every
+            // diffusion family in this repo runs in bf16/fp16 on GPU.
+            dtype_bytes: 2,
+            family,
+        }
+    }
+
+    /// Compute the activation budget bytes from this hint.
+    pub fn budget_bytes(&self) -> u64 {
+        activation_bytes(
+            self.width,
+            self.height,
+            self.batch,
+            self.dtype_bytes,
+            self.family,
+        )
+    }
+}
 
 // ── MPS memory guard ────────────────────────────────────────────────────────
 
@@ -21,8 +86,11 @@ fn check_model_memory_budget(
     let hard_limit = available_bytes * 9 / 10; // 90%
     if peak_bytes > hard_limit {
         return Err(ApiError::insufficient_memory(format!(
-            "model '{}' needs ~{:.1} GB but only ~{:.1} GB available. \
-             Close other applications, unload the current model, or use a smaller variant.",
+            "model '{}' estimated peak ~{:.1} GB exceeds available ~{:.1} GB \
+             (peak = max(text-encoders, transformer + VAE) + 2 GB headroom; \
+             encoders are dropped before denoise). \
+             Try a smaller variant (e.g. ':q8' / ':q5'), enable --offload (FLUX), \
+             or close other GPU apps.",
             model_name,
             peak_bytes as f64 / 1_000_000_000.0,
             available_bytes as f64 / 1_000_000_000.0,
@@ -55,18 +123,31 @@ fn check_model_memory_budget(
 /// The Eager sum (`transformer + vae + all_encoders`) overcounts by the
 /// encoder weight on every load — enough to false-reject a quantized FLUX on
 /// a 24 GB card even when the swap would actually fit.
+///
+/// `hint` adds a resolution-scaled activation budget on top of the
+/// component-size peak so a 2048² generation isn't under-budgeted. When
+/// `None` the inner peak retains the existing 2 GB
+/// `MEMORY_BUDGET_HEADROOM` constant from `estimate_peak_memory` and no
+/// extra is added — equivalent to the pre-Tier-2.3 behavior.
 pub(crate) fn preflight_memory_guard_with_available(
     model_name: &str,
     paths: &ModelPaths,
     active_vram_bytes: u64,
     available_bytes: u64,
+    hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
     let peak = mold_inference::device::estimate_peak_memory(
         paths,
         mold_inference::LoadStrategy::Sequential,
     );
+    // Add the per-request activation budget on top of the file-size peak.
+    // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
+    // is a generic "kernels + small state" constant that doesn't scale; the
+    // hint is the resolution/dtype/arch-aware delta on top.
+    let activation = hint.map(|h| h.budget_bytes()).unwrap_or(0);
+    let peak_with_activation = peak.saturating_add(activation);
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
-    check_model_memory_budget(model_name, peak, effective_available)
+    check_model_memory_budget(model_name, peak_with_activation, effective_available)
 }
 
 /// Check whether estimated peak memory fits before committing to a model load.
@@ -91,6 +172,7 @@ pub(crate) fn preflight_memory_guard(
     paths: &ModelPaths,
     active_vram_bytes: u64,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
     // CUDA branch: when an active model will be reclaimed via primary-context
     // reset, the post-reclaim budget is the device total, not free+active.
@@ -98,15 +180,51 @@ pub(crate) fn preflight_memory_guard(
     {
         if active_vram_bytes > 0 {
             if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
-                return preflight_memory_guard_with_available(model_name, paths, 0, total);
+                return preflight_memory_guard_with_available(model_name, paths, 0, total, hint);
             }
         }
-        if let Some(free) = mold_inference::device::free_vram_bytes(gpu_ordinal) {
+        // Ghost-VRAM case: no active model in our cache, but the device
+        // reports `free` significantly below `total` because cuBLAS / cuDNN /
+        // kernel modules from a previous load are still squatting on
+        // workspace allocations. Reclaim the primary context — we have
+        // nothing live to lose — and re-query before deciding. After reclaim,
+        // re-query through `usable_free_vram_bytes` so the OS reserve
+        // (T2-B) is respected on the post-reclaim reading too.
+        if let (Some(free), Some(total)) = (
+            mold_inference::device::free_vram_bytes(gpu_ordinal),
+            mold_inference::device::total_vram_bytes(gpu_ordinal),
+        ) {
+            const GHOST_VRAM_THRESHOLD: u64 = 1_500_000_000; // 1.5 GB
+            if total.saturating_sub(free) > GHOST_VRAM_THRESHOLD {
+                tracing::info!(
+                    gpu = gpu_ordinal,
+                    free_gb = format_args!("{:.1}", free as f64 / 1e9),
+                    total_gb = format_args!("{:.1}", total as f64 / 1e9),
+                    "no active model on this GPU but VRAM is held — reclaiming primary context",
+                );
+                mold_inference::device::reclaim_gpu_memory(gpu_ordinal);
+            }
+            let effective_free = mold_inference::device::usable_free_vram_bytes(gpu_ordinal)
+                .unwrap_or_else(|| {
+                    free.saturating_sub(mold_inference::device::reserved_vram_bytes())
+                });
+            return preflight_memory_guard_with_available(
+                model_name,
+                paths,
+                active_vram_bytes,
+                effective_free,
+                hint,
+            );
+        }
+        // Fallback if total_vram is unavailable: still go through the
+        // reserve-adjusted reading.
+        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
             return preflight_memory_guard_with_available(
                 model_name,
                 paths,
                 active_vram_bytes,
                 free,
+                hint,
             );
         }
     }
@@ -119,6 +237,7 @@ pub(crate) fn preflight_memory_guard(
                 paths,
                 active_vram_bytes,
                 available,
+                hint,
             );
         }
     }
@@ -233,6 +352,51 @@ pub(crate) async fn catalog_family_for(state: &AppState, model_name: &str) -> Op
     config.models.get(model_name).and_then(|m| m.family.clone())
 }
 
+/// Resolve the family slug for any model name — checks the static manifest
+/// first (covers `flux-dev:q8` and friends), then falls back to the catalog
+/// config entry (covers `cv:*` / `hf:*`). Used by the activation-budget
+/// preflight to dispatch to the right [`ActivationFamily`].
+pub(crate) async fn family_for_model(state: &AppState, model_name: &str) -> Option<String> {
+    if let Some(manifest) = mold_core::manifest::find_manifest(model_name) {
+        return Some(manifest.family.clone());
+    }
+    catalog_family_for(state, model_name).await
+}
+
+/// Sync variant of [`family_for_model`] for the GPU-worker hot path which
+/// runs inside `spawn_blocking` and only has a `&Config` snapshot to work
+/// with. Falls through to manifest-then-config in the same order.
+pub(crate) fn family_for_model_sync(
+    model_name: &str,
+    config: &mold_core::Config,
+) -> Option<String> {
+    if let Some(manifest) = mold_core::manifest::find_manifest(model_name) {
+        return Some(manifest.family.clone());
+    }
+    config.models.get(model_name).and_then(|m| m.family.clone())
+}
+
+/// Sync variant of [`activation_hint_for_request`] for the GPU-worker hot
+/// path. Returns `None` when the family slug can't be resolved.
+pub(crate) fn activation_hint_for_request_sync(
+    config: &mold_core::Config,
+    req: &GenerateRequest,
+) -> Option<ActivationHint> {
+    let family = family_for_model_sync(&req.model, config)?;
+    Some(ActivationHint::from_request(req, &family))
+}
+
+/// Build an [`ActivationHint`] for the given request using the resolved
+/// model family (manifest or catalog). Returns `None` when the family slug
+/// can't be resolved — the preflight then falls back to the size-only peak.
+pub(crate) async fn activation_hint_for_request(
+    state: &AppState,
+    req: &GenerateRequest,
+) -> Option<ActivationHint> {
+    let family = family_for_model(state, &req.model).await?;
+    Some(ActivationHint::from_request(req, &family))
+}
+
 fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, paths: &ModelPaths) {
     let to_str = |p: &std::path::PathBuf| p.to_str().map(str::to_owned);
     match companion {
@@ -248,7 +412,19 @@ fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, pat
                 .and_then(to_str)
                 .or_else(|| cfg.clip_tokenizer.clone());
         }
-        "sdxl-vae" | "sd-vae-ft-mse" | "flux-vae" => {}
+        "sdxl-vae" | "sd-vae-ft-mse" => {}
+        // Civitai FLUX fine-tune convention is split: some bundle the
+        // VAE in the same .safetensors as the transformer, some are
+        // transformer-only. `synthesize_catalog_config` peeks the
+        // header and clears cfg.vae for the transformer-only case;
+        // here we populate it from the companion's resolved path.
+        // When the bundle DID include a VAE, cfg.vae is already set
+        // to the primary checkpoint and we leave it alone — the
+        // bundled VAE wins, so the guarded arm doesn't fire and the
+        // catch-all (no-op) handles it.
+        "flux-vae" if cfg.vae.is_none() => {
+            cfg.vae = to_str(&paths.transformer);
+        }
         "ltx-video-vae" | "flux2-vae" => {
             cfg.vae = to_str(&paths.transformer);
         }
@@ -290,6 +466,7 @@ fn synthesize_catalog_config(
 ) -> anyhow::Result<mold_core::ModelConfig> {
     use mold_catalog::companions::companions_for;
     use mold_catalog::entry::Bundling;
+    use mold_catalog::families::Family;
 
     let primary = entry
         .download_recipe
@@ -317,7 +494,29 @@ fn synthesize_catalog_config(
 
     if matches!(entry.bundling, Bundling::SingleFile) {
         cfg.transformer = Some(primary_str.clone());
-        cfg.vae = Some(primary_str);
+        // Civitai FLUX fine-tunes are split: some bundle the VAE under
+        // `first_stage_model.*` keys, some (e.g. cv:994561 — the
+        // *_realHornyProV3Unet.safetensors file) are transformer-only.
+        // For SDXL/SD1.5 the convention is consistent (VAE bundled), but
+        // for FLUX we have to peek the safetensors header. When the bundle
+        // lacks a VAE, defer cfg.vae and let the flux-vae companion populate
+        // it below — copy_catalog_companion only writes to flux-vae's slot
+        // when cfg.vae is None, so a bundled VAE always wins.
+        if entry.family == Family::Flux
+            && primary_path.exists()
+            && !mold_inference::loader::flux_single_file_bundles_vae(&primary_path).map_err(
+                |e| {
+                    anyhow::anyhow!(
+                        "probe FLUX checkpoint {} for bundled VAE: {e}",
+                        primary_path.display()
+                    )
+                },
+            )?
+        {
+            // Transformer-only FLUX checkpoint — flux-vae companion is required.
+        } else {
+            cfg.vae = Some(primary_str);
+        }
     } else {
         anyhow::bail!(
             "bundling={:?} not supported (single-file only)",
@@ -540,11 +739,23 @@ pub(crate) async fn check_model_available(
     // Catalog bridge: synthesize config for installed cv:* / hf:* entries so
     // the web UI can generate with models downloaded from the catalog.
     if looks_like_catalog_id(model_name) {
-        if install_catalog_model(state, model_name).await {
+        let synth_ok = install_catalog_model(state, model_name).await;
+        if synth_ok {
             let config = state.config.read().await;
             if let Some(paths) = ModelPaths::resolve(model_name, &config) {
                 return Ok(Some(paths));
             }
+            // Synthesis succeeded (entry was found and config built) but
+            // ModelPaths::resolve failed — the catalog config is missing
+            // a required field (transformer or vae). For a transformer-only
+            // FLUX checkpoint that's the flux-vae companion not being on
+            // disk. Surface that specifically rather than the misleading
+            // "not installed" generic.
+            return Err(ApiError::not_found(format!(
+                "catalog model '{model_name}' is missing required components. \
+                 Re-pull the entry from the catalog so its companions \
+                 (CLIP-L / T5 / VAE) are fetched alongside the primary checkpoint."
+            )));
         }
         return Err(ApiError::not_found(format!(
             "catalog model '{model_name}' is not installed. Download it from the catalog first."
@@ -565,10 +776,16 @@ pub(crate) async fn check_model_available(
 ///
 /// Checks the model cache: if already loaded, just touches the LRU order.
 /// If cached but unloaded, reloads it. If not in cache, creates a new engine.
+///
+/// `hint` carries the per-request resolution / family used by the activation
+/// budget. `None` falls back to the previous fixed-headroom approximation —
+/// admin-API loads with no resolution context (cache prewarm, etc.) take
+/// this path.
 pub(crate) async fn ensure_model_ready(
     state: &AppState,
     model_name: &str,
     progress: Option<EngineProgressCallback>,
+    hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
     let _guard = state.model_load_lock.lock().await;
 
@@ -594,7 +811,7 @@ pub(crate) async fn ensure_model_ready(
             // MPS memory guard: check before unloading the active model.
             // Include the active model's footprint as reclaimable memory.
             if let Some(paths) = entry.engine.model_paths() {
-                preflight_memory_guard(model_name, paths, active_vram, 0)?;
+                preflight_memory_guard(model_name, paths, active_vram, 0, hint)?;
             }
 
             // Parked engines retain tokenizers/caches for faster reload.
@@ -713,7 +930,7 @@ pub(crate) async fn ensure_model_ready(
 
     // Not in cache — check if model is available on disk.
     match check_model_available(state, model_name).await? {
-        Some(paths) => create_and_load_engine(state, model_name, paths, progress).await,
+        Some(paths) => create_and_load_engine(state, model_name, paths, progress, hint).await,
         None => Ok(()),
     }
 }
@@ -807,6 +1024,7 @@ async fn create_and_load_engine(
     model_name: &str,
     paths: ModelPaths,
     progress: Option<EngineProgressCallback>,
+    hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
     // MPS memory guard: reject before unloading current model so it stays operational.
     // Include the active model's footprint as reclaimable memory.
@@ -814,7 +1032,7 @@ async fn create_and_load_engine(
         let cache = state.model_cache.lock().await;
         cache.active_vram_bytes()
     };
-    preflight_memory_guard(model_name, &paths, active_vram, 0)?;
+    preflight_memory_guard(model_name, &paths, active_vram, 0, hint)?;
 
     // Unload the current active model to free GPU memory.
     // Only reclaim GPU memory if there was an active model — calling
@@ -978,7 +1196,8 @@ mod tests {
         // Available 8 GB alone is insufficient; add 10 GB active VRAM →
         // 18 GB effective, comfortably above peak.
         let (_dir, paths) = test_paths_with_total_size(10 * GB);
-        let result = preflight_memory_guard_with_available("swap-test", &paths, 10 * GB, 8 * GB);
+        let result =
+            preflight_memory_guard_with_available("swap-test", &paths, 10 * GB, 8 * GB, None);
         assert!(
             result.is_ok(),
             "expected swap to succeed with reclaimable VRAM, got {result:?}"
@@ -992,7 +1211,7 @@ mod tests {
         // 20 GB on disk → peak ≥ 20 GB. Available 8 GB + 5 GB active =
         // 13 GB effective < peak → reject.
         let (_dir, paths) = test_paths_with_total_size(20 * GB);
-        let result = preflight_memory_guard_with_available("too-big", &paths, 5 * GB, 8 * GB);
+        let result = preflight_memory_guard_with_available("too-big", &paths, 5 * GB, 8 * GB, None);
         assert!(
             result.is_err(),
             "expected oversized model to be rejected, got Ok"
@@ -1125,7 +1344,7 @@ mod tests {
         // reclaimed → effective_available passed in by the outer guard
         // is total_vram = 24 GB on CUDA, but we test the inner directly with
         // the Sequential strategy in mind.
-        let result = preflight_memory_guard_with_available("flux-dev:q8", &paths, 0, 24 * GB);
+        let result = preflight_memory_guard_with_available("flux-dev:q8", &paths, 0, 24 * GB, None);
         assert!(
             result.is_ok(),
             "quantized FLUX must fit on a 24 GB card under the Sequential \
@@ -1149,6 +1368,425 @@ mod tests {
             eager_peak > hard_limit,
             "Eager peak ({eager_peak}) should exceed hard limit ({hard_limit}) — \
              this is the false-rejection the Sequential switch fixes"
+        );
+    }
+
+    /// Tier 2.3: the server-side preflight must consume the
+    /// resolution-scaled activation budget. A model that fits at 768²
+    /// (where the activation budget is the 256 MB floor) must be rejected
+    /// at 2048² (where the budget grows past 1 GB) on the same card.
+    #[test]
+    fn preflight_memory_guard_accepts_resolution_for_activation_budget() {
+        // Shape: 23 GB transformer, 1 GB VAE, 9 GB T5, 1 GB CLIP. Sequential
+        // peak = max(10, 24) + 2 GB headroom = 26 GB. On a 30 GB card the
+        // 90 % hard limit is 27 GB:
+        //   * 768²:  26 + 0.256 (floor) = 26.256 ≤ 27  → accept
+        //   * 2048²: 26 + 1.09          = 27.09  > 27  → reject
+        // Without the activation hint both would land at 26 GB and accept.
+        let (_dir, paths) = flux_shaped_paths_with_sizes(23, 1, 9, 1);
+
+        let hint_768 = ActivationHint {
+            width: 768,
+            height: 768,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+        let hint_2048 = ActivationHint {
+            width: 2048,
+            height: 2048,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+
+        let card_total = 30 * GB;
+        let result_768 = preflight_memory_guard_with_available(
+            "flux-dev",
+            &paths,
+            0,
+            card_total,
+            Some(hint_768),
+        );
+        let result_2048 = preflight_memory_guard_with_available(
+            "flux-dev",
+            &paths,
+            0,
+            card_total,
+            Some(hint_2048),
+        );
+
+        assert!(
+            result_768.is_ok(),
+            "768² FLUX should fit on 30 GB (small activation budget), got {result_768:?}"
+        );
+        assert!(
+            result_2048.is_err(),
+            "2048² FLUX must be rejected on 30 GB (large activation budget pushes \
+             peak past 90 % cap), got {result_2048:?}"
+        );
+    }
+
+    /// `ActivationHint::from_request` picks the right family + batch for a
+    /// real-shaped GenerateRequest.
+    #[test]
+    fn activation_hint_from_request_classifies_correctly() {
+        let mut req = GenerateRequest {
+            prompt: "test".into(),
+            negative_prompt: None,
+            model: "flux-dev:bf16".into(),
+            width: 1024,
+            height: 1024,
+            steps: 20,
+            guidance: 3.5,
+            seed: None,
+            batch_size: 1,
+            output_format: Default::default(),
+            embed_metadata: None,
+            scheduler: None,
+            source_image: None,
+            edit_images: None,
+            strength: 1.0,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            source_video: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: None,
+        };
+
+        // FLUX is guidance-distilled → batch=1 even with guidance > 1.
+        let hint_flux = ActivationHint::from_request(&req, "flux");
+        assert_eq!(hint_flux.family, ActivationFamily::FluxDit);
+        assert_eq!(hint_flux.batch, 1);
+
+        // SDXL with CFG → batch=2.
+        let hint_sdxl = ActivationHint::from_request(&req, "sdxl");
+        assert_eq!(hint_sdxl.family, ActivationFamily::SdxlUnet);
+        assert_eq!(hint_sdxl.batch, 2);
+
+        // SDXL with no CFG (LCM/Turbo) → batch=1.
+        req.guidance = 1.0;
+        let hint_sdxl_lcm = ActivationHint::from_request(&req, "sdxl");
+        assert_eq!(hint_sdxl_lcm.batch, 1);
+
+        // Unknown family slug falls through to FluxDit.
+        let hint_unknown = ActivationHint::from_request(&req, "totally-bogus");
+        assert_eq!(hint_unknown.family, ActivationFamily::FluxDit);
+    }
+
+    // ── FLUX catalog bridge: VAE-bundle probe + flux-vae companion wiring ──
+
+    /// Direct-unit test of `copy_catalog_companion("flux-vae", _)`: when
+    /// `cfg.vae` is unset (transformer-only checkpoint) the handler must
+    /// populate it from the companion's resolved `paths.transformer`.
+    /// The same handler must NOT clobber a bundled-VAE cfg.vae.
+    #[test]
+    fn copy_catalog_companion_flux_vae_populates_when_unset() {
+        let mut cfg = mold_core::ModelConfig {
+            family: Some("flux".into()),
+            transformer: Some("/m/cv-x/flux/civitai/x/unet.safetensors".into()),
+            vae: None,
+            ..Default::default()
+        };
+        let paths = ModelPaths {
+            transformer: PathBuf::from("/m/flux-vae/ae.safetensors"),
+            transformer_shards: Vec::new(),
+            vae: PathBuf::from("/m/flux-vae/ae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        copy_catalog_companion(&mut cfg, "flux-vae", &paths);
+        assert_eq!(
+            cfg.vae.as_deref(),
+            Some("/m/flux-vae/ae.safetensors"),
+            "transformer-only cfg.vae must be populated from the flux-vae companion path"
+        );
+    }
+
+    #[test]
+    fn copy_catalog_companion_flux_vae_does_not_override_bundled() {
+        let mut cfg = mold_core::ModelConfig {
+            family: Some("flux".into()),
+            transformer: Some("/m/cv-x/flux/civitai/x/full.safetensors".into()),
+            vae: Some("/m/cv-x/flux/civitai/x/full.safetensors".into()),
+            ..Default::default()
+        };
+        let paths = ModelPaths {
+            transformer: PathBuf::from("/m/flux-vae/ae.safetensors"),
+            transformer_shards: Vec::new(),
+            vae: PathBuf::from("/m/flux-vae/ae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        copy_catalog_companion(&mut cfg, "flux-vae", &paths);
+        assert_eq!(
+            cfg.vae.as_deref(),
+            Some("/m/cv-x/flux/civitai/x/full.safetensors"),
+            "bundled cfg.vae must survive the flux-vae companion pass"
+        );
+    }
+
+    /// Synthesize a minimal safetensors at `path` that lists the given
+    /// keys in the JSON header (each as a 1-element F32 tensor sharing the
+    /// same 4-byte zero blob). Sufficient for the header-peek probe; no
+    /// dep on the `safetensors` crate.
+    fn write_safetensors_with_keys(path: &std::path::Path, keys: &[&str]) {
+        use std::io::Write;
+        let mut header = serde_json::Map::new();
+        for key in keys {
+            header.insert(
+                (*key).to_string(),
+                serde_json::json!({
+                    "dtype": "F32",
+                    "shape": [1],
+                    "data_offsets": [0, 4],
+                }),
+            );
+        }
+        let header_json = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        let mut f = std::fs::File::create(path).expect("create fixture");
+        f.write_all(&(header_json.len() as u64).to_le_bytes())
+            .unwrap();
+        f.write_all(&header_json).unwrap();
+        f.write_all(&[0u8; 4]).unwrap();
+    }
+
+    fn flux_unet_only_catalog_entry(
+        version_id: &str,
+        file_name: &str,
+    ) -> mold_catalog::entry::CatalogEntry {
+        use mold_catalog::entry::{
+            CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat, LicenseFlags,
+            Modality, RecipeFile, Source, TokenKind,
+        };
+        use mold_catalog::families::Family;
+
+        CatalogEntry {
+            id: CatalogId::from(format!("cv:{version_id}")),
+            source: Source::Civitai,
+            source_id: version_id.to_string(),
+            name: "FLUX Unet-only fine-tune".into(),
+            author: Some("someone".into()),
+            family: Family::Flux,
+            family_role: FamilyRole::Finetune,
+            sub_family: None,
+            modality: Modality::Image,
+            kind: mold_catalog::entry::Kind::Checkpoint,
+            file_format: FileFormat::Safetensors,
+            bundling: mold_catalog::entry::Bundling::SingleFile,
+            size_bytes: Some(12_000_000_000),
+            download_count: 0,
+            rating: None,
+            likes: 0,
+            nsfw: false,
+            thumbnail_url: None,
+            description: None,
+            license: None,
+            license_flags: LicenseFlags::default(),
+            tags: vec![],
+            companions: vec!["t5-v1_1-xxl".into(), "clip-l".into(), "flux-vae".into()],
+            download_recipe: DownloadRecipe {
+                files: vec![RecipeFile {
+                    url: format!("https://civitai.com/api/download/models/{version_id}"),
+                    dest: format!("{{family}}/civitai/{version_id}/{file_name}"),
+                    sha256: Some("DEAD".repeat(16)),
+                    size_bytes: Some(12_000_000_000),
+                }],
+                needs_token: Some(TokenKind::Civitai),
+            },
+            engine_phase: 1,
+            created_at: None,
+            updated_at: None,
+            added_at: 0,
+            trained_words: vec![],
+        }
+    }
+
+    /// Transformer-only FLUX checkpoint: synth must defer cfg.vae and the
+    /// flux-vae companion path must populate it (when present in config).
+    ///
+    /// Sets MOLD_HOME to the tempdir so `ModelPaths::resolve` doesn't walk
+    /// the developer's real `~/.mold/models/.hf-cache/` (which on this
+    /// machine has a real flux-vae shipped from a manifest install).
+    #[test]
+    fn synthesize_catalog_config_uses_flux_vae_companion_when_bundle_lacks_vae() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        // SAFETY: env mutation is racy with other tests; this is the only
+        // test in this module that touches MOLD_HOME and the suite serializes
+        // env-var tests by combining them into one #[test].
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        // Place a transformer-only safetensors fixture at the path that
+        // the recipe-rendering will produce for `cv:994561`.
+        let primary_path = models_dir
+            .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &primary_path,
+            &[
+                "double_blocks.0.img_attn.proj.weight",
+                "single_blocks.0.linear1.weight",
+                "img_in.weight",
+            ],
+        );
+
+        // Stub flux-vae's manifest config so `ModelPaths::resolve("flux-vae", _)`
+        // returns a path WITHOUT walking the dev machine's real HF cache.
+        let vae_path = models_dir.join("flux-vae/ae.safetensors");
+        std::fs::create_dir_all(vae_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&vae_path).unwrap();
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.models.insert(
+            "flux-vae".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(vae_path.to_string_lossy().into_owned()),
+                vae: Some(vae_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+        // Stub clip-l + t5 so their absence doesn't blow up the loop —
+        // they're declared in `companions_for(Family::Flux, _)` and
+        // unresolved entries log a warning rather than failing, but we set
+        // them anyway to verify they don't interfere.
+        config.models.insert(
+            "clip-l".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!("{}/clip-l/model.safetensors", models_dir.display())),
+                vae: Some(format!("{}/clip-l/model.safetensors", models_dir.display())),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "t5-v1_1-xxl".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!(
+                    "{}/t5-v1_1-xxl/t5xxl_fp16.safetensors",
+                    models_dir.display()
+                )),
+                vae: Some(format!(
+                    "{}/t5-v1_1-xxl/t5xxl_fp16.safetensors",
+                    models_dir.display()
+                )),
+                ..Default::default()
+            },
+        );
+
+        let entry =
+            flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");
+        let synth = synthesize_catalog_config(&entry, models_dir, &config).unwrap();
+
+        // cfg.transformer points at the recipe-rendered primary path.
+        assert_eq!(
+            synth.transformer.as_deref(),
+            primary_path.to_str(),
+            "transformer must point at the on-disk primary checkpoint"
+        );
+        // cfg.vae was populated from the flux-vae companion's resolved
+        // path — NOT from the transformer-only primary.
+        assert_eq!(
+            synth.vae.as_deref(),
+            vae_path.to_str(),
+            "flux-vae companion must populate cfg.vae for transformer-only checkpoints",
+        );
+
+        // Restore env for sibling tests.
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    /// Bundled-VAE FLUX checkpoint: synth must keep cfg.vae == primary;
+    /// flux-vae companion is a no-op.
+    #[test]
+    fn synthesize_catalog_config_uses_bundled_vae_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+
+        let primary_path = models_dir.join("cv-101010/flux/civitai/101010/flux_full.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        // Bundled-VAE: A1111 prefix on the encoder.
+        write_safetensors_with_keys(
+            &primary_path,
+            &[
+                "model.diffusion_model.double_blocks.0.img_attn.proj.weight",
+                "first_stage_model.encoder.conv_in.weight",
+            ],
+        );
+
+        // Even with flux-vae stubbed, cfg.vae must remain pointing at the
+        // primary checkpoint — bundled VAE wins.
+        let vae_path = models_dir.join("flux-vae/ae.safetensors");
+        std::fs::create_dir_all(vae_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&vae_path).unwrap();
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.models.insert(
+            "flux-vae".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(vae_path.to_string_lossy().into_owned()),
+                vae: Some(vae_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+
+        let entry = flux_unet_only_catalog_entry("101010", "flux_full.safetensors");
+        let synth = synthesize_catalog_config(&entry, models_dir, &config).unwrap();
+
+        assert_eq!(synth.transformer.as_deref(), primary_path.to_str());
+        assert_eq!(
+            synth.vae.as_deref(),
+            primary_path.to_str(),
+            "bundled-VAE checkpoint must keep cfg.vae == primary; flux-vae companion is a no-op",
         );
     }
 }

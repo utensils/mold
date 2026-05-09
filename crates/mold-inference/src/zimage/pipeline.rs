@@ -17,7 +17,7 @@ use crate::cache::{
 };
 use crate::device::{
     check_memory_budget, effective_device_ref, fmt_gb, free_vram_bytes, memory_status_string,
-    preflight_memory_check, should_use_gpu,
+    preflight_memory_check, should_use_gpu, usable_free_vram_bytes,
 };
 // Re-exported for tests (test harness is disabled via `test = false` in Cargo.toml,
 // but tests reference this constant via `super::*`).
@@ -313,14 +313,22 @@ impl ZImageEngine {
         tracing::info!(quantized = is_gguf, "Z-Image transformer loaded");
 
         // --- Decide where to place VAE and Qwen3 text encoder based on remaining VRAM ---
-        let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // Log the raw driver reading; budget the placement decisions
+        // against the reserve-adjusted value below.
+        let free_raw = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let is_cuda = device.is_cuda();
         let is_metal = device.is_metal();
-        if free > 0 {
-            self.base
-                .progress
-                .info(&format!("Free VRAM after transformer: {}", fmt_gb(free)));
-            tracing::info!(free_vram = free, "free VRAM after loading transformer");
+        if free_raw > 0 {
+            self.base.progress.info(&format!(
+                "Free VRAM after transformer: {}",
+                fmt_gb(free_raw)
+            ));
+            tracing::info!(
+                free_vram = free_raw,
+                free_vram_usable = free,
+                "free VRAM after loading transformer"
+            );
         }
 
         // VAE decode at 1024x1024 needs ~6GB workspace for conv2d im2col.
@@ -505,7 +513,8 @@ impl ZImageEngine {
             let cap_mask = Tensor::ones((1, token_count), DType::U8, &device)?;
             (cap_feats, cap_mask)
         } else {
-            let free = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+            // Reserve-adjusted reading drives the Qwen3 variant selection.
+            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting Qwen3 encoder");
             let qwen3_resolve_start = Instant::now();
             let qwen3_preference = self.qwen3_variant.as_deref();
@@ -555,7 +564,14 @@ impl ZImageEngine {
                 .filter_map(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .sum();
-            preflight_memory_check("Qwen3 text encoder", te_size)?;
+            let te_activation_budget = crate::device::activation_bytes(
+                req.width,
+                req.height,
+                1,
+                crate::device::dtype_bytes(te_dtype),
+                crate::device::ActivationFamily::SmallTransformer,
+            );
+            preflight_memory_check("Qwen3 text encoder", te_size, te_activation_budget)?;
 
             if let Some(status) = memory_status_string() {
                 self.base.progress.info(&status);
@@ -702,7 +718,18 @@ impl ZImageEngine {
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum();
-        preflight_memory_check("Z-Image transformer", xformer_size)?;
+        let xformer_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            1,
+            crate::device::dtype_bytes(dtype),
+            crate::device::ActivationFamily::ZImageDit,
+        );
+        preflight_memory_check(
+            "Z-Image transformer",
+            xformer_size,
+            xformer_activation_budget,
+        )?;
 
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
@@ -800,8 +827,9 @@ impl ZImageEngine {
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }
-        // With sequential loading, we can always try GPU for VAE since transformer is freed
-        let free_for_vae = free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        // With sequential loading, we can always try GPU for VAE since transformer is freed.
+        // Reserve-adjusted reading: should_use_gpu must respect the OS reserve.
+        let free_for_vae = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
         let vae_on_gpu = should_use_gpu(
             device.is_cuda(),
             device.is_metal(),
@@ -954,16 +982,24 @@ impl ZImageEngine {
             let cap_mask = Tensor::ones((1, token_count), DType::U8, &loaded.device)?;
             (cap_feats, cap_mask)
         } else {
-            // Cache miss — reload encoder if it was dropped after a previous generation
+            // Cache miss — restore encoder if it was dropped or parked after
+            // a previous generation. is_parked() is true only on the BF16
+            // path; GGUF flows through the reload() branch.
             if loaded.text_encoder.model.is_none() {
-                let te_label = if loaded.text_encoder.is_quantized {
+                let te_label = if loaded.text_encoder.is_parked() {
+                    "Unparking Qwen3 encoder (CPU→GPU)"
+                } else if loaded.text_encoder.is_quantized {
                     "Reloading Qwen3 encoder (GGUF)"
                 } else {
                     "Reloading Qwen3 encoder (BF16)"
                 };
                 progress.stage_start(te_label);
                 let reload_start = Instant::now();
-                loaded.text_encoder.reload(progress)?;
+                if loaded.text_encoder.is_parked() {
+                    loaded.text_encoder.unpark_to_gpu(progress)?;
+                } else {
+                    loaded.text_encoder.reload(progress)?;
+                }
                 progress.stage_done(te_label, reload_start.elapsed());
             }
 
@@ -977,16 +1013,28 @@ impl ZImageEngine {
             )?;
             tracing::info!(token_count = cap_feats.dim(1)?, "text encoding complete");
 
-            // Drop text encoder to free memory for denoising + VAE decode.
-            // Always drop on GPU. On Metal (unified memory), also drop CPU-loaded
-            // weights since they share the same physical RAM as GPU allocations.
-            // On CUDA, keep CPU-loaded weights resident to avoid expensive reloads.
+            // Free GPU VRAM for denoising + VAE decode. With
+            // `MOLD_KEEP_TE_RAM=1` and the BF16 encoder, parameters move
+            // to host RAM instead of being released — saves ~10 s of reload
+            // on the next request. GGUF and Metal flow through the original
+            // drop path (Metal is unified memory, GGUF is device-tied).
             if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
-                loaded.text_encoder.drop_weights();
-                tracing::info!(
-                    on_gpu = loaded.text_encoder.on_gpu,
-                    "Qwen3 text encoder dropped to free memory for denoising"
-                );
+                let park_mode = crate::device::keep_te_in_ram()
+                    && !loaded.device.is_metal()
+                    && !loaded.text_encoder.is_quantized;
+                if park_mode {
+                    loaded.text_encoder.park_to_cpu()?;
+                    tracing::info!(
+                        on_gpu = loaded.text_encoder.on_gpu,
+                        "Qwen3 text encoder parked to CPU host RAM"
+                    );
+                } else {
+                    loaded.text_encoder.drop_weights();
+                    tracing::info!(
+                        on_gpu = loaded.text_encoder.on_gpu,
+                        "Qwen3 text encoder dropped to free memory for denoising"
+                    );
+                }
             }
 
             (cap_feats, cap_mask)

@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
@@ -41,6 +41,129 @@ impl LoraDeltaCache {
     }
 }
 
+/// Identity for a parsed `LoraAdapter` on disk. Combining the path
+/// hash with the file's modification time means a user who edits a
+/// `.safetensors` in place (e.g. re-exports from a trainer) gets a
+/// fresh parse on the next load — no stale state.
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+pub(crate) struct ParsedLoraCacheKey {
+    path_hash: u64,
+    file_mtime_nanos: i128,
+}
+
+impl ParsedLoraCacheKey {
+    /// Build a cache key from a path on disk. Falls back gracefully
+    /// when the file system can't report an mtime (read-only mounts,
+    /// some FUSE backends): `i128::MIN` is used as the sentinel so
+    /// every load on such a path becomes a miss, which is the safe
+    /// behaviour.
+    fn from_path(path: &Path) -> Result<Self> {
+        use std::hash::Hasher;
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        canonical.hash(&mut hasher);
+        let path_hash = hasher.finish();
+
+        let file_mtime_nanos = std::fs::metadata(&canonical)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i128)
+            .unwrap_or(i128::MIN);
+
+        Ok(Self {
+            path_hash,
+            file_mtime_nanos,
+        })
+    }
+}
+
+/// Tiny FIFO cache for parsed `LoraAdapter`s. 4 slots covers the
+/// "user toggling a LoRA on/off" and "user scrubbing the strength
+/// slider" cases without holding more than ~80 MB of CPU-resident
+/// adapter weights in memory. We don't bother with a true LRU
+/// (mostly-recently-used) policy at this size — FIFO with capacity 4
+/// is correct enough and avoids the borrow contortions of an
+/// `LruCache::get(&mut self, ...)` that touches order-tracking.
+const PARSED_LORA_CACHE_CAPACITY: usize = 4;
+
+struct ParsedLoraCache {
+    order: VecDeque<ParsedLoraCacheKey>,
+    entries: HashMap<ParsedLoraCacheKey, Arc<LoraAdapter>>,
+}
+
+impl ParsedLoraCache {
+    fn new() -> Self {
+        Self {
+            order: VecDeque::with_capacity(PARSED_LORA_CACHE_CAPACITY),
+            entries: HashMap::with_capacity(PARSED_LORA_CACHE_CAPACITY),
+        }
+    }
+
+    fn get(&self, key: &ParsedLoraCacheKey) -> Option<Arc<LoraAdapter>> {
+        self.entries.get(key).map(Arc::clone)
+    }
+
+    fn insert(&mut self, key: ParsedLoraCacheKey, adapter: Arc<LoraAdapter>) {
+        if self.entries.contains_key(&key) {
+            // Refresh: drop the existing entry from the FIFO order so
+            // we don't double-count it and silently leak a slot.
+            self.order.retain(|existing| existing != &key);
+        }
+        self.entries.insert(key.clone(), adapter);
+        self.order.push_back(key);
+        while self.entries.len() > PARSED_LORA_CACHE_CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn parsed_lora_cache() -> &'static Mutex<ParsedLoraCache> {
+    static CACHE: OnceLock<Mutex<ParsedLoraCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ParsedLoraCache::new()))
+}
+
+/// Load a LoRA adapter, returning a cached `Arc<LoraAdapter>` when
+/// the same `(path, mtime)` was loaded recently. The cache survives
+/// across transformer rebuilds — slider scrubbing on a single LoRA
+/// hits this on every step after the first, saving the ~200-500 ms
+/// of `safetensors::load` per rebuild.
+///
+/// On mtime change the previous entry is shadowed by a new one with
+/// a different cache key; the old entry stays resident until FIFO
+/// evicts it (acceptable — adapters are tens of MB on CPU).
+pub(crate) fn get_or_load_adapter(path: &Path) -> Result<Arc<LoraAdapter>> {
+    let key = ParsedLoraCacheKey::from_path(path)?;
+    {
+        let cache = parsed_lora_cache().lock().unwrap();
+        if let Some(adapter) = cache.get(&key) {
+            tracing::debug!(
+                path = %path.display(),
+                "parsed-LoRA cache hit"
+            );
+            return Ok(adapter);
+        }
+    }
+    let adapter = Arc::new(LoraAdapter::load(path)?);
+    {
+        let mut cache = parsed_lora_cache().lock().unwrap();
+        cache.insert(key, Arc::clone(&adapter));
+    }
+    Ok(adapter)
+}
+
+#[cfg(test)]
+fn clear_parsed_lora_cache_for_test() {
+    let mut cache = parsed_lora_cache().lock().unwrap();
+    cache.entries.clear();
+    cache.order.clear();
+}
+
 /// A parsed LoRA adapter: pairs of (A, B) weight matrices keyed by layer name.
 pub(crate) struct LoraAdapter {
     /// Map from diffusers layer name (without lora_A/lora_B suffix) to (A, B) tensors.
@@ -55,19 +178,94 @@ pub(crate) struct LoraLayer {
     pub alpha: Option<f64>,
 }
 
+/// Direction of a single tensor inside a LoRA pair: `.lora_A.weight`
+/// (the `(rank, in)` down-projection) or `.lora_B.weight` (the
+/// `(out, rank)` up-projection). [`classify_lora_key`] returns this
+/// alongside the layer stem so the loader can pair them up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoraDirection {
+    Down,
+    Up,
+}
+
+/// Suffixes that mark the down-projection (`A`) tensor. Order matters:
+/// the matcher returns on the first hit, so list more-specific suffixes
+/// (e.g. `.lora_linear_layer.down.weight`) before generic ones
+/// (`.lora_down.weight`) when they could shadow each other.
+///
+/// References:
+/// - Diffusers / PEFT canonical: `.lora_A.weight`
+/// - Kohya / sd-scripts: `.lora_down.weight`
+/// - OneTrainer (note inverted naming — the *down* matrix is
+///   `lora_linear_layer.down.weight`):
+///   <https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/weight_adapter/lora.py>
+/// - PEFT default-adapter (when a model has multiple PEFT adapters
+///   and the user picked the literally-named "default" one):
+///   `.lora_A.default.weight`.
+const LORA_DOWN_SUFFIXES: &[&str] = &[
+    ".lora_linear_layer.down.weight",
+    ".lora_A.default.weight",
+    ".lora_A.weight",
+    ".lora_down.weight",
+];
+
+/// Suffixes that mark the up-projection (`B`) tensor.
+///
+/// `.lora_B` (without `.weight`) is the Mochi / certain video-LoRA
+/// edge case where the trainer dropped the `.weight` segment. We
+/// keep it last so it never shadows `.lora_B.weight` or
+/// `.lora_B.default.weight` for keys that end with the longer suffix.
+const LORA_UP_SUFFIXES: &[&str] = &[
+    ".lora_linear_layer.up.weight",
+    ".lora_B.default.weight",
+    ".lora_B.weight",
+    ".lora_up.weight",
+    ".lora_B",
+];
+
+/// Classify a tensor key from a LoRA safetensors file by its trailing
+/// convention. Returns `Some((direction, stem))` where `stem` is the
+/// layer name with the LoRA suffix stripped, or `None` for keys that
+/// aren't LoRA pair tensors (e.g. `.alpha` scalars or unrelated state).
+///
+/// This is a pure function — no I/O, no allocation beyond the slice
+/// reference — so it's exhaustively unit-tested against the suffix
+/// matrix (Diffusers / Kohya / OneTrainer / PEFT default-adapter /
+/// Mochi edge case) without needing a synthetic safetensors fixture.
+pub(crate) fn classify_lora_key(key: &str) -> Option<(LoraDirection, &str)> {
+    for suffix in LORA_DOWN_SUFFIXES {
+        if let Some(stem) = key.strip_suffix(suffix) {
+            return Some((LoraDirection::Down, stem));
+        }
+    }
+    for suffix in LORA_UP_SUFFIXES {
+        if let Some(stem) = key.strip_suffix(suffix) {
+            return Some((LoraDirection::Up, stem));
+        }
+    }
+    None
+}
+
 impl LoraAdapter {
     /// Load a LoRA safetensors file. Tensors are loaded on CPU.
     ///
-    /// Accepts two on-disk naming conventions:
-    /// - **diffusers / PEFT-canonical**: `<layer>.lora_A.weight` /
-    ///   `<layer>.lora_B.weight`. `<layer>` is a dot-separated module path
-    ///   like `transformer.transformer_blocks.0.attn.to_q`.
+    /// Accepts the suffix matrix in [`classify_lora_key`]:
+    /// - **Diffusers / PEFT-canonical**: `<layer>.lora_A.weight` /
+    ///   `<layer>.lora_B.weight`. `<layer>` is a dot-separated module
+    ///   path like `transformer.transformer_blocks.0.attn.to_q`.
     /// - **Kohya / sd-scripts**: `<layer>.lora_down.weight` /
-    ///   `<layer>.lora_up.weight`. `lora_down` is the (rank, in) matrix
-    ///   (== `lora_A`); `lora_up` is the (out, rank) matrix (== `lora_B`).
-    ///   `<layer>` is the Kohya-flattened module path with `.` collapsed
-    ///   to `_` and prefixed with `lora_unet_`. `map_lora_key` recognises
-    ///   both conventions downstream.
+    ///   `<layer>.lora_up.weight`. `lora_down` is the (rank, in)
+    ///   matrix (== `lora_A`); `lora_up` is the (out, rank) matrix
+    ///   (== `lora_B`).
+    /// - **OneTrainer**: `<layer>.lora_linear_layer.down.weight` /
+    ///   `<layer>.lora_linear_layer.up.weight`.
+    /// - **PEFT default-adapter**: `<layer>.lora_A.default.weight` /
+    ///   `<layer>.lora_B.default.weight`.
+    /// - **Mochi-style**: `<layer>.lora_A.weight` / `<layer>.lora_B`
+    ///   (no trailing `.weight`), seen in some video-LoRA trainers.
+    ///
+    /// `map_lora_key` recognises both diffusers and Kohya stems
+    /// downstream.
     pub fn load(path: &Path) -> Result<Self> {
         let tensors = candle_core::safetensors::load(path, &Device::Cpu)?;
         let mut a_tensors: HashMap<String, Tensor> = HashMap::new();
@@ -76,17 +274,16 @@ impl LoraAdapter {
         let mut rank = 0usize;
 
         for (name, tensor) in &tensors {
-            if let Some(layer) = name
-                .strip_suffix(".lora_A.weight")
-                .or_else(|| name.strip_suffix(".lora_down.weight"))
-            {
-                rank = rank.max(tensor.dim(0)?);
-                a_tensors.insert(layer.to_string(), tensor.clone());
-            } else if let Some(layer) = name
-                .strip_suffix(".lora_B.weight")
-                .or_else(|| name.strip_suffix(".lora_up.weight"))
-            {
-                b_tensors.insert(layer.to_string(), tensor.clone());
+            if let Some((direction, stem)) = classify_lora_key(name) {
+                match direction {
+                    LoraDirection::Down => {
+                        rank = rank.max(tensor.dim(0)?);
+                        a_tensors.insert(stem.to_string(), tensor.clone());
+                    }
+                    LoraDirection::Up => {
+                        b_tensors.insert(stem.to_string(), tensor.clone());
+                    }
+                }
             } else if let Some(layer) = name.strip_suffix(".alpha") {
                 if let Ok(val) = tensor.to_scalar::<f32>() {
                     alpha_values.insert(layer.to_string(), val as f64);
@@ -111,7 +308,7 @@ impl LoraAdapter {
 }
 
 /// Describes how a diffusers-format LoRA key maps to a candle model tensor.
-enum LoraTarget {
+pub(crate) enum LoraTarget {
     /// Direct 1:1 mapping: LoRA delta applies to the entire candle tensor.
     Direct { candle_key: String },
     /// Fused mapping: LoRA delta applies to a row slice of the candle tensor.
@@ -127,7 +324,7 @@ enum LoraTarget {
 /// Map a LoRA layer key (diffusers- or Kohya-format) to a candle model target.
 ///
 /// Returns None for unrecognized keys (logged as warning, skipped).
-fn map_lora_key(diffusers_key: &str) -> Option<LoraTarget> {
+pub(crate) fn map_lora_key(diffusers_key: &str) -> Option<LoraTarget> {
     // Kohya / sd-scripts naming (`lora_unet_*`) — keys carry the FLUX module
     // path with `.` flattened to `_`. The transformer's fused tensors
     // (`img_attn.qkv`, `txt_attn.qkv`, `single_blocks.*.linear1`) match the
@@ -297,7 +494,7 @@ fn map_kohya_unet_key(rest: &str) -> Option<LoraTarget> {
 /// Compute the row offset and size for a fused slice, handling both
 /// equal-split (QKV with num_components=3) and single-block linear1
 /// (Q,K,V each h_sz, then MLP is the remainder).
-fn fused_slice_range(
+pub(crate) fn fused_slice_range(
     base_rows: usize,
     lora_out_dim: usize,
     component: usize,
@@ -945,6 +1142,18 @@ pub(crate) fn gguf_lora_var_builder(
         total_layers.saturating_sub(applied),
     ));
 
+    // Drain pending cuMemFreeAsync from the per-tensor merge loop. Each
+    // patched tensor allocates F32 A/B/B@A intermediates on GPU sized like the
+    // full weight (~150 MB for a 3072×12288 MLP); their drops queue async
+    // frees that don't actually return VRAM to the device until a sync. With
+    // 50+ LoRA-affected tensors per adapter and a stack of 2 LoRAs, the queued
+    // frees pile up to several GB. Without this sync, denoising starts with a
+    // bloated working set and VAE decode at 1024² OOMs even though the kept
+    // transformer is the same size as the no-LoRA case.
+    if on_gpu {
+        device.synchronize()?;
+    }
+
     Ok(candle_transformers::quantized_var_builder::VarBuilder::from_qtensors(data, device))
 }
 
@@ -1365,5 +1574,174 @@ mod tests {
             .expect("present");
         assert_eq!(stack.len(), 1);
         assert_eq!(stack[0].lora_path_hash, 0xCC);
+    }
+
+    // ── classify_lora_key — multi-format suffix matrix ──────────────────
+
+    #[test]
+    fn classify_lora_key_diffusers() {
+        assert_eq!(
+            classify_lora_key("x.lora_A.weight"),
+            Some((LoraDirection::Down, "x"))
+        );
+        assert_eq!(
+            classify_lora_key("x.lora_B.weight"),
+            Some((LoraDirection::Up, "x"))
+        );
+    }
+
+    #[test]
+    fn classify_lora_key_kohya() {
+        assert_eq!(
+            classify_lora_key("x.lora_down.weight"),
+            Some((LoraDirection::Down, "x"))
+        );
+        assert_eq!(
+            classify_lora_key("x.lora_up.weight"),
+            Some((LoraDirection::Up, "x"))
+        );
+    }
+
+    /// OneTrainer's flat-naming scheme inverts the down/up positions
+    /// in the dotted key compared to Kohya: the *down* matrix is at
+    /// `lora_linear_layer.down.weight`, NOT `lora_linear_layer.up.weight`.
+    /// Pin the mapping so a future refactor doesn't silently swap them.
+    #[test]
+    fn classify_lora_key_onetrainer_inverted_naming() {
+        assert_eq!(
+            classify_lora_key("x.lora_linear_layer.down.weight"),
+            Some((LoraDirection::Down, "x"))
+        );
+        assert_eq!(
+            classify_lora_key("x.lora_linear_layer.up.weight"),
+            Some((LoraDirection::Up, "x"))
+        );
+    }
+
+    #[test]
+    fn classify_lora_key_default_adapter_peft() {
+        assert_eq!(
+            classify_lora_key("x.lora_A.default.weight"),
+            Some((LoraDirection::Down, "x"))
+        );
+        assert_eq!(
+            classify_lora_key("x.lora_B.default.weight"),
+            Some((LoraDirection::Up, "x"))
+        );
+    }
+
+    /// Mochi-style trainer drops the trailing `.weight` segment from
+    /// the up matrix only. Down stays as `.lora_A.weight`. The
+    /// suffix-list ordering is load-bearing: `.lora_B` comes last so
+    /// it doesn't shadow `.lora_B.weight` / `.lora_B.default.weight`.
+    #[test]
+    fn classify_lora_key_mochi_no_dot_weight() {
+        assert_eq!(
+            classify_lora_key("x.lora_B"),
+            Some((LoraDirection::Up, "x"))
+        );
+        // Sanity: the down side keeps the canonical form.
+        assert_eq!(
+            classify_lora_key("x.lora_A.weight"),
+            Some((LoraDirection::Down, "x"))
+        );
+    }
+
+    #[test]
+    fn classify_lora_key_unrelated_returns_none() {
+        assert_eq!(classify_lora_key("x.weight"), None);
+        assert_eq!(classify_lora_key("transformer.embed.weight"), None);
+        assert_eq!(classify_lora_key("alpha"), None);
+        // `.alpha` scalars are also not LoRA pair tensors — the
+        // loader handles them on its own branch.
+        assert_eq!(classify_lora_key("layer.alpha"), None);
+    }
+
+    /// Stems must come back unmodified — the loader pairs A/B by
+    /// stem equality, so any silent normalisation here would break
+    /// adapter loading on long module paths.
+    #[test]
+    fn classify_lora_key_preserves_dotted_stem() {
+        assert_eq!(
+            classify_lora_key("transformer.transformer_blocks.5.attn.to_q.lora_A.weight"),
+            Some((
+                LoraDirection::Down,
+                "transformer.transformer_blocks.5.attn.to_q",
+            ))
+        );
+    }
+
+    // ── parsed_lora_cache — hit + mtime invalidate ──────────────────────
+
+    /// Build the same fixture as `load_accepts_kohya_lora_down_up_alpha`
+    /// but reusable so the cache tests can also drop a real safetensors
+    /// file at a path of their choice. Returns a path the caller owns.
+    fn write_synthetic_kohya_safetensors(path: &Path) {
+        use safetensors::tensor::TensorView;
+        let layer = "lora_unet_double_blocks_0_img_attn_qkv";
+
+        let down: Vec<f32> = (0..2 * 4).map(|i| i as f32 * 0.1).collect();
+        let up: Vec<f32> = (0..6 * 2).map(|i| i as f32 * 0.2).collect();
+        let alpha: Vec<f32> = vec![16.0];
+
+        let down_bytes: Vec<u8> = down.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let up_bytes: Vec<u8> = up.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let alpha_bytes: Vec<u8> = alpha.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        let down_view = TensorView::new(safetensors::Dtype::F32, vec![2, 4], &down_bytes).unwrap();
+        let up_view = TensorView::new(safetensors::Dtype::F32, vec![6, 2], &up_bytes).unwrap();
+        let alpha_view = TensorView::new(safetensors::Dtype::F32, vec![], &alpha_bytes).unwrap();
+
+        let entries: Vec<(String, TensorView)> = vec![
+            (format!("{layer}.lora_down.weight"), down_view),
+            (format!("{layer}.lora_up.weight"), up_view),
+            (format!("{layer}.alpha"), alpha_view),
+        ];
+        safetensors::serialize_to_file(entries, &None, path).expect("write safetensors");
+    }
+
+    /// Loading the same path twice must hand back the exact same
+    /// `Arc<LoraAdapter>` — `Arc::ptr_eq` is the strongest possible
+    /// hit-test (no parsed-from-disk twin can ever satisfy it).
+    #[test]
+    fn parsed_lora_cache_is_a_hit_on_second_load() {
+        clear_parsed_lora_cache_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hit.safetensors");
+        write_synthetic_kohya_safetensors(&path);
+
+        let first = get_or_load_adapter(&path).expect("first load");
+        let second = get_or_load_adapter(&path).expect("second load");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "second load must return the same Arc — proof the cache hit, no re-parse"
+        );
+    }
+
+    /// When the file mtime changes (e.g. the user re-trains and saves
+    /// over the same path), the cache key changes, so the second load
+    /// must produce a NEW `Arc` even though the path string is
+    /// identical.
+    #[test]
+    fn parsed_lora_cache_invalidates_on_mtime_change() {
+        clear_parsed_lora_cache_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("invalidate.safetensors");
+        write_synthetic_kohya_safetensors(&path);
+
+        let first = get_or_load_adapter(&path).expect("first load");
+
+        // Bump the file mtime by rewriting the file with fresh
+        // contents. We sleep just long enough to exceed common
+        // file-system mtime resolutions (HFS+ on older macOS rounds
+        // to 1 s) so `metadata.modified()` actually changes.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        write_synthetic_kohya_safetensors(&path);
+
+        let second = get_or_load_adapter(&path).expect("second load");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "mtime change must produce a fresh Arc — proof the cache key invalidated"
+        );
     }
 }

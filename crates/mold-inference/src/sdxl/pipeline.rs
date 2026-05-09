@@ -8,12 +8,13 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor, image_size_cache_key, latent_size_cache_key,
-    prompt_cache_key, restore_cached_tensor, CachedTensor, ImageSizeCacheKey, LatentSizeCacheKey,
-    LruCache, PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
+    cfg_prompt_cache_key, clear_cache, get_or_insert_cached_tensor, image_size_cache_key,
+    latent_size_cache_key, restore_cached_tensor, CachedTensor, CfgPromptCacheKey,
+    ImageSizeCacheKey, LatentSizeCacheKey, LruCache, DEFAULT_IMAGE_CACHE_CAPACITY,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{cfg_active, rand_seed, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressEvent};
@@ -39,7 +40,7 @@ pub struct SDXLEngine {
     base: EngineBase<LoadedSDXL>,
     scheduler: Scheduler,
     is_turbo: bool,
-    prompt_cache: Mutex<LruCache<PromptCacheKey, CachedTensor>>,
+    prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensor>>,
     source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
@@ -661,7 +662,7 @@ impl SDXLEngine {
         start_step: usize,
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
     ) -> Result<()> {
-        let use_cfg = guidance > 1.0;
+        let use_cfg = cfg_active(guidance);
         let mut scheduler = crate::scheduler::build_scheduler(
             sched,
             steps as usize,
@@ -819,10 +820,15 @@ impl SDXLEngine {
         dtype: DType,
         guidance: f64,
     ) -> Result<Tensor> {
-        let cache_key = prompt_cache_key(prompt, guidance);
+        // SDXL caches the **concatenated** `(uncond, cond)` tensor when CFG is
+        // active, so the cache key must include the negative prompt and the
+        // guidance scale. Keying on the positive prompt + guidance alone
+        // returned a stale uncond branch when the user changed only the
+        // negative prompt — silent wrong output.
+        let cache_key = cfg_prompt_cache_key(prompt, negative_prompt, guidance);
         let (text_embeddings, cache_hit) =
             get_or_insert_cached_tensor(&self.prompt_cache, cache_key, device, dtype, || {
-                let use_cfg = guidance > 1.0;
+                let use_cfg = cfg_active(guidance);
 
                 self.base.progress.stage_start("Encoding prompt (CLIP-L)");
                 let encode_l_start = Instant::now();
@@ -933,7 +939,7 @@ impl SDXLEngine {
 
         // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
         let neg = req.negative_prompt.as_deref().unwrap_or("");
-        let cache_key = prompt_cache_key(&req.prompt, guidance);
+        let cache_key = cfg_prompt_cache_key(&req.prompt, neg, guidance);
         let text_embeddings = if let Some(tensor) =
             restore_cached_tensor(&self.prompt_cache, &cache_key, &device, dtype)?
         {
@@ -1054,7 +1060,16 @@ impl SDXLEngine {
         let unet_size = std::fs::metadata(&self.base.paths.transformer)
             .map(|m| m.len())
             .unwrap_or(0);
-        preflight_memory_check("UNet", unet_size)?;
+        // SDXL runs CFG by default → batch=2 unless guidance ≈ 1 (LCM/Turbo).
+        let unet_batch = if req.guidance > 1.0 { 2 } else { 1 };
+        let unet_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            unet_batch,
+            crate::device::dtype_bytes(dtype),
+            crate::device::ActivationFamily::SdxlUnet,
+        );
+        preflight_memory_check("UNet", unet_size, unet_activation_budget)?;
         if let Some(status) = memory_status_string() {
             self.base.progress.info(&status);
         }
@@ -1174,7 +1189,19 @@ impl SDXLEngine {
             VAE_SCALE_STANDARD
         };
         let latents = (latents / vae_scale)?;
-        let img = vae.decode(&latents.to_dtype(dtype)?)?;
+        let latents_for_vae = latents.to_dtype(dtype)?;
+        let device_for_sync = device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &latents_for_vae,
+            |t| vae.decode(t).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "SDXL (sequential) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
@@ -1357,7 +1384,20 @@ impl SDXLEngine {
             VAE_SCALE_STANDARD
         };
         let latents = (latents / vae_scale)?;
-        let img = loaded.vae.decode(&latents.to_dtype(loaded.dtype)?)?;
+        let latents_for_vae = latents.to_dtype(loaded.dtype)?;
+        let vae = &loaded.vae;
+        let device_for_sync = loaded.device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &latents_for_vae,
+            |t| vae.decode(t).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "SDXL (parallel) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         // 7. Post-process: [1, 3, H, W] → clamp → u8
         let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
@@ -1765,5 +1805,60 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(single_file);
+    }
+
+    // SDXL cfg_active predicate tests — pin the cfg=1.0 short-circuit so
+    // a regression to `guidance > 1.0` is caught at the per-pipeline boundary.
+
+    #[test]
+    fn test_cfg_disabled_at_guidance_1_0() {
+        assert!(!cfg_active(1.0));
+    }
+
+    #[test]
+    fn test_cfg_disabled_just_below_1_0() {
+        assert!(!cfg_active(1.0 - 1e-5));
+    }
+
+    #[test]
+    fn test_cfg_enabled_at_guidance_1_5() {
+        assert!(cfg_active(1.5));
+    }
+
+    #[test]
+    fn test_cfg_enabled_at_guidance_7_5() {
+        assert!(cfg_active(7.5));
+    }
+
+    /// Regression test for the SDXL prompt-cache key bug: keying only on
+    /// the positive prompt + guidance (as the original code did) returns
+    /// stale (uncond_old, cond) when the user changes just the negative.
+    #[test]
+    fn sdxl_prompt_cache_distinguishes_negative_prompt_changes() {
+        use crate::cache::{cfg_prompt_cache_key, store_cached_tensor};
+
+        let cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensor>> =
+            Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY));
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let embeddings = candle_core::Tensor::zeros((1, 4), dtype, &device).unwrap();
+
+        let key_a = cfg_prompt_cache_key("a cat", "blurry", 7.0);
+        store_cached_tensor(&cache, key_a.clone(), &embeddings).unwrap();
+
+        // Same positive + same guidance, different negative → MUST miss.
+        let key_b = cfg_prompt_cache_key("a cat", "low quality", 7.0);
+        let restored = restore_cached_tensor(&cache, &key_b, &device, dtype).unwrap();
+        assert!(
+            restored.is_none(),
+            "different negative prompt must miss the cache (silent-wrong-output bug)"
+        );
+
+        // Same key as the insert → MUST hit.
+        let restored = restore_cached_tensor(&cache, &key_a, &device, dtype).unwrap();
+        assert!(
+            restored.is_some(),
+            "identical (pos, neg, guidance) must hit"
+        );
     }
 }
