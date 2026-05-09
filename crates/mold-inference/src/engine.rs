@@ -125,6 +125,21 @@ pub(crate) fn cfg_active(guidance: f64) -> bool {
     (guidance - 1.0).abs() > CFG_DISABLE_EPSILON
 }
 
+/// Resolve the effective `cfg_plus` flag for a request.
+///
+/// Precedence: explicit request field > `MOLD_CFG_PLUS` env var > false.
+/// Mirrors `MOLD_OFFLOAD` / `MOLD_KEEP_TE_RAM`. Shared across SD3, SDXL,
+/// and SD1.5 so the wire-format and env contract stay identical.
+pub(crate) fn resolve_cfg_plus(req: &GenerateRequest) -> bool {
+    if let Some(explicit) = req.cfg_plus {
+        return explicit;
+    }
+    matches!(
+        std::env::var("MOLD_CFG_PLUS").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
 /// Generate deterministic noise on a device with a given seed.
 ///
 /// This is the ONLY correct way to generate initial noise for denoising.

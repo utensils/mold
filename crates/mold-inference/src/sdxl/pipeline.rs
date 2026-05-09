@@ -13,8 +13,9 @@ use crate::cache::{
     ImageSizeCacheKey, LatentSizeCacheKey, LruCache, DEFAULT_IMAGE_CACHE_CAPACITY,
     DEFAULT_PROMPT_CACHE_CAPACITY,
 };
+use crate::cfg_plus_ddim::DdimAlphaSchedule;
 use crate::device::{check_memory_budget, memory_status_string, preflight_memory_check};
-use crate::engine::{cfg_active, rand_seed, InferenceEngine, LoadStrategy};
+use crate::engine::{cfg_active, rand_seed, resolve_cfg_plus, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressEvent};
@@ -651,6 +652,7 @@ impl SDXLEngine {
     ///
     /// `start_step` allows starting from a later timestep for img2img (0 = full txt2img).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn denoise_loop(
         &self,
         unet: &stable_diffusion::unet_2d::UNet2DConditionModel,
@@ -658,6 +660,7 @@ impl SDXLEngine {
         sched: Scheduler,
         latents: &mut Tensor,
         guidance: f64,
+        cfg_plus: bool,
         steps: u32,
         start_step: usize,
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
@@ -671,6 +674,27 @@ impl SDXLEngine {
         )?;
         let timesteps = scheduler.timesteps().to_vec();
         let active_timesteps = &timesteps[start_step..];
+
+        // CFG++ requires the doubled `[uncond, cond]` forward (so we can read
+        // the uncond row at integration time) AND a DDIM scheduler (the only
+        // one whose alpha schedule we mirror). Other combinations fall back
+        // to standard CFG with a one-shot warn so misconfigurations surface.
+        let cfg_plus_schedule = if cfg_plus && use_cfg && matches!(sched, Scheduler::Ddim) {
+            Some(DdimAlphaSchedule::from_default(steps as usize))
+        } else {
+            if cfg_plus && !use_cfg {
+                tracing::warn!(
+                    guidance,
+                    "cfg_plus requested but cfg_scale ≈ 1.0 — falling back to standard step (no uncond available)"
+                );
+            } else if cfg_plus {
+                tracing::warn!(
+                    scheduler = ?sched,
+                    "cfg_plus requested but only DDIM is supported on SDXL/SD1.5 — falling back to standard step. Re-run with `--scheduler ddim` to enable CFG++."
+                );
+            }
+            None
+        };
 
         let denoise_label = format!("Denoising ({} steps)", active_timesteps.len());
         self.base.progress.stage_start(&denoise_label);
@@ -687,16 +711,26 @@ impl SDXLEngine {
             let latent_input = scheduler.scale_model_input(latent_input, t)?;
             let noise_pred = unet.forward(&latent_input, t as f64, text_embeddings)?;
 
-            let noise_pred = if use_cfg {
+            // Hold onto the raw uncond row when CFG++ is active so we can use
+            // it as the renoise direction below; standard path discards it
+            // after CFG blending.
+            let (noise_pred_blended, noise_pred_uncond_opt) = if use_cfg {
                 let chunks = noise_pred.chunk(2, 0)?;
-                let noise_pred_uncond = &chunks[0];
+                let noise_pred_uncond = chunks[0].clone();
                 let noise_pred_cond = &chunks[1];
-                (noise_pred_uncond + ((noise_pred_cond - noise_pred_uncond)? * guidance)?)?
+                let blended =
+                    (&noise_pred_uncond + ((noise_pred_cond - &noise_pred_uncond)? * guidance)?)?;
+                (blended, Some(noise_pred_uncond))
             } else {
-                noise_pred
+                (noise_pred, None)
             };
 
-            *latents = scheduler.step(&noise_pred, t, &*latents)?;
+            *latents = match (cfg_plus_schedule.as_ref(), noise_pred_uncond_opt.as_ref()) {
+                (Some(ddim_sched), Some(eps_uncond)) => {
+                    ddim_sched.cfg_plus_step(&*latents, &noise_pred_blended, eps_uncond, t)?
+                }
+                _ => scheduler.step(&noise_pred_blended, t, &*latents)?,
+            };
 
             if let Some(ctx) = inpaint_ctx {
                 let noised_original =
@@ -1155,6 +1189,7 @@ impl SDXLEngine {
             sched,
             &mut latents,
             guidance,
+            resolve_cfg_plus(req),
             req.steps,
             start_step,
             inpaint_ctx.as_ref(),
@@ -1359,6 +1394,7 @@ impl SDXLEngine {
             sched,
             &mut latents,
             guidance,
+            resolve_cfg_plus(req),
             req.steps,
             start_step,
             inpaint_ctx.as_ref(),

@@ -559,8 +559,10 @@ Examples:
         scheduler: Option<Scheduler>,
 
         /// Enable CFG++ (manifold-projection guidance, Chung et al. 2024).
-        /// Lowers usable CFG to ~1.5–2 and reduces guidance artifacts.
-        /// SD3 only in this release; ignored by other families and at cfg ≈ 1.0.
+        /// Lowers usable CFG to ~1.5–2.5 and reduces guidance artifacts.
+        /// Supported on SD3, SDXL, and SD1.5 (DDIM scheduler only — others
+        /// fall back to standard CFG with a warn). Ignored by guidance-
+        /// distilled families (FLUX, Z-Image, Flux.2) and at cfg ≈ 1.0.
         #[arg(long, env = "MOLD_CFG_PLUS", help_heading = "Advanced")]
         cfg_plus: bool,
 
