@@ -51,6 +51,10 @@ struct LoadedFlux2 {
     /// GPU device for transformer + VAE
     device: Device,
     dtype: DType,
+    /// Effective VAE dtype after `MOLD_VAE_DTYPE` resolution. May differ from
+    /// `dtype` when fp32 VAE decode is forced to suppress banding artifacts.
+    /// Captured at load time; sequential reloads re-resolve per request.
+    vae_dtype: DType,
 }
 
 // ---------------------------------------------------------------------------
@@ -505,9 +509,11 @@ impl Flux2Engine {
         let vae_stage = Instant::now();
         tracing::info!(path = %self.base.paths.vae.display(), "loading VAE on GPU...");
         let vae_cfg = Flux2VaeConfig::klein();
+        // Resolve VAE precision once at load — see LoadedFlux2::vae_dtype.
+        let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
         let vae_vb = crate::weight_loader::load_safetensors_with_progress(
             std::slice::from_ref(&self.base.paths.vae),
-            gpu_dtype,
+            vae_dtype,
             &vae_device,
             "VAE",
             &self.base.progress,
@@ -592,6 +598,7 @@ impl Flux2Engine {
             vae,
             device,
             dtype: gpu_dtype,
+            vae_dtype,
         });
 
         tracing::info!(model = %self.base.model_name, "all Flux.2 model components loaded successfully");
@@ -772,9 +779,12 @@ impl Flux2Engine {
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         let vae_cfg = Flux2VaeConfig::klein();
+        // Sequential path resolves MOLD_VAE_DTYPE per request — env changes
+        // take effect on the next generate() without an engine reload.
+        let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
         let vae_vb = crate::weight_loader::load_safetensors_with_progress(
             std::slice::from_ref(&self.base.paths.vae),
-            gpu_dtype,
+            vae_dtype,
             &vae_device,
             "VAE",
             &self.base.progress,
@@ -902,7 +912,7 @@ impl Flux2Engine {
             std::fs::write(&dump_path, &bytes)?;
             tracing::info!(path = %dump_path, dims = ?dims, "dumped pre-VAE latent");
         }
-        let img_for_vae = img.to_dtype(gpu_dtype)?;
+        let img_for_vae = img.to_dtype(vae_dtype)?;
         let device_for_sync = device.clone();
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
@@ -1096,7 +1106,7 @@ impl Flux2Engine {
                 req.height,
                 Self::img2img_source_normalize_range(),
                 &loaded.device,
-                loaded.dtype,
+                loaded.vae_dtype,
             )?;
             let encoded = loaded.vae.encode(&source_tensor)?;
             progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
@@ -1190,7 +1200,7 @@ impl Flux2Engine {
             std::fs::write(&dump_path, &bytes)?;
             tracing::info!(path = %dump_path, dims = ?dims, "dumped pre-VAE latent (parallel)");
         }
-        let img_for_vae = img.to_dtype(loaded.dtype)?;
+        let img_for_vae = img.to_dtype(loaded.vae_dtype)?;
         let vae = &loaded.vae;
         let device_for_sync = loaded.device.clone();
         let img = crate::vae_tiling::decode_with_oom_fallback(

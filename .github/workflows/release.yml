@@ -23,6 +23,23 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.7
 
+      - name: Probe sccache (disable on cache outage)
+        shell: bash
+        run: |
+          # Mirror the CI probe in ci.yml: actually compile a tiny program through sccache
+          # so we exercise the GHA cache backend, not just the local daemon. Outages there
+          # surface only on first read — `sccache --start-server` alone won't catch them.
+          set +e
+          printf 'fn main() {}\n' > /tmp/sccache_probe.rs
+          sccache rustc --edition 2021 -- /tmp/sccache_probe.rs -o /tmp/sccache_probe
+          status=$?
+          rm -f /tmp/sccache_probe /tmp/sccache_probe.rs
+          if [ $status -ne 0 ]; then
+            echo "::warning::sccache probe failed (likely GHA cache outage); falling back to direct rustc"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            sccache --stop-server >/dev/null 2>&1 || true
+          fi
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: macos-release
@@ -65,6 +82,23 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.7
 
+      - name: Probe sccache (disable on cache outage)
+        shell: bash
+        run: |
+          # Mirror the CI probe in ci.yml: actually compile a tiny program through sccache
+          # so we exercise the GHA cache backend, not just the local daemon. Outages there
+          # surface only on first read — `sccache --start-server` alone won't catch them.
+          set +e
+          printf 'fn main() {}\n' > /tmp/sccache_probe.rs
+          sccache rustc --edition 2021 -- /tmp/sccache_probe.rs -o /tmp/sccache_probe
+          status=$?
+          rm -f /tmp/sccache_probe /tmp/sccache_probe.rs
+          if [ $status -ne 0 ]; then
+            echo "::warning::sccache probe failed (likely GHA cache outage); falling back to direct rustc"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            sccache --stop-server >/dev/null 2>&1 || true
+          fi
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-cuda-sm89-release
@@ -106,6 +140,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Probe sccache (disable on cache outage)
+        shell: bash
+        run: |
+          # Mirror the CI probe in ci.yml: actually compile a tiny program through sccache
+          # so we exercise the GHA cache backend, not just the local daemon. Outages there
+          # surface only on first read — `sccache --start-server` alone won't catch them.
+          set +e
+          printf 'fn main() {}\n' > /tmp/sccache_probe.rs
+          sccache rustc --edition 2021 -- /tmp/sccache_probe.rs -o /tmp/sccache_probe
+          status=$?
+          rm -f /tmp/sccache_probe /tmp/sccache_probe.rs
+          if [ $status -ne 0 ]; then
+            echo "::warning::sccache probe failed (likely GHA cache outage); falling back to direct rustc"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            sccache --stop-server >/dev/null 2>&1 || true
+          fi
 
       - uses: Swatinem/rust-cache@v2
         with:

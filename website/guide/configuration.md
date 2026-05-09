@@ -150,6 +150,7 @@ Environment variables take precedence over config file values.
 | `MOLD_QWEN3_VARIANT`      | `auto`                                  | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3                                                                                                                                                                                                                                                              |
 | `MOLD_SCHEDULER`          | —                                       | SD1.5/SDXL: ddim/euler-ancestral/uni-pc                                                                                                                                                                                                                                                            |
 | `MOLD_CFG_PLUS`           | —                                       | `1` to enable CFG++ (manifold-projection guidance, Chung et al. 2024). Drops usable CFG to ~1.5–2.5 and removes guidance artifacts. Per-request `--cfg-plus` overrides. Supported on SD3, SDXL, and SD1.5 (DDIM only — Euler-A / UniPC fall back). Ignored by FLUX / Z-Image / Flux.2 (distilled). |
+| `MOLD_VAE_DTYPE`          | `auto`                                  | Override VAE precision: `auto`, `bf16`, `fp16`, `fp32`. Use `fp32` to fix banding artifacts on FLUX/SD3 finetuned VAEs (~2× decode VRAM; tiled VAE absorbs OOM via existing fallback). Wired into FLUX, FLUX2, SD3, SDXL, SD1.5.                                                                   |
 
 ### Prompt Expansion
 

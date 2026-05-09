@@ -568,9 +568,10 @@ impl SD3Engine {
             // Load VAE early for source image encoding
             self.base.progress.stage_start("Loading VAE for encoding");
             let vae_stage = Instant::now();
+            let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
             let vae_vb = crate::weight_loader::load_safetensors_with_progress(
                 std::slice::from_ref(&self.base.paths.vae),
-                gpu_dtype,
+                vae_dtype,
                 &device,
                 "VAE",
                 &self.base.progress,
@@ -591,7 +592,7 @@ impl SD3Engine {
                 req.height,
                 Self::img2img_source_normalize_range(),
                 &device,
-                gpu_dtype,
+                vae_dtype,
             )?;
             let dist = autoencoder.encode(&source_tensor)?;
             // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609.
@@ -724,9 +725,10 @@ impl SD3Engine {
         // --- Phase 4: VAE decode ---
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
+        let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
         let vae_vb = crate::weight_loader::load_safetensors_with_progress(
             std::slice::from_ref(&self.base.paths.vae),
-            gpu_dtype,
+            vae_dtype,
             &device,
             "VAE",
             &self.base.progress,
@@ -741,8 +743,9 @@ impl SD3Engine {
         let vae_decode_start = Instant::now();
 
         // SD3 VAE scaling: x / 1.5305 + 0.0609
-        // Cast to VAE dtype (quantized path outputs F32, VAE is F16/BF16)
-        let x = ((x / 1.5305)? + 0.0609)?.to_dtype(gpu_dtype)?;
+        // Cast to VAE dtype (quantized path outputs F32, VAE is F16/BF16/F32
+        // depending on MOLD_VAE_DTYPE).
+        let x = ((x / 1.5305)? + 0.0609)?.to_dtype(vae_dtype)?;
         let device_for_sync = device.clone();
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &x,
@@ -923,9 +926,10 @@ impl SD3Engine {
 
                     progress.stage_start("Loading VAE for encoding");
                     let vae_stage = Instant::now();
+                    let vae_dtype = crate::device::resolve_vae_dtype(loaded_dtype);
                     let vae_vb = crate::weight_loader::load_safetensors_with_progress(
                         std::slice::from_ref(&loaded.vae_vb_path),
-                        loaded_dtype,
+                        vae_dtype,
                         &loaded.device,
                         "VAE",
                         progress,
@@ -942,7 +946,7 @@ impl SD3Engine {
                         req.height,
                         Self::img2img_source_normalize_range(),
                         &loaded_device,
-                        loaded_dtype,
+                        vae_dtype,
                     )?;
                     let dist = autoencoder.encode(&source_tensor)?;
                     // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609.
@@ -1053,9 +1057,10 @@ impl SD3Engine {
             progress.stage_start("VAE decode");
             let vae_decode_start = Instant::now();
 
+            let vae_dtype = crate::device::resolve_vae_dtype(loaded.dtype);
             let vae_vb = crate::weight_loader::load_safetensors_with_progress(
                 std::slice::from_ref(&loaded.vae_vb_path),
-                loaded.dtype,
+                vae_dtype,
                 &loaded.device,
                 "VAE",
                 progress,
@@ -1063,7 +1068,7 @@ impl SD3Engine {
             let vae_vb = vae_vb.rename_f(sd3_vae_vb_rename).pp("first_stage_model");
             let autoencoder = build_sd3_vae_autoencoder(vae_vb)?;
 
-            let x = ((x / 1.5305)? + 0.0609)?.to_dtype(loaded.dtype)?;
+            let x = ((x / 1.5305)? + 0.0609)?.to_dtype(vae_dtype)?;
             let device_for_sync = loaded.device.clone();
             let img = crate::vae_tiling::decode_with_oom_fallback(
                 &x,

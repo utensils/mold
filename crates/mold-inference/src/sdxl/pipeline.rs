@@ -34,6 +34,10 @@ struct LoadedSDXL {
     /// Device the CLIP-L / CLIP-G weights live on (shared — Tier 1 groups them).
     clip_device: Device,
     dtype: DType,
+    /// Effective VAE dtype after `MOLD_VAE_DTYPE` resolution. Captured at
+    /// load time so img2img encode + decode use the matching precision when
+    /// fp32 is forced. May equal `dtype` (default behaviour preserved).
+    vae_dtype: DType,
 }
 
 /// SDXL inference engine backed by candle's stable_diffusion module.
@@ -357,6 +361,8 @@ impl SDXLEngine {
             .unwrap_or_default();
         let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
+        // Resolve VAE precision once at load — see LoadedSDXL::vae_dtype.
+        let vae_dtype = crate::device::resolve_vae_dtype(dtype);
         let (unet, vae, clip_l, clip_g) = if let Some(single_file) = self.single_file_path.clone() {
             self.load_components_single_file(
                 &single_file,
@@ -364,6 +370,7 @@ impl SDXLEngine {
                 &device,
                 &clip_device,
                 dtype,
+                vae_dtype,
             )?
         } else {
             self.load_components_diffusers(
@@ -373,6 +380,7 @@ impl SDXLEngine {
                 &device,
                 &clip_device,
                 dtype,
+                vae_dtype,
             )?
         };
 
@@ -392,6 +400,7 @@ impl SDXLEngine {
             device,
             clip_device,
             dtype,
+            vae_dtype,
         });
 
         tracing::info!(model = %self.base.model_name, "all SDXL components loaded successfully");
@@ -408,6 +417,7 @@ impl SDXLEngine {
         device: &Device,
         clip_device: &Device,
         dtype: DType,
+        vae_dtype: DType,
     ) -> Result<(
         stable_diffusion::unet_2d::UNet2DConditionModel,
         stable_diffusion::vae::AutoEncoderKL,
@@ -423,7 +433,7 @@ impl SDXLEngine {
 
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_start = Instant::now();
-        let vae = sd_config.build_vae(&self.base.paths.vae, device, dtype)?;
+        let vae = sd_config.build_vae(&self.base.paths.vae, device, vae_dtype)?;
         self.base
             .progress
             .stage_done("Loading VAE (GPU)", vae_start.elapsed());
@@ -477,6 +487,7 @@ impl SDXLEngine {
         device: &Device,
         clip_device: &Device,
         dtype: DType,
+        vae_dtype: DType,
     ) -> Result<(
         stable_diffusion::unet_2d::UNet2DConditionModel,
         stable_diffusion::vae::AutoEncoderKL,
@@ -494,7 +505,7 @@ impl SDXLEngine {
 
         self.base.progress.stage_start("Loading VAE (single-file)");
         let vae_start = Instant::now();
-        let vae = Self::build_vae_single_file(single_file, &remap, sd_config, device, dtype)?;
+        let vae = Self::build_vae_single_file(single_file, &remap, sd_config, device, vae_dtype)?;
         self.base
             .progress
             .stage_done("Loading VAE (single-file)", vae_start.elapsed());
@@ -753,6 +764,11 @@ impl SDXLEngine {
 
     /// Prepare img2img latents: VAE encode source image, add noise at the appropriate timestep.
     /// Returns (noised_latents, start_step, encoded, noise).
+    ///
+    /// `dtype` is the engine-wide compute dtype (used for noise + denoise loop).
+    /// `vae_dtype` may differ when `MOLD_VAE_DTYPE` forces fp32 — it controls
+    /// the source-tensor decode and the VAE encode input precision; the
+    /// returned encoded latents are cast back to `dtype` for the denoise.
     #[allow(clippy::too_many_arguments)]
     fn prepare_img2img_latents(
         &self,
@@ -766,6 +782,7 @@ impl SDXLEngine {
         seed: u64,
         device: &Device,
         dtype: DType,
+        vae_dtype: DType,
     ) -> Result<(Tensor, usize, Tensor, Tensor)> {
         use crate::img_utils::{decode_source_image, NormalizeRange};
         let vae_scale = if self.is_turbo {
@@ -791,10 +808,14 @@ impl SDXLEngine {
                     height,
                     NormalizeRange::MinusOneToOne,
                     device,
-                    dtype,
+                    vae_dtype,
                 )?;
                 let encoded = vae.encode(&source_tensor)?;
                 let encoded = (encoded.mode()? * vae_scale)?;
+                // VAE may have been loaded at fp32 (banding fix); cast the
+                // encoded latents back to engine dtype so the rest of the
+                // denoise loop stays at its natural precision.
+                let encoded = encoded.to_dtype(dtype)?;
 
                 self.base
                     .progress
@@ -1127,7 +1148,8 @@ impl SDXLEngine {
 
             self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_start_t = Instant::now();
-            let vae = self.build_vae_for_strategy(&sd_config, &device, dtype)?;
+            let vae_dtype = crate::device::resolve_vae_dtype(dtype);
+            let vae = self.build_vae_for_strategy(&sd_config, &device, vae_dtype)?;
             self.base
                 .progress
                 .stage_done("Loading VAE (GPU)", vae_start_t.elapsed());
@@ -1143,6 +1165,7 @@ impl SDXLEngine {
                 seed,
                 &device,
                 dtype,
+                vae_dtype,
             )?;
 
             let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
@@ -1210,7 +1233,8 @@ impl SDXLEngine {
         };
         self.base.progress.stage_start(vae_load_label);
         let vae_start = Instant::now();
-        let vae = self.build_vae_for_strategy(&sd_config, &device, dtype)?;
+        let vae_dtype = crate::device::resolve_vae_dtype(dtype);
+        let vae = self.build_vae_for_strategy(&sd_config, &device, vae_dtype)?;
         self.base
             .progress
             .stage_done(vae_load_label, vae_start.elapsed());
@@ -1224,7 +1248,7 @@ impl SDXLEngine {
             VAE_SCALE_STANDARD
         };
         let latents = (latents / vae_scale)?;
-        let latents_for_vae = latents.to_dtype(dtype)?;
+        let latents_for_vae = latents.to_dtype(vae_dtype)?;
         let device_for_sync = device.clone();
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &latents_for_vae,
@@ -1345,6 +1369,7 @@ impl SDXLEngine {
                     seed,
                     &loaded.device,
                     loaded.dtype,
+                    loaded.vae_dtype,
                 )?;
                 let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
                     let mask = self.cached_mask(
@@ -1420,7 +1445,7 @@ impl SDXLEngine {
             VAE_SCALE_STANDARD
         };
         let latents = (latents / vae_scale)?;
-        let latents_for_vae = latents.to_dtype(loaded.dtype)?;
+        let latents_for_vae = latents.to_dtype(loaded.vae_dtype)?;
         let vae = &loaded.vae;
         let device_for_sync = loaded.device.clone();
         let img = crate::vae_tiling::decode_with_oom_fallback(

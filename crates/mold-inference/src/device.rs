@@ -847,6 +847,41 @@ pub(crate) fn gpu_dtype(device: &candle_core::Device) -> candle_core::DType {
     }
 }
 
+/// Resolve the VAE decode dtype for the current generation.
+///
+/// Reads `MOLD_VAE_DTYPE` to let users force a different precision for the
+/// VAE decode pass than the rest of the model. Default (`auto` or unset)
+/// preserves the per-pipeline historical choice (typically BF16 on CUDA,
+/// F16 on SDXL/SD1.5, F32 on CPU). Forcing `fp32` fixes occasional banding
+/// artifacts on FLUX/SD3 finetuned VAEs whose conv weights round badly at
+/// half precision; the trade-off is ~2× peak VRAM on the decode step,
+/// which `vae_tiling::decode_with_oom_fallback` will absorb by retrying
+/// with tiles when the full-tensor decode OOMs.
+///
+/// Accepted values: `auto` (= unset), `bf16`, `fp16` / `f16`, `fp32` / `f32`.
+/// Any other value emits a one-shot warn and falls back to the default —
+/// loud enough to surface typos without failing the request.
+pub(crate) fn resolve_vae_dtype(default_dtype: candle_core::DType) -> candle_core::DType {
+    use candle_core::DType;
+    match std::env::var("MOLD_VAE_DTYPE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        None | Some("") | Some("auto") => default_dtype,
+        Some("bf16") | Some("BF16") => DType::BF16,
+        Some("fp16") | Some("f16") | Some("FP16") | Some("F16") => DType::F16,
+        Some("fp32") | Some("f32") | Some("FP32") | Some("F32") => DType::F32,
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "MOLD_VAE_DTYPE has unrecognised value; expected one of auto/bf16/fp16/fp32 — falling back to default"
+            );
+            default_dtype
+        }
+    }
+}
+
 /// Format bytes as a human-readable size (e.g. "11.7 GB").
 pub(crate) fn fmt_gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
@@ -1998,6 +2033,94 @@ mod tests {
         assert!(
             (10.5..11.5).contains(&peak_gb),
             "sharded peak should be ~11 GB, got {peak_gb:.1} GB"
+        );
+    }
+
+    // --- resolve_vae_dtype tests ---
+    //
+    // MOLD_VAE_DTYPE is process-global; tests serialize via a static mutex
+    // (mirrors the MOLD_LONG_PROMPTS / MOLD_CFG_PLUS test pattern elsewhere
+    // in the crate).
+
+    fn vae_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn resolve_vae_dtype_unset_returns_default() {
+        let _g = vae_env_lock();
+        // SAFETY: serialized via vae_env_lock to avoid racing parallel tests.
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(
+            resolve_vae_dtype(candle_core::DType::BF16),
+            candle_core::DType::BF16
+        );
+        assert_eq!(
+            resolve_vae_dtype(candle_core::DType::F16),
+            candle_core::DType::F16
+        );
+    }
+
+    #[test]
+    fn resolve_vae_dtype_auto_returns_default() {
+        let _g = vae_env_lock();
+        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "auto") };
+        let resolved = resolve_vae_dtype(candle_core::DType::BF16);
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(resolved, candle_core::DType::BF16);
+    }
+
+    #[test]
+    fn resolve_vae_dtype_fp32_forces_f32_regardless_of_default() {
+        let _g = vae_env_lock();
+        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "fp32") };
+        let resolved = resolve_vae_dtype(candle_core::DType::BF16);
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(resolved, candle_core::DType::F32);
+    }
+
+    #[test]
+    fn resolve_vae_dtype_bf16_forces_bf16_even_when_default_is_f32() {
+        // CPU default is F32; user opts back into BF16 explicitly. Pins the
+        // contract that the env knob can both raise *and* lower precision.
+        let _g = vae_env_lock();
+        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "bf16") };
+        let resolved = resolve_vae_dtype(candle_core::DType::F32);
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(resolved, candle_core::DType::BF16);
+    }
+
+    #[test]
+    fn resolve_vae_dtype_fp16_alias_recognised() {
+        // f16 / fp16 / F16 / FP16 must all resolve identically — different
+        // tools and shells normalise case differently.
+        let _g = vae_env_lock();
+        for value in ["fp16", "f16", "FP16", "F16"] {
+            unsafe { std::env::set_var("MOLD_VAE_DTYPE", value) };
+            let resolved = resolve_vae_dtype(candle_core::DType::BF16);
+            assert_eq!(
+                resolved,
+                candle_core::DType::F16,
+                "value `{value}` should resolve to F16"
+            );
+        }
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+    }
+
+    #[test]
+    fn resolve_vae_dtype_invalid_value_falls_back_to_default() {
+        let _g = vae_env_lock();
+        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "fp64") };
+        let resolved = resolve_vae_dtype(candle_core::DType::BF16);
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(
+            resolved,
+            candle_core::DType::BF16,
+            "invalid value must fall back, not error"
         );
     }
 }

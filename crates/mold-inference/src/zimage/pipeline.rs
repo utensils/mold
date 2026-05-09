@@ -114,6 +114,10 @@ struct LoadedZImage {
     /// Device where the VAE lives (may be CPU if VRAM is extremely tight)
     vae_device: Device,
     dtype: DType,
+    /// Effective VAE dtype after `MOLD_VAE_DTYPE` resolution. May differ from
+    /// `dtype` when fp32 VAE decode is forced on GPU. Captured at load time.
+    /// CPU VAE is always F32 regardless of this field.
+    vae_dtype: DType,
     /// Whether the transformer source file is GGUF (needed for reload/logging).
     is_gguf: bool,
     /// Path to the VAE safetensors file (needed for CPU fallback reload on OOM).
@@ -344,7 +348,13 @@ impl ZImageEngine {
             })
         })?;
         let vae_on_gpu = !vae_device.is_cpu();
-        let vae_dtype = if vae_on_gpu { dtype } else { DType::F32 };
+        // GPU branch honours `MOLD_VAE_DTYPE`; CPU is already F32 (the highest
+        // precision we'd ever want), so the env knob is a no-op there.
+        let vae_dtype = if vae_on_gpu {
+            crate::device::resolve_vae_dtype(dtype)
+        } else {
+            DType::F32
+        };
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
         if !vae_on_gpu && (is_cuda || is_metal) {
@@ -442,6 +452,7 @@ impl ZImageEngine {
             device,
             vae_device,
             dtype,
+            vae_dtype,
             is_gguf,
             vae_path: self.base.paths.vae.clone(),
         });
@@ -654,7 +665,7 @@ impl ZImageEngine {
             let encode_vae_dtype = if encode_vae_device.is_cpu() {
                 DType::F32
             } else {
-                dtype
+                crate::device::resolve_vae_dtype(dtype)
             };
             let encode_label = if encode_vae_device.is_cpu() {
                 "Loading VAE for source encoding (CPU)"
@@ -846,7 +857,13 @@ impl ZImageEngine {
             })
         })?;
         let vae_on_gpu = !vae_device.is_cpu();
-        let vae_dtype = if vae_on_gpu { dtype } else { DType::F32 };
+        // GPU branch honours `MOLD_VAE_DTYPE`; CPU is already F32 (the highest
+        // precision we'd ever want), so the env knob is a no-op there.
+        let vae_dtype = if vae_on_gpu {
+            crate::device::resolve_vae_dtype(dtype)
+        } else {
+            DType::F32
+        };
         let vae_device_label = if vae_on_gpu { "GPU" } else { "CPU" };
 
         let vae_label = format!("Loading VAE ({})", vae_device_label);
@@ -1224,7 +1241,7 @@ impl ZImageEngine {
                 if loaded.vae_device.is_cpu() {
                     DType::F32
                 } else {
-                    loaded.dtype
+                    loaded.vae_dtype
                 },
             )?;
             match loaded.vae.decode(&decode_latents) {

@@ -673,6 +673,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_QWEN3_VARIANT`        | `auto`                  | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3                                      |
 | `MOLD_SCHEDULER`            | unset                   | SD1.5/SDXL: ddim/euler-ancestral/uni-pc                                    |
 | `MOLD_CFG_PLUS`             | unset                   | Set `1` to enable CFG++ (manifold-projection guidance). Drops usable CFG to ~1.5–2.5, removes guidance artifacts. Per-request `--cfg-plus` overrides. Supported on SD3, SDXL, and SD1.5 (DDIM scheduler only — Euler-A / UniPC fall back to standard CFG with a warn). Ignored by guidance-distilled families (FLUX, Z-Image, Flux.2) and at cfg ≈ 1.0. |
+| `MOLD_VAE_DTYPE`            | `auto`                  | Override VAE precision: `auto` (per-pipeline default), `bf16`, `fp16`, `fp32`. Use `fp32` to fix banding artifacts on FLUX/SD3 finetuned VAEs (~2× decode VRAM; tiled VAE absorbs OOM). Wired into FLUX, FLUX2, SD3, SDXL, SD1.5; no-op for Z-Image CPU VAE / Wuerstchen / Qwen-Image (already F32). |
 | `MOLD_API_KEY`              | unset                   | API key for server auth (single, comma-separated, or `@/path/to/keys.txt`) |
 | `MOLD_RATE_LIMIT`           | unset                   | Per-IP rate limit for generation endpoints (e.g., `10/min`)                |
 | `MOLD_RATE_LIMIT_BURST`     | unset                   | Burst allowance override (defaults to 2x rate)                             |
