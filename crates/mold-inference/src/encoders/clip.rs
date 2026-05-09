@@ -430,7 +430,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests {
+mod chunking_tests {
     use super::*;
 
     /// Real CLIP-L tokenizer ids (from openai/clip-vit-large-patch14).

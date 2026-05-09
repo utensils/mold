@@ -1817,8 +1817,14 @@ mod tests {
 
     /// All `MOLD_RESERVE_VRAM_MB` env-var behaviors live under one `#[test]`
     /// to serialize access to the shared process-global env var.
+    /// Combined into a single `#[test]` so cargo's parallel runner can't race
+    /// between the `set_var`/`remove_var` of `test_reserved_vram_env_behaviors`
+    /// and the `remove_var` of `test_usable_free_vram_bytes_subtracts_reserve`.
+    /// (Two parallel tests touching the same env var caused intermittent
+    /// failures where one test's set_var was clobbered before its assertion.)
     #[test]
-    fn test_reserved_vram_env_behaviors() {
+    fn test_reserved_vram_and_usable_free_vram() {
+        // ── Part 1: reserved_vram_bytes env behavior ────────────────────
         unsafe { std::env::remove_var("MOLD_RESERVE_VRAM_MB") };
 
         let default = reserved_vram_bytes();
@@ -1843,14 +1849,8 @@ mod tests {
         }
 
         unsafe { std::env::remove_var("MOLD_RESERVE_VRAM_MB") };
-    }
 
-    /// `usable_free_vram_bytes` must subtract the reserve from the raw
-    /// driver reading, saturating at zero so a tiny / busy GPU never wraps.
-    #[test]
-    fn test_usable_free_vram_bytes_subtracts_reserve() {
-        unsafe { std::env::remove_var("MOLD_RESERVE_VRAM_MB") };
-
+        // ── Part 2: usable_free_vram_bytes wrapper ──────────────────────
         let raw = free_vram_bytes(0);
         let usable = usable_free_vram_bytes(0);
         match (raw, usable) {

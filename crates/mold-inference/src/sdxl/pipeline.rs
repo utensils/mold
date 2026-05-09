@@ -1856,6 +1856,9 @@ mod tests {
 
         // Same key as the insert → MUST hit.
         let restored = restore_cached_tensor(&cache, &key_a, &device, dtype).unwrap();
-        assert!(restored.is_some(), "identical (pos, neg, guidance) must hit");
+        assert!(
+            restored.is_some(),
+            "identical (pos, neg, guidance) must hit"
+        );
     }
 }

@@ -205,7 +205,9 @@ pub(crate) fn preflight_memory_guard(
                 mold_inference::device::reclaim_gpu_memory(gpu_ordinal);
             }
             let effective_free = mold_inference::device::usable_free_vram_bytes(gpu_ordinal)
-                .unwrap_or_else(|| free.saturating_sub(mold_inference::device::reserved_vram_bytes()));
+                .unwrap_or_else(|| {
+                    free.saturating_sub(mold_inference::device::reserved_vram_bytes())
+                });
             return preflight_memory_guard_with_available(
                 model_name,
                 paths,
