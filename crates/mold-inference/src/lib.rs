@@ -1,5 +1,6 @@
 pub mod attention;
 mod cache;
+pub(crate) mod cfg_plus_ddim;
 pub mod controlnet;
 pub mod device;
 mod encoders;

@@ -16,7 +16,9 @@ use crate::device::{
     usable_free_vram_bytes,
 };
 use crate::encoders;
-use crate::engine::{rand_seed, InferenceEngine, LoadStrategy, OptionRestoreGuard};
+use crate::engine::{
+    rand_seed, resolve_cfg_plus, InferenceEngine, LoadStrategy, OptionRestoreGuard,
+};
 use crate::engine_base::EngineBase;
 use crate::image::{build_output_metadata, encode_image};
 use crate::img_utils;
@@ -26,20 +28,6 @@ use super::quantized_mmdit::QuantizedMMDiT;
 use super::sampling::{self, SkipLayerGuidanceConfig};
 use super::transformer::SD3Transformer;
 use super::vae::{build_sd3_vae_autoencoder, sd3_vae_vb_rename};
-
-/// Resolve the effective `cfg_plus` flag for a request.
-///
-/// Precedence: explicit request field > MOLD_CFG_PLUS env var > false.
-/// Mirrors the precedence pattern used by MOLD_OFFLOAD / MOLD_KEEP_TE_RAM.
-fn resolve_cfg_plus(req: &GenerateRequest) -> bool {
-    if let Some(explicit) = req.cfg_plus {
-        return explicit;
-    }
-    matches!(
-        std::env::var("MOLD_CFG_PLUS").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
 
 /// Loaded SD3 model components, ready for inference.
 struct LoadedSD3 {
