@@ -915,4 +915,130 @@ mod tests {
         let plain_before = plain.narrow(2, 0, 6).unwrap();
         assert!(max_abs_diff(&back_before, &plain_before) < 1e-7);
     }
+
+    #[test]
+    fn lora_registry_is_empty_and_len_track_pushes() {
+        // The Default-derived registry starts empty; len/is_empty must
+        // agree, and pushing an entry must flip both.
+        let mut reg = LoraRegistry::new();
+        assert_eq!(reg.len(), 0);
+        assert!(reg.is_empty());
+        let device = Device::Cpu;
+        let down = Tensor::zeros((2, 4), DType::F32, &device).unwrap();
+        let up = Tensor::zeros((4, 2), DType::F32, &device).unwrap();
+        reg.push(
+            "double_blocks.0.img_attn.qkv.weight".to_string(),
+            LinearLoraAdapter {
+                down,
+                up,
+                scale: 1.0,
+                fused_slice: None,
+            },
+        );
+        assert_eq!(reg.len(), 1);
+        assert!(!reg.is_empty());
+        // adapters_for must round-trip the entry; an unknown key returns
+        // an empty slice without panicking.
+        assert_eq!(
+            reg.adapters_for("double_blocks.0.img_attn.qkv.weight")
+                .len(),
+            1
+        );
+        assert!(reg.adapters_for("missing.weight").is_empty());
+    }
+
+    #[test]
+    fn module_forward_delegates_to_inherent_forward() {
+        // candle's Module::forward blanket impl wraps anyhow errors as
+        // candle_core::Error::Msg. The happy path must still produce the
+        // same tensor as LoraLinear::forward — exercise the trait dispatch
+        // so the wrapping branch is recorded as covered.
+        let inner = make_linear(8, 4, true);
+        let x = make_input(2, 3, 4);
+        let lora = LoraLinear::plain(inner.clone());
+        let direct = LoraLinear::forward(&lora, &x).unwrap();
+        let trait_call = <LoraLinear as candle_core::Module>::forward(&lora, &x).unwrap();
+        assert!(max_abs_diff(&direct, &trait_call) < 1e-7);
+    }
+
+    #[test]
+    fn matmul_through_lora_handles_each_rank_branch() {
+        // Three rank branches: 4-D, 3-D, fallback. Each matmul shape
+        // covers a distinct match arm in matmul_through_lora.
+        let device = Device::Cpu;
+        let in_dim = 4;
+        let rank = 2;
+        let out_dim = 3;
+        let down = Tensor::ones((rank, in_dim), DType::F32, &device).unwrap();
+        let up = Tensor::ones((out_dim, rank), DType::F32, &device).unwrap();
+
+        // 4-D input: [b0, b1, t, h] reshape branch.
+        let x4 = Tensor::ones((1, 2, 5, in_dim), DType::F32, &device).unwrap();
+        let y4 = matmul_through_lora(&x4, &down, &up).unwrap();
+        assert_eq!(y4.dims(), &[1, 2, 5, out_dim]);
+
+        // 3-D input: [b, t, h] reshape branch (already covered elsewhere
+        // via apply(), but pin explicitly to insulate against refactors).
+        let x3 = Tensor::ones((2, 5, in_dim), DType::F32, &device).unwrap();
+        let y3 = matmul_through_lora(&x3, &down, &up).unwrap();
+        assert_eq!(y3.dims(), &[2, 5, out_dim]);
+
+        // 2-D fallback: matmul straight through, no reshape.
+        let x2 = Tensor::ones((5, in_dim), DType::F32, &device).unwrap();
+        let y2 = matmul_through_lora(&x2, &down, &up).unwrap();
+        assert_eq!(y2.dims(), &[5, out_dim]);
+    }
+
+    #[test]
+    fn adapter_to_runtime_reuses_tensor_when_device_and_dtype_match() {
+        // Same device + same dtype must short-circuit the to_device /
+        // to_dtype conversions entirely. The function still clones the
+        // tensor (candle's clone is cheap — Arc bump), but it must not
+        // produce a different shape or dtype.
+        let device = Device::Cpu;
+        let t = Tensor::zeros((4, 4), DType::F32, &device).unwrap();
+        let out = adapter_to_runtime(&t, &device, DType::F32).unwrap();
+        assert_eq!(out.dims(), t.dims());
+        assert_eq!(out.dtype(), DType::F32);
+    }
+
+    #[test]
+    fn adapter_to_runtime_casts_when_dtype_differs() {
+        // Different dtype path: F32 -> BF16 conversion must run. Asserts
+        // both the dtype switch and the shape preservation.
+        let device = Device::Cpu;
+        let src = Tensor::ones((4, 4), DType::F32, &device).unwrap();
+        let out = adapter_to_runtime(&src, &device, DType::BF16).unwrap();
+        assert_eq!(out.dtype(), DType::BF16);
+        assert_eq!(out.dims(), &[4, 4]);
+    }
+
+    #[test]
+    fn inner_quantized_returns_none_on_plain_variants() {
+        // inner_quantized must yield None for the BF16/F32 variants —
+        // mirror of inner()'s panic-on-quantized contract.
+        let inner = make_linear(8, 4, true);
+        let plain = LoraLinear::plain(inner.clone());
+        assert!(plain.inner_quantized().is_none());
+        let with_adapters = LoraLinear::WithAdapters {
+            inner,
+            adapters: Vec::new(),
+        };
+        assert!(with_adapters.inner_quantized().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "LoraLinear::inner() called on a Quantized variant")]
+    fn inner_panics_on_quantized_variant() {
+        // The panic in `inner()` for quantized variants is part of the
+        // contract — call sites that hold a BF16-only handle assume the
+        // unwrap happens here, not at every use. Pin it.
+        use candle_core::quantized::{GgmlDType, QTensor};
+        let device = Device::Cpu;
+        let weight = Tensor::zeros((4, 4), DType::F32, &device).unwrap();
+        let storage = QTensor::quantize(&weight, GgmlDType::F32).unwrap();
+        let inner = QuantizedLinear::from_arc(std::sync::Arc::new(storage), None).unwrap();
+        let q = LoraLinear::quantized(inner);
+        let _ = q.inner();
+    }
 }
