@@ -659,6 +659,8 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_LOG`                  | `warn`                  | Log level (trace/debug/info/warn/error)                                    |
 | `MOLD_EAGER`                | unset                   | Set `1` to keep all components loaded                                      |
 | `MOLD_OFFLOAD`              | unset                   | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower)           |
+| `MOLD_OFFLOAD_PREFETCH`     | `on`                    | FLUX offload async H2D prefetch stream (`off` reverts to synchronous)      |
+| `MOLD_PINNED_VRAM_MAX_GB`   | RAM × 0.5 (Linux)       | Cap on cumulative pinned host memory used by the FLUX offload path         |
 | `MOLD_EMBED_METADATA`       | `1`                     | Set `0` to disable PNG metadata                                            |
 | `MOLD_PREVIEW`              | unset                   | Set `1` to display generated images inline in the terminal                 |
 | `MOLD_T5_VARIANT`           | `auto`                  | T5 encoder: auto/fp16/q8/q6/q5/q4/q3                                       |
