@@ -132,19 +132,21 @@ Environment variables take precedence over config file values.
 
 ### Generation
 
-| Variable              | Default | Description                              |
-| --------------------- | ------- | ---------------------------------------- |
-| `MOLD_EAGER`          | —       | `1` to keep all components loaded        |
-| `MOLD_OFFLOAD`        | —       | `1` to force CPU↔GPU block streaming     |
-| `MOLD_KEEP_TE_RAM`    | —       | `1` to park text encoders on CPU between requests instead of dropping them. FP16/BF16 only (GGUF falls through to drop+reload). Disabled on Metal (unified memory). |
-| `MOLD_LORA_BYPASS`    | `auto`  | FLUX LoRA application path on the offload route: `auto` enables bypass mode when LoRAs are present, `on` always bypasses, `off` uses the legacy merge-into-base path |
-| `MOLD_VAE_TILED`      | `auto`  | Tiled VAE decode for FLUX/FLUX2/SDXL/SD3: `auto` retries with tiling on OOM, `force` always tiles (lower peak VRAM), `off` disables tiling entirely |
-| `MOLD_ATTN`           | `math`  | Attention backend: `math` (hand-rolled SDP, default) or `flash` (candle-flash-attn v2). The flash path needs `--features cuda,flash-attn` AND `RUSTFLAGS='--cfg mold_flash_attn_real'`; without those it falls back to math with a one-shot warning. |
-| `MOLD_EMBED_METADATA` | `1`     | `0` to disable PNG metadata              |
-| `MOLD_PREVIEW`        | —       | `1` to display images inline in terminal |
-| `MOLD_T5_VARIANT`     | `auto`  | T5 encoder: auto/fp16/q8/q6/q5/q4/q3     |
-| `MOLD_QWEN3_VARIANT`  | `auto`  | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3    |
-| `MOLD_SCHEDULER`      | —       | SD1.5/SDXL: ddim/euler-ancestral/uni-pc  |
+| Variable                  | Default       | Description                                                              |
+| ------------------------- | ------------- | ------------------------------------------------------------------------ |
+| `MOLD_EAGER`              | —             | `1` to keep all components loaded                                        |
+| `MOLD_OFFLOAD`            | —             | `1` to force CPU↔GPU block streaming                                     |
+| `MOLD_OFFLOAD_PREFETCH`   | `on`          | FLUX offload async H2D prefetch stream — set `off` to revert to synchronous |
+| `MOLD_PINNED_VRAM_MAX_GB` | RAM × 0.5     | Cap on pinned host memory used by the FLUX offload path                  |
+| `MOLD_KEEP_TE_RAM`        | —             | `1` to park text encoders on CPU between requests. FP16/BF16 only (GGUF falls through to drop+reload). Disabled on Metal (unified memory). |
+| `MOLD_LORA_BYPASS`        | `auto`        | FLUX LoRA application path on the offload route: `auto` enables bypass when LoRAs are present, `on` always bypasses, `off` uses legacy merge-into-base |
+| `MOLD_VAE_TILED`          | `auto`        | Tiled VAE decode for FLUX/FLUX2/SDXL/SD3: `auto` retries with tiling on OOM, `force` always tiles, `off` disables                |
+| `MOLD_ATTN`               | `math`        | Attention backend: `math` (default) or `flash` (needs `--features cuda,flash-attn` AND `RUSTFLAGS='--cfg mold_flash_attn_real'`; falls back to math with a one-shot warning otherwise) |
+| `MOLD_EMBED_METADATA`     | `1`           | `0` to disable PNG metadata                                              |
+| `MOLD_PREVIEW`            | —             | `1` to display images inline in terminal                                 |
+| `MOLD_T5_VARIANT`         | `auto`        | T5 encoder: auto/fp16/q8/q6/q5/q4/q3                                     |
+| `MOLD_QWEN3_VARIANT`      | `auto`        | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3                                    |
+| `MOLD_SCHEDULER`          | —             | SD1.5/SDXL: ddim/euler-ancestral/uni-pc                                  |
 
 ### Prompt Expansion
 

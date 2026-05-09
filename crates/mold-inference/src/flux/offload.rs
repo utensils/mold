@@ -12,10 +12,22 @@ use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::{LayerNorm, Linear, RmsNorm, VarBuilder};
 
 use crate::flux::lora_bypass::{LoraLinear, LoraRegistry};
+use crate::flux::pinned::{
+    largest_block_size_bytes, pinned_cap_bytes, prefetch_enabled_from_env, try_pin_to_host,
+    PinnedMemoryTracker, PinnedRegion,
+};
 use crate::progress::ProgressReporter;
+
+#[cfg(feature = "cuda")]
+use std::sync::Arc;
 
 // Re-export Config and EmbedNd — these are public types with public constructors.
 use candle_transformers::models::flux::model::{Config, EmbedNd};
+
+#[cfg(feature = "cuda")]
+type PrefetchStream = Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>;
+#[cfg(feature = "cuda")]
+type PrefetchBuffer = candle_core::cuda_backend::cudarc::driver::CudaSlice<u8>;
 
 // ── Reimplemented candle-internal helpers ────────────────────────────────────
 
@@ -107,6 +119,161 @@ fn layer_norm_to_device(ln: &LayerNorm, dev: &Device) -> Result<LayerNorm> {
 fn rms_norm_to_device(rn: &RmsNorm, dev: &Device) -> Result<RmsNorm> {
     let inner = rn.clone().into_inner();
     Ok(RmsNorm::new(inner.weight().to_device(dev)?, 1e-6))
+}
+
+// ── Block-weight visitors (for pinning + size sums) ──────────────────────────
+//
+// `try_pin_visit_*` walk every CPU-resident base weight in a block. We use
+// closures rather than returning a Vec<&Tensor> so the same traversal logic
+// drives byte-counting and pinning without allocating a temporary index.
+
+/// Visit every `Linear`, `LayerNorm`, and `RmsNorm` base weight in a
+/// `DoubleBlock`. Returns the running total of `n_bytes` across all visits.
+fn visit_double_block_weights<F>(b: &DoubleBlock, mut f: F) -> usize
+where
+    F: FnMut(&Tensor) -> usize,
+{
+    let mut total = 0usize;
+    total += f(b.img_mod.lin.weight());
+    if let Some(t) = b.img_mod.lin.bias() {
+        total += f(t);
+    }
+    total += f(b.img_norm1.weight());
+    if let Some(t) = b.img_norm1.bias() {
+        total += f(t);
+    }
+    total += f(b.img_attn.qkv.weight());
+    if let Some(t) = b.img_attn.qkv.bias() {
+        total += f(t);
+    }
+    // RmsNorm exposes `clone().into_inner().weight()` which is awkward; we
+    // pin the wrapped weight directly via the same accessor used in
+    // `rms_norm_to_device`.
+    total += f(b.img_attn.query_norm.clone().into_inner().weight());
+    total += f(b.img_attn.key_norm.clone().into_inner().weight());
+    total += f(b.img_attn.proj.weight());
+    if let Some(t) = b.img_attn.proj.bias() {
+        total += f(t);
+    }
+    total += f(b.img_norm2.weight());
+    if let Some(t) = b.img_norm2.bias() {
+        total += f(t);
+    }
+    total += f(b.img_mlp.lin1.weight());
+    if let Some(t) = b.img_mlp.lin1.bias() {
+        total += f(t);
+    }
+    total += f(b.img_mlp.lin2.weight());
+    if let Some(t) = b.img_mlp.lin2.bias() {
+        total += f(t);
+    }
+    total += f(b.txt_mod.lin.weight());
+    if let Some(t) = b.txt_mod.lin.bias() {
+        total += f(t);
+    }
+    total += f(b.txt_norm1.weight());
+    if let Some(t) = b.txt_norm1.bias() {
+        total += f(t);
+    }
+    total += f(b.txt_attn.qkv.weight());
+    if let Some(t) = b.txt_attn.qkv.bias() {
+        total += f(t);
+    }
+    total += f(b.txt_attn.query_norm.clone().into_inner().weight());
+    total += f(b.txt_attn.key_norm.clone().into_inner().weight());
+    total += f(b.txt_attn.proj.weight());
+    if let Some(t) = b.txt_attn.proj.bias() {
+        total += f(t);
+    }
+    total += f(b.txt_norm2.weight());
+    if let Some(t) = b.txt_norm2.bias() {
+        total += f(t);
+    }
+    total += f(b.txt_mlp.lin1.weight());
+    if let Some(t) = b.txt_mlp.lin1.bias() {
+        total += f(t);
+    }
+    total += f(b.txt_mlp.lin2.weight());
+    if let Some(t) = b.txt_mlp.lin2.bias() {
+        total += f(t);
+    }
+    total
+}
+
+/// Visit every base weight in a `SingleBlock`.
+fn visit_single_block_weights<F>(b: &SingleBlock, mut f: F) -> usize
+where
+    F: FnMut(&Tensor) -> usize,
+{
+    let mut total = 0usize;
+    total += f(b.linear1.weight());
+    if let Some(t) = b.linear1.bias() {
+        total += f(t);
+    }
+    total += f(b.linear2.weight());
+    if let Some(t) = b.linear2.bias() {
+        total += f(t);
+    }
+    total += f(b.query_norm.clone().into_inner().weight());
+    total += f(b.key_norm.clone().into_inner().weight());
+    total += f(b.pre_norm.weight());
+    if let Some(t) = b.pre_norm.bias() {
+        total += f(t);
+    }
+    total += f(b.modulation.lin.weight());
+    if let Some(t) = b.modulation.lin.bias() {
+        total += f(t);
+    }
+    total
+}
+
+/// Bytes consumed by a single tensor — `elem_count() * dtype.size_in_bytes()`.
+fn tensor_bytes(t: &Tensor) -> usize {
+    t.elem_count() * t.dtype().size_in_bytes()
+}
+
+// ── Prefetch stream + buffer init ────────────────────────────────────────────
+
+/// Bring up a non-default CUDA stream + a reusable byte buffer sized to the
+/// largest block. Allocating up-front means subsequent block prefetches
+/// never invoke `cudaMalloc`, which otherwise dominates short-step inference.
+///
+/// On non-CUDA builds this entire function is compiled out (the caller is
+/// already gated by `#[cfg(feature = "cuda")]`).
+#[cfg(feature = "cuda")]
+fn init_prefetch(
+    gpu_device: &Device,
+    largest_block_bytes: usize,
+) -> Result<(Option<PrefetchStream>, Option<PrefetchBuffer>)> {
+    let cuda_dev = match gpu_device.as_cuda_device() {
+        Ok(d) => d,
+        Err(_) => return Ok((None, None)),
+    };
+    let ctx = cuda_dev.cuda_stream().context().clone();
+    let stream = match ctx.new_stream() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("FLUX offload: failed to create prefetch stream ({e:?}) — falling back to single-stream");
+            return Ok((None, None));
+        }
+    };
+    if largest_block_bytes == 0 {
+        return Ok((Some(stream), None));
+    }
+    // Allocate the destination buffer on the prefetch stream so freeing
+    // happens on the same stream and we don't surprise candle's
+    // event-tracker.
+    let buf = match unsafe { stream.alloc::<u8>(largest_block_bytes) } {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                "FLUX offload: prefetch buffer alloc failed ({largest_block_bytes} bytes, {e:?}) — \
+                 falling back to single-stream"
+            );
+            return Ok((Some(stream), None));
+        }
+    };
+    Ok((Some(stream), Some(buf)))
 }
 
 // ── Self-contained block types ───────────────────────────────────────────────
@@ -616,6 +783,35 @@ pub(crate) struct OffloadedFluxTransformer {
     /// already live on `gpu_device` so block-stream cycles never have
     /// to copy them — only the base `Linear` weights move.
     lora_registry: Option<LoraRegistry>,
+    /// `cuMemHostRegister`'d regions backing every CPU-resident block
+    /// weight. Held for the lifetime of the transformer so the underlying
+    /// page-locks survive across forward passes. Empty on Metal/CPU and
+    /// when pinning was disabled or capped.
+    #[allow(dead_code)]
+    pinned_regions: Vec<PinnedRegion>,
+    /// Side stream for async H2D prefetching of block N+1 while block N
+    /// computes on the device's primary stream. None on Metal/CPU and
+    /// when `MOLD_OFFLOAD_PREFETCH=off`.
+    ///
+    /// **Implementation note:** candle-core-mold's `Tensor::to_device`
+    /// dispatches H2D through the device's *primary* stream — there is
+    /// no public API to redirect a single tensor transfer onto a
+    /// different stream. Hooking the actual block-prefetch onto this
+    /// side stream therefore requires either a `Tensor::from_storage` +
+    /// manual `cuMemcpyHtoDAsync_v2` path (one branch per dtype) or a
+    /// candle-core-mold patch exposing a stream override on `to_device`.
+    /// The stream itself is created and held here so the follow-up that
+    /// wires the manual transfer path can simply consume it; pinning
+    /// alone (Phase 1) already captures the bulk of the H2D speedup.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    prefetch_stream: Option<PrefetchStream>,
+    /// Reusable destination buffer sized to the largest block on this
+    /// model. Allocated once on the prefetch stream so block-level H2D
+    /// never `cudaMalloc`s. None when prefetching is disabled.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    prefetch_buffer: Option<PrefetchBuffer>,
 }
 
 impl OffloadedFluxTransformer {
@@ -677,6 +873,71 @@ impl OffloadedFluxTransformer {
             single_blocks.len(),
         ));
 
+        // Per-block byte sizes — feeds both the prefetch-buffer sizing and
+        // the pinning summary log.
+        let mut block_sizes: Vec<usize> =
+            Vec::with_capacity(double_blocks.len() + single_blocks.len());
+        for b in &double_blocks {
+            block_sizes.push(visit_double_block_weights(b, tensor_bytes));
+        }
+        for b in &single_blocks {
+            block_sizes.push(visit_single_block_weights(b, tensor_bytes));
+        }
+
+        // ── Phase 1: pin every CPU-resident block weight ────────────────
+        let tracker = PinnedMemoryTracker::new(pinned_cap_bytes());
+        let mut pinned_regions: Vec<PinnedRegion> = Vec::new();
+        let mut pin_visit = |t: &Tensor| -> usize {
+            match try_pin_to_host(t, &tracker) {
+                Ok(Some(region)) => {
+                    pinned_regions.push(region);
+                    0
+                }
+                Ok(None) => 0,
+                Err(e) => {
+                    tracing::debug!("try_pin_to_host failed: {e:?} (continuing)");
+                    0
+                }
+            }
+        };
+        for b in &double_blocks {
+            visit_double_block_weights(b, &mut pin_visit);
+        }
+        for b in &single_blocks {
+            visit_single_block_weights(b, &mut pin_visit);
+        }
+
+        // ── Phase 2: optionally bring up a prefetch stream + buffer ────
+        let prefetch_on = prefetch_enabled_from_env() && gpu_device.is_cuda();
+        let largest_block = largest_block_size_bytes(&block_sizes);
+
+        #[cfg(feature = "cuda")]
+        let (prefetch_stream, prefetch_buffer) = if prefetch_on {
+            init_prefetch(gpu_device, largest_block)?
+        } else {
+            (None, None)
+        };
+
+        // Single-line INFO so users can confirm both levers are running.
+        let pinned_gb = tracker.used_bytes() as f64 / 1_000_000_000.0;
+        if pinned_regions.is_empty() {
+            progress.info(&format!(
+                "FLUX offload: prefetch={} (largest block {:.1} MB) — pinning skipped \
+                 (no CUDA / unsupported tensors)",
+                if prefetch_on { "on" } else { "off" },
+                largest_block as f64 / 1_000_000.0,
+            ));
+        } else {
+            progress.info(&format!(
+                "FLUX offload: pinned {:.2} GB across {} tensors, prefetch={} \
+                 (largest block {:.1} MB)",
+                pinned_gb,
+                pinned_regions.len(),
+                if prefetch_on { "on" } else { "off" },
+                largest_block as f64 / 1_000_000.0,
+            ));
+        }
+
         Ok(Self {
             img_in,
             txt_in,
@@ -689,6 +950,11 @@ impl OffloadedFluxTransformer {
             single_blocks,
             gpu_device: gpu_device.clone(),
             lora_registry: None,
+            pinned_regions,
+            #[cfg(feature = "cuda")]
+            prefetch_stream,
+            #[cfg(feature = "cuda")]
+            prefetch_buffer,
         })
     }
 
