@@ -178,21 +178,21 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
     }
 }
 
-/// LoRA support is available for FLUX, Flux.2, and LTX-2 — `mold-inference`'s
-/// `flux/lora.rs`, `flux2/lora.rs`, and `ltx2/lora.rs` are the engine paths
-/// that know how to merge low-rank adapters into the base weights. Surfacing
-/// the gate at validation produces a clear 400 instead of an opaque
-/// inference-layer panic when a user picks an unsupported model family + a
-/// LoRA. SD1.5 / SDXL / SD3 LoRA support is on the roadmap; extend this
-/// match when those engines learn the LoRA path.
+/// LoRA support is available for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL,
+/// Qwen-Image (and qwen-image-edit), and Z-Image — `mold-inference`'s
+/// per-family `lora.rs` modules are the engine paths that know how to merge
+/// low-rank adapters into the base weights. Surfacing the gate at validation
+/// produces a clear 400 instead of an opaque inference-layer panic when a
+/// user picks an unsupported model family + a LoRA.
 fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
-        Some("flux") | Some("flux2") | Some("ltx2") => Ok(()),
+        Some("flux") | Some("flux2") | Some("ltx2") | Some("sd15") | Some("sd3") | Some("sdxl")
+        | Some("qwen-image") | Some("qwen-image-edit") | Some("z-image") => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported for FLUX, Flux.2, and LTX-2 models; got family {other:?}"
+            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, and Z-Image models; got family {other:?}"
         )),
         None => Err(
-            "LoRA requires a known model family — pick a FLUX, Flux.2, or LTX-2 model first"
+            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, or Z-Image model first"
                 .to_string(),
         ),
     }
@@ -1776,6 +1776,70 @@ mod tests {
         assert!(
             !err.is_empty(),
             "unknown family with LoRA must produce an error: {err}"
+        );
+    }
+
+    /// SD1.5 LoRA support landed in `crates/mold-inference/src/sd15/lora.rs` —
+    /// the validator must accept it, just like FLUX and LTX-2.
+    #[test]
+    fn lora_on_sd15_accepted() {
+        let mut req = valid_req();
+        req.model = "sd15:fp16".to_string();
+        req.width = 512;
+        req.height = 512;
+        req.guidance = 7.0;
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 0.8,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "SD1.5 + LoRA must pass validation"
+        );
+    }
+
+    /// The plural `loras` form must accept SD1.5 too — the gate must apply
+    /// uniformly to both shapes.
+    #[test]
+    fn loras_plural_on_sd15_accepted() {
+        let mut req = valid_req();
+        req.model = "sd15:fp16".to_string();
+        req.width = 512;
+        req.height = 512;
+        req.guidance = 7.0;
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "SD1.5 + loras plural must pass validation"
+        );
+    }
+
+    /// The rejection message lists every supported family; SDXL still isn't
+    /// supported, so a SDXL request with a LoRA should mention SD1.5 in the
+    /// list of available alternatives.
+    #[test]
+    fn lora_on_sdxl_message_now_lists_sd15() {
+        let mut req = valid_req();
+        req.model = "sdxl".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("sd1.5")
+                || err.to_lowercase().contains("sd15")
+                || err.to_lowercase().contains("sd 1.5"),
+            "error must list SD1.5 as a supported family: {err}"
         );
     }
 
