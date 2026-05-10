@@ -178,19 +178,22 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
     }
 }
 
-/// LoRA support is currently FLUX-only — `mold-inference`'s `flux/lora.rs`
-/// is the only engine path that knows how to merge low-rank adapters into
-/// the base weights. Surfacing the gate at validation produces a clear
-/// 400 instead of an opaque inference-layer panic when a user picks a
-/// non-FLUX model + a LoRA. SD1.5 / SDXL LoRA support is on the roadmap;
-/// extend this match when those engines learn the LoRA path.
+/// LoRA support is available for FLUX and LTX-2 — `mold-inference`'s
+/// `flux/lora.rs` and `ltx2/lora.rs` are the engine paths that know how to
+/// merge low-rank adapters into the base weights. Surfacing the gate at
+/// validation produces a clear 400 instead of an opaque inference-layer panic
+/// when a user picks an unsupported model family + a LoRA. SD1.5 / SDXL /
+/// SD3 LoRA support is on the roadmap; extend this match when those engines
+/// learn the LoRA path.
 fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
-        Some("flux") => Ok(()),
+        Some("flux") | Some("ltx2") => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported only for FLUX models; got family {other:?}"
+            "LoRA is currently supported for FLUX and LTX-2 models; got family {other:?}"
         )),
-        None => Err("LoRA requires a known model family — pick a FLUX model first".to_string()),
+        None => {
+            Err("LoRA requires a known model family — pick a FLUX or LTX-2 model first".to_string())
+        }
     }
 }
 
@@ -1574,6 +1577,87 @@ mod tests {
             },
         ]);
         assert!(validate_generate_request(&req).is_ok());
+    }
+
+    fn valid_ltx2_req() -> GenerateRequest {
+        GenerateRequest {
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            output_format: OutputFormat::Mp4,
+            ..valid_req()
+        }
+    }
+
+    #[test]
+    fn lora_on_ltx2_accepted() {
+        // LTX-2 has a full LoRA engine path (ltx2/lora.rs) — the validator
+        // must not block it.
+        let mut req = valid_ltx2_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "LTX2.3_Crisp_Enhance.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "LTX-2 + LoRA must pass validation"
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_ltx2_accepted() {
+        // The loras-plural path routes through the same gate; confirm LTX-2
+        // passes there too.
+        let mut req = valid_ltx2_req();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "LTX-2 + loras plural must pass validation"
+        );
+    }
+
+    #[test]
+    fn lora_on_sdxl_still_rejected_with_updated_message() {
+        // SDXL still lacks LoRA support. The updated message now lists both
+        // FLUX and LTX-2 as supported families.
+        let mut req = valid_req();
+        req.model = "sdxl".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("flux"),
+            "error must mention FLUX: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("ltx-2") || err.to_lowercase().contains("ltx2"),
+            "error must mention LTX-2: {err}"
+        );
+    }
+
+    #[test]
+    fn lora_on_unknown_family_still_rejected() {
+        // family: None (no manifest match) must still produce an error.
+        let mut req = valid_req();
+        req.model = "some-unknown-model-xyz".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            !err.is_empty(),
+            "unknown family with LoRA must produce an error: {err}"
+        );
     }
 
     // ── dimension_warning tests ────────────────────────────────────────────
