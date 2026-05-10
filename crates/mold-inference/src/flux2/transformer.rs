@@ -851,11 +851,12 @@ impl LastLayer {
 
     fn forward(&self, xs: &Tensor, vec: &Tensor) -> Result<Tensor> {
         let chunks = vec.silu()?.apply(&self.ada_ln_modulation)?.chunk(2, 1)?;
-        // BFL native `final_layer.adaLN_modulation.1.weight` stores (shift, scale)
-        // along dim 0; the diffusers converter applies `swap_scale_shift` to flip
-        // it for diffusers' AdaLayerNormContinuous. mold loads the BFL weight as-is,
-        // so chunks[0]=shift, chunks[1]=scale.
-        let (shift, scale) = (&chunks[0], &chunks[1]);
+        // Diffusers `AdaLayerNormContinuous` convention: scale first, shift second.
+        // Diffusers checkpoints store this ordering directly. BFL-native
+        // single-file checkpoints store (shift, scale) but `SingleFileBackend`
+        // applies `SwapHalves` when loading `norm_out.linear.weight` so the
+        // weight always arrives here in diffusers (scale, shift) order.
+        let (scale, shift) = (&chunks[0], &chunks[1]);
         let xs = xs
             .apply(&self.norm_final)?
             .broadcast_mul(&(scale.unsqueeze(1)? + 1.0)?)?
@@ -1539,6 +1540,96 @@ mod tests {
         assert!(
             !cfg.guidance_embed,
             "Klein is a distilled model; guidance_embed must be false"
+        );
+    }
+
+    /// Regression test for the LastLayer shift/scale ordering bug (commit c0c2b80).
+    ///
+    /// `AdaLayerNormContinuous` — the diffusers norm — outputs (scale, shift):
+    /// `x = norm(x) * (1 + scale) + shift`.
+    ///
+    /// `LastLayer::forward` must use chunks[0]=scale, chunks[1]=shift.
+    ///
+    /// Strategy: use xs=zeros so `norm(xs)=0` and the output reduces to
+    /// `shift` only. If chunks were swapped, the output would be `scale`
+    /// instead, which is distinct from `shift` in our fixture.
+    ///
+    /// `ada_ln_modulation` weight (2·h_sz × h_sz): constructed so that
+    /// - rows 0..h_sz (scale half) produce `scale_val` per element
+    /// - rows h_sz..2·h_sz (shift half) produce `shift_val` per element
+    ///
+    /// For a vec of all-ones and weight `w` per row, `silu(vec)·w.T` gives
+    /// `h_sz * silu(1) * w_row` per output.  Set `w_row = target / (h_sz * silu(1))`.
+    #[test]
+    fn last_layer_forward_uses_diffusers_scale_then_shift_ordering() {
+        use candle_core::Device;
+        use candle_nn::VarBuilder;
+        use std::collections::HashMap;
+
+        let dev = Device::Cpu;
+        let h_sz = 2usize;
+        let out_c = 2usize; // proj_out: h_sz → h_sz (square for identity weight)
+
+        let scale_val = 3.0f32;
+        let shift_val = 0.5f32;
+
+        // silu(1.0) ≈ 0.7311.  With vec = ones (h_sz=2 elements), the ada_ln
+        // output for row i is: h_sz * silu(1) * w_per_element.
+        // So w_per_element = target / (h_sz * silu(1)).
+        let silu_one = 0.731_058_6f32; // silu(1) = 1 / (1 + e^-1)
+        let dot_factor = h_sz as f32 * silu_one;
+        let w_scale = scale_val / dot_factor;
+        let w_shift = shift_val / dot_factor;
+
+        // ada_ln weight: (2·h_sz, h_sz) = (4, 2).
+        // Rows 0..1 are the SCALE half (diffusers first half → chunks[0]).
+        // Rows 2..3 are the SHIFT half (diffusers second half → chunks[1]).
+        let ada_weight: Vec<f32> = vec![
+            w_scale, w_scale, // row 0 → scale[0]
+            w_scale, w_scale, // row 1 → scale[1]
+            w_shift, w_shift, // row 2 → shift[0]
+            w_shift, w_shift, // row 3 → shift[1]
+        ];
+
+        // proj_out (out_c × h_sz): identity so output = xs_mod unchanged.
+        let proj_weight = vec![1.0f32, 0.0, 0.0, 1.0];
+
+        let mut map: HashMap<String, candle_core::Tensor> = HashMap::new();
+        map.insert(
+            "norm_out.linear.weight".to_string(),
+            Tensor::from_vec(ada_weight, (2 * h_sz, h_sz), &dev).unwrap(),
+        );
+        map.insert(
+            "proj_out.weight".to_string(),
+            Tensor::from_vec(proj_weight, (out_c, h_sz), &dev).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(map, DType::F32, &dev);
+        let layer = LastLayer::new(h_sz, out_c, vb).unwrap();
+
+        // xs: all-zeros → norm(xs)=0 → output = 0*(1+scale) + shift = shift.
+        let xs = Tensor::zeros((1, 1, h_sz), DType::F32, &dev).unwrap();
+        // vec: all-ones → silu → matmul → scale_val in scale half, shift_val in shift half.
+        let vec_ = Tensor::ones((1, h_sz), DType::F32, &dev).unwrap();
+
+        let out = layer.forward(&xs, &vec_).unwrap();
+        let vals: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(vals.len(), out_c);
+
+        // Correct ordering (scale, shift) → output = norm(0)*(1+scale_val) + shift_val = shift_val.
+        // Wrong ordering (shift, scale) → output = norm(0)*(1+shift_val) + scale_val = scale_val.
+        // These differ (0.5 vs 3.0) so the assertion unambiguously catches the regression.
+        let tol = 0.08; // BF16 + silu rounding headroom
+        assert!(
+            (vals[0] - shift_val).abs() < tol,
+            "LastLayer output[0]={:.4}: expected shift={shift_val:.4} \
+             (diffusers scale-then-shift ordering). \
+             Got scale={scale_val:.4} instead? The c0c2b80 regression is present.",
+            vals[0],
+        );
+        assert!(
+            (vals[1] - shift_val).abs() < tol,
+            "LastLayer output[1]={:.4}: expected shift={shift_val:.4}",
+            vals[1],
         );
     }
 }
