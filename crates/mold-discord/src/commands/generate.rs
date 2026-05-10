@@ -224,7 +224,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         guidance: params.guidance.unwrap_or(def_guidance),
         seed: params.seed,
         batch_size: 1,
-        output_format,
+        output_format: Some(output_format),
         embed_metadata: None,
         scheduler: None,
         cfg_plus: None,
@@ -521,7 +521,7 @@ mod tests {
         assert!(req.seed.is_none());
         assert!(req.negative_prompt.is_none());
         assert_eq!(req.batch_size, 1);
-        assert_eq!(req.output_format, OutputFormat::Png);
+        assert_eq!(req.output_format, Some(OutputFormat::Png));
         assert!(req.frames.is_none());
         assert!(req.fps.is_none());
         assert!(req.source_image.is_none());
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(req.height, 1024);
         assert_eq!(req.steps, 20);
         assert_eq!(req.guidance, 3.5);
-        assert_eq!(req.output_format, OutputFormat::Png);
+        assert_eq!(req.output_format, Some(OutputFormat::Png));
     }
 
     #[test]
@@ -592,7 +592,7 @@ mod tests {
             family: Some("ltx-video"),
             ..base_params("a drone shot", "ltx-video-0.9.6-distilled:bf16")
         });
-        assert_eq!(req.output_format, OutputFormat::Mp4);
+        assert_eq!(req.output_format, Some(OutputFormat::Mp4));
         assert_eq!(req.frames, Some(25));
         assert_eq!(req.fps, Some(24));
     }
@@ -603,7 +603,7 @@ mod tests {
             family: Some("ltx2"),
             ..base_params("panning over a beach", "ltx-2-19b-distilled:fp8")
         });
-        assert_eq!(req.output_format, OutputFormat::Mp4);
+        assert_eq!(req.output_format, Some(OutputFormat::Mp4));
         assert_eq!(req.frames, Some(25));
     }
 
@@ -614,7 +614,7 @@ mod tests {
             video_format: Some(VideoFormat::Gif),
             ..base_params("waves", "ltx-2-19b-distilled:fp8")
         });
-        assert_eq!(req.output_format, OutputFormat::Gif);
+        assert_eq!(req.output_format, Some(OutputFormat::Gif));
     }
 
     #[test]
@@ -638,7 +638,7 @@ mod tests {
             video_format: Some(VideoFormat::Mp4),
             ..base_params("a cat", "flux-schnell:q8")
         });
-        assert_eq!(req.output_format, OutputFormat::Png);
+        assert_eq!(req.output_format, Some(OutputFormat::Png));
         assert!(req.frames.is_none());
     }
 
@@ -701,7 +701,7 @@ mod tests {
             source_image: Some(bytes.clone()),
             ..base_params("dolly in", "ltx-2-19b-distilled:fp8")
         });
-        assert_eq!(req.output_format, OutputFormat::Mp4);
+        assert_eq!(req.output_format, Some(OutputFormat::Mp4));
         assert_eq!(req.source_image.as_ref(), Some(&bytes));
         assert_eq!(req.frames, Some(25));
     }

@@ -700,7 +700,7 @@ fn synth_generate_request(req: &ChainRequest, video: &VideoData) -> mold_core::G
         guidance: req.guidance,
         seed: req.seed,
         batch_size: 1,
-        output_format: video.format,
+        output_format: Some(video.format),
         embed_metadata: Some(false),
         scheduler: None,
         cfg_plus: None,

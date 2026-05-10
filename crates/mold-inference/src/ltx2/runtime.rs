@@ -4930,7 +4930,7 @@ mod tests {
             guidance: 3.0,
             seed: Some(7),
             batch_size: 1,
-            output_format: format,
+            output_format: Some(format),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,

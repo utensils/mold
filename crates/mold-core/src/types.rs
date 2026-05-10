@@ -264,8 +264,15 @@ pub struct GenerateRequest {
     #[serde(default = "default_batch_size")]
     #[schema(example = 1)]
     pub batch_size: u32,
-    #[serde(default)]
-    pub output_format: OutputFormat,
+    /// Output format for the generated media.
+    ///
+    /// When omitted the server picks a sensible default based on the model
+    /// family: `mp4` for video models (`ltx2`, `ltx-video`), `png` for all
+    /// image families. Explicitly setting this field always wins — including
+    /// if you set `png` for a video model, which the server will then reject
+    /// with a 422 so you get a clear error rather than a silent wrong output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embed_metadata: Option<bool>,
     /// Scheduler override for UNet-based models (SD1.5, SDXL).
@@ -368,6 +375,43 @@ pub struct GenerateRequest {
     /// 2026-04-19 model-ui-overhaul design doc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<DevicePlacement>,
+}
+
+impl GenerateRequest {
+    /// Returns the resolved output format, falling back to the default (`Png`)
+    /// when the caller did not supply one.
+    ///
+    /// In normal server flows `normalise_output_format` is called before this
+    /// and fills `output_format` with a family-aware default, so this method
+    /// always returns the normalised value. Inference engines and other
+    /// consumers that hold a fully-normalised request can use this instead of
+    /// accessing the field directly to avoid an `.unwrap()`.
+    pub fn resolved_output_format(&self) -> OutputFormat {
+        self.output_format.unwrap_or_default()
+    }
+
+    /// Fill `output_format` with a family-aware default when the caller did
+    /// not supply one.
+    ///
+    /// - `ltx2` with `enable_audio == Some(true)` → `Mp4` (audio requires mp4)
+    /// - `ltx2` (any other case) → `Mp4` (most compatible video container)
+    /// - `ltx-video` → `Mp4` (most compatible; engine falls back to APNG when
+    ///   the field is non-video, but Mp4 is the right API default)
+    /// - all other families → `Png` (existing image default)
+    ///
+    /// This is a no-op when `output_format` is already `Some(…)` — explicit
+    /// caller choices are always preserved, even invalid ones. Validation that
+    /// runs after normalisation will then reject them with a clear error.
+    pub fn normalise_output_format(&mut self, family: Option<&str>) -> &mut Self {
+        if self.output_format.is_some() {
+            return self;
+        }
+        self.output_format = Some(match family {
+            Some("ltx2") | Some("ltx-video") => OutputFormat::Mp4,
+            _ => OutputFormat::Png,
+        });
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1151,7 +1195,7 @@ mod tests {
             guidance: 0.0,
             seed: Some(42),
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: Some(true),
             scheduler: None,
             cfg_plus: None,
@@ -1207,18 +1251,20 @@ mod tests {
     }
 
     #[test]
-    fn generate_request_output_format_defaults_to_png() {
-        // output_format omitted — should default to PNG, not fail deserialization
+    fn generate_request_output_format_omitted_is_none() {
+        // output_format omitted — field is None; normalise_output_format fills it later
         let json = r#"{"prompt":"test","model":"flux-schnell","width":768,"height":768,"steps":4,"batch_size":1}"#;
         let req: GenerateRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.output_format, OutputFormat::Png);
+        assert_eq!(req.output_format, None);
+        // resolved_output_format falls back to Png for None
+        assert_eq!(req.resolved_output_format(), OutputFormat::Png);
     }
 
     #[test]
     fn generate_request_output_format_explicit_jpeg() {
         let json = r#"{"prompt":"test","model":"flux-schnell","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"jpeg"}"#;
         let req: GenerateRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.output_format, OutputFormat::Jpeg);
+        assert_eq!(req.output_format, Some(OutputFormat::Jpeg));
     }
 
     #[test]
@@ -1227,7 +1273,8 @@ mod tests {
         let json = r#"{"prompt":"a cat","model":"test","width":512,"height":512,"steps":4}"#;
         let req: GenerateRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.prompt, "a cat");
-        assert_eq!(req.output_format, OutputFormat::Png);
+        assert_eq!(req.output_format, None);
+        assert_eq!(req.resolved_output_format(), OutputFormat::Png);
         assert_eq!(req.batch_size, 1);
         assert!((req.guidance - 3.5).abs() < 0.001);
         assert!(req.seed.is_none());
@@ -1309,7 +1356,7 @@ mod tests {
             guidance: 7.5,
             seed: None,
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,
@@ -1357,7 +1404,7 @@ mod tests {
             guidance: 3.5,
             seed: None,
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,
@@ -1402,7 +1449,7 @@ mod tests {
             guidance: 0.0,
             seed: Some(7),
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: Some(true),
             scheduler: None,
             cfg_plus: None,
@@ -1449,7 +1496,7 @@ mod tests {
             guidance: 7.5,
             seed: Some(1),
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: Some(true),
             scheduler: None,
             cfg_plus: None,
@@ -1494,7 +1541,7 @@ mod tests {
             guidance: 7.0,
             seed: Some(9),
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: Some(true),
             scheduler: Some(Scheduler::UniPc),
             cfg_plus: None,
@@ -1707,7 +1754,7 @@ mod tests {
             guidance: 3.5,
             seed: None,
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,
@@ -1758,7 +1805,7 @@ mod tests {
             guidance: 4.0,
             seed: None,
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,
@@ -1822,7 +1869,7 @@ mod tests {
             guidance: 3.5,
             seed: None,
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,
@@ -1871,7 +1918,7 @@ mod tests {
             guidance: 3.5,
             seed: None,
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,
@@ -1941,7 +1988,7 @@ mod tests {
             guidance: 3.5,
             seed: None,
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,

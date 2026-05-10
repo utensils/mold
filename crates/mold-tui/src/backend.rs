@@ -474,7 +474,7 @@ fn build_request(
         guidance: params.guidance,
         seed: params.seed,
         batch_size: params.batch,
-        output_format: params.format,
+        output_format: Some(params.format),
         embed_metadata: Some(mold_core::Config::load_or_default().effective_embed_metadata(None)),
         scheduler: params.scheduler,
         cfg_plus: None,

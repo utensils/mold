@@ -70,7 +70,7 @@ impl MoldClient {
         let width = req.width;
         let height = req.height;
         let model = req.model.clone();
-        let format = req.output_format;
+        let format = req.resolved_output_format();
 
         let start = std::time::Instant::now();
         let resp = self

@@ -422,7 +422,7 @@ pub async fn run(
         guidance: effective_guidance,
         seed,
         batch_size: batch,
-        output_format,
+        output_format: Some(output_format),
         embed_metadata: Some(embed_metadata),
         scheduler,
         cfg_plus,

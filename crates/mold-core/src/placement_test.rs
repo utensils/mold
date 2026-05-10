@@ -98,7 +98,7 @@ fn generate_request_placement_round_trips() {
         guidance: 3.5,
         seed: Some(7),
         batch_size: 1,
-        output_format: super::OutputFormat::Png,
+        output_format: Some(super::OutputFormat::Png),
         embed_metadata: None,
         scheduler: None,
         cfg_plus: None,

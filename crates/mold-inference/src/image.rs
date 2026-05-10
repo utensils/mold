@@ -399,7 +399,7 @@ mod tests {
             guidance: 0.0,
             seed: Some(42),
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: Some(false),
             scheduler: None,
             cfg_plus: None,
