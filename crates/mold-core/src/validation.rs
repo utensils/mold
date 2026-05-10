@@ -178,22 +178,22 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
     }
 }
 
-/// LoRA support is available for FLUX, Flux.2, LTX-2, SD1.5, SDXL, and Z-Image
-/// — `mold-inference`'s per-family `lora.rs` modules are the engine paths that
-/// know how to merge low-rank adapters into the base weights. Surfacing the
-/// gate at validation produces a clear 400 instead of an opaque inference-layer
-/// panic when a user picks an unsupported model family + a LoRA. SD3 /
-/// Qwen-Image LoRA support is on the roadmap; extend this match when those
-/// engines learn the LoRA path.
+/// LoRA support is available for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, and
+/// Z-Image — `mold-inference`'s per-family `lora.rs` modules are the engine
+/// paths that know how to merge low-rank adapters into the base weights.
+/// Surfacing the gate at validation produces a clear 400 instead of an opaque
+/// inference-layer panic when a user picks an unsupported model family + a
+/// LoRA. Qwen-Image LoRA support is on the roadmap; extend this match when
+/// those engines learn the LoRA path.
 fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
-        Some("flux") | Some("flux2") | Some("ltx2") | Some("sd15") | Some("sdxl")
+        Some("flux") | Some("flux2") | Some("ltx2") | Some("sd15") | Some("sd3") | Some("sdxl")
         | Some("z-image") => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SDXL, and Z-Image models; got family {other:?}"
+            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, and Z-Image models; got family {other:?}"
         )),
         None => Err(
-            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SDXL, or Z-Image model first"
+            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, or Z-Image model first"
                 .to_string(),
         ),
     }
@@ -1715,6 +1715,67 @@ mod tests {
             ..valid_req()
         }
     }
+
+    fn valid_sd3_req() -> GenerateRequest {
+        GenerateRequest {
+            model: "sd3.5-large".to_string(),
+            ..valid_req()
+        }
+    }
+
+    #[test]
+    fn lora_on_sd3_accepted() {
+        // SD3.5 has a full LoRA engine path (sd3/lora.rs) — the validator
+        // must not block it.
+        let mut req = valid_sd3_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "sd35_style.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "SD3 + LoRA must pass validation: {:?}",
+            validate_generate_request(&req)
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_sd3_accepted() {
+        let mut req = valid_sd3_req();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "SD3 + loras plural must pass validation"
+        );
+    }
+
+    #[test]
+    fn lora_rejection_message_lists_sd3() {
+        // The rejection message must enumerate every supported family.
+        // wuerstchen has no LoRA path so the request is rejected; the message
+        // must include SD3 in the supported list.
+        let mut req = valid_req();
+        req.model = "wuerstchen-c".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("sd3"),
+            "rejection message must list SD3 alongside FLUX/LTX-2: {err}"
+        );
+    }
+
 
     #[test]
     fn lora_on_zimage_accepted() {
