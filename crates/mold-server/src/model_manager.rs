@@ -78,23 +78,26 @@ impl ActivationHint {
 ///
 /// Hard-fails if peak > 90% of available (model won't fit even with page reclamation).
 /// Warns if peak > 80% of available (tight but feasible).
+///
+/// `suggestion` is appended to the rejection message so call sites can surface
+/// arch-specific remediation (e.g. reduce `--frames` / `--width` for LTX-Video).
 fn check_model_memory_budget(
     model_name: &str,
     peak_bytes: u64,
     available_bytes: u64,
+    suggestion: &str,
 ) -> Result<(), ApiError> {
     let hard_limit = available_bytes * 9 / 10; // 90%
     if peak_bytes > hard_limit {
         return Err(ApiError::insufficient_memory(format!(
             "model '{}' estimated peak ~{:.1} GB exceeds the per-load budget cap ~{:.1} GB \
              (90% of {:.1} GB free, with 2 GB activation headroom built into peak estimate; \
-             encoders are dropped before denoise). \
-             Try a smaller variant (e.g. ':q5' / ':q4'), enable --offload (FLUX), \
-             or close other GPU apps.",
+             encoders are dropped before denoise). {}",
             model_name,
             peak_bytes as f64 / 1_000_000_000.0,
             hard_limit as f64 / 1_000_000_000.0,
             available_bytes as f64 / 1_000_000_000.0,
+            suggestion,
         )));
     }
 
@@ -109,6 +112,23 @@ fn check_model_memory_budget(
     }
 
     Ok(())
+}
+
+/// Build the suggestion text appended to preflight rejection messages.
+/// For LTX-Video (non-streaming full-weight load) the dominant knob is
+/// reducing `frames` or `width`/`height`; for other families a quantized
+/// variant or `--offload` (FLUX) is the typical escape.
+fn rejection_suggestion(hint: Option<ActivationHint>) -> &'static str {
+    match hint.map(|h| h.family) {
+        Some(ActivationFamily::LtxVideo) => {
+            "Try reducing --frames or --width/--height, use a quantized variant \
+             (e.g. ':q8'), or close other GPU apps."
+        }
+        _ => {
+            "Try a smaller variant (e.g. ':q8' / ':q5'), enable --offload (FLUX), \
+             or close other GPU apps."
+        }
+    }
 }
 
 /// Pure inner: given an `available_bytes` budget and the active model's
@@ -171,7 +191,13 @@ pub(crate) fn preflight_memory_guard_with_available(
     let activation = hint.map(|h| h.budget_bytes()).unwrap_or(0);
     let peak_with_activation = peak.saturating_add(activation);
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
-    check_model_memory_budget(model_name, peak_with_activation, effective_available)
+    let suggestion = rejection_suggestion(hint);
+    check_model_memory_budget(
+        model_name,
+        peak_with_activation,
+        effective_available,
+        suggestion,
+    )
 }
 
 /// Peak GPU residency for streaming-transformer families. Mirrors the
@@ -1564,12 +1590,12 @@ mod tests {
 
     #[test]
     fn memory_guard_ok_when_plenty_of_memory() {
-        assert!(check_model_memory_budget("test-model", 5 * GB, 20 * GB).is_ok());
+        assert!(check_model_memory_budget("test-model", 5 * GB, 20 * GB, "").is_ok());
     }
 
     #[test]
     fn memory_guard_rejects_over_90pct() {
-        let result = check_model_memory_budget("flux-dev:bf16", 19 * GB, 20 * GB);
+        let result = check_model_memory_budget("flux-dev:bf16", 19 * GB, 20 * GB, "Try --offload.");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code, "INSUFFICIENT_MEMORY");
@@ -1580,25 +1606,25 @@ mod tests {
     #[test]
     fn memory_guard_ok_at_90pct_boundary() {
         // 18 GB peak, 20 GB available → 90% exactly → should pass
-        assert!(check_model_memory_budget("test", 18 * GB, 20 * GB).is_ok());
+        assert!(check_model_memory_budget("test", 18 * GB, 20 * GB, "").is_ok());
     }
 
     #[test]
     fn memory_guard_ok_in_warn_zone() {
         // 17 GB peak, 20 GB available → 85% → passes but would warn
-        assert!(check_model_memory_budget("test", 17 * GB, 20 * GB).is_ok());
+        assert!(check_model_memory_budget("test", 17 * GB, 20 * GB, "").is_ok());
     }
 
     #[test]
     fn memory_guard_ok_below_warn_zone() {
         // 15 GB peak, 20 GB available → 75% → no warn, no error
-        assert!(check_model_memory_budget("test", 15 * GB, 20 * GB).is_ok());
+        assert!(check_model_memory_budget("test", 15 * GB, 20 * GB, "").is_ok());
     }
 
     #[test]
     fn memory_guard_rejects_tiny_available() {
         // Model larger than total available
-        let result = check_model_memory_budget("huge-model", 30 * GB, 16 * GB);
+        let result = check_model_memory_budget("huge-model", 30 * GB, 16 * GB, "");
         assert!(result.is_err());
     }
 
@@ -1614,7 +1640,7 @@ mod tests {
         let free_vram = 2 * GB;
         let active_vram = 18 * GB;
         let effective = free_vram + active_vram;
-        assert!(check_model_memory_budget("swap-target", 15 * GB, effective).is_ok());
+        assert!(check_model_memory_budget("swap-target", 15 * GB, effective, "").is_ok());
     }
 
     /// Verifies the swap math also rejects when the swap is genuinely
@@ -1626,7 +1652,7 @@ mod tests {
         let free_vram = GB;
         let active_vram = 8 * GB;
         let effective = free_vram + active_vram;
-        assert!(check_model_memory_budget("too-large", 15 * GB, effective).is_err());
+        assert!(check_model_memory_budget("too-large", 15 * GB, effective, "").is_err());
     }
 
     /// Build a `ModelPaths` whose components include text encoders, mirroring a
@@ -2627,7 +2653,12 @@ mod tests {
             "test invariant: peak ({peak}) must exceed cap ({cap})"
         );
 
-        let result = check_model_memory_budget("qwen-image:q8", peak, available);
+        let result = check_model_memory_budget(
+            "qwen-image:q8",
+            peak,
+            available,
+            "Try a smaller variant (e.g. ':q5' / ':q4'), enable --offload (FLUX), or close other GPU apps.",
+        );
         assert!(result.is_err(), "expected rejection, got Ok");
 
         let err = result.unwrap_err();
@@ -2679,7 +2710,12 @@ mod tests {
                 continue;
             }
 
-            let result = check_model_memory_budget("test-model", peak, available);
+            let result = check_model_memory_budget(
+                "test-model",
+                peak,
+                available,
+                "Try a smaller variant.",
+            );
             assert!(
                 result.is_err(),
                 "expected rejection for peak={peak_gb} available={available_gb}, got Ok"
@@ -2702,5 +2738,176 @@ mod tests {
                  message must include cap={cap_str}, got: {msg}"
             );
         }
+    }
+
+    // ── LTX-Video preflight regression (Part 1) ──────────────────────────────
+
+    /// Build LTX-Video-shaped paths: separate transformer (13B BF16 ≈ 26 GB),
+    /// VAE (~0.5 GB), and T5 encoder (~9.5 GB). Mirrors the on-disk layout of
+    /// `ltx-video-0.9.8-13b-dev:bf16` pulled via `mold pull`.
+    fn ltx_video_13b_paths(
+        transformer_gb: u64,
+        vae_gb: u64,
+        t5_gb: u64,
+    ) -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk("ltx-video-0.9.8-13b-dev_fp16.safetensors", transformer_gb);
+        let vae = mk("ltx-video-vae.safetensors", vae_gb);
+        let t5 = mk("t5xxl_fp16.safetensors", t5_gb);
+        let paths = ModelPaths {
+            transformer,
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: Some(t5),
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
+    /// Regression: `ltx-video-0.9.8-13b-dev:bf16` at 768×512×25 on a 24 GB
+    /// card MUST be rejected by the preflight. The transformer is ~26 GB BF16
+    /// (non-streaming, loaded whole), which alone exceeds 24 GB VRAM. Before
+    /// the fix, `activation_family_for("ltx-video")` returned `Ltx2Video`
+    /// which triggered the streaming cap path (6 GB) and let the load through,
+    /// causing a hard OOM during `load_transformer`.
+    #[test]
+    fn preflight_rejects_ltx_video_13b_at_768x512x25_on_24gb_card() {
+        // 26 GB transformer + 0.5 GB VAE + 9.5 GB T5 (mirrors real disk layout).
+        // Sequential peak = max(T5=9.5, transformer+VAE=26.5) + 2 GB headroom
+        //                 = 26.5 + 2 = 28.5 GB > 90% of 24 GB (21.6 GB) → reject.
+        let (_dir, paths) = ltx_video_13b_paths(26, 1, 10);
+        let hint = ActivationHint {
+            width: 768,
+            height: 512,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::LtxVideo,
+        };
+        let result = preflight_memory_guard_with_available(
+            "ltx-video-0.9.8-13b-dev:bf16",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+        );
+        assert!(
+            result.is_err(),
+            "13B LTX-Video BF16 (26 GB transformer) must be rejected on a 24 GB card — \
+             the transformer is not streamed and its full weight must be counted, \
+             got {result:?}",
+        );
+        let err = result.unwrap_err();
+        // Message must surface the LTX-Video-specific mitigation hints.
+        assert!(
+            err.error.contains("frames") || err.error.contains("width"),
+            "rejection message must suggest reducing frames or resolution, got: {}",
+            err.error,
+        );
+    }
+
+    /// Golden: the preflight estimate for LTX-Video 13B BF16 must be within
+    /// ~3 GB of the expected peak (Sequential: max(T5, transformer+VAE) +
+    /// 2 GB headroom = max(9.5, 26.5) + 2 = 28.5 GB). We accept ±3 GB to
+    /// account for rounding in file sizes; the key invariant is that it's
+    /// never so low that a 24 GB card incorrectly admits the load.
+    #[test]
+    fn preflight_estimate_for_ltx_video_13b_within_expected_range() {
+        let (_dir, paths) = ltx_video_13b_paths(26, 1, 10);
+        // Sequential peak = max(T5=10, transformer+VAE=27) + 2 headroom = 29 GB.
+        // (We use 10 GB for T5 to keep nice round numbers; real T5 is ~9.5 GB.)
+        let expected_gb = 29u64;
+        let peak = mold_inference::device::estimate_peak_memory(
+            &paths,
+            mold_inference::LoadStrategy::Sequential,
+        );
+        let peak_gb = peak / GB;
+        assert!(
+            peak_gb >= expected_gb.saturating_sub(3),
+            "peak estimate ({peak_gb} GB) is unexpectedly low — LTX-Video 13B BF16 \
+             sequential estimate should be ≥ {} GB",
+            expected_gb.saturating_sub(3),
+        );
+        assert!(
+            peak_gb <= expected_gb + 3,
+            "peak estimate ({peak_gb} GB) is unexpectedly high for 26+1+10 GB layout \
+             — should be ≤ {} GB",
+            expected_gb + 3,
+        );
+    }
+
+    /// `activation_family_for("ltx-video")` must return `LtxVideo` (non-streaming),
+    /// not `Ltx2Video`. Before the fix both slugs returned `Ltx2Video`, which
+    /// caused the preflight to apply the streaming cap and admit an OOM load.
+    #[test]
+    fn activation_family_for_ltx_video_is_non_streaming() {
+        let family = mold_inference::device::activation_family_for("ltx-video");
+        assert_eq!(
+            family,
+            ActivationFamily::LtxVideo,
+            "ltx-video slug must map to LtxVideo (non-streaming, full-weight load)"
+        );
+        // Verify it does NOT trigger the streaming cap path.
+        assert!(
+            !family.streaming_transformer(),
+            "LtxVideo must NOT be treated as a streaming transformer — \
+             it loads the entire weight file into VRAM at generate time"
+        );
+        // Verify ltx2 still maps to the streaming variant.
+        assert!(
+            mold_inference::device::activation_family_for("ltx2").streaming_transformer(),
+            "ltx2 must still map to the streaming family"
+        );
+    }
+
+    /// The rejection message for an OOM-at-preflight LTX-Video load must
+    /// mention reducing frames or resolution (not `--offload`, which is a
+    /// FLUX-specific flag and not applicable to LTX-Video).
+    #[test]
+    fn preflight_rejection_message_for_ltx_video_suggests_frames_or_resolution() {
+        let (_dir, paths) = ltx_video_13b_paths(26, 1, 10);
+        let hint = ActivationHint {
+            width: 768,
+            height: 512,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::LtxVideo,
+        };
+        let result = preflight_memory_guard_with_available(
+            "ltx-video-0.9.8-13b-dev:bf16",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+        );
+        let err = result.expect_err("must reject");
+        assert!(
+            err.error.contains("frames") || err.error.contains("width"),
+            "LTX-Video rejection message must suggest reducing frames or \
+             width/height (not --offload), got: {}",
+            err.error,
+        );
+        // Must NOT suggest --offload (that's a FLUX flag, not applicable here).
+        assert!(
+            !err.error.contains("--offload"),
+            "LTX-Video rejection must not mention --offload (FLUX-only flag), \
+             got: {}",
+            err.error,
+        );
     }
 }
