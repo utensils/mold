@@ -58,7 +58,7 @@ pub(crate) struct Ltx2ExecutionGraph {
 
 fn wants_audio_output(req: &GenerateRequest) -> bool {
     req.enable_audio
-        .unwrap_or(req.output_format == OutputFormat::Mp4)
+        .unwrap_or(req.resolved_output_format() == OutputFormat::Mp4)
 }
 
 pub(crate) fn build_execution_graph(
@@ -179,7 +179,7 @@ mod tests {
             guidance: 3.0,
             seed: Some(7),
             batch_size: 1,
-            output_format: OutputFormat::Mp4,
+            output_format: Some(OutputFormat::Mp4),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,

@@ -197,7 +197,7 @@ mod tests {
             } else {
                 vec![ImageData {
                     data: minimal_png(),
-                    format: req.output_format,
+                    format: req.resolved_output_format(),
                     width: req.width,
                     height: req.height,
                     index: 0,

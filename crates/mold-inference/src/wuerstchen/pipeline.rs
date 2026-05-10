@@ -1225,7 +1225,7 @@ impl WuerstchenEngine {
         update_output_metadata_size(&mut output_metadata, actual_w as u32, actual_h as u32);
         let image_bytes = encode_image(
             &img,
-            req.output_format,
+            req.resolved_output_format(),
             actual_w as u32,
             actual_h as u32,
             output_metadata.as_ref(),
@@ -1241,7 +1241,7 @@ impl WuerstchenEngine {
         Ok(GenerateResponse {
             images: vec![ImageData {
                 data: image_bytes,
-                format: req.output_format,
+                format: req.resolved_output_format(),
                 width: req.width,
                 height: req.height,
                 index: 0,
@@ -1453,7 +1453,7 @@ impl WuerstchenEngine {
         update_output_metadata_size(&mut output_metadata, actual_w as u32, actual_h as u32);
         let image_bytes = encode_image(
             &img,
-            req.output_format,
+            req.resolved_output_format(),
             actual_w as u32,
             actual_h as u32,
             output_metadata.as_ref(),
@@ -1465,7 +1465,7 @@ impl WuerstchenEngine {
         Ok(GenerateResponse {
             images: vec![ImageData {
                 data: image_bytes,
-                format: req.output_format,
+                format: req.resolved_output_format(),
                 width: req.width,
                 height: req.height,
                 index: 0,

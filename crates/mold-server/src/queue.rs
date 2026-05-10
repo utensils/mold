@@ -1047,7 +1047,7 @@ mod tests {
             guidance: 3.5,
             seed: Some(7),
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,

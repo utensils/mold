@@ -893,7 +893,7 @@ impl ZImageEngine {
         let output_metadata = build_output_metadata(req, seed, None);
         let image_bytes = encode_image(
             &image,
-            req.output_format,
+            req.resolved_output_format(),
             req.width,
             req.height,
             output_metadata.as_ref(),
@@ -909,7 +909,7 @@ impl ZImageEngine {
         Ok(GenerateResponse {
             images: vec![ImageData {
                 data: image_bytes,
-                format: req.output_format,
+                format: req.resolved_output_format(),
                 width: req.width,
                 height: req.height,
                 index: 0,
@@ -1284,7 +1284,7 @@ impl ZImageEngine {
         let output_metadata = build_output_metadata(req, seed, None);
         let image_bytes = encode_image(
             &image,
-            req.output_format,
+            req.resolved_output_format(),
             req.width,
             req.height,
             output_metadata.as_ref(),
@@ -1296,7 +1296,7 @@ impl ZImageEngine {
         Ok(GenerateResponse {
             images: vec![ImageData {
                 data: image_bytes,
-                format: req.output_format,
+                format: req.resolved_output_format(),
                 width: req.width,
                 height: req.height,
                 index: 0,

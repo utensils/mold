@@ -344,6 +344,16 @@ async fn prepare_generation(
         return Err(model_manager::install_error_to_api_error(&e));
     }
     let family_hint = model_manager::catalog_family_for(state, &request.model).await;
+
+    // Resolve the model family for normalisation. `family_for_model` checks the
+    // static manifest first (covers all built-in models), then falls back to the
+    // catalog DB entry (covers `cv:*` / `hf:*` models installed above).
+    let resolved_family = model_manager::family_for_model(state, &request.model).await;
+    // Fill in a family-aware output format default when the caller omitted the
+    // field. This must happen before validation so the validator sees a concrete
+    // format and can gate on it correctly.
+    request.normalise_output_format(resolved_family.as_deref());
+
     if let Err(e) = validate_generate_request(request, family_hint.as_deref()) {
         return Err(ApiError::validation(e));
     }
@@ -453,7 +463,7 @@ async fn generate(
         steps = req.steps,
         guidance = req.guidance,
         seed = ?req.seed,
-        format = %req.output_format,
+        format = %req.resolved_output_format(),
         lora = ?req.lora.as_ref().map(|l| &l.path),
         lora_scale = ?req.lora.as_ref().map(|l| l.scale),
         loras = ?req.loras.as_ref().map(|v| v.iter().map(|l| &l.path).collect::<Vec<_>>()),
