@@ -1277,6 +1277,9 @@ mod tests {
             catalog_live_civitai_base: std::sync::Arc::new(
                 crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
             ),
+            catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1333,6 +1336,9 @@ mod tests {
             catalog_live_civitai_base: std::sync::Arc::new(
                 crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
             ),
+            catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -1592,6 +1598,9 @@ mod tests {
             catalog_live_civitai_base: std::sync::Arc::new(
                 crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
             ),
+            catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));

@@ -29,8 +29,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use mold_catalog::entry::{Bundling, CatalogEntry, Kind};
-use mold_core::download::sanitize_recipe_id;
+use mold_catalog::entry::{Bundling, CatalogEntry};
 use mold_core::{Config, ModelConfig, ModelPaths};
 
 /// True if `input` has the structural shape of a catalog ID
@@ -82,96 +81,80 @@ pub fn synthesize_model_config(
     models_dir: &Path,
     config: &Config,
 ) -> Result<ModelConfig> {
-    let primary =
-        entry.download_recipe.files.first().ok_or_else(|| {
-            anyhow::anyhow!("catalog entry {} has empty download_recipe", entry.id.0)
-        })?;
+    // Pure intent — no disk reads. Single source of truth lives in
+    // `mold_catalog::synthesis`; both server and CLI consume it.
+    let intent = mold_catalog::synthesis::synthesize_intent(entry, models_dir)?;
+    intent_to_model_config(&intent, config)
+}
 
-    // Reproduce the path computation that `fetch_recipe` wrote to disk:
-    // `<models_dir>/<sanitized-id>/<rendered-dest>`.
-    let sanitized = sanitize_recipe_id(entry.id.as_str());
-    let (author, name) = match entry.source_id.split_once('/') {
-        Some((a, n)) => (a, n),
-        None => ("", entry.source_id.as_str()),
-    };
-    let rendered_dest =
-        mold_catalog::entry::render_recipe_dest(&primary.dest, entry.family.as_str(), author, name);
-    let primary_path = models_dir.join(&sanitized).join(&rendered_dest);
-    let primary_str = primary_path
+/// CLI-side disk-aware resolution: turn an intent into a `ModelConfig`.
+///
+/// Differs from the server's `resolve_intent_to_paths` only in failure
+/// mode: CLI's pull flow runs this after `pull_and_configure` completes
+/// the download, so missing companions are an unrecoverable bug rather
+/// than a transient. We log + skip rather than hard-erroring to keep
+/// existing CLI behavior; the engine load surface picks up any real
+/// missing field at construction time with a precise message.
+fn intent_to_model_config(
+    intent: &mold_catalog::synthesis::CatalogModelIntent,
+    config: &Config,
+) -> Result<ModelConfig> {
+    let primary_str = intent
+        .primary_recipe_path
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("synthesized path is not valid UTF-8: {primary_path:?}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "synthesized path is not valid UTF-8: {:?}",
+                intent.primary_recipe_path
+            )
+        })?
         .to_string();
 
     let mut cfg = ModelConfig {
-        family: Some(entry.family.as_str().to_string()),
+        family: Some(intent.family.clone()),
         ..Default::default()
     };
 
-    // Single-file vs. separated dispatch. Civitai checkpoints in this
-    // catalog are always SingleFile (the manifest path covers separated
-    // diffusers layouts under `[models]`).
-    if matches!(entry.bundling, Bundling::SingleFile) {
-        cfg.transformer = Some(primary_str.clone());
-        // Civitai FLUX fine-tune convention is split: some bundle the VAE
-        // (`*_full.safetensors`), some are transformer-only
-        // (`*Unet.safetensors`). For SDXL/SD1.5 the convention is consistent
-        // (VAE always bundled); for FLUX we peek the safetensors header.
-        // When the bundle lacks a VAE we defer cfg.vae — the flux-vae
-        // companion populates it in `copy_companion_into_cfg`.
-        if entry.family == mold_catalog::families::Family::Flux
-            && primary_path.exists()
-            && !mold_inference::loader::flux_single_file_bundles_vae(&primary_path).map_err(
-                |e| {
-                    anyhow::anyhow!(
-                        "probe FLUX checkpoint {} for bundled VAE: {e}",
-                        primary_path.display()
-                    )
-                },
-            )?
-        {
-            // Transformer-only FLUX checkpoint — flux-vae companion populates cfg.vae below.
-        } else {
-            cfg.vae = Some(primary_str);
-        }
-    } else {
+    if !matches!(intent.bundling, Bundling::SingleFile) {
         anyhow::bail!(
-            "catalog entry {} has bundling={:?} which is not yet wired into the run bridge \
+            "catalog entry has bundling={:?} which is not yet wired into the run bridge \
              (single-file only)",
-            entry.id.0,
-            entry.bundling,
+            intent.bundling,
         );
     }
+    cfg.transformer = Some(primary_str.clone());
 
-    populate_companion_paths(
-        &mut cfg,
-        entry.family,
-        entry.sub_family.as_deref(),
-        entry.kind,
-        config,
-    );
+    // FLUX is the only family with mixed bundling — peek the safetensors
+    // header. SDXL/SD1.5 always bundle; Flux.2 / LTX-Video / LTX-2 always
+    // need a separate VAE companion.
+    let family = mold_catalog::families::Family::from_str(&intent.family)
+        .map_err(|e| anyhow::anyhow!("intent has unknown family slug: {e}"))?;
+    let bundles = if family == mold_catalog::families::Family::Flux {
+        if intent.primary_recipe_path.exists() {
+            mold_inference::loader::flux_single_file_bundles_vae(&intent.primary_recipe_path)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "probe FLUX checkpoint {} for bundled VAE: {e}",
+                        intent.primary_recipe_path.display()
+                    )
+                })?
+        } else {
+            false
+        }
+    } else {
+        mold_catalog::synthesis::family_bundles_vae_unconditionally(family)
+    };
+    if bundles {
+        cfg.vae = Some(primary_str);
+    }
 
-    Ok(cfg)
-}
-
-/// For each canonical companion this family declares, look up the
-/// companion's resolved manifest paths and copy the relevant token /
-/// encoder fields onto `cfg`. Best-effort: skip companions whose paths
-/// aren't resolvable. The single-file engine dispatch surfaces a
-/// precise error ("requires a companion-pulled clip_tokenizer") when
-/// a *required* field is still None at engine-construction time.
-fn populate_companion_paths(
-    cfg: &mut ModelConfig,
-    family: mold_catalog::families::Family,
-    sub_family: Option<&str>,
-    kind: Kind,
-    config: &Config,
-) {
-    use mold_catalog::companions::companions_for;
-    for companion in companions_for(family, sub_family, Bundling::SingleFile, kind) {
-        if let Some(paths) = ModelPaths::resolve(&companion, config) {
-            copy_companion_into_cfg(cfg, &companion, &paths);
+    for companion in &intent.companions {
+        if let Some(paths) = ModelPaths::resolve(&companion.name, config) {
+            copy_companion_into_cfg(&mut cfg, &companion.name, &paths);
         }
     }
+
+    Ok(cfg)
 }
 
 fn copy_companion_into_cfg(cfg: &mut ModelConfig, companion_name: &str, paths: &ModelPaths) {
@@ -340,8 +323,8 @@ mod tests {
     }
 
     use mold_catalog::entry::{
-        CatalogId, DownloadRecipe, FamilyRole, FileFormat, LicenseFlags, Modality, RecipeFile,
-        Source, TokenKind,
+        CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind, LicenseFlags, Modality,
+        RecipeFile, Source, TokenKind,
     };
     use mold_catalog::families::Family;
 
@@ -437,6 +420,33 @@ mod tests {
         }
     }
 
+    /// Pin MOLD_HOME to a path that contains no real `.hf-cache/` so
+    /// `ModelPaths::resolve` can't find an unrelated installed companion
+    /// from the dev machine and inject it into the synthesized config.
+    /// Returns a guard whose Drop restores the previous value.
+    struct MoldHomeGuard {
+        prev: Option<String>,
+    }
+
+    impl Drop for MoldHomeGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("MOLD_HOME", v),
+                    None => std::env::remove_var("MOLD_HOME"),
+                }
+            }
+        }
+    }
+
+    fn pin_mold_home(path: &std::path::Path) -> MoldHomeGuard {
+        let prev = std::env::var("MOLD_HOME").ok();
+        unsafe {
+            std::env::set_var("MOLD_HOME", path.to_string_lossy().as_ref());
+        }
+        MoldHomeGuard { prev }
+    }
+
     /// `stub_companion_paths` above stubs both clip-l and clip-g with
     /// their own `tokenizer.json`. Real on-disk state has clip-g without
     /// a tokenizer entry on its companion manifest — clip-g's text
@@ -473,6 +483,7 @@ mod tests {
     fn sdxl_synth_falls_back_clip_g_tokenizer_to_clip_l() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_models_dir_env();
+        let _home_guard = pin_mold_home(std::path::Path::new("/tmp/mold-test-models"));
 
         let models_dir = "/tmp/mold-test-models";
         let mut config = explicit_config(models_dir);
@@ -499,6 +510,7 @@ mod tests {
     fn synthesize_model_config_for_sdxl_single_file_civitai_entry() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_models_dir_env();
+        let _home_guard = pin_mold_home(std::path::Path::new("/tmp/mold-test-models"));
 
         let models_dir = "/tmp/mold-test-models";
         let mut config = explicit_config(models_dir);
@@ -681,6 +693,7 @@ mod tests {
     fn flux2_klein_9b_synth_populates_qwen3_8b_encoder_and_klein_vae() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_models_dir_env();
+        let _home_guard = pin_mold_home(std::path::Path::new("/tmp/mold-test-models"));
 
         let models_dir = "/tmp/mold-test-models";
         let mut config = explicit_config(models_dir);
@@ -729,6 +742,7 @@ mod tests {
     fn flux2_klein_4b_synth_populates_qwen3_4b_encoder() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_models_dir_env();
+        let _home_guard = pin_mold_home(std::path::Path::new("/tmp/mold-test-models"));
 
         let models_dir = "/tmp/mold-test-models";
         let mut config = explicit_config(models_dir);
@@ -873,6 +887,7 @@ mod tests {
         // Build the on-disk transformer-only fixture exactly where
         // `synthesize_model_config` will probe it.
         let dir = tempfile::tempdir().unwrap();
+        let _home_guard = pin_mold_home(dir.path());
         let models_dir = dir.path().to_str().unwrap();
         let primary_path = std::path::PathBuf::from(format!(
             "{models_dir}/cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors"
@@ -914,6 +929,7 @@ mod tests {
         clear_models_dir_env();
 
         let dir = tempfile::tempdir().unwrap();
+        let _home_guard = pin_mold_home(dir.path());
         let models_dir = dir.path().to_str().unwrap();
         let primary_path = std::path::PathBuf::from(format!(
             "{models_dir}/cv-101010/flux/civitai/101010/flux_full.safetensors"

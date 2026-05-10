@@ -168,6 +168,15 @@ pub struct AppState {
     /// Upstream base URL for live Civitai search. Production runs with
     /// the public host; tests override via `with_civitai_base`.
     pub catalog_live_civitai_base: Arc<String>,
+    /// Cache of pure synthesis intents for installed catalog (`cv:*`/`hf:*`)
+    /// IDs, keyed by ID. Resolution into a `ModelConfig` is deferred to
+    /// engine-load time so disk-state races (file present vs not) can't
+    /// seal a wrong config; see `model_manager::resolve_intent_to_paths`.
+    pub catalog_intents: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, mold_catalog::synthesis::CatalogModelIntent>,
+        >,
+    >,
 }
 
 /// Default TTL for the live-search cache. Five minutes is long enough
@@ -299,6 +308,7 @@ impl AppState {
             resources: ResourceBroadcaster::new(),
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
+            catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -328,6 +338,7 @@ impl AppState {
             resources: ResourceBroadcaster::new(),
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
+            catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -372,6 +383,7 @@ impl AppState {
             resources: ResourceBroadcaster::new(),
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
+            catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -403,6 +415,7 @@ impl AppState {
             resources: ResourceBroadcaster::new(),
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
+            catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         };
         (state, rx)
     }
@@ -434,6 +447,7 @@ impl AppState {
             resources: ResourceBroadcaster::new(),
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
+            catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 

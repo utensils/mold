@@ -15,3 +15,4 @@ pub mod hf_seeds;
 pub mod live;
 pub mod normalizer;
 pub mod sidecar;
+pub mod synthesis;

@@ -340,13 +340,19 @@ fn looks_like_catalog_id(id: &str) -> bool {
 /// used to feed `validate_generate_request_with_family` so catalog IDs
 /// get the same family-gated feature checks as manifest-resident models.
 ///
-/// Reads from `state.config.models` — callers must run
-/// `ensure_catalog_model_installed` first so the entry has been
-/// synthesized into the config. Returns `None` for non-catalog ids,
-/// uninstalled catalog ids, or entries lacking a family.
+/// Reads from the intent cache first (populated by `install_catalog_model`
+/// before the engine-load resolution runs), then falls back to
+/// `state.config.models` for back-compat with callers that snapshotted
+/// the resolved `ModelConfig`.
 pub(crate) async fn catalog_family_for(state: &AppState, model_name: &str) -> Option<String> {
     if !looks_like_catalog_id(model_name) {
         return None;
+    }
+    {
+        let intents = state.catalog_intents.read().await;
+        if let Some(intent) = intents.get(model_name) {
+            return Some(intent.family.clone());
+        }
     }
     let config = state.config.read().await;
     config.models.get(model_name).and_then(|m| m.family.clone())
@@ -459,156 +465,345 @@ fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, pat
     }
 }
 
-fn synthesize_catalog_config(
-    entry: &mold_catalog::entry::CatalogEntry,
-    models_dir: &std::path::Path,
+/// Errors from the disk-aware resolution stage that turns a pure
+/// `CatalogModelIntent` into a runtime `ModelConfig`.
+///
+/// Intent synthesis is pure; everything that depends on actual disk state
+/// — the FLUX VAE-bundle probe, companion path lookup, file existence —
+/// runs here and surfaces precise errors instead of silent partial state.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ResolveError {
+    /// A required companion's manifest entry isn't in the user's
+    /// `Config.models` map. This is a real config bug — the user hasn't
+    /// installed (or has a broken manifest entry for) a base model the
+    /// catalog entry depends on.
+    #[error(
+        "catalog model '{model}' is missing required component '{companion}'.\n\
+         The manifest entry for '{companion}' is not present in your config — \
+         install the matching base model first."
+    )]
+    CompanionConfigMissing {
+        model: String,
+        companion: &'static str,
+    },
+
+    /// A required companion's file isn't on disk yet. Transient — caller
+    /// hasn't finished `mold pull`-ing this entry. Tells the user
+    /// specifically which component is missing rather than the generic
+    /// "missing required components" pre-fix message.
+    #[error(
+        "catalog model '{model}' is missing required component '{companion}'.\n\
+         The companion file isn't on disk yet. Run `mold pull {model}` to fetch \
+         the primary checkpoint AND its companion files."
+    )]
+    CompanionFileMissing {
+        model: String,
+        companion: &'static str,
+    },
+
+    /// The FLUX bundled-VAE probe couldn't be run (e.g. malformed
+    /// safetensors header). Surfaces the underlying inference-loader
+    /// error so the user can act.
+    #[error("probe of FLUX checkpoint {path} for bundled VAE failed: {source}")]
+    FluxProbeFailed {
+        path: String,
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+/// All companions emitted by `companions_for` are statically known
+/// names from the registry. We pin the resolution to the same
+/// `&'static str` so error messages can carry it without an allocation
+/// and the match in `copy_catalog_companion` never sees a typo.
+fn known_companion_static(name: &str) -> Option<&'static str> {
+    // The set is closed: any name in `companions_for` outputs maps here.
+    // Adding a new companion to the registry without a match arm here is
+    // a compile-time invitation to update both sides.
+    Some(match name {
+        "clip-l" => "clip-l",
+        "clip-g" => "clip-g",
+        "sdxl-vae" => "sdxl-vae",
+        "sd-vae-ft-mse" => "sd-vae-ft-mse",
+        "flux-vae" => "flux-vae",
+        "flux2-te" => "flux2-te",
+        "flux2-te-9b" => "flux2-te-9b",
+        "flux2-vae" => "flux2-vae",
+        "z-image-te" => "z-image-te",
+        "ltx-video-vae" => "ltx-video-vae",
+        "ltx2-te" => "ltx2-te",
+        "t5-v1_1-xxl" => "t5-v1_1-xxl",
+        _ => return None,
+    })
+}
+
+/// Disk-aware resolution: turn a pure `CatalogModelIntent` into a
+/// `ModelConfig` ready for engine load.
+///
+/// Runs the FLUX bundled-VAE probe (file must be on disk) and walks the
+/// required-companion list, populating the `ModelConfig` fields each
+/// companion contributes. Returns a [`ResolveError`] when a required
+/// companion can't be resolved — never silently returns a partial config.
+pub(crate) fn resolve_intent_to_paths(
+    model_name: &str,
+    intent: &mold_catalog::synthesis::CatalogModelIntent,
     config: &mold_core::Config,
-) -> anyhow::Result<mold_core::ModelConfig> {
-    use mold_catalog::companions::companions_for;
-    use mold_catalog::entry::Bundling;
-    use mold_catalog::families::Family;
-
-    let primary = entry
-        .download_recipe
-        .files
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("empty recipe for {}", entry.id.0))?;
-
-    let sanitized = mold_core::download::sanitize_recipe_id(entry.id.as_str());
-    let (author, name) = match entry.source_id.split_once('/') {
-        Some((a, n)) => (a, n),
-        None => ("", entry.source_id.as_str()),
-    };
-    let rendered_dest =
-        mold_catalog::entry::render_recipe_dest(&primary.dest, entry.family.as_str(), author, name);
-    let primary_path = models_dir.join(&sanitized).join(&rendered_dest);
-    let primary_str = primary_path
+) -> Result<mold_core::ModelConfig, ResolveError> {
+    let primary_str = intent
+        .primary_recipe_path
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("path not UTF-8: {primary_path:?}"))?
+        .expect("synthesize_intent guarantees UTF-8 paths")
         .to_string();
 
     let mut cfg = mold_core::ModelConfig {
-        family: Some(entry.family.as_str().to_string()),
+        family: Some(intent.family.clone()),
         ..Default::default()
     };
+    cfg.transformer = Some(primary_str.clone());
 
-    if matches!(entry.bundling, Bundling::SingleFile) {
-        cfg.transformer = Some(primary_str.clone());
-        // Civitai FLUX fine-tunes are split: some bundle the VAE under
-        // `first_stage_model.*` keys, some (e.g. cv:994561 — the
-        // *_realHornyProV3Unet.safetensors file) are transformer-only.
-        // For SDXL/SD1.5 the convention is consistent (VAE bundled), but
-        // for FLUX we have to peek the safetensors header. When the bundle
-        // lacks a VAE, defer cfg.vae and let the flux-vae companion populate
-        // it below — copy_catalog_companion only writes to flux-vae's slot
-        // when cfg.vae is None, so a bundled VAE always wins.
-        if entry.family == Family::Flux
-            && primary_path.exists()
-            && !mold_inference::loader::flux_single_file_bundles_vae(&primary_path).map_err(
-                |e| {
-                    anyhow::anyhow!(
-                        "probe FLUX checkpoint {} for bundled VAE: {e}",
-                        primary_path.display()
-                    )
-                },
-            )?
-        {
-            // Transformer-only FLUX checkpoint — flux-vae companion is required.
-        } else {
-            cfg.vae = Some(primary_str);
-        }
+    // FLUX is the only family with mixed bundling — peek the safetensors
+    // header to decide whether the primary file carries the VAE or
+    // whether the flux-vae companion has to populate cfg.vae.
+    let is_flux = intent.family == "flux";
+    let probe_says_bundled = if is_flux && intent.primary_recipe_path.exists() {
+        Some(
+            mold_inference::loader::flux_single_file_bundles_vae(&intent.primary_recipe_path)
+                .map_err(|e| ResolveError::FluxProbeFailed {
+                    path: intent.primary_recipe_path.display().to_string(),
+                    source: e.into(),
+                })?,
+        )
+    } else if is_flux {
+        // Primary not on disk yet — defer. The flux-vae companion (which
+        // is in the required list for FLUX) must populate cfg.vae below.
+        None
+    } else if mold_catalog::synthesis::family_bundles_vae_unconditionally(flux_family_for_slug(
+        &intent.family,
+    )) {
+        // SDXL / SD1.5 always bundle the VAE.
+        Some(true)
     } else {
-        anyhow::bail!(
-            "bundling={:?} not supported (single-file only)",
-            entry.bundling
-        );
+        // Flux.2 / LTX-Video / LTX-2 always need a separate VAE companion.
+        Some(false)
+    };
+    if probe_says_bundled == Some(true) {
+        cfg.vae = Some(primary_str);
+    }
+    // probe_says_bundled == Some(false) ⇒ leave cfg.vae None for the
+    // VAE-companion arm in copy_catalog_companion to fill. None case
+    // (FLUX, file not yet on disk) is the same: the companion fills
+    // cfg.vae if its own file is present, otherwise we surface
+    // CompanionFileMissing below.
+
+    let mut missing_required: Option<&'static str> = None;
+
+    for companion in &intent.companions {
+        let static_name =
+            known_companion_static(&companion.name).expect("companion name in registry");
+        match ModelPaths::resolve(static_name, config) {
+            Some(paths) => copy_catalog_companion(&mut cfg, static_name, &paths),
+            None => {
+                if companion.required {
+                    // Pin the first missing required companion; we keep
+                    // looping so the entire missing set could be logged
+                    // in future iterations, but the first one is what the
+                    // user-facing error reports.
+                    if missing_required.is_none() {
+                        missing_required = Some(static_name);
+                    }
+                }
+            }
+        }
     }
 
-    for companion in companions_for(
-        entry.family,
-        entry.sub_family.as_deref(),
-        Bundling::SingleFile,
-        entry.kind,
-    ) {
-        match ModelPaths::resolve(&companion, config) {
-            Some(paths) => copy_catalog_companion(&mut cfg, &companion, &paths),
-            None => tracing::warn!(
-                catalog_id = %entry.id.0,
-                companion = %companion,
-                "companion did not resolve from manifest paths — engine load may fail"
-            ),
-        }
+    if let Some(missing) = missing_required {
+        return Err(classify_missing_companion(model_name, missing, config));
     }
 
     Ok(cfg)
 }
 
-/// If `model_name` is a catalog ID and not yet in the config, hit live
-/// HF/Civitai for the entry and synthesize its `ModelConfig`. Returns
-/// `true` when a config entry was added (or already existed).
-pub(crate) async fn install_catalog_model(state: &AppState, model_name: &str) -> bool {
+fn flux_family_for_slug(slug: &str) -> mold_catalog::families::Family {
+    use mold_catalog::families::Family;
+    match slug {
+        "flux" => Family::Flux,
+        "flux2" => Family::Flux2,
+        "sd15" => Family::Sd15,
+        "sdxl" => Family::Sdxl,
+        "z-image" => Family::ZImage,
+        "ltx-video" => Family::LtxVideo,
+        "ltx2" => Family::Ltx2,
+        "qwen-image" => Family::QwenImage,
+        "wuerstchen" => Family::Wuerstchen,
+        // Defensive — synthesize_intent only emits known slugs.
+        _ => Family::Flux,
+    }
+}
+
+/// Decide whether a missing companion is "config bug" vs "file not yet
+/// downloaded". The catalog bridge writes companion entries into
+/// `config.models` lazily — if they aren't there at all, that's a
+/// CompanionConfigMissing. If the entry is there but the file the
+/// manifest paths point at doesn't exist, that's CompanionFileMissing
+/// (the user didn't `mold pull` yet).
+fn classify_missing_companion(
+    model_name: &str,
+    companion: &'static str,
+    config: &mold_core::Config,
+) -> ResolveError {
+    if !config.models.contains_key(companion) {
+        ResolveError::CompanionConfigMissing {
+            model: model_name.to_string(),
+            companion,
+        }
+    } else {
+        ResolveError::CompanionFileMissing {
+            model: model_name.to_string(),
+            companion,
+        }
+    }
+}
+
+/// Backwards-compatible wrapper: pure synthesis + disk-aware resolution
+/// in one step. Used only by the in-tree tests that pre-date the
+/// intent / lazy-resolve split — production paths call
+/// `synthesize_intent` + `resolve_intent_to_paths` separately so the
+/// intent can be cached and resolution re-runs as files land.
+#[cfg(test)]
+fn synthesize_catalog_config(
+    entry: &mold_catalog::entry::CatalogEntry,
+    models_dir: &std::path::Path,
+    config: &mold_core::Config,
+) -> anyhow::Result<mold_core::ModelConfig> {
+    let intent = mold_catalog::synthesis::synthesize_intent(entry, models_dir)?;
+    Ok(resolve_intent_to_paths(entry.id.as_str(), &intent, config)?)
+}
+
+/// If `model_name` is a catalog ID and not yet in the intent cache, hit
+/// live HF/Civitai for the entry and synthesize its
+/// [`CatalogModelIntent`]. Returns `Ok(())` when a fresh entry was
+/// installed or one was already cached. Returns a typed [`InstallError`]
+/// so the caller can map per-variant to a user-facing HTTP status.
+///
+/// This function is *pure synthesis* — no disk reads. The intent stays
+/// valid across download events; resolution into a `ModelConfig` is run
+/// lazily by [`resolve_intent_to_paths`] at engine-load time.
+pub(crate) async fn install_catalog_model(
+    state: &AppState,
+    model_name: &str,
+) -> Result<(), mold_core::InstallError> {
     if !looks_like_catalog_id(model_name) {
-        return false;
+        // Caller should have shape-checked first; treat it as a no-op
+        // success rather than fabricating a custom error variant.
+        return Ok(());
     }
 
-    // Already synthesized from a prior request?
+    // Already installed from a prior request — keep the cached intent.
     {
-        let config = state.config.read().await;
-        if config.models.contains_key(model_name) {
-            return true;
+        let intents = state.catalog_intents.read().await;
+        if intents.contains_key(model_name) {
+            return Ok(());
         }
     }
 
-    // Live single-id lookup. Tokens are picked up from env so unauthenticated
-    // browsing still works.
+    // Live single-id lookup. Tokens are picked up from env so
+    // unauthenticated browsing still works.
     let civitai_base = state.catalog_live_civitai_base.as_str();
     let entry = if let Some(version_id) = model_name.strip_prefix("cv:") {
-        match mold_catalog::live::fetch_civitai_version(
+        mold_catalog::live::fetch_civitai_version(
             civitai_base,
             version_id,
             std::env::var("CIVITAI_TOKEN").ok().as_deref(),
         )
         .await
-        {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(model = model_name, error = %e, "live civitai lookup failed");
-                return false;
-            }
-        }
+        .map_err(|e| live_error_to_install_error(model_name, &e))?
     } else if let Some(repo_id) = model_name.strip_prefix("hf:") {
-        match mold_catalog::live::fetch_hf_repo(
+        mold_catalog::live::fetch_hf_repo(
             "https://huggingface.co",
             repo_id,
             std::env::var("HF_TOKEN").ok().as_deref(),
         )
         .await
-        {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(model = model_name, error = %e, "live hf lookup failed");
-                return false;
-            }
-        }
+        .map_err(|e| live_error_to_install_error(model_name, &e))?
     } else {
-        return false;
+        return Ok(());
     };
 
-    let synth = {
-        let config = state.config.read().await;
-        let models_dir = config.resolved_models_dir();
-        match synthesize_catalog_config(&entry, &models_dir, &config) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(model = model_name, error = %e, "synthesize failed");
-                return false;
-            }
+    let models_dir = state.config.read().await.resolved_models_dir();
+    let intent = mold_catalog::synthesis::synthesize_intent(&entry, &models_dir).map_err(|e| {
+        mold_core::InstallError::RecipeMalformed(format!("synthesize intent for {model_name}: {e}"))
+    })?;
+
+    let mut intents = state.catalog_intents.write().await;
+    intents.insert(model_name.to_string(), intent);
+    Ok(())
+}
+
+/// Translate a `LiveSearchError` into the user-facing `InstallError`
+/// shape. The `Upstream` variant carries the HTTP status from the
+/// upstream's response body — 404 is "not found", anything else is
+/// "malformed recipe" (the live API answered, but the response wasn't
+/// what mold expects).
+fn live_error_to_install_error(
+    model_name: &str,
+    err: &mold_catalog::live::LiveSearchError,
+) -> mold_core::InstallError {
+    use mold_catalog::live::LiveSearchError;
+    match err {
+        LiveSearchError::Network(e) => {
+            mold_core::InstallError::Network(format!("{model_name}: {e}"))
         }
-    };
+        LiveSearchError::Decode(e) => mold_core::InstallError::RecipeMalformed(format!(
+            "{model_name}: decode upstream payload: {e}"
+        )),
+        LiveSearchError::Upstream { status, body, .. } if *status == 404 => {
+            mold_core::InstallError::NotFound(format!(
+                "{model_name}: upstream returned 404 ({})",
+                truncate_body(body)
+            ))
+        }
+        LiveSearchError::Upstream { status, body, .. } => {
+            mold_core::InstallError::RecipeMalformed(format!(
+                "{model_name}: upstream HTTP {status}: {}",
+                truncate_body(body)
+            ))
+        }
+    }
+}
 
-    let mut config = state.config.write().await;
-    config.models.insert(model_name.to_string(), synth);
-    true
+fn truncate_body(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.len() > 160 {
+        format!("{}…", &trimmed[..160])
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Translate `InstallError` into the user-facing `ApiError`. Each variant
+/// maps to a distinct HTTP status so clients can tell "Civitai is down"
+/// from "you typed a bad ID".
+pub(crate) fn install_error_to_api_error(err: &mold_core::InstallError) -> ApiError {
+    use mold_core::InstallError;
+    match err {
+        InstallError::Network(msg) => {
+            // 502 Bad Gateway via internal_with_status — the catalog
+            // upstream is unreachable, not a mold internal failure.
+            ApiError::internal_with_status(
+                format!("network unreachable: {msg}"),
+                axum::http::StatusCode::BAD_GATEWAY,
+            )
+        }
+        InstallError::NotFound(msg) => ApiError::not_found(msg.to_string()),
+        InstallError::RecipeMalformed(msg) => ApiError::internal(msg.to_string()),
+    }
+}
+
+/// Translate `ResolveError` into the user-facing `ApiError`. Both
+/// variants surface as 404 (the model isn't loadable yet) but with
+/// distinct, specific messages so the user can act.
+pub(crate) fn resolve_error_to_api_error(err: &ResolveError) -> ApiError {
+    ApiError::not_found(err.to_string())
 }
 
 /// Return `ModelInfoExtended` entries for every installed catalog
@@ -736,30 +931,54 @@ pub(crate) async fn check_model_available(
         }
     }
 
-    // Catalog bridge: synthesize config for installed cv:* / hf:* entries so
-    // the web UI can generate with models downloaded from the catalog.
+    // Catalog bridge: install (live lookup → cache intent), then resolve the
+    // intent against fresh disk state on every request. Lazy resolution
+    // means a request that fires while files are still downloading no
+    // longer seals a wrong `cfg.vae` into the config — the next request
+    // re-resolves once files land.
     if looks_like_catalog_id(model_name) {
-        let synth_ok = install_catalog_model(state, model_name).await;
-        if synth_ok {
-            let config = state.config.read().await;
-            if let Some(paths) = ModelPaths::resolve(model_name, &config) {
-                return Ok(Some(paths));
-            }
-            // Synthesis succeeded (entry was found and config built) but
-            // ModelPaths::resolve failed — the catalog config is missing
-            // a required field (transformer or vae). For a transformer-only
-            // FLUX checkpoint that's the flux-vae companion not being on
-            // disk. Surface that specifically rather than the misleading
-            // "not installed" generic.
-            return Err(ApiError::not_found(format!(
-                "catalog model '{model_name}' is missing required components. \
-                 Re-pull the entry from the catalog so its companions \
-                 (CLIP-L / T5 / VAE) are fetched alongside the primary checkpoint."
-            )));
+        if let Err(install_err) = install_catalog_model(state, model_name).await {
+            return Err(install_error_to_api_error(&install_err));
         }
-        return Err(ApiError::not_found(format!(
-            "catalog model '{model_name}' is not installed. Download it from the catalog first."
-        )));
+        let intents = state.catalog_intents.read().await;
+        let intent = intents
+            .get(model_name)
+            .ok_or_else(|| {
+                ApiError::not_found(format!(
+                    "catalog model '{model_name}' is not installed. Download it from \
+                     the catalog first."
+                ))
+            })?
+            .clone();
+        drop(intents);
+
+        let resolved = {
+            let config = state.config.read().await;
+            resolve_intent_to_paths(model_name, &intent, &config)
+        };
+        match resolved {
+            Ok(model_cfg) => {
+                // Cache the resolved ModelConfig back into config.models so
+                // downstream `resolved_model_config` / family lookups still
+                // work as before.
+                {
+                    let mut config = state.config.write().await;
+                    config.models.insert(model_name.to_string(), model_cfg);
+                }
+                let config = state.config.read().await;
+                if let Some(paths) = ModelPaths::resolve(model_name, &config) {
+                    return Ok(Some(paths));
+                }
+                // ModelPaths::resolve failed despite successful synthesis —
+                // shouldn't happen because resolve_intent_to_paths checks
+                // companions, but surface a precise diagnostic if it does.
+                return Err(ApiError::not_found(format!(
+                    "catalog model '{model_name}' resolved to a config that ModelPaths \
+                     could not turn into runtime paths — internal mismatch, please file an issue."
+                )));
+            }
+            Err(e) => return Err(resolve_error_to_api_error(&e)),
+        }
     }
 
     if mold_core::manifest::find_manifest(model_name).is_some() {
@@ -1749,6 +1968,11 @@ mod tests {
     fn synthesize_catalog_config_uses_bundled_vae_when_present() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
+        // SAFETY: env mutation is racy with other tests; this is the
+        // only test in this module that touches MOLD_HOME for the
+        // bundled-VAE flow. Pair with the transformer-only sibling.
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
 
         let primary_path = models_dir.join("cv-101010/flux/civitai/101010/flux_full.safetensors");
         std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
@@ -1761,8 +1985,6 @@ mod tests {
             ],
         );
 
-        // Even with flux-vae stubbed, cfg.vae must remain pointing at the
-        // primary checkpoint — bundled VAE wins.
         let vae_path = models_dir.join("flux-vae/ae.safetensors");
         std::fs::create_dir_all(vae_path.parent().unwrap()).unwrap();
         std::fs::File::create(&vae_path).unwrap();
@@ -1770,12 +1992,39 @@ mod tests {
             models_dir: models_dir.to_string_lossy().into_owned(),
             ..Default::default()
         };
+        // Stub all FLUX companions so resolve_intent_to_paths' hard
+        // companion check passes — even with flux-vae present we want to
+        // assert cfg.vae stays at the primary.
         config.models.insert(
             "flux-vae".into(),
             mold_core::ModelConfig {
                 family: Some("companion".into()),
                 transformer: Some(vae_path.to_string_lossy().into_owned()),
                 vae: Some(vae_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "clip-l".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!("{}/clip-l/model.safetensors", models_dir.display())),
+                vae: Some(format!("{}/clip-l/model.safetensors", models_dir.display())),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "t5-v1_1-xxl".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!(
+                    "{}/t5-v1_1-xxl/t5xxl_fp16.safetensors",
+                    models_dir.display()
+                )),
+                vae: Some(format!(
+                    "{}/t5-v1_1-xxl/t5xxl_fp16.safetensors",
+                    models_dir.display()
+                )),
                 ..Default::default()
             },
         );
@@ -1789,5 +2038,295 @@ mod tests {
             primary_path.to_str(),
             "bundled-VAE checkpoint must keep cfg.vae == primary; flux-vae companion is a no-op",
         );
+
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    // ── Lazy intent / disk-aware resolution regression tests ───────────────
+
+    /// Stub the FLUX companion manifest entries (flux-vae, clip-l, t5)
+    /// pointing at on-disk files inside `models_dir`. Mirrors what the
+    /// real manifest installer would have done.
+    fn stub_flux_companion_paths_in_dir(
+        config: &mut mold_core::Config,
+        models_dir: &std::path::Path,
+        flux_vae_present: bool,
+    ) {
+        let vae_path = models_dir.join("flux-vae/ae.safetensors");
+        std::fs::create_dir_all(vae_path.parent().unwrap()).unwrap();
+        if flux_vae_present {
+            std::fs::File::create(&vae_path).unwrap();
+        }
+        config.models.insert(
+            "flux-vae".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(vae_path.to_string_lossy().into_owned()),
+                vae: Some(vae_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+        let clip_path = models_dir.join("clip-l/model.safetensors");
+        std::fs::create_dir_all(clip_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&clip_path).unwrap();
+        config.models.insert(
+            "clip-l".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(clip_path.to_string_lossy().into_owned()),
+                vae: Some(clip_path.to_string_lossy().into_owned()),
+                clip_tokenizer: Some(format!("{}/clip-l/tokenizer.json", models_dir.display())),
+                ..Default::default()
+            },
+        );
+        let t5_path = models_dir.join("t5-v1_1-xxl/t5xxl_fp16.safetensors");
+        std::fs::create_dir_all(t5_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&t5_path).unwrap();
+        config.models.insert(
+            "t5-v1_1-xxl".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(t5_path.to_string_lossy().into_owned()),
+                vae: Some(t5_path.to_string_lossy().into_owned()),
+                t5_tokenizer: Some(format!(
+                    "{}/t5-v1_1-xxl/tokenizer.json",
+                    models_dir.display()
+                )),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// Task 3 (Step 1): synthesis must produce the same intent regardless
+    /// of whether the primary file is on disk yet. The disk-dependent
+    /// part is moved to `resolve_intent_to_paths`, which is only called
+    /// at engine-load time.
+    #[test]
+    fn synthesis_intent_is_consistent_before_and_after_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let entry =
+            flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");
+
+        let intent_absent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+
+        let primary_path = models_dir
+            .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &primary_path,
+            &[
+                "double_blocks.0.img_attn.proj.weight",
+                "single_blocks.0.linear1.weight",
+                "img_in.weight",
+            ],
+        );
+
+        let intent_present =
+            mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+
+        assert_eq!(
+            intent_absent, intent_present,
+            "intent synthesis must be pure — independent of disk state"
+        );
+    }
+
+    /// Task 3 (Step 2 + Step 3): with the primary present as a
+    /// transformer-only checkpoint, resolution picks the flux-vae
+    /// companion for cfg.vae rather than the primary checkpoint.
+    #[test]
+    fn resolve_intent_picks_flux_vae_companion_when_primary_is_transformer_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        let primary_path = models_dir
+            .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &primary_path,
+            &[
+                "double_blocks.0.img_attn.proj.weight",
+                "single_blocks.0.linear1.weight",
+                "img_in.weight",
+            ],
+        );
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        stub_flux_companion_paths_in_dir(&mut config, models_dir, true);
+
+        let entry =
+            flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let cfg = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap();
+
+        let vae_path = models_dir.join("flux-vae/ae.safetensors");
+        assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
+        assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
+
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    /// Task 5 (Step 1): resolution surfaces the *specific* missing
+    /// companion name rather than a generic "missing required components"
+    /// blob. The CompanionConfigMissing variant fires when the manifest
+    /// entry isn't in the user's Config.models — a real config bug.
+    #[test]
+    fn resolve_intent_returns_error_naming_missing_required_companion() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+
+        let primary_path = models_dir
+            .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &primary_path,
+            &["double_blocks.0.img_attn.proj.weight", "img_in.weight"],
+        );
+
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        // Empty config — none of t5, clip-l, flux-vae are installed.
+        let config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+
+        let entry =
+            flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let err = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap_err();
+
+        let msg = err.to_string();
+        // The first missing companion in the FLUX list is t5-v1_1-xxl;
+        // we just need the error to name *some* specific companion.
+        assert!(
+            msg.contains("t5-v1_1-xxl") || msg.contains("clip-l") || msg.contains("flux-vae"),
+            "error must name a specific missing companion, got: {msg}"
+        );
+        assert!(matches!(err, ResolveError::CompanionConfigMissing { .. }));
+
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    /// Task 6: with the lazy intent / resolve flow, a second request
+    /// after the file lands succeeds where the first might have raced.
+    /// This exercises the no-stale-config invariant directly: both calls
+    /// run the full intent + resolve pipeline; the second one sees the
+    /// fresh disk state.
+    #[test]
+    fn cv_id_resolves_when_files_arrive_after_initial_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        let entry =
+            flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        // Companions are present; primary file initially missing.
+        stub_flux_companion_paths_in_dir(&mut config, models_dir, true);
+
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+
+        // First resolve — primary not yet on disk. The flux-vae companion
+        // populates cfg.vae; the FLUX probe is short-circuited because
+        // the file doesn't exist. cfg.transformer points at the expected
+        // future location (intent-derived).
+        let cfg_first = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap();
+        let primary_path = models_dir
+            .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
+        let vae_path = models_dir.join("flux-vae/ae.safetensors");
+        assert_eq!(cfg_first.transformer.as_deref(), primary_path.to_str());
+        assert_eq!(cfg_first.vae.as_deref(), vae_path.to_str());
+
+        // File arrives mid-flight as a transformer-only checkpoint.
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &primary_path,
+            &["double_blocks.0.img_attn.proj.weight", "img_in.weight"],
+        );
+
+        // Second resolve sees the file: probe runs, declares "no bundled
+        // VAE", flux-vae companion still wins. Same result, but this time
+        // through the fully-armed disk-aware path.
+        let cfg_second = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap();
+        assert_eq!(cfg_second.transformer.as_deref(), primary_path.to_str());
+        assert_eq!(cfg_second.vae.as_deref(), vae_path.to_str());
+
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    // ── InstallError translation tests (Task 4) ────────────────────────────
+
+    #[test]
+    fn live_error_to_install_error_maps_404_to_not_found() {
+        let upstream = mold_catalog::live::LiveSearchError::Upstream {
+            host: "civitai.com",
+            status: 404,
+            body: "{\"error\": \"not found\"}".to_string(),
+        };
+        let mapped = live_error_to_install_error("cv:42", &upstream);
+        assert!(matches!(mapped, mold_core::InstallError::NotFound(_)));
+    }
+
+    #[test]
+    fn live_error_to_install_error_maps_5xx_to_recipe_malformed() {
+        let upstream = mold_catalog::live::LiveSearchError::Upstream {
+            host: "civitai.com",
+            status: 500,
+            body: "internal".into(),
+        };
+        let mapped = live_error_to_install_error("cv:42", &upstream);
+        assert!(matches!(
+            mapped,
+            mold_core::InstallError::RecipeMalformed(_)
+        ));
+    }
+
+    #[test]
+    fn install_error_to_api_error_maps_network_to_502() {
+        let err = mold_core::InstallError::Network("dns: civitai.com".into());
+        let api = install_error_to_api_error(&err);
+        // API error doesn't expose .status() publicly, but .code is
+        // "INTERNAL_ERROR" with the BAD_GATEWAY status flag (see
+        // ApiError::internal_with_status). The user-visible message must
+        // carry "network unreachable" so they know what happened.
+        assert!(api.error.contains("network unreachable"));
+    }
+
+    #[test]
+    fn install_error_to_api_error_maps_not_found_to_404() {
+        let err = mold_core::InstallError::NotFound("cv:99999999".into());
+        let api = install_error_to_api_error(&err);
+        assert_eq!(api.code, "MODEL_NOT_FOUND");
     }
 }
