@@ -169,6 +169,15 @@ enum BackendEntry {
         source_base: String,
         component: Nvfp4Component,
     },
+    /// Load `source_key` and swap its two equal halves along `axis`.
+    ///
+    /// Used to convert BFL-native weight ordering to diffusers ordering.
+    /// Specifically, BFL's `final_layer.adaLN_modulation.1.weight` stores
+    /// `(shift, scale)` along the output dimension (dim 0), but diffusers'
+    /// `AdaLayerNormContinuous` convention — and `LastLayer::forward` —
+    /// expect `(scale, shift)`. Swapping at load time means the forward
+    /// path never needs to know which checkpoint format was used.
+    SwapHalves { source_key: String, axis: usize },
 }
 
 /// `SimpleBackend` over an mmap'd Civitai single-file checkpoint.
@@ -453,6 +462,19 @@ impl SingleFileBackend {
                 source_base,
                 component,
             } => self.load_nvfp4_component(source_base, *component, dev),
+            BackendEntry::SwapHalves { source_key, axis } => {
+                let t = self.st.load(source_key, dev)?;
+                let total = t.dim(*axis)?;
+                if total % 2 != 0 {
+                    return Err(candle_core::Error::Msg(format!(
+                        "single-file backend: SwapHalves source '{source_key}' axis {axis} dim {total} is odd",
+                    )));
+                }
+                let half = total / 2;
+                let first = t.narrow(*axis, 0, half)?;
+                let second = t.narrow(*axis, half, half)?;
+                Tensor::cat(&[&second, &first], *axis)
+            }
         }
     }
 
@@ -732,10 +754,6 @@ fn build_flux2_entries(
         ),
         ("proj_out.weight", "final_layer.linear.weight"),
         (
-            "norm_out.linear.weight",
-            "final_layer.adaLN_modulation.1.weight",
-        ),
-        (
             "double_stream_modulation_img.linear.weight",
             "double_stream_modulation_img.lin.weight",
         ),
@@ -753,6 +771,22 @@ fn build_flux2_entries(
             e.insert(k, v);
         }
     }
+
+    // BFL-native checkpoints store `final_layer.adaLN_modulation.1.weight`
+    // with (shift, scale) row ordering, while diffusers' AdaLayerNormContinuous
+    // convention — and `LastLayer::forward` — expects (scale, shift).
+    // The diffusers model converter applies `swap_scale_shift` before saving
+    // diffusers checkpoints, so the swap is already baked in for HF hub files.
+    // For BFL-native single-file exports (this code path), we apply the swap
+    // at load time so `LastLayer::forward` always receives (scale, shift).
+    let ada_ln_bfl_key = format!("{prefix}final_layer.adaLN_modulation.1.weight");
+    e.insert(
+        "norm_out.linear.weight".to_string(),
+        BackendEntry::SwapHalves {
+            source_key: ada_ln_bfl_key,
+            axis: 0,
+        },
+    );
 
     // --- Conditional: pooled-vector embedder (disabled in Klein). ---
     if cfg.vec_in_dim > 0 {
@@ -965,6 +999,19 @@ mod tests {
     use std::path::PathBuf;
 
     /// Build a synthetic safetensors with caller-supplied (key, shape, F32 data) tensors.
+    /// Like `write_synthetic` but accepts owned `String` keys (for dynamically
+    /// constructed key names).
+    fn write_synthetic_with_tensors(
+        name: &str,
+        tensors: &[(String, Vec<usize>, Vec<f32>)],
+    ) -> PathBuf {
+        let refs: Vec<(&str, Vec<usize>, Vec<f32>)> = tensors
+            .iter()
+            .map(|(k, s, d)| (k.as_str(), s.clone(), d.clone()))
+            .collect();
+        write_synthetic(name, &refs)
+    }
+
     fn write_synthetic(name: &str, tensors: &[(&str, Vec<usize>, Vec<f32>)]) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "mold-sf-backend-{}-{}-{}.safetensors",
@@ -1505,7 +1552,8 @@ mod tests {
             ("time_in.in_layer.weight", vec![1, 1]),
             ("time_in.out_layer.weight", vec![1, 1]),
             ("final_layer.linear.weight", vec![1, 1]),
-            ("final_layer.adaLN_modulation.1.weight", vec![1, 1]),
+            // SwapHalves requires an even axis-0 dim: use 2 rows (scale half + shift half).
+            ("final_layer.adaLN_modulation.1.weight", vec![2, 1]),
             ("double_stream_modulation_img.lin.weight", vec![1, 1]),
             ("double_stream_modulation_txt.lin.weight", vec![1, 1]),
             ("single_stream_modulation.lin.weight", vec![1, 1]),
@@ -1591,7 +1639,6 @@ mod tests {
             "time_guidance_embed.timestep_embedder.linear_1.weight",
             "time_guidance_embed.timestep_embedder.linear_2.weight",
             "proj_out.weight",
-            "norm_out.linear.weight",
             "double_stream_modulation_img.linear.weight",
             "double_stream_modulation_txt.linear.weight",
             "single_stream_modulation.linear.weight",
@@ -1600,6 +1647,15 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{diffusers_key}: {e}"));
             assert_eq!(t.dims(), &[1, 1], "{diffusers_key}: shape");
         }
+        // norm_out.linear.weight uses SwapHalves on a [2, 1] source, so shape
+        // is preserved as [2, 1] after the swap (swaps rows 0↔1, same dims).
+        let t = SimpleBackend::get_unchecked(&backend, "norm_out.linear.weight", DType::F32, &dev)
+            .expect("norm_out.linear.weight must be accessible");
+        assert_eq!(
+            t.dims(),
+            &[2, 1],
+            "norm_out.linear.weight: SwapHalves preserves shape"
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -2107,6 +2163,113 @@ mod tests {
             err.to_string().contains("model.diffusion_model"),
             "error must mention model.diffusion_model, got: {err}",
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn flux2_singlefile_backend_swaps_ada_ln_halves_for_diffusers_ordering() {
+        // BFL-native checkpoints store `final_layer.adaLN_modulation.1.weight`
+        // in (shift, scale) row order (BFL format), but mold's LastLayer and
+        // diffusers both expect (scale, shift). SingleFileBackend must swap the
+        // two halves when loading `norm_out.linear.weight`.
+        //
+        // Plant sentinel values: rows 0..N/2 = 10.0 (shift half),
+        //                        rows N/2..N = 20.0 (scale half).
+        // After SwapHalves, rows 0..N/2 must be 20.0, rows N/2..N must be 10.0.
+        let n = 4usize; // even; each half is 2 rows
+                        // BFL ordering: first half = shift (10.0), second half = scale (20.0).
+                        // After SwapHalves the halves are exchanged → first = scale (20.0), second = shift (10.0).
+        let mut ada_data: Vec<f32> = vec![10.0f32; n / 2]; // shift half
+        ada_data.extend(vec![20.0f32; n / 2]); // scale half
+
+        let cfg = flux2_test_config();
+        let prefix = "model.diffusion_model";
+
+        // Write a fixture with the sentinel ada_ln weight and stubs for
+        // all other keys the backend validation needs.
+        let mut tensors: Vec<(String, Vec<usize>, Vec<f32>)> = Vec::new();
+        for suffix in [
+            "img_in.weight",
+            "txt_in.weight",
+            "time_in.in_layer.weight",
+            "time_in.out_layer.weight",
+            "final_layer.linear.weight",
+            "double_stream_modulation_img.lin.weight",
+            "double_stream_modulation_txt.lin.weight",
+            "single_stream_modulation.lin.weight",
+        ] {
+            tensors.push((format!("{prefix}.{suffix}"), vec![1, 1], vec![0.0f32]));
+        }
+        // ada_ln modulation weight: n rows × 1 col, with sentinel pattern
+        tensors.push((
+            format!("{prefix}.final_layer.adaLN_modulation.1.weight"),
+            vec![n, 1],
+            ada_data,
+        ));
+        // stubs for double / single blocks
+        for i in 0..cfg.depth {
+            for suffix in [
+                "img_attn.qkv.weight",
+                "txt_attn.qkv.weight",
+                "img_attn.proj.weight",
+                "img_attn.norm.query_norm.scale",
+                "img_attn.norm.key_norm.scale",
+                "img_mlp.0.weight",
+                "img_mlp.2.weight",
+                "txt_attn.proj.weight",
+                "txt_attn.norm.query_norm.scale",
+                "txt_attn.norm.key_norm.scale",
+                "txt_mlp.0.weight",
+                "txt_mlp.2.weight",
+            ] {
+                tensors.push((
+                    format!("{prefix}.double_blocks.{i}.{suffix}"),
+                    vec![3, 1],
+                    vec![0.0; 3],
+                ));
+            }
+        }
+        for i in 0..cfg.depth_single_blocks {
+            for suffix in [
+                "single_blocks.attn.to_qkv_mlp_proj.weight",
+                "single_blocks.attn.to_out.weight",
+                "single_blocks.attn.norm.query_norm.scale",
+                "single_blocks.attn.norm.key_norm.scale",
+            ] {
+                // Use individual block index in suffix
+                let _ = i; // suppress unused warning
+                tensors.push((
+                    format!("{prefix}.single_blocks.{i}.{suffix}"),
+                    vec![1, 1],
+                    vec![0.0],
+                ));
+            }
+        }
+
+        let path = write_synthetic_with_tensors("flux2-ada-swap-test", &tensors);
+        let backend =
+            SingleFileBackend::from_flux2_singlefile(&path, &cfg).expect("backend must load");
+
+        let dev = Device::Cpu;
+        let t = SimpleBackend::get_unchecked(&backend, "norm_out.linear.weight", DType::F32, &dev)
+            .expect("norm_out.linear.weight must be accessible");
+
+        assert_eq!(t.dims(), &[n, 1], "SwapHalves must preserve shape ({n}, 1)");
+        let vals: Vec<f32> = t.flatten_all().unwrap().to_vec1().unwrap();
+        // After swap: first half should be the original second half (20.0 = scale)
+        for (i, &v) in vals[..n / 2].iter().enumerate() {
+            assert!(
+                (v - 20.0).abs() < 1e-6,
+                "row {i}: expected 20.0 (scale, now first) after swap, got {v}",
+            );
+        }
+        // After swap: second half should be the original first half (10.0 = shift)
+        for (i, &v) in vals[n / 2..].iter().enumerate() {
+            assert!(
+                (v - 10.0).abs() < 1e-6,
+                "row {i}: expected 10.0 (shift, now second) after swap, got {v}",
+            );
+        }
         let _ = std::fs::remove_file(path);
     }
 }
