@@ -2710,12 +2710,8 @@ mod tests {
                 continue;
             }
 
-            let result = check_model_memory_budget(
-                "test-model",
-                peak,
-                available,
-                "Try a smaller variant.",
-            );
+            let result =
+                check_model_memory_budget("test-model", peak, available, "Try a smaller variant.");
             assert!(
                 result.is_err(),
                 "expected rejection for peak={peak_gb} available={available_gb}, got Ok"

@@ -1655,7 +1655,7 @@ mod tests {
     fn valid_ltx2_req() -> GenerateRequest {
         GenerateRequest {
             model: "ltx-2-19b-distilled:fp8".to_string(),
-            output_format: OutputFormat::Mp4,
+            output_format: Some(OutputFormat::Mp4),
             ..valid_req()
         }
     }
