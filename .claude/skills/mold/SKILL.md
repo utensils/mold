@@ -131,11 +131,16 @@ selected LoRA — clicking a chip appends the phrase to the active prompt.
 
 **Requirements:**
 
-- FLUX models only (BF16 or GGUF quantized) — SD1.5 / SDXL LoRA inference is
-  not yet implemented. The server returns a 400 with a clear "LoRA is currently
-  supported only for FLUX models" message if a LoRA is sent for any other
-  family.
-- LoRA file must be `.safetensors` format (diffusers-format keys)
+- FLUX (BF16 + GGUF), LTX-2, Flux.2, and Z-Image families support LoRAs.
+  SD1.5 / SDXL / SD3 / Qwen-Image / Wuerstchen / LTX-Video are not yet
+  wired — the server returns a 400 with a "LoRA is currently supported
+  for FLUX, LTX-2 and Z-Image models" message for any other family. (The
+  message text is centralised in `mold-core::validation::require_lora_capable_family`
+  and will list whichever families are wired at the time it's surfaced.)
+- LoRA file must be `.safetensors` format. Z-Image / FLUX accept
+  diffusers (PEFT canonical), Kohya/sd-scripts, OneTrainer, and PEFT
+  default-adapter naming. Z-Image fused-QKV LoRAs (cv:2904324) splat
+  across the split `attention.to_q/to_k/to_v` candle tensors automatically.
 - BF16 models on 24GB cards auto-use block-level offloading (3-5x slower but fits in VRAM)
 - GGUF Q4/Q6 work at 1024x1024; Q8 works at 512x512 (Q8 + LoRA at 1024x1024 is tight on 24GB, see #95)
 

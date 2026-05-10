@@ -186,13 +186,12 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
 /// user picks an unsupported model family + a LoRA.
 fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
-        Some("flux") | Some("flux2") | Some("ltx2") | Some("sd15") | Some("sd3") | Some("sdxl")
-        | Some("qwen-image") | Some("qwen-image-edit") | Some("z-image") => Ok(()),
+        Some("flux") | Some("flux2") | Some("ltx2") | Some("sd15") | Some("z-image") => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, and Z-Image models; got family {other:?}"
+            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, and Z-Image models; got family {other:?}"
         )),
         None => Err(
-            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, or Z-Image model first"
+            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, or Z-Image model first"
                 .to_string(),
         ),
     }
@@ -1697,6 +1696,47 @@ mod tests {
         );
     }
 
+    fn valid_zimage_req() -> GenerateRequest {
+        GenerateRequest {
+            model: "z-image-turbo:bf16".to_string(),
+            ..valid_req()
+        }
+    }
+
+    #[test]
+    fn lora_on_zimage_accepted() {
+        // Z-Image grew a LoRA engine path (zimage/lora.rs) — the validator
+        // must let it through.
+        let mut req = valid_zimage_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "NSFW_master_ZIT_000017532.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Z-Image + LoRA must pass validation"
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_zimage_accepted() {
+        let mut req = valid_zimage_req();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Z-Image + loras plural must pass validation"
+        );
+    }
+
     #[test]
     fn lora_on_flux2_accepted() {
         // Flux.2 has a full LoRA engine path (flux2/lora.rs) — the validator
@@ -1740,8 +1780,9 @@ mod tests {
 
     #[test]
     fn lora_on_sdxl_still_rejected_with_updated_message() {
-        // SDXL still lacks LoRA support. The updated message now lists every
-        // family that has a LoRA path implemented (FLUX, Flux.2, LTX-2).
+        // SDXL still lacks LoRA support. The updated message lists every
+        // family that has a LoRA path implemented so far
+        // (FLUX, Flux.2, LTX-2, SD1.5, Z-Image).
         let mut req = valid_req();
         req.model = "sdxl".to_string();
         req.lora = Some(crate::LoraWeight {
