@@ -316,6 +316,79 @@ pub struct QwenImageEngine {
     offload: bool,
     /// Per-request placement override.
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// Per-request LoRA stack. Captured at the start of `generate()`,
+    /// cleared on exit. The transformer-load path consults this when
+    /// constructing the `VarBuilder` so the LoRA-merged weights land
+    /// before any forward pass runs.
+    pending_loras: Vec<mold_core::LoraWeight>,
+    /// Fingerprint of the LoRA stack currently baked into the loaded
+    /// transformer. Eager-mode generates compare against this to decide
+    /// whether to rebuild — an unchanged stack reuses the previously
+    /// merged weights. Currently always recomputed at load time
+    /// (same correctness-first stance as the sibling flux2 / sd3 / sdxl
+    /// / z-image early ports); the fingerprint API is in place for the
+    /// rebuild-elision follow-up.
+    #[allow(dead_code)]
+    active_lora_fingerprint: Vec<QwenImageLoraFingerprint>,
+}
+
+/// Order-sensitive fingerprint of a single LoRA adapter (path-hash + scale).
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+struct QwenImageLoraFingerprint {
+    path_hash: u64,
+    scale_bits: u64,
+}
+
+impl QwenImageLoraFingerprint {
+    #[allow(dead_code)]
+    fn from_lora(lora: &mold_core::LoraWeight) -> Self {
+        Self {
+            path_hash: super::lora::lora_path_hash(&lora.path),
+            scale_bits: lora.scale.to_bits(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn fingerprint_stack(loras: &[mold_core::LoraWeight]) -> Vec<QwenImageLoraFingerprint> {
+    loras
+        .iter()
+        .map(QwenImageLoraFingerprint::from_lora)
+        .collect()
+}
+
+/// Resolve the effective LoRA list for a request. Mirrors `flux::pipeline::
+/// effective_loras` — accepts both `lora` (singular, legacy) and `loras`
+/// (plural, current). Entries with a near-zero scale are dropped.
+fn effective_loras(req: &mold_core::GenerateRequest) -> Vec<mold_core::LoraWeight> {
+    /// Match the FLUX threshold so the user-facing semantics are
+    /// identical across families.
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+
+    let raw: Vec<mold_core::LoraWeight> = if let Some(plural) = &req.loras {
+        if !plural.is_empty() {
+            plural.clone()
+        } else {
+            req.lora.iter().cloned().collect()
+        }
+    } else {
+        req.lora.iter().cloned().collect()
+    };
+
+    raw.into_iter()
+        .filter(|w| {
+            let keep = w.scale.abs() > ZERO_SCALE_EPS;
+            if !keep {
+                tracing::debug!(
+                    path = w.path.as_str(),
+                    scale = w.scale,
+                    "dropping zero-scale LoRA from effective Qwen-Image stack"
+                );
+            }
+            keep
+        })
+        .collect()
 }
 
 impl QwenImageEngine {
@@ -762,6 +835,8 @@ impl QwenImageEngine {
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             offload,
             pending_placement: None,
+            pending_loras: Vec::new(),
+            active_lora_fingerprint: Vec::new(),
         }
     }
 
@@ -904,6 +979,8 @@ impl QwenImageEngine {
         width: usize,
         height: usize,
     ) -> Result<QwenImageTransformer> {
+        let active_loras = &self.pending_loras;
+        let has_lora = !active_loras.is_empty();
         if self.detect_is_quantized() {
             let transformer_size = std::fs::metadata(&self.base.paths.transformer)
                 .map(|m| m.len())
@@ -933,8 +1010,27 @@ impl QwenImageEngine {
                     height,
                 ));
             }
-            let vb =
-                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
+            let vb = if has_lora {
+                let adapters = super::lora::load_lora_adapters(active_loras, &self.base.progress)?;
+                let specs: Vec<super::lora::QwenImageLoraSpec<'_>> = adapters
+                    .iter()
+                    .zip(active_loras.iter())
+                    .map(|(adapter, w)| super::lora::QwenImageLoraSpec {
+                        adapter: adapter.as_ref(),
+                        scale: w.scale,
+                        path_hash: super::lora::lora_path_hash(&w.path),
+                    })
+                    .collect();
+                super::lora::gguf_lora_var_builder(
+                    &self.base.paths.transformer,
+                    &specs,
+                    device,
+                    &self.base.progress,
+                    None,
+                )?
+            } else {
+                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?
+            };
             Ok(QwenImageTransformer::Quantized(
                 QuantizedQwenImageTransformer2DModel::new(cfg, vb, device, !split_cfg_for_memory)?,
             ))
@@ -974,6 +1070,13 @@ impl QwenImageEngine {
             }
 
             if use_offload {
+                if has_lora {
+                    bail!(
+                        "Qwen-Image LoRA support is not yet wired through the block-offload \
+                         transformer path. Disable offload (drop --offload / unset MOLD_OFFLOAD), \
+                         or pick a checkpoint that fits without offload, to use LoRAs."
+                    );
+                }
                 // Create TWO VarBuilders: GPU for blocks that fit, CPU for overflow.
                 let (gpu_vb, cpu_vb) = if is_fp8 {
                     let gpu = crate::weight_loader::load_fp8_safetensors(
@@ -1020,7 +1123,15 @@ impl QwenImageEngine {
                     )?,
                 ))
             } else {
-                let xformer_vb = if is_fp8 {
+                let xformer_vb = if has_lora {
+                    self.build_bf16_lora_var_builder(
+                        &xformer_paths,
+                        dtype,
+                        device,
+                        is_fp8,
+                        active_loras,
+                    )?
+                } else if is_fp8 {
                     crate::weight_loader::load_fp8_safetensors(
                         &xformer_paths,
                         device,
@@ -1041,6 +1152,57 @@ impl QwenImageEngine {
                 ))
             }
         }
+    }
+
+    /// Construct a `VarBuilder` for the BF16/FP8 in-memory path with a
+    /// LoRA-merging `SimpleBackend` wrapping the underlying mmap (or
+    /// `NativeFp8Backend`). Each `vb.get()` call delivers a tensor with
+    /// `W' = W + scale·(B @ A)` already merged in.
+    fn build_bf16_lora_var_builder<'a>(
+        &self,
+        xformer_paths: &[std::path::PathBuf],
+        dtype: DType,
+        device: &Device,
+        is_fp8: bool,
+        loras: &[mold_core::LoraWeight],
+    ) -> Result<candle_nn::VarBuilder<'a>> {
+        let adapters = super::lora::load_lora_adapters(loras, &self.base.progress)?;
+        let specs: Vec<super::lora::QwenImageLoraSpec<'_>> = adapters
+            .iter()
+            .zip(loras.iter())
+            .map(|(adapter, w)| super::lora::QwenImageLoraSpec {
+                adapter: adapter.as_ref(),
+                scale: w.scale,
+                path_hash: super::lora::lora_path_hash(&w.path),
+            })
+            .collect();
+
+        let path_refs: Vec<&std::path::Path> = xformer_paths.iter().map(|p| p.as_path()).collect();
+        let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&path_refs)? };
+        let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = if is_fp8 {
+            // FP8 path needs the `NativeFp8Backend` so F8E4M3 weights
+            // stay F8E4M3 in VRAM; the LoRA wrapper merges deltas in
+            // F32 and the per-layer dequant in `QwenLinear::Fp8::forward`
+            // sees pre-merged weights as expected.
+            self.base
+                .progress
+                .info("Detected FP8 safetensors — loading with LoRA-merging wrapper");
+            Box::new(crate::weight_loader::NativeFp8Backend::from_mmap(tensors))
+        } else {
+            // candle's `MmapedSafetensors` implements `SimpleBackend`
+            // directly; use it as the inner layer of the LoRA wrapper.
+            Box::new(tensors)
+        };
+
+        let wrapped =
+            super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)?;
+
+        let target_dtype = if is_fp8 { DType::BF16 } else { dtype };
+        Ok(candle_nn::VarBuilder::from_backend(
+            wrapped,
+            target_dtype,
+            device.clone(),
+        ))
     }
 
     /// Load VAE from disk.
@@ -2906,8 +3068,10 @@ impl QwenImageEngine {
 impl InferenceEngine for QwenImageEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.pending_placement = req.placement.clone();
+        self.pending_loras = effective_loras(req);
         let result = self.generate_inner(req);
         self.pending_placement = None;
+        self.pending_loras.clear();
         result
     }
 

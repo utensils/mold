@@ -25,6 +25,15 @@ pub(crate) struct NativeFp8Backend {
     inner: candle_core::safetensors::MmapedSafetensors,
 }
 
+impl NativeFp8Backend {
+    /// Construct a backend directly from an already-mmapped tensor set.
+    /// Used by family-specific LoRA paths (e.g. `qwen_image::lora`) to
+    /// wrap the FP8 backend before the LoRA `SimpleBackend` layer.
+    pub(crate) fn from_mmap(inner: candle_core::safetensors::MmapedSafetensors) -> Self {
+        Self { inner }
+    }
+}
+
 fn total_file_bytes(paths: &[impl AsRef<Path>]) -> u64 {
     paths
         .iter()

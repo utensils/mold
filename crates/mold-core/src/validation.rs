@@ -178,22 +178,21 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
     }
 }
 
-/// LoRA support is available for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, and
-/// Z-Image — `mold-inference`'s per-family `lora.rs` modules are the engine
-/// paths that know how to merge low-rank adapters into the base weights.
-/// Surfacing the gate at validation produces a clear 400 instead of an opaque
-/// inference-layer panic when a user picks an unsupported model family + a
-/// LoRA. Qwen-Image LoRA support is on the roadmap; extend this match when
-/// those engines learn the LoRA path.
+/// LoRA support is available for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL,
+/// Qwen-Image (and qwen-image-edit), and Z-Image — `mold-inference`'s
+/// per-family `lora.rs` modules are the engine paths that know how to merge
+/// low-rank adapters into the base weights. Surfacing the gate at validation
+/// produces a clear 400 instead of an opaque inference-layer panic when a
+/// user picks an unsupported model family + a LoRA.
 fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
         Some("flux") | Some("flux2") | Some("ltx2") | Some("sd15") | Some("sd3") | Some("sdxl")
-        | Some("z-image") => Ok(()),
+        | Some("qwen-image") | Some("qwen-image-edit") | Some("z-image") => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, and Z-Image models; got family {other:?}"
+            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, and Z-Image models; got family {other:?}"
         )),
         None => Err(
-            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, or Z-Image model first"
+            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, or Z-Image model first"
                 .to_string(),
         ),
     }
@@ -1879,6 +1878,72 @@ mod tests {
         assert!(
             err.to_lowercase().contains("sdxl"),
             "error must mention SDXL: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("qwen-image"),
+            "error must mention Qwen-Image: {err}"
+        );
+    }
+
+    /// Qwen-Image gained LoRA support in feat/lora-all-families. The
+    /// validator must let `qwen-image` through.
+    #[test]
+    fn lora_on_qwen_image_accepted() {
+        let mut req = valid_req();
+        req.model = "qwen-image-2512".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Qwen-Image + LoRA must pass validation",
+        );
+    }
+
+    /// `qwen-image-edit` shares the LoRA family gate with `qwen-image`.
+    /// The edit family also gates on `edit_images` separately, so this
+    /// test exercises just the LoRA gate by inspecting the rejection
+    /// message: it must NOT mention LoRA when the only non-LoRA failure
+    /// is the missing edit_images.
+    #[test]
+    fn lora_on_qwen_image_edit_passes_lora_gate() {
+        let mut req = valid_req();
+        req.model = "qwen-image-edit-2511:q4".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        // The request fails on edit_images (a separate gate) but the
+        // LoRA gate is permissive.
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            !err.to_lowercase().contains("lora"),
+            "LoRA gate must not reject qwen-image-edit; remaining failure should be on edit_images: {err}",
+        );
+        assert!(
+            err.contains("edit_images"),
+            "expected the only failure to be the edit_images gate: {err}",
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_qwen_image_accepted() {
+        let mut req = valid_req();
+        req.model = "qwen-image-2512".to_string();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Qwen-Image + multi-LoRA must pass validation",
         );
     }
 
