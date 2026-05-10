@@ -178,22 +178,23 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
     }
 }
 
-/// LoRA support is available for FLUX and LTX-2 — `mold-inference`'s
-/// `flux/lora.rs` and `ltx2/lora.rs` are the engine paths that know how to
-/// merge low-rank adapters into the base weights. Surfacing the gate at
-/// validation produces a clear 400 instead of an opaque inference-layer panic
-/// when a user picks an unsupported model family + a LoRA. SD1.5 / SDXL /
-/// SD3 LoRA support is on the roadmap; extend this match when those engines
-/// learn the LoRA path.
+/// LoRA support is available for FLUX, Flux.2, and LTX-2 — `mold-inference`'s
+/// `flux/lora.rs`, `flux2/lora.rs`, and `ltx2/lora.rs` are the engine paths
+/// that know how to merge low-rank adapters into the base weights. Surfacing
+/// the gate at validation produces a clear 400 instead of an opaque
+/// inference-layer panic when a user picks an unsupported model family + a
+/// LoRA. SD1.5 / SDXL / SD3 LoRA support is on the roadmap; extend this
+/// match when those engines learn the LoRA path.
 fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
-        Some("flux") | Some("ltx2") => Ok(()),
+        Some("flux") | Some("flux2") | Some("ltx2") => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported for FLUX and LTX-2 models; got family {other:?}"
+            "LoRA is currently supported for FLUX, Flux.2, and LTX-2 models; got family {other:?}"
         )),
-        None => {
-            Err("LoRA requires a known model family — pick a FLUX or LTX-2 model first".to_string())
-        }
+        None => Err(
+            "LoRA requires a known model family — pick a FLUX, Flux.2, or LTX-2 model first"
+                .to_string(),
+        ),
     }
 }
 
@@ -1697,9 +1698,50 @@ mod tests {
     }
 
     #[test]
+    fn lora_on_flux2_accepted() {
+        // Flux.2 has a full LoRA engine path (flux2/lora.rs) — the validator
+        // must not block it. The validator only sees the family resolved
+        // from the model name; Flux.2 LoRAs from Civitai (cv:2682864 and
+        // siblings) reach this code via the `family_hint` carried by the
+        // catalog, but a stable model name like `flux2-klein` works the
+        // same way.
+        let mut req = valid_req();
+        req.model = "flux2-klein".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "DarkKlein9b.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Flux.2 + LoRA must pass validation"
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_flux2_accepted() {
+        // The plural loras stack must also pass on Flux.2.
+        let mut req = valid_req();
+        req.model = "flux2-klein-9b".to_string();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "lora-a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "lora-b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Flux.2 + loras plural must pass validation"
+        );
+    }
+
+    #[test]
     fn lora_on_sdxl_still_rejected_with_updated_message() {
-        // SDXL still lacks LoRA support. The updated message now lists both
-        // FLUX and LTX-2 as supported families.
+        // SDXL still lacks LoRA support. The updated message now lists every
+        // family that has a LoRA path implemented (FLUX, Flux.2, LTX-2).
         let mut req = valid_req();
         req.model = "sdxl".to_string();
         req.lora = Some(crate::LoraWeight {
@@ -1710,6 +1752,10 @@ mod tests {
         assert!(
             err.to_lowercase().contains("flux"),
             "error must mention FLUX: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("flux.2") || err.to_lowercase().contains("flux2"),
+            "error must mention Flux.2: {err}"
         );
         assert!(
             err.to_lowercase().contains("ltx-2") || err.to_lowercase().contains("ltx2"),
