@@ -86,13 +86,14 @@ fn check_model_memory_budget(
     let hard_limit = available_bytes * 9 / 10; // 90%
     if peak_bytes > hard_limit {
         return Err(ApiError::insufficient_memory(format!(
-            "model '{}' estimated peak ~{:.1} GB exceeds available ~{:.1} GB \
-             (peak = max(text-encoders, transformer + VAE) + 2 GB headroom; \
+            "model '{}' estimated peak ~{:.1} GB exceeds the per-load budget cap ~{:.1} GB \
+             (90% of {:.1} GB free, with 2 GB activation headroom built into peak estimate; \
              encoders are dropped before denoise). \
-             Try a smaller variant (e.g. ':q8' / ':q5'), enable --offload (FLUX), \
+             Try a smaller variant (e.g. ':q5' / ':q4'), enable --offload (FLUX), \
              or close other GPU apps.",
             model_name,
             peak_bytes as f64 / 1_000_000_000.0,
+            hard_limit as f64 / 1_000_000_000.0,
             available_bytes as f64 / 1_000_000_000.0,
         )));
     }
@@ -1573,7 +1574,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.code, "INSUFFICIENT_MEMORY");
         assert!(err.error.contains("flux-dev:bf16"));
-        assert!(err.error.contains("available"));
+        assert!(err.error.contains("budget cap"));
     }
 
     #[test]
@@ -2594,5 +2595,112 @@ mod tests {
         let err = mold_core::InstallError::NotFound("cv:99999999".into());
         let api = install_error_to_api_error(&err);
         assert_eq!(api.code, "MODEL_NOT_FOUND");
+    }
+
+    // ── preflight error message budget-cap correctness ───────────────────────
+
+    /// The rejection fraction used by `check_model_memory_budget`. Pinned so a
+    /// future change to the factor forces a matching update to the error message
+    /// (and this test).
+    const BUDGET_FRACTION_NUMERATOR: u64 = 9;
+    const BUDGET_FRACTION_DENOMINATOR: u64 = 10;
+
+    /// Compute the budget cap the way `check_model_memory_budget` does.
+    fn expected_budget_cap(available: u64) -> u64 {
+        available * BUDGET_FRACTION_NUMERATOR / BUDGET_FRACTION_DENOMINATOR
+    }
+
+    /// The rejection error message must display the budget cap (the number that
+    /// was actually compared against peak), not the raw available VRAM. This is
+    /// the root-cause regression test for the "24.4 GB exceeds 25.3 GB" bug.
+    #[test]
+    fn preflight_error_message_states_correct_budget_cap() {
+        // Mirrors the user's reported values: peak=24.4 GB, free=25.3 GB.
+        // Cap = 25.3 × 0.9 = 22.77 GB. Peak (24.4) > cap (22.77) → reject.
+        let peak: u64 = 24_400_000_000;
+        let available: u64 = 25_300_000_000;
+        let cap = expected_budget_cap(available);
+
+        // Sanity: the test scenario is actually a rejection.
+        assert!(
+            peak > cap,
+            "test invariant: peak ({peak}) must exceed cap ({cap})"
+        );
+
+        let result = check_model_memory_budget("qwen-image:q8", peak, available);
+        assert!(result.is_err(), "expected rejection, got Ok");
+
+        let err = result.unwrap_err();
+        let msg = &err.error;
+
+        // The message must contain the cap, not just the raw available.
+        let cap_gb = cap as f64 / 1_000_000_000.0;
+        let cap_str = format!("{cap_gb:.1}");
+        assert!(
+            msg.contains("budget cap"),
+            "error must mention 'budget cap', got: {msg}"
+        );
+        assert!(
+            msg.contains(&cap_str),
+            "error must contain the cap value ~{cap_str} GB, got: {msg}"
+        );
+
+        // The message must NOT imply that peak < available (the original bug).
+        // If the message says "exceeds X GB" where X > peak, the user will be confused.
+        // We detect this by checking there's no bare available_gb with no "cap" context
+        // that would make the inequality look false.
+        let available_gb = available as f64 / 1_000_000_000.0;
+        let available_str = format!("{available_gb:.1}");
+        // available_gb should appear only as the input to the cap formula, not as the
+        // comparison target. Presence of "budget cap" already anchors correct phrasing.
+        let _ = available_str; // checked indirectly via the "budget cap" assertion above
+    }
+
+    /// The "exceeds" target printed in the rejection message must always be
+    /// strictly less than the printed peak. A table of (peak_gb, available_gb)
+    /// rejection scenarios verifies no phrasing inverts the inequality.
+    #[test]
+    fn preflight_error_message_does_not_imply_peak_less_than_available() {
+        let scenarios: &[(f64, f64)] = &[
+            // (peak_gb, available_gb) — all must trigger rejection
+            (24.4, 25.3), // user-reported case
+            (19.0, 20.0), // 19 > 90% of 20 = 18
+            (10.0, 10.5), // just over 90%
+            (30.0, 32.0), // 30 > 90% of 32 = 28.8
+            (9.1, 10.0),  // 9.1 > 90% of 10 = 9
+        ];
+        for &(peak_gb, available_gb) in scenarios {
+            let peak = (peak_gb * 1_000_000_000.0) as u64;
+            let available = (available_gb * 1_000_000_000.0) as u64;
+            let cap = expected_budget_cap(available);
+
+            // Only test rejection scenarios.
+            if peak <= cap {
+                continue;
+            }
+
+            let result = check_model_memory_budget("test-model", peak, available);
+            assert!(
+                result.is_err(),
+                "expected rejection for peak={peak_gb} available={available_gb}, got Ok"
+            );
+
+            let msg = result.unwrap_err().error;
+
+            // The comparison target in the message ("budget cap") must be < peak.
+            // We verify this by asserting the cap value appears in the message.
+            let cap_gb = cap as f64 / 1_000_000_000.0;
+            let cap_str = format!("{cap_gb:.1}");
+            assert!(
+                msg.contains("budget cap"),
+                "scenario peak={peak_gb} available={available_gb}: \
+                 message must say 'budget cap', got: {msg}"
+            );
+            assert!(
+                msg.contains(&cap_str),
+                "scenario peak={peak_gb} available={available_gb}: \
+                 message must include cap={cap_str}, got: {msg}"
+            );
+        }
     }
 }

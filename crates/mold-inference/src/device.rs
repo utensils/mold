@@ -2431,4 +2431,17 @@ mod tests {
             "invalid value must fall back, not error"
         );
     }
+
+    /// Pin the `MEMORY_BUDGET_HEADROOM` constant so a future change forces a
+    /// matching update to the preflight rejection error message in
+    /// `mold-server::model_manager::check_model_memory_budget`, which prints
+    /// "with 2 GB activation headroom" in its formatted output.
+    #[test]
+    fn memory_budget_headroom_is_2gb() {
+        assert_eq!(
+            MEMORY_BUDGET_HEADROOM, 2_000_000_000,
+            "MEMORY_BUDGET_HEADROOM changed — update the rejection error message \
+             in mold-server::model_manager::check_model_memory_budget to match"
+        );
+    }
 }
