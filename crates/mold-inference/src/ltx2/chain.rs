@@ -416,7 +416,7 @@ fn build_stage_generate_request(
         // Continuation stages never use the per-chain output_format
         // downstream — the orchestrator decodes to frames regardless —
         // but MP4 is the canonical intermediate for LTX-2.
-        output_format: OutputFormat::Mp4,
+        output_format: Some(OutputFormat::Mp4),
         embed_metadata: None,
         scheduler: None,
         cfg_plus: None,

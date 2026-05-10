@@ -199,7 +199,7 @@ mod tests {
             guidance: 3.0,
             seed: Some(42),
             batch_size: 1,
-            output_format: mold_core::OutputFormat::Mp4,
+            output_format: Some(mold_core::OutputFormat::Mp4),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,

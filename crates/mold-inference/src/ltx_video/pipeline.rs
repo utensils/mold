@@ -904,7 +904,7 @@ impl LtxVideoEngine {
         req: &GenerateRequest,
     ) -> Result<Vec<image::RgbImage>> {
         let mut apng_req = req.clone();
-        apng_req.output_format = OutputFormat::Apng;
+        apng_req.output_format = Some(OutputFormat::Apng);
         // gif_preview encoding doubles the encode cost; chain mode never
         // surfaces per-stage previews so skip it.
         apng_req.gif_preview = false;
@@ -1541,8 +1541,8 @@ impl LtxVideoEngine {
         // Step 6: Post-process and encode video
         // ---------------------------------------------------------------
         // Default to APNG for video output (lossless, metadata-rich)
-        let output_format = if req.output_format.is_video() {
-            req.output_format
+        let output_format = if req.resolved_output_format().is_video() {
+            req.resolved_output_format()
         } else {
             OutputFormat::Apng
         };

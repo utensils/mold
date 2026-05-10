@@ -8,10 +8,52 @@ use super::connectors::{
     Embeddings1DConnector, EmbeddingsFeatureExtractor, EmbeddingsProcessor,
     EmbeddingsProcessorOutput, FeatureExtractorV1, FeatureExtractorV2, PaddingSide, Projection,
 };
-use super::encoder::GemmaHiddenStateEncoder;
-use super::gemma::{EncodedPromptPair, GemmaAssets};
+use super::encoder::{GemmaHiddenStateEncoder, GemmaHiddenStates};
+use super::gemma::{
+    resolve_gemma_variant, EncodedPromptPair, GemmaAssets, GemmaVariant, PromptTokens,
+};
+use super::gemma3_gguf::GgufGemmaEncoder;
 use crate::ltx2::model::LtxRopeType;
 use crate::ltx2::preset::{GemmaFeatureExtractorKind, Ltx2ModelPreset};
+
+/// Backend for the Gemma 3 12B prompt encoder. The two variants both produce
+/// `Vec<Tensor>` of hidden states with `len() == num_hidden_layers + 1`, so
+/// the downstream embeddings projection in [`EmbeddingsProcessor`] is variant-
+/// agnostic.
+pub enum GemmaHiddenStateBackend {
+    /// BF16 safetensors split (`google/gemma-3-12b-it-qat-q4_0-unquantized`).
+    /// Historical default; ~23 GB on GPU.
+    Safetensors(GemmaHiddenStateEncoder),
+    /// Q4 GGUF (`google/gemma-3-12b-it-qat-q4_0-gguf`). ~7 GB on GPU; fits
+    /// alongside a streaming 22B LTX-2 transformer on a single 24 GB card.
+    Gguf(GgufGemmaEncoder),
+}
+
+impl GemmaHiddenStateBackend {
+    /// Backend tag — surfaced through [`NativePromptEncoder::backend_variant`]
+    /// so call sites can branch on which Gemma 3 weight format was loaded.
+    #[allow(dead_code)]
+    pub fn variant(&self) -> GemmaVariant {
+        match self {
+            Self::Safetensors(_) => GemmaVariant::Bf16Safetensors,
+            Self::Gguf(_) => GemmaVariant::Q4Gguf,
+        }
+    }
+
+    pub fn device(&self) -> &candle_core::Device {
+        match self {
+            Self::Safetensors(encoder) => encoder.device(),
+            Self::Gguf(encoder) => encoder.device(),
+        }
+    }
+
+    fn encode_prompt_tokens(&mut self, tokens: &PromptTokens) -> Result<GemmaHiddenStates> {
+        match self {
+            Self::Safetensors(encoder) => encoder.encode_prompt_tokens(tokens),
+            Self::Gguf(encoder) => encoder.encode_prompt_tokens(tokens),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NativePromptEncoding {
@@ -20,22 +62,34 @@ pub struct NativePromptEncoding {
 }
 
 pub struct NativePromptEncoder {
-    gemma: GemmaHiddenStateEncoder,
+    gemma_backend: GemmaHiddenStateBackend,
     embeddings_processor: EmbeddingsProcessor,
     padding_side: PaddingSide,
 }
 
 impl NativePromptEncoder {
+    /// Construct a [`NativePromptEncoder`] from a pre-built BF16 safetensors
+    /// Gemma encoder. Used by tests and the FP16 runtime path; production code
+    /// goes through [`Self::load`].
+    #[allow(dead_code)]
     pub fn new(
         gemma: GemmaHiddenStateEncoder,
         embeddings_processor: EmbeddingsProcessor,
         padding_side: PaddingSide,
     ) -> Self {
         Self {
-            gemma,
+            gemma_backend: GemmaHiddenStateBackend::Safetensors(gemma),
             embeddings_processor,
             padding_side,
         }
+    }
+
+    /// Variant of the loaded Gemma encoder. Used by the runtime placement
+    /// logger and by tests that need to assert the resolver picked the right
+    /// backend.
+    #[allow(dead_code)]
+    pub fn backend_variant(&self) -> GemmaVariant {
+        self.gemma_backend.variant()
     }
 
     pub fn load(
@@ -46,7 +100,26 @@ impl NativePromptEncoder {
         dtype: DType,
     ) -> Result<Self> {
         let assets = GemmaAssets::discover(gemma_root)?;
-        let gemma = GemmaHiddenStateEncoder::load_from_assets(&assets, device, dtype)?;
+        let variant = resolve_gemma_variant(&assets)?;
+        let gemma_backend = match variant {
+            GemmaVariant::Bf16Safetensors => GemmaHiddenStateBackend::Safetensors(
+                GemmaHiddenStateEncoder::load_from_assets(&assets, device, dtype)?,
+            ),
+            GemmaVariant::Q4Gguf => {
+                let gguf_path = assets.gguf_path.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "GemmaVariant::Q4Gguf resolved but assets.gguf_path is None — \
+                         resolve_gemma_variant invariant violated"
+                    )
+                })?;
+                GemmaHiddenStateBackend::Gguf(GgufGemmaEncoder::load(gguf_path, device)?)
+            }
+        };
+        tracing::info!(
+            variant = ?variant,
+            device = ?gemma_backend.device(),
+            "loaded LTX-2 Gemma 3 12B prompt encoder"
+        );
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 std::slice::from_ref(&checkpoint_path),
@@ -110,7 +183,11 @@ impl NativePromptEncoder {
             )
         })?;
 
-        Ok(Self::new(gemma, embeddings_processor, PaddingSide::Left))
+        Ok(Self {
+            gemma_backend,
+            embeddings_processor,
+            padding_side: PaddingSide::Left,
+        })
     }
 
     pub fn encode_prompt_pair(&mut self, pair: &EncodedPromptPair) -> Result<NativePromptEncoding> {
@@ -139,15 +216,12 @@ impl NativePromptEncoder {
     }
 
     pub fn device(&self) -> &Device {
-        self.gemma.device()
+        self.gemma_backend.device()
     }
 
-    fn encode_prompt_tokens(
-        &mut self,
-        tokens: &super::gemma::PromptTokens,
-    ) -> Result<EmbeddingsProcessorOutput> {
+    fn encode_prompt_tokens(&mut self, tokens: &PromptTokens) -> Result<EmbeddingsProcessorOutput> {
         let encoded = self
-            .gemma
+            .gemma_backend
             .encode_prompt_tokens(tokens)
             .context("failed to encode Gemma prompt tokens")?;
         self.embeddings_processor
@@ -536,6 +610,55 @@ mod tests {
         assert_eq!(
             output.conditional.attention_mask.to_vec2::<u8>().unwrap(),
             output.unconditional.attention_mask.to_vec2::<u8>().unwrap()
+        );
+    }
+
+    /// `backend_variant()` is the accessor `NativePromptEncoder::load` callers
+    /// (and the runtime placement logger) use to know which Gemma weight
+    /// format ended up loaded. Pin it for the safetensors path; the GGUF path
+    /// is covered by the loader-side tests in `gemma3_gguf::tests` and the
+    /// resolver tests in `gemma::tests`.
+    #[test]
+    fn backend_variant_reports_safetensors_for_new_constructor() {
+        let cfg = tiny_gemma_config();
+        let gemma = GemmaHiddenStateEncoder::new(&cfg, zero_gemma_var_builder(&cfg)).unwrap();
+        let processor = build_embeddings_processor(
+            zero_connector_source_var_builder(),
+            GemmaFeatureExtractorKind::V2DualAv,
+            cfg.hidden_size,
+            cfg.num_hidden_layers,
+            8,
+            Some(4),
+            ConnectorSpec {
+                prefix: "model.diffusion_model.video_embeddings_connector.",
+                num_attention_heads: 2,
+                attention_head_dim: 4,
+                num_layers: 1,
+                apply_gated_attention: false,
+                positional_embedding_theta: 10_000.0,
+                positional_embedding_max_pos: &[32],
+                rope_type: LtxRopeType::Split,
+                double_precision_rope: true,
+                num_learnable_registers: Some(128),
+            },
+            Some(ConnectorSpec {
+                prefix: "model.diffusion_model.audio_embeddings_connector.",
+                num_attention_heads: 1,
+                attention_head_dim: 4,
+                num_layers: 1,
+                apply_gated_attention: false,
+                positional_embedding_theta: 10_000.0,
+                positional_embedding_max_pos: &[32],
+                rope_type: LtxRopeType::Split,
+                double_precision_rope: true,
+                num_learnable_registers: Some(128),
+            }),
+        )
+        .unwrap();
+        let prompt_encoder = NativePromptEncoder::new(gemma, processor, PaddingSide::Left);
+        assert_eq!(
+            prompt_encoder.backend_variant(),
+            crate::ltx2::text::gemma::GemmaVariant::Bf16Safetensors
         );
     }
 }

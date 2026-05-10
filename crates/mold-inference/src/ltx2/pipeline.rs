@@ -446,7 +446,7 @@ impl Ltx2Engine {
         }
 
         let output_encode_start = Instant::now();
-        let output_bytes = match req.output_format {
+        let output_bytes = match req.resolved_output_format() {
             OutputFormat::Apng => {
                 let metadata = video_enc::VideoMetadata {
                     prompt: req.prompt.clone(),
@@ -500,7 +500,7 @@ impl Ltx2Engine {
         Self::log_timing("pipeline.encode_thumbnail", thumbnail_start);
         let gif_preview_start = Instant::now();
         let gif_preview = if req.gif_preview {
-            if req.output_format == OutputFormat::Gif {
+            if req.resolved_output_format() == OutputFormat::Gif {
                 output_bytes.clone()
             } else {
                 video_enc::encode_gif(&rendered.frames, plan.frame_rate)?
@@ -511,7 +511,7 @@ impl Ltx2Engine {
         Self::log_timing("pipeline.encode_gif_preview", gif_preview_start);
 
         let probe_start = Instant::now();
-        let probe = if req.output_format == OutputFormat::Mp4 {
+        let probe = if req.resolved_output_format() == OutputFormat::Mp4 {
             let path = work_dir.join("probe.mp4");
             fs::write(&path, &output_bytes)?;
             Some(self.probe_video(&path)?)
@@ -607,7 +607,7 @@ impl Ltx2Engine {
             .as_ref()
             .map(|probe| probe.fps)
             .unwrap_or(plan.frame_rate);
-        let has_audio = if req.output_format == OutputFormat::Mp4 {
+        let has_audio = if req.resolved_output_format() == OutputFormat::Mp4 {
             probe
                 .as_ref()
                 .map(|probe| probe.has_audio)
@@ -615,7 +615,7 @@ impl Ltx2Engine {
         } else {
             false
         };
-        let audio_sample_rate = if req.output_format == OutputFormat::Mp4 {
+        let audio_sample_rate = if req.resolved_output_format() == OutputFormat::Mp4 {
             probe
                 .as_ref()
                 .and_then(|probe| probe.audio_sample_rate)
@@ -623,7 +623,7 @@ impl Ltx2Engine {
         } else {
             None
         };
-        let audio_channels = if req.output_format == OutputFormat::Mp4 {
+        let audio_channels = if req.resolved_output_format() == OutputFormat::Mp4 {
             probe
                 .as_ref()
                 .and_then(|probe| probe.audio_channels)
@@ -636,7 +636,7 @@ impl Ltx2Engine {
             images: vec![],
             video: Some(VideoData {
                 data: output_bytes,
-                format: req.output_format,
+                format: req.resolved_output_format(),
                 width,
                 height,
                 frames,
@@ -1208,7 +1208,7 @@ mod tests {
             guidance: 3.0,
             seed: Some(42),
             batch_size: 1,
-            output_format,
+            output_format: Some(output_format),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,
@@ -1289,7 +1289,7 @@ mod tests {
             guidance: 3.5,
             seed: Some(42),
             batch_size: 1,
-            output_format: OutputFormat::Mp4,
+            output_format: Some(OutputFormat::Mp4),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,
@@ -1338,7 +1338,7 @@ mod tests {
             guidance: 1.0,
             seed: Some(1),
             batch_size: 1,
-            output_format: OutputFormat::Mp4,
+            output_format: Some(OutputFormat::Mp4),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,
@@ -1490,7 +1490,7 @@ mod tests {
             guidance: 3.0,
             seed: Some(42),
             batch_size: 1,
-            output_format: OutputFormat::Mp4,
+            output_format: Some(OutputFormat::Mp4),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,

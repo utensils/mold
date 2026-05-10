@@ -67,6 +67,10 @@ pub struct GemmaAssets {
     pub tokenizer_model: Option<PathBuf>,
     pub special_tokens_map: Option<PathBuf>,
     pub tokenizer_config: Option<PathBuf>,
+    /// First `*.gguf` file found in `root` (lexically sorted), if any. Present
+    /// when the user has installed a Q4 GGUF variant of Gemma 3 alongside (or
+    /// instead of) the BF16 safetensors split.
+    pub gguf_path: Option<PathBuf>,
 }
 
 impl GemmaAssets {
@@ -89,6 +93,26 @@ impl GemmaAssets {
             tokenizer_model: candidate(root, "tokenizer.model"),
             special_tokens_map: candidate(root, "special_tokens_map.json"),
             tokenizer_config: candidate(root, "tokenizer_config.json"),
+            gguf_path: discover_gguf(root),
+        })
+    }
+
+    /// True when the asset root contains BF16 safetensors weights
+    /// (`model.safetensors` or sharded `model-*-of-*.safetensors`).
+    pub fn has_bf16_weights(&self) -> bool {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return false;
+        };
+        entries.filter_map(|e| e.ok()).any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .map(|name| {
+                    (name == "model.safetensors"
+                        || (name.starts_with("model-") && name.ends_with(".safetensors")))
+                        && entry.path().is_file()
+                })
+                .unwrap_or(false)
         })
     }
 
@@ -290,6 +314,100 @@ fn candidate(root: &Path, filename: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Find the first `*.gguf` file in `root` (lexically sorted). Returns `None`
+/// when no GGUF is present. Used by [`GemmaAssets::discover`] to surface a
+/// Q4 GGUF Gemma 3 weight file when the user has installed one.
+fn discover_gguf(root: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut matches: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let is_gguf = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false);
+            (is_gguf && path.is_file()).then_some(path)
+        })
+        .collect();
+    matches.sort();
+    matches.into_iter().next()
+}
+
+/// Which Gemma 3 weight format is loaded for the LTX-2 prompt encoder.
+///
+/// `Bf16Safetensors` matches the historical default — the unquantized
+/// `model-*-of-*.safetensors` shards from `google/gemma-3-12b-it-qat-q4_0-unquantized`.
+/// `Q4Gguf` is the new ~7 GB Q4 quantized variant from
+/// `google/gemma-3-12b-it-qat-q4_0-gguf` that fits comfortably alongside a
+/// streaming 22B LTX-2 transformer on a 24 GB GPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GemmaVariant {
+    Bf16Safetensors,
+    Q4Gguf,
+}
+
+/// Resolve which Gemma 3 weight format to load given the assets present and
+/// the user's `MOLD_LTX2_GEMMA_VARIANT` override.
+///
+/// Precedence (highest first):
+/// 1. `MOLD_LTX2_GEMMA_VARIANT={q4,bf16}` — explicit override; errors if the
+///    requested variant's files aren't present in the asset root.
+/// 2. `MOLD_LTX2_GEMMA_VARIANT=auto` (or unset) with **only** GGUF on disk →
+///    `Q4Gguf`.
+/// 3. Auto with **only** BF16 on disk → `Bf16Safetensors`.
+/// 4. Auto with both present → `Bf16Safetensors` (preserves historical
+///    behavior so existing installs don't switch backends silently — opt in
+///    explicitly via the env var).
+/// 5. Auto with neither present → `Err`.
+pub fn resolve_gemma_variant(assets: &GemmaAssets) -> Result<GemmaVariant> {
+    let has_bf16 = assets.has_bf16_weights();
+    let has_gguf = assets.gguf_path.is_some();
+
+    if let Ok(raw) = std::env::var("MOLD_LTX2_GEMMA_VARIANT") {
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "q4" | "gguf" | "q4_gguf" => {
+                if !has_gguf {
+                    bail!(
+                        "MOLD_LTX2_GEMMA_VARIANT=q4 requested but no .gguf file found in '{}'",
+                        assets.root.display()
+                    );
+                }
+                return Ok(GemmaVariant::Q4Gguf);
+            }
+            "bf16" | "safetensors" | "bf16_safetensors" => {
+                if !has_bf16 {
+                    bail!(
+                        "MOLD_LTX2_GEMMA_VARIANT=bf16 requested but no model*.safetensors files \
+                         found in '{}'",
+                        assets.root.display()
+                    );
+                }
+                return Ok(GemmaVariant::Bf16Safetensors);
+            }
+            "auto" | "" => { /* fall through to auto-detection */ }
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    "unrecognised MOLD_LTX2_GEMMA_VARIANT value; expected q4/bf16/auto — \
+                     falling back to auto-detection"
+                );
+            }
+        }
+    }
+
+    match (has_bf16, has_gguf) {
+        (true, _) => Ok(GemmaVariant::Bf16Safetensors),
+        (false, true) => Ok(GemmaVariant::Q4Gguf),
+        (false, false) => bail!(
+            "Gemma asset root '{}' contains neither model*.safetensors nor *.gguf weights",
+            assets.root.display()
+        ),
+    }
+}
+
 fn infer_known_special_token(tokenizer: &Tokenizer, candidates: &[&str]) -> Option<String> {
     candidates.iter().find_map(|candidate| {
         tokenizer
@@ -331,9 +449,57 @@ impl SpecialTokenValue {
 #[cfg(test)]
 mod tests {
     use super::{
-        left_pad_batch, pad_to_alignment, EncodedPromptPair, GemmaAssets, DEFAULT_GEMMA_MAX_LENGTH,
+        left_pad_batch, pad_to_alignment, resolve_gemma_variant, EncodedPromptPair, GemmaAssets,
+        GemmaVariant, DEFAULT_GEMMA_MAX_LENGTH,
     };
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Variant-resolver tests mutate `MOLD_LTX2_GEMMA_VARIANT`. Process-global
+    /// env state can only be touched from one test at a time.
+    fn variant_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Take the env lock, snapshot the variant var, run `body`, restore.
+    fn with_variant_env<F: FnOnce()>(value: Option<&str>, body: F) {
+        let _guard = variant_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("MOLD_LTX2_GEMMA_VARIANT");
+        // SAFETY: serialized through `variant_env_lock`.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("MOLD_LTX2_GEMMA_VARIANT", v),
+                None => std::env::remove_var("MOLD_LTX2_GEMMA_VARIANT"),
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_GEMMA_VARIANT");
+            if let Some(v) = prior {
+                std::env::set_var("MOLD_LTX2_GEMMA_VARIANT", v);
+            }
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    fn write_minimal_asset_root(
+        dir: &Path,
+        with_safetensors_index: bool,
+        with_gguf: bool,
+    ) -> GemmaAssets {
+        // tokenizer.json is required by `discover` — always write a stub.
+        fs::write(dir.join("tokenizer.json"), tokenizer_json_with_pad()).unwrap();
+        if with_safetensors_index {
+            fs::write(dir.join("model-00001-of-00005.safetensors"), b"stub").unwrap();
+        }
+        if with_gguf {
+            fs::write(dir.join("gemma-3-12b-it-q4_0.gguf"), b"stub").unwrap();
+        }
+        GemmaAssets::discover(dir).unwrap()
+    }
 
     fn tokenizer_json_with_pad() -> &'static str {
         r#"{
@@ -478,5 +644,160 @@ mod tests {
     #[test]
     fn default_gemma_length_matches_upstream_ltx2_contract() {
         assert_eq!(DEFAULT_GEMMA_MAX_LENGTH, 256);
+    }
+
+    // ── Variant resolver tests ───────────────────────────────────────────
+
+    #[test]
+    fn discover_finds_gguf_when_present() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let assets = write_minimal_asset_root(temp_dir.path(), false, true);
+        assert!(assets.gguf_path.is_some());
+        assert!(assets
+            .gguf_path
+            .as_ref()
+            .unwrap()
+            .ends_with("gemma-3-12b-it-q4_0.gguf"));
+    }
+
+    #[test]
+    fn discover_returns_none_for_gguf_when_absent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let assets = write_minimal_asset_root(temp_dir.path(), true, false);
+        assert!(assets.gguf_path.is_none());
+        assert!(assets.has_bf16_weights());
+    }
+
+    #[test]
+    fn discover_finds_namespaced_gguf_lexically_first() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Write two GGUFs; discover should pick the lexically-first one for
+        // determinism — users are expected to drop a single GGUF into the root.
+        fs::write(
+            temp_dir.path().join("tokenizer.json"),
+            tokenizer_json_with_pad(),
+        )
+        .unwrap();
+        fs::write(temp_dir.path().join("gemma-3-12b-it-q4_0.gguf"), b"a").unwrap();
+        fs::write(temp_dir.path().join("zzz-leftover.gguf"), b"b").unwrap();
+        let assets = GemmaAssets::discover(temp_dir.path()).unwrap();
+        assert!(assets
+            .gguf_path
+            .as_ref()
+            .unwrap()
+            .ends_with("gemma-3-12b-it-q4_0.gguf"));
+    }
+
+    #[test]
+    fn resolver_picks_q4_when_env_set_and_gguf_present() {
+        with_variant_env(Some("q4"), || {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let assets = write_minimal_asset_root(temp_dir.path(), true, true);
+            assert_eq!(
+                resolve_gemma_variant(&assets).unwrap(),
+                GemmaVariant::Q4Gguf
+            );
+        });
+    }
+
+    #[test]
+    fn resolver_errors_when_q4_requested_but_no_gguf_on_disk() {
+        with_variant_env(Some("q4"), || {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let assets = write_minimal_asset_root(temp_dir.path(), true, false);
+            let err = resolve_gemma_variant(&assets).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("q4"),
+                "error mentions the requested variant: {msg}"
+            );
+            assert!(
+                msg.contains(".gguf"),
+                "error mentions the missing file kind: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn resolver_picks_bf16_when_env_set_and_safetensors_present() {
+        with_variant_env(Some("bf16"), || {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let assets = write_minimal_asset_root(temp_dir.path(), true, true);
+            assert_eq!(
+                resolve_gemma_variant(&assets).unwrap(),
+                GemmaVariant::Bf16Safetensors
+            );
+        });
+    }
+
+    #[test]
+    fn resolver_errors_when_bf16_requested_but_no_safetensors_on_disk() {
+        with_variant_env(Some("bf16"), || {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let assets = write_minimal_asset_root(temp_dir.path(), false, true);
+            let err = resolve_gemma_variant(&assets).unwrap_err();
+            assert!(err.to_string().contains("safetensors"));
+        });
+    }
+
+    #[test]
+    fn resolver_auto_prefers_bf16_when_both_present() {
+        with_variant_env(Some("auto"), || {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let assets = write_minimal_asset_root(temp_dir.path(), true, true);
+            assert_eq!(
+                resolve_gemma_variant(&assets).unwrap(),
+                GemmaVariant::Bf16Safetensors,
+                "auto must default to BF16 when both are present — opt into Q4 explicitly"
+            );
+        });
+    }
+
+    #[test]
+    fn resolver_auto_picks_gguf_when_only_gguf_present() {
+        with_variant_env(None, || {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let assets = write_minimal_asset_root(temp_dir.path(), false, true);
+            assert_eq!(
+                resolve_gemma_variant(&assets).unwrap(),
+                GemmaVariant::Q4Gguf
+            );
+        });
+    }
+
+    #[test]
+    fn resolver_unset_env_falls_through_to_auto() {
+        with_variant_env(None, || {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let assets = write_minimal_asset_root(temp_dir.path(), true, false);
+            assert_eq!(
+                resolve_gemma_variant(&assets).unwrap(),
+                GemmaVariant::Bf16Safetensors
+            );
+        });
+    }
+
+    #[test]
+    fn resolver_unrecognised_value_falls_back_to_auto() {
+        with_variant_env(Some("nonsense"), || {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let assets = write_minimal_asset_root(temp_dir.path(), false, true);
+            // Auto with only GGUF → Q4. We don't fail hard on unrecognised values
+            // because that would lock users out of the assets they just installed.
+            assert_eq!(
+                resolve_gemma_variant(&assets).unwrap(),
+                GemmaVariant::Q4Gguf
+            );
+        });
+    }
+
+    #[test]
+    fn resolver_errors_when_no_weights_present() {
+        with_variant_env(Some("auto"), || {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let assets = write_minimal_asset_root(temp_dir.path(), false, false);
+            let err = resolve_gemma_variant(&assets).unwrap_err();
+            assert!(err.to_string().contains("neither"));
+        });
     }
 }

@@ -178,19 +178,22 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
     }
 }
 
-/// LoRA support is currently FLUX-only — `mold-inference`'s `flux/lora.rs`
-/// is the only engine path that knows how to merge low-rank adapters into
-/// the base weights. Surfacing the gate at validation produces a clear
-/// 400 instead of an opaque inference-layer panic when a user picks a
-/// non-FLUX model + a LoRA. SD1.5 / SDXL LoRA support is on the roadmap;
-/// extend this match when those engines learn the LoRA path.
+/// LoRA support is available for FLUX and LTX-2 — `mold-inference`'s
+/// `flux/lora.rs` and `ltx2/lora.rs` are the engine paths that know how to
+/// merge low-rank adapters into the base weights. Surfacing the gate at
+/// validation produces a clear 400 instead of an opaque inference-layer panic
+/// when a user picks an unsupported model family + a LoRA. SD1.5 / SDXL /
+/// SD3 LoRA support is on the roadmap; extend this match when those engines
+/// learn the LoRA path.
 fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
-        Some("flux") => Ok(()),
+        Some("flux") | Some("ltx2") => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported only for FLUX models; got family {other:?}"
+            "LoRA is currently supported for FLUX and LTX-2 models; got family {other:?}"
         )),
-        None => Err("LoRA requires a known model family — pick a FLUX model first".to_string()),
+        None => {
+            Err("LoRA requires a known model family — pick a FLUX or LTX-2 model first".to_string())
+        }
     }
 }
 
@@ -426,12 +429,12 @@ pub fn validate_generate_request_with_family(
     }
 
     if family == Some("ltx2") {
-        match req.output_format {
+        match req.resolved_output_format() {
             OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4 => {}
             _ => return Err("LTX-2 outputs must use mp4, gif, apng, or webp".to_string()),
         }
 
-        if req.enable_audio == Some(true) && req.output_format != OutputFormat::Mp4 {
+        if req.enable_audio == Some(true) && req.resolved_output_format() != OutputFormat::Mp4 {
             return Err("audio-enabled LTX-2 outputs must use mp4 format".to_string());
         }
 
@@ -655,7 +658,7 @@ mod tests {
             guidance: 0.0,
             seed: Some(42),
             batch_size: 1,
-            output_format: OutputFormat::Png,
+            output_format: Some(OutputFormat::Png),
             embed_metadata: None,
             scheduler: None,
             cfg_plus: None,
@@ -748,6 +751,79 @@ mod tests {
         assert!(w > h, "should remain landscape");
     }
 
+    // ── normalise_output_format tests ────────────────────────────────────────
+
+    #[test]
+    fn normalise_output_format_unset_for_ltx2_picks_mp4() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = None;
+        req.normalise_output_format(Some("ltx2"));
+        assert_eq!(
+            req.resolved_output_format(),
+            OutputFormat::Mp4,
+            "ltx2 with no explicit format should default to mp4"
+        );
+    }
+
+    #[test]
+    fn normalise_output_format_unset_for_ltx2_with_audio_picks_mp4() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = None;
+        req.enable_audio = Some(true);
+        req.normalise_output_format(Some("ltx2"));
+        assert_eq!(
+            req.resolved_output_format(),
+            OutputFormat::Mp4,
+            "ltx2 with audio and no explicit format should default to mp4"
+        );
+    }
+
+    #[test]
+    fn normalise_output_format_unset_for_ltx_video_picks_mp4() {
+        let mut req = valid_req();
+        req.model = "ltx-video:fp16".to_string();
+        req.output_format = None;
+        req.normalise_output_format(Some("ltx-video"));
+        assert_eq!(
+            req.resolved_output_format(),
+            OutputFormat::Mp4,
+            "ltx-video with no explicit format should default to mp4"
+        );
+    }
+
+    #[test]
+    fn normalise_output_format_unset_for_flux_picks_png() {
+        let mut req = valid_req();
+        req.model = "flux-schnell:q8".to_string();
+        req.output_format = None;
+        req.normalise_output_format(Some("flux"));
+        assert_eq!(
+            req.resolved_output_format(),
+            OutputFormat::Png,
+            "flux with no explicit format should default to png"
+        );
+    }
+
+    #[test]
+    fn normalise_output_format_explicit_png_for_ltx2_remains_png_and_validation_rejects_it() {
+        // When the user explicitly requests PNG for an ltx2 model, normalise
+        // must leave it as-is so validation can reject it with a clear error.
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Png);
+        req.normalise_output_format(Some("ltx2"));
+        // normalise must not touch an explicit value
+        assert_eq!(req.output_format, Some(OutputFormat::Png));
+        // and validation must still reject explicit PNG on ltx2
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("LTX-2 outputs must use"),
+            "expected validation error for explicit png on ltx2, got: {err}"
+        );
+    }
+
     // ── validate_generate_request tests ──────────────────────────────────────
 
     #[test]
@@ -759,7 +835,7 @@ mod tests {
     fn ltx2_audio_requires_mp4() {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
-        req.output_format = OutputFormat::Gif;
+        req.output_format = Some(OutputFormat::Gif);
         req.enable_audio = Some(true);
         assert!(validate_generate_request(&req).unwrap_err().contains("mp4"));
     }
@@ -768,7 +844,7 @@ mod tests {
     fn ltx2_retake_requires_source_video() {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
-        req.output_format = OutputFormat::Mp4;
+        req.output_format = Some(OutputFormat::Mp4);
         req.retake_range = Some(crate::TimeRange {
             start_seconds: 0.0,
             end_seconds: 1.0,
@@ -782,7 +858,7 @@ mod tests {
     fn ltx2_audio_file_rejects_inline_payloads_above_limit() {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
-        req.output_format = OutputFormat::Mp4;
+        req.output_format = Some(OutputFormat::Mp4);
         req.audio_file = Some(vec![0; MAX_INLINE_AUDIO_BYTES + 1]);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("audio_file exceeds"), "got: {err}");
@@ -793,7 +869,7 @@ mod tests {
     fn ltx2_source_video_rejects_inline_payloads_above_limit() {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
-        req.output_format = OutputFormat::Mp4;
+        req.output_format = Some(OutputFormat::Mp4);
         req.source_video = Some(vec![0; MAX_INLINE_SOURCE_VIDEO_BYTES + 1]);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("source_video exceeds"), "got: {err}");
@@ -804,7 +880,7 @@ mod tests {
     fn ltx2_keyframe_pipeline_requires_multiple_keyframes() {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
-        req.output_format = OutputFormat::Mp4;
+        req.output_format = Some(OutputFormat::Mp4);
         req.pipeline = Some(crate::Ltx2PipelineMode::Keyframe);
         req.frames = Some(17);
         req.keyframes = Some(vec![crate::KeyframeCondition {
@@ -856,7 +932,7 @@ mod tests {
         // catalog ID.
         let mut req = valid_req();
         req.model = "cv:2781713".to_string();
-        req.output_format = OutputFormat::Mp4;
+        req.output_format = Some(OutputFormat::Mp4);
         req.enable_audio = Some(true);
         validate_generate_request_with_family(&req, Some("ltx2")).unwrap();
     }
@@ -867,7 +943,7 @@ mod tests {
         // user gets a clear 400 instead of an opaque inference-layer error.
         let mut req = valid_req();
         req.model = "cv:2781713".to_string();
-        req.output_format = OutputFormat::Mp4;
+        req.output_format = Some(OutputFormat::Mp4);
         req.enable_audio = Some(true);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("unknown model family"), "got: {err}");
@@ -881,7 +957,7 @@ mod tests {
         // catalog-resolved family through unconditionally.
         let mut req = valid_req();
         req.model = "private-name".to_string();
-        req.output_format = OutputFormat::Mp4;
+        req.output_format = Some(OutputFormat::Mp4);
         req.enable_audio = Some(true);
         validate_generate_request_with_family(&req, Some("ltx2")).unwrap();
     }
@@ -890,7 +966,7 @@ mod tests {
     fn ltx2_allows_temporal_upscale_request() {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
-        req.output_format = OutputFormat::Mp4;
+        req.output_format = Some(OutputFormat::Mp4);
         req.temporal_upscale = Some(crate::Ltx2TemporalUpscale::X2);
         validate_generate_request(&req).unwrap();
     }
@@ -899,7 +975,7 @@ mod tests {
     fn ltx2_allows_x1_5_spatial_upscale_request() {
         let mut req = valid_req();
         req.model = "ltx-2.3-22b-distilled:fp8".to_string();
-        req.output_format = OutputFormat::Mp4;
+        req.output_format = Some(OutputFormat::Mp4);
         req.spatial_upscale = Some(crate::Ltx2SpatialUpscale::X1_5);
         validate_generate_request(&req).unwrap();
     }
@@ -989,7 +1065,7 @@ mod tests {
     fn ltx2_frames_must_still_follow_8n_plus_1() {
         let mut req = valid_req();
         req.model = "ltx-2-19b-distilled:fp8".to_string();
-        req.output_format = OutputFormat::Mp4;
+        req.output_format = Some(OutputFormat::Mp4);
         req.frames = Some(10);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("8n+1"), "got: {err}");
@@ -1574,6 +1650,87 @@ mod tests {
             },
         ]);
         assert!(validate_generate_request(&req).is_ok());
+    }
+
+    fn valid_ltx2_req() -> GenerateRequest {
+        GenerateRequest {
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            output_format: Some(OutputFormat::Mp4),
+            ..valid_req()
+        }
+    }
+
+    #[test]
+    fn lora_on_ltx2_accepted() {
+        // LTX-2 has a full LoRA engine path (ltx2/lora.rs) — the validator
+        // must not block it.
+        let mut req = valid_ltx2_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "LTX2.3_Crisp_Enhance.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "LTX-2 + LoRA must pass validation"
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_ltx2_accepted() {
+        // The loras-plural path routes through the same gate; confirm LTX-2
+        // passes there too.
+        let mut req = valid_ltx2_req();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "LTX-2 + loras plural must pass validation"
+        );
+    }
+
+    #[test]
+    fn lora_on_sdxl_still_rejected_with_updated_message() {
+        // SDXL still lacks LoRA support. The updated message now lists both
+        // FLUX and LTX-2 as supported families.
+        let mut req = valid_req();
+        req.model = "sdxl".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("flux"),
+            "error must mention FLUX: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("ltx-2") || err.to_lowercase().contains("ltx2"),
+            "error must mention LTX-2: {err}"
+        );
+    }
+
+    #[test]
+    fn lora_on_unknown_family_still_rejected() {
+        // family: None (no manifest match) must still produce an error.
+        let mut req = valid_req();
+        req.model = "some-unknown-model-xyz".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            !err.is_empty(),
+            "unknown family with LoRA must produce an error: {err}"
+        );
     }
 
     // ── dimension_warning tests ────────────────────────────────────────────

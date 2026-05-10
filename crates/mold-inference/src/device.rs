@@ -241,7 +241,12 @@ pub enum ActivationFamily {
     Wuerstchen,
     /// T5 / CLIP / Qwen3 / Gemma text encoder workspace.
     SmallTransformer,
-    /// LTX-Video / LTX-2 (19B / 22B) video transformer. Always loaded via
+    /// LTX-Video (0.9.6 / 0.9.8 2B or 13B) video transformer. Loads the
+    /// entire transformer into VRAM at generation time (not streamed). The
+    /// 13B BF16 variant is ~26 GB on disk. The file-size-based preflight
+    /// applies unchanged; no streaming cap override.
+    LtxVideo,
+    /// LTX-2 (19B / 22B) video transformer. Always loaded via
     /// the streaming block source (`new_streaming` in
     /// `crates/mold-inference/src/ltx2/model/video_transformer.rs`) — only
     /// `streaming_prefetch_count` blocks are GPU-resident at any one time,
@@ -258,6 +263,13 @@ impl ActivationFamily {
     /// though only ~2 GB of transformer weights are co-resident at peak.
     pub fn streaming_transformer(self) -> bool {
         matches!(self, ActivationFamily::Ltx2Video)
+    }
+
+    /// Whether this family needs the full-weight peak (transformer fully
+    /// resident on GPU at inference time). Used to choose the right headroom
+    /// constant in the preflight suggestion message.
+    pub fn is_full_weight_video(self) -> bool {
+        matches!(self, ActivationFamily::LtxVideo)
     }
 }
 
@@ -332,14 +344,16 @@ pub fn activation_bytes(
         // Image-space scaling is a soft proxy for "small workspace" — the
         // floor usually dominates for typical inputs.
         ActivationFamily::SmallTransformer => 87.0,
-        // LTX-Video / LTX-2: video latents are temporally compressed (8× spatial
-        // + 8× temporal in the LTX VAE), but each forward operates on the full
-        // [B, C, T, H/8, W/8] latent. Per-frame activation is similar to FLUX dit
-        // (split blocks, RMSNorm, no CFG-batched workspace), so we use the FLUX
-        // factor as a starting point — the factor is the per-pixel multiplier,
-        // and `activation_bytes` only sees image-space (H, W). Frame-count
-        // overhead is absorbed by the headroom buffer; the dominant cost on a
-        // 24 GB card is encoder + 1-2 streaming blocks, not activations.
+        // LTX-Video (0.9.6 / 0.9.8): per-frame activation is similar to FLUX
+        // dit (split blocks, RMSNorm, no CFG-batched workspace). The full
+        // transformer is resident on GPU during denoise, so the activation
+        // budget here is an additional workspace on top of the weight peak
+        // captured by the file-size estimator.
+        ActivationFamily::LtxVideo => 130.0,
+        // LTX-2: same per-pixel activation shape as LTX-Video. Only 1-2
+        // streaming blocks are GPU-resident at a time, so the dominant
+        // cost on a 24 GB card is encoder + block workspace, not the
+        // full-weight sum.
         ActivationFamily::Ltx2Video => 130.0,
     };
     let raw = (area as f64 * bytes_per_pixel as f64 * factor) as u64;
@@ -379,12 +393,15 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         "qwen-image" | "qwen-image-edit" => ActivationFamily::QwenImageDit,
         "z-image" => ActivationFamily::ZImageDit,
         "wuerstchen" => ActivationFamily::Wuerstchen,
-        // LTX-Video / LTX-2: streaming-loaded transformer (see
-        // `ActivationFamily::Ltx2Video::streaming_transformer`). The
-        // preflight uses this hint to skip the transformer file-size
-        // budget — at full BF16 the 22B file is 46 GB but only a couple
-        // of blocks are co-resident on GPU at peak.
-        "ltx-video" | "ltx2" | "ltx-2" | "ltx-2.3" => ActivationFamily::Ltx2Video,
+        // LTX-Video (0.9.6 / 0.9.8 2B or 13B): loads the entire transformer
+        // into VRAM during each generate call. The file-size-based preflight
+        // applies normally — the 13B BF16 checkpoint is ~26 GB and must be
+        // counted in full.
+        "ltx-video" => ActivationFamily::LtxVideo,
+        // LTX-2 (19B / 22B): streaming-loaded transformer — only a couple of
+        // blocks are GPU-resident at peak, so the preflight skips the
+        // file-size estimate and uses a fixed streaming cap instead.
+        "ltx2" | "ltx-2" | "ltx-2.3" => ActivationFamily::Ltx2Video,
         // Unknown families default to FLUX dit shape — same activation
         // class, conservative against unknowns.
         _ => ActivationFamily::FluxDit,
@@ -830,6 +847,29 @@ pub fn reclaim_gpu_memory(ordinal: usize) {
 /// No-op on non-CUDA platforms.
 #[cfg(not(feature = "cuda"))]
 pub fn reclaim_gpu_memory(_ordinal: usize) {}
+
+/// Best-effort CUDA device synchronize, ignoring errors.
+///
+/// After a `CUDA_ERROR_OUT_OF_MEMORY` the CUDA context may have in-flight work
+/// that hasn't been flushed; subsequent allocations can inherit a poisoned
+/// scheduler state. Calling synchronize before reporting the OOM and before
+/// any retry lets CUDA drain pending work and reset internal queues so the
+/// next allocation attempt starts clean.
+///
+/// Errors are silently swallowed — this is a "best effort" hygiene step, not a
+/// hard requirement. The caller has already decided to surface an OOM error;
+/// a secondary synchronize failure shouldn't shadow the primary message.
+///
+/// On non-CUDA platforms this is a no-op.
+#[cfg(feature = "cuda")]
+pub fn try_synchronize_device(_ordinal: usize) {
+    use candle_core::cuda_backend::cudarc::driver::result;
+    let _ = result::ctx::synchronize();
+}
+
+/// No-op on non-CUDA platforms.
+#[cfg(not(feature = "cuda"))]
+pub fn try_synchronize_device(_ordinal: usize) {}
 
 // ── VRAM query ───────────────────────────────────────────────────────────────
 
@@ -2429,6 +2469,19 @@ mod tests {
             resolved,
             candle_core::DType::BF16,
             "invalid value must fall back, not error"
+        );
+    }
+
+    /// Pin the `MEMORY_BUDGET_HEADROOM` constant so a future change forces a
+    /// matching update to the preflight rejection error message in
+    /// `mold-server::model_manager::check_model_memory_budget`, which prints
+    /// "with 2 GB activation headroom" in its formatted output.
+    #[test]
+    fn memory_budget_headroom_is_2gb() {
+        assert_eq!(
+            MEMORY_BUDGET_HEADROOM, 2_000_000_000,
+            "MEMORY_BUDGET_HEADROOM changed — update the rejection error message \
+             in mold-server::model_manager::check_model_memory_budget to match"
         );
     }
 }

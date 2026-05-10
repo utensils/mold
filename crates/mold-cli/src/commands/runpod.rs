@@ -1351,7 +1351,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         guidance: effective_guidance,
         seed: opts.seed,
         batch_size: 1,
-        output_format,
+        output_format: Some(output_format),
         embed_metadata: None,
         scheduler: None,
         cfg_plus: None,
