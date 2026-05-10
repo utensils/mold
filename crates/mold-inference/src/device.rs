@@ -459,6 +459,135 @@ pub fn select_expand_device_with_preference(
     ExpandPlacement::Cpu
 }
 
+// ── LTX-2 Gemma encoder placement ────────────────────────────────────────────
+
+/// Minimum free VRAM (bytes) needed to land Gemma 3 12B BF16 on a single GPU
+/// alongside its activation workspace. ~23 GB resident weights + ~1 GB
+/// activation overhead. Encoder isn't streamed — picking GPU means the whole
+/// thing is co-resident with the LTX-2 transformer phase.
+pub const LTX2_GEMMA_VRAM_THRESHOLD: u64 = 24_000_000_000;
+
+/// Resolved placement for the LTX-2 Gemma 3 12B prompt encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LtxGemmaPlacement {
+    /// Place the encoder on GPU with the given ordinal.
+    Gpu(usize),
+    /// Place the encoder on CPU (system RAM).
+    Cpu,
+}
+
+impl LtxGemmaPlacement {
+    /// Convert to a candle `Device`. CUDA failures fall back to CPU rather
+    /// than panic — the caller already paid for the placement decision and a
+    /// runtime CUDA error here is far worse than honoring the hint as CPU.
+    pub fn into_device(self) -> candle_core::Device {
+        match self {
+            LtxGemmaPlacement::Gpu(ordinal) => match candle_core::Device::new_cuda(ordinal) {
+                Ok(d) => d,
+                Err(err) => {
+                    tracing::warn!(
+                        ordinal,
+                        error = %err,
+                        "failed to open CUDA device for LTX-2 Gemma encoder, falling back to CPU"
+                    );
+                    candle_core::Device::Cpu
+                }
+            },
+            LtxGemmaPlacement::Cpu => candle_core::Device::Cpu,
+        }
+    }
+}
+
+/// Pick where to load the LTX-2 Gemma 3 12B prompt encoder: active GPU first,
+/// then sibling GPUs in ordinal order, then CPU.
+///
+/// - `gpus` is the output of [`discover_gpus`] — ordinals in ascending order.
+/// - `active_ordinal` is the GPU the LTX-2 transformer was loaded onto. We
+///   prefer co-residency (no cross-device tensor copy at encode time) but
+///   fall through to siblings when the active GPU is full.
+/// - A GPU is considered to fit when `free_vram_bytes > threshold` (strict
+///   greater-than, mirrors [`select_expand_device`]).
+/// - Returns [`LtxGemmaPlacement::Cpu`] when no GPU has room.
+pub fn select_ltx2_gemma_device(
+    gpus: &[DiscoveredGpu],
+    active_ordinal: usize,
+    threshold: u64,
+) -> LtxGemmaPlacement {
+    if let Some(g) = gpus
+        .iter()
+        .find(|g| g.ordinal == active_ordinal && g.free_vram_bytes > threshold)
+    {
+        return LtxGemmaPlacement::Gpu(g.ordinal);
+    }
+    for g in gpus {
+        if g.ordinal == active_ordinal {
+            continue;
+        }
+        if g.free_vram_bytes > threshold {
+            return LtxGemmaPlacement::Gpu(g.ordinal);
+        }
+    }
+    LtxGemmaPlacement::Cpu
+}
+
+/// Read [`MOLD_LTX2_GEMMA_DEVICE`] (and the deprecated
+/// [`MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER`] alias) and return an explicit
+/// placement override. `auto`, an unset env, or a value the parser doesn't
+/// recognise return `None` so the caller falls through to the auto-resolver.
+///
+/// The returned `Gpu` placement always points at `gpu_ordinal` — explicit
+/// `gpu` doesn't try to outsmart the user by walking siblings.
+pub fn resolve_ltx2_gemma_device_override(gpu_ordinal: usize) -> Option<LtxGemmaPlacement> {
+    if let Ok(raw) = std::env::var("MOLD_LTX2_GEMMA_DEVICE") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let lower = trimmed.to_ascii_lowercase();
+            match lower.as_str() {
+                "cpu" => return Some(LtxGemmaPlacement::Cpu),
+                "gpu" => return Some(LtxGemmaPlacement::Gpu(gpu_ordinal)),
+                "auto" => return None,
+                _ => {
+                    tracing::warn!(
+                        value = %trimmed,
+                        "unrecognised MOLD_LTX2_GEMMA_DEVICE value; expected cpu/gpu/auto",
+                    );
+                    return None;
+                }
+            }
+        }
+    }
+
+    if std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").is_some() {
+        warn_once_legacy_force_cpu_prompt_encoder();
+        return Some(LtxGemmaPlacement::Cpu);
+    }
+
+    None
+}
+
+fn warn_once_legacy_force_cpu_prompt_encoder() {
+    use std::sync::OnceLock;
+    static WARNED: OnceLock<()> = OnceLock::new();
+    WARNED.get_or_init(|| {
+        tracing::warn!(
+            "MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER is deprecated; \
+             use MOLD_LTX2_GEMMA_DEVICE=cpu instead",
+        );
+    });
+}
+
+/// Resolve the LTX-2 Gemma encoder placement once, honoring the env override
+/// before falling through to the GPU-walk + CPU fallback. The runtime and
+/// the server-side preflight both call this so they reach the same decision
+/// for the same observation of free VRAM and env vars.
+pub fn resolve_ltx2_gemma_placement(gpu_ordinal: usize) -> LtxGemmaPlacement {
+    if let Some(p) = resolve_ltx2_gemma_device_override(gpu_ordinal) {
+        return p;
+    }
+    let gpus = discover_gpus();
+    select_ltx2_gemma_device(&gpus, gpu_ordinal, LTX2_GEMMA_VRAM_THRESHOLD)
+}
+
 /// Minimum free VRAM for BF16 Qwen3-4B on GPU with drop-and-reload.
 /// 8.2GB model + 2GB activation headroom = 10.2GB.
 /// With drop-and-reload, the encoder is temporary — loaded for encoding, then dropped.
@@ -1857,6 +1986,152 @@ mod tests {
             select_expand_device_with_preference(&gpus, 3 * GB, false, Some(1)),
             ExpandPlacement::Gpu(0),
         );
+    }
+
+    // ── select_ltx2_gemma_device ─────────────────────────────────────────
+
+    /// Single GPU with room: encoder lands on the active GPU. Mirrors a
+    /// 2× 3090 host where one card is busy with another model and the
+    /// other has 24+ GB free for Gemma.
+    #[test]
+    fn select_ltx2_gemma_device_picks_active_gpu_when_room() {
+        let gpus = vec![gpu(0, 25)];
+        assert_eq!(
+            select_ltx2_gemma_device(&gpus, 0, 24 * GB),
+            LtxGemmaPlacement::Gpu(0),
+        );
+    }
+
+    /// Single 24 GB card already streaming a 22B LTX-2 transformer: only
+    /// ~17 GB free, doesn't clear the 24 GB Gemma threshold, so the encoder
+    /// must land on CPU instead of OOMing.
+    #[test]
+    fn select_ltx2_gemma_device_falls_to_cpu_when_no_gpu_fits() {
+        let gpus = vec![gpu(0, 17)];
+        assert_eq!(
+            select_ltx2_gemma_device(&gpus, 0, 24 * GB),
+            LtxGemmaPlacement::Cpu,
+        );
+    }
+
+    /// Multi-GPU host: the active GPU is full (4 GB free), but a sibling
+    /// GPU has plenty of room. Encoder runs there and pays a single
+    /// cross-device copy at encode time.
+    #[test]
+    fn select_ltx2_gemma_device_picks_sibling_gpu_when_active_full() {
+        let gpus = vec![gpu(0, 4), gpu(1, 25)];
+        assert_eq!(
+            select_ltx2_gemma_device(&gpus, 0, 24 * GB),
+            LtxGemmaPlacement::Gpu(1),
+        );
+    }
+
+    /// Three-GPU walk: the active GPU is GPU 1; both GPU 0 and GPU 2 have
+    /// room. The walk picks the first sibling in ordinal order (GPU 0)
+    /// rather than starting from `active_ordinal`.
+    #[test]
+    fn select_ltx2_gemma_device_walks_remaining_in_ordinal_order() {
+        let gpus = vec![gpu(0, 25), gpu(1, 4), gpu(2, 25)];
+        assert_eq!(
+            select_ltx2_gemma_device(&gpus, 1, 24 * GB),
+            LtxGemmaPlacement::Gpu(0),
+        );
+    }
+
+    #[test]
+    fn select_ltx2_gemma_device_returns_cpu_when_no_gpus_discovered() {
+        let gpus: Vec<DiscoveredGpu> = vec![];
+        assert_eq!(
+            select_ltx2_gemma_device(&gpus, 0, 24 * GB),
+            LtxGemmaPlacement::Cpu,
+        );
+    }
+
+    /// `LTX2_GEMMA_VRAM_THRESHOLD` is the headline knob; pin its bytes so
+    /// edits go through the constant rather than scattering literal 24-GB
+    /// figures across call sites.
+    #[test]
+    fn ltx2_gemma_vram_threshold_is_24gb() {
+        assert_eq!(LTX2_GEMMA_VRAM_THRESHOLD, 24_000_000_000);
+    }
+
+    // ── resolve_ltx2_gemma_device_override ───────────────────────────────
+
+    /// All `MOLD_LTX2_GEMMA_DEVICE` / `MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER`
+    /// env-var behaviors live under one `#[test]` to serialize access to the
+    /// shared process-global env vars (cargo's parallel runner can't race
+    /// between `set_var`/`remove_var` of two adjacent tests).
+    #[test]
+    fn resolve_ltx2_gemma_device_override_env_behaviors() {
+        // Snapshot then clear both vars so we start from a known state.
+        let prior_main = std::env::var_os("MOLD_LTX2_GEMMA_DEVICE");
+        let prior_legacy = std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
+            std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+        }
+
+        // Unset → None (auto path).
+        assert_eq!(resolve_ltx2_gemma_device_override(0), None);
+
+        // Explicit cpu → Cpu.
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "cpu") };
+        assert_eq!(
+            resolve_ltx2_gemma_device_override(0),
+            Some(LtxGemmaPlacement::Cpu),
+        );
+
+        // Explicit gpu → Gpu(active_ordinal).
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "gpu") };
+        assert_eq!(
+            resolve_ltx2_gemma_device_override(1),
+            Some(LtxGemmaPlacement::Gpu(1)),
+        );
+
+        // Case-insensitive parse.
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "CPU") };
+        assert_eq!(
+            resolve_ltx2_gemma_device_override(0),
+            Some(LtxGemmaPlacement::Cpu),
+        );
+
+        // Explicit auto → None (lets the auto-resolver run).
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "auto") };
+        assert_eq!(resolve_ltx2_gemma_device_override(0), None);
+
+        // Garbage → None + warn (warn isn't asserted; we just confirm None).
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "wat") };
+        assert_eq!(resolve_ltx2_gemma_device_override(0), None);
+
+        // Legacy alias still pins to CPU when the new var is unset.
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
+            std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", "1");
+        }
+        assert_eq!(
+            resolve_ltx2_gemma_device_override(0),
+            Some(LtxGemmaPlacement::Cpu),
+        );
+
+        // New var beats legacy alias (legacy `=1` would say cpu, new var
+        // pins to gpu — new wins).
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "gpu") };
+        assert_eq!(
+            resolve_ltx2_gemma_device_override(2),
+            Some(LtxGemmaPlacement::Gpu(2)),
+        );
+
+        // Restore.
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
+            std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+            if let Some(v) = prior_main {
+                std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", v);
+            }
+            if let Some(v) = prior_legacy {
+                std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", v);
+            }
+        }
     }
 
     // ── keep_te_in_ram ───────────────────────────────────────────────────

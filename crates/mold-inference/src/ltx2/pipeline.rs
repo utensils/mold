@@ -54,10 +54,6 @@ pub struct Ltx2Engine {
 }
 
 impl Ltx2Engine {
-    fn debug_force_cpu_prompt_encoder() -> bool {
-        std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").is_some()
-    }
-
     fn debug_timings_enabled() -> bool {
         std::env::var_os("MOLD_LTX2_DEBUG_TIMINGS").is_some()
     }
@@ -364,11 +360,8 @@ impl Ltx2Engine {
         device: Device,
     ) -> Result<Ltx2RuntimeSession> {
         let load_start = Instant::now();
-        let prompt_device = if Self::debug_force_cpu_prompt_encoder() && !device.is_cpu() {
-            Device::Cpu
-        } else {
-            device.clone()
-        };
+        let prompt_device = resolve_prompt_encoder_device(&device, self.gpu_ordinal);
+        log_prompt_encoder_placement(&device, &prompt_device);
         let dtype = gpu_dtype(&prompt_device);
         self.emit("Loading native LTX-2 prompt encoder");
         let prompt_encoder = NativePromptEncoder::load(
@@ -379,7 +372,13 @@ impl Ltx2Engine {
             dtype,
         )?;
         Self::log_timing("pipeline.create_runtime.load_prompt_encoder", load_start);
-        if prompt_device.is_cuda() {
+        // Cross-device case (transformer on CUDA, encoder on CPU/sibling GPU)
+        // can't use the deferred-cuda path because the prompt encoder doesn't
+        // need a CUDA stream sync at the transformer's ordinal. Fall back to
+        // the synchronous path; encode-time `move_prompt_encoding_to_device`
+        // handles the cross-device tensor copy.
+        let same_device = device.same_device(&prompt_device);
+        if prompt_device.is_cuda() && same_device {
             Ok(Ltx2RuntimeSession::new_deferred_cuda(
                 prompt_encoder,
                 self.gpu_ordinal,
@@ -878,6 +877,44 @@ impl InferenceEngine for Ltx2Engine {
     fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::ltx2::ChainStageRenderer> {
         Some(self)
     }
+}
+
+/// Resolve the device for the LTX-2 Gemma 3 12B prompt encoder given the
+/// transformer's chosen device.
+///
+/// - Transformer on CPU/Metal: keep the encoder on the same device. CPU
+///   means the user opted out of GPU end-to-end and Metal LTX-2 isn't
+///   supported anyway (caller will have errored before this).
+/// - Transformer on CUDA: defer to the auto-resolver in
+///   [`crate::device::resolve_ltx2_gemma_placement`], which honors the
+///   `MOLD_LTX2_GEMMA_DEVICE` override and walks active GPU → siblings →
+///   CPU on a free-VRAM probe.
+pub(crate) fn resolve_prompt_encoder_device(
+    transformer_device: &Device,
+    gpu_ordinal: usize,
+) -> Device {
+    if !transformer_device.is_cuda() {
+        return transformer_device.clone();
+    }
+    crate::device::resolve_ltx2_gemma_placement(gpu_ordinal).into_device()
+}
+
+fn log_prompt_encoder_placement(transformer_device: &Device, prompt_device: &Device) {
+    if transformer_device.same_device(prompt_device) {
+        return;
+    }
+    let label = if prompt_device.is_cpu() {
+        "CPU".to_string()
+    } else if prompt_device.is_cuda() {
+        "GPU (sibling ordinal)".to_string()
+    } else {
+        "non-CUDA device".to_string()
+    };
+    tracing::info!(
+        prompt_encoder_device = %label,
+        "LTX-2 Gemma encoder placed off the transformer device — \
+         encode-time tensor copy will move conditioning back to the transformer GPU"
+    );
 }
 
 #[cfg(test)]
@@ -1588,5 +1625,59 @@ mod tests {
             msg.contains("motion_tail_pixel_frames"),
             "error must name the motion_tail constraint, got: {msg}",
         );
+    }
+
+    /// CPU transformer → encoder pinned to the same device. The auto resolver
+    /// must short-circuit before probing GPUs (which on a CUDA-less host
+    /// would still pick CPU, but on a CUDA host must not place a 23 GB
+    /// encoder on a card the transformer chose to skip).
+    #[test]
+    fn resolve_prompt_encoder_device_keeps_cpu_when_transformer_is_cpu() {
+        let prior_main = std::env::var_os("MOLD_LTX2_GEMMA_DEVICE");
+        let prior_legacy = std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
+            std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+        }
+
+        let resolved = resolve_prompt_encoder_device(&Device::Cpu, 0);
+        assert!(resolved.is_cpu());
+
+        unsafe {
+            if let Some(v) = prior_main {
+                std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", v);
+            }
+            if let Some(v) = prior_legacy {
+                std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", v);
+            }
+        }
+    }
+
+    /// `MOLD_LTX2_GEMMA_DEVICE=cpu` pins the encoder to CPU even when the
+    /// transformer device is CUDA-shaped. We exercise this through the
+    /// device-level resolver because the runtime path needs the same
+    /// decision the load path will make and constructing a real CUDA
+    /// device in CI isn't possible.
+    #[test]
+    fn resolver_picks_cpu_when_env_pins_cpu() {
+        let prior_main = std::env::var_os("MOLD_LTX2_GEMMA_DEVICE");
+        let prior_legacy = std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+            std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "cpu");
+        }
+        assert_eq!(
+            crate::device::resolve_ltx2_gemma_placement(0),
+            crate::device::LtxGemmaPlacement::Cpu,
+        );
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
+            if let Some(v) = prior_main {
+                std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", v);
+            }
+            if let Some(v) = prior_legacy {
+                std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", v);
+            }
+        }
     }
 }

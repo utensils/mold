@@ -147,7 +147,16 @@ pub(crate) fn preflight_memory_guard_with_available(
     // time_embed / caption_projection / scale_shift_table / norms).
     let streaming = hint.is_some_and(|h| h.family.streaming_transformer());
     let peak = if streaming {
-        streaming_transformer_peak(paths)
+        // LTX-2 also pays for a Gemma 3 12B prompt encoder. When the resolver
+        // determines the encoder will run on CPU (`MOLD_LTX2_GEMMA_DEVICE=cpu`
+        // or auto-placement on a card without enough free VRAM) the encoder
+        // phase doesn't compete with the transformer phase for GPU at all —
+        // collapse encoder_total out of the peak so the preflight admits the
+        // load. This must stay in lockstep with `resolve_prompt_encoder_device`
+        // in `mold-inference::ltx2::pipeline` or the preflight will admit
+        // loads that subsequently OOM (or reject loads that would have fit).
+        let gemma_will_be_cpu = ltx2_encoder_phase_will_be_cpu(0);
+        streaming_transformer_peak(paths, gemma_will_be_cpu)
     } else {
         mold_inference::device::estimate_peak_memory(
             paths,
@@ -168,14 +177,20 @@ pub(crate) fn preflight_memory_guard_with_available(
 /// Sequential strategy in `device::estimate_peak_memory` but replaces the
 /// `transformer_size + vae_size` term with a `STREAMING_TRANSFORMER_CAP`
 /// that bounds "block-streaming overhead, fully-resident top-level weights,
-/// and VAE." Encoder phase still pays full encoder_total because text
-/// encoders (Gemma, T5, CLIP) load whole.
+/// and VAE."
+///
+/// When `gemma_on_cpu` is true, encoder_total is dropped from the max because
+/// the prompt encoder won't compete for VRAM at all — it lives in system RAM
+/// and pipes its conditioning across to the transformer GPU at encode time.
+/// When false, the encoder phase still pays full encoder_total (text encoders
+/// load whole; the runtime drops them before denoise but during the encode
+/// phase they're co-resident with allocations made earlier in the request).
 ///
 /// The cap is conservative: at 22B BF16 with `streaming_prefetch_count=2`,
 /// two blocks ≈ 1.83 GB + non-block fragments ≈ 200 MB + VAE ≈ 200 MB
 /// ≈ 2.3 GB. The 6 GB cap leaves room for activation workspace, OS
 /// fragmentation, and future LTX presets without revisiting this file.
-fn streaming_transformer_peak(paths: &ModelPaths) -> u64 {
+fn streaming_transformer_peak(paths: &ModelPaths, gemma_on_cpu: bool) -> u64 {
     const STREAMING_TRANSFORMER_CAP: u64 = 6_000_000_000; // 6 GB
     const HEADROOM: u64 = 2_000_000_000; // 2 GB, mirrors device::MEMORY_BUDGET_HEADROOM
 
@@ -192,10 +207,26 @@ fn streaming_transformer_peak(paths: &ModelPaths) -> u64 {
         .map(|p| file_size(p))
         .unwrap_or(0);
     let text_encoder_size: u64 = paths.text_encoder_files.iter().map(|p| file_size(p)).sum();
-    let encoder_total = t5_size + clip_size + clip2_size + text_encoder_size;
+    let encoder_total = if gemma_on_cpu {
+        0
+    } else {
+        t5_size + clip_size + clip2_size + text_encoder_size
+    };
 
     let inference_phase = STREAMING_TRANSFORMER_CAP;
     std::cmp::max(encoder_total, inference_phase) + HEADROOM
+}
+
+/// Resolve, for the preflight, whether the LTX-2 Gemma 3 12B prompt encoder
+/// is going to land on CPU. This is a thin wrapper around the inference-side
+/// `resolve_ltx2_gemma_placement` so the preflight and the load path reach
+/// the same conclusion under the same env state and the same observation of
+/// free VRAM.
+fn ltx2_encoder_phase_will_be_cpu(gpu_ordinal: usize) -> bool {
+    matches!(
+        mold_inference::device::resolve_ltx2_gemma_placement(gpu_ordinal),
+        mold_inference::device::LtxGemmaPlacement::Cpu,
+    )
 }
 
 /// Check whether estimated peak memory fits before committing to a model load.
@@ -1178,6 +1209,51 @@ mod tests {
 
     const GB: u64 = 1_000_000_000;
 
+    /// RAII guard for `MOLD_LTX2_GEMMA_DEVICE` (and the deprecated alias).
+    /// Drop restores the prior values so adjacent tests don't see stale
+    /// state. Cargo's parallel runner is serialized via a static mutex
+    /// because env vars are process-global.
+    struct Ltx2GemmaEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prior_main: Option<std::ffi::OsString>,
+        prior_legacy: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for Ltx2GemmaEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
+                std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+                if let Some(v) = self.prior_main.take() {
+                    std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", v);
+                }
+                if let Some(v) = self.prior_legacy.take() {
+                    std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", v);
+                }
+            }
+        }
+    }
+
+    fn ltx2_gemma_env_guard(value: &str) -> Ltx2GemmaEnvGuard {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prior_main = std::env::var_os("MOLD_LTX2_GEMMA_DEVICE");
+        let prior_legacy = std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+            std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", value);
+        }
+        Ltx2GemmaEnvGuard {
+            _lock: lock,
+            prior_main,
+            prior_legacy,
+        }
+    }
+
     /// Build a `ModelPaths` whose `transformer` and `vae` files exist on disk
     /// with a combined size of `total_bytes`. `estimate_peak_memory()` reads
     /// file sizes via `std::fs::metadata`, so the on-disk footprint is what
@@ -1565,12 +1641,14 @@ mod tests {
         );
     }
 
-    /// Encoder phase for LTX-2 still pays full encoder_total. With a 25 GB
-    /// Gemma TE on a 24 GB card the encoder phase trips the 90 % cap even
-    /// when the transformer is streamed — a real OOM the user should see
-    /// from the runtime, but the preflight captures it up-front.
+    /// Encoder phase for LTX-2 still pays full encoder_total when the user
+    /// pins the placement to GPU (`MOLD_LTX2_GEMMA_DEVICE=gpu`). With a
+    /// 25 GB Gemma TE on a 24 GB card the encoder phase trips the 90 % cap
+    /// even when the transformer is streamed — a real OOM the user should
+    /// see from the runtime, but the preflight captures it up-front.
     #[test]
     fn preflight_rejects_ltx2_when_encoder_phase_exceeds_card() {
+        let _guard = ltx2_gemma_env_guard("gpu");
         let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 25);
         let hint = ActivationHint {
             width: 768,
@@ -1586,6 +1664,32 @@ mod tests {
             "25 GB Gemma TE alone exceeds 90 %% of 24 GB during the encoder \
              phase — preflight must surface this even when the transformer \
              is streamed, got {result:?}",
+        );
+    }
+
+    /// `MOLD_LTX2_GEMMA_DEVICE=cpu` shifts the Gemma TE to system RAM. The
+    /// encoder phase no longer competes for VRAM; the streaming-aware peak
+    /// collapses to "transformer streaming cap + activation + headroom" and
+    /// the same 25 GB Gemma + 46 GB transformer paths admit on a 24 GB card.
+    /// This is the load-bearing behavior on a single 3090 running cv:2752735.
+    #[test]
+    fn preflight_admits_ltx2_22b_with_25gb_gemma_when_resolver_picks_cpu() {
+        let _guard = ltx2_gemma_env_guard("cpu");
+        let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 25);
+        let hint = ActivationHint {
+            width: 768,
+            height: 512,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Ltx2Video,
+        };
+        let result =
+            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        assert!(
+            result.is_ok(),
+            "with MOLD_LTX2_GEMMA_DEVICE=cpu the encoder phase should not \
+             count against GPU VRAM, so cv:2752735 must admit on 24 GB even \
+             with a 25 GB Gemma TE, got {result:?}",
         );
     }
 
