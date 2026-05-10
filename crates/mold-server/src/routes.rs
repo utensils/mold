@@ -333,10 +333,16 @@ async fn prepare_generation(
 
     // Catalog (`cv:*` / `hf:*`) IDs aren't in the static manifest, so the
     // pure-mold-core family lookup returns `None` for them. Run the live
-    // single-id install first so config.models has the entry; then feed
-    // its family string through as a hint so audio / keyframes / pipeline
-    // gates work for installed Civitai LTX-2 checkpoints.
-    let _ = model_manager::install_catalog_model(state, &request.model).await;
+    // single-id install first so the intent cache has the entry; then
+    // feed its family string through as a hint so audio / keyframes /
+    // pipeline gates work for installed Civitai LTX-2 checkpoints.
+    //
+    // A `Network` error here means Civitai/HF is unreachable — surface it
+    // immediately as 502 rather than letting the user fall through to
+    // a "not installed" 404 they can't act on.
+    if let Err(e) = model_manager::install_catalog_model(state, &request.model).await {
+        return Err(model_manager::install_error_to_api_error(&e));
+    }
     let family_hint = model_manager::catalog_family_for(state, &request.model).await;
     if let Err(e) = validate_generate_request(request, family_hint.as_deref()) {
         return Err(ApiError::validation(e));

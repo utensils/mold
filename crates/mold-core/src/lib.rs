@@ -9,6 +9,7 @@ pub mod download;
 pub mod error;
 pub mod expand;
 pub mod expand_prompts;
+pub mod install_error;
 pub mod manifest;
 pub mod runpod;
 pub mod types;
@@ -34,6 +35,7 @@ pub use control::{
     classify_generate_error, classify_server_error, GenerateServerAction, ServerAvailability,
 };
 pub use error::{MoldError, Result as MoldResult};
+pub use install_error::InstallError;
 pub use types::GenerateRequest;
 pub use types::Scheduler;
 pub use types::*;

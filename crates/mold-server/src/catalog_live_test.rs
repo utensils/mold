@@ -255,3 +255,63 @@ async fn installed_endpoint_marks_uninstalled_when_primary_missing() {
     assert_eq!(entries[0]["installed"], false);
     assert!(entries[0]["primary_path"].is_null());
 }
+
+// ── install_catalog_model error-path tests (Task 4) ─────────────────────────
+
+/// `install_catalog_model` must surface upstream 404s as `NotFound` so
+/// the user gets a 404 with a helpful message rather than the legacy
+/// "not installed" 404 every Civitai outage looked like.
+#[tokio::test]
+async fn install_catalog_model_returns_not_found_for_unknown_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/model-versions/99999999"))
+        .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"error":"not found"}"#))
+        .mount(&server)
+        .await;
+
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    let res = crate::model_manager::install_catalog_model(&state, "cv:99999999").await;
+    let err = res.expect_err("must fail");
+    assert!(
+        matches!(err, mold_core::InstallError::NotFound(_)),
+        "got {err:?}"
+    );
+}
+
+/// `install_catalog_model` must distinguish a 5xx upstream payload from
+/// a clean 404 — the former indicates either a mold parsing bug or a
+/// genuinely broken upstream response, and is mapped to RecipeMalformed.
+#[tokio::test]
+async fn install_catalog_model_returns_recipe_malformed_on_upstream_5xx() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/model-versions/123"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("internal"))
+        .mount(&server)
+        .await;
+
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    let res = crate::model_manager::install_catalog_model(&state, "cv:123").await;
+    let err = res.expect_err("must fail");
+    assert!(
+        matches!(err, mold_core::InstallError::RecipeMalformed(_)),
+        "got {err:?}"
+    );
+}
+
+/// `install_catalog_model` must surface unreachable-upstream as the
+/// Network variant, NOT as "not installed". This is the load-bearing
+/// fix for the "Civitai is down" scenario the plan calls out.
+#[tokio::test]
+async fn install_catalog_model_returns_network_error_when_civitai_unreachable() {
+    // Point at a port that nothing's listening on. Connection refused →
+    // reqwest::Error → InstallError::Network.
+    let state = AppState::for_tests().with_civitai_base("http://127.0.0.1:1");
+    let res = crate::model_manager::install_catalog_model(&state, "cv:42").await;
+    let err = res.expect_err("must fail");
+    assert!(
+        matches!(err, mold_core::InstallError::Network(_)),
+        "got {err:?}"
+    );
+}
