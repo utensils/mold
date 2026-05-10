@@ -241,6 +241,24 @@ pub enum ActivationFamily {
     Wuerstchen,
     /// T5 / CLIP / Qwen3 / Gemma text encoder workspace.
     SmallTransformer,
+    /// LTX-Video / LTX-2 (19B / 22B) video transformer. Always loaded via
+    /// the streaming block source (`new_streaming` in
+    /// `crates/mold-inference/src/ltx2/model/video_transformer.rs`) — only
+    /// `streaming_prefetch_count` blocks are GPU-resident at any one time,
+    /// so the file size on disk (~46 GB at BF16 for the 22B preset)
+    /// massively over-estimates GPU residency.
+    Ltx2Video,
+}
+
+impl ActivationFamily {
+    /// Whether this family loads its transformer in a block-streaming mode
+    /// (only a few blocks GPU-resident at a time, the rest mmap'd / paged).
+    /// The preflight uses this to bypass the file-size-based transformer
+    /// budget, which would otherwise reject 22B LTX-2 on a 24 GB card even
+    /// though only ~2 GB of transformer weights are co-resident at peak.
+    pub fn streaming_transformer(self) -> bool {
+        matches!(self, ActivationFamily::Ltx2Video)
+    }
 }
 
 /// Estimated activation memory (in bytes) for a single forward pass.
@@ -314,6 +332,15 @@ pub fn activation_bytes(
         // Image-space scaling is a soft proxy for "small workspace" — the
         // floor usually dominates for typical inputs.
         ActivationFamily::SmallTransformer => 87.0,
+        // LTX-Video / LTX-2: video latents are temporally compressed (8× spatial
+        // + 8× temporal in the LTX VAE), but each forward operates on the full
+        // [B, C, T, H/8, W/8] latent. Per-frame activation is similar to FLUX dit
+        // (split blocks, RMSNorm, no CFG-batched workspace), so we use the FLUX
+        // factor as a starting point — the factor is the per-pixel multiplier,
+        // and `activation_bytes` only sees image-space (H, W). Frame-count
+        // overhead is absorbed by the headroom buffer; the dominant cost on a
+        // 24 GB card is encoder + 1-2 streaming blocks, not activations.
+        ActivationFamily::Ltx2Video => 130.0,
     };
     let raw = (area as f64 * bytes_per_pixel as f64 * factor) as u64;
     /// Sanity floor: even tiny inputs reserve ~256 MB for kernel workspaces
@@ -352,7 +379,13 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         "qwen-image" | "qwen-image-edit" => ActivationFamily::QwenImageDit,
         "z-image" => ActivationFamily::ZImageDit,
         "wuerstchen" => ActivationFamily::Wuerstchen,
-        // Unknown / video families default to FLUX dit shape — same activation
+        // LTX-Video / LTX-2: streaming-loaded transformer (see
+        // `ActivationFamily::Ltx2Video::streaming_transformer`). The
+        // preflight uses this hint to skip the transformer file-size
+        // budget — at full BF16 the 22B file is 46 GB but only a couple
+        // of blocks are co-resident on GPU at peak.
+        "ltx-video" | "ltx2" | "ltx-2" | "ltx-2.3" => ActivationFamily::Ltx2Video,
+        // Unknown families default to FLUX dit shape — same activation
         // class, conservative against unknowns.
         _ => ActivationFamily::FluxDit,
     }
@@ -424,6 +457,135 @@ pub fn select_expand_device_with_preference(
         }
     }
     ExpandPlacement::Cpu
+}
+
+// ── LTX-2 Gemma encoder placement ────────────────────────────────────────────
+
+/// Minimum free VRAM (bytes) needed to land Gemma 3 12B BF16 on a single GPU
+/// alongside its activation workspace. ~23 GB resident weights + ~1 GB
+/// activation overhead. Encoder isn't streamed — picking GPU means the whole
+/// thing is co-resident with the LTX-2 transformer phase.
+pub const LTX2_GEMMA_VRAM_THRESHOLD: u64 = 24_000_000_000;
+
+/// Resolved placement for the LTX-2 Gemma 3 12B prompt encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LtxGemmaPlacement {
+    /// Place the encoder on GPU with the given ordinal.
+    Gpu(usize),
+    /// Place the encoder on CPU (system RAM).
+    Cpu,
+}
+
+impl LtxGemmaPlacement {
+    /// Convert to a candle `Device`. CUDA failures fall back to CPU rather
+    /// than panic — the caller already paid for the placement decision and a
+    /// runtime CUDA error here is far worse than honoring the hint as CPU.
+    pub fn into_device(self) -> candle_core::Device {
+        match self {
+            LtxGemmaPlacement::Gpu(ordinal) => match candle_core::Device::new_cuda(ordinal) {
+                Ok(d) => d,
+                Err(err) => {
+                    tracing::warn!(
+                        ordinal,
+                        error = %err,
+                        "failed to open CUDA device for LTX-2 Gemma encoder, falling back to CPU"
+                    );
+                    candle_core::Device::Cpu
+                }
+            },
+            LtxGemmaPlacement::Cpu => candle_core::Device::Cpu,
+        }
+    }
+}
+
+/// Pick where to load the LTX-2 Gemma 3 12B prompt encoder: active GPU first,
+/// then sibling GPUs in ordinal order, then CPU.
+///
+/// - `gpus` is the output of [`discover_gpus`] — ordinals in ascending order.
+/// - `active_ordinal` is the GPU the LTX-2 transformer was loaded onto. We
+///   prefer co-residency (no cross-device tensor copy at encode time) but
+///   fall through to siblings when the active GPU is full.
+/// - A GPU is considered to fit when `free_vram_bytes > threshold` (strict
+///   greater-than, mirrors [`select_expand_device`]).
+/// - Returns [`LtxGemmaPlacement::Cpu`] when no GPU has room.
+pub fn select_ltx2_gemma_device(
+    gpus: &[DiscoveredGpu],
+    active_ordinal: usize,
+    threshold: u64,
+) -> LtxGemmaPlacement {
+    if let Some(g) = gpus
+        .iter()
+        .find(|g| g.ordinal == active_ordinal && g.free_vram_bytes > threshold)
+    {
+        return LtxGemmaPlacement::Gpu(g.ordinal);
+    }
+    for g in gpus {
+        if g.ordinal == active_ordinal {
+            continue;
+        }
+        if g.free_vram_bytes > threshold {
+            return LtxGemmaPlacement::Gpu(g.ordinal);
+        }
+    }
+    LtxGemmaPlacement::Cpu
+}
+
+/// Read [`MOLD_LTX2_GEMMA_DEVICE`] (and the deprecated
+/// [`MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER`] alias) and return an explicit
+/// placement override. `auto`, an unset env, or a value the parser doesn't
+/// recognise return `None` so the caller falls through to the auto-resolver.
+///
+/// The returned `Gpu` placement always points at `gpu_ordinal` — explicit
+/// `gpu` doesn't try to outsmart the user by walking siblings.
+pub fn resolve_ltx2_gemma_device_override(gpu_ordinal: usize) -> Option<LtxGemmaPlacement> {
+    if let Ok(raw) = std::env::var("MOLD_LTX2_GEMMA_DEVICE") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let lower = trimmed.to_ascii_lowercase();
+            match lower.as_str() {
+                "cpu" => return Some(LtxGemmaPlacement::Cpu),
+                "gpu" => return Some(LtxGemmaPlacement::Gpu(gpu_ordinal)),
+                "auto" => return None,
+                _ => {
+                    tracing::warn!(
+                        value = %trimmed,
+                        "unrecognised MOLD_LTX2_GEMMA_DEVICE value; expected cpu/gpu/auto",
+                    );
+                    return None;
+                }
+            }
+        }
+    }
+
+    if std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").is_some() {
+        warn_once_legacy_force_cpu_prompt_encoder();
+        return Some(LtxGemmaPlacement::Cpu);
+    }
+
+    None
+}
+
+fn warn_once_legacy_force_cpu_prompt_encoder() {
+    use std::sync::OnceLock;
+    static WARNED: OnceLock<()> = OnceLock::new();
+    WARNED.get_or_init(|| {
+        tracing::warn!(
+            "MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER is deprecated; \
+             use MOLD_LTX2_GEMMA_DEVICE=cpu instead",
+        );
+    });
+}
+
+/// Resolve the LTX-2 Gemma encoder placement once, honoring the env override
+/// before falling through to the GPU-walk + CPU fallback. The runtime and
+/// the server-side preflight both call this so they reach the same decision
+/// for the same observation of free VRAM and env vars.
+pub fn resolve_ltx2_gemma_placement(gpu_ordinal: usize) -> LtxGemmaPlacement {
+    if let Some(p) = resolve_ltx2_gemma_device_override(gpu_ordinal) {
+        return p;
+    }
+    let gpus = discover_gpus();
+    select_ltx2_gemma_device(&gpus, gpu_ordinal, LTX2_GEMMA_VRAM_THRESHOLD)
 }
 
 /// Minimum free VRAM for BF16 Qwen3-4B on GPU with drop-and-reload.
@@ -844,6 +1006,41 @@ pub(crate) fn gpu_dtype(device: &candle_core::Device) -> candle_core::DType {
         candle_core::DType::BF16
     } else {
         candle_core::DType::F32
+    }
+}
+
+/// Resolve the VAE decode dtype for the current generation.
+///
+/// Reads `MOLD_VAE_DTYPE` to let users force a different precision for the
+/// VAE decode pass than the rest of the model. Default (`auto` or unset)
+/// preserves the per-pipeline historical choice (typically BF16 on CUDA,
+/// F16 on SDXL/SD1.5, F32 on CPU). Forcing `fp32` fixes occasional banding
+/// artifacts on FLUX/SD3 finetuned VAEs whose conv weights round badly at
+/// half precision; the trade-off is ~2× peak VRAM on the decode step,
+/// which `vae_tiling::decode_with_oom_fallback` will absorb by retrying
+/// with tiles when the full-tensor decode OOMs.
+///
+/// Accepted values: `auto` (= unset), `bf16`, `fp16` / `f16`, `fp32` / `f32`.
+/// Any other value emits a one-shot warn and falls back to the default —
+/// loud enough to surface typos without failing the request.
+pub(crate) fn resolve_vae_dtype(default_dtype: candle_core::DType) -> candle_core::DType {
+    use candle_core::DType;
+    match std::env::var("MOLD_VAE_DTYPE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        None | Some("") | Some("auto") => default_dtype,
+        Some("bf16") | Some("BF16") => DType::BF16,
+        Some("fp16") | Some("f16") | Some("FP16") | Some("F16") => DType::F16,
+        Some("fp32") | Some("f32") | Some("FP32") | Some("F32") => DType::F32,
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "MOLD_VAE_DTYPE has unrecognised value; expected one of auto/bf16/fp16/fp32 — falling back to default"
+            );
+            default_dtype
+        }
     }
 }
 
@@ -1791,6 +1988,152 @@ mod tests {
         );
     }
 
+    // ── select_ltx2_gemma_device ─────────────────────────────────────────
+
+    /// Single GPU with room: encoder lands on the active GPU. Mirrors a
+    /// 2× 3090 host where one card is busy with another model and the
+    /// other has 24+ GB free for Gemma.
+    #[test]
+    fn select_ltx2_gemma_device_picks_active_gpu_when_room() {
+        let gpus = vec![gpu(0, 25)];
+        assert_eq!(
+            select_ltx2_gemma_device(&gpus, 0, 24 * GB),
+            LtxGemmaPlacement::Gpu(0),
+        );
+    }
+
+    /// Single 24 GB card already streaming a 22B LTX-2 transformer: only
+    /// ~17 GB free, doesn't clear the 24 GB Gemma threshold, so the encoder
+    /// must land on CPU instead of OOMing.
+    #[test]
+    fn select_ltx2_gemma_device_falls_to_cpu_when_no_gpu_fits() {
+        let gpus = vec![gpu(0, 17)];
+        assert_eq!(
+            select_ltx2_gemma_device(&gpus, 0, 24 * GB),
+            LtxGemmaPlacement::Cpu,
+        );
+    }
+
+    /// Multi-GPU host: the active GPU is full (4 GB free), but a sibling
+    /// GPU has plenty of room. Encoder runs there and pays a single
+    /// cross-device copy at encode time.
+    #[test]
+    fn select_ltx2_gemma_device_picks_sibling_gpu_when_active_full() {
+        let gpus = vec![gpu(0, 4), gpu(1, 25)];
+        assert_eq!(
+            select_ltx2_gemma_device(&gpus, 0, 24 * GB),
+            LtxGemmaPlacement::Gpu(1),
+        );
+    }
+
+    /// Three-GPU walk: the active GPU is GPU 1; both GPU 0 and GPU 2 have
+    /// room. The walk picks the first sibling in ordinal order (GPU 0)
+    /// rather than starting from `active_ordinal`.
+    #[test]
+    fn select_ltx2_gemma_device_walks_remaining_in_ordinal_order() {
+        let gpus = vec![gpu(0, 25), gpu(1, 4), gpu(2, 25)];
+        assert_eq!(
+            select_ltx2_gemma_device(&gpus, 1, 24 * GB),
+            LtxGemmaPlacement::Gpu(0),
+        );
+    }
+
+    #[test]
+    fn select_ltx2_gemma_device_returns_cpu_when_no_gpus_discovered() {
+        let gpus: Vec<DiscoveredGpu> = vec![];
+        assert_eq!(
+            select_ltx2_gemma_device(&gpus, 0, 24 * GB),
+            LtxGemmaPlacement::Cpu,
+        );
+    }
+
+    /// `LTX2_GEMMA_VRAM_THRESHOLD` is the headline knob; pin its bytes so
+    /// edits go through the constant rather than scattering literal 24-GB
+    /// figures across call sites.
+    #[test]
+    fn ltx2_gemma_vram_threshold_is_24gb() {
+        assert_eq!(LTX2_GEMMA_VRAM_THRESHOLD, 24_000_000_000);
+    }
+
+    // ── resolve_ltx2_gemma_device_override ───────────────────────────────
+
+    /// All `MOLD_LTX2_GEMMA_DEVICE` / `MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER`
+    /// env-var behaviors live under one `#[test]` to serialize access to the
+    /// shared process-global env vars (cargo's parallel runner can't race
+    /// between `set_var`/`remove_var` of two adjacent tests).
+    #[test]
+    fn resolve_ltx2_gemma_device_override_env_behaviors() {
+        // Snapshot then clear both vars so we start from a known state.
+        let prior_main = std::env::var_os("MOLD_LTX2_GEMMA_DEVICE");
+        let prior_legacy = std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
+            std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+        }
+
+        // Unset → None (auto path).
+        assert_eq!(resolve_ltx2_gemma_device_override(0), None);
+
+        // Explicit cpu → Cpu.
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "cpu") };
+        assert_eq!(
+            resolve_ltx2_gemma_device_override(0),
+            Some(LtxGemmaPlacement::Cpu),
+        );
+
+        // Explicit gpu → Gpu(active_ordinal).
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "gpu") };
+        assert_eq!(
+            resolve_ltx2_gemma_device_override(1),
+            Some(LtxGemmaPlacement::Gpu(1)),
+        );
+
+        // Case-insensitive parse.
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "CPU") };
+        assert_eq!(
+            resolve_ltx2_gemma_device_override(0),
+            Some(LtxGemmaPlacement::Cpu),
+        );
+
+        // Explicit auto → None (lets the auto-resolver run).
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "auto") };
+        assert_eq!(resolve_ltx2_gemma_device_override(0), None);
+
+        // Garbage → None + warn (warn isn't asserted; we just confirm None).
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "wat") };
+        assert_eq!(resolve_ltx2_gemma_device_override(0), None);
+
+        // Legacy alias still pins to CPU when the new var is unset.
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
+            std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", "1");
+        }
+        assert_eq!(
+            resolve_ltx2_gemma_device_override(0),
+            Some(LtxGemmaPlacement::Cpu),
+        );
+
+        // New var beats legacy alias (legacy `=1` would say cpu, new var
+        // pins to gpu — new wins).
+        unsafe { std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", "gpu") };
+        assert_eq!(
+            resolve_ltx2_gemma_device_override(2),
+            Some(LtxGemmaPlacement::Gpu(2)),
+        );
+
+        // Restore.
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
+            std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
+            if let Some(v) = prior_main {
+                std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", v);
+            }
+            if let Some(v) = prior_legacy {
+                std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", v);
+            }
+        }
+    }
+
     // ── keep_te_in_ram ───────────────────────────────────────────────────
 
     /// `MOLD_KEEP_TE_RAM` defaults to off so the existing drop-and-reload
@@ -1998,6 +2341,94 @@ mod tests {
         assert!(
             (10.5..11.5).contains(&peak_gb),
             "sharded peak should be ~11 GB, got {peak_gb:.1} GB"
+        );
+    }
+
+    // --- resolve_vae_dtype tests ---
+    //
+    // MOLD_VAE_DTYPE is process-global; tests serialize via a static mutex
+    // (mirrors the MOLD_LONG_PROMPTS / MOLD_CFG_PLUS test pattern elsewhere
+    // in the crate).
+
+    fn vae_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn resolve_vae_dtype_unset_returns_default() {
+        let _g = vae_env_lock();
+        // SAFETY: serialized via vae_env_lock to avoid racing parallel tests.
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(
+            resolve_vae_dtype(candle_core::DType::BF16),
+            candle_core::DType::BF16
+        );
+        assert_eq!(
+            resolve_vae_dtype(candle_core::DType::F16),
+            candle_core::DType::F16
+        );
+    }
+
+    #[test]
+    fn resolve_vae_dtype_auto_returns_default() {
+        let _g = vae_env_lock();
+        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "auto") };
+        let resolved = resolve_vae_dtype(candle_core::DType::BF16);
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(resolved, candle_core::DType::BF16);
+    }
+
+    #[test]
+    fn resolve_vae_dtype_fp32_forces_f32_regardless_of_default() {
+        let _g = vae_env_lock();
+        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "fp32") };
+        let resolved = resolve_vae_dtype(candle_core::DType::BF16);
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(resolved, candle_core::DType::F32);
+    }
+
+    #[test]
+    fn resolve_vae_dtype_bf16_forces_bf16_even_when_default_is_f32() {
+        // CPU default is F32; user opts back into BF16 explicitly. Pins the
+        // contract that the env knob can both raise *and* lower precision.
+        let _g = vae_env_lock();
+        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "bf16") };
+        let resolved = resolve_vae_dtype(candle_core::DType::F32);
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(resolved, candle_core::DType::BF16);
+    }
+
+    #[test]
+    fn resolve_vae_dtype_fp16_alias_recognised() {
+        // f16 / fp16 / F16 / FP16 must all resolve identically — different
+        // tools and shells normalise case differently.
+        let _g = vae_env_lock();
+        for value in ["fp16", "f16", "FP16", "F16"] {
+            unsafe { std::env::set_var("MOLD_VAE_DTYPE", value) };
+            let resolved = resolve_vae_dtype(candle_core::DType::BF16);
+            assert_eq!(
+                resolved,
+                candle_core::DType::F16,
+                "value `{value}` should resolve to F16"
+            );
+        }
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+    }
+
+    #[test]
+    fn resolve_vae_dtype_invalid_value_falls_back_to_default() {
+        let _g = vae_env_lock();
+        unsafe { std::env::set_var("MOLD_VAE_DTYPE", "fp64") };
+        let resolved = resolve_vae_dtype(candle_core::DType::BF16);
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(
+            resolved,
+            candle_core::DType::BF16,
+            "invalid value must fall back, not error"
         );
     }
 }

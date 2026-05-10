@@ -8,12 +8,6 @@ use std::sync::Mutex;
 pub(crate) const DEFAULT_PROMPT_CACHE_CAPACITY: usize = 16;
 pub(crate) const DEFAULT_IMAGE_CACHE_CAPACITY: usize = 8;
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(crate) struct PromptCacheKey {
-    prompt: String,
-    guidance_bits: u64,
-}
-
 /// Cache key for CFG-based pipelines that cache the **concatenated**
 /// `(uncond, cond)` conditioning tensor produced from `(prompt, negative_prompt)`.
 ///
@@ -23,6 +17,12 @@ pub(crate) struct PromptCacheKey {
 /// The result is plausible but not what the user asked for. This key fixes that
 /// by including the negative prompt and the guidance scale that decides whether
 /// the uncond branch is computed at all.
+///
+/// Used by every CFG-capable pipeline in this crate (SD1.5, SDXL, SD3) — there
+/// used to be a `PromptCacheKey` keyed only on `(prompt, guidance)` for SD1.5,
+/// but it carried the silent-wrong-output bug above and was migrated to this
+/// shape. See the per-family regression tests in each `pipeline.rs::tests`
+/// module (e.g. `sd15_prompt_cache_distinguishes_negative_prompt_changes`).
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct CfgPromptCacheKey {
     prompt: String,
@@ -51,13 +51,6 @@ pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(bytes);
     hasher.finish()
-}
-
-pub(crate) fn prompt_cache_key(prompt: &str, guidance: f64) -> PromptCacheKey {
-    PromptCacheKey {
-        prompt: prompt.to_string(),
-        guidance_bits: guidance.to_bits(),
-    }
 }
 
 pub(crate) fn cfg_prompt_cache_key(
@@ -353,10 +346,13 @@ mod tests {
     }
 
     #[test]
-    fn prompt_cache_key_includes_guidance_bits() {
+    fn cfg_prompt_cache_key_includes_guidance_bits() {
+        // Guidance scale matters because cfg_active toggles whether the
+        // uncond branch is computed; the cached tensor's shape differs
+        // accordingly.
         assert_ne!(
-            prompt_cache_key("hello", 1.0),
-            prompt_cache_key("hello", 7.5)
+            cfg_prompt_cache_key("hello", "", 1.0),
+            cfg_prompt_cache_key("hello", "", 7.5),
         );
     }
 

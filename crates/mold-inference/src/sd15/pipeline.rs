@@ -8,9 +8,10 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::cache::{
-    clear_cache, get_or_insert_cached_tensor, image_size_cache_key, latent_size_cache_key,
-    prompt_cache_key, restore_cached_tensor, CachedTensor, ImageSizeCacheKey, LatentSizeCacheKey,
-    LruCache, PromptCacheKey, DEFAULT_IMAGE_CACHE_CAPACITY, DEFAULT_PROMPT_CACHE_CAPACITY,
+    cfg_prompt_cache_key, clear_cache, get_or_insert_cached_tensor, image_size_cache_key,
+    latent_size_cache_key, restore_cached_tensor, CachedTensor, CfgPromptCacheKey,
+    ImageSizeCacheKey, LatentSizeCacheKey, LruCache, DEFAULT_IMAGE_CACHE_CAPACITY,
+    DEFAULT_PROMPT_CACHE_CAPACITY,
 };
 use crate::cfg_plus_ddim::DdimAlphaSchedule;
 use crate::controlnet::ControlNetModel;
@@ -43,6 +44,9 @@ struct LoadedSD15 {
     /// Tier 1 `text_encoders` placement override pins encoders to CPU.
     clip_device: Device,
     dtype: DType,
+    /// Effective VAE dtype after `MOLD_VAE_DTYPE` resolution. May differ from
+    /// `dtype` when fp32 VAE decode is forced. Captured at load time.
+    vae_dtype: DType,
 }
 
 /// SD1.5 inference engine backed by candle's stable_diffusion module.
@@ -51,7 +55,7 @@ struct LoadedSD15 {
 pub struct SD15Engine {
     base: EngineBase<LoadedSD15>,
     scheduler: Scheduler,
-    prompt_cache: Mutex<LruCache<PromptCacheKey, CachedTensor>>,
+    prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensor>>,
     source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
     control_tensor_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
@@ -391,6 +395,8 @@ impl SD15Engine {
             .unwrap_or_default();
         let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
+        // Resolve VAE precision once at load — see LoadedSD15::vae_dtype.
+        let vae_dtype = crate::device::resolve_vae_dtype(dtype);
         let (unet, vae, clip) = if let Some(single_file) = self.single_file_path.clone() {
             self.load_components_single_file(
                 &single_file,
@@ -398,9 +404,17 @@ impl SD15Engine {
                 &device,
                 &clip_device,
                 dtype,
+                vae_dtype,
             )?
         } else {
-            self.load_components_diffusers(&clip_encoder, &sd_config, &device, &clip_device, dtype)?
+            self.load_components_diffusers(
+                &clip_encoder,
+                &sd_config,
+                &device,
+                &clip_device,
+                dtype,
+                vae_dtype,
+            )?
         };
 
         let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer)
@@ -414,6 +428,7 @@ impl SD15Engine {
             sd_config,
             device,
             clip_device,
+            vae_dtype,
             dtype,
         });
 
@@ -422,6 +437,7 @@ impl SD15Engine {
     }
 
     /// Diffusers-layout component loader (existing pre-2.6 path).
+    #[allow(clippy::too_many_arguments)]
     fn load_components_diffusers(
         &mut self,
         clip_encoder: &std::path::Path,
@@ -429,6 +445,7 @@ impl SD15Engine {
         device: &Device,
         clip_device: &Device,
         dtype: DType,
+        vae_dtype: DType,
     ) -> Result<(
         stable_diffusion::unet_2d::UNet2DConditionModel,
         stable_diffusion::vae::AutoEncoderKL,
@@ -449,7 +466,7 @@ impl SD15Engine {
 
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_start = Instant::now();
-        let vae = sd_config.build_vae(&self.base.paths.vae, device, dtype)?;
+        let vae = sd_config.build_vae(&self.base.paths.vae, device, vae_dtype)?;
         self.base
             .progress
             .stage_done("Loading VAE (GPU)", vae_start.elapsed());
@@ -480,6 +497,7 @@ impl SD15Engine {
     ///
     /// Reaches into `sd_config.unet()` / `.autoencoder()` accessors exposed
     /// by candle-transformers-mold 0.9.12 (utensils/candle PR #1).
+    #[allow(clippy::too_many_arguments)]
     fn load_components_single_file(
         &mut self,
         single_file: &std::path::Path,
@@ -487,6 +505,7 @@ impl SD15Engine {
         device: &Device,
         clip_device: &Device,
         dtype: DType,
+        vae_dtype: DType,
     ) -> Result<(
         stable_diffusion::unet_2d::UNet2DConditionModel,
         stable_diffusion::vae::AutoEncoderKL,
@@ -503,7 +522,7 @@ impl SD15Engine {
 
         self.base.progress.stage_start("Loading VAE (single-file)");
         let vae_start = Instant::now();
-        let vae = Self::build_vae_single_file(single_file, &remap, sd_config, device, dtype)?;
+        let vae = Self::build_vae_single_file(single_file, &remap, sd_config, device, vae_dtype)?;
         self.base
             .progress
             .stage_done("Loading VAE (single-file)", vae_start.elapsed());
@@ -661,6 +680,10 @@ impl SD15Engine {
 
     /// Prepare img2img latents: VAE encode source image, add noise at the appropriate timestep.
     /// Returns (noised_latents, start_step, encoded_latents, noise) -- extra fields for inpainting.
+    ///
+    /// `dtype` drives the noise/denoise loop; `vae_dtype` may differ when
+    /// `MOLD_VAE_DTYPE` forces fp32 (encoded latents are cast back to `dtype`
+    /// before returning so the denoise loop runs at engine precision).
     #[allow(clippy::too_many_arguments)]
     fn prepare_img2img_latents(
         &self,
@@ -674,6 +697,7 @@ impl SD15Engine {
         seed: u64,
         device: &Device,
         dtype: DType,
+        vae_dtype: DType,
     ) -> Result<(Tensor, usize, Tensor, Tensor)> {
         use crate::img_utils::{decode_source_image, NormalizeRange};
         let cache_key = image_size_cache_key(source_bytes, width, height);
@@ -694,11 +718,14 @@ impl SD15Engine {
                     height,
                     NormalizeRange::MinusOneToOne,
                     device,
-                    dtype,
+                    vae_dtype,
                 )?;
 
                 let encoded = vae.encode(&source_tensor)?;
                 let encoded = (encoded.mode()? * VAE_SCALE)?;
+                // Cast back to engine dtype so the denoise loop stays at its
+                // natural precision when MOLD_VAE_DTYPE upgraded the VAE.
+                let encoded = encoded.to_dtype(dtype)?;
 
                 self.base
                     .progress
@@ -759,7 +786,12 @@ impl SD15Engine {
         dtype: DType,
         guidance: f64,
     ) -> Result<Tensor> {
-        let cache_key = prompt_cache_key(prompt, guidance);
+        // SD1.5 caches the **concatenated** `(uncond, cond)` tensor when CFG is
+        // active, so the cache key must include the negative prompt and the
+        // guidance scale. Keying on the positive prompt + guidance alone
+        // returned a stale uncond branch when the user changed only the
+        // negative prompt — silent wrong output. Mirrors the SD3 / SDXL fix.
+        let cache_key = cfg_prompt_cache_key(prompt, negative_prompt, guidance);
         let (text_embeddings, cache_hit) =
             get_or_insert_cached_tensor(&self.prompt_cache, cache_key, device, dtype, || {
                 let use_cfg = cfg_active(guidance);
@@ -942,7 +974,7 @@ impl SD15Engine {
 
         // --- Phase 1: Encode prompt (check cache first to skip encoder load) ---
         let neg = req.negative_prompt.as_deref().unwrap_or("");
-        let cache_key = prompt_cache_key(&req.prompt, guidance);
+        let cache_key = cfg_prompt_cache_key(&req.prompt, neg, guidance);
         let text_embeddings = if let Some(tensor) =
             restore_cached_tensor(&self.prompt_cache, &cache_key, &device, dtype)?
         {
@@ -1056,7 +1088,8 @@ impl SD15Engine {
             // Load VAE first for encoding
             self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_start = Instant::now();
-            let vae = self.build_vae_for_strategy(&sd_config, &device, dtype)?;
+            let vae_dtype = crate::device::resolve_vae_dtype(dtype);
+            let vae = self.build_vae_for_strategy(&sd_config, &device, vae_dtype)?;
             self.base
                 .progress
                 .stage_done("Loading VAE (GPU)", vae_start.elapsed());
@@ -1072,6 +1105,7 @@ impl SD15Engine {
                 seed,
                 &device,
                 dtype,
+                vae_dtype,
             )?;
 
             // Drop VAE to free memory for UNet
@@ -1147,7 +1181,8 @@ impl SD15Engine {
         };
         self.base.progress.stage_start(vae_load_label);
         let vae_start = Instant::now();
-        let vae = self.build_vae_for_strategy(&sd_config, &device, dtype)?;
+        let vae_dtype = crate::device::resolve_vae_dtype(dtype);
+        let vae = self.build_vae_for_strategy(&sd_config, &device, vae_dtype)?;
         self.base
             .progress
             .stage_done(vae_load_label, vae_start.elapsed());
@@ -1156,7 +1191,7 @@ impl SD15Engine {
         let vae_decode_start = Instant::now();
 
         let latents = (latents / VAE_SCALE)?;
-        let img = vae.decode(&latents.to_dtype(dtype)?)?;
+        let img = vae.decode(&latents.to_dtype(vae_dtype)?)?;
 
         let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
@@ -1262,6 +1297,7 @@ impl SD15Engine {
                     seed,
                     &loaded.device,
                     loaded.dtype,
+                    loaded.vae_dtype,
                 )?;
                 let inpaint_ctx = if let Some(ref mask_bytes) = req.mask_image {
                     let mask = self.cached_mask(
@@ -1339,7 +1375,7 @@ impl SD15Engine {
         let vae_start = Instant::now();
 
         let latents = (latents / VAE_SCALE)?;
-        let img = loaded.vae.decode(&latents.to_dtype(loaded.dtype)?)?;
+        let img = loaded.vae.decode(&latents.to_dtype(loaded.vae_dtype)?)?;
 
         let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
@@ -1674,5 +1710,38 @@ mod tests {
     #[test]
     fn test_cfg_enabled_at_guidance_7_5() {
         assert!(cfg_active(7.5));
+    }
+
+    /// Regression test for the SD1.5 prompt-cache key bug: keying only on the
+    /// positive prompt + guidance (as the original code did) returns stale
+    /// `(uncond_old, cond)` when the user changes just the negative prompt.
+    /// Mirrors the SD3 / SDXL regression tests in their respective pipelines.
+    #[test]
+    fn sd15_prompt_cache_distinguishes_negative_prompt_changes() {
+        use crate::cache::{cfg_prompt_cache_key, store_cached_tensor};
+
+        let cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensor>> =
+            Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY));
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let embeddings = candle_core::Tensor::zeros((1, 4), dtype, &device).unwrap();
+
+        let key_a = cfg_prompt_cache_key("a cat", "blurry", 7.0);
+        store_cached_tensor(&cache, key_a.clone(), &embeddings).unwrap();
+
+        // Same positive + same guidance, different negative → MUST miss.
+        let key_b = cfg_prompt_cache_key("a cat", "low quality", 7.0);
+        let restored = restore_cached_tensor(&cache, &key_b, &device, dtype).unwrap();
+        assert!(
+            restored.is_none(),
+            "different negative prompt must miss the cache (silent-wrong-output bug)",
+        );
+
+        // Same key as the insert → MUST hit.
+        let restored = restore_cached_tensor(&cache, &key_a, &device, dtype).unwrap();
+        assert!(
+            restored.is_some(),
+            "identical (pos, neg, guidance) must hit",
+        );
     }
 }

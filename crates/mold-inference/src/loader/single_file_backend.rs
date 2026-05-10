@@ -27,7 +27,94 @@ use anyhow::{anyhow, Context, Result};
 use candle_core::{safetensors::MmapedSafetensors, DType, Device, Tensor};
 use candle_nn::var_builder::SimpleBackend;
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
+
+/// Verify the safetensors file at `path` is not truncated relative to its
+/// declared header. Returns a clear, actionable error when the on-disk file
+/// is shorter than the header demands.
+///
+/// Without this check, an interrupted Civitai download (e.g. cv:2739091:
+/// 11.2 GB on disk vs. 18.16 GB declared) bubbles up from
+/// `MmapedSafetensors::new` as an opaque safetensors `InvalidData` —
+/// users see only the outer `with_context` wrapper and have no way to
+/// know that a re-download is the fix.
+///
+/// Touches only the JSON header; tensor data is never read.
+fn check_safetensors_not_truncated(path: &Path) -> Result<()> {
+    let file_size = std::fs::metadata(path)
+        .with_context(|| format!("stat {} for size check", path.display()))?
+        .len();
+
+    let mut f =
+        File::open(path).with_context(|| format!("open {} for size check", path.display()))?;
+    let mut len_buf = [0u8; 8];
+    f.read_exact(&mut len_buf).with_context(|| {
+        format!(
+            "read safetensors header length at {} (file is only {} bytes — likely truncated)",
+            path.display(),
+            file_size,
+        )
+    })?;
+    let header_len = u64::from_le_bytes(len_buf);
+
+    let header_end = 8u64.saturating_add(header_len);
+    if header_end > file_size {
+        return Err(anyhow!(
+            "checkpoint at {} is truncated: file is {} bytes but the safetensors header alone \
+             needs {} bytes (8-byte length prefix + {} declared header length). \
+             Re-download the model — the file is incomplete.",
+            path.display(),
+            file_size,
+            header_end,
+            header_len,
+        ));
+    }
+
+    let mut header_buf = vec![0u8; header_len as usize];
+    f.read_exact(&mut header_buf)
+        .with_context(|| format!("read safetensors header at {}", path.display()))?;
+    let header: serde_json::Value = serde_json::from_slice(&header_buf)
+        .with_context(|| format!("parse safetensors header JSON at {}", path.display()))?;
+    let obj = header.as_object().ok_or_else(|| {
+        anyhow!(
+            "safetensors header at {} is not a JSON object",
+            path.display(),
+        )
+    })?;
+
+    let mut max_end: u64 = 0;
+    for (k, v) in obj {
+        if k == "__metadata__" {
+            continue;
+        }
+        if let Some(end) = v
+            .get("data_offsets")
+            .and_then(|x| x.as_array())
+            .filter(|a| a.len() == 2)
+            .and_then(|a| a[1].as_u64())
+        {
+            max_end = max_end.max(end);
+        }
+    }
+
+    let expected_total = header_end.saturating_add(max_end);
+    if expected_total > file_size {
+        let missing = expected_total - file_size;
+        return Err(anyhow!(
+            "checkpoint at {} is truncated: file is {} bytes but the safetensors header declares \
+             tensor data ending at {} bytes ({} bytes missing). \
+             The download is incomplete — re-fetch the model.",
+            path.display(),
+            file_size,
+            expected_total,
+            missing,
+        ));
+    }
+
+    Ok(())
+}
 
 /// One NVFP4 sub-component routed through a sub-key on the diffusers side.
 ///
@@ -100,6 +187,12 @@ impl SingleFileBackend {
     /// Mmap the checkpoint and wrap it in a backend with the given entries.
     /// Internal helper — used by every per-component factory.
     fn from_entries(checkpoint: &Path, entries: BTreeMap<String, BackendEntry>) -> Result<Self> {
+        check_safetensors_not_truncated(checkpoint).with_context(|| {
+            format!(
+                "validate single-file checkpoint at {}",
+                checkpoint.display(),
+            )
+        })?;
         let st = unsafe { MmapedSafetensors::new(checkpoint) }
             .with_context(|| format!("mmap single-file checkpoint at {}", checkpoint.display()))?;
         Ok(Self { st, entries })
@@ -1922,6 +2015,78 @@ mod tests {
         assert!(
             err.to_string().contains("model.diffusion_model"),
             "error must mention model.diffusion_model, got: {err}",
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn check_safetensors_not_truncated_passes_for_intact_file() {
+        let path = write_synthetic(
+            "intact",
+            &[(
+                "model.diffusion_model.img_in.weight",
+                vec![2, 2],
+                vec![1.0, 2.0, 3.0, 4.0],
+            )],
+        );
+        check_safetensors_not_truncated(&path).expect("intact file must validate");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn check_safetensors_not_truncated_flags_short_file() {
+        // Mirror cv:2739091: write a valid safetensors then chop trailing
+        // tensor bytes so the on-disk size is shorter than the header
+        // declares. The validator must reject with a message that names
+        // the byte gap and points at re-downloading.
+        let path = write_synthetic(
+            "truncated",
+            &[(
+                "model.diffusion_model.img_in.weight",
+                vec![4, 4],
+                (0..16).map(|i| i as f32).collect(),
+            )],
+        );
+        let full_size = std::fs::metadata(&path).unwrap().len();
+        let truncated_size = full_size - 16; // drop the last 4 f32 elements
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_len(truncated_size).unwrap();
+        drop(f);
+
+        let err =
+            check_safetensors_not_truncated(&path).expect_err("truncated file must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("truncated"),
+            "error must say 'truncated', got: {msg}",
+        );
+        assert!(
+            msg.contains("missing") || msg.contains("Re-download") || msg.contains("re-fetch"),
+            "error must hint at re-downloading, got: {msg}",
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn from_flux2_singlefile_surfaces_truncation_clearly() {
+        // End-to-end on the public entry point used by cv:2739091. The
+        // outer `with_context` wrapper carries through the chain so the
+        // user-visible message contains both "validate" and "truncated".
+        let cfg = flux2_test_config();
+        let path = write_flux2_bfl_fixture(&cfg, None);
+        let full_size = std::fs::metadata(&path).unwrap().len();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_len(full_size - 4).unwrap();
+        drop(f);
+
+        let err = match SingleFileBackend::from_flux2_singlefile(&path, &cfg) {
+            Ok(_) => panic!("truncated Flux.2 single-file must be rejected before mmap"),
+            Err(e) => e,
+        };
+        let chained = format!("{err:#}");
+        assert!(
+            chained.contains("validate single-file checkpoint") && chained.contains("truncated"),
+            "expected outer wrapper + truncated root, got: {chained}",
         );
         let _ = std::fs::remove_file(path);
     }

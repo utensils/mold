@@ -22,8 +22,12 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
 }
 
 /// Strips backtrace frames from candle error messages.
+///
+/// Renders the full anyhow cause chain (`{:#}`) so wrappers like
+/// `with_context("mmap single-file checkpoint at …")` carry their root cause
+/// through to the wire — otherwise users see the outer wrapper only.
 pub(crate) fn clean_error_message(e: &anyhow::Error) -> String {
-    let full = format!("{e}");
+    let full = format!("{e:#}");
     let mut lines: Vec<&str> = Vec::new();
     for line in full.lines() {
         let trimmed = line.trim_start();

@@ -6463,4 +6463,91 @@ mod tests {
             vec![0.1, -0.1, 0.2, -0.2, 0.3, -0.3]
         );
     }
+
+    /// Build a synthetic `NativePromptEncoding` on the supplied device.
+    /// Shapes match what the V2 connectors produce (batch=1, seq=3, dims
+    /// match `tiny_gemma_config()` widths).
+    fn synthetic_prompt_encoding(device: &Device) -> super::NativePromptEncoding {
+        use super::EmbeddingsProcessorOutput;
+
+        let video = Tensor::from_vec(
+            (0..24).map(|x| x as f32).collect::<Vec<_>>(),
+            (1, 3, 8),
+            device,
+        )
+        .unwrap();
+        let audio = Tensor::from_vec(
+            (0..12).map(|x| x as f32 * 0.5).collect::<Vec<_>>(),
+            (1, 3, 4),
+            device,
+        )
+        .unwrap();
+        let mask = Tensor::from_vec(vec![1u8, 1, 1], (1, 3), device).unwrap();
+
+        super::NativePromptEncoding {
+            conditional: EmbeddingsProcessorOutput {
+                video_encoding: video.clone(),
+                audio_encoding: Some(audio.clone()),
+                attention_mask: mask.clone(),
+            },
+            unconditional: EmbeddingsProcessorOutput {
+                video_encoding: video,
+                audio_encoding: Some(audio),
+                attention_mask: mask,
+            },
+        }
+    }
+
+    /// `move_prompt_encoding_to_device` round-trips a CPU-built encoding back
+    /// to CPU intact. Pins the function shape (preserves video/audio/mask,
+    /// preserves dtypes) so a future refactor that drops audio or downcasts
+    /// the mask gets caught.
+    #[test]
+    fn move_prompt_encoding_round_trips_on_cpu() {
+        let prompt = synthetic_prompt_encoding(&Device::Cpu);
+        let video_before = prompt.conditional.video_encoding.to_vec3::<f32>().unwrap();
+
+        let moved = super::move_prompt_encoding_to_device(prompt, &Device::Cpu).unwrap();
+
+        assert!(moved.conditional.video_encoding.device().is_cpu());
+        assert!(moved.unconditional.video_encoding.device().is_cpu());
+        assert!(moved.conditional.attention_mask.device().is_cpu());
+        let audio = moved
+            .conditional
+            .audio_encoding
+            .as_ref()
+            .expect("audio survives the move");
+        assert!(audio.device().is_cpu());
+        assert_eq!(
+            moved.conditional.video_encoding.to_vec3::<f32>().unwrap(),
+            video_before,
+            "values must round-trip exactly"
+        );
+    }
+
+    /// LTX-2 Gemma encoder built on CPU + transformer on CUDA: the move
+    /// function must lift the conditioning to the CUDA device for the
+    /// transformer's encode-time consumer. Ignored when CUDA isn't built —
+    /// the no-feature gate keeps CI green on Metal/CPU runners.
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore)]
+    fn runtime_handles_prompt_encoder_on_cpu_with_transformer_on_cuda() {
+        let cuda = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let prompt = synthetic_prompt_encoding(&Device::Cpu);
+        let moved = super::move_prompt_encoding_to_device(prompt, &cuda).unwrap();
+        assert!(moved.conditional.video_encoding.device().is_cuda());
+        assert!(moved.unconditional.video_encoding.device().is_cuda());
+        assert!(moved.conditional.attention_mask.device().is_cuda());
+        assert!(moved
+            .conditional
+            .audio_encoding
+            .as_ref()
+            .unwrap()
+            .device()
+            .is_cuda());
+    }
 }

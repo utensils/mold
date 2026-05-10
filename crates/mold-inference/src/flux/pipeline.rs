@@ -868,6 +868,12 @@ struct LoadedFlux {
     /// GPU device for FLUX transformer + VAE
     device: Device,
     dtype: DType,
+    /// Effective VAE dtype after `MOLD_VAE_DTYPE` resolution. Stored so the
+    /// post-denoise cast and the decode forward pass agree on precision —
+    /// the eager path loads the VAE once at startup so this is captured at
+    /// load time and persists for the engine's lifetime. Sequential reloads
+    /// re-resolve per request.
+    vae_dtype: DType,
     is_schnell: bool,
     /// True if using quantized GGUF model (state tensors must be F32)
     is_quantized: bool,
@@ -1259,9 +1265,11 @@ impl FluxEngine {
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         tracing::info!(path = %self.base.paths.vae.display(), "loading VAE on GPU...");
+        // Resolve VAE precision once at load time — see LoadedFlux::vae_dtype.
+        let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
         let vae_vb = crate::weight_loader::load_safetensors_with_progress(
             std::slice::from_ref(&self.base.paths.vae),
-            gpu_dtype,
+            vae_dtype,
             &vae_device,
             "VAE",
             &self.base.progress,
@@ -1403,6 +1411,7 @@ impl FluxEngine {
             vae,
             device,
             dtype: gpu_dtype,
+            vae_dtype,
             is_schnell,
             is_quantized,
             transformer_path,
@@ -1896,6 +1905,10 @@ impl FluxEngine {
         } else {
             flux::autoencoder::Config::dev()
         };
+        // Resolve once so the early img2img encode and the later decode load
+        // the VAE at the same precision; fixes shape mismatch when
+        // `MOLD_VAE_DTYPE=fp32` would otherwise upgrade only the decode path.
+        let early_vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
 
         let (img, inpaint_ctx, early_vae) = if let Some(ref source_bytes) = req.source_image {
             let start_t = timesteps[0];
@@ -1905,7 +1918,7 @@ impl FluxEngine {
             let vae_stage = Instant::now();
             let vae_vb = crate::weight_loader::load_safetensors_with_progress(
                 std::slice::from_ref(&self.base.paths.vae),
-                gpu_dtype,
+                early_vae_dtype,
                 &device,
                 "VAE",
                 &self.base.progress,
@@ -1925,7 +1938,7 @@ impl FluxEngine {
                 req.height,
                 crate::img_utils::NormalizeRange::MinusOneToOne,
                 &device,
-                gpu_dtype,
+                early_vae_dtype,
             )?;
             // FLUX VAE expects pixels in [-1, 1]; encode applies shift/scale internally
             let encoded = vae.encode(&source_tensor)?;
@@ -2029,6 +2042,9 @@ impl FluxEngine {
         // --- Phase 4: VAE decode ---
         // Use VAE from img2img path if already loaded, otherwise load now
         // (deferred loading saves ~300MB VRAM during denoising for FP8 models).
+        // Sequential path resolves MOLD_VAE_DTYPE per request — env changes
+        // take effect on the next generate() without an engine reload.
+        let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
         let vae = if let Some(vae) = early_vae {
             vae
         } else {
@@ -2036,7 +2052,7 @@ impl FluxEngine {
             let vae_stage = Instant::now();
             let vae_vb = crate::weight_loader::load_safetensors_with_progress(
                 std::slice::from_ref(&self.base.paths.vae),
-                gpu_dtype,
+                vae_dtype,
                 &device,
                 "VAE",
                 &self.base.progress,
@@ -2049,7 +2065,7 @@ impl FluxEngine {
         };
         self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
-        let img_for_vae = img.to_dtype(gpu_dtype)?;
+        let img_for_vae = img.to_dtype(vae_dtype)?;
         let device_for_sync = device.clone();
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
@@ -2525,7 +2541,7 @@ impl FluxEngine {
                 req.height,
                 crate::img_utils::NormalizeRange::MinusOneToOne,
                 &loaded.device,
-                loaded.dtype,
+                loaded.vae_dtype,
             )?;
             let encoded = loaded.vae.encode(&source_tensor)?;
             progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
@@ -2688,10 +2704,13 @@ impl FluxEngine {
         // keep path didn't, which made the bug branch-specific).
         loaded.device.synchronize()?;
 
-        // 8. Decode with VAE — cast to VAE dtype (BF16) in case quantized model produced F32
+        // 8. Decode with VAE — cast to the VAE's actual loaded dtype (which
+        // may differ from `loaded.dtype` when MOLD_VAE_DTYPE forces fp32 to
+        // suppress banding; the quantized-model F32-state case is also
+        // handled by this cast).
         progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
-        let img_for_vae = img.to_dtype(loaded.dtype)?;
+        let img_for_vae = img.to_dtype(loaded.vae_dtype)?;
         let vae = &loaded.vae;
         let device_for_sync = loaded.device.clone();
         let img = crate::vae_tiling::decode_with_oom_fallback(
