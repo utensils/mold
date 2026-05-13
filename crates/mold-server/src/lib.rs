@@ -6,6 +6,7 @@ pub mod test_support;
 pub mod downloads;
 pub mod gpu_pool;
 pub mod gpu_worker;
+pub mod job_registry;
 pub mod logging;
 #[cfg(feature = "metrics")]
 pub mod metrics;

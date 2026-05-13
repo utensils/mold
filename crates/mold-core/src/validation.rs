@@ -178,22 +178,23 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
     }
 }
 
-/// LoRA support is available for FLUX and LTX-2 — `mold-inference`'s
-/// `flux/lora.rs` and `ltx2/lora.rs` are the engine paths that know how to
-/// merge low-rank adapters into the base weights. Surfacing the gate at
-/// validation produces a clear 400 instead of an opaque inference-layer panic
-/// when a user picks an unsupported model family + a LoRA. SD1.5 / SDXL /
-/// SD3 LoRA support is on the roadmap; extend this match when those engines
-/// learn the LoRA path.
+/// LoRA support is available for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL,
+/// Qwen-Image (and qwen-image-edit), and Z-Image — `mold-inference`'s
+/// per-family `lora.rs` modules are the engine paths that know how to merge
+/// low-rank adapters into the base weights. Surfacing the gate at validation
+/// produces a clear 400 instead of an opaque inference-layer panic when a
+/// user picks an unsupported model family + a LoRA.
 fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
-        Some("flux") | Some("ltx2") => Ok(()),
+        Some("flux") | Some("flux2") | Some("ltx2") | Some("sd15") | Some("sd3") | Some("sdxl")
+        | Some("qwen-image") | Some("qwen-image-edit") | Some("z-image") => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported for FLUX and LTX-2 models; got family {other:?}"
+            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, and Z-Image models; got family {other:?}"
         )),
-        None => {
-            Err("LoRA requires a known model family — pick a FLUX or LTX-2 model first".to_string())
-        }
+        None => Err(
+            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, or Z-Image model first"
+                .to_string(),
+        ),
     }
 }
 
@@ -1600,37 +1601,48 @@ mod tests {
         );
     }
 
-    /// Generation with a LoRA attached on a non-FLUX model must fail at
-    /// validation with a clear error — not at the inference layer with
-    /// an opaque panic. This is the user-facing 400 the web UI will
-    /// surface when (e.g.) the picker sneaks past its family gate.
+    fn valid_sdxl_req() -> GenerateRequest {
+        // Pick a real manifest-known SDXL name so `model_family` resolves to
+        // `sdxl`. The test surface mirrors `valid_flux_req` / `valid_ltx2_req`.
+        GenerateRequest {
+            model: "sdxl-base:fp16".to_string(),
+            ..valid_req()
+        }
+    }
+
+    /// SDXL gained LoRA support in Wave 1 of the LoRA-all-families work —
+    /// `mold-inference::sdxl::lora` wraps the UNet `VarBuilder` with an
+    /// `SdxlLoraBackend` that merges `W' = W + scale·(B @ A)` on the fly.
+    /// The validator must now accept LoRAs on SDXL.
     #[test]
-    fn lora_on_sdxl_rejected_with_family_message() {
-        let mut req = valid_req();
-        req.model = "sdxl".to_string();
+    fn lora_on_sdxl_accepted() {
+        let mut req = valid_sdxl_req();
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
         });
-        let err = validate_generate_request(&req).unwrap_err();
         assert!(
-            err.to_lowercase().contains("flux"),
-            "error must mention FLUX so the user knows which family is supported: {err}"
+            validate_generate_request(&req).is_ok(),
+            "SDXL + LoRA must pass validation now that sdxl/lora.rs is live"
         );
     }
 
     #[test]
-    fn loras_plural_on_sdxl_rejected() {
-        let mut req = valid_req();
-        req.model = "sdxl".to_string();
-        req.loras = Some(vec![crate::LoraWeight {
-            path: "adapter.safetensors".to_string(),
-            scale: 1.0,
-        }]);
-        let err = validate_generate_request(&req).unwrap_err();
+    fn loras_plural_on_sdxl_accepted() {
+        let mut req = valid_sdxl_req();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".to_string(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".to_string(),
+                scale: 0.4,
+            },
+        ]);
         assert!(
-            err.to_lowercase().contains("flux"),
-            "loras-plural path must also family-gate: {err}"
+            validate_generate_request(&req).is_ok(),
+            "SDXL + plural LoRAs (multi-LoRA stack) must pass validation"
         );
     }
 
@@ -1696,12 +1708,155 @@ mod tests {
         );
     }
 
+    fn valid_zimage_req() -> GenerateRequest {
+        GenerateRequest {
+            model: "z-image-turbo:bf16".to_string(),
+            ..valid_req()
+        }
+    }
+
+    fn valid_sd3_req() -> GenerateRequest {
+        GenerateRequest {
+            model: "sd3.5-large".to_string(),
+            ..valid_req()
+        }
+    }
+
     #[test]
-    fn lora_on_sdxl_still_rejected_with_updated_message() {
-        // SDXL still lacks LoRA support. The updated message now lists both
-        // FLUX and LTX-2 as supported families.
+    fn lora_on_sd3_accepted() {
+        // SD3.5 has a full LoRA engine path (sd3/lora.rs) — the validator
+        // must not block it.
+        let mut req = valid_sd3_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "sd35_style.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "SD3 + LoRA must pass validation: {:?}",
+            validate_generate_request(&req)
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_sd3_accepted() {
+        let mut req = valid_sd3_req();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "SD3 + loras plural must pass validation"
+        );
+    }
+
+    #[test]
+    fn lora_rejection_message_lists_sd3() {
+        // The rejection message must enumerate every supported family.
+        // wuerstchen has no LoRA path so the request is rejected; the message
+        // must include SD3 in the supported list.
         let mut req = valid_req();
-        req.model = "sdxl".to_string();
+        req.model = "wuerstchen-c".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("sd3"),
+            "rejection message must list SD3 alongside FLUX/LTX-2: {err}"
+        );
+    }
+
+    #[test]
+    fn lora_on_zimage_accepted() {
+        // Z-Image grew a LoRA engine path (zimage/lora.rs) — the validator
+        // must let it through.
+        let mut req = valid_zimage_req();
+        req.lora = Some(crate::LoraWeight {
+            path: "NSFW_master_ZIT_000017532.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Z-Image + LoRA must pass validation"
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_zimage_accepted() {
+        let mut req = valid_zimage_req();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Z-Image + loras plural must pass validation"
+        );
+    }
+
+    #[test]
+    fn lora_on_flux2_accepted() {
+        // Flux.2 has a full LoRA engine path (flux2/lora.rs) — the validator
+        // must not block it. The validator only sees the family resolved
+        // from the model name; Flux.2 LoRAs from Civitai (cv:2682864 and
+        // siblings) reach this code via the `family_hint` carried by the
+        // catalog, but a stable model name like `flux2-klein` works the
+        // same way.
+        let mut req = valid_req();
+        req.model = "flux2-klein".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "DarkKlein9b.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Flux.2 + LoRA must pass validation"
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_flux2_accepted() {
+        // The plural loras stack must also pass on Flux.2.
+        let mut req = valid_req();
+        req.model = "flux2-klein-9b".to_string();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "lora-a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "lora-b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Flux.2 + loras plural must pass validation"
+        );
+    }
+
+    #[test]
+    fn lora_on_unsupported_family_lists_sdxl_in_message() {
+        // SD3 / Qwen-Image still lack a LoRA engine path. The validator must
+        // reject and the message must enumerate every supported family so
+        // the user knows what to pick instead.
+        let mut req = valid_req();
+        req.model = "wuerstchen-c".to_string();
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
@@ -1712,8 +1867,82 @@ mod tests {
             "error must mention FLUX: {err}"
         );
         assert!(
+            err.to_lowercase().contains("flux.2") || err.to_lowercase().contains("flux2"),
+            "error must mention Flux.2: {err}"
+        );
+        assert!(
             err.to_lowercase().contains("ltx-2") || err.to_lowercase().contains("ltx2"),
             "error must mention LTX-2: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("sdxl"),
+            "error must mention SDXL: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("qwen-image"),
+            "error must mention Qwen-Image: {err}"
+        );
+    }
+
+    /// Qwen-Image gained LoRA support in feat/lora-all-families. The
+    /// validator must let `qwen-image` through.
+    #[test]
+    fn lora_on_qwen_image_accepted() {
+        let mut req = valid_req();
+        req.model = "qwen-image-2512".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Qwen-Image + LoRA must pass validation",
+        );
+    }
+
+    /// `qwen-image-edit` shares the LoRA family gate with `qwen-image`.
+    /// The edit family also gates on `edit_images` separately, so this
+    /// test exercises just the LoRA gate by inspecting the rejection
+    /// message: it must NOT mention LoRA when the only non-LoRA failure
+    /// is the missing edit_images.
+    #[test]
+    fn lora_on_qwen_image_edit_passes_lora_gate() {
+        let mut req = valid_req();
+        req.model = "qwen-image-edit-2511:q4".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        // The request fails on edit_images (a separate gate) but the
+        // LoRA gate is permissive.
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            !err.to_lowercase().contains("lora"),
+            "LoRA gate must not reject qwen-image-edit; remaining failure should be on edit_images: {err}",
+        );
+        assert!(
+            err.contains("edit_images"),
+            "expected the only failure to be the edit_images gate: {err}",
+        );
+    }
+
+    #[test]
+    fn loras_plural_on_qwen_image_accepted() {
+        let mut req = valid_req();
+        req.model = "qwen-image-2512".to_string();
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Qwen-Image + multi-LoRA must pass validation",
         );
     }
 
@@ -1730,6 +1959,70 @@ mod tests {
         assert!(
             !err.is_empty(),
             "unknown family with LoRA must produce an error: {err}"
+        );
+    }
+
+    /// SD1.5 LoRA support landed in `crates/mold-inference/src/sd15/lora.rs` —
+    /// the validator must accept it, just like FLUX and LTX-2.
+    #[test]
+    fn lora_on_sd15_accepted() {
+        let mut req = valid_req();
+        req.model = "sd15:fp16".to_string();
+        req.width = 512;
+        req.height = 512;
+        req.guidance = 7.0;
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 0.8,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "SD1.5 + LoRA must pass validation"
+        );
+    }
+
+    /// The plural `loras` form must accept SD1.5 too — the gate must apply
+    /// uniformly to both shapes.
+    #[test]
+    fn loras_plural_on_sd15_accepted() {
+        let mut req = valid_req();
+        req.model = "sd15:fp16".to_string();
+        req.width = 512;
+        req.height = 512;
+        req.guidance = 7.0;
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".into(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".into(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "SD1.5 + loras plural must pass validation"
+        );
+    }
+
+    /// The rejection message lists every supported family; SDXL still isn't
+    /// supported, so a SDXL request with a LoRA should mention SD1.5 in the
+    /// list of available alternatives.
+    #[test]
+    fn lora_on_sdxl_message_now_lists_sd15() {
+        let mut req = valid_req();
+        req.model = "sdxl".to_string();
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("sd1.5")
+                || err.to_lowercase().contains("sd15")
+                || err.to_lowercase().contains("sd 1.5"),
+            "error must list SD1.5 as a supported family: {err}"
         );
     }
 

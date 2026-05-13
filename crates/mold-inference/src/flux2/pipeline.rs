@@ -15,7 +15,7 @@
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
-use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -70,6 +70,43 @@ pub struct Flux2Engine {
     /// Per-request placement override. Set at the start of `generate()`,
     /// cleared on exit. `None` preserves the existing VRAM-aware auto logic.
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// Per-request LoRA stack (effective: zero-scale entries already filtered).
+    /// Set at the start of `generate()`, cleared on exit. Read by
+    /// `load_transformer` / `reload_transformer_if_needed` to decide whether
+    /// to wrap the transformer's `VarBuilder` with a `Flux2LoraBackend`.
+    pending_loras: Vec<LoraWeight>,
+}
+
+/// Resolve the effective LoRA list for a request. Mirrors the FLUX helper of
+/// the same shape: `loras` (plural) wins over `lora` (singular) when both are
+/// set, and zero-scale entries are filtered out so they don't trigger a
+/// transformer rebuild for nothing.
+pub(crate) fn effective_flux2_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
+    /// Threshold below which a LoRA scale is treated as off (matches FLUX).
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+
+    let raw: Vec<LoraWeight> = if let Some(plural) = &req.loras {
+        if !plural.is_empty() {
+            plural.clone()
+        } else {
+            req.lora.iter().cloned().collect()
+        }
+    } else {
+        req.lora.iter().cloned().collect()
+    };
+    raw.into_iter()
+        .filter(|w| {
+            let keep = w.scale.abs() > ZERO_SCALE_EPS;
+            if !keep {
+                tracing::debug!(
+                    path = w.path.as_str(),
+                    scale = w.scale,
+                    "dropping zero-scale Flux.2 LoRA"
+                );
+            }
+            keep
+        })
+        .collect()
 }
 
 impl Flux2Engine {
@@ -86,6 +123,7 @@ impl Flux2Engine {
             qwen3_variant,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
+            pending_loras: Vec::new(),
         }
     }
 
@@ -140,6 +178,7 @@ impl Flux2Engine {
             qwen3_variant,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
+            pending_loras: Vec::new(),
         })
     }
 
@@ -267,13 +306,50 @@ impl Flux2Engine {
     }
 
     /// Load the transformer from either GGUF or BF16 safetensors.
+    ///
+    /// When `self.pending_loras` is non-empty, every BF16 / GGUF branch wraps
+    /// the underlying tensor source with a Flux.2 LoRA backend so the
+    /// constructed transformer carries `W' = W + scale·B@A` for every
+    /// LoRA-targeted layer (additive across multiple adapters). See
+    /// `super::lora` for the key-mapping rules.
     fn load_transformer(
         &self,
         cfg: &Flux2Config,
         gpu_dtype: DType,
         device: &Device,
     ) -> Result<(Flux2TransformerWrapper, &'static str)> {
+        let has_lora = !self.pending_loras.is_empty();
         if self.is_gguf_transformer() {
+            if has_lora {
+                // Dequant→merge→requant on every LoRA-affected GGUF tensor.
+                // Non-LoRA tensors stay quantised, untouched.
+                let adapters =
+                    super::lora::load_lora_adapters(&self.pending_loras, &self.base.progress)?;
+                let specs: Vec<super::lora::Flux2LoraSpec<'_>> = adapters
+                    .iter()
+                    .zip(self.pending_loras.iter())
+                    .map(|(adapter, w)| super::lora::Flux2LoraSpec {
+                        adapter: adapter.as_ref(),
+                        scale: w.scale,
+                        path_hash: super::lora::lora_path_hash(&w.path),
+                    })
+                    .collect();
+                let gguf_vb = super::lora::gguf_lora_var_builder_flux2(
+                    &self.base.paths.transformer,
+                    &specs,
+                    device,
+                    &self.base.progress,
+                    None,
+                )?;
+                return Ok((
+                    Flux2TransformerWrapper::Quantized(
+                        super::quantized_transformer::QuantizedFlux2Transformer::new(
+                            cfg, gguf_vb, device,
+                        )?,
+                    ),
+                    "Loading Flux.2 transformer (GPU, GGUF + LoRA)",
+                ));
+            }
             // Weights stay quantized in VRAM via QMatMul — no dequantization at load
             // time. A Q4 Klein-9B uses ~6GB VRAM instead of ~18GB with full dequant.
             let gguf_vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
@@ -302,13 +378,40 @@ impl Flux2Engine {
                     &self.base.paths.transformer,
                     cfg,
                 )?;
-            let flux_vb =
-                candle_nn::VarBuilder::from_backend(Box::new(backend), gpu_dtype, device.clone());
+            let backend: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(backend);
+            let backend = if has_lora {
+                let adapters =
+                    super::lora::load_lora_adapters(&self.pending_loras, &self.base.progress)?;
+                let specs: Vec<super::lora::Flux2LoraSpec<'_>> = adapters
+                    .iter()
+                    .zip(self.pending_loras.iter())
+                    .map(|(adapter, w)| super::lora::Flux2LoraSpec {
+                        adapter: adapter.as_ref(),
+                        scale: w.scale,
+                        path_hash: super::lora::lora_path_hash(&w.path),
+                    })
+                    .collect();
+                super::lora::wrap_backend_with_lora(
+                    backend,
+                    &specs,
+                    super::lora::Flux2KeySpace::Diffusers,
+                    &self.base.progress,
+                    None,
+                )?
+            } else {
+                backend
+            };
+            let flux_vb = candle_nn::VarBuilder::from_backend(backend, gpu_dtype, device.clone());
+            let label = if has_lora {
+                "Loading Flux.2 transformer (GPU, BF16, single-file remap + LoRA)"
+            } else {
+                "Loading Flux.2 transformer (GPU, BF16, single-file remap)"
+            };
             Ok((
                 Flux2TransformerWrapper::BF16(super::transformer::Flux2Transformer::new(
                     cfg, flux_vb,
                 )?),
-                "Loading Flux.2 transformer (GPU, BF16, single-file remap)",
+                label,
             ))
         } else {
             let xformer_paths = if !self.base.paths.transformer_shards.is_empty() {
@@ -316,18 +419,91 @@ impl Flux2Engine {
             } else {
                 vec![self.base.paths.transformer.clone()]
             };
-            let flux_vb = crate::weight_loader::load_safetensors_with_progress(
-                &xformer_paths,
-                gpu_dtype,
-                device,
-                "Flux.2 transformer",
-                &self.base.progress,
-            )?;
+            let flux_vb = if has_lora {
+                // Build our own mmap-backed SimpleBackend so we can wrap with
+                // `Flux2LoraBackend`. The progress reporting drops to a single
+                // info line — the legacy progress bar is keyed to candle's
+                // internal mmap path.
+                use candle_core::safetensors::MmapedSafetensors;
+                let path_refs: Vec<&std::path::Path> =
+                    xformer_paths.iter().map(|p| p.as_path()).collect();
+                let st = unsafe { MmapedSafetensors::multi(&path_refs)? };
+                struct MmapBackend {
+                    st: MmapedSafetensors,
+                }
+                impl candle_nn::var_builder::SimpleBackend for MmapBackend {
+                    fn get(
+                        &self,
+                        _s: candle_core::Shape,
+                        name: &str,
+                        _h: candle_nn::Init,
+                        dtype: DType,
+                        dev: &Device,
+                    ) -> candle_core::Result<Tensor> {
+                        let t = self.st.load(name, dev)?;
+                        if t.dtype() != dtype {
+                            t.to_dtype(dtype)
+                        } else {
+                            Ok(t)
+                        }
+                    }
+                    fn get_unchecked(
+                        &self,
+                        name: &str,
+                        dtype: DType,
+                        dev: &Device,
+                    ) -> candle_core::Result<Tensor> {
+                        let t = self.st.load(name, dev)?;
+                        if t.dtype() != dtype {
+                            t.to_dtype(dtype)
+                        } else {
+                            Ok(t)
+                        }
+                    }
+                    fn contains_tensor(&self, name: &str) -> bool {
+                        self.st.get(name).is_ok()
+                    }
+                }
+                let inner: Box<dyn candle_nn::var_builder::SimpleBackend> =
+                    Box::new(MmapBackend { st });
+                let adapters =
+                    super::lora::load_lora_adapters(&self.pending_loras, &self.base.progress)?;
+                let specs: Vec<super::lora::Flux2LoraSpec<'_>> = adapters
+                    .iter()
+                    .zip(self.pending_loras.iter())
+                    .map(|(adapter, w)| super::lora::Flux2LoraSpec {
+                        adapter: adapter.as_ref(),
+                        scale: w.scale,
+                        path_hash: super::lora::lora_path_hash(&w.path),
+                    })
+                    .collect();
+                let wrapped = super::lora::wrap_backend_with_lora(
+                    inner,
+                    &specs,
+                    super::lora::Flux2KeySpace::Diffusers,
+                    &self.base.progress,
+                    None,
+                )?;
+                candle_nn::VarBuilder::from_backend(wrapped, gpu_dtype, device.clone())
+            } else {
+                crate::weight_loader::load_safetensors_with_progress(
+                    &xformer_paths,
+                    gpu_dtype,
+                    device,
+                    "Flux.2 transformer",
+                    &self.base.progress,
+                )?
+            };
+            let label = if has_lora {
+                "Loading Flux.2 transformer (GPU, BF16 + LoRA)"
+            } else {
+                "Loading Flux.2 transformer (GPU, BF16)"
+            };
             Ok((
                 Flux2TransformerWrapper::BF16(super::transformer::Flux2Transformer::new(
                     cfg, flux_vb,
                 )?),
-                "Loading Flux.2 transformer (GPU, BF16)",
+                label,
             ))
         }
     }
@@ -1255,8 +1431,10 @@ impl Flux2Engine {
 impl InferenceEngine for Flux2Engine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.pending_placement = req.placement.clone();
+        self.pending_loras = effective_flux2_loras(req);
         let result = self.generate_inner(req);
         self.pending_placement = None;
+        self.pending_loras.clear();
         result
     }
 

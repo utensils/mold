@@ -5,7 +5,7 @@ use candle_transformers::models::z_image::{
     SchedulerConfig, VaeConfig, ZImageTransformer2DModel,
 };
 use candle_transformers::quantized_var_builder;
-use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -132,6 +132,44 @@ pub struct ZImageEngine {
     prompt_cache: Mutex<LruCache<String, CachedTensor>>,
     /// Per-request placement override.
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// Per-request LoRA stack (effective: zero-scale entries already filtered).
+    ///
+    /// Set in [`InferenceEngine::generate`] at the entry point and cleared
+    /// at exit. `load_transformer` / `reload_transformer` consult this to
+    /// decide whether to wrap the constructed `VarBuilder` with a
+    /// `ZImageLoraBackend`.
+    pending_loras: Vec<LoraWeight>,
+}
+
+/// Resolve the effective LoRA list for a request: `loras` (plural) wins
+/// over the singular `lora` when both are set, and zero-scale entries are
+/// dropped so they don't trigger a needless transformer rebuild.
+pub(crate) fn effective_zimage_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
+    /// Threshold below which a LoRA scale is treated as off (matches FLUX).
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+
+    let raw: Vec<LoraWeight> = if let Some(plural) = &req.loras {
+        if !plural.is_empty() {
+            plural.clone()
+        } else {
+            req.lora.iter().cloned().collect()
+        }
+    } else {
+        req.lora.iter().cloned().collect()
+    };
+    raw.into_iter()
+        .filter(|w| {
+            let keep = w.scale.abs() > ZERO_SCALE_EPS;
+            if !keep {
+                tracing::debug!(
+                    path = w.path.as_str(),
+                    scale = w.scale,
+                    "dropping zero-scale Z-Image LoRA"
+                );
+            }
+            keep
+        })
+        .collect()
 }
 
 impl ZImageEngine {
@@ -147,6 +185,7 @@ impl ZImageEngine {
             qwen3_variant,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
+            pending_loras: Vec::new(),
         }
     }
 
@@ -222,7 +261,20 @@ impl ZImageEngine {
         Ok(text_tokenizer_path.clone())
     }
 
-    /// Load transformer from disk.
+    /// Load transformer from disk, optionally merging LoRA deltas inline.
+    ///
+    /// When `self.pending_loras` is non-empty:
+    /// * **BF16 path**: build an mmap-backed `SimpleBackend` ourselves
+    ///   (`weight_loader::load_safetensors_with_progress` returns a
+    ///   `VarBuilder` whose backend can't be wrapped after the fact),
+    ///   wrap it with a `ZImageLoraBackend`, and feed the resulting
+    ///   `VarBuilder` to `ZImageTransformer2DModel::new`.
+    /// * **GGUF path**: dequantise into a dense tensor map via
+    ///   [`super::gguf_dense::dequantize_gguf_dense_tensors`], wrap the
+    ///   `HashMap` `SimpleBackend` impl with the LoRA wrapper, then build
+    ///   the model. The fused-QKV `attention.qkv` LoRA targets the split
+    ///   `to_q`/`to_k`/`to_v` candle keys (the same key-space the BF16
+    ///   path sees) — see [`super::lora`] for the splat math.
     fn load_transformer(
         &self,
         device: &Device,
@@ -231,12 +283,99 @@ impl ZImageEngine {
     ) -> Result<ZImageTransformer> {
         let is_gguf = self.detect_is_gguf();
         let xformer_paths = self.transformer_paths();
+        let has_lora = !self.pending_loras.is_empty();
 
         if is_gguf {
-            let vb =
+            let qvb =
                 quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
+            if has_lora {
+                let (tensors, dev) =
+                    super::gguf_dense::dequantize_gguf_dense_tensors(cfg, dtype, &qvb)?;
+                let adapters =
+                    super::lora::load_lora_adapters(&self.pending_loras, &self.base.progress)?;
+                let specs: Vec<super::lora::ZImageLoraSpec<'_>> = adapters
+                    .iter()
+                    .zip(self.pending_loras.iter())
+                    .map(|(adapter, w)| super::lora::ZImageLoraSpec {
+                        adapter: adapter.as_ref(),
+                        scale: w.scale,
+                        path_hash: super::lora::lora_path_hash(&w.path),
+                    })
+                    .collect();
+                let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(tensors);
+                let wrapped =
+                    super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)?;
+                let vb = candle_nn::VarBuilder::from_backend(wrapped, dtype, dev);
+                return Ok(ZImageTransformer::Dense(ZImageTransformer2DModel::new(
+                    cfg, vb,
+                )?));
+            }
             Ok(ZImageTransformer::Dense(load_gguf_dense_transformer(
-                cfg, dtype, vb,
+                cfg, dtype, qvb,
+            )?))
+        } else if has_lora {
+            // Build an mmap-backed SimpleBackend so we can layer a LoRA
+            // wrapper on top. Drops the streaming progress bar that
+            // `load_safetensors_with_progress` would emit; the LoRA
+            // info-line is good enough signal for a single load.
+            use candle_core::safetensors::MmapedSafetensors;
+            let path_refs: Vec<&std::path::Path> =
+                xformer_paths.iter().map(|p| p.as_path()).collect();
+            let st = unsafe { MmapedSafetensors::multi(&path_refs)? };
+            struct MmapBackend {
+                st: MmapedSafetensors,
+            }
+            impl candle_nn::var_builder::SimpleBackend for MmapBackend {
+                fn get(
+                    &self,
+                    _s: candle_core::Shape,
+                    name: &str,
+                    _h: candle_nn::Init,
+                    dtype: DType,
+                    dev: &Device,
+                ) -> candle_core::Result<Tensor> {
+                    let t = self.st.load(name, dev)?;
+                    if t.dtype() != dtype {
+                        t.to_dtype(dtype)
+                    } else {
+                        Ok(t)
+                    }
+                }
+                fn get_unchecked(
+                    &self,
+                    name: &str,
+                    dtype: DType,
+                    dev: &Device,
+                ) -> candle_core::Result<Tensor> {
+                    let t = self.st.load(name, dev)?;
+                    if t.dtype() != dtype {
+                        t.to_dtype(dtype)
+                    } else {
+                        Ok(t)
+                    }
+                }
+                fn contains_tensor(&self, name: &str) -> bool {
+                    self.st.get(name).is_ok()
+                }
+            }
+            let inner: Box<dyn candle_nn::var_builder::SimpleBackend> =
+                Box::new(MmapBackend { st });
+            let adapters =
+                super::lora::load_lora_adapters(&self.pending_loras, &self.base.progress)?;
+            let specs: Vec<super::lora::ZImageLoraSpec<'_>> = adapters
+                .iter()
+                .zip(self.pending_loras.iter())
+                .map(|(adapter, w)| super::lora::ZImageLoraSpec {
+                    adapter: adapter.as_ref(),
+                    scale: w.scale,
+                    path_hash: super::lora::lora_path_hash(&w.path),
+                })
+                .collect();
+            let wrapped =
+                super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)?;
+            let vb = candle_nn::VarBuilder::from_backend(wrapped, dtype, device.clone());
+            Ok(ZImageTransformer::Dense(ZImageTransformer2DModel::new(
+                cfg, vb,
             )?))
         } else {
             let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
@@ -1313,8 +1452,10 @@ impl ZImageEngine {
 impl InferenceEngine for ZImageEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.pending_placement = req.placement.clone();
+        self.pending_loras = effective_zimage_loras(req);
         let result = self.generate_inner(req);
         self.pending_placement = None;
+        self.pending_loras.clear();
         result
     }
 

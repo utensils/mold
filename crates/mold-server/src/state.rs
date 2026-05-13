@@ -10,6 +10,7 @@ use mold_inference::shared_pool::SharedPool;
 
 use crate::downloads::DownloadQueue;
 use crate::gpu_pool::GpuPool;
+use crate::job_registry::{JobRegistry, SharedJobRegistry};
 use crate::model_cache::ModelCache;
 use crate::resources::ResourceBroadcaster;
 
@@ -42,6 +43,14 @@ pub enum SseMessage {
 
 /// A generation job submitted to the queue worker.
 pub struct GenerationJob {
+    /// Server-assigned UUIDv4. Echoed back to the client in the initial
+    /// `SseProgressEvent::Queued` event so the SPA can later reconcile
+    /// a persisted "running" card against `GET /api/queue` — anything
+    /// the registry doesn't know about is a zombie left over from a
+    /// dropped SSE stream and gets dead-lettered client-side. Always
+    /// non-empty for jobs created through the public API; tests that
+    /// construct `GenerationJob` directly may leave it empty.
+    pub id: String,
     pub request: mold_core::GenerateRequest,
     /// Channel to send SSE progress/complete/error events (None for non-streaming).
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
@@ -147,6 +156,11 @@ pub struct AppState {
     pub chain_lock: Arc<Mutex<()>>,
     /// Generation request queue.
     pub queue: QueueHandle,
+    /// Authoritative registry of in-flight jobs (queued + running). Powers
+    /// `GET /api/queue` so the SPA can reconcile persisted "running" cards
+    /// against server reality and dead-letter zombies whose SSE stream
+    /// silently dropped.
+    pub job_registry: SharedJobRegistry,
     /// Shared tokenizer pool for cross-engine caching.
     pub shared_pool: Arc<std::sync::Mutex<SharedPool>>,
     /// Shutdown trigger for graceful shutdown via `/api/shutdown` endpoint.
@@ -300,6 +314,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             chain_lock: Arc::new(Mutex::new(())),
             queue,
+            job_registry: JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -330,6 +345,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             chain_lock: Arc::new(Mutex::new(())),
             queue,
+            job_registry: JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -375,6 +391,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             chain_lock: Arc::new(Mutex::new(())),
             queue,
+            job_registry: JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -407,6 +424,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             chain_lock: Arc::new(Mutex::new(())),
             queue,
+            job_registry: JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -439,6 +457,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             chain_lock: Arc::new(Mutex::new(())),
             queue,
+            job_registry: JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),

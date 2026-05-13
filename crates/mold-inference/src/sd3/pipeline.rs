@@ -2,8 +2,9 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp};
 use candle_transformers::models::mmdit::model::{Config as MMDiTConfig, MMDiT};
 use candle_transformers::quantized_var_builder;
-use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
-use std::sync::Mutex;
+use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::cache::{
@@ -24,10 +25,130 @@ use crate::image::{build_output_metadata, encode_image};
 use crate::img_utils;
 use crate::progress::{ProgressCallback, ProgressReporter};
 
+use super::lora as sd3_lora;
 use super::quantized_mmdit::QuantizedMMDiT;
 use super::sampling::{self, SkipLayerGuidanceConfig};
 use super::transformer::SD3Transformer;
 use super::vae::{build_sd3_vae_autoencoder, sd3_vae_vb_rename};
+
+/// Smallest LoRA scale the engine treats as non-zero. Sliders pinned to
+/// 0.0 are dropped from the effective stack — forcing a transformer
+/// rebuild for a no-op patch is pure overhead. The threshold matches
+/// the precision of an f64 scrubbed by a UI slider.
+const ZERO_SCALE_EPS: f64 = 1e-8;
+
+/// Collapse a `GenerateRequest`'s `lora` (legacy single) and `loras`
+/// (plural) fields into an ordered, zero-pruned working list. Plural
+/// wins when both are set — the singular form is for backward compat.
+pub(crate) fn effective_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
+    let raw: Vec<LoraWeight> = if let Some(plural) = &req.loras {
+        if !plural.is_empty() {
+            plural.clone()
+        } else {
+            req.lora.iter().cloned().collect()
+        }
+    } else {
+        req.lora.iter().cloned().collect()
+    };
+    raw.into_iter()
+        .filter(|w| {
+            let keep = w.scale.abs() > ZERO_SCALE_EPS;
+            if !keep {
+                tracing::debug!(
+                    path = w.path.as_str(),
+                    scale = w.scale,
+                    "dropping zero-scale LoRA from SD3 effective stack"
+                );
+            }
+            keep
+        })
+        .collect()
+}
+
+/// Build a LoRA-aware SD3 `VarBuilder` from BF16 safetensors. Caller
+/// is responsible for short-circuiting to the non-LoRA mmap path when
+/// `loras` is empty — this function errors on an empty stack so a stray
+/// caller doesn't silently get the wrong builder shape.
+fn sd3_lora_var_builder<'a>(
+    transformer_path: &Path,
+    loras: &[LoraWeight],
+    dtype: DType,
+    device: &Device,
+    progress: &ProgressReporter,
+    delta_cache: Option<Arc<Mutex<sd3_lora::LoraDeltaCache>>>,
+) -> Result<candle_nn::VarBuilder<'a>> {
+    let adapters: Vec<Arc<sd3_lora::LoraAdapter>> = loras
+        .iter()
+        .map(|w| {
+            progress.info("Loading SD3 LoRA adapter");
+            let adapter = sd3_lora::get_or_load_adapter(Path::new(&w.path))?;
+            progress.info(&format!(
+                "SD3 LoRA: {} layers, rank {}, scale {:.2}",
+                adapter.layers.len(),
+                adapter.rank,
+                w.scale,
+            ));
+            anyhow::Ok(adapter)
+        })
+        .collect::<Result<_>>()?;
+
+    let specs: Vec<sd3_lora::LoraSpec<'_>> = adapters
+        .iter()
+        .zip(loras.iter())
+        .map(|(adapter, w)| sd3_lora::LoraSpec {
+            adapter: adapter.as_ref(),
+            scale: w.scale,
+            path_hash: sd3_lora::lora_path_hash(&w.path),
+        })
+        .collect();
+
+    sd3_lora::lora_var_builder(
+        transformer_path,
+        &specs,
+        dtype,
+        device,
+        progress,
+        delta_cache,
+    )
+}
+
+/// GGUF counterpart to `sd3_lora_var_builder` — selectively dequantizes
+/// patched tensors, merges, and re-quantizes back to the original GGML
+/// dtype on the target device.
+fn sd3_gguf_lora_var_builder(
+    transformer_path: &Path,
+    loras: &[LoraWeight],
+    device: &Device,
+    progress: &ProgressReporter,
+    delta_cache: Option<Arc<Mutex<sd3_lora::LoraDeltaCache>>>,
+) -> Result<quantized_var_builder::VarBuilder> {
+    let adapters: Vec<Arc<sd3_lora::LoraAdapter>> = loras
+        .iter()
+        .map(|w| {
+            progress.info("Loading SD3 LoRA adapter");
+            let adapter = sd3_lora::get_or_load_adapter(Path::new(&w.path))?;
+            progress.info(&format!(
+                "SD3 LoRA: {} layers, rank {}, scale {:.2}",
+                adapter.layers.len(),
+                adapter.rank,
+                w.scale,
+            ));
+            anyhow::Ok(adapter)
+        })
+        .collect::<Result<_>>()?;
+
+    let specs: Vec<sd3_lora::LoraSpec<'_>> = adapters
+        .iter()
+        .zip(loras.iter())
+        .map(|(adapter, w)| sd3_lora::LoraSpec {
+            adapter: adapter.as_ref(),
+            scale: w.scale,
+            path_hash: sd3_lora::lora_path_hash(&w.path),
+        })
+        .collect();
+
+    sd3_lora::gguf_lora_var_builder(transformer_path, &specs, device, progress, delta_cache)
+}
 
 /// Loaded SD3 model components, ready for inference.
 struct LoadedSD3 {
@@ -54,6 +175,10 @@ pub struct SD3Engine {
     t5_variant: Option<String>,
     prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensorPair>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// CPU-resident cache of pre-computed LoRA deltas, shared across
+    /// transformer rebuilds. Saves the `B @ A * scale` matmul when the
+    /// same LoRA stack reappears on a later generate.
+    lora_delta_cache: Arc<Mutex<sd3_lora::LoraDeltaCache>>,
 }
 
 impl SD3Engine {
@@ -74,6 +199,7 @@ impl SD3Engine {
             t5_variant,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
+            lora_delta_cache: Arc::new(Mutex::new(sd3_lora::LoraDeltaCache::new())),
         }
     }
 
@@ -650,22 +776,31 @@ impl SD3Engine {
             self.base.progress.info(&status);
         }
 
-        let xformer_label = if is_quantized {
-            "Loading SD3 MMDiT transformer (GPU, quantized)"
-        } else {
-            "Loading SD3 MMDiT transformer (GPU, FP16)"
+        let active_loras = effective_loras(req);
+        let lora_delta_cache = self.lora_delta_cache.clone();
+        let xformer_label = match (is_quantized, active_loras.is_empty()) {
+            (true, true) => "Loading SD3 MMDiT transformer (GPU, quantized)",
+            (true, false) => "Loading SD3 MMDiT transformer (GPU, quantized, with LoRA)",
+            (false, true) => "Loading SD3 MMDiT transformer (GPU, FP16)",
+            (false, false) => "Loading SD3 MMDiT transformer (GPU, FP16, with LoRA)",
         };
         self.base.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
 
         let transformer = if is_quantized {
-            // GGUF files from city96 use unprefixed tensor names
-            let vb = quantized_var_builder::VarBuilder::from_gguf(
-                &self.base.paths.transformer,
-                &device,
-            )?;
+            let vb = if active_loras.is_empty() {
+                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, &device)?
+            } else {
+                sd3_gguf_lora_var_builder(
+                    &self.base.paths.transformer,
+                    &active_loras,
+                    &device,
+                    &self.base.progress,
+                    Some(lora_delta_cache.clone()),
+                )?
+            };
             SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
-        } else {
+        } else if active_loras.is_empty() {
             // BF16 safetensors from stabilityai use "model.diffusion_model." prefix
             let vb = crate::weight_loader::load_safetensors_with_progress(
                 std::slice::from_ref(&self.base.paths.transformer),
@@ -679,6 +814,19 @@ impl SD3Engine {
                 false,
                 vb.pp("model.diffusion_model"),
             )?)
+        } else {
+            // LoRA path: the `LoraBackend` strips the on-disk prefix
+            // automatically, so the builder is positioned at the prefix
+            // root — feed it straight to `MMDiT::new`.
+            let vb = sd3_lora_var_builder(
+                &self.base.paths.transformer,
+                &active_loras,
+                gpu_dtype,
+                &device,
+                &self.base.progress,
+                Some(lora_delta_cache.clone()),
+            )?;
+            SD3Transformer::BF16(MMDiT::new(&mmdit_config, false, vb)?)
         };
         self.base
             .progress
@@ -815,12 +963,26 @@ impl SD3Engine {
         let prompt_cache = &self.prompt_cache;
         let mmdit_config = self.mmdit_config();
         let transformer_path = self.base.paths.transformer.clone();
+        let active_loras = effective_loras(req);
+        let lora_delta_cache = self.lora_delta_cache.clone();
 
         let mut loaded = OptionRestoreGuard::take(&mut self.base.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded -- call load() first"))?;
         let loaded_dtype = loaded.dtype;
         let loaded_device = loaded.device.clone();
         let is_quantized = loaded._is_quantized;
+
+        // LoRA: force a transformer rebuild via the LoRA path. The
+        // eager-loaded transformer is the unpatched base; even if the
+        // same stack was applied on a previous generate, the in-memory
+        // tensors no longer carry that delta after the post-decode
+        // drop. The `LoraDeltaCache` keeps the matmul work cheap on
+        // every rebuild.
+        if !active_loras.is_empty() && loaded.transformer.is_some() {
+            loaded.transformer = None;
+            loaded_device.synchronize()?;
+            progress.info("SD3 LoRA: dropping base transformer for LoRA merge");
+        }
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -981,15 +1143,30 @@ impl SD3Engine {
 
             // Reload transformer if needed (dropped for img2img VAE encoding, or prior VAE decode)
             if loaded.transformer.is_none() {
-                progress.stage_start("Reloading SD3 transformer");
+                let reload_label = if active_loras.is_empty() {
+                    "Reloading SD3 transformer"
+                } else {
+                    "Reloading SD3 transformer (with LoRA)"
+                };
+                progress.stage_start(reload_label);
                 let reload_start = Instant::now();
                 let transformer = if is_quantized {
-                    let vb = quantized_var_builder::VarBuilder::from_gguf(
-                        &transformer_path,
-                        &loaded_device,
-                    )?;
+                    let vb = if active_loras.is_empty() {
+                        quantized_var_builder::VarBuilder::from_gguf(
+                            &transformer_path,
+                            &loaded_device,
+                        )?
+                    } else {
+                        sd3_gguf_lora_var_builder(
+                            &transformer_path,
+                            &active_loras,
+                            &loaded_device,
+                            progress,
+                            Some(lora_delta_cache.clone()),
+                        )?
+                    };
                     SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
-                } else {
+                } else if active_loras.is_empty() {
                     let vb = crate::weight_loader::load_safetensors_with_progress(
                         std::slice::from_ref(&transformer_path),
                         loaded_dtype,
@@ -999,9 +1176,22 @@ impl SD3Engine {
                     )?;
                     let vb = vb.pp("model.diffusion_model");
                     SD3Transformer::BF16(MMDiT::new(&mmdit_config, false, vb)?)
+                } else {
+                    // LoRA path: the `LoraBackend` already absorbs the
+                    // on-disk `model.diffusion_model.` prefix, so the
+                    // builder is positioned at the prefix root.
+                    let vb = sd3_lora_var_builder(
+                        &transformer_path,
+                        &active_loras,
+                        loaded_dtype,
+                        &loaded_device,
+                        progress,
+                        Some(lora_delta_cache.clone()),
+                    )?;
+                    SD3Transformer::BF16(MMDiT::new(&mmdit_config, false, vb)?)
                 };
                 loaded.transformer = Some(transformer);
-                progress.stage_done("Reloading SD3 transformer", reload_start.elapsed());
+                progress.stage_done(reload_label, reload_start.elapsed());
             }
 
             let slg_config = if loaded.is_medium {

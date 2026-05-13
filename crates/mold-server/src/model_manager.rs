@@ -131,6 +131,52 @@ fn rejection_suggestion(hint: Option<ActivationHint>) -> &'static str {
     }
 }
 
+const FLUX2_KLEIN_9B_BF16_MIN_VRAM: u64 = 32_000_000_000;
+const FLUX2_KLEIN_9B_TRANSFORMER_FLOOR: u64 = 16_000_000_000;
+const FLUX2_KLEIN_9B_TEXT_ENCODER_FLOOR: u64 = 14_000_000_000;
+
+fn transformer_file_size(paths: &ModelPaths) -> u64 {
+    let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    if !paths.transformer_shards.is_empty() {
+        paths.transformer_shards.iter().map(|p| file_size(p)).sum()
+    } else {
+        file_size(&paths.transformer)
+    }
+}
+
+fn is_gguf_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
+}
+
+fn is_flux2_klein_9b_bf16_load(
+    model_name: &str,
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+) -> bool {
+    let lower = model_name.to_lowercase();
+    let family_matches = hint
+        .map(|h| h.family == ActivationFamily::Flux2Dit)
+        .unwrap_or_else(|| lower.contains("flux2"));
+    if !family_matches || is_gguf_path(&paths.transformer) {
+        return false;
+    }
+
+    let name_matches_9b = lower.contains("klein-9b") || lower.contains("9b");
+    let name_marks_full_precision = lower.contains(":bf16") || lower.contains(":fp16");
+    let transformer_size = transformer_file_size(paths);
+    let text_encoder_size: u64 = paths
+        .text_encoder_files
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+        .sum();
+    let size_matches_9b = transformer_size >= FLUX2_KLEIN_9B_TRANSFORMER_FLOOR
+        && text_encoder_size >= FLUX2_KLEIN_9B_TEXT_ENCODER_FLOOR;
+
+    (name_matches_9b && name_marks_full_precision) || size_matches_9b
+}
+
 /// Pure inner: given an `available_bytes` budget and the active model's
 /// reclaimable VRAM, decide whether the new model fits. Adding
 /// `active_vram_bytes` to `available_bytes` accounts for the currently-loaded
@@ -192,6 +238,19 @@ pub(crate) fn preflight_memory_guard_with_available(
     let peak_with_activation = peak.saturating_add(activation);
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
     let suggestion = rejection_suggestion(hint);
+
+    if is_flux2_klein_9b_bf16_load(model_name, paths, hint)
+        && effective_available < FLUX2_KLEIN_9B_BF16_MIN_VRAM
+    {
+        return Err(ApiError::insufficient_memory(format!(
+            "model '{}' requires a 32 GB GPU for the Flux.2 Klein-9B BF16 transformer \
+             ({:.1} GB effective budget detected). Use a quantized Klein-9B variant \
+             (e.g. ':q8' / ':q4') or run on a larger card.",
+            model_name,
+            effective_available as f64 / 1_000_000_000.0,
+        )));
+    }
+
     check_model_memory_budget(
         model_name,
         peak_with_activation,
@@ -1793,7 +1852,93 @@ mod tests {
         assert!(
             result_2048.is_err(),
             "2048² FLUX must be rejected on 30 GB (large activation budget pushes \
-             peak past 90 % cap), got {result_2048:?}"
+            peak past 90 % cap), got {result_2048:?}"
+        );
+    }
+
+    fn flux2_klein9b_bf16_paths() -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let shard_a = mk("diffusion_pytorch_model-00001-of-00002.safetensors", 10);
+        let shard_b = mk("diffusion_pytorch_model-00002-of-00002.safetensors", 8);
+        let vae = mk("flux2-vae.safetensors", 1);
+        let te_a = mk("text_encoder-00001-of-00004.safetensors", 5);
+        let te_b = mk("text_encoder-00002-of-00004.safetensors", 5);
+        let te_c = mk("text_encoder-00003-of-00004.safetensors", 5);
+        let te_d = mk("text_encoder-00004-of-00004.safetensors", 1);
+        let paths = ModelPaths {
+            transformer: shard_a.clone(),
+            transformer_shards: vec![shard_a, shard_b],
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![te_a, te_b, te_c, te_d],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
+    #[test]
+    fn preflight_rejects_flux2_klein9b_bf16_on_24gb_card() {
+        let (_dir, paths) = flux2_klein9b_bf16_paths();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        let result = preflight_memory_guard_with_available(
+            "flux2-klein-9b:bf16",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+        );
+
+        assert!(
+            result.is_err(),
+            "Klein-9B BF16 must not be admitted on a 24 GB card; \
+             the plain file-size sequential estimate undercounts its load-time peak, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn preflight_allows_flux2_klein9b_bf16_on_32gb_card() {
+        let (_dir, paths) = flux2_klein9b_bf16_paths();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        let result = preflight_memory_guard_with_available(
+            "flux2-klein-9b:bf16",
+            &paths,
+            0,
+            32 * GB,
+            Some(hint),
+        );
+
+        assert!(
+            result.is_ok(),
+            "Klein-9B BF16 should be allowed once the card budget reaches 32 GB, got {result:?}"
         );
     }
 

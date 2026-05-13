@@ -397,6 +397,61 @@ mod tests {
         assert!(ct.contains("application/json"));
     }
 
+    // ── /api/queue ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn queue_returns_empty_listing_on_idle_server() {
+        // No jobs in flight → snapshot is an empty array. Wire contract:
+        // the response is `{ "entries": [] }`, NOT a bare array — extra
+        // top-level fields can be added later without a breaking change.
+        let app = app_empty();
+        let resp = app
+            .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["entries"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn queue_lists_registered_jobs_in_fifo_order_with_running_state_and_gpu() {
+        // Hand-build state so we can poke the registry without standing up
+        // a real generation flow. Locks in the wire shape that the SPA's
+        // reconciliation poller depends on.
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        state.job_registry.register("bbbb", "sdxl:q8");
+        state.job_registry.mark_running("aaaa", Some(0));
+
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let entries = body["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 2);
+
+        // Position 0 — the running job. Carries `gpu`.
+        assert_eq!(entries[0]["id"], "aaaa");
+        assert_eq!(entries[0]["state"], "running");
+        assert_eq!(entries[0]["position"], 0);
+        assert_eq!(entries[0]["gpu"], 0);
+
+        // Position 1 — still queued. `gpu` is omitted from the wire shape
+        // (clients shouldn't see `"gpu": null` and infer GPU 0).
+        assert_eq!(entries[1]["id"], "bbbb");
+        assert_eq!(entries[1]["state"], "queued");
+        assert_eq!(entries[1]["position"], 1);
+        assert!(
+            entries[1].get("gpu").is_none(),
+            "queued rows must not emit a `gpu` field, got: {}",
+            entries[1]
+        );
+    }
+
     #[tokio::test]
     async fn status_when_no_model() {
         let app = app_empty();
@@ -1262,6 +1317,7 @@ mod tests {
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             chain_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
+            job_registry: crate::job_registry::JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
             )),
@@ -1321,6 +1377,7 @@ mod tests {
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             chain_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
+            job_registry: crate::job_registry::JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
             )),
@@ -1583,6 +1640,7 @@ mod tests {
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             chain_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
+            job_registry: crate::job_registry::JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
             )),

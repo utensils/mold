@@ -242,6 +242,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/resources", get(get_resources))
         .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/status", get(server_status))
+        .route("/api/queue", get(list_queue))
         .route("/api/capabilities", get(server_capabilities))
         .route(
             "/api/capabilities/chain-limits",
@@ -472,7 +473,14 @@ async fn generate(
 
     // Submit to generation queue
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    // Non-streaming path still gets a registry entry so an HTTP client
+    // hanging on the response is visible via GET /api/queue alongside
+    // SSE clients. Cleanup happens unconditionally on every terminal
+    // path (drop guard in `gpu_worker::process_job`).
+    let job_id = uuid::Uuid::new_v4().to_string();
+    state.job_registry.register(&job_id, &req.model);
     let job = GenerationJob {
+        id: job_id.clone(),
         request: req,
         progress_tx: None,
         result_tx,
@@ -483,6 +491,7 @@ async fn generate(
         .queue
         .submit(job, state.queue_capacity)
         .await
+        .inspect_err(|_| state.job_registry.remove(&job_id))
         .map_err(submit_error_to_api)?;
 
     // Wait for the queue worker to process the job
@@ -1178,7 +1187,12 @@ async fn generate_stream(
     }
 
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    // Assign a server-side ID and register before submit so the entry is
+    // visible to /api/queue from the moment we accept the request.
+    let job_id = uuid::Uuid::new_v4().to_string();
+    state.job_registry.register(&job_id, &req.model);
     let job = GenerationJob {
+        id: job_id.clone(),
         request: req,
         progress_tx: Some(tx.clone()),
         result_tx,
@@ -1189,10 +1203,15 @@ async fn generate_stream(
         .queue
         .submit(job, state.queue_capacity)
         .await
+        .inspect_err(|_| state.job_registry.remove(&job_id))
         .map_err(submit_error_to_api)?;
 
-    // Send initial queue position to the client
-    let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued { position }));
+    // First event the client sees — carries the position AND the server
+    // ID so the SPA can later reconcile this job against /api/queue.
+    let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued {
+        position,
+        id: job_id,
+    }));
 
     // Hold `tx` alive in a background task until the job completes, so the SSE
     // stream never closes prematurely even if the queue worker hasn't received
@@ -1658,6 +1677,24 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
 )]
 async fn health() -> impl IntoResponse {
     StatusCode::OK
+}
+
+// ── /api/queue ───────────────────────────────────────────────────────────────
+
+/// Snapshot of every job currently queued or running on the server. Clients
+/// (notably the web SPA) poll this to reconcile their local card list — any
+/// "running" card whose server id isn't here is a zombie left over from a
+/// dropped SSE stream and should be dead-lettered.
+#[utoipa::path(
+    get,
+    path = "/api/queue",
+    tag = "queue",
+    responses(
+        (status = 200, description = "Queue snapshot", body = crate::job_registry::QueueListing),
+    )
+)]
+async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::QueueListing> {
+    Json(state.job_registry.snapshot())
 }
 
 // ── /api/capabilities ────────────────────────────────────────────────────────

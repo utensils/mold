@@ -5271,7 +5271,7 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             });
             return true;
         }
-        SseProgressEvent::Queued { position } => {
+        SseProgressEvent::Queued { position, .. } => {
             progress.current_stage = Some(format!("Queued (position {position})"));
         }
     }

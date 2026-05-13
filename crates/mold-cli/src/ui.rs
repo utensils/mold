@@ -363,7 +363,7 @@ pub(crate) async fn render_progress(
                     bar.finish_with_message(download_label(&filename, file_index, total_files));
                 }
             }
-            SseProgressEvent::Queued { position } => {
+            SseProgressEvent::Queued { position, .. } => {
                 if position > 0 {
                     pb.set_message(format!("Queued (position {})", position));
                     pb.enable_steady_tick(Duration::from_millis(100));

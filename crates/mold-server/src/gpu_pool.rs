@@ -3,10 +3,108 @@ use mold_core::types::{DevicePlacement, DeviceRef, GpuWorkerState, GpuWorkerStat
 use mold_db::MetadataDb;
 use mold_inference::device::DiscoveredGpu;
 use mold_inference::shared_pool::SharedPool;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::time::{Duration, Instant};
+
+const MODEL_CUDA_OOM_COOLDOWN: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Default)]
+struct ModelCudaOomState {
+    failed_ordinals: BTreeSet<usize>,
+    unschedulable_until: Option<Instant>,
+}
+
+static MODEL_CUDA_OOMS: LazyLock<RwLock<HashMap<String, ModelCudaOomState>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModelCudaOomOutcome {
+    unschedulable_until: Option<Instant>,
+}
+
+impl ModelCudaOomOutcome {
+    pub(crate) fn is_unschedulable(&self) -> bool {
+        self.unschedulable_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+}
+
+pub(crate) fn record_model_cuda_oom(model_name: &str, ordinal: usize) -> ModelCudaOomOutcome {
+    let now = Instant::now();
+    let mut states = MODEL_CUDA_OOMS.write().unwrap();
+    let state = states.entry(model_name.to_string()).or_default();
+
+    if let Some(until) = state.unschedulable_until {
+        if now < until {
+            return ModelCudaOomOutcome {
+                unschedulable_until: Some(until),
+            };
+        }
+        state.unschedulable_until = None;
+        state.failed_ordinals.clear();
+    }
+
+    state.failed_ordinals.insert(ordinal);
+    let unschedulable_until = if state.failed_ordinals.len() >= 2 {
+        let until = now + MODEL_CUDA_OOM_COOLDOWN;
+        state.unschedulable_until = Some(until);
+        tracing::warn!(
+            model = %model_name,
+            failed_gpus = ?state.failed_ordinals,
+            cooldown_secs = MODEL_CUDA_OOM_COOLDOWN.as_secs(),
+            "model marked temporarily unschedulable after CUDA OOM on multiple GPUs"
+        );
+        Some(until)
+    } else {
+        None
+    };
+
+    ModelCudaOomOutcome {
+        unschedulable_until,
+    }
+}
+
+pub(crate) fn model_unschedulable_message(model_name: &str) -> Option<String> {
+    let now = Instant::now();
+    let mut states = MODEL_CUDA_OOMS.write().unwrap();
+    let state = states.get_mut(model_name)?;
+    let until = state.unschedulable_until?;
+    if now >= until {
+        states.remove(model_name);
+        return None;
+    }
+    let remaining = until.saturating_duration_since(now).as_secs().max(1);
+    Some(format!(
+        "model '{model_name}' is temporarily unschedulable after CUDA OOM on multiple GPUs; \
+         retry in {remaining}s or use a quantized/smaller variant."
+    ))
+}
+
+pub(crate) fn failed_ordinals_for_model(model_name: &str) -> Vec<usize> {
+    let now = Instant::now();
+    let mut states = MODEL_CUDA_OOMS.write().unwrap();
+    let Some(state) = states.get_mut(model_name) else {
+        return Vec::new();
+    };
+    if let Some(until) = state.unschedulable_until {
+        if now >= until {
+            states.remove(model_name);
+        }
+        return Vec::new();
+    }
+    state.failed_ordinals.iter().copied().collect()
+}
+
+pub(crate) fn clear_model_cuda_oom(model_name: &str) {
+    MODEL_CUDA_OOMS.write().unwrap().remove(model_name);
+}
+
+#[cfg(test)]
+pub(crate) fn clear_model_cuda_ooms_for_tests() {
+    MODEL_CUDA_OOMS.write().unwrap().clear();
+}
 
 /// Per-GPU worker state. Each GPU gets its own model cache, load lock, and health tracking.
 pub struct GpuWorker {
@@ -32,6 +130,11 @@ pub struct ActiveGeneration {
 
 /// A job dispatched to a GPU worker thread for processing.
 pub struct GpuJob {
+    /// Server-assigned UUIDv4 carried over from `GenerationJob.id`. Used by
+    /// the worker to flip the registry entry from `Queued` → `Running` (and
+    /// to remove it when the job finishes), and surfaced to clients via
+    /// `GET /api/queue` for zombie-card reconciliation.
+    pub id: String,
     pub model: String,
     pub request: mold_core::GenerateRequest,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
@@ -44,6 +147,10 @@ pub struct GpuJob {
     pub metadata_db: Arc<Option<MetadataDb>>,
     /// Decrement the global queue counter when the worker finishes this job.
     pub queue: crate::state::QueueHandle,
+    /// Job registry handle so the worker can flip state to Running on pickup
+    /// and remove the entry on completion / error. Cheap clone — registry is
+    /// behind an `Arc<RwLock>` internally.
+    pub registry: crate::job_registry::SharedJobRegistry,
 }
 
 /// Pool of GPU workers with placement strategy.
@@ -594,5 +701,52 @@ mod tests {
             3,
             "active cooldown must NOT reset the counter",
         );
+    }
+
+    #[test]
+    fn model_oom_on_sibling_gpu_marks_model_unschedulable() {
+        clear_model_cuda_ooms_for_tests();
+        let model = "flux2-klein-9b:bf16";
+
+        let first = record_model_cuda_oom(model, 0);
+        assert!(
+            !first.is_unschedulable(),
+            "first OOM only records the failed ordinal"
+        );
+        assert!(
+            model_unschedulable_message(model).is_none(),
+            "a single-GPU OOM should not cool down the model yet"
+        );
+
+        let second = record_model_cuda_oom(model, 1);
+        assert!(
+            second.is_unschedulable(),
+            "OOM on a sibling GPU should mark the model unschedulable"
+        );
+        let msg = model_unschedulable_message(model).expect("cooldown message");
+        assert!(msg.contains(model), "{msg}");
+        assert!(msg.contains("temporarily unschedulable"), "{msg}");
+
+        clear_model_cuda_ooms_for_tests();
+    }
+
+    #[test]
+    fn failed_model_ordinals_can_be_skipped_before_cooldown() {
+        clear_model_cuda_ooms_for_tests();
+        let (failed, _failed_rx) = test_worker(0, 24_000_000_000);
+        let (untested, _untested_rx) = test_worker(1, 24_000_000_000);
+        let pool = GpuPool {
+            workers: vec![failed, untested.clone()],
+        };
+        let model = "flux2-klein-9b:bf16";
+
+        record_model_cuda_oom(model, 0);
+        let skip = failed_ordinals_for_model(model);
+        let picked = pool
+            .select_worker_excluding(model, 32_000_000_000, &skip)
+            .expect("sibling GPU should be tried before cooldown");
+
+        assert_eq!(picked.gpu.ordinal, untested.gpu.ordinal);
+        clear_model_cuda_ooms_for_tests();
     }
 }

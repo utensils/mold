@@ -67,6 +67,29 @@ pub struct SD15Engine {
     /// calling candle's per-component `build_*` helpers. `None` for
     /// diffusers-layout (HF) checkpoints.
     pub(crate) single_file_path: Option<PathBuf>,
+    /// Per-request LoRA list, set from `req.lora` / `req.loras` in
+    /// `generate()` and cleared after. Read by `build_unet_for_strategy` to
+    /// decide whether to wrap the UNet's `VarBuilder` with `super::lora`'s
+    /// `wrap_backend_with_lora`. Empty in the no-LoRA hot path. Mirrors the
+    /// SDXL field of the same name.
+    pending_loras: Vec<mold_core::LoraWeight>,
+    /// Fingerprint of the LoRA stack currently merged into the loaded UNet
+    /// (eager mode). When `effective_sd15_loras(req)` produces a different
+    /// fingerprint, `generate_inner` drops the UNet so the next
+    /// `reload_unet_if_needed` call rebuilds it with the new wrapper.
+    /// Empty when no LoRA is active.
+    active_lora_fingerprint: Vec<(String, u64)>,
+}
+
+/// Compute a stable fingerprint for a LoRA stack: ordered list of
+/// `(path, scale_bits)`. Two stacks are equal iff they merge to the same
+/// transformer, so a comparison drives UNet reload on any change (swap,
+/// scale, add, remove, reorder).
+fn lora_stack_fingerprint(loras: &[mold_core::LoraWeight]) -> Vec<(String, u64)> {
+    loras
+        .iter()
+        .map(|w| (w.path.clone(), w.scale.to_bits()))
+        .collect()
 }
 
 impl SD15Engine {
@@ -86,6 +109,8 @@ impl SD15Engine {
             control_tensor_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             pending_placement: None,
             single_file_path: None,
+            pending_loras: Vec::new(),
+            active_lora_fingerprint: Vec::new(),
         }
     }
 
@@ -165,6 +190,8 @@ impl SD15Engine {
             control_tensor_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             pending_placement: None,
             single_file_path: Some(single_file_path),
+            pending_loras: Vec::new(),
+            active_lora_fingerprint: Vec::new(),
         })
     }
 
@@ -237,18 +264,143 @@ impl SD15Engine {
     /// every UNet load site (eager `load`, sequential `generate_sequential`,
     /// and `reload_unet_if_needed`) so the branch logic lives in exactly
     /// one place.
+    ///
+    /// When `self.pending_loras` is non-empty, the underlying tensor source
+    /// (mmap'd diffusers safetensors or `SingleFileBackend`) is wrapped in
+    /// `super::lora::wrap_backend_with_lora` so the UNet construction loads
+    /// `W' = W + scale·(B @ A)` for every LoRA-targeted layer. The wrapper
+    /// is transparent to `UNet2DConditionModel::new`.
     fn build_unet_for_strategy(
         &self,
         sd_config: &stable_diffusion::StableDiffusionConfig,
         device: &Device,
         dtype: DType,
     ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
+        let has_lora = !self.pending_loras.is_empty();
         if let Some(single_file) = self.single_file_path.as_ref() {
             let remap = Self::load_sd15_remap(single_file)?;
-            Self::build_unet_single_file(single_file, &remap, sd_config, device, dtype)
+            if has_lora {
+                self.build_unet_single_file_with_lora(single_file, &remap, sd_config, device, dtype)
+            } else {
+                Self::build_unet_single_file(single_file, &remap, sd_config, device, dtype)
+            }
+        } else if has_lora {
+            self.build_unet_diffusers_with_lora(sd_config, device, dtype)
         } else {
             Ok(sd_config.build_unet(&self.base.paths.transformer, device, 4, false, dtype)?)
         }
+    }
+
+    /// Build the UNet from a diffusers-layout single safetensors file with
+    /// LoRA wrappers active. Mirrors candle's `build_unet`: open the mmap,
+    /// wrap it in a `SimpleBackend`, layer `Sd15LoraBackend` on top, and feed
+    /// the resulting `VarBuilder` to `UNet2DConditionModel::new`.
+    fn build_unet_diffusers_with_lora(
+        &self,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
+        use candle_core::safetensors::MmapedSafetensors;
+        use candle_nn::VarBuilder;
+
+        let st = unsafe { MmapedSafetensors::multi(&[&self.base.paths.transformer])? };
+
+        struct MmapBackend {
+            st: MmapedSafetensors,
+        }
+        impl candle_nn::var_builder::SimpleBackend for MmapBackend {
+            fn get(
+                &self,
+                _s: candle_core::Shape,
+                name: &str,
+                _h: candle_nn::Init,
+                dtype: DType,
+                dev: &Device,
+            ) -> candle_core::Result<Tensor> {
+                let t = self.st.load(name, dev)?;
+                if t.dtype() != dtype {
+                    t.to_dtype(dtype)
+                } else {
+                    Ok(t)
+                }
+            }
+            fn get_unchecked(
+                &self,
+                name: &str,
+                dtype: DType,
+                dev: &Device,
+            ) -> candle_core::Result<Tensor> {
+                let t = self.st.load(name, dev)?;
+                if t.dtype() != dtype {
+                    t.to_dtype(dtype)
+                } else {
+                    Ok(t)
+                }
+            }
+            fn contains_tensor(&self, name: &str) -> bool {
+                self.st.get(name).is_ok()
+            }
+        }
+        let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(MmapBackend { st });
+        let wrapped = self.wrap_with_loras(inner)?;
+        let vb = VarBuilder::from_backend(wrapped, dtype, device.clone());
+        Ok(stable_diffusion::unet_2d::UNet2DConditionModel::new(
+            vb,
+            4,
+            4,
+            false,
+            sd_config.unet().clone(),
+        )?)
+    }
+
+    /// Same as `build_unet_single_file` but with the LoRA wrapper layered on
+    /// top of `SingleFileBackend`. The SD1.5 `SingleFileBackend` translates
+    /// diffusers candle keys onto the mmap'd A1111 checkpoint; the LoRA
+    /// wrapper then intercepts the merged tensor and adds the per-layer
+    /// delta before it lands on the UNet constructor.
+    fn build_unet_single_file_with_lora(
+        &self,
+        single_file: &std::path::Path,
+        remap: &crate::loader::Sd15Remap,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<stable_diffusion::unet_2d::UNet2DConditionModel> {
+        use crate::loader::SingleFileBackend;
+        use candle_nn::VarBuilder;
+
+        let backend = SingleFileBackend::from_sd15_unet(single_file, remap)?;
+        let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(backend);
+        let wrapped = self.wrap_with_loras(inner)?;
+        let vb = VarBuilder::from_backend(wrapped, dtype, device.clone());
+        Ok(stable_diffusion::unet_2d::UNet2DConditionModel::new(
+            vb,
+            4,
+            4,
+            false,
+            sd_config.unet().clone(),
+        )?)
+    }
+
+    /// Wrap an `inner` SimpleBackend with the SD1.5 LoRA backend. Resolves
+    /// the `pending_loras` list into `Sd15LoraSpec`s (parsed-LoRA cache hits
+    /// keep adapter parsing cheap across requests).
+    fn wrap_with_loras(
+        &self,
+        inner: Box<dyn candle_nn::var_builder::SimpleBackend>,
+    ) -> Result<Box<dyn candle_nn::var_builder::SimpleBackend>> {
+        let adapters = super::lora::load_lora_adapters(&self.pending_loras, &self.base.progress)?;
+        let specs: Vec<super::lora::Sd15LoraSpec<'_>> = adapters
+            .iter()
+            .zip(self.pending_loras.iter())
+            .map(|(adapter, w)| super::lora::Sd15LoraSpec {
+                adapter: adapter.as_ref(),
+                scale: w.scale,
+                path_hash: super::lora::lora_path_hash(&w.path),
+            })
+            .collect();
+        super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)
     }
 
     /// VAE load with the same single-file vs diffusers branch as
@@ -1241,6 +1393,21 @@ impl SD15Engine {
             return self.generate_sequential(req);
         }
 
+        // Eager mode: if the requested LoRA stack differs from what's merged
+        // into the loaded UNet, drop it now so `reload_unet_if_needed` rebuilds
+        // it with the new wrapper.
+        let requested_stack = lora_stack_fingerprint(&self.pending_loras);
+        if requested_stack != self.active_lora_fingerprint {
+            if let Some(loaded) = self.base.loaded.as_mut() {
+                if loaded.unet.is_some() {
+                    loaded.unet = None;
+                    loaded.device.synchronize()?;
+                    tracing::info!("SD1.5 UNet dropped (LoRA stack changed)");
+                }
+            }
+            self.active_lora_fingerprint = requested_stack;
+        }
+
         // Eager mode: reload UNet if dropped after previous VAE decode
         self.reload_unet_if_needed()?;
 
@@ -1418,8 +1585,10 @@ impl SD15Engine {
 impl InferenceEngine for SD15Engine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.pending_placement = req.placement.clone();
+        self.pending_loras = super::lora::effective_sd15_loras(req);
         let result = self.generate_inner(req);
         self.pending_placement = None;
+        self.pending_loras.clear();
         result
     }
 
@@ -1441,6 +1610,7 @@ impl InferenceEngine for SD15Engine {
         clear_cache(&self.source_latent_cache);
         clear_cache(&self.mask_cache);
         clear_cache(&self.control_tensor_cache);
+        self.active_lora_fingerprint.clear();
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
@@ -1742,6 +1912,48 @@ mod tests {
         assert!(
             restored.is_some(),
             "identical (pos, neg, guidance) must hit",
+        );
+    }
+
+    /// `lora_stack_fingerprint` must produce equal fingerprints for the same
+    /// `(path, scale)` pair and distinct ones when either changes — this is
+    /// the predicate that drives UNet drop on LoRA stack change in eager
+    /// mode. Same shape as the SDXL test of the same name.
+    #[test]
+    fn lora_stack_fingerprint_equality_drives_unet_drop() {
+        let a = mold_core::LoraWeight {
+            path: "/a.safetensors".to_string(),
+            scale: 0.8,
+        };
+        let b = mold_core::LoraWeight {
+            path: "/b.safetensors".to_string(),
+            scale: 0.4,
+        };
+        let same_a = mold_core::LoraWeight {
+            path: "/a.safetensors".to_string(),
+            scale: 0.8,
+        };
+
+        // Identical contents → identical fingerprint.
+        assert_eq!(
+            lora_stack_fingerprint(&[a.clone(), b.clone()]),
+            lora_stack_fingerprint(&[same_a.clone(), b.clone()])
+        );
+
+        // Same path but different scale → different fingerprint.
+        let scaled = mold_core::LoraWeight {
+            path: "/a.safetensors".to_string(),
+            scale: 0.81,
+        };
+        assert_ne!(
+            lora_stack_fingerprint(std::slice::from_ref(&a)),
+            lora_stack_fingerprint(std::slice::from_ref(&scaled))
+        );
+
+        // Reordering yields a different fingerprint (stack order matters).
+        assert_ne!(
+            lora_stack_fingerprint(&[a.clone(), b.clone()]),
+            lora_stack_fingerprint(&[b, a])
         );
     }
 }

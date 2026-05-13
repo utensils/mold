@@ -36,6 +36,18 @@ export interface Job {
   /** When the job was auto-promoted to the chain endpoint. `null` for a
    * normal single-clip submission. */
   chain: ChainJobMeta | null;
+  /** `Date.now()` of the most recent SSE event delivered to this job.
+   * Lets `RunningJobCard` flag a stale stream (no progress for >60 s) so
+   * the user can dismiss / retry instead of staring at a frozen card
+   * after the underlying connection silently dropped. */
+  lastProgressAt: number;
+  /** Server-assigned UUID, captured from the first `queued` SSE event.
+   * `null` until that event arrives (e.g. between submit and HTTP
+   * handshake), and stays `null` against legacy servers that predate
+   * L3. The reconciliation poller only sweeps cards whose `serverId`
+   * is non-null — without an id we can't tell server-side reality from
+   * legacy-server-pretending-it-knows-nothing. */
+  serverId: string | null;
 }
 
 export interface ChainJobMeta {
@@ -58,6 +70,7 @@ function emptyProgress(): JobProgress {
 }
 
 function applyProgress(job: Job, evt: SseProgressEvent) {
+  job.lastProgressAt = Date.now();
   const p = job.progress;
   switch (evt.type) {
     case "stage_start":
@@ -79,6 +92,12 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
     case "queued":
       p.stage = `Queued (position ${evt.position})`;
       p.queuePosition = evt.position;
+      // Capture the server-assigned id the first time it lands.
+      // Legacy servers (pre-L3) omit `id`; we leave `serverId` null
+      // and the reconciliation poller skips this card.
+      if (evt.id && !job.serverId) {
+        job.serverId = evt.id;
+      }
       break;
     case "weight_load":
       p.stage = `Loading ${evt.component}`;
@@ -96,6 +115,7 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
  * `RunningJobCard` UI renders a familiar "Denoising clip K/N · step X/Y"
  * readout without the per-event UI layer needing to know about chaining. */
 function applyChainProgress(job: Job, evt: ChainProgressEvent) {
+  job.lastProgressAt = Date.now();
   const p = job.progress;
   const meta = job.chain;
   switch (evt.type) {
@@ -276,6 +296,11 @@ interface PersistedJob {
   error: string | null;
   state: Job["state"];
   chain: ChainJobMeta | null;
+  /** May be missing on payloads persisted before lastProgressAt existed —
+   * load path falls back to `startedAt`. */
+  lastProgressAt?: number;
+  /** Optional — pre-L3 payloads don't carry a serverId. */
+  serverId?: string | null;
 }
 
 function stripHeavyResult(r: SseCompleteEvent | null): PersistedResult | null {
@@ -290,25 +315,34 @@ function stripHeavyResult(r: SseCompleteEvent | null): PersistedResult | null {
   return rest;
 }
 
-function loadPersistedJobs(): Job[] {
+/** Reconstitute the persisted job rail. `raw` is the localStorage payload
+ * (caller injects it so tests can drive the dead-letter logic without
+ * touching `localStorage` directly).
+ *
+ * `loadPersistedJobs` runs exactly once per SPA boot — at module-import
+ * time. Any row persisted as `running` therefore belongs to a session
+ * whose SSE stream is now dead (the page was hard-reloaded, the user
+ * landed in a new tab, or the server restarted). Reconnecting that
+ * stream is impossible from this side, so we flip the row to `error`
+ * with a load-bearing reason. This is the only mechanism that removes
+ * zombie "running" cards left over from prior pile-ups when the queue
+ * was deep and connections dropped silently.
+ *
+ * Within a single SPA session, route changes do NOT call this function —
+ * the singleton `jobs` ref is preserved and the SSE callback closures
+ * keep mutating it. So this dead-letter does not interfere with the
+ * route-change-during-generation flow. */
+function loadPersistedJobs(raw: string | null): Job[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as PersistedJob[];
     if (!Array.isArray(parsed)) return [];
     return parsed.map((p) => {
-      // Running jobs are kept as `running` after a route change — with the
-      // singleton scope the SSE callback closures from `submit()` continue
-      // mutating the same `jobs` ref across navigation, so a job that was
-      // mid-generation when the user navigated away is still receiving
-      // live progress events.
-      //
-      // Hard refreshes / server restarts are different: the SSE stream is
-      // truly gone and no further events will arrive. We don't have a
-      // way to tell those cases apart from in-progress-still-streaming
-      // here — RunningJobCard renders a "stale"/"reconnecting" hint
-      // after a timeout, and the user can dismiss / retry from the UI.
-      //
+      const wasZombie = p.state === "running";
+      const state: Job["state"] = wasZombie ? "error" : p.state;
+      const error = wasZombie
+        ? (p.error ?? "page reloaded — server progress lost")
+        : p.error;
       // `result` is null for running/error/cancelled jobs and a
       // metadata-only object for done jobs (the base64 image was
       // stripped at persist time — see `persistJobs`). The live result
@@ -323,9 +357,11 @@ function loadPersistedJobs(): Job[] {
         controller: new AbortController(),
         progress: p.progress ?? emptyProgress(),
         result: p.result as SseCompleteEvent | null,
-        error: p.error,
-        state: p.state,
+        error,
+        state,
         chain: p.chain,
+        lastProgressAt: p.lastProgressAt ?? p.startedAt,
+        serverId: p.serverId ?? null,
       };
     });
   } catch {
@@ -354,6 +390,8 @@ function persistJobs(jobs: Job[]) {
       error: j.error,
       state: j.state,
       chain: j.chain,
+      lastProgressAt: j.lastProgressAt,
+      serverId: j.serverId,
     }));
     localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
   } catch {
@@ -375,7 +413,13 @@ function persistJobs(jobs: Job[]) {
 // register/unregister, so a stale toast handler from an unmounted component
 // doesn't keep firing.
 
-const jobs = ref<Job[]>(loadPersistedJobs());
+const jobs = ref<Job[]>(
+  loadPersistedJobs(
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem(STORAGE_KEY)
+      : null,
+  ),
+);
 
 // Persist whenever the list or any job's mutable state changes. 200 ms
 // debounce keeps writes out of the SSE hot path (we get a progress event
@@ -426,8 +470,22 @@ function scheduleAutoRemoveOnDone(id: string) {
   }, AUTO_REMOVE_DONE_MS);
 }
 
+/// How long a running job can go without a progress event before
+/// `RunningJobCard` flags it as stale. Calibrated for the slowest
+/// realistic path: a fresh model swap on a large quantized engine can
+/// hold the load lock for ~30 s without an SSE event, and offload-mode
+/// transformer-block streaming can be quiet for a similar stretch. 60 s
+/// is a comfortable buffer past both — long enough to avoid false
+/// positives during legitimate work, short enough that a truly dropped
+/// stream surfaces within a minute instead of leaving the user staring
+/// at a frozen card indefinitely.
+export const STALE_THRESHOLD_MS = 60_000;
+
 export const __testing__ = {
   AUTO_REMOVE_DONE_MS,
+  STALE_THRESHOLD_MS,
+  loadPersistedJobs,
+  STORAGE_KEY,
 };
 
 function submitJob(
@@ -441,10 +499,11 @@ function submitJob(
   // (stage, step, state, result) trigger RunningJobCard re-renders. The
   // closure must hold the proxy, not the raw object — mutations through
   // the raw target bypass the Proxy's set trap and skip dep notification.
+  const now = Date.now();
   const job = reactive<Job>({
     id,
     request: req,
-    startedAt: Date.now(),
+    startedAt: now,
     controller,
     progress: emptyProgress(),
     result: null,
@@ -459,6 +518,8 @@ function submitJob(
           estimatedTotalFrames: null,
         }
       : null,
+    lastProgressAt: now,
+    serverId: null,
   }) as Job;
   jobs.value = [job, ...jobs.value];
 

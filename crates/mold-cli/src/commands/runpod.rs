@@ -1628,7 +1628,7 @@ fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
             ..
         } => format!("✓ [{file_index}/{total_files}] {filename}"),
         E::PullComplete { model } => format!("pull complete: {model}"),
-        E::Queued { position } => format!("queued (#{position})"),
+        E::Queued { position, .. } => format!("queued (#{position})"),
         E::WeightLoad {
             component,
             bytes_loaded,
@@ -2482,7 +2482,10 @@ mod tests {
             "pull complete: flux-dev:q8"
         );
         assert_eq!(
-            format_progress_event(&E::Queued { position: 3 }),
+            format_progress_event(&E::Queued {
+                position: 3,
+                id: String::new(),
+            }),
             "queued (#3)"
         );
 

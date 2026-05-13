@@ -183,103 +183,121 @@ fn insert_transformer_block(
     Ok(())
 }
 
-pub(crate) fn load_gguf_dense_transformer(
+/// Dequantise the GGUF tensor map into a dense `HashMap<String, Tensor>`
+/// keyed by the candle key-space (`layers.{i}.attention.to_q.weight`, …).
+/// The fused `attention.qkv` is already split into three `to_q`/`to_k`/`to_v`
+/// tensors here, so downstream consumers see the same key-space as the
+/// BF16 path.
+///
+/// The returned device is the device the tensors were dequantised onto —
+/// callers feed it back into `DenseVarBuilder::from_tensors` (or wrap the
+/// `HashMap` with a `ZImageLoraBackend` first).
+pub(crate) fn dequantize_gguf_dense_tensors(
     cfg: &Config,
     dtype: DType,
-    vb: QuantizedVarBuilder,
-) -> Result<ZImageTransformer2DModel> {
+    vb: &QuantizedVarBuilder,
+) -> Result<(HashMap<String, candle_core::Tensor>, candle_core::Device)> {
     let device = vb.device().clone();
     let mut tensors = HashMap::new();
+    populate_gguf_dense_tensors(&mut tensors, cfg, dtype, vb)?;
+    Ok((tensors, device))
+}
 
+fn populate_gguf_dense_tensors(
+    tensors: &mut HashMap<String, candle_core::Tensor>,
+    cfg: &Config,
+    dtype: DType,
+    vb: &QuantizedVarBuilder,
+) -> Result<()> {
     for layer in ["0", "2"] {
         insert_linear_weight(
-            &mut tensors,
+            tensors,
             format!("t_embedder.mlp.{layer}.weight"),
-            &vb,
+            vb,
             &format!("t_embedder.mlp.{layer}.weight"),
             dtype,
         )?;
         insert_scalar_or_norm(
-            &mut tensors,
+            tensors,
             format!("t_embedder.mlp.{layer}.bias"),
-            &vb,
+            vb,
             &format!("t_embedder.mlp.{layer}.bias"),
             dtype,
         )?;
     }
 
     insert_scalar_or_norm(
-        &mut tensors,
+        tensors,
         "cap_embedder.0.weight",
-        &vb,
+        vb,
         "cap_embedder.0.weight",
         dtype,
     )?;
     insert_linear_weight(
-        &mut tensors,
+        tensors,
         "cap_embedder.1.weight",
-        &vb,
+        vb,
         "cap_embedder.1.weight",
         dtype,
     )?;
     insert_scalar_or_norm(
-        &mut tensors,
+        tensors,
         "cap_embedder.1.bias",
-        &vb,
+        vb,
         "cap_embedder.1.bias",
         dtype,
     )?;
 
     insert_linear_weight(
-        &mut tensors,
+        tensors,
         "all_x_embedder.2-1.weight",
-        &vb,
+        vb,
         "x_embedder.weight",
         dtype,
     )?;
     insert_scalar_or_norm(
-        &mut tensors,
+        tensors,
         "all_x_embedder.2-1.bias",
-        &vb,
+        vb,
         "x_embedder.bias",
         dtype,
     )?;
-    insert_pad_token(&mut tensors, "x_pad_token", &vb, "x_pad_token", dtype)?;
-    insert_pad_token(&mut tensors, "cap_pad_token", &vb, "cap_pad_token", dtype)?;
+    insert_pad_token(tensors, "x_pad_token", vb, "x_pad_token", dtype)?;
+    insert_pad_token(tensors, "cap_pad_token", vb, "cap_pad_token", dtype)?;
 
     insert_linear_weight(
-        &mut tensors,
+        tensors,
         "all_final_layer.2-1.linear.weight",
-        &vb,
+        vb,
         "final_layer.linear.weight",
         dtype,
     )?;
     insert_scalar_or_norm(
-        &mut tensors,
+        tensors,
         "all_final_layer.2-1.linear.bias",
-        &vb,
+        vb,
         "final_layer.linear.bias",
         dtype,
     )?;
     insert_linear_weight(
-        &mut tensors,
+        tensors,
         "all_final_layer.2-1.adaLN_modulation.1.weight",
-        &vb,
+        vb,
         "final_layer.adaLN_modulation.1.weight",
         dtype,
     )?;
     insert_scalar_or_norm(
-        &mut tensors,
+        tensors,
         "all_final_layer.2-1.adaLN_modulation.1.bias",
-        &vb,
+        vb,
         "final_layer.adaLN_modulation.1.bias",
         dtype,
     )?;
 
     for i in 0..cfg.n_refiner_layers {
         insert_transformer_block(
-            &mut tensors,
-            &vb,
+            tensors,
+            vb,
             &format!("noise_refiner.{i}"),
             &format!("noise_refiner.{i}"),
             true,
@@ -287,8 +305,8 @@ pub(crate) fn load_gguf_dense_transformer(
             dtype,
         )?;
         insert_transformer_block(
-            &mut tensors,
-            &vb,
+            tensors,
+            vb,
             &format!("context_refiner.{i}"),
             &format!("context_refiner.{i}"),
             false,
@@ -299,8 +317,8 @@ pub(crate) fn load_gguf_dense_transformer(
 
     for i in 0..cfg.n_layers {
         insert_transformer_block(
-            &mut tensors,
-            &vb,
+            tensors,
+            vb,
             &format!("layers.{i}"),
             &format!("layers.{i}"),
             true,
@@ -309,6 +327,17 @@ pub(crate) fn load_gguf_dense_transformer(
         )?;
     }
 
+    Ok(())
+}
+
+/// Convenience wrapper: dequantise the GGUF transformer into a dense
+/// `ZImageTransformer2DModel`. No LoRA path.
+pub(crate) fn load_gguf_dense_transformer(
+    cfg: &Config,
+    dtype: DType,
+    vb: QuantizedVarBuilder,
+) -> Result<ZImageTransformer2DModel> {
+    let (tensors, device) = dequantize_gguf_dense_tensors(cfg, dtype, &vb)?;
     let vb = DenseVarBuilder::from_tensors(tensors, dtype, &device);
     ZImageTransformer2DModel::new(cfg, vb)
         .context("failed to build dense Z-Image transformer from GGUF weights")
