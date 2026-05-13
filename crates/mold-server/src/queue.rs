@@ -875,6 +875,22 @@ pub async fn run_queue_dispatcher(
         let job_id = job.id.clone();
         let model_name = job.request.model.clone();
         let estimated_vram = estimate_model_vram(&model_name);
+
+        if let Some(err_msg) = crate::gpu_pool::model_unschedulable_message(&model_name) {
+            tracing::warn!(model = %model_name, "{err_msg}");
+            if let Some(tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: err_msg.clone(),
+                }));
+            }
+            let _ = job.result_tx.send(Err(err_msg));
+            state.queue.decrement();
+            state.job_registry.remove(&job_id);
+            #[cfg(feature = "metrics")]
+            crate::metrics::record_queue_depth(state.queue.pending());
+            continue;
+        }
+
         let preferred_gpu = match state
             .gpu_pool
             .resolve_explicit_placement_gpu(job.request.placement.as_ref())
@@ -919,7 +935,16 @@ pub async fn run_queue_dispatcher(
             registry: state.job_registry.clone(),
         });
 
-        let mut skip: Vec<usize> = Vec::new();
+        let mut skip: Vec<usize> = if preferred_gpu.is_none() {
+            let failed = crate::gpu_pool::failed_ordinals_for_model(&model_name);
+            if failed.len() < state.gpu_pool.worker_count() {
+                failed
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
         let mut dispatched = false;
 
         while !dispatched {
@@ -1026,7 +1051,12 @@ pub fn estimate_model_vram(model_name: &str) -> u64 {
     // Use a simple heuristic based on model name patterns.
     // Quantized models are smaller; BF16/FP16 are larger.
     let lower = model_name.to_lowercase();
-    if lower.contains(":q4") {
+    if lower.contains("flux2")
+        && lower.contains("9b")
+        && (lower.contains(":bf16") || lower.contains(":fp16"))
+    {
+        32_000_000_000 // Klein-9B BF16 needs a 32GB-class card in practice.
+    } else if lower.contains(":q4") {
         6_000_000_000 // ~6GB
     } else if lower.contains(":q8") || lower.contains(":fp8") {
         12_000_000_000 // ~12GB

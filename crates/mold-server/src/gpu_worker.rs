@@ -66,6 +66,17 @@ pub(crate) fn oom_user_message(model_name: &str) -> String {
     )
 }
 
+fn cuda_oom_user_message(worker: &GpuWorker, model_name: &str) -> (String, bool) {
+    let base = oom_user_message(model_name);
+    let outcome = crate::gpu_pool::record_model_cuda_oom(model_name, worker.gpu.ordinal);
+    if outcome.is_unschedulable() {
+        if let Some(cooldown) = crate::gpu_pool::model_unschedulable_message(model_name) {
+            return (format!("{base} {cooldown}"), false);
+        }
+    }
+    (base, true)
+}
+
 fn process_job(worker: &GpuWorker, job: GpuJob) {
     let model_name = job.model.clone();
     let ordinal = worker.gpu.ordinal;
@@ -118,11 +129,15 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         // Detect CUDA OOM during load: synchronize the device so subsequent
         // allocations don't inherit a poisoned context, then surface a
         // user-friendly message instead of the opaque DriverError string.
-        let err_msg = if is_cuda_oom(&e) {
+        let is_oom = is_cuda_oom(&e);
+        let (err_msg, count_worker_failure) = if is_oom {
             mold_inference::device::try_synchronize_device(ordinal);
-            oom_user_message(&model_name)
+            cuda_oom_user_message(worker, &model_name)
         } else {
-            format!("model load error: {}", clean_error_message(&e))
+            (
+                format!("model load error: {}", clean_error_message(&e)),
+                true,
+            )
         };
         if let Some(ref tx) = job.progress_tx {
             let _ = tx.send(SseMessage::Error(SseErrorEvent {
@@ -131,7 +146,9 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         }
         let _ = job.result_tx.send(Err(err_msg));
         worker.in_flight.fetch_sub(1, Ordering::SeqCst);
-        record_failure(worker);
+        if count_worker_failure {
+            record_failure(worker);
+        }
         return;
     }
 
@@ -279,6 +296,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         Ok(Ok(mut response)) => {
             // Reset failure counter on success.
             worker.consecutive_failures.store(0, Ordering::SeqCst);
+            crate::gpu_pool::clear_model_cuda_oom(&model_name);
 
             // Attach GPU ordinal to response.
             response.gpu = Some(ordinal);
@@ -367,16 +385,22 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         }
         Ok(Err(e)) => {
             tracing::warn!(gpu = ordinal, model = %model_name, "Generation failed: {e}");
-            record_failure(worker);
             // Detect CUDA OOM during inference: synchronize so subsequent
             // allocations start from a clean CUDA context state, then surface
             // a user-friendly message instead of the opaque DriverError string.
-            let err_msg = if is_cuda_oom(&e) {
+            let is_oom = is_cuda_oom(&e);
+            let (err_msg, count_worker_failure) = if is_oom {
                 mold_inference::device::try_synchronize_device(ordinal);
-                oom_user_message(&model_name)
+                cuda_oom_user_message(worker, &model_name)
             } else {
-                format!("generation error: {}", clean_error_message(&e))
+                (
+                    format!("generation error: {}", clean_error_message(&e)),
+                    true,
+                )
             };
+            if count_worker_failure {
+                record_failure(worker);
+            }
             if let Some(ref tx) = job.progress_tx {
                 let _ = tx.send(SseMessage::Error(SseErrorEvent {
                     message: err_msg.clone(),
