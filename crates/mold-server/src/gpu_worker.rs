@@ -69,23 +69,39 @@ pub(crate) fn oom_user_message(model_name: &str) -> String {
 fn process_job(worker: &GpuWorker, job: GpuJob) {
     let model_name = job.model.clone();
     let ordinal = worker.gpu.ordinal;
+    let job_id = job.id.clone();
 
-    // Release the global queue slot when this job finishes, regardless of
-    // which exit path runs. The dispatcher only decrements when it *fails* to
-    // dispatch — once we own the GpuJob, we own the slot.
-    struct QueueSlot(crate::state::QueueHandle);
-    impl Drop for QueueSlot {
+    // Release the global queue slot AND the registry entry when this job
+    // finishes, regardless of which exit path runs. The dispatcher only
+    // decrements when it *fails* to dispatch — once we own the GpuJob, we
+    // own both pieces of cleanup. Combining them in one drop guard keeps
+    // the two counters from drifting on early-return paths.
+    struct CleanupGuard {
+        queue: crate::state::QueueHandle,
+        registry: crate::job_registry::SharedJobRegistry,
+        id: String,
+    }
+    impl Drop for CleanupGuard {
         fn drop(&mut self) {
-            self.0.decrement();
+            self.queue.decrement();
+            self.registry.remove(&self.id);
         }
     }
-    let _slot = QueueSlot(job.queue.clone());
+    let _cleanup = CleanupGuard {
+        queue: job.queue.clone(),
+        registry: job.registry.clone(),
+        id: job_id.clone(),
+    };
 
     if job.result_tx.is_closed() {
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping dispatched job — client disconnected");
         worker.in_flight.fetch_sub(1, Ordering::SeqCst);
         return;
     }
+
+    // Mark the registry entry as running on this specific GPU. The /api/queue
+    // listing now shows this row as `state: "running"` with `gpu: <ordinal>`.
+    job.registry.mark_running(&job_id, Some(ordinal));
 
     tracing::info!(gpu = ordinal, model = %model_name, "dispatched job");
 

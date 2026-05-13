@@ -986,9 +986,16 @@ pub enum SseProgressEvent {
     PullComplete {
         model: String,
     },
-    /// Request is queued behind other generations.
+    /// Request is queued behind other generations. The first event the
+    /// server emits per request — clients can latch onto `id` to later
+    /// reconcile against `GET /api/queue` (sweep zombie cards whose
+    /// SSE stream silently dropped). `id` defaults to an empty string
+    /// on legacy servers that predate the field; new clients should
+    /// treat empty as "no server-assigned identifier".
     Queued {
         position: usize,
+        #[serde(default)]
+        id: String,
     },
     /// Progress loading model weights from disk.
     WeightLoad {
@@ -1679,12 +1686,33 @@ mod tests {
 
     #[test]
     fn sse_progress_queued_roundtrip() {
-        let event = SseProgressEvent::Queued { position: 3 };
+        let event = SseProgressEvent::Queued {
+            position: 3,
+            id: "job-7".to_string(),
+        };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"queued""#));
         assert!(json.contains(r#""position":3"#));
+        assert!(json.contains(r#""id":"job-7""#));
         let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, SseProgressEvent::Queued { position: 3 }));
+        assert!(matches!(back, SseProgressEvent::Queued { position: 3, ref id } if id == "job-7"));
+    }
+
+    /// Forward-compat: a Queued payload missing the `id` field — which
+    /// legacy servers (pre-L3) emit — must deserialize cleanly with an
+    /// empty id. Without `#[serde(default)]` on the field this would
+    /// reject every Queued event from an older mold-serve.
+    #[test]
+    fn sse_progress_queued_back_compat_missing_id() {
+        let legacy = r#"{"type":"queued","position":2}"#;
+        let evt: SseProgressEvent = serde_json::from_str(legacy).unwrap();
+        match evt {
+            SseProgressEvent::Queued { position, id } => {
+                assert_eq!(position, 2);
+                assert_eq!(id, "");
+            }
+            other => panic!("expected Queued, got {other:?}"),
+        }
     }
 
     #[test]

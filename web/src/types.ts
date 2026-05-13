@@ -193,13 +193,31 @@ export interface ServerStatus {
   queue_capacity?: number | null;
 }
 
+// ── /api/queue (L3 reconciliation) ─────────────────────────────────────────
+
+export type QueueJobState = "queued" | "running";
+
+export interface QueueEntry {
+  id: string;
+  model: string;
+  state: QueueJobState;
+  started_at_unix_ms: number;
+  position: number;
+  /** Present only when `state === "running"`. */
+  gpu?: number;
+}
+
+export interface QueueListing {
+  entries: QueueEntry[];
+}
+
 export type SseProgressEvent =
   | { type: "stage_start"; name: string }
   | { type: "stage_done"; name: string; elapsed_ms: number }
   | { type: "info"; message: string }
   | { type: "cache_hit"; resource: string }
   | { type: "denoise_step"; step: number; total: number; elapsed_ms: number }
-  | { type: "queued"; position: number }
+  | { type: "queued"; position: number; id?: string }
   | {
       type: "weight_load";
       bytes_loaded: number;

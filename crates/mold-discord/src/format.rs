@@ -18,7 +18,7 @@ const COLOR_ERROR: u32 = 0xED4245; // red
 /// Format an SSE progress event into a human-readable status line.
 pub fn format_progress(event: &SseProgressEvent) -> String {
     match event {
-        SseProgressEvent::Queued { position } => {
+        SseProgressEvent::Queued { position, .. } => {
             if *position == 0 {
                 "Starting generation...".to_string()
             } else {
@@ -410,13 +410,19 @@ mod tests {
 
     #[test]
     fn format_progress_queued_zero() {
-        let event = SseProgressEvent::Queued { position: 0 };
+        let event = SseProgressEvent::Queued {
+            position: 0,
+            id: String::new(),
+        };
         assert_eq!(format_progress(&event), "Starting generation...");
     }
 
     #[test]
     fn format_progress_queued_nonzero() {
-        let event = SseProgressEvent::Queued { position: 3 };
+        let event = SseProgressEvent::Queued {
+            position: 3,
+            id: String::new(),
+        };
         assert_eq!(format_progress(&event), "Queued — position #3");
     }
 

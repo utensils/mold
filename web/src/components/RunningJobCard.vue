@@ -1,6 +1,9 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { Job } from "../composables/useGenerateStream";
+import { computed, onBeforeUnmount, ref } from "vue";
+import {
+  STALE_THRESHOLD_MS,
+  type Job,
+} from "../composables/useGenerateStream";
 
 // Hide-mode renders the thumbnail behind a blurred shroud until the user
 // reveals it. `revealed` is a per-card boolean; the parent tracks the
@@ -43,6 +46,27 @@ function onClick() {
   if (isHidden.value) return;
   if (clickable.value) emit("open", props.job);
 }
+
+// Reactive wall-clock ticked once per 10 s. Powers the `isStale` predicate
+// without re-rendering 60 fps when nothing actually changed. Stops on
+// unmount so this card doesn't keep a timer alive after the running strip
+// scrolls it off.
+const now = ref(Date.now());
+const tickId = window.setInterval(() => {
+  now.value = Date.now();
+}, 10_000);
+onBeforeUnmount(() => window.clearInterval(tickId));
+
+// Stale = `running` but no SSE progress event has landed within
+// STALE_THRESHOLD_MS. The L1 silent-close fix in api.ts catches most
+// dropped streams within the SSE keepalive window (15 s), so by the
+// time we surface this badge the connection is almost certainly dead
+// — the card stays visible so the user can dismiss / retry instead of
+// trusting a frozen progress bar.
+const isStale = computed(() => {
+  if (props.job.state !== "running") return false;
+  return now.value - props.job.lastProgressAt > STALE_THRESHOLD_MS;
+});
 
 const pct = computed(() => {
   const p = props.job.progress;
@@ -135,6 +159,18 @@ const thumbSrc = computed(() => {
       </div>
     </div>
     <div class="text-xs text-slate-300">{{ job.progress.stage }}</div>
+    <div
+      v-if="isStale"
+      role="status"
+      class="flex items-center gap-1 text-[11px] text-amber-400"
+    >
+      <span class="inline-block h-1.5 w-1.5 rounded-full bg-amber-400"></span>
+      <span>
+        No progress for &gt;{{
+          Math.floor(STALE_THRESHOLD_MS / 1000)
+        }}s — stream may have dropped. Cancel and retry if needed.
+      </span>
+    </div>
     <div
       v-if="pct !== null"
       class="h-1 w-full overflow-hidden rounded-full bg-slate-900/60"

@@ -1775,7 +1775,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn lora_on_zimage_accepted() {
         // Z-Image grew a LoRA engine path (zimage/lora.rs) — the validator

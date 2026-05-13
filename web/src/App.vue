@@ -8,9 +8,20 @@ import {
   useDownloads,
 } from "./composables/useDownloads";
 import { fetchModels } from "./api";
+import { useGenerateStream } from "./composables/useGenerateStream";
+import { startQueueReconciler } from "./composables/useQueueReconciler";
 
 // Singleton — mounted once, survives navigation.
 const downloads = useDownloads();
+
+// Queue reconciliation (L3): poll `/api/queue` and dead-letter any
+// running card whose server-side registry entry is gone. Catches the
+// edge cases the per-job SSE error path can't see (server restarted
+// mid-generation, browser tab suspended past keepalive, etc.). Mounted
+// once at the App root so the loop runs regardless of which page the
+// user is on.
+const stream = useGenerateStream();
+const reconciler = startQueueReconciler(stream.jobs);
 const drawerOpen = ref(false);
 
 function openDownloads() {
@@ -37,6 +48,7 @@ const off = onDownloadComplete(() => {
 onBeforeUnmount(() => {
   window.removeEventListener("mold:open-downloads", onOpenEvent);
   off();
+  reconciler.stop();
 });
 
 const etaSeconds = computed(() => {

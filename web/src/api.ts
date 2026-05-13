@@ -92,6 +92,19 @@ export async function fetchStatus(signal?: AbortSignal): Promise<ServerStatus> {
   return (await res.json()) as ServerStatus;
 }
 
+/** Snapshot the server's authoritative list of in-flight jobs. Used by the
+ * client-side reconciliation loop to dead-letter "running" cards whose
+ * `serverId` no longer appears in the registry (zombie from a dropped SSE
+ * stream). Throws on transport failure so the caller can back off; the
+ * empty-listing case (`{entries: []}`) is a successful response. */
+export async function fetchQueue(
+  signal?: AbortSignal,
+): Promise<import("./types").QueueListing> {
+  const res = await fetch(`${base}/api/queue`, { signal });
+  if (!res.ok) throw new Error(`GET /api/queue failed: ${res.status}`);
+  return (await res.json()) as import("./types").QueueListing;
+}
+
 const chainLimitsCache = new Map<string, { value: ChainLimits; at: number }>();
 const CHAIN_LIMITS_TTL_MS = 30_000;
 
@@ -140,6 +153,12 @@ export async function generateStream(
   handlers: GenerateStreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
+  // Tracks whether a terminal SSE signal (`complete`, server `error`
+  // event, or HTTP-level failure) has fired. Without this guard a
+  // silent mid-stream close — network blip, server restart, proxy
+  // idle timeout — leaves the caller's job in `running` forever
+  // because the fetch reader resolves cleanly with no event delivered.
+  let terminal = false;
   try {
     const res = await streamSse({
       url: `${base}/api/generate/stream`,
@@ -154,8 +173,10 @@ export async function generateStream(
           return;
         }
         if (evt.event === "complete") {
+          terminal = true;
           handlers.onComplete(parsed as SseCompleteEvent);
         } else if (evt.event === "error") {
+          terminal = true;
           const body = evt.data;
           handlers.onError({ kind: "http", status: 0, body });
         } else {
@@ -165,6 +186,7 @@ export async function generateStream(
         }
       },
       onHttpError: (res) => {
+        terminal = true;
         const retryAfterHeader = res.headers.get("Retry-After");
         const retryAfter = retryAfterHeader
           ? Number.parseFloat(retryAfterHeader)
@@ -185,8 +207,15 @@ export async function generateStream(
       },
     });
     void res;
+    if (!terminal && !signal?.aborted) {
+      handlers.onError({
+        kind: "network",
+        message: "stream closed before completion",
+      });
+    }
   } catch (err) {
     if (signal?.aborted) return; // user canceled
+    if (terminal) return;
     handlers.onError({
       kind: "network",
       message: err instanceof Error ? err.message : String(err),
@@ -212,6 +241,9 @@ export async function generateChainStream(
   handlers: ChainStreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
+  // See `generateStream` for the rationale — same silent-close guard
+  // applied to the chain endpoint.
+  let terminal = false;
   try {
     const res = await streamSse({
       url: `${base}/api/generate/chain/stream`,
@@ -226,14 +258,17 @@ export async function generateChainStream(
           return;
         }
         if (evt.event === "complete") {
+          terminal = true;
           handlers.onComplete(parsed as SseChainCompleteEvent);
         } else if (evt.event === "error") {
+          terminal = true;
           handlers.onError({ kind: "http", status: 0, body: evt.data });
         } else {
           handlers.onProgress(parsed as ChainProgressEvent);
         }
       },
       onHttpError: (res) => {
+        terminal = true;
         const retryAfterHeader = res.headers.get("Retry-After");
         const retryAfter = retryAfterHeader
           ? Number.parseFloat(retryAfterHeader)
@@ -254,8 +289,15 @@ export async function generateChainStream(
       },
     });
     void res;
+    if (!terminal && !signal?.aborted) {
+      handlers.onError({
+        kind: "network",
+        message: "stream closed before completion",
+      });
+    }
   } catch (err) {
     if (signal?.aborted) return;
+    if (terminal) return;
     handlers.onError({
       kind: "network",
       message: err instanceof Error ? err.message : String(err),

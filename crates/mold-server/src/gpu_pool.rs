@@ -32,6 +32,11 @@ pub struct ActiveGeneration {
 
 /// A job dispatched to a GPU worker thread for processing.
 pub struct GpuJob {
+    /// Server-assigned UUIDv4 carried over from `GenerationJob.id`. Used by
+    /// the worker to flip the registry entry from `Queued` → `Running` (and
+    /// to remove it when the job finishes), and surfaced to clients via
+    /// `GET /api/queue` for zombie-card reconciliation.
+    pub id: String,
     pub model: String,
     pub request: mold_core::GenerateRequest,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
@@ -44,6 +49,10 @@ pub struct GpuJob {
     pub metadata_db: Arc<Option<MetadataDb>>,
     /// Decrement the global queue counter when the worker finishes this job.
     pub queue: crate::state::QueueHandle,
+    /// Job registry handle so the worker can flip state to Running on pickup
+    /// and remove the entry on completion / error. Cheap clone — registry is
+    /// behind an `Arc<RwLock>` internally.
+    pub registry: crate::job_registry::SharedJobRegistry,
 }
 
 /// Pool of GPU workers with placement strategy.

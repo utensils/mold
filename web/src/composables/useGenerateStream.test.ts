@@ -110,6 +110,89 @@ function scriptChain(
   };
 }
 
+// ── Load-time dead-letter ───────────────────────────────────────────────────
+//
+// At module-import time we have no way to reconnect to whatever SSE
+// streams were live in the prior session. A persisted `running` row is,
+// by construction, a zombie — its underlying connection is gone. The
+// load path flips it to `error` with a load-bearing reason so the user
+// has a card they can dismiss / retry instead of one that pretends to
+// be running indefinitely.
+describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
+  function persisted(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "abc",
+      request: singleGen(),
+      startedAt: 1_000_000,
+      progress: {
+        stage: "Denoising",
+        step: 5,
+        totalSteps: 30,
+        weightBytesLoaded: null,
+        weightBytesTotal: null,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: 1000,
+      },
+      result: null,
+      error: null,
+      state: "running",
+      chain: null,
+      lastProgressAt: 1_010_000,
+      ...overrides,
+    };
+  }
+
+  it("flips a persisted running job to error with a server-progress-lost message", () => {
+    const raw = JSON.stringify([persisted({ id: "zombie-1" })]);
+    const jobs = __testing__.loadPersistedJobs(raw);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].state).toBe("error");
+    expect(jobs[0].error).toMatch(/server progress lost/i);
+    // Progress is preserved so the user sees where the zombie stalled
+    // instead of an empty card.
+    expect(jobs[0].progress.stage).toBe("Denoising");
+    expect(jobs[0].progress.step).toBe(5);
+  });
+
+  it("passes through done jobs unchanged", () => {
+    const raw = JSON.stringify([persisted({ id: "x", state: "done" })]);
+    const jobs = __testing__.loadPersistedJobs(raw);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].state).toBe("done");
+    expect(jobs[0].error).toBeNull();
+  });
+
+  it("passes through error jobs unchanged (preserves the original error text)", () => {
+    const raw = JSON.stringify([
+      persisted({ id: "x", state: "error", error: "OOM" }),
+    ]);
+    const jobs = __testing__.loadPersistedJobs(raw);
+    expect(jobs[0].state).toBe("error");
+    expect(jobs[0].error).toBe("OOM");
+  });
+
+  it("returns [] for null / empty / malformed payloads (no throw)", () => {
+    expect(__testing__.loadPersistedJobs(null)).toEqual([]);
+    expect(__testing__.loadPersistedJobs("")).toEqual([]);
+    expect(__testing__.loadPersistedJobs("not-json")).toEqual([]);
+    expect(__testing__.loadPersistedJobs('{"not":"an array"}')).toEqual([]);
+  });
+
+  it("falls back to startedAt when lastProgressAt is missing (back-compat for pre-L2 payloads)", () => {
+    const raw = JSON.stringify([
+      persisted({
+        id: "old",
+        state: "done",
+        lastProgressAt: undefined,
+        startedAt: 555,
+      }),
+    ]);
+    const jobs = __testing__.loadPersistedJobs(raw);
+    expect(jobs[0].lastProgressAt).toBe(555);
+  });
+});
+
 describe("isPrebuiltChainRequest", () => {
   it("returns true for a ChainRequestWire with populated stages", () => {
     expect(isPrebuiltChainRequest(scriptChain())).toBe(true);

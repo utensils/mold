@@ -340,11 +340,16 @@ pub async fn run_queue_worker(
 
         let loaded = single_gpu_loaded_models(&state).await;
         let job = pick_next_job(&mut buffer, &loaded, max_deferrals);
+        let job_id = job.id.clone();
 
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
         process_job(&state, job).await;
         state.queue.decrement();
+        // Drop the registry entry on every terminal path — the worker
+        // here doesn't own a drop guard, so we do it inline alongside
+        // the queue counter decrement.
+        state.job_registry.remove(&job_id);
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
     }
@@ -541,10 +546,17 @@ async fn process_job(state: &AppState, job: GenerationJob) {
         return;
     }
 
-    // Send "now processing" event (position 0)
+    // Single-GPU path: there's only one slot. `gpu=None` keeps the wire
+    // shape consistent with multi-GPU even when we don't know the ordinal.
+    state.job_registry.mark_running(&job.id, None);
+
+    // Send "now processing" event (position 0). `id` echoes the
+    // server-assigned UUID so reconnecting clients can match progress
+    // updates to their persisted card.
     if let Some(ref tx) = job.progress_tx {
         let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued {
             position: 0,
+            id: job.id.clone(),
         }));
     }
 
@@ -860,6 +872,7 @@ pub async fn run_queue_dispatcher(
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
 
+        let job_id = job.id.clone();
         let model_name = job.request.model.clone();
         let estimated_vram = estimate_model_vram(&model_name);
         let preferred_gpu = match state
@@ -876,6 +889,7 @@ pub async fn run_queue_dispatcher(
                 }
                 let _ = job.result_tx.send(Err(err_msg));
                 state.queue.decrement();
+                state.job_registry.remove(&job_id);
                 #[cfg(feature = "metrics")]
                 crate::metrics::record_queue_depth(state.queue.pending());
                 continue;
@@ -885,6 +899,7 @@ pub async fn run_queue_dispatcher(
         if job.result_tx.is_closed() {
             tracing::debug!(model = %model_name, "skipping queued multi-GPU job — client disconnected");
             state.queue.decrement();
+            state.job_registry.remove(&job_id);
             #[cfg(feature = "metrics")]
             crate::metrics::record_queue_depth(state.queue.pending());
             continue;
@@ -892,6 +907,7 @@ pub async fn run_queue_dispatcher(
 
         // Build the GpuJob once; the retry loop moves it between attempts.
         let mut gpu_job = Some(GpuJob {
+            id: job.id.clone(),
             model: model_name.clone(),
             request: job.request,
             progress_tx: job.progress_tx,
@@ -900,6 +916,7 @@ pub async fn run_queue_dispatcher(
             config: state.config.clone(),
             metadata_db: state.metadata_db.clone(),
             queue: state.queue.clone(),
+            registry: state.job_registry.clone(),
         });
 
         let mut skip: Vec<usize> = Vec::new();
@@ -915,6 +932,7 @@ pub async fn run_queue_dispatcher(
                     "dropping queued multi-GPU job before dispatch — client disconnected"
                 );
                 state.queue.decrement();
+                state.job_registry.remove(&job_id);
                 break;
             }
 
@@ -945,6 +963,7 @@ pub async fn run_queue_dispatcher(
                 }
                 let _ = rejected.result_tx.send(Err(err_msg));
                 state.queue.decrement();
+                state.job_registry.remove(&job_id);
                 break;
             };
 
@@ -990,6 +1009,7 @@ pub async fn run_queue_dispatcher(
                         }
                         let _ = rejected.result_tx.send(Err(err_msg));
                         state.queue.decrement();
+                        state.job_registry.remove(&job_id);
                         break;
                     }
                 }
@@ -1455,6 +1475,7 @@ mod tests {
 
         let (filler_result_tx, _filler_result_rx) = tokio::sync::oneshot::channel();
         let filler_job = crate::gpu_pool::GpuJob {
+            id: String::new(),
             model: "busy-model".to_string(),
             request: fake_request("busy-model"),
             progress_tx: None,
@@ -1463,6 +1484,7 @@ mod tests {
             config: state.config.clone(),
             metadata_db: state.metadata_db.clone(),
             queue: state.queue.clone(),
+            registry: state.job_registry.clone(),
         };
         worker.job_tx.send(filler_job).unwrap();
 
@@ -1470,6 +1492,7 @@ mod tests {
 
         let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
+            id: String::new(),
             request: fake_request("flux-dev:q4"),
             progress_tx: None,
             result_tx,
@@ -1543,6 +1566,7 @@ mod tests {
     fn buf_job(model: &str) -> BufferedJob {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         BufferedJob::new(crate::state::GenerationJob {
+            id: String::new(),
             request: fake_request(model),
             progress_tx: None,
             result_tx: tx,
@@ -1725,6 +1749,7 @@ mod tests {
         for model in ["a", "b", "a", "b"] {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let job = crate::state::GenerationJob {
+                id: String::new(),
                 request: fake_request(model),
                 progress_tx: None,
                 result_tx: tx,
@@ -1774,6 +1799,7 @@ mod tests {
         for i in 0..10 {
             let (tx, _rx) = tokio::sync::oneshot::channel();
             let job = GenerationJob {
+                id: String::new(),
                 request: fake_request(&format!("model-{i}")),
                 progress_tx: None,
                 result_tx: tx,
@@ -1874,6 +1900,7 @@ mod tests {
             let (tx, rx) = tokio::sync::oneshot::channel();
             held_rxs.push(rx);
             let job = crate::state::GenerationJob {
+                id: String::new(),
                 request: fake_request(&format!("model-{i}")),
                 progress_tx: None,
                 result_tx: tx,
@@ -2003,6 +2030,7 @@ mod tests {
 
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
+            id: String::new(),
             request,
             progress_tx: None,
             result_tx,
