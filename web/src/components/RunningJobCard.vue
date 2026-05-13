@@ -1,9 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
-import {
-  STALE_THRESHOLD_MS,
-  type Job,
-} from "../composables/useGenerateStream";
+import { STALE_THRESHOLD_MS, type Job } from "../composables/useGenerateStream";
 
 // Hide-mode renders the thumbnail behind a blurred shroud until the user
 // reveals it. `revealed` is a per-card boolean; the parent tracks the
@@ -166,9 +163,8 @@ const thumbSrc = computed(() => {
     >
       <span class="inline-block h-1.5 w-1.5 rounded-full bg-amber-400"></span>
       <span>
-        No progress for &gt;{{
-          Math.floor(STALE_THRESHOLD_MS / 1000)
-        }}s — stream may have dropped. Cancel and retry if needed.
+        No progress for &gt;{{ Math.floor(STALE_THRESHOLD_MS / 1000) }}s —
+        stream may have dropped. Cancel and retry if needed.
       </span>
     </div>
     <div
