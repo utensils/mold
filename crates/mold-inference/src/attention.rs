@@ -131,20 +131,93 @@ pub fn attention_default_scale(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Ten
     attention(q, k, v, scale as f32)
 }
 
+/// Tracks whether we've already logged chunked math attention selection.
+static CHUNKED_MATH_LOGGED: OnceLock<()> = OnceLock::new();
+
 /// Hand-rolled SDP — the historical FLUX path. Flattens batch+heads into a
 /// single leading dim to avoid the 4D `matmul` quirks on some backends.
 pub fn math_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
+    math_attention_impl(q, k, v, scale, math_attention_chunk_size(q))
+}
+
+fn math_attention_impl(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+    chunk_size: Option<usize>,
+) -> Result<Tensor> {
     let mut batch_dims = q.dims().to_vec();
     batch_dims.pop();
     batch_dims.pop();
     let q3 = q.flatten_to(batch_dims.len() - 1)?;
     let k3 = k.flatten_to(batch_dims.len() - 1)?;
     let v3 = v.flatten_to(batch_dims.len() - 1)?;
-    let attn_weights = (q3.matmul(&k3.t()?)? * f64::from(scale))?;
-    let attn = candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(&v3)?;
+    let attn = if let Some(chunk_size) = chunk_size {
+        math_attention_chunked_flat(&q3, &k3, &v3, scale, chunk_size)?
+    } else {
+        let attn_weights = (q3.matmul(&k3.t()?)? * f64::from(scale))?;
+        candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(&v3)?
+    };
     batch_dims.push(attn.dim(D::Minus2)?);
     batch_dims.push(attn.dim(D::Minus1)?);
     attn.reshape(batch_dims)
+}
+
+fn math_attention_chunk_size(q: &Tensor) -> Option<usize> {
+    let q_len = q.dim(D::Minus2).ok()?;
+    if let Ok(raw) = std::env::var("MOLD_ATTN_CHUNK") {
+        let trimmed = raw.trim();
+        if trimmed == "0" || trimmed.eq_ignore_ascii_case("off") {
+            return None;
+        }
+        match trimmed.parse::<usize>() {
+            Ok(size) if size > 0 && size < q_len => return Some(size),
+            Ok(_) => return None,
+            Err(_) => tracing::warn!(
+                value = trimmed,
+                "MOLD_ATTN_CHUNK must be a positive integer, 0, or off; using default"
+            ),
+        }
+    }
+
+    if matches!(q.device(), Device::Cuda(_)) && q_len > 1024 {
+        Some(512)
+    } else {
+        None
+    }
+}
+
+fn math_attention_chunked_flat(
+    q3: &Tensor,
+    k3: &Tensor,
+    v3: &Tensor,
+    scale: f32,
+    chunk_size: usize,
+) -> Result<Tensor> {
+    let q_len = q3.dim(1)?;
+    let k_t = k3.t()?;
+    let mut chunks = Vec::with_capacity(q_len.div_ceil(chunk_size));
+    let mut start = 0;
+    while start < q_len {
+        let len = (q_len - start).min(chunk_size);
+        let q_chunk = q3.narrow(1, start, len)?;
+        let attn_weights = (q_chunk.matmul(&k_t)? * f64::from(scale))?;
+        let attn = candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(v3)?;
+        chunks.push(attn);
+        start += len;
+    }
+
+    CHUNKED_MATH_LOGGED.get_or_init(|| {
+        tracing::info!(
+            chunk_size,
+            q_len,
+            "using chunked math attention to reduce peak VRAM"
+        );
+    });
+
+    let refs: Vec<&Tensor> = chunks.iter().collect();
+    Tensor::cat(&refs, 1)
 }
 
 /// Flash-attention v2 path.
@@ -250,6 +323,20 @@ mod tests {
         assert!(
             max_abs_diff(&got, &want) < 1e-5,
             "math attention diverged from reference"
+        );
+    }
+
+    #[test]
+    fn test_chunked_math_attention_matches_full_math() {
+        let (q, k, v) = rand_qkv((1, 3, 17, 16));
+        let scale = 1.0 / (16f32).sqrt();
+        let full = math_attention_impl(&q, &k, &v, scale, None).unwrap();
+        let chunked = math_attention_impl(&q, &k, &v, scale, Some(5)).unwrap();
+
+        assert_eq!(chunked.dims(), full.dims());
+        assert!(
+            max_abs_diff(&chunked, &full) < 1e-5,
+            "chunked math attention diverged from full math"
         );
     }
 
