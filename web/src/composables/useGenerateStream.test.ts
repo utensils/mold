@@ -263,6 +263,74 @@ describe("resolveChainRequest", () => {
   });
 });
 
+// ── Work-start tracking ─────────────────────────────────────────────────────
+//
+// The stale-stream warning is useful only after server-side work has actually
+// begun. A job can sit in the queue without progress for minutes; that should
+// not look like a dropped stream. These tests drive the SSE callbacks directly
+// so the component can rely on `job.workStarted` instead of inferring from
+// display text.
+describe("workStarted tracking", () => {
+  beforeEach(() => {
+    lastSingleHandlers = null;
+    try {
+      localStorage.removeItem("mold.generate.jobs");
+    } catch {
+      /* ignore — happy-dom should have it */
+    }
+    const stream = useGenerateStream();
+    for (const j of stream.jobs.value) {
+      if (j.state === "running") stream.cancel(j.id);
+    }
+    stream.clearDone();
+  });
+
+  it("stays false while the job is queued, then flips on real progress", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+
+    expect(job.workStarted).toBe(false);
+    expect(lastSingleHandlers).not.toBeNull();
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 3,
+      id: "server-job",
+    });
+    expect(job.workStarted).toBe(false);
+    expect(job.progress.queuePosition).toBe(3);
+
+    lastSingleHandlers!.onProgress({ type: "stage_start", name: "Loading" });
+    expect(job.workStarted).toBe(true);
+    expect(job.progress.queuePosition).toBeNull();
+  });
+
+  it("does not treat pre-queue info as work, but does treat post-queue info as work", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    expect(lastSingleHandlers).not.toBeNull();
+
+    lastSingleHandlers!.onProgress({
+      type: "info",
+      message: "dimension warning",
+    });
+    expect(job.workStarted).toBe(false);
+
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "server-job",
+    });
+    lastSingleHandlers!.onProgress({
+      type: "info",
+      message: "Downloading weights",
+    });
+    expect(job.workStarted).toBe(true);
+    expect(job.progress.queuePosition).toBeNull();
+  });
+});
+
 // ── Auto-remove on completion ───────────────────────────────────────────────
 //
 // The running-strip card is supposed to vanish ~1.5 s after a successful

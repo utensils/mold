@@ -46,6 +46,7 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     state: "running",
     chain: null,
     lastProgressAt: 1000,
+    workStarted: true,
     serverId: "srv-1",
     ...overrides,
   };
