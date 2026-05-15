@@ -410,6 +410,68 @@ pub(crate) fn preflight_memory_guard(
     // No memory info available on this platform — skip the guard.
     Ok(())
 }
+
+/// Effective memory budget to use when deciding whether a server engine can
+/// stay eager-loaded or should degrade to load-use-drop sequential mode.
+///
+/// This mirrors the budget shape in [`preflight_memory_guard`]: CUDA swaps can
+/// reclaim the whole primary context when an active model exists, while Metal
+/// uses unified system memory and adds the active footprint as reclaimable.
+pub(crate) fn effective_load_available_bytes(
+    active_vram_bytes: u64,
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+) -> Option<u64> {
+    #[cfg(feature = "cuda")]
+    {
+        if active_vram_bytes > 0 {
+            if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
+                return Some(total);
+            }
+        }
+        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
+            return Some(free);
+        }
+    }
+
+    mold_inference::device::available_system_memory_bytes()
+        .filter(|available| *available > 0)
+        .map(|available| available.saturating_add(active_vram_bytes))
+}
+
+/// Choose the server load strategy for the current memory budget.
+///
+/// The server normally prefers eager engines so the active model stays hot.
+/// When eager residency would exceed the same 90% cap used by preflight but
+/// the model fits under sequential load-use-drop, degrade to Sequential. This
+/// keeps preflight and the actual load path consistent: a model admitted only
+/// because text encoders can be dropped should not then OOM during eager
+/// startup before it gets a chance to generate.
+pub(crate) fn select_server_load_strategy_for_budget(
+    paths: &ModelPaths,
+    available_bytes: Option<u64>,
+    hint: Option<ActivationHint>,
+) -> mold_inference::LoadStrategy {
+    let Some(available_bytes) = available_bytes.filter(|v| *v > 0) else {
+        return mold_inference::LoadStrategy::Eager;
+    };
+
+    let activation = hint.map(|h| h.budget_bytes()).unwrap_or(0);
+    let eager_peak =
+        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
+            .saturating_add(activation);
+    let sequential_peak = mold_inference::device::estimate_peak_memory(
+        paths,
+        mold_inference::LoadStrategy::Sequential,
+    )
+    .saturating_add(activation);
+    let hard_limit = available_bytes.saturating_mul(9) / 10;
+
+    if eager_peak > hard_limit && sequential_peak <= hard_limit {
+        mold_inference::LoadStrategy::Sequential
+    } else {
+        mold_inference::LoadStrategy::Eager
+    }
+}
 pub(crate) type DownloadProgressCallback =
     Arc<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>;
 
@@ -1194,8 +1256,25 @@ pub(crate) async fn ensure_model_ready(
             // Cached but not on GPU (Parked) — need to reload.
             // MPS memory guard: check before unloading the active model.
             // Include the active model's footprint as reclaimable memory.
-            if let Some(paths) = entry.engine.model_paths() {
+            let cached_paths = entry.engine.model_paths().cloned();
+            if let Some(paths) = cached_paths.as_ref() {
                 preflight_memory_guard(model_name, paths, active_vram, 0, hint)?;
+            }
+            let load_strategy = cached_paths
+                .as_ref()
+                .map(|paths| {
+                    select_server_load_strategy_for_budget(
+                        paths,
+                        effective_load_available_bytes(active_vram, 0),
+                        hint,
+                    )
+                })
+                .unwrap_or(mold_inference::LoadStrategy::Eager);
+            if load_strategy == mold_inference::LoadStrategy::Sequential {
+                tracing::info!(
+                    model = %model_name,
+                    "server load strategy degraded to sequential to fit memory budget"
+                );
             }
 
             // Parked engines retain tokenizers/caches for faster reload.
@@ -1226,6 +1305,46 @@ pub(crate) async fn ensure_model_ready(
             drop(cache);
 
             let mut engine = cached.engine;
+            if load_strategy == mold_inference::LoadStrategy::Sequential {
+                let Some(paths) = cached_paths else {
+                    let evicted = {
+                        let mut cache = state.model_cache.lock().await;
+                        cache.insert(engine, 0)
+                    };
+                    drop(evicted);
+                    return Err(ApiError::internal(format!(
+                        "cached engine for '{model_name}' does not expose model paths"
+                    )));
+                };
+                let config = state.config.read().await;
+                let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+                match mold_inference::create_engine_with_pool(
+                    model_name.to_string(),
+                    paths,
+                    &config,
+                    load_strategy,
+                    0,
+                    offload,
+                    Some(state.shared_pool.clone()),
+                ) {
+                    Ok(new_engine) => {
+                        drop(config);
+                        drop(engine);
+                        engine = new_engine;
+                    }
+                    Err(e) => {
+                        drop(config);
+                        let evicted = {
+                            let mut cache = state.model_cache.lock().await;
+                            cache.insert(engine, 0)
+                        };
+                        drop(evicted);
+                        return Err(ApiError::internal(format!(
+                            "failed to recreate cached engine for '{model_name}': {e}"
+                        )));
+                    }
+                }
+            }
 
             if let Some(callback) = progress.clone() {
                 engine.set_on_progress(Box::new(move |event| {
@@ -1417,6 +1536,17 @@ async fn create_and_load_engine(
         cache.active_vram_bytes()
     };
     preflight_memory_guard(model_name, &paths, active_vram, 0, hint)?;
+    let load_strategy = select_server_load_strategy_for_budget(
+        &paths,
+        effective_load_available_bytes(active_vram, 0),
+        hint,
+    );
+    if load_strategy == mold_inference::LoadStrategy::Sequential {
+        tracing::info!(
+            model = %model_name,
+            "server load strategy degraded to sequential to fit memory budget"
+        );
+    }
 
     // Unload the current active model to free GPU memory.
     // Only reclaim GPU memory if there was an active model — calling
@@ -1451,7 +1581,7 @@ async fn create_and_load_engine(
         model_name.to_string(),
         paths,
         &config,
-        mold_inference::LoadStrategy::Eager,
+        load_strategy,
         0,
         offload,
         Some(state.shared_pool.clone()),
@@ -1796,8 +1926,37 @@ mod tests {
         assert!(
             eager_peak > hard_limit,
             "Eager peak ({eager_peak}) should exceed hard limit ({hard_limit}) — \
-             this is the false-rejection the Sequential switch fixes"
+            this is the false-rejection the Sequential switch fixes"
         );
+    }
+
+    #[test]
+    fn server_load_strategy_degrades_when_only_sequential_fits() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(24 * GB), None);
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "server load should match the sequential preflight assumption instead \
+             of eager-loading a model whose summed components exceed the budget"
+        );
+    }
+
+    #[test]
+    fn server_load_strategy_stays_eager_when_eager_fits() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(8, 1, 2, 1);
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(24 * GB), None);
+
+        assert_eq!(strategy, mold_inference::LoadStrategy::Eager);
+    }
+
+    #[test]
+    fn server_load_strategy_stays_eager_when_no_budget_available() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
+        let strategy = select_server_load_strategy_for_budget(&paths, None, None);
+
+        assert_eq!(strategy, mold_inference::LoadStrategy::Eager);
     }
 
     /// Tier 2.3: the server-side preflight must consume the
