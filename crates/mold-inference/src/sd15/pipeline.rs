@@ -1343,7 +1343,19 @@ impl SD15Engine {
         let vae_decode_start = Instant::now();
 
         let latents = (latents / VAE_SCALE)?;
-        let img = vae.decode(&latents.to_dtype(vae_dtype)?)?;
+        let latents_for_vae = latents.to_dtype(vae_dtype)?;
+        let device_for_sync = device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &latents_for_vae,
+            |t| vae.decode(t).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "SD1.5 (sequential) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
@@ -1542,7 +1554,20 @@ impl SD15Engine {
         let vae_start = Instant::now();
 
         let latents = (latents / VAE_SCALE)?;
-        let img = loaded.vae.decode(&latents.to_dtype(loaded.vae_dtype)?)?;
+        let latents_for_vae = latents.to_dtype(loaded.vae_dtype)?;
+        let vae = &loaded.vae;
+        let device_for_sync = loaded.device.clone();
+        let img = crate::vae_tiling::decode_with_oom_fallback(
+            &latents_for_vae,
+            |t| vae.decode(t).map_err(Into::into),
+            || {
+                if let Err(e) = device_for_sync.synchronize() {
+                    tracing::warn!(
+                        "SD1.5 (parallel) device.synchronize() after VAE OOM failed: {e}"
+                    );
+                }
+            },
+        )?;
 
         let img = ((img / 2.)? + 0.5)?.clamp(0f32, 1f32)?;
         let img = (img * 255.)?.to_dtype(DType::U8)?;
