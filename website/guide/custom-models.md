@@ -101,9 +101,10 @@ comma-separation — no more flipping back to the Civitai page to copy/paste.
 
 ## LoRA Rules
 
-- FLUX only — SD1.5 / SDXL LoRA inference is not yet implemented. The
-  server returns a 400 with "LoRA is currently supported only for FLUX
-  models" if you attach a LoRA to any other family.
+- Supported families: **FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image
+  (+ Qwen-Image-Edit), Z-Image**. Wuerstchen and LTX-Video are not yet wired —
+  attaching a LoRA there returns a 400 with the current supported-family list.
+  (Source of truth: `mold-core::validation::require_lora_capable_family`.)
 - `.safetensors` only
 - scale must be between `0.0` and `2.0`
 - the server resolves the path on the machine doing inference

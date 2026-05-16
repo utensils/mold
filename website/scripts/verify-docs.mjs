@@ -82,6 +82,15 @@ const ignoredEnvVars = new Set([
   // the web SPA bundle for rust-embed. Not user-facing runtime config.
   'MOLD_EMBED_WEB_DIR',
   'MOLD_WEB_DIST',
+  // Debug / dev / test-only — intentionally not user-facing.
+  // `MOLD_FLUX2_DUMP_LATENT` is a developer probe that dumps pre-VAE
+  // latents to a path; `MOLD_NVFP4_PROBE_PATH` gates the NVFP4 single-file
+  // load probe behind an external test fixture; `MOLD_TEST_CLIP_TOKENIZER`
+  // is a unit-test fixture path. Surfacing them in docs would invite users
+  // to set them in normal operation, which is wrong.
+  'MOLD_FLUX2_DUMP_LATENT',
+  'MOLD_NVFP4_PROBE_PATH',
+  'MOLD_TEST_CLIP_TOKENIZER',
 ])
 const docsText = walk(websiteDir)
   .filter((file) => /\.(md|ts|css)$/u.test(file))

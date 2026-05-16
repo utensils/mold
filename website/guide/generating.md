@@ -195,12 +195,13 @@ mold run sd15:fp16 "a cat" --scheduler uni-pc         # Fast convergence
 mold run sd15:fp16 "a cat" --scheduler euler-ancestral # Stochastic
 ```
 
-## LoRA Adapters (FLUX)
+## LoRA Adapters
 
-Apply fine-tuned style adapters to FLUX models:
+Apply fine-tuned style adapters across the supported families — **FLUX, Flux.2,
+LTX-2, SD1.5, SD3, SDXL, Qwen-Image (+ Qwen-Image-Edit), Z-Image**:
 
 ```bash
-# Basic LoRA
+# Basic LoRA (FLUX example)
 mold run flux-dev:bf16 "a portrait" --lora style.safetensors
 
 # Adjust strength (0.0 = no effect, 1.0 = full, up to 2.0)
@@ -208,10 +209,17 @@ mold run flux-dev:bf16 "anime style" --lora style.safetensors --lora-scale 0.7
 
 # Works with quantized models too
 mold run flux-dev:q4 "a portrait" --lora style.safetensors --lora-scale 0.8
+
+# Same flag syntax across families
+mold run sdxl:fp16    "a sunset" --lora sdxl-style.safetensors
+mold run z-image:bf16 "anime"    --lora cv:2904324
 ```
 
 ::: tip LoRA requirements
-FLUX models only (BF16 or GGUF quantized). Requires `.safetensors` format with diffusers-format keys. BF16 models on 24GB cards auto-use block-level offloading.
+Requires `.safetensors` format. Z-Image / FLUX accept diffusers (PEFT canonical),
+Kohya/sd-scripts, OneTrainer, and PEFT default-adapter naming. BF16 FLUX on
+24 GB cards auto-uses block-level offloading. Wuerstchen and LTX-Video are not
+yet wired — attaching a LoRA there returns a 400 with the supported-family list.
 :::
 
 ## Inline Preview
