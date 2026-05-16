@@ -1,0 +1,15 @@
+# makepkg build artifacts that land here when contributors run
+# `makepkg` directly in one of the package directories (rather than
+# the recommended scripts/aur/test-in-docker.sh path).
+src/
+pkg/
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.tar.gz
+*.tar.xz
+
+# .SRCINFO is auto-derived from PKGBUILD. CI regenerates it inside an Arch
+# container on every release publish, and the one-time seed push generates
+# it locally via scripts/aur/test-in-docker.sh — see packaging/aur/README.md.
+# Committing it here would drift any time the PKGBUILD changes.
+.SRCINFO
