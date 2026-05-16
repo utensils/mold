@@ -36,6 +36,7 @@ Inside `nix develop` the devshell exposes shortcuts (`build`, `build-release`, `
 ```
 crates/
 ├── mold-core/        Shared types, HTTP client, config, manifest, validation, download
+├── mold-catalog/     Live HF + Civitai model-discovery proxy (5-min in-proc cache, no bulk-scrape DB). Depended on by mold-cli + mold-server only — mold-discord and mold-tui MUST NOT transitively depend on it.
 ├── mold-db/          SQLite (rusqlite, bundled, WAL) — gallery, settings, model_prefs, prompt_history
 ├── mold-inference/   Candle engines per family (FLUX, SD1.5/XL/3, Z-Image, Flux.2, Qwen-Image, Wuerstchen, LTX-Video, LTX-2)
 ├── mold-server/      Axum HTTP server (consumed as lib by mold-cli)
@@ -50,6 +51,7 @@ crates/
 |---|---|
 | `mold-cli/` | `mold-ai` (binary: `mold`) |
 | `mold-core/` | `mold-ai-core` |
+| `mold-catalog/` | `mold-ai-catalog` |
 | `mold-db/` | `mold-ai-db` |
 | `mold-inference/` | `mold-ai-inference` |
 | `mold-server/` | `mold-ai-server` |

@@ -131,11 +131,10 @@ selected LoRA — clicking a chip appends the phrase to the active prompt.
 
 **Requirements:**
 
-- FLUX (BF16 + GGUF), LTX-2, Flux.2, and Z-Image families support LoRAs.
-  SD1.5 / SDXL / SD3 / Qwen-Image / Wuerstchen / LTX-Video are not yet
-  wired — the server returns a 400 with a "LoRA is currently supported
-  for FLUX, LTX-2 and Z-Image models" message for any other family. (The
-  message text is centralised in `mold-core::validation::require_lora_capable_family`
+- FLUX (BF16 + GGUF), Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image (+ Qwen-Image-Edit),
+  and Z-Image families support LoRAs. Wuerstchen and LTX-Video are not yet wired —
+  the server returns a 400 with the list of supported families for any other family.
+  (The message text is centralised in `mold-core::validation::require_lora_capable_family`
   and will list whichever families are wired at the time it's surfaced.)
 - LoRA file must be `.safetensors` format. Z-Image / FLUX accept
   diffusers (PEFT canonical), Kohya/sd-scripts, OneTrainer, and PEFT
@@ -642,6 +641,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `GET /api/models` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
 - `GET /api/gallery` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`
 - `POST /api/upscale` · `POST /api/upscale/stream`
+- `GET /api/queue` — authoritative server-side job listing for SPA reconciliation (queued + running jobs with UUIDv4 ids)
 - `GET /api/status` · `GET /health` · `GET /api/capabilities`
 
 ### Prometheus Metrics
@@ -655,7 +655,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | Variable                    | Default                 | Purpose                                                                    |
 | --------------------------- | ----------------------- | -------------------------------------------------------------------------- |
 | `MOLD_HOME`                 | `~/.mold`               | Base directory for config, cache, and default models                       |
-| `MOLD_DEFAULT_MODEL`        | `flux2-klein`           | Default model (smart fallback to only downloaded model)                    |
+| `MOLD_DEFAULT_MODEL`        | `flux2-klein:q8`        | Default model (smart fallback to only downloaded model)                    |
 | `MOLD_HOST`                 | `http://localhost:7680` | Remote server URL                                                          |
 | `MOLD_MODELS_DIR`           | `$MOLD_HOME/models`     | Model storage path                                                         |
 | `MOLD_OUTPUT_DIR`           | `~/.mold/output`        | Image output directory (set empty to disable)                              |

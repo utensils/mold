@@ -37,14 +37,14 @@ mold run "a sunset over mountains"
 
 ## What You Get
 
-- **10 model families** — FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein,
-  Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video
+- **11 model families** — FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein,
+  Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3
 - **txt2img, img2img, multimodal edit, inpainting, ControlNet** — all in one binary
 - **Image upscaling** — Real-ESRGAN super-resolution (2x/4x) via CLI, server API, or TUI
 - **Pipe-friendly** — `mold run "a cat" | viu -` just works
 - **Client-server** — run the GPU part on one machine, generate from anywhere
 - **Prompt expansion** — short prompts become detailed via local LLM
-- **LoRA adapters** — apply fine-tuned styles to FLUX models
+- **LoRA adapters** — apply fine-tuned styles across FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, and Z-Image
 - **PNG metadata** — generation parameters embedded for reproducibility
 
 ## Requirements

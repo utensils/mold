@@ -121,14 +121,14 @@ Environment variables take precedence over config file values.
 
 ### Core
 
-| Variable             | Default                 | Description                         |
-| -------------------- | ----------------------- | ----------------------------------- |
-| `MOLD_HOME`          | `~/.mold`               | Base directory for config and cache |
-| `MOLD_DEFAULT_MODEL` | `flux2-klein`           | Default model name                  |
-| `MOLD_HOST`          | `http://localhost:7680` | Remote server URL                   |
-| `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`     | Model storage directory             |
-| `MOLD_PORT`          | `7680`                  | Server port                         |
-| `MOLD_LOG`           | `warn` / `info`         | Log level                           |
+| Variable             | Default                            | Description                         |
+| -------------------- | ---------------------------------- | ----------------------------------- |
+| `MOLD_HOME`          | `~/.mold`                          | Base directory for config and cache |
+| `MOLD_DEFAULT_MODEL` | `flux2-klein:q8`                   | Default model name                  |
+| `MOLD_HOST`          | `http://localhost:7680`            | Remote server URL                   |
+| `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`                | Model storage directory             |
+| `MOLD_PORT`          | `7680`                             | Server port                         |
+| `MOLD_LOG`           | `info` (serve) / `warn` (cli, tui) | Log level                           |
 
 ### Generation
 
@@ -168,19 +168,26 @@ Environment variables take precedence over config file values.
 
 ### Server
 
-| Variable                | Default             | Description                                                                                                                                                       |
-| ----------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MOLD_GPUS`             | all visible         | Which GPUs the server uses: comma-separated ordinals (`0,1`) or `all`. See [Multi-GPU](/guide/cli-reference#multi-gpu)                                            |
-| `MOLD_QUEUE_SIZE`       | `200`               | Max queued generation jobs; overflow returns HTTP 503 with `Retry-After`                                                                                          |
-| `MOLD_OUTPUT_DIR`       | `~/.mold/output`    | Image output directory (set empty to disable)                                                                                                                     |
-| `MOLD_THUMBNAIL_WARMUP` | —                   | `1` to prebuild gallery thumbnails at server startup (default: disabled)                                                                                          |
-| `MOLD_WEB_DIR`          | —                   | Override the web gallery SPA bundle location. First resolved path among this, `$XDG_DATA_HOME/mold/web`, `~/.mold/web`, `<binary dir>/web`, and `./web/dist` wins |
-| `MOLD_DB_PATH`          | `MOLD_HOME/mold.db` | Override the SQLite gallery metadata DB location                                                                                                                  |
-| `MOLD_DB_DISABLE`       | —                   | `1` to disable the SQLite metadata DB entirely — server and CLI fall back to filesystem walks                                                                     |
-| `MOLD_CORS_ORIGIN`      | —                   | Restrict CORS to specific origin                                                                                                                                  |
-| `MOLD_API_KEY`          | —                   | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`)                                                                                 |
-| `MOLD_RATE_LIMIT`       | —                   | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)                                                                                  |
-| `MOLD_RATE_LIMIT_BURST` | —                   | Burst allowance override (defaults to 2x rate, capped at 100)                                                                                                     |
+| Variable                      | Default             | Description                                                                                                                                                                              |
+| ----------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOLD_GPUS`                   | all visible         | Which GPUs the server uses: comma-separated ordinals (`0,1`) or `all`. See [Multi-GPU](/guide/cli-reference#multi-gpu)                                                                   |
+| `MOLD_QUEUE_SIZE`             | `200`               | Max queued generation jobs; overflow returns HTTP 503 with `Retry-After`                                                                                                                 |
+| `MOLD_OUTPUT_DIR`             | `~/.mold/output`    | Image output directory (set empty to disable)                                                                                                                                            |
+| `MOLD_THUMBNAIL_WARMUP`       | —                   | `1` to prebuild gallery thumbnails at server startup (default: disabled)                                                                                                                 |
+| `MOLD_WEB_DIR`                | —                   | Override the web gallery SPA bundle location. First resolved path among this, `$XDG_DATA_HOME/mold/web`, `~/.mold/web`, `<binary dir>/web`, and `./web/dist` wins                        |
+| `MOLD_DB_PATH`                | `MOLD_HOME/mold.db` | Override the SQLite gallery metadata DB location                                                                                                                                         |
+| `MOLD_DB_DISABLE`             | —                   | `1` to disable the SQLite metadata DB entirely — server and CLI fall back to filesystem walks                                                                                            |
+| `MOLD_CORS_ORIGIN`            | —                   | Restrict CORS to specific origin                                                                                                                                                         |
+| `MOLD_API_KEY`                | —                   | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`)                                                                                                        |
+| `MOLD_RATE_LIMIT`             | —                   | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)                                                                                                         |
+| `MOLD_RATE_LIMIT_BURST`       | —                   | Burst allowance override (defaults to 2x rate, capped at 100)                                                                                                                            |
+| `MOLD_MAX_CACHED_MODELS`      | `3`                 | LRU model-cache capacity (range `1..=16`). At most one entry stays GPU-resident; the rest are parked in CPU RAM. Out-of-range values warn and fall back to default.                      |
+| `MOLD_CACHE_IDLE_TTL_SECS`    | `1800` (30 min)     | Idle timeout for parked cache entries (range `60..=86400`). Untouched entries are evicted past this TTL.                                                                                 |
+| `MOLD_QUEUE_LOOKAHEAD_BUFFER` | `8`                 | Server queue lookahead size (range `1..=64`). The dispatcher peeks this many jobs ahead to honour locality.                                                                              |
+| `MOLD_QUEUE_MAX_DEFERRALS`    | `3`                 | Per-job starvation budget (range `0..=32`). A job can be deferred this many times before forced pickup.                                                                                  |
+| `MOLD_MALLOC_TRIM`            | `1` (Linux/glibc)   | `0` disables the post-generation `malloc_trim(0)` call. Cheap (~ms) but Linux-only; reclaims arena pages after large GGUF+LoRA rebuilds.                                                 |
+| `MOLD_FLUX_DELTA_CACHE`       | `1`                 | `0` disables the CPU-side FLUX LoRA delta cache (~25 GB host RAM on typical FLUX LoRAs). Disabling forces a sub-second `B@A·scale` recompute on each rebuild.                            |
+| `MOLD_FLUX_KEEP_TRANSFORMER`  | `0`                 | `1` keeps the FLUX transformer GPU-resident across same-LoRA generations (saves a full GGUF+LoRA rebuild). Server force-drops it if VAE decode headroom is too tight at that resolution. |
 
 ### Upscaling
 

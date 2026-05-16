@@ -64,9 +64,13 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 
-# Copy manifests first for layer caching of dependency builds
+# Copy manifests first for layer caching of dependency builds.
+# Must include every workspace member listed in the root Cargo.toml — cargo
+# fails to resolve the workspace if any member's manifest is missing.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/mold-core/Cargo.toml crates/mold-core/Cargo.toml
+COPY crates/mold-catalog/Cargo.toml crates/mold-catalog/Cargo.toml
+COPY crates/mold-db/Cargo.toml crates/mold-db/Cargo.toml
 COPY crates/mold-inference/Cargo.toml crates/mold-inference/Cargo.toml
 COPY crates/mold-server/Cargo.toml crates/mold-server/Cargo.toml
 COPY crates/mold-cli/Cargo.toml crates/mold-cli/Cargo.toml
@@ -75,12 +79,16 @@ COPY crates/mold-tui/Cargo.toml crates/mold-tui/Cargo.toml
 
 # Create stub source files so cargo can resolve and build dependencies
 RUN mkdir -p crates/mold-core/src \
+             crates/mold-catalog/src \
+             crates/mold-db/src \
              crates/mold-inference/src \
              crates/mold-server/src \
              crates/mold-cli/src \
              crates/mold-discord/src \
              crates/mold-tui/src \
     && echo "// stub" > crates/mold-core/src/lib.rs \
+    && echo "// stub" > crates/mold-catalog/src/lib.rs \
+    && echo "// stub" > crates/mold-db/src/lib.rs \
     && echo "// stub" > crates/mold-inference/src/lib.rs \
     && echo "// stub" > crates/mold-server/src/lib.rs \
     && echo 'fn main() { println!("stub"); }' > crates/mold-cli/src/main.rs \
