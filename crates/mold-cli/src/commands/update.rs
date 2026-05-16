@@ -110,23 +110,47 @@ fn detect_cuda_arch() -> String {
 
 /// Check if the binary path looks like it was installed by a package manager.
 /// Returns a hint string if so.
-fn detect_package_manager(exe_path: &Path) -> Option<&'static str> {
+fn detect_package_manager(exe_path: &Path) -> Option<String> {
     let path_str = exe_path.to_string_lossy();
     if path_str.contains("/nix/store/") {
-        Some("nix flake update")
+        Some("nix flake update".to_string())
     } else if path_str.contains("/Cellar/") || path_str.contains("/homebrew/") {
-        Some("brew upgrade mold")
+        Some("brew upgrade mold".to_string())
     } else if cfg!(target_os = "linux")
         && (path_str.starts_with("/usr/bin/") || path_str.starts_with("/usr/sbin/"))
     {
-        // Arch's usrmerge symlinks /usr/sbin → /usr/bin, so `which` on an
-        // AUR install can resolve to either path. /usr/local/bin is
+        // Bail unconditionally — any `/usr/bin` or `/usr/sbin` install on
+        // Linux is system-managed (Arch's usrmerge symlinks /usr/sbin →
+        // /usr/bin, so `which` can resolve to either). /usr/local/bin is
         // intentionally excluded — that's the conventional install.sh
         // target and unowned by any package manager.
-        Some("paru -Syu mold-ai-bin (or mold-ai, depending on which AUR package you installed)")
+        //
+        // Hint text is distro-specific: only Arch / Arch-derivative users
+        // would recognise `paru`, so we read /etc/os-release to pick the
+        // right wording. Fedora/Debian/openSUSE/etc. get a generic hint.
+        let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        if is_arch_linux(&os_release) {
+            Some(
+                "paru -Syu mold-ai-bin (or mold-ai, depending on which AUR package you installed)"
+                    .to_string(),
+            )
+        } else {
+            Some("update via your distro's package manager (apt/dnf/zypper/etc.)".to_string())
+        }
     } else {
         None
     }
+}
+
+/// Heuristic for Arch / Arch-derivative detection from /etc/os-release content.
+/// Matches `ID=arch` or any `ID_LIKE=…arch…` (Manjaro, EndeavourOS, Garuda…).
+fn is_arch_linux(os_release: &str) -> bool {
+    os_release.lines().any(|line| {
+        let line = line.trim();
+        line == "ID=arch"
+            || line == "ID=\"arch\""
+            || (line.starts_with("ID_LIKE=") && line.contains("arch"))
+    })
 }
 
 // ── SHA-256 checksum verification ───────────────────────────────────────────
@@ -673,13 +697,19 @@ mod tests {
     #[test]
     fn test_detect_nix_store() {
         let path = Path::new("/nix/store/abc123-mold/bin/mold");
-        assert_eq!(detect_package_manager(path), Some("nix flake update"));
+        assert_eq!(
+            detect_package_manager(path),
+            Some("nix flake update".to_string())
+        );
     }
 
     #[test]
     fn test_detect_homebrew() {
         let path = Path::new("/opt/homebrew/Cellar/mold/0.6.1/bin/mold");
-        assert_eq!(detect_package_manager(path), Some("brew upgrade mold"));
+        assert_eq!(
+            detect_package_manager(path),
+            Some("brew upgrade mold".to_string())
+        );
     }
 
     #[test]
@@ -696,20 +726,20 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn test_detect_pacman_usr_bin() {
+    fn test_detect_system_managed_usr_bin() {
+        // Bail-out is unconditional on Linux /usr/bin — the hint text
+        // varies by distro but the bail itself protects every Linux
+        // install from a self-update writing to a system path.
         let hint = detect_package_manager(Path::new("/usr/bin/mold"));
         assert!(hint.is_some());
-        assert!(hint.unwrap().contains("paru"));
-        assert!(hint.unwrap().contains("mold-ai-bin"));
     }
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn test_detect_pacman_usr_sbin() {
+    fn test_detect_system_managed_usr_sbin() {
         // Arch's usrmerge symlinks /usr/sbin → /usr/bin.
         let hint = detect_package_manager(Path::new("/usr/sbin/mold"));
         assert!(hint.is_some());
-        assert!(hint.unwrap().contains("paru"));
     }
 
     #[test]
@@ -719,6 +749,40 @@ mod tests {
         // there; classify as None so `update` doesn't print Linux hints
         // to a Darwin user.
         assert_eq!(detect_package_manager(Path::new("/usr/bin/mold")), None);
+    }
+
+    // ── Arch detection from /etc/os-release ─────────────────────────────
+
+    #[test]
+    fn test_is_arch_linux_canonical() {
+        assert!(is_arch_linux("NAME=\"Arch Linux\"\nID=arch\n"));
+    }
+
+    #[test]
+    fn test_is_arch_linux_id_quoted() {
+        // Some distros quote the ID value; both forms are valid per
+        // freedesktop os-release(5).
+        assert!(is_arch_linux("ID=\"arch\"\n"));
+    }
+
+    #[test]
+    fn test_is_arch_linux_via_id_like() {
+        // Manjaro / EndeavourOS / Garuda — derivatives where users
+        // still use paru/yay against the AUR.
+        assert!(is_arch_linux("ID=manjaro\nID_LIKE=arch\n"));
+        assert!(is_arch_linux("ID=endeavouros\nID_LIKE=\"arch\"\n"));
+    }
+
+    #[test]
+    fn test_is_not_arch_linux() {
+        assert!(!is_arch_linux("ID=fedora\n"));
+        assert!(!is_arch_linux("ID=debian\nID_LIKE=\"\"\n"));
+        assert!(!is_arch_linux("ID=ubuntu\nID_LIKE=debian\n"));
+        assert!(!is_arch_linux(
+            "ID=opensuse-tumbleweed\nID_LIKE=\"suse opensuse\"\n"
+        ));
+        // Empty file (some minimal containers don't ship os-release)
+        assert!(!is_arch_linux(""));
     }
 
     // ── Binary replacement ──────────────────────────────────────────────

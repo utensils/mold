@@ -427,9 +427,13 @@ jobs:
   publish-aur:
     name: Publish AUR (${{ matrix.pkgname }})
     needs: [release-version]
-    # Only fires on real tag pushes — workflow_dispatch re-runs of
-    # historical tags must not republish to the AUR (matches the
-    # `make_latest` invariant in release-version).
+    # Fires on `v*` tag pushes. Manually re-running the workflow on a
+    # past tag (via "Re-run jobs" in the UI) preserves the tag ref so
+    # this job re-evaluates, BUT `allow_empty_commits: false` in the
+    # deploy step below makes that a no-op when the PKGBUILD content
+    # hasn't changed. A re-run after a tag force-push with new content
+    # will produce a new commit — which is the intended escape hatch
+    # for releasing a hotfix to the same tag.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     strategy:

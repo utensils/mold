@@ -64,7 +64,10 @@ build() {
   # profile, so /opt/cuda/bin (where Arch's `cuda` package puts nvcc) is
   # not on PATH by default. candle's CUDA build needs nvcc at compile time.
   export PATH="/opt/cuda/bin:${PATH}"
-  export LIBRARY_PATH="/opt/cuda/lib64/stubs:${LIBRARY_PATH:-}"
+  # `${VAR:+:${VAR}}` only prepends the `:` when VAR is set + non-empty.
+  # `:${VAR:-}` would expand to a trailing `:` when VAR is unset, which
+  # adds an empty entry = CWD to the linker search path.
+  export LIBRARY_PATH="/opt/cuda/lib64/stubs${LIBRARY_PATH:+:${LIBRARY_PATH}}"
   # --frozen + --offline pairs with `cargo fetch --locked` in prepare():
   #   --frozen  refuses to mutate Cargo.lock
   #   --offline refuses any network IO during build
