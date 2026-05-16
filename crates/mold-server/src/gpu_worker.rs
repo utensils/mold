@@ -257,6 +257,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         .unwrap_or(true);
     let rss_pre_trim = if trim_enabled {
         let v = crate::resources::ram_snapshot().used_by_mold;
+        #[cfg(target_os = "linux")]
         unsafe {
             libc::malloc_trim(0);
         }
