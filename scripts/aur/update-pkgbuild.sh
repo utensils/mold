@@ -50,9 +50,17 @@ fi
 
 fetch_sha() {
   local url="$1"
-  # `-fL` so curl follows redirects and fails on 404 instead of
-  # silently writing an HTML error page that hashes to garbage.
-  curl --silent --show-error --fail --location "${url}" \
+  # `-fL` so curl follows redirects and fails on 404 instead of silently
+  # writing an HTML error page that hashes to garbage. `--retry` covers
+  # the GitHub Releases CDN eventual-consistency window — release assets
+  # are usually reachable within ~5 s of `softprops/action-gh-release@v2`
+  # completing, but the publish-aur CI job kicks off immediately after
+  # `release-version` succeeds and occasionally races the CDN. Retrying
+  # on transient 404 / 5xx / network errors collapses the race without
+  # needing to plumb artifact downloads through the matrix job.
+  curl --silent --show-error --fail --location \
+    --retry 10 --retry-delay 5 --retry-all-errors --max-time 120 \
+    "${url}" \
     | _hasher \
     | awk '{print $1}'
 }

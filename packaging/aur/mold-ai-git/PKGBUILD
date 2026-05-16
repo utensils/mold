@@ -65,7 +65,10 @@ build() {
   # not on PATH by default. candle's CUDA build needs nvcc at compile time.
   export PATH="/opt/cuda/bin:${PATH}"
   export LIBRARY_PATH="/opt/cuda/lib64/stubs:${LIBRARY_PATH:-}"
-  cargo build --release --frozen \
+  # --frozen + --offline pairs with `cargo fetch --locked` in prepare():
+  #   --frozen  refuses to mutate Cargo.lock
+  #   --offline refuses any network IO during build
+  cargo build --release --frozen --offline \
     -p mold-ai \
     --features cuda,preview,expand,tui,webp,mp4,metrics
 }

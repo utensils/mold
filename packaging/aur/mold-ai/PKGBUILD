@@ -59,9 +59,13 @@ build() {
   # not on PATH by default. candle's CUDA build needs nvcc at compile time.
   export PATH="/opt/cuda/bin:${PATH}"
   export LIBRARY_PATH="/opt/cuda/lib64/stubs:${LIBRARY_PATH:-}"
-  # --frozen pairs with `cargo fetch --locked`: refuses to touch the network
-  # during build, so a stale Cargo.lock fails loudly.
-  cargo build --release --frozen \
+  # --frozen + --offline pairs with `cargo fetch --locked` above:
+  #   --frozen  refuses to mutate Cargo.lock — stale lockfile fails loudly
+  #   --offline refuses any network IO — proves the fetch step grabbed
+  #             every transitive dep, including build-script deps that
+  #             --frozen alone would still allow to download
+  # Together they make AUR chroot builds fully reproducible.
+  cargo build --release --frozen --offline \
     -p mold-ai \
     --features cuda,preview,expand,tui,webp,mp4,metrics
 }

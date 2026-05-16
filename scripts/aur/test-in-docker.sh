@@ -81,7 +81,11 @@ INNER
 )
 
 if "$shell_after"; then
-  build_cmd="${build_cmd}"$'\n''echo "==> dropping into shell (the built workdir is $workdir)"; exec bash'
+  # `$workdir` lives in the container shell, not the host shell — escape
+  # it so the host doesn't try (and fail) to interpolate it before the
+  # string ever reaches the container. Same reason the main heredoc uses
+  # `\$workdir` throughout.
+  build_cmd="${build_cmd}"$'\n''echo "==> dropping into shell (the built workdir is \$workdir)"; exec bash'
 fi
 
 exec "$runtime" run --rm -it --init \
