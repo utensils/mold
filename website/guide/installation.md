@@ -21,7 +21,7 @@ All options are passed as environment variables:
 curl -fsSL ... | MOLD_INSTALL_DIR=/usr/local/bin sh
 
 # Pin to a specific release tag (default: latest)
-curl -fsSL ... | MOLD_VERSION=v0.9.0 sh
+curl -fsSL ... | MOLD_VERSION=v0.10.0 sh
 
 # Force a GPU architecture (default: auto-detect on Linux)
 curl -fsSL ... | MOLD_CUDA_ARCH=sm120 sh   # Blackwell (RTX 50-series)

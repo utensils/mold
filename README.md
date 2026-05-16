@@ -31,7 +31,7 @@ builds include Metal support.
 Pin a specific version with `MOLD_VERSION`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_VERSION=v0.9.0 sh
+curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_VERSION=v0.10.0 sh
 ```
 
 <details>
