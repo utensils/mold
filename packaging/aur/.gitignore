@@ -7,3 +7,9 @@ pkg/
 *.pkg.tar.xz
 *.tar.gz
 *.tar.xz
+
+# .SRCINFO is auto-derived from PKGBUILD. CI regenerates it inside an Arch
+# container on every release publish, and the one-time seed push generates
+# it locally via scripts/aur/test-in-docker.sh — see packaging/aur/README.md.
+# Committing it here would drift any time the PKGBUILD changes.
+.SRCINFO

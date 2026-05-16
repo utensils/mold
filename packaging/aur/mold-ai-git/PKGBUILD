@@ -60,6 +60,10 @@ build() {
   cd "mold"
   export CARGO_HOME="${srcdir}/cargo-home"
   export CUDA_COMPUTE_CAP="${CUDA_COMPUTE_CAP:-89}"
+  # makepkg runs in a minimal environment and does not source the user's
+  # profile, so /opt/cuda/bin (where Arch's `cuda` package puts nvcc) is
+  # not on PATH by default. candle's CUDA build needs nvcc at compile time.
+  export PATH="/opt/cuda/bin:${PATH}"
   export LIBRARY_PATH="/opt/cuda/lib64/stubs:${LIBRARY_PATH:-}"
   cargo build --release --frozen \
     -p mold-ai \
