@@ -367,6 +367,22 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
 
+      - name: Publish mold-ai-db
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p mold-ai-db
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish mold-ai-catalog
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p mold-ai-catalog
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
       - name: Publish mold-ai-inference
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
