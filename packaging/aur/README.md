@@ -1,0 +1,113 @@
+# Arch User Repository (AUR) packaging
+
+mold is published to the AUR as three packages. The binary is `mold` (which
+matches the well-known [extra/mold](https://archlinux.org/packages/extra/x86_64/mold/)
+linker by rui314) — to avoid collision, the AUR packages are namespaced as
+`mold-ai*` and each declares `conflicts=('mold')`. You cannot install both the
+linker and these packages simultaneously.
+
+| Package | Source | Update cadence | Audience |
+|---|---|---|---|
+| [`mold-ai-bin`](./mold-ai-bin/PKGBUILD) | Repackages the upstream `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` (RTX 40-series / Ada Lovelace) from GitHub Releases | Every tagged release (automatic via CI) | Most users — fastest install, no compile |
+| [`mold-ai`](./mold-ai/PKGBUILD) | Builds from the release tarball with CUDA features | Every tagged release (automatic via CI) | Users who need a different `CUDA_COMPUTE_CAP` (e.g. Blackwell sm_120) or non-Ada GPU |
+| [`mold-ai-git`](./mold-ai-git/PKGBUILD) | Builds from `main` HEAD | Pushed manually when the build recipe changes | Bleeding-edge users tracking `main` |
+
+The PKGBUILDs here are the source of truth. The AUR git repos
+(`ssh://aur@aur.archlinux.org/<pkgname>.git`) are downstream mirrors
+that CI force-publishes to on every release.
+
+## Choosing a GPU variant
+
+The `mold-ai-bin` package ships the **sm_89 (Ada Lovelace)** tarball by
+default — that targets RTX 40-series cards. If you have an RTX 50-series
+(sm_120 / Blackwell) or anything older than Ada, install the source
+PKGBUILD with an explicit compute capability:
+
+```bash
+# RTX 50-series (Blackwell)
+CUDA_COMPUTE_CAP=120 paru -S mold-ai
+
+# Older NVIDIA (Ampere = 86, Turing = 75, etc. — see https://developer.nvidia.com/cuda-gpus)
+CUDA_COMPUTE_CAP=86 paru -S mold-ai
+```
+
+`paru` forwards env vars to `makepkg`. With vanilla `makepkg`, run
+`CUDA_COMPUTE_CAP=120 makepkg -si` directly.
+
+## Release flow
+
+On a tag push (`v*`), `.github/workflows/release.yml` builds the
+release artifacts as usual, then runs a `publish-aur` matrix job (one
+entry per AUR package, currently `mold-ai-bin` and `mold-ai`). The job:
+
+1. Checks out the tagged commit.
+2. Runs [`scripts/aur/update-pkgbuild.sh`](../../scripts/aur/update-pkgbuild.sh)
+   which downloads the matching release artifact, computes the
+   `sha256sum`, and rewrites `pkgver` + `sha256sums` in the PKGBUILD.
+3. Uses [`KSXGitHub/github-actions-deploy-aur`](https://github.com/KSXGitHub/github-actions-deploy-aur)
+   to regenerate `.SRCINFO` inside an Arch container, commit, and push
+   to the AUR git repo over SSH.
+
+`mold-ai-git` is **not** auto-published. Its `PKGBUILD` only changes
+when the build recipe itself changes (deps, feature flags), so it is
+pushed manually whenever someone edits it here.
+
+## One-time setup
+
+1. Make sure `~/.ssh/id_ed25519.pub` is registered with the AUR
+   account (https://aur.archlinux.org/account/<user> → "My Account"
+   → "SSH Public Key").
+2. Add the matching **private** key to this GitHub repository as the
+   `AUR_SSH_PRIVATE_KEY` secret:
+   ```bash
+   gh secret set AUR_SSH_PRIVATE_KEY -R utensils/mold < ~/.ssh/id_ed25519
+   ```
+3. Seed each AUR git repo with an initial push from a workstation.
+   AUR requires the branch name to be `master`, not `main`:
+   ```bash
+   for pkg in mold-ai-bin mold-ai mold-ai-git; do
+     git clone "ssh://aur@aur.archlinux.org/${pkg}.git" "/tmp/${pkg}"
+     cd "/tmp/${pkg}"
+     git symbolic-ref HEAD refs/heads/master
+     cp "<REPO_ROOT>/packaging/aur/${pkg}/PKGBUILD" .
+     cp "<REPO_ROOT>/packaging/aur/${pkg}/.SRCINFO" .
+     git add PKGBUILD .SRCINFO
+     git -c user.name="James Brink" -c user.email="brink.james@gmail.com" \
+       commit -m "Initial upload: ${pkg}"
+     git push origin master
+     cd -
+   done
+   ```
+   After this first push, CI takes over for `mold-ai-bin` and `mold-ai`.
+   `mold-ai-git` is hand-pushed only.
+
+## Local PKGBUILD smoke test (macOS / non-Arch hosts)
+
+```bash
+scripts/aur/test-in-docker.sh mold-ai-bin    # prebuilt tarball — fastest
+scripts/aur/test-in-docker.sh mold-ai        # source build (very slow under emulation; pulls 5GB of CUDA)
+scripts/aur/test-in-docker.sh mold-ai-git    # VCS build
+scripts/aur/test-in-docker.sh --rebuild      # force image rebuild
+scripts/aur/test-in-docker.sh --shell mold-ai-bin   # drop into a shell after the build
+```
+
+Each invocation builds the PKGBUILD inside an Arch container (Rosetta /
+qemu-user under amd64), installs it via `pacman -U`, and runs `mold
+--version` as a smoke test. Note: smoke tests do not exercise GPU codepaths
+— they only confirm the binary links and parses CLI args.
+
+## Editing a PKGBUILD locally (Arch host)
+
+```bash
+cd packaging/aur/mold-ai-bin
+# After editing PKGBUILD:
+makepkg --printsrcinfo > .SRCINFO
+makepkg -sci   # build + install locally
+```
+
+## Upgrade behavior
+
+`mold update` exits cleanly with a hint on AUR installs — pacman manages
+updates for AUR users. The `mold-ai-bin` package follows tagged
+releases; `mold-ai` rebuilds against the same tag; `mold-ai-git`
+rebuilds whatever the user pulls from `main` at install time.

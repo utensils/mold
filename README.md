@@ -44,6 +44,18 @@ nix run github:utensils/mold -- run "a cat"                   # Ada / RTX 40-ser
 nix run github:utensils/mold#mold-sm120 -- run "a cat"        # Blackwell / RTX 50-series
 ```
 
+### AUR — Arch Linux
+
+```bash
+paru -S mold-ai-bin     # Prebuilt binary, CUDA sm_89 (RTX 40-series). Fastest.
+paru -S mold-ai         # Builds from source — set CUDA_COMPUTE_CAP=120 for RTX 50-series
+paru -S mold-ai-git     # Builds from main HEAD
+```
+
+Conflicts with `extra/mold` (the rui314 linker) — they share the `/usr/bin/mold`
+path. See [`packaging/aur/README.md`](packaging/aur/README.md) for details and
+the Blackwell (sm_120) build flag.
+
 ### From source
 
 ```bash

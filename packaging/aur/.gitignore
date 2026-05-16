@@ -1,0 +1,9 @@
+# makepkg build artifacts that land here when contributors run
+# `makepkg` directly in one of the package directories (rather than
+# the recommended scripts/aur/test-in-docker.sh path).
+src/
+pkg/
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.tar.gz
+*.tar.xz

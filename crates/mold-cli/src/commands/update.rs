@@ -116,6 +116,14 @@ fn detect_package_manager(exe_path: &Path) -> Option<&'static str> {
         Some("nix flake update")
     } else if path_str.contains("/Cellar/") || path_str.contains("/homebrew/") {
         Some("brew upgrade mold")
+    } else if cfg!(target_os = "linux")
+        && (path_str.starts_with("/usr/bin/") || path_str.starts_with("/usr/sbin/"))
+    {
+        // Arch's usrmerge symlinks /usr/sbin → /usr/bin, so `which` on an
+        // AUR install can resolve to either path. /usr/local/bin is
+        // intentionally excluded — that's the conventional install.sh
+        // target and unowned by any package manager.
+        Some("paru -Syu mold-ai-bin (or mold-ai, depending on which AUR package you installed)")
     } else {
         None
     }
@@ -684,6 +692,33 @@ mod tests {
     fn test_detect_usr_local() {
         let path = Path::new("/usr/local/bin/mold");
         assert_eq!(detect_package_manager(path), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_detect_pacman_usr_bin() {
+        let hint = detect_package_manager(Path::new("/usr/bin/mold"));
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("paru"));
+        assert!(hint.unwrap().contains("mold-ai-bin"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_detect_pacman_usr_sbin() {
+        // Arch's usrmerge symlinks /usr/sbin → /usr/bin.
+        let hint = detect_package_manager(Path::new("/usr/sbin/mold"));
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("paru"));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn test_usr_bin_is_unmanaged_off_linux() {
+        // On macOS /usr/bin is system territory but pacman doesn't exist
+        // there; classify as None so `update` doesn't print Linux hints
+        // to a Darwin user.
+        assert_eq!(detect_package_manager(Path::new("/usr/bin/mold")), None);
     }
 
     // ── Binary replacement ──────────────────────────────────────────────
