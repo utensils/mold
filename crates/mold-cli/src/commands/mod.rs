@@ -10,6 +10,7 @@ pub mod expand;
 pub(crate) mod generate;
 pub mod info;
 pub mod list;
+pub mod mcp;
 pub mod ps;
 pub mod pull;
 pub mod rm;

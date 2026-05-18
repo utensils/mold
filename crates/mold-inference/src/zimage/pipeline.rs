@@ -1,16 +1,18 @@
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_core::{DType, Device, IndexOp, Shape, Tensor};
 use candle_transformers::models::z_image::{
     calculate_shift, postprocess_image, AutoEncoderKL, Config, FlowMatchEulerDiscreteScheduler,
-    SchedulerConfig, VaeConfig, ZImageTransformer2DModel,
+    SchedulerConfig, VaeConfig,
 };
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
 use super::gguf_dense::load_gguf_dense_transformer;
-use super::transformer::ZImageTransformer;
+use super::transformer::{MoldZImageTransformer2DModel, ZImageTransformer};
 use crate::cache::{
     clear_cache, get_or_insert_cached_tensor, prompt_text_key, restore_cached_tensor, CachedTensor,
     LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
@@ -34,10 +36,265 @@ use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 /// The VAE itself is small (~160MB), but decode at 1024x1024 needs ~6GB workspace
 /// for conv2d im2col expansions through the upsampling blocks.
 const VAE_DECODE_VRAM_THRESHOLD: u64 = 6_500_000_000;
+/// Eager mode loads the VAE before denoising but drops the transformer before
+/// decode. Use a weight-load threshold here, not the decode workspace threshold,
+/// so CUDA/Metal decode still happens on GPU after the transformer is freed.
+const VAE_WEIGHT_LOAD_VRAM_THRESHOLD: u64 = 600_000_000;
 
 /// Z-Image scheduler shift constants from the reference implementation.
 const BASE_IMAGE_SEQ_LEN: usize = 256;
 const MAX_IMAGE_SEQ_LEN: usize = 4096;
+const ZIMAGE_SINGLE_FILE_PREFIX: &str = "model.diffusion_model.";
+
+struct ZImageSafetensorsBackend {
+    st: candle_core::safetensors::MmapedSafetensors,
+}
+
+impl ZImageSafetensorsBackend {
+    fn new(st: candle_core::safetensors::MmapedSafetensors) -> Self {
+        Self { st }
+    }
+
+    fn resolve_stored_name<'a>(&'a self, name: &'a str) -> Option<Cow<'a, str>> {
+        if self.st.get(name).is_ok() {
+            return Some(Cow::Borrowed(name));
+        }
+        if let Some(alias) = zimage_safetensors_alias(name) {
+            if self.st.get(alias.as_ref()).is_ok() {
+                return Some(alias);
+            }
+        }
+        let prefixed = format!("{ZIMAGE_SINGLE_FILE_PREFIX}{name}");
+        if self.st.get(&prefixed).is_ok() {
+            return Some(Cow::Owned(prefixed));
+        }
+        if let Some(alias) = zimage_safetensors_alias(name) {
+            let prefixed_alias = format!("{ZIMAGE_SINGLE_FILE_PREFIX}{}", alias.as_ref());
+            if self.st.get(&prefixed_alias).is_ok() {
+                return Some(Cow::Owned(prefixed_alias));
+            }
+        }
+        None
+    }
+
+    fn stored_name<'a>(&'a self, name: &'a str) -> Cow<'a, str> {
+        self.resolve_stored_name(name)
+            .unwrap_or(Cow::Borrowed(name))
+    }
+
+    fn load_cast(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+        let stored_name = self.stored_name(name);
+        let tensor = self.st.load(stored_name.as_ref(), dev)?;
+        if tensor.dtype() != dtype {
+            tensor.to_dtype(dtype)
+        } else {
+            Ok(tensor)
+        }
+    }
+
+    fn load_tensor(
+        &self,
+        name: &str,
+        expected_shape: Option<&Shape>,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        if let Some((source_name, component)) = zimage_qkv_request(name) {
+            return self.load_qkv_split(&source_name, component, expected_shape, dtype, dev);
+        }
+        self.load_cast(name, dtype, dev)
+    }
+
+    fn load_qkv_split(
+        &self,
+        source_name: &str,
+        component: usize,
+        expected_shape: Option<&Shape>,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        let qkv = self.load_cast(source_name, dtype, dev)?;
+        let rows = qkv.dim(0)?;
+        let split_rows = expected_shape
+            .and_then(|shape| shape.dims().first().copied())
+            .unwrap_or(rows / 3);
+        if component >= 3 || split_rows == 0 || rows != split_rows * 3 {
+            return Err(candle_core::Error::msg(format!(
+                "invalid fused QKV shape for {source_name}: rows={rows}, split_rows={split_rows}"
+            )));
+        }
+        qkv.narrow(0, component * split_rows, split_rows)?
+            .contiguous()
+    }
+}
+
+impl candle_nn::var_builder::SimpleBackend for ZImageSafetensorsBackend {
+    fn get(
+        &self,
+        shape: Shape,
+        name: &str,
+        _init: candle_nn::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        let tensor = self.load_tensor(name, Some(&shape), dtype, dev)?;
+        if tensor.shape() != &shape {
+            Err(candle_core::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {name}"),
+                expected: shape,
+                got: tensor.shape().clone(),
+            })?
+        }
+        Ok(tensor)
+    }
+
+    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+        self.load_tensor(name, None, dtype, dev)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        if let Some((source_name, _)) = zimage_qkv_request(name) {
+            return self.resolve_stored_name(&source_name).is_some();
+        }
+        self.resolve_stored_name(name).is_some()
+    }
+}
+
+struct ZImageVaeSafetensorsBackend {
+    st: candle_core::safetensors::MmapedSafetensors,
+    aliases: BTreeMap<String, String>,
+}
+
+impl ZImageVaeSafetensorsBackend {
+    fn new(st: candle_core::safetensors::MmapedSafetensors) -> Self {
+        let aliases = st
+            .tensors()
+            .into_iter()
+            .filter_map(|(name, _)| {
+                zimage_vae_diffusers_name(&name).map(|diffusers| (diffusers, name))
+            })
+            .collect();
+        Self { st, aliases }
+    }
+
+    fn resolve_stored_name<'a>(&'a self, name: &'a str) -> Cow<'a, str> {
+        if self.st.get(name).is_ok() {
+            return Cow::Borrowed(name);
+        }
+        self.aliases
+            .get(name)
+            .map(|source| Cow::Borrowed(source.as_str()))
+            .unwrap_or(Cow::Borrowed(name))
+    }
+
+    fn load_cast(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+        let stored_name = self.resolve_stored_name(name);
+        let tensor = self.st.load(stored_name.as_ref(), dev)?;
+        if tensor.dtype() != dtype {
+            tensor.to_dtype(dtype)
+        } else {
+            Ok(tensor)
+        }
+    }
+}
+
+impl candle_nn::var_builder::SimpleBackend for ZImageVaeSafetensorsBackend {
+    fn get(
+        &self,
+        shape: Shape,
+        name: &str,
+        _init: candle_nn::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        let mut tensor = self.load_cast(name, dtype, dev)?;
+        if tensor.shape() != &shape
+            && tensor.dims().len() == 4
+            && shape.dims().len() == 2
+            && tensor.dims()[0] == shape.dims()[0]
+            && tensor.dims()[1] == shape.dims()[1]
+            && tensor.dims()[2] == 1
+            && tensor.dims()[3] == 1
+        {
+            tensor = tensor.reshape(shape.dims())?;
+        }
+        if tensor.shape() != &shape {
+            Err(candle_core::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {name}"),
+                expected: shape,
+                got: tensor.shape().clone(),
+            })?
+        }
+        Ok(tensor)
+    }
+
+    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+        self.load_cast(name, dtype, dev)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.st.get(name).is_ok() || self.aliases.contains_key(name)
+    }
+}
+
+fn zimage_vae_diffusers_name(source_name: &str) -> Option<String> {
+    if source_name.starts_with("first_stage_model.") {
+        return crate::loader::vae_keys::apply_vae_rename(source_name);
+    }
+    if source_name.starts_with("encoder.")
+        || source_name.starts_with("decoder.")
+        || source_name.starts_with("quant_conv.")
+        || source_name.starts_with("post_quant_conv.")
+    {
+        return crate::loader::vae_keys::apply_vae_rename(&format!(
+            "first_stage_model.{source_name}"
+        ));
+    }
+    None
+}
+
+fn zimage_qkv_request(name: &str) -> Option<(String, usize)> {
+    for (suffix, component) in [
+        (".attention.to_q.weight", 0),
+        (".attention.to_k.weight", 1),
+        (".attention.to_v.weight", 2),
+    ] {
+        if let Some(prefix) = name.strip_suffix(suffix) {
+            return Some((format!("{prefix}.attention.qkv.weight"), component));
+        }
+    }
+    None
+}
+
+fn zimage_safetensors_alias(name: &str) -> Option<Cow<'_, str>> {
+    match name {
+        "all_x_embedder.2-1.weight" => return Some(Cow::Borrowed("x_embedder.weight")),
+        "all_x_embedder.2-1.bias" => return Some(Cow::Borrowed("x_embedder.bias")),
+        "all_final_layer.2-1.linear.weight" => {
+            return Some(Cow::Borrowed("final_layer.linear.weight"));
+        }
+        "all_final_layer.2-1.linear.bias" => {
+            return Some(Cow::Borrowed("final_layer.linear.bias"));
+        }
+        "all_final_layer.2-1.adaLN_modulation.1.weight" => {
+            return Some(Cow::Borrowed("final_layer.adaLN_modulation.1.weight"));
+        }
+        "all_final_layer.2-1.adaLN_modulation.1.bias" => {
+            return Some(Cow::Borrowed("final_layer.adaLN_modulation.1.bias"));
+        }
+        _ => {}
+    }
+    for (requested, stored) in [
+        (".attention.to_out.0.weight", ".attention.out.weight"),
+        (".attention.norm_q.weight", ".attention.q_norm.weight"),
+        (".attention.norm_k.weight", ".attention.k_norm.weight"),
+    ] {
+        if let Some(prefix) = name.strip_suffix(requested) {
+            return Some(Cow::Owned(format!("{prefix}{stored}")));
+        }
+    }
+    None
+}
 const BASE_SHIFT: f64 = 0.5;
 const MAX_SHIFT: f64 = 1.15;
 
@@ -80,6 +337,44 @@ fn build_zimage_scheduler(
     }
     scheduler.reset();
     (scheduler, start_index)
+}
+
+fn load_zimage_vae(
+    path: &std::path::Path,
+    dtype: DType,
+    device: &Device,
+    progress: &ProgressReporter,
+) -> Result<AutoEncoderKL> {
+    use candle_core::safetensors::MmapedSafetensors;
+
+    let bytes_total = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    progress.weight_load("VAE", 0, bytes_total);
+    let st = unsafe { MmapedSafetensors::multi(&[path])? };
+    let vae_vb = candle_nn::VarBuilder::from_backend(
+        Box::new(ZImageVaeSafetensorsBackend::new(st)),
+        dtype,
+        device.clone(),
+    );
+    progress.weight_load("VAE", bytes_total, bytes_total);
+    AutoEncoderKL::new(&VaeConfig::z_image(), vae_vb).map_err(Into::into)
+}
+
+fn zimage_qwen3_preference<'a>(
+    configured: Option<&'a str>,
+    text_encoder_paths: &[std::path::PathBuf],
+) -> Option<&'a str> {
+    if configured.is_none() && zimage_has_recipe_text_encoder(text_encoder_paths) {
+        Some("bf16")
+    } else {
+        configured
+    }
+}
+
+fn zimage_has_recipe_text_encoder(text_encoder_paths: &[std::path::PathBuf]) -> bool {
+    text_encoder_paths.iter().any(|path| {
+        path.components()
+            .any(|component| component.as_os_str() == "civitai")
+    })
 }
 
 fn model_timestep(scheduler: &FlowMatchEulerDiscreteScheduler) -> f64 {
@@ -306,7 +601,7 @@ impl ZImageEngine {
                 let wrapped =
                     super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)?;
                 let vb = candle_nn::VarBuilder::from_backend(wrapped, dtype, dev);
-                return Ok(ZImageTransformer::Dense(ZImageTransformer2DModel::new(
+                return Ok(ZImageTransformer::Dense(MoldZImageTransformer2DModel::new(
                     cfg, vb,
                 )?));
             }
@@ -322,44 +617,8 @@ impl ZImageEngine {
             let path_refs: Vec<&std::path::Path> =
                 xformer_paths.iter().map(|p| p.as_path()).collect();
             let st = unsafe { MmapedSafetensors::multi(&path_refs)? };
-            struct MmapBackend {
-                st: MmapedSafetensors,
-            }
-            impl candle_nn::var_builder::SimpleBackend for MmapBackend {
-                fn get(
-                    &self,
-                    _s: candle_core::Shape,
-                    name: &str,
-                    _h: candle_nn::Init,
-                    dtype: DType,
-                    dev: &Device,
-                ) -> candle_core::Result<Tensor> {
-                    let t = self.st.load(name, dev)?;
-                    if t.dtype() != dtype {
-                        t.to_dtype(dtype)
-                    } else {
-                        Ok(t)
-                    }
-                }
-                fn get_unchecked(
-                    &self,
-                    name: &str,
-                    dtype: DType,
-                    dev: &Device,
-                ) -> candle_core::Result<Tensor> {
-                    let t = self.st.load(name, dev)?;
-                    if t.dtype() != dtype {
-                        t.to_dtype(dtype)
-                    } else {
-                        Ok(t)
-                    }
-                }
-                fn contains_tensor(&self, name: &str) -> bool {
-                    self.st.get(name).is_ok()
-                }
-            }
             let inner: Box<dyn candle_nn::var_builder::SimpleBackend> =
-                Box::new(MmapBackend { st });
+                Box::new(ZImageSafetensorsBackend::new(st));
             let adapters =
                 super::lora::load_lora_adapters(&self.pending_loras, &self.base.progress)?;
             let specs: Vec<super::lora::ZImageLoraSpec<'_>> = adapters
@@ -374,18 +633,30 @@ impl ZImageEngine {
             let wrapped =
                 super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)?;
             let vb = candle_nn::VarBuilder::from_backend(wrapped, dtype, device.clone());
-            Ok(ZImageTransformer::Dense(ZImageTransformer2DModel::new(
+            Ok(ZImageTransformer::Dense(MoldZImageTransformer2DModel::new(
                 cfg, vb,
             )?))
         } else {
-            let xformer_vb = crate::weight_loader::load_safetensors_with_progress(
-                &xformer_paths,
+            use candle_core::safetensors::MmapedSafetensors;
+            let path_refs: Vec<&std::path::Path> =
+                xformer_paths.iter().map(|p| p.as_path()).collect();
+            let bytes_total = xformer_paths
+                .iter()
+                .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+                .sum();
+            self.base
+                .progress
+                .weight_load("Z-Image transformer", 0, bytes_total);
+            let st = unsafe { MmapedSafetensors::multi(&path_refs)? };
+            let xformer_vb = candle_nn::VarBuilder::from_backend(
+                Box::new(ZImageSafetensorsBackend::new(st)),
                 dtype,
-                device,
-                "Z-Image transformer",
-                &self.base.progress,
-            )?;
-            Ok(ZImageTransformer::Dense(ZImageTransformer2DModel::new(
+                device.clone(),
+            );
+            self.base
+                .progress
+                .weight_load("Z-Image transformer", bytes_total, bytes_total);
+            Ok(ZImageTransformer::Dense(MoldZImageTransformer2DModel::new(
                 cfg, xformer_vb,
             )?))
         }
@@ -393,15 +664,12 @@ impl ZImageEngine {
 
     /// Load VAE from disk.
     fn load_vae(&self, device: &Device, dtype: DType) -> Result<AutoEncoderKL> {
-        let vae_cfg = VaeConfig::z_image();
-        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-            &[self.base.paths.vae.as_path()],
+        load_zimage_vae(
+            self.base.paths.vae.as_path(),
             dtype,
             device,
-            "VAE",
             &self.base.progress,
-        )?;
-        Ok(AutoEncoderKL::new(&vae_cfg, vae_vb)?)
+        )
     }
 
     /// Load all model components (Eager mode).
@@ -474,9 +742,10 @@ impl ZImageEngine {
             );
         }
 
-        // VAE decode at 1024x1024 needs ~6GB workspace for conv2d im2col.
-        // On tight VRAM, load VAE on CPU to guarantee decode succeeds.
-        let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_DECODE_VRAM_THRESHOLD);
+        // Eager mode drops the transformer before decode, so placement only
+        // needs enough room for VAE weights at load time. Decode workspace is
+        // allocated later after the large transformer has been released.
+        let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_WEIGHT_LOAD_VRAM_THRESHOLD);
         let vae_ref =
             effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
         let vae_device = crate::device::resolve_device(Some(vae_ref), || {
@@ -498,9 +767,9 @@ impl ZImageEngine {
 
         if !vae_on_gpu && (is_cuda || is_metal) {
             self.base.progress.info(&format!(
-                "VAE on CPU ({} free < {} threshold for decode workspace)",
+                "VAE on CPU ({} free < {} threshold for VAE weight load)",
                 fmt_gb(free),
-                fmt_gb(VAE_DECODE_VRAM_THRESHOLD),
+                fmt_gb(VAE_WEIGHT_LOAD_VRAM_THRESHOLD),
             ));
         }
 
@@ -517,7 +786,10 @@ impl ZImageEngine {
         // --- Qwen3 text encoder: auto-select variant based on VRAM ---
         self.base.progress.stage_start("Selecting Qwen3 encoder");
         let qwen3_resolve_start = Instant::now();
-        let qwen3_preference = self.qwen3_variant.as_deref();
+        let qwen3_preference = zimage_qwen3_preference(
+            self.qwen3_variant.as_deref(),
+            &self.base.paths.text_encoder_files,
+        );
         let (resolved_paths, is_qwen3_gguf, te_on_gpu, _te_auto_device_label) = {
             let bf16_paths = self.base.paths.text_encoder_files.clone();
             let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
@@ -667,7 +939,10 @@ impl ZImageEngine {
             let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             self.base.progress.stage_start("Selecting Qwen3 encoder");
             let qwen3_resolve_start = Instant::now();
-            let qwen3_preference = self.qwen3_variant.as_deref();
+            let qwen3_preference = zimage_qwen3_preference(
+                self.qwen3_variant.as_deref(),
+                &self.base.paths.text_encoder_files,
+            );
             let (resolved_paths, is_qwen3_gguf, te_on_gpu, _te_auto_device_label) = {
                 let bf16_paths = self.base.paths.text_encoder_files.clone();
                 let have_bf16 = !bf16_paths.is_empty() && bf16_paths.iter().all(|p| p.exists());
@@ -1393,15 +1668,12 @@ impl ZImageEngine {
                         progress.info("VAE decode OOM on GPU — retrying on CPU");
                         loaded.device.synchronize()?;
                         // Load a fresh VAE on CPU (can't call self.load_vae_cpu() due to borrow)
-                        let vae_cfg = VaeConfig::z_image();
-                        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                            &[loaded.vae_path.as_path()],
+                        let cpu_vae = load_zimage_vae(
+                            loaded.vae_path.as_path(),
                             DType::F32,
                             &Device::Cpu,
-                            "VAE",
                             progress,
                         )?;
-                        let cpu_vae = AutoEncoderKL::new(&vae_cfg, vae_vb)?;
                         let cpu_latents =
                             latents_4d.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
                         cpu_vae.decode(&cpu_latents)?
@@ -1542,6 +1814,197 @@ mod tests {
     }
 
     #[test]
+    fn zimage_safetensors_backend_accepts_civitai_diffusion_prefix() {
+        use candle_nn::var_builder::SimpleBackend;
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+        use std::collections::HashMap;
+
+        fn f32_bytes(values: &[f32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        let dir = temp_test_dir("mold-zimage-prefix-backend");
+        let path = dir.join("zimage.safetensors");
+        let data = f32_bytes(&[42.0]);
+        let qkv = f32_bytes(&[1.0, 2.0, 3.0]);
+        let out = f32_bytes(&[7.0]);
+        let q_norm = f32_bytes(&[8.0]);
+        let k_norm = f32_bytes(&[9.0]);
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            format!("{ZIMAGE_SINGLE_FILE_PREFIX}t_embedder.mlp.0.weight"),
+            TensorView::new(SafeDtype::F32, vec![1, 1], data.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            format!("{ZIMAGE_SINGLE_FILE_PREFIX}x_embedder.weight"),
+            TensorView::new(SafeDtype::F32, vec![1, 1], data.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            format!("{ZIMAGE_SINGLE_FILE_PREFIX}noise_refiner.0.attention.qkv.weight"),
+            TensorView::new(SafeDtype::F32, vec![3, 1], qkv.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            format!("{ZIMAGE_SINGLE_FILE_PREFIX}noise_refiner.0.attention.out.weight"),
+            TensorView::new(SafeDtype::F32, vec![1, 1], out.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            format!("{ZIMAGE_SINGLE_FILE_PREFIX}noise_refiner.0.attention.q_norm.weight"),
+            TensorView::new(SafeDtype::F32, vec![1], q_norm.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            format!("{ZIMAGE_SINGLE_FILE_PREFIX}noise_refiner.0.attention.k_norm.weight"),
+            TensorView::new(SafeDtype::F32, vec![1], k_norm.as_slice()).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let st = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path.as_path()]) }
+            .unwrap();
+        let backend = ZImageSafetensorsBackend::new(st);
+        assert!(backend.contains_tensor("t_embedder.mlp.0.weight"));
+        let tensor = backend
+            .get_unchecked("t_embedder.mlp.0.weight", DType::F32, &Device::Cpu)
+            .unwrap();
+        assert_eq!(tensor.to_vec2::<f32>().unwrap(), vec![vec![42.0]]);
+        assert!(backend.contains_tensor("all_x_embedder.2-1.weight"));
+        let alias_tensor = backend
+            .get_unchecked("all_x_embedder.2-1.weight", DType::F32, &Device::Cpu)
+            .unwrap();
+        assert_eq!(alias_tensor.to_vec2::<f32>().unwrap(), vec![vec![42.0]]);
+        assert!(backend.contains_tensor("noise_refiner.0.attention.to_q.weight"));
+        assert!(backend.contains_tensor("noise_refiner.0.attention.to_k.weight"));
+        assert!(backend.contains_tensor("noise_refiner.0.attention.to_v.weight"));
+        let k = backend
+            .get(
+                Shape::from((1, 1)),
+                "noise_refiner.0.attention.to_k.weight",
+                candle_nn::Init::Const(0.0),
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+        assert_eq!(k.to_vec2::<f32>().unwrap(), vec![vec![2.0]]);
+        let out = backend
+            .get_unchecked(
+                "noise_refiner.0.attention.to_out.0.weight",
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+        assert_eq!(out.to_vec2::<f32>().unwrap(), vec![vec![7.0]]);
+        let q_norm = backend
+            .get_unchecked(
+                "noise_refiner.0.attention.norm_q.weight",
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+        assert_eq!(q_norm.to_vec1::<f32>().unwrap(), vec![8.0]);
+        let k_norm = backend
+            .get_unchecked(
+                "noise_refiner.0.attention.norm_k.weight",
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+        assert_eq!(k_norm.to_vec1::<f32>().unwrap(), vec![9.0]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn zimage_vae_backend_accepts_bare_ldm_vae_keys() {
+        use candle_nn::var_builder::SimpleBackend;
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+        use std::collections::HashMap;
+
+        fn f32_bytes(values: &[f32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        let dir = temp_test_dir("mold-zimage-vae-backend");
+        let path = dir.join("vae.safetensors");
+        let norm = f32_bytes(&[5.0]);
+        let conv = f32_bytes(&[7.0]);
+        let attn_q = f32_bytes(&[1.0, 2.0, 3.0, 4.0]);
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "encoder.down.0.block.0.norm1.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], norm.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            "decoder.norm_out.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], conv.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            "encoder.mid.attn_1.q.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2, 2, 1, 1], attn_q.as_slice()).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let st = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path.as_path()]) }
+            .unwrap();
+        let backend = ZImageVaeSafetensorsBackend::new(st);
+
+        assert!(backend.contains_tensor("encoder.down_blocks.0.resnets.0.norm1.weight"));
+        let norm = backend
+            .get_unchecked(
+                "encoder.down_blocks.0.resnets.0.norm1.weight",
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+        assert_eq!(norm.to_vec1::<f32>().unwrap(), vec![5.0]);
+
+        assert!(backend.contains_tensor("decoder.conv_norm_out.weight"));
+        let conv = backend
+            .get_unchecked("decoder.conv_norm_out.weight", DType::F32, &Device::Cpu)
+            .unwrap();
+        assert_eq!(conv.to_vec1::<f32>().unwrap(), vec![7.0]);
+        let q = backend
+            .get(
+                Shape::from((2, 2)),
+                "encoder.mid_block.attentions.0.to_q.weight",
+                candle_nn::Init::Const(0.0),
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+        assert_eq!(
+            q.to_vec2::<f32>().unwrap(),
+            vec![vec![1.0, 2.0], vec![3.0, 4.0]]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn zimage_recipe_text_encoder_defaults_to_bf16_variant() {
+        let recipe_paths = vec![std::path::PathBuf::from(
+            "/models/cv-2442439/z-image/civitai/2442439/zImageTurbo_turbo_txt.safetensors",
+        )];
+        let shared_paths = vec![std::path::PathBuf::from(
+            "/models/shared/z-image/text_encoder/model-00001-of-00003.safetensors",
+        )];
+
+        assert_eq!(zimage_qwen3_preference(None, &recipe_paths), Some("bf16"));
+        assert_eq!(zimage_qwen3_preference(None, &shared_paths), None);
+        assert_eq!(
+            zimage_qwen3_preference(Some("q8"), &recipe_paths),
+            Some("q8")
+        );
+        assert_eq!(
+            zimage_qwen3_preference(Some("auto"), &recipe_paths),
+            Some("auto")
+        );
+    }
+
+    #[test]
     fn latent_dimensions() {
         // 1024px → 2 * (1024 / 16) = 128
         assert_eq!(2 * (1024 / 16), 128);
@@ -1612,6 +2075,17 @@ mod tests {
             false,
             17_000_000_000,
             VAE_DECODE_VRAM_THRESHOLD
+        ));
+    }
+
+    #[test]
+    fn eager_vae_weight_load_threshold_is_below_decode_workspace_threshold() {
+        assert!(VAE_WEIGHT_LOAD_VRAM_THRESHOLD < VAE_DECODE_VRAM_THRESHOLD);
+        assert!(should_use_gpu(
+            true,
+            false,
+            1_000_000_000,
+            VAE_WEIGHT_LOAD_VRAM_THRESHOLD
         ));
     }
 

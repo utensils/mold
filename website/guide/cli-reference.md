@@ -162,6 +162,40 @@ transparently. `GET /api/status` returns a `gpus[]` array with per-worker state
 carries a `"gpu": <ordinal>` field so clients can see which card produced a
 given output.
 
+## `mold mcp`
+
+Start a stdio Model Context Protocol server for LM Studio and other MCP hosts.
+The MCP process proxies tool calls to a running `mold serve` instance.
+
+```bash
+mold mcp [--host URL]
+```
+
+| Flag           | Description                                           |
+| -------------- | ----------------------------------------------------- |
+| `--host <URL>` | Mold server URL. Defaults to `MOLD_HOST` or localhost |
+
+Available MCP tools:
+
+| Tool             | Description                                      |
+| ---------------- | ------------------------------------------------ |
+| `generate_image` | Generate one PNG or JPEG image                   |
+| `list_models`    | List models visible to the running mold server   |
+| `server_status`  | Show server health, queue, loaded model, and GPU |
+
+Example LM Studio `mcp.json` entry:
+
+```json
+{
+  "mcpServers": {
+    "mold": {
+      "command": "/absolute/path/to/mold",
+      "args": ["mcp", "--host", "http://localhost:7680"]
+    }
+  }
+}
+```
+
 ## `mold pull`
 
 Download a model from HuggingFace.

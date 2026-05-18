@@ -230,6 +230,22 @@ describe("useGenerateForm", () => {
     expect(form.supportsScheduler("sdxl")).toBe(true);
     expect(form.supportsScheduler("sd15")).toBe(true);
     expect(form.supportsScheduler("flux")).toBe(false);
+
+    // LoRA picker visibility — mirrors the server-side validation gate.
+    for (const family of [
+      "flux",
+      "flux2",
+      "ltx2",
+      "sd15",
+      "sd3",
+      "sdxl",
+      "qwen-image",
+      "qwen-image-edit",
+      "z-image",
+    ]) {
+      expect(form.supportsLora(family)).toBe(true);
+    }
+    expect(form.supportsLora("wuerstchen")).toBe(false);
   });
 
   it("reset() restores defaults", () => {

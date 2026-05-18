@@ -4,9 +4,10 @@ use anyhow::{bail, Context, Result};
 use candle_core::{DType, Tensor};
 use candle_nn::VarBuilder as DenseVarBuilder;
 use candle_transformers::{
-    models::z_image::{Config, ZImageTransformer2DModel},
-    quantized_var_builder::VarBuilder as QuantizedVarBuilder,
+    models::z_image::Config, quantized_var_builder::VarBuilder as QuantizedVarBuilder,
 };
+
+use super::transformer::MoldZImageTransformer2DModel;
 
 fn dequantized_tensor(vb: &QuantizedVarBuilder, name: &str, dtype: DType) -> Result<Tensor> {
     let tensor = vb
@@ -336,10 +337,10 @@ pub(crate) fn load_gguf_dense_transformer(
     cfg: &Config,
     dtype: DType,
     vb: QuantizedVarBuilder,
-) -> Result<ZImageTransformer2DModel> {
+) -> Result<MoldZImageTransformer2DModel> {
     let (tensors, device) = dequantize_gguf_dense_tensors(cfg, dtype, &vb)?;
     let vb = DenseVarBuilder::from_tensors(tensors, dtype, &device);
-    ZImageTransformer2DModel::new(cfg, vb)
+    MoldZImageTransformer2DModel::new(cfg, vb)
         .context("failed to build dense Z-Image transformer from GGUF weights")
 }
 

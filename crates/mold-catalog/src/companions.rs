@@ -135,18 +135,22 @@ pub static COMPANIONS: &[Companion] = &[
         files: &["vae/diffusion_pytorch_model.safetensors"],
         size_bytes: 168_120_878,
     },
-    // Reserved canonical for Z-Image. The exact text-encoder repo is
-    // finalized when phase-4 single-file loader lands; the canonical
-    // NAME is committed now so phase-1 entries can reference it without
-    // rewrites.
+    // Z-Image shared runtime assets (Qwen3 BF16 shards + tokenizer + VAE).
+    // Civitai single-file primaries are transformer-only.
     Companion {
         canonical_name: "z-image-te",
         kind: Kind::TextEncoder,
         family_scope: &[Family::ZImage],
         source: Source::Hf,
         repo: "Tongyi-MAI/Z-Image-Turbo",
-        files: &["text_encoder/*"],
-        size_bytes: 4_400_000_000,
+        files: &[
+            "text_encoder/model-00001-of-00003.safetensors",
+            "text_encoder/model-00002-of-00003.safetensors",
+            "text_encoder/model-00003-of-00003.safetensors",
+            "tokenizer/tokenizer.json",
+            "vae/diffusion_pytorch_model.safetensors",
+        ],
+        size_bytes: 8_224_071_556,
     },
     // VAE for LTX-Video single-file catalog entries. Civitai LTX-Video
     // fine-tunes are transformer-only, so the VAE must be pulled

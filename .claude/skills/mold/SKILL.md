@@ -20,6 +20,7 @@ mold run "watercolor" --image photo.png --strength 0.7  # img2img
 mold run qwen-image-edit-2511:q4 "make the chair red leather" --image chair.png --image swatch.png --qwen2-variant q4
 mold run qwen-image:q2 "a poster" --qwen2-variant q6    # Qwen-Image quantized text encoder
 mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # LoRA adapter
+mold mcp --host http://localhost:7680                # Stdio MCP bridge for LM Studio
 ```
 
 ## How to Use This Skill
@@ -27,7 +28,7 @@ mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # L
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `mcp`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images
@@ -438,7 +439,10 @@ hit the upstream APIs directly for the recipe. Phase-1 supports HF
 separated-bundling entries; phases 2 (SD1.5/SDXL), 3 (FLUX 1.x), 4
 (Z-Image), and 5 (LTX-Video / LTX-2 / LTX-2.3) single-file Civitai
 checkpoints are supported — downloaded with companions and runnable
-via `mold run cv:<id>`. Flux.2 fine-tunes pull `flux2-vae` (168 MB
+via `mold run cv:<id>`. Z-Image fine-tunes pull `z-image-te`
+(Tongyi-MAI Qwen3 shards + tokenizer + fallback VAE; satisfied by an existing
+`z-image-turbo` install) and use recipe-provided text-encoder files
+when the Civitai version publishes them. Flux.2 fine-tunes pull `flux2-vae` (168 MB
 Klein VAE, ungated) and either `flux2-te` (Qwen3-4B, ungated, for
 `sub_family=klein-4b`) or `flux2-te-9b` (Qwen3-8B, **HF_TOKEN required**,
 for `klein-9b` / `flux2-d`). Phase-5 LTX-Video entries pull

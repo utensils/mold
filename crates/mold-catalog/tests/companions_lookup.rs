@@ -128,10 +128,13 @@ fn every_canonical_name_resolves() {
 
 #[test]
 fn z_image_te_canonical_is_committed() {
-    // The exact text-encoder repo for Z-Image phase-4 is finalized when
-    // single-file loaders land, but the canonical NAME is committed now
-    // so phase-1 entries can reference it without rewrites.
     let c = companion_by_name("z-image-te").expect("z-image-te");
     assert_eq!(c.kind, Kind::TextEncoder);
     assert!(c.family_scope.contains(&Family::ZImage));
+    assert_eq!(c.repo, "Tongyi-MAI/Z-Image-Turbo");
+    assert!(c
+        .files
+        .contains(&"text_encoder/model-00001-of-00003.safetensors"));
+    assert!(c.files.contains(&"tokenizer/tokenizer.json"));
+    assert!(c.files.contains(&"vae/diffusion_pytorch_model.safetensors"));
 }

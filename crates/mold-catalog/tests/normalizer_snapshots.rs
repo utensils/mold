@@ -1,4 +1,6 @@
-use mold_catalog::entry::{Bundling, CatalogEntry, FamilyRole, FileFormat, Kind, Modality, Source};
+use mold_catalog::entry::{
+    Bundling, CatalogEntry, FamilyRole, FileFormat, Kind, Modality, RecipeFileRole, Source,
+};
 use mold_catalog::families::Family;
 use mold_catalog::normalizer::{from_civitai, from_hf, CivitaiItem, HfDetail, HfTreeEntry};
 
@@ -54,6 +56,72 @@ fn civitai_juggernaut_normalizes_as_sdxl_single_file() {
         Some("ABC123")
     );
     assert!(entry.thumbnail_url.as_deref().is_some());
+}
+
+#[test]
+fn civitai_zimage_multifile_version_picks_model_file_not_text_encoder() {
+    // cv:2442439 lists Text Encoder, VAE, then Model. The primary recipe
+    // must choose the Model file; otherwise mold tries to load Qwen3 text
+    // encoder weights as the Z-Image transformer and fails on t_embedder.
+    let json = r#"{
+        "id": 2442000,
+        "name": "Z Image Turbo",
+        "type": "Checkpoint",
+        "nsfw": false,
+        "creator": { "username": "z" },
+        "stats": { "downloadCount": 10, "favoriteCount": 0 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 2442439,
+            "name": "Turbo",
+            "baseModel": "ZImageTurbo",
+            "baseModelType": "Standard",
+            "files": [
+                { "id": 1, "name": "zImageTurbo_turbo_txt.safetensors",
+                  "type": "Text Encoder", "sizeKB": 7856427.78125, "downloadCount": 0,
+                  "metadata": { "format": "SafeTensor" },
+                  "downloadUrl": "https://civitai.example/txt", "hashes": {} },
+                { "id": 2, "name": "ae_zimgturbo.safetensors",
+                  "type": "VAE", "sizeKB": 327445.69140625, "downloadCount": 0,
+                  "metadata": { "format": "SafeTensor", "fp": "bf16" },
+                  "downloadUrl": "https://civitai.example/vae", "hashes": {} },
+                { "id": 3, "name": "zImageTurbo_turbo.safetensors",
+                  "type": "Model", "sizeKB": 12021353.90625, "downloadCount": 0,
+                  "metadata": { "format": "SafeTensor", "fp": "bf16", "size": "full" },
+                  "downloadUrl": "https://civitai.example/model", "hashes": { "SHA256": "ABC" } }
+            ],
+            "images": []
+        }]
+    }"#;
+    let item: CivitaiItem = serde_json::from_str(json).unwrap();
+    let entry = from_civitai(item).expect("mapped");
+
+    assert_eq!(entry.family, Family::ZImage);
+    assert_eq!(entry.download_recipe.files.len(), 2);
+    assert_eq!(
+        entry.download_recipe.files[0].url,
+        "https://civitai.example/model"
+    );
+    assert_eq!(
+        entry.download_recipe.files[0].dest,
+        "{family}/civitai/2442439/zImageTurbo_turbo.safetensors"
+    );
+    assert_eq!(
+        entry.download_recipe.files[0].sha256.as_deref(),
+        Some("ABC")
+    );
+    assert_eq!(
+        entry.download_recipe.files[1].url,
+        "https://civitai.example/txt"
+    );
+    assert_eq!(
+        entry.download_recipe.files[1].dest,
+        "{family}/civitai/2442439/zImageTurbo_turbo_txt.safetensors"
+    );
+    assert_eq!(
+        entry.download_recipe.files[1].role,
+        Some(RecipeFileRole::TextEncoder)
+    );
 }
 
 #[test]

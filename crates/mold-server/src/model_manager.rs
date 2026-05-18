@@ -608,12 +608,17 @@ fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, pat
             cfg.t5_tokenizer = paths.t5_tokenizer.as_ref().and_then(to_str);
         }
         "z-image-te" | "flux2-te" | "flux2-te-9b" => {
-            cfg.text_encoder_files = paths
-                .text_encoder_files
-                .iter()
-                .filter_map(to_str)
-                .collect::<Vec<_>>()
-                .into();
+            if companion == "z-image-te" && cfg.vae.is_none() {
+                cfg.vae = to_str(&paths.vae);
+            }
+            if companion != "z-image-te" || cfg.text_encoder_files.is_none() {
+                cfg.text_encoder_files = paths
+                    .text_encoder_files
+                    .iter()
+                    .filter_map(to_str)
+                    .collect::<Vec<_>>()
+                    .into();
+            }
             cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_str);
         }
         "ltx2-te" => {
@@ -757,6 +762,27 @@ pub(crate) fn resolve_intent_to_paths(
     };
     if probe_says_bundled == Some(true) {
         cfg.vae = Some(primary_str);
+    }
+    if let Some(vae_recipe_path) = &intent.vae_recipe_path {
+        cfg.vae = Some(
+            vae_recipe_path
+                .to_str()
+                .expect("synthesize_intent guarantees UTF-8 paths")
+                .to_string(),
+        );
+    }
+    if !intent.text_encoder_recipe_paths.is_empty() {
+        cfg.text_encoder_files = Some(
+            intent
+                .text_encoder_recipe_paths
+                .iter()
+                .map(|path| {
+                    path.to_str()
+                        .expect("synthesize_intent guarantees UTF-8 paths")
+                        .to_string()
+                })
+                .collect(),
+        );
     }
     // probe_says_bundled == Some(false) ⇒ leave cfg.vae None for the
     // VAE-companion arm in copy_catalog_companion to fill. None case
@@ -2409,6 +2435,7 @@ mod tests {
                     dest: format!("{{family}}/civitai/{version_id}/{file_name}"),
                     sha256: Some("DEAD".repeat(16)),
                     size_bytes: Some(12_000_000_000),
+                    role: None,
                 }],
                 needs_token: Some(TokenKind::Civitai),
             },
@@ -2734,6 +2761,134 @@ mod tests {
         let vae_path = models_dir.join("flux-vae/ae.safetensors");
         assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
         assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
+
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_intent_uses_zimage_recipe_text_encoder_and_shared_companion_vae() {
+        use mold_catalog::entry::{
+            Bundling, CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat,
+            LicenseFlags, Modality, RecipeFile, RecipeFileRole, Source, TokenKind,
+        };
+        use mold_catalog::families::Family;
+
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let te_dir = models_dir.join("z-image-te");
+        config.models.insert(
+            "z-image-te".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(
+                    te_dir
+                        .join("text_encoder/model-00001-of-00003.safetensors")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                vae: Some(
+                    te_dir
+                        .join("vae/diffusion_pytorch_model.safetensors")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                text_encoder_files: Some(vec![
+                    te_dir
+                        .join("text_encoder/model-00001-of-00003.safetensors")
+                        .to_string_lossy()
+                        .into_owned(),
+                    te_dir
+                        .join("text_encoder/model-00002-of-00003.safetensors")
+                        .to_string_lossy()
+                        .into_owned(),
+                    te_dir
+                        .join("text_encoder/model-00003-of-00003.safetensors")
+                        .to_string_lossy()
+                        .into_owned(),
+                ]),
+                text_tokenizer: Some(
+                    te_dir
+                        .join("tokenizer/tokenizer.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
+        );
+        let entry = CatalogEntry {
+            id: CatalogId::from("cv:2442439"),
+            source: Source::Civitai,
+            source_id: "2442439".into(),
+            name: "Z Image Turbo".into(),
+            author: Some("z".into()),
+            family: Family::ZImage,
+            family_role: FamilyRole::Finetune,
+            sub_family: None,
+            modality: Modality::Image,
+            kind: mold_catalog::entry::Kind::Checkpoint,
+            file_format: FileFormat::Safetensors,
+            bundling: Bundling::SingleFile,
+            size_bytes: Some(12_021_353_906),
+            download_count: 0,
+            rating: None,
+            likes: 0,
+            nsfw: false,
+            thumbnail_url: None,
+            description: None,
+            license: None,
+            license_flags: LicenseFlags::default(),
+            tags: vec![],
+            companions: vec!["z-image-te".into()],
+            download_recipe: DownloadRecipe {
+                files: vec![
+                    RecipeFile {
+                        url: "https://civitai.example/model".into(),
+                        dest: "{family}/civitai/2442439/zImageTurbo_turbo.safetensors".into(),
+                        sha256: None,
+                        size_bytes: Some(12_021_353_906),
+                        role: None,
+                    },
+                    RecipeFile {
+                        url: "https://civitai.example/text".into(),
+                        dest: "{family}/civitai/2442439/zImageTurbo_turbo_txt.safetensors".into(),
+                        sha256: None,
+                        size_bytes: Some(8_044_982_048),
+                        role: Some(RecipeFileRole::TextEncoder),
+                    },
+                ],
+                needs_token: Some(TokenKind::Civitai),
+            },
+            engine_phase: 1,
+            created_at: None,
+            updated_at: None,
+            added_at: 0,
+            trained_words: vec![],
+        };
+
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let cfg = resolve_intent_to_paths("cv:2442439", &intent, &config).unwrap();
+
+        let recipe_text_encoder =
+            models_dir.join("cv-2442439/z-image/civitai/2442439/zImageTurbo_turbo_txt.safetensors");
+        let shared_vae = te_dir.join("vae/diffusion_pytorch_model.safetensors");
+        assert_eq!(cfg.vae.as_deref(), shared_vae.to_str());
+        let expected_text_encoder_files = vec![recipe_text_encoder.to_string_lossy().into_owned()];
+        assert_eq!(
+            cfg.text_encoder_files.as_deref(),
+            Some(expected_text_encoder_files.as_slice())
+        );
 
         unsafe {
             match _saved {

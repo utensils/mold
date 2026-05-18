@@ -52,3 +52,9 @@ mold run z-image-turbo:q8 \
 Z-Image uses a Qwen3 text encoder (BF16 or GGUF with auto-fallback). The
 quantized transformer is implemented directly in mold (not upstream candle) due
 to GGUF tensor naming differences.
+
+Catalog `cv:*` Z-Image checkpoints use the hidden `z-image-te` companion for
+the same Qwen3 text encoder shards, tokenizer, and VAE. When the Civitai
+version publishes its own text-encoder file, that per-version file is downloaded
+and used instead of the shared encoder shards. An existing `z-image-turbo`
+install satisfies the shared files.

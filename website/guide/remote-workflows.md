@@ -38,6 +38,34 @@ Remote workflows pair well with both:
 
 In both cases, the key variable is still `MOLD_HOST`.
 
+## LM Studio MCP
+
+`mold mcp` starts a stdio MCP server that exposes mold generation tools to
+LM Studio and other MCP hosts. It talks to the normal `mold serve` HTTP API, so
+keep the server running separately.
+
+```bash
+mold serve --bind 127.0.0.1 --port 7680
+```
+
+In LM Studio, open the Program tab, choose **Install → Edit mcp.json**, and add
+an entry like this:
+
+```json
+{
+  "mcpServers": {
+    "mold": {
+      "command": "/absolute/path/to/mold",
+      "args": ["mcp", "--host", "http://localhost:7680"]
+    }
+  }
+}
+```
+
+The MCP server exposes `generate_image`, `list_models`, and `server_status`.
+Set `MOLD_API_KEY` in the MCP process environment if your mold server requires
+one.
+
 ## Remote Pulls vs Local Pulls
 
 Behavior depends on where the command runs:

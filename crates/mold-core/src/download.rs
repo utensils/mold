@@ -2817,6 +2817,16 @@ mod tests {
     }
 
     #[test]
+    fn missing_companions_resolves_zimage_text_encoder() {
+        let models_dir = recipe_tmp_dir("companion_zimage_te");
+        let json = r#"["z-image-te"]"#;
+        let missing = missing_companions_from_json(Some(json), &models_dir);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "z-image-te");
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
     fn missing_companions_skips_present_returns_only_missing() {
         let models_dir = recipe_tmp_dir("companion_skip_present");
         stage_complete_companion(&models_dir, "clip-l");
