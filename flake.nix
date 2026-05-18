@@ -215,8 +215,9 @@
             #                      that hang inside the Nix sandbox (issue #286).
             #
             # Skip the lifecycle-scripts phase (second bun install without
-            # --ignore-scripts). esbuild and rollup ship their Darwin native binaries
-            # as explicit packages already in bunDeps; their postinstall download
+            # --ignore-scripts). All native-binary packages (esbuild, rollup,
+            # @tailwindcss/oxide, lightningcss) ship their platform-specific tarballs
+            # as explicit entries in bunDeps already; their postinstall download
             # scripts would attempt network access the sandbox blocks.
             dontRunLifecycleScripts = true;
             buildPhase = ''
