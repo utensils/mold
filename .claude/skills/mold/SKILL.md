@@ -23,6 +23,9 @@ mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # L
 mold mcp --host http://localhost:7680                # Stdio MCP bridge for LM Studio
 ```
 
+`mold mcp` exposes synchronous image generation, async generation with status
+polling, gallery search/fetch, model listing, and server status tools.
+
 ## How to Use This Skill
 
 Parse `$ARGUMENTS` to determine the action:
