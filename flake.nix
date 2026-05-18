@@ -93,7 +93,7 @@
           commonArgs = {
             inherit src;
             pname = "mold";
-            version = "0.9.0";
+            version = "0.10.0";
             strictDeps = true;
 
             # Pass git metadata so build.rs can embed it (no .git in Nix sandbox).
@@ -199,18 +199,26 @@
           # `mold` binary by `rust-embed` (see `crates/mold-server/build.rs`).
           mold-web = pkgs.stdenv.mkDerivation {
             pname = "mold-web";
-            version = "0.9.0";
+            version = "0.10.0";
             src = ./web;
             nativeBuildInputs = [ pkgs.bun2nix.hook ];
             bunDeps = pkgs.bun2nix.fetchBunDeps {
               bunNix = ./web/bun.nix;
             };
-            # --linker=isolated gives each package its own node_modules, which
-            # sidesteps bun's AccessDenied failures when the hoisted linker tries
-            # to create nested `@vue/compiler-*/node_modules/estree-walker`
-            # directories during a sandboxed Darwin build (Vue pulls v2 while
-            # Vitest pulls v3, so the tree can't be flattened).
-            bunInstallFlags = [ "--linker=isolated" ];
+            # Do NOT set bunInstallFlags here. The bun2nix hook defaults to
+            # "--linker=isolated --backend=symlink", which is exactly what we need:
+            #   --linker=isolated  avoids AccessDenied when the hoisted linker tries
+            #                      to create nested estree-walker dirs (Vue v2 vs v3).
+            #   --backend=symlink  makes bun resolve packages from BUN_INSTALL_CACHE_DIR
+            #                      via symlinks; without it bun ignores the pre-fetched
+            #                      cache on aarch64-darwin and makes live npm fetches
+            #                      that hang inside the Nix sandbox (issue #286).
+            #
+            # Skip the lifecycle-scripts phase (second bun install without
+            # --ignore-scripts). esbuild and rollup ship their Darwin native binaries
+            # as explicit packages already in bunDeps; their postinstall download
+            # scripts would attempt network access the sandbox blocks.
+            dontRunLifecycleScripts = true;
             buildPhase = ''
               runHook preBuild
               bun run build
