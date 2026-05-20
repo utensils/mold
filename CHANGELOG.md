@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`.envrc` now sources `nix-direnv` 3.1.1 for cached devshell loads.** Replaces the stdlib `use flake` (which re-evaluates the flake on every `cd` into the project) with the nix-direnv variant that hashes `flake.nix` + `flake.lock` and caches the resolved environment under `.direnv/`. Warm-path shell entry on this repo drops from ~10.6 s to ~0.3 s (35× faster on macOS). Cold path (first entry, or after `flake.lock` changes) is unchanged. The `.envrc` follows upstream's self-bootstrap pattern: `has nix_direnv_version || source_url …` — contributors who already have nix-direnv installed via home-manager (`programs.direnv.nix-direnv.enable = true;`) skip the network fetch; everyone else gets it pinned by SRI hash on first entry and cached under `~/.config/direnv/`.
+
+### Added
+
+- **AUR packaging — `mold-ai-bin`, `mold-ai`, `mold-ai-git` published to the Arch User Repository on every tagged release.** Three PKGBUILDs live in `packaging/aur/`; the `mold-ai-bin` package repackages the upstream `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` (RTX 40-series / Ada Lovelace) for the fast-path install, `mold-ai` builds from the release tarball with `--features cuda,preview,expand,tui,webp,mp4,metrics` and honours `CUDA_COMPUTE_CAP` (set to `120` for RTX 50-series / Blackwell), and `mold-ai-git` tracks `main` HEAD. All three declare `conflicts=('mold')` because the binary path `/usr/bin/mold` collides with the well-known [extra/mold](https://archlinux.org/packages/extra/x86_64/mold/) linker by rui314 — pacman refuses to install both simultaneously. A new `publish-aur` matrix job in `.github/workflows/release.yml` (gated on `AUR_SSH_PRIVATE_KEY`) fires after `release-version` on `v*` tag pushes, runs `scripts/aur/update-pkgbuild.sh` to rewrite `pkgver` + `sha256sums`, then uses `KSXGitHub/github-actions-deploy-aur@v2.7.2` to regenerate `.SRCINFO` in an Arch container and push to `ssh://aur@aur.archlinux.org/<pkgname>.git`. `mold-ai-git` is hand-pushed only since its PKGBUILD only changes when the build recipe changes. `mold update` now classifies `/usr/bin/mold` and `/usr/sbin/mold` (covers Arch's usrmerge) as AUR-managed and exits cleanly with a `paru -Syu mold-ai-bin` hint instead of attempting an in-place swap of a pacman-owned file. A `packaging/aur/test/Dockerfile` + `scripts/aur/test-in-docker.sh` provide a Rosetta-friendly smoke-test loop for macOS contributors. (Closes: AUR distribution gap.)
+
+## [0.10.0] - 2026-05-15
+
+*LoRA across every supported family, live HF + Civitai catalog, multi-prompt chain v2 scripts, CFG++ sampler, DB-backed user settings, TUI redesign, and a heavy round of queue + memory-management hardening.*
+
 ### Added
 
 - **`mold mcp` stdio bridge for LM Studio and other MCP hosts.** The new CLI subcommand speaks newline-delimited JSON-RPC over stdin/stdout and proxies tools to the existing `mold serve` HTTP API via `MOLD_HOST` / `--host`. It exposes `generate_image` (single PNG/JPEG result returned as MCP image content), `generate_image_async` + `generation_status` (short-returning job flow with SSE progress and completed image retrieval, avoiding host-side long tool-call timeouts), `list_gallery` / `get_gallery_image` (search/filter/sort saved gallery items and fetch the latest or named image), `list_models`, and `server_status`, with docs showing the LM Studio `mcp.json` entry.

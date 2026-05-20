@@ -36,6 +36,7 @@ Inside `nix develop` the devshell exposes shortcuts (`build`, `build-release`, `
 ```
 crates/
 ├── mold-core/        Shared types, HTTP client, config, manifest, validation, download
+├── mold-catalog/     Live HF + Civitai model-discovery proxy (5-min in-proc cache, no bulk-scrape DB). Depended on by mold-cli + mold-server only — mold-discord and mold-tui MUST NOT transitively depend on it.
 ├── mold-db/          SQLite (rusqlite, bundled, WAL) — gallery, settings, model_prefs, prompt_history
 ├── mold-inference/   Candle engines per family (FLUX, SD1.5/XL/3, Z-Image, Flux.2, Qwen-Image, Wuerstchen, LTX-Video, LTX-2)
 ├── mold-server/      Axum HTTP server (consumed as lib by mold-cli)
@@ -50,6 +51,7 @@ crates/
 |---|---|
 | `mold-cli/` | `mold-ai` (binary: `mold`) |
 | `mold-core/` | `mold-ai-core` |
+| `mold-catalog/` | `mold-ai-catalog` |
 | `mold-db/` | `mold-ai-db` |
 | `mold-inference/` | `mold-ai-inference` |
 | `mold-server/` | `mold-ai-server` |
@@ -128,6 +130,7 @@ SPA in `web/` (Vue 3 + Vite 7 + Tailwind v4). Embedded into the `mold` binary at
 - **TDD.** Every bug fix and feature: failing test first, then code. Prefer unit tests on exported contracts (key→action maps, focus transitions, serialization round-trips, layout invariants) over E2E. Layout constants need a test that asserts the inner area fits the rendered row count — otherwise they drift.
 - **Keep in sync when models / CLI flags / env vars / endpoints change:** `CHANGELOG.md` (Keep-a-Changelog format, under `[Unreleased]`), `.claude/skills/mold/SKILL.md` (used by other agents), `website/` (VitePress docs).
 - **Don't break centered TUI gallery thumbnails.** `crates/mold-tui/src/ui/gallery.rs` uses a fixed-protocol thumbnail path. Do not revert the grid to plain `StatefulImage` for Kitty/Sixel/iTerm2 — it reintroduces top-left-padded thumbnails instead of centered aspect-correct ones. Keep the regression tests passing.
+- **AUR PKGBUILDs auto-publish on `v*` tags.** `packaging/aur/{mold-ai-bin, mold-ai}/PKGBUILD` are the source of truth; CI rewrites their `pkgver` + `sha256sums` in the `publish-aur` job and pushes to the AUR git repos. The `-bin` package tracks the `cuda-sm89` release tarball; Blackwell (sm_120) users build the source PKGBUILD with `CUDA_COMPUTE_CAP=120`. `mold-ai-git` is hand-pushed when the build recipe changes. AUR packages declare `conflicts=('mold')` because they collide with the rui314 linker at `/usr/bin/mold`. The in-tree `mold update` correctly bows out on `/usr/bin/mold` and `/usr/sbin/mold` Linux installs.
 
 ## Key design decisions
 

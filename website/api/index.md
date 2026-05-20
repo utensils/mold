@@ -4,29 +4,32 @@ When running `mold serve`, you get a REST API for remote image generation.
 
 ## Endpoints
 
-| Method   | Path                           | Description                          |
-| -------- | ------------------------------ | ------------------------------------ |
-| `POST`   | `/api/generate`                | Generate images from prompt          |
-| `POST`   | `/api/generate/stream`         | Generate with SSE progress streaming |
-| `POST`   | `/api/generate/chain`          | Chained video generation (LTX-2)     |
-| `POST`   | `/api/generate/chain/stream`   | Chained video with SSE progress      |
-| `POST`   | `/api/expand`                  | Expand a prompt using LLM            |
-| `GET`    | `/api/models`                  | List available models                |
-| `POST`   | `/api/models/load`             | Load/swap the active model           |
-| `POST`   | `/api/models/pull`             | Pull/download a model                |
-| `DELETE` | `/api/models/unload`           | Unload model to free GPU memory      |
-| `GET`    | `/api/gallery`                 | List saved images                    |
-| `GET`    | `/api/gallery/image/:name`     | Fetch a saved image                  |
-| `DELETE` | `/api/gallery/image/:name`     | Delete a saved image                 |
-| `GET`    | `/api/gallery/thumbnail/:name` | Fetch a cached thumbnail             |
-| `POST`   | `/api/upscale`                 | Upscale image with Real-ESRGAN       |
-| `POST`   | `/api/upscale/stream`          | Upscale with SSE tile progress       |
-| `POST`   | `/api/shutdown`                | Trigger graceful server shutdown     |
-| `GET`    | `/api/status`                  | Server health + status               |
-| `GET`    | `/health`                      | Simple 200 OK health check           |
-| `GET`    | `/api/openapi.json`            | OpenAPI spec                         |
-| `GET`    | `/api/docs`                    | Interactive API docs (Scalar)        |
-| `GET`    | `/metrics`                     | Prometheus metrics (feature-gated)   |
+| Method   | Path                             | Description                                                                                                       |
+| -------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `POST`   | `/api/generate`                  | Generate images from prompt                                                                                       |
+| `POST`   | `/api/generate/stream`           | Generate with SSE progress streaming                                                                              |
+| `POST`   | `/api/generate/chain`            | Chained video generation (LTX-2)                                                                                  |
+| `POST`   | `/api/generate/chain/stream`     | Chained video with SSE progress                                                                                   |
+| `POST`   | `/api/expand`                    | Expand a prompt using LLM                                                                                         |
+| `GET`    | `/api/models`                    | List available models                                                                                             |
+| `POST`   | `/api/models/load`               | Load/swap the active model                                                                                        |
+| `POST`   | `/api/models/pull`               | Pull/download a model                                                                                             |
+| `DELETE` | `/api/models/unload`             | Unload model to free GPU memory                                                                                   |
+| `GET`    | `/api/gallery`                   | List saved images                                                                                                 |
+| `GET`    | `/api/gallery/image/:name`       | Fetch a saved image                                                                                               |
+| `DELETE` | `/api/gallery/image/:name`       | Delete a saved image                                                                                              |
+| `GET`    | `/api/gallery/thumbnail/:name`   | Fetch a cached thumbnail                                                                                          |
+| `POST`   | `/api/upscale`                   | Upscale image with Real-ESRGAN                                                                                    |
+| `POST`   | `/api/upscale/stream`            | Upscale with SSE tile progress                                                                                    |
+| `GET`    | `/api/queue`                     | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
+| `GET`    | `/api/capabilities`              | Feature capabilities (gallery delete, chain limits, …)                                                            |
+| `GET`    | `/api/capabilities/chain-limits` | Chain-generation request limits                                                                                   |
+| `POST`   | `/api/shutdown`                  | Trigger graceful server shutdown                                                                                  |
+| `GET`    | `/api/status`                    | Server health + status                                                                                            |
+| `GET`    | `/health`                        | Simple 200 OK health check                                                                                        |
+| `GET`    | `/api/openapi.json`              | OpenAPI spec                                                                                                      |
+| `GET`    | `/api/docs`                      | Interactive API docs (Scalar)                                                                                     |
+| `GET`    | `/metrics`                       | Prometheus metrics (feature-gated)                                                                                |
 
 ## Authentication
 

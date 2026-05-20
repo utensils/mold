@@ -21,7 +21,7 @@ All options are passed as environment variables:
 curl -fsSL ... | MOLD_INSTALL_DIR=/usr/local/bin sh
 
 # Pin to a specific release tag (default: latest)
-curl -fsSL ... | MOLD_VERSION=v0.9.0 sh
+curl -fsSL ... | MOLD_VERSION=v0.10.0 sh
 
 # Force a GPU architecture (default: auto-detect on Linux)
 curl -fsSL ... | MOLD_CUDA_ARCH=sm120 sh   # Blackwell (RTX 50-series)
@@ -51,6 +51,46 @@ Or re-run the install script:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 ```
+
+## Arch Linux / AUR
+
+Three packages on the [AUR](https://aur.archlinux.org/):
+
+```bash
+paru -S mold-ai-bin     # Prebuilt binary, CUDA sm_89 (RTX 40-series). Fastest.
+paru -S mold-ai         # Builds from source — for Blackwell, prefix CUDA_COMPUTE_CAP=120
+paru -S mold-ai-git     # Builds from main HEAD
+```
+
+Substitute `yay`, `pikaur`, or any other AUR helper as appropriate. With
+vanilla `makepkg`:
+
+```bash
+git clone https://aur.archlinux.org/mold-ai-bin.git
+cd mold-ai-bin
+makepkg -si
+```
+
+**Conflict with `extra/mold`**: All three packages declare `conflicts=('mold')`
+because they install `/usr/bin/mold` — the same path used by the
+[rui314 linker](https://archlinux.org/packages/extra/x86_64/mold/). You cannot
+have both installed simultaneously. If you need the linker for your build
+toolchain, install mold via Nix or the one-line installer (which targets
+`~/.local/bin`) instead.
+
+**Blackwell (RTX 50-series)**: The `mold-ai-bin` package ships the sm_89 (Ada)
+tarball. For sm_120 (Blackwell) use the source PKGBUILD with an explicit
+compute capability:
+
+```bash
+CUDA_COMPUTE_CAP=120 paru -S mold-ai
+```
+
+To upgrade: `paru -Syu mold-ai-bin` (or `mold-ai` / `mold-ai-git`). `mold update`
+will detect a pacman-managed install and direct you here instead of attempting
+to overwrite the binary.
+
+To uninstall: `sudo pacman -R mold-ai-bin` (or whichever package you installed).
 
 ## Nix
 
