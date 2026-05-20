@@ -5460,12 +5460,13 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 11 Companion = 108
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 12 Companion = 109
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
-        // catalog bridge (single-file Civitai Flux.2 fine-tunes); +ltx2-te
-        // for the catalog bridge (single-file Civitai LTX-2 / LTX-2.3
-        // fine-tunes — Gemma 3 12B text encoder).
-        assert_eq!(known_manifests().len(), 108);
+        // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
+        // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
+        // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
+        // Gemma 3 12B text encoder).
+        assert_eq!(known_manifests().len(), 109);
     }
 
     #[test]

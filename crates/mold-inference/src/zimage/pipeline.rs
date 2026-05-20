@@ -2080,7 +2080,9 @@ mod tests {
 
     #[test]
     fn eager_vae_weight_load_threshold_is_below_decode_workspace_threshold() {
-        assert!(VAE_WEIGHT_LOAD_VRAM_THRESHOLD < VAE_DECODE_VRAM_THRESHOLD);
+        const {
+            assert!(VAE_WEIGHT_LOAD_VRAM_THRESHOLD < VAE_DECODE_VRAM_THRESHOLD);
+        }
         assert!(should_use_gpu(
             true,
             false,

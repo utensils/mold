@@ -177,15 +177,15 @@ mold mcp [--host URL]
 
 Available MCP tools:
 
-| Tool                   | Description                                                        |
-| ---------------------- | ------------------------------------------------------------------ |
-| `generate_image`       | Generate one PNG or JPEG image                                     |
-| `generate_image_async` | Start generation and return a job id immediately                   |
-| `generation_status`    | Poll async jobs and fetch completed image content                  |
-| `list_gallery`         | Search, filter, and sort saved gallery items                       |
-| `get_gallery_image`    | Fetch a gallery image by filename or the latest matching item      |
-| `list_models`          | List models visible to the running mold server                     |
-| `server_status`        | Show server health, queue, loaded model, and GPU                   |
+| Tool                   | Description                                                   |
+| ---------------------- | ------------------------------------------------------------- |
+| `generate_image`       | Generate one PNG or JPEG image                                |
+| `generate_image_async` | Start generation and return a job id immediately              |
+| `generation_status`    | Poll async jobs and fetch completed image content             |
+| `list_gallery`         | Search, filter, and sort saved gallery items                  |
+| `get_gallery_image`    | Fetch a gallery image by filename or the latest matching item |
+| `list_models`          | List models visible to the running mold server                |
+| `server_status`        | Show server health, queue, loaded model, and GPU              |
 
 Use `generate_image_async` in hosts with short tool-call timeouts. It uses the
 server's streaming endpoint for progress, then `generation_status` returns the
