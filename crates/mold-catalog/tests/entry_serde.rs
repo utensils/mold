@@ -39,6 +39,7 @@ fn sample_entry() -> CatalogEntry {
                 dest: "{family}/{author}/{name}.safetensors".into(),
                 sha256: Some("deadbeef".into()),
                 size_bytes: Some(23_800_000_000),
+                role: None,
             }],
             needs_token: Some(TokenKind::Hf),
         },

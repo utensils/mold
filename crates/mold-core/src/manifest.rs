@@ -304,6 +304,7 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
                 "clip-g" | "sdxl-vae" => "sdxl",
                 "sd-vae-ft-mse" => "sd15",
                 "ltx-video-vae" => "ltx-video",
+                "z-image-te" => "z-image",
                 "flux2-vae" | "flux2-te" | "flux2-te-9b" => "flux2",
                 "ltx2-te" => "ltx2",
                 _ => "companion",
@@ -4760,6 +4761,30 @@ fn companion_manifests() -> Vec<ModelManifest> {
             defaults: defaults.clone(),
             hidden: true,
         },
+        // Z-Image shared runtime assets — Qwen3 BF16 shards, tokenizer, and
+        // VAE used by single-file Civitai Z-Image checkpoints. The primary
+        // checkpoint is the transformer only; catalog resolution fills
+        // cfg.text_encoder_files / cfg.text_tokenizer / cfg.vae from this
+        // companion.
+        ModelManifest {
+            name: "z-image-te".to_string(),
+            family: "companion".to_string(),
+            description: "Z-Image Qwen3 text encoder + tokenizer companion (single-file Z-Image)"
+                .to_string(),
+            files: shared_zimage_files()
+                .into_iter()
+                .filter(|file| {
+                    matches!(
+                        file.component,
+                        ModelComponent::TextEncoder
+                            | ModelComponent::TextTokenizer
+                            | ModelComponent::Vae
+                    )
+                })
+                .collect(),
+            defaults: defaults.clone(),
+            hidden: true,
+        },
         // Gemma 3 12B text encoder + tokenizer companion for LTX-2 / LTX-2.3
         // single-file Civitai checkpoints. The combined LTX-2 .safetensors
         // bundles transformer + VAE only; the runtime (`ltx2/assets.rs`)
@@ -4963,7 +4988,11 @@ mod tests {
         // routing branch they take is is_model_specific_component, so they
         // don't exercise this path. Cover only companions with at least
         // one shared file.
-        let cases = [("t5-v1_1-xxl", "shared/flux"), ("clip-l", "shared/flux")];
+        let cases = [
+            ("t5-v1_1-xxl", "shared/flux"),
+            ("clip-l", "shared/flux"),
+            ("z-image-te", "shared/z-image"),
+        ];
         for (companion, expected_prefix) in cases {
             let manifest = find_manifest(companion)
                 .unwrap_or_else(|| panic!("companion manifest '{companion}' not registered"));
@@ -5006,6 +5035,37 @@ mod tests {
             has_tokenizer,
             "t5-v1_1-xxl companion must declare a T5Tokenizer file"
         );
+    }
+
+    #[test]
+    fn zimage_text_encoder_companion_includes_shards_and_tokenizer() {
+        // Regression: cv:* Z-Image loads declared a required `z-image-te`
+        // companion, but there was no synthetic manifest for the auto-pull
+        // and catalog resolution failed with "missing required component".
+        let manifest = find_manifest("z-image-te").unwrap();
+        let text_encoder_shards = manifest
+            .files
+            .iter()
+            .filter(|f| f.component == ModelComponent::TextEncoder)
+            .count();
+        let has_tokenizer = manifest
+            .files
+            .iter()
+            .any(|f| f.component == ModelComponent::TextTokenizer);
+        let has_vae = manifest
+            .files
+            .iter()
+            .any(|f| f.component == ModelComponent::Vae);
+
+        assert_eq!(
+            text_encoder_shards, 3,
+            "z-image-te must declare all three Qwen3 text encoder shards"
+        );
+        assert!(
+            has_tokenizer,
+            "z-image-te companion must declare the Qwen3 tokenizer"
+        );
+        assert!(has_vae, "z-image-te companion must declare the Z-Image VAE");
     }
 
     #[test]
@@ -5400,12 +5460,13 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 11 Companion = 108
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 12 Companion = 109
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
-        // catalog bridge (single-file Civitai Flux.2 fine-tunes); +ltx2-te
-        // for the catalog bridge (single-file Civitai LTX-2 / LTX-2.3
-        // fine-tunes — Gemma 3 12B text encoder).
-        assert_eq!(known_manifests().len(), 108);
+        // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
+        // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
+        // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
+        // Gemma 3 12B text encoder).
+        assert_eq!(known_manifests().len(), 109);
     }
 
     #[test]
@@ -6663,12 +6724,12 @@ mod tests {
     #[test]
     fn all_utility_models_identified_by_is_utility() {
         let utility_count = known_manifests().iter().filter(|m| m.is_utility()).count();
-        // Currently 13: 2 qwen3-expand variants + 11 catalog companions
+        // Currently 14: 2 qwen3-expand variants + 12 catalog companions
         // (clip-l, clip-g, sdxl-vae, sd-vae-ft-mse, t5-v1_1-xxl, flux-vae,
-        // ltx-video-vae, flux2-te, flux2-te-9b, flux2-vae, ltx2-te).
+        // ltx-video-vae, flux2-te, flux2-te-9b, flux2-vae, z-image-te, ltx2-te).
         assert_eq!(
-            utility_count, 13,
-            "expected exactly 13 utility models, got {utility_count}"
+            utility_count, 14,
+            "expected exactly 14 utility models, got {utility_count}"
         );
     }
 
@@ -6696,9 +6757,6 @@ mod tests {
 
     /// All canonical companion names from `mold_catalog::companions::COMPANIONS`
     /// that the `POST /api/catalog/:id/download` companion auto-pull resolves.
-    /// `z-image-te` is intentionally absent — phase 4 reserves the canonical
-    /// name but the synthetic manifest waits until the Z-Image single-file
-    /// loader lands.
     const COMPANION_NAMES: &[&str] = &[
         "clip-l",
         "clip-g",
@@ -6709,6 +6767,7 @@ mod tests {
         "flux2-te",
         "flux2-te-9b",
         "flux2-vae",
+        "z-image-te",
         "ltx-video-vae",
         "ltx2-te",
     ];

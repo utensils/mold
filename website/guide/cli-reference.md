@@ -162,6 +162,49 @@ transparently. `GET /api/status` returns a `gpus[]` array with per-worker state
 carries a `"gpu": <ordinal>` field so clients can see which card produced a
 given output.
 
+## `mold mcp`
+
+Start a stdio Model Context Protocol server for LM Studio and other MCP hosts.
+The MCP process proxies tool calls to a running `mold serve` instance.
+
+```bash
+mold mcp [--host URL]
+```
+
+| Flag           | Description                                           |
+| -------------- | ----------------------------------------------------- |
+| `--host <URL>` | Mold server URL. Defaults to `MOLD_HOST` or localhost |
+
+Available MCP tools:
+
+| Tool                   | Description                                                   |
+| ---------------------- | ------------------------------------------------------------- |
+| `generate_image`       | Generate one PNG or JPEG image                                |
+| `generate_image_async` | Start generation and return a job id immediately              |
+| `generation_status`    | Poll async jobs and fetch completed image content             |
+| `list_gallery`         | Search, filter, and sort saved gallery items                  |
+| `get_gallery_image`    | Fetch a gallery image by filename or the latest matching item |
+| `list_models`          | List models visible to the running mold server                |
+| `server_status`        | Show server health, queue, loaded model, and GPU              |
+
+Use `generate_image_async` in hosts with short tool-call timeouts. It uses the
+server's streaming endpoint for progress, then `generation_status` returns the
+final image once the job has completed.
+
+Example LM Studio `mcp.json` entry:
+
+```json
+{
+  "mcpServers": {
+    "mold": {
+      "command": "/absolute/path/to/mold",
+      "args": ["mcp", "--host", "http://localhost:7680"],
+      "timeout": 300000
+    }
+  }
+}
+```
+
 ## `mold pull`
 
 Download a model from HuggingFace.

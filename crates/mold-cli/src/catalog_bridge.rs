@@ -147,6 +147,37 @@ fn intent_to_model_config(
     if bundles {
         cfg.vae = Some(primary_str);
     }
+    if let Some(vae_recipe_path) = &intent.vae_recipe_path {
+        cfg.vae = Some(
+            vae_recipe_path
+                .to_str()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "synthesized VAE path is not valid UTF-8: {:?}",
+                        vae_recipe_path
+                    )
+                })?
+                .to_string(),
+        );
+    }
+    if !intent.text_encoder_recipe_paths.is_empty() {
+        cfg.text_encoder_files = Some(
+            intent
+                .text_encoder_recipe_paths
+                .iter()
+                .map(|path| {
+                    path.to_str()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "synthesized text encoder path is not valid UTF-8: {:?}",
+                                path
+                            )
+                        })
+                        .map(str::to_owned)
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
+    }
 
     for companion in &intent.companions {
         if let Some(paths) = ModelPaths::resolve(&companion.name, config) {
@@ -231,13 +262,18 @@ fn copy_companion_into_cfg(cfg: &mut ModelConfig, companion_name: &str, paths: &
             cfg.t5_tokenizer = paths.t5_tokenizer.as_ref().and_then(to_string);
         }
         "z-image-te" => {
-            // Z-Image companions bring text-encoder shards.
-            cfg.text_encoder_files = paths
-                .text_encoder_files
-                .iter()
-                .filter_map(to_string)
-                .collect::<Vec<_>>()
-                .into();
+            // Z-Image companions bring the shared VAE plus text-encoder shards.
+            if cfg.vae.is_none() {
+                cfg.vae = to_string(&paths.vae);
+            }
+            if cfg.text_encoder_files.is_none() {
+                cfg.text_encoder_files = paths
+                    .text_encoder_files
+                    .iter()
+                    .filter_map(to_string)
+                    .collect::<Vec<_>>()
+                    .into();
+            }
             cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_string);
         }
         "ltx2-te" => {
@@ -324,7 +360,7 @@ mod tests {
 
     use mold_catalog::entry::{
         CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind, LicenseFlags, Modality,
-        RecipeFile, Source, TokenKind,
+        RecipeFile, RecipeFileRole, Source, TokenKind,
     };
     use mold_catalog::families::Family;
 
@@ -361,6 +397,7 @@ mod tests {
                         "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF".into(),
                     ),
                     size_bytes: Some(6_938_040_788),
+                    role: None,
                 }],
                 needs_token: Some(TokenKind::Civitai),
             },
@@ -418,6 +455,148 @@ mod tests {
         ] {
             std::env::remove_var(key);
         }
+    }
+
+    #[test]
+    fn zimage_companion_populates_vae_and_text_encoder_paths() {
+        let paths = ModelPaths {
+            transformer: "/models/shared/z-image/text_encoder/model-00001-of-00003.safetensors"
+                .into(),
+            transformer_shards: Vec::new(),
+            vae: "/models/shared/z-image/vae/diffusion_pytorch_model.safetensors".into(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![
+                "/models/shared/z-image/text_encoder/model-00001-of-00003.safetensors".into(),
+                "/models/shared/z-image/text_encoder/model-00002-of-00003.safetensors".into(),
+                "/models/shared/z-image/text_encoder/model-00003-of-00003.safetensors".into(),
+            ],
+            text_tokenizer: Some("/models/shared/z-image/tokenizer/tokenizer.json".into()),
+            decoder: None,
+        };
+        let mut cfg = ModelConfig::default();
+
+        copy_companion_into_cfg(&mut cfg, "z-image-te", &paths);
+
+        assert_eq!(
+            cfg.vae.as_deref(),
+            Some("/models/shared/z-image/vae/diffusion_pytorch_model.safetensors")
+        );
+        assert_eq!(cfg.text_encoder_files.as_ref().unwrap().len(), 3);
+        assert_eq!(
+            cfg.text_tokenizer.as_deref(),
+            Some("/models/shared/z-image/tokenizer/tokenizer.json")
+        );
+    }
+
+    #[test]
+    fn zimage_recipe_text_encoder_wins_and_shared_companion_vae_is_used() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_models_dir_env();
+        let _home_guard = pin_mold_home(std::path::Path::new("/tmp/mold-test-models"));
+
+        let models_dir = "/tmp/mold-test-models";
+        let mut config = explicit_config(models_dir);
+        let te_dir = format!("{models_dir}/z-image-te");
+        config.models.insert(
+            "z-image-te".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(format!(
+                    "{te_dir}/text_encoder/model-00001-of-00003.safetensors"
+                )),
+                vae: Some(format!("{te_dir}/vae/diffusion_pytorch_model.safetensors")),
+                text_encoder_files: Some(vec![
+                    format!("{te_dir}/text_encoder/model-00001-of-00003.safetensors"),
+                    format!("{te_dir}/text_encoder/model-00002-of-00003.safetensors"),
+                    format!("{te_dir}/text_encoder/model-00003-of-00003.safetensors"),
+                ]),
+                text_tokenizer: Some(format!("{te_dir}/tokenizer/tokenizer.json")),
+                ..Default::default()
+            },
+        );
+        let entry = CatalogEntry {
+            id: CatalogId::from("cv:2442439"),
+            source: Source::Civitai,
+            source_id: "2442439".into(),
+            name: "Z Image Turbo".into(),
+            author: Some("z".into()),
+            family: Family::ZImage,
+            family_role: FamilyRole::Finetune,
+            sub_family: None,
+            modality: Modality::Image,
+            kind: Kind::Checkpoint,
+            file_format: FileFormat::Safetensors,
+            bundling: Bundling::SingleFile,
+            size_bytes: Some(12_021_353_906),
+            download_count: 0,
+            rating: None,
+            likes: 0,
+            nsfw: false,
+            thumbnail_url: None,
+            description: None,
+            license: None,
+            license_flags: LicenseFlags::default(),
+            tags: vec![],
+            companions: vec!["z-image-te".into()],
+            download_recipe: DownloadRecipe {
+                files: vec![
+                    RecipeFile {
+                        url: "https://civitai.example/model".into(),
+                        dest: "{family}/civitai/2442439/zImageTurbo_turbo.safetensors".into(),
+                        sha256: None,
+                        size_bytes: Some(12_021_353_906),
+                        role: None,
+                    },
+                    RecipeFile {
+                        url: "https://civitai.example/text".into(),
+                        dest: "{family}/civitai/2442439/zImageTurbo_turbo_txt.safetensors".into(),
+                        sha256: None,
+                        size_bytes: Some(8_044_982_048),
+                        role: Some(RecipeFileRole::TextEncoder),
+                    },
+                ],
+                needs_token: Some(TokenKind::Civitai),
+            },
+            engine_phase: 1,
+            created_at: None,
+            updated_at: None,
+            added_at: 0,
+            trained_words: vec![],
+        };
+
+        let synth =
+            synthesize_model_config(&entry, std::path::Path::new(models_dir), &config).unwrap();
+
+        let expected_transformer = format!(
+            "{models_dir}/cv-2442439/z-image/civitai/2442439/zImageTurbo_turbo.safetensors"
+        );
+        let expected_vae = format!("{te_dir}/vae/diffusion_pytorch_model.safetensors");
+        let expected_tokenizer = format!("{te_dir}/tokenizer/tokenizer.json");
+        assert_eq!(
+            synth.transformer.as_deref(),
+            Some(expected_transformer.as_str())
+        );
+        assert_eq!(synth.vae.as_deref(), Some(expected_vae.as_str()));
+        let expected_text_encoder = format!(
+            "{models_dir}/cv-2442439/z-image/civitai/2442439/zImageTurbo_turbo_txt.safetensors"
+        );
+        let expected_text_encoder_files = vec![expected_text_encoder];
+        assert_eq!(
+            synth.text_encoder_files.as_deref(),
+            Some(expected_text_encoder_files.as_slice())
+        );
+        assert_eq!(
+            synth.text_tokenizer.as_deref(),
+            Some(expected_tokenizer.as_str())
+        );
     }
 
     /// Pin MOLD_HOME to a path that contains no real `.hf-cache/` so
@@ -574,6 +753,7 @@ mod tests {
                     "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF".into(),
                 ),
                 size_bytes: Some(12_345_678),
+                role: None,
             }],
             needs_token: Some(TokenKind::Civitai),
         }
@@ -776,6 +956,7 @@ mod tests {
                     "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF".into(),
                 ),
                 size_bytes: Some(12_000_000_000),
+                role: None,
             }],
             needs_token: Some(TokenKind::Civitai),
         }

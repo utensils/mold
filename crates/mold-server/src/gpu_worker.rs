@@ -497,6 +497,31 @@ fn preflight_memory_guard_with_eviction(
     }
 }
 
+fn select_load_strategy_for_worker(
+    worker: &GpuWorker,
+    model_name: &str,
+    paths: &ModelPaths,
+    hint: Option<crate::model_manager::ActivationHint>,
+) -> mold_inference::LoadStrategy {
+    let active_vram = worker
+        .model_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .active_vram_bytes();
+    let available =
+        crate::model_manager::effective_load_available_bytes(active_vram, worker.gpu.ordinal);
+    let strategy =
+        crate::model_manager::select_server_load_strategy_for_budget(paths, available, hint);
+    if strategy == mold_inference::LoadStrategy::Sequential {
+        tracing::info!(
+            gpu = worker.gpu.ordinal,
+            model = %model_name,
+            "server load strategy degraded to sequential to fit memory budget"
+        );
+    }
+    strategy
+}
+
 /// Ensure a model is loaded on this worker's GPU.
 ///
 /// Holds `worker.model_load_lock` implicitly via the caller for generation
@@ -536,6 +561,11 @@ pub fn ensure_model_ready_sync(
     drop(cache);
 
     if has_cached {
+        let load_strategy = cached_paths
+            .as_ref()
+            .map(|paths| select_load_strategy_for_worker(worker, model_name, paths, hint))
+            .unwrap_or(mold_inference::LoadStrategy::Eager);
+
         // Preflight before unloading the active model — the active model's
         // footprint counts toward effective availability since we're about
         // to free it. On budget failure, evict-to-fit drops parked entries
@@ -557,6 +587,62 @@ pub fn ensure_model_ready_sync(
             cache.unload_active();
         }
         device::reclaim_gpu_memory(worker.gpu.ordinal);
+
+        if load_strategy == mold_inference::LoadStrategy::Sequential {
+            let paths = cached_paths.ok_or_else(|| {
+                anyhow::anyhow!("cached engine for '{model_name}' does not expose model paths")
+            })?;
+            let old_engine = {
+                let mut cache = worker.model_cache.lock().unwrap();
+                cache
+                    .remove(model_name)
+                    .ok_or_else(|| anyhow::anyhow!("cache race: model '{model_name}' vanished"))?
+            };
+
+            let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+            let mut engine = match mold_inference::create_engine_with_pool(
+                model_name.to_string(),
+                paths,
+                config,
+                load_strategy,
+                worker.gpu.ordinal,
+                offload,
+                Some(worker.shared_pool.clone()),
+            ) {
+                Ok(engine) => engine,
+                Err(err) => {
+                    let evicted = {
+                        let mut cache = worker.model_cache.lock().unwrap();
+                        cache.insert(old_engine, 0)
+                    };
+                    drop(evicted);
+                    return Err(err);
+                }
+            };
+
+            tracing::info!(
+                gpu = worker.gpu.ordinal,
+                model = %model_name,
+                "recreating cached engine in sequential mode..."
+            );
+            let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
+            if let Err(err) = engine.load() {
+                let evicted = {
+                    let mut cache = worker.model_cache.lock().unwrap();
+                    cache.insert(old_engine, 0)
+                };
+                drop(evicted);
+                return Err(err);
+            }
+            let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);
+            drop(old_engine);
+            let evicted = {
+                let mut cache = worker.model_cache.lock().unwrap();
+                cache.insert_loaded(model_name.to_string(), engine, vram)
+            };
+            drop(evicted);
+            return Ok(());
+        }
 
         // Take the engine out and reload it.
         let mut engine = {
@@ -619,6 +705,8 @@ pub fn ensure_model_ready_sync(
     )
     .map_err(|e| anyhow::anyhow!(e.error))?;
 
+    let load_strategy = select_load_strategy_for_worker(worker, model_name, &paths, hint);
+
     // Unload active model first.
     {
         let mut cache = worker.model_cache.lock().unwrap();
@@ -631,7 +719,7 @@ pub fn ensure_model_ready_sync(
         model_name.to_string(),
         paths,
         config,
-        mold_inference::LoadStrategy::Eager,
+        load_strategy,
         worker.gpu.ordinal,
         offload,
         Some(worker.shared_pool.clone()),

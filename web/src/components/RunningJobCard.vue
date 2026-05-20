@@ -55,13 +55,14 @@ const tickId = window.setInterval(() => {
 onBeforeUnmount(() => window.clearInterval(tickId));
 
 // Stale = `running` but no SSE progress event has landed within
-// STALE_THRESHOLD_MS. The L1 silent-close fix in api.ts catches most
+// STALE_THRESHOLD_MS after the job has moved past the queued phase.
+// Queued jobs can sit silently for a long time; only actual work going
+// quiet is suspicious. The L1 silent-close fix in api.ts catches most
 // dropped streams within the SSE keepalive window (15 s), so by the
-// time we surface this badge the connection is almost certainly dead
-// — the card stays visible so the user can dismiss / retry instead of
-// trusting a frozen progress bar.
+// time we surface this badge the connection is almost certainly dead.
 const isStale = computed(() => {
   if (props.job.state !== "running") return false;
+  if (!props.job.workStarted) return false;
   return now.value - props.job.lastProgressAt > STALE_THRESHOLD_MS;
 });
 

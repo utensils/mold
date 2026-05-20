@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::companions::companions_for;
-use crate::entry::{render_recipe_dest, Bundling, CatalogEntry};
+use crate::entry::{render_recipe_dest, Bundling, CatalogEntry, RecipeFile, RecipeFileRole};
 use crate::families::Family;
 
 /// Pure description of what an installed catalog model needs.
@@ -45,6 +45,18 @@ pub struct CatalogModelIntent {
     /// Expected on-disk path of the primary checkpoint. Existence is
     /// **not asserted** — resolution stage checks that.
     pub primary_recipe_path: PathBuf,
+    /// Optional recipe-provided VAE file. Some Civitai entries publish
+    /// transformer, VAE, and text encoder as separate files under one
+    /// model-version ID; when present, this VAE must beat the shared
+    /// companion VAE during runtime path resolution.
+    pub vae_recipe_path: Option<PathBuf>,
+    /// Optional recipe-provided text encoder files. Z-Image Civitai
+    /// versions may publish a tuned Qwen3 encoder alongside the
+    /// transformer and VAE; when present, these files must beat the
+    /// shared `z-image-te` encoder shards while still using the shared
+    /// tokenizer from that companion.
+    #[serde(default)]
+    pub text_encoder_recipe_paths: Vec<PathBuf>,
     /// Companions this model needs, with required/optional flag.
     pub companions: Vec<CompanionIntent>,
     pub bundling: Bundling,
@@ -110,13 +122,39 @@ pub fn synthesize_intent(
         Some((a, n)) => (a, n),
         None => ("", entry.source_id.as_str()),
     };
-    let rendered_dest = render_recipe_dest(&primary.dest, entry.family.as_str(), author, name);
-    let primary_path = models_dir.join(&sanitized).join(&rendered_dest);
+    let primary_path = recipe_file_path(models_dir, &sanitized, entry, primary, author, name);
 
     if primary_path.to_str().is_none() {
         return Err(SynthesisError::NonUtf8Path {
             path: primary_path.display().to_string(),
         });
+    }
+    let vae_recipe_path = entry
+        .download_recipe
+        .files
+        .iter()
+        .find(|file| file.role == Some(RecipeFileRole::Vae))
+        .map(|file| recipe_file_path(models_dir, &sanitized, entry, file, author, name));
+    if let Some(path) = &vae_recipe_path {
+        if path.to_str().is_none() {
+            return Err(SynthesisError::NonUtf8Path {
+                path: path.display().to_string(),
+            });
+        }
+    }
+    let text_encoder_recipe_paths = entry
+        .download_recipe
+        .files
+        .iter()
+        .filter(|file| file.role == Some(RecipeFileRole::TextEncoder))
+        .map(|file| recipe_file_path(models_dir, &sanitized, entry, file, author, name))
+        .collect::<Vec<_>>();
+    for path in &text_encoder_recipe_paths {
+        if path.to_str().is_none() {
+            return Err(SynthesisError::NonUtf8Path {
+                path: path.display().to_string(),
+            });
+        }
     }
 
     if !matches!(entry.bundling, Bundling::SingleFile) {
@@ -147,9 +185,23 @@ pub fn synthesize_intent(
         family: entry.family.as_str().to_string(),
         sub_family: entry.sub_family.clone(),
         primary_recipe_path: primary_path,
+        vae_recipe_path,
+        text_encoder_recipe_paths,
         companions,
         bundling: entry.bundling,
     })
+}
+
+fn recipe_file_path(
+    models_dir: &Path,
+    sanitized_id: &str,
+    entry: &CatalogEntry,
+    file: &RecipeFile,
+    author: &str,
+    name: &str,
+) -> PathBuf {
+    let rendered_dest = render_recipe_dest(&file.dest, entry.family.as_str(), author, name);
+    models_dir.join(sanitized_id).join(rendered_dest)
 }
 
 /// Convenience accessor — true if `name` is in the intent's companion
@@ -173,9 +225,7 @@ pub fn family_bundles_vae_unconditionally(family: Family) -> bool {
         // Mixed bundling — let the resolver probe the actual safetensors.
         Family::Flux => false,
         // Always-separate VAE.
-        Family::Flux2 | Family::LtxVideo | Family::Ltx2 => false,
-        // ZImage is text-encoder-only companion; primary bundles VAE.
-        Family::ZImage => true,
+        Family::Flux2 | Family::ZImage | Family::LtxVideo | Family::Ltx2 => false,
         // Single-file unsupported — engine_phase: 99 entries. Doesn't
         // matter what we return; resolution will reject before VAE.
         Family::QwenImage | Family::Wuerstchen => true,
@@ -187,7 +237,7 @@ mod tests {
     use super::*;
     use crate::entry::{
         CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind, LicenseFlags, Modality,
-        RecipeFile, Source, TokenKind,
+        RecipeFile, RecipeFileRole, Source, TokenKind,
     };
 
     fn juggernaut_entry() -> CatalogEntry {
@@ -223,6 +273,7 @@ mod tests {
                         "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF".into(),
                     ),
                     size_bytes: Some(6_938_040_788),
+                    role: None,
                 }],
                 needs_token: Some(TokenKind::Civitai),
             },
@@ -265,6 +316,7 @@ mod tests {
                     dest: "{family}/civitai/994561/realHornyProV3Unet.safetensors".into(),
                     sha256: None,
                     size_bytes: Some(12_000_000_000),
+                    role: None,
                 }],
                 needs_token: Some(TokenKind::Civitai),
             },
@@ -329,6 +381,49 @@ mod tests {
         let intent = synthesize_intent(&entry, Path::new("/tmp")).unwrap();
         let names: Vec<&str> = intent.companions.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["t5-v1_1-xxl", "clip-l", "flux-vae"]);
+    }
+
+    #[test]
+    fn zimage_catalog_primary_does_not_bundle_vae() {
+        assert!(!family_bundles_vae_unconditionally(Family::ZImage));
+    }
+
+    #[test]
+    fn synthesize_intent_records_recipe_text_encoder_path() {
+        let mut entry = flux_unet_only_entry();
+        entry.id = CatalogId::from("cv:2442439");
+        entry.source_id = "2442439".into();
+        entry.family = Family::ZImage;
+        entry.download_recipe.files = vec![
+            RecipeFile {
+                url: "https://civitai.example/model".into(),
+                dest: "{family}/civitai/2442439/zImageTurbo_turbo.safetensors".into(),
+                sha256: None,
+                size_bytes: Some(12_021_353_906),
+                role: None,
+            },
+            RecipeFile {
+                url: "https://civitai.example/text".into(),
+                dest: "{family}/civitai/2442439/zImageTurbo_turbo_txt.safetensors".into(),
+                sha256: None,
+                size_bytes: Some(8_044_982_048),
+                role: Some(RecipeFileRole::TextEncoder),
+            },
+        ];
+
+        let intent = synthesize_intent(&entry, Path::new("/tmp/mold-test-models")).unwrap();
+
+        assert_eq!(
+            intent.primary_recipe_path,
+            Path::new("/tmp/mold-test-models")
+                .join("cv-2442439/z-image/civitai/2442439/zImageTurbo_turbo.safetensors")
+        );
+        assert!(intent.vae_recipe_path.is_none());
+        assert_eq!(
+            intent.text_encoder_recipe_paths,
+            vec![Path::new("/tmp/mold-test-models")
+                .join("cv-2442439/z-image/civitai/2442439/zImageTurbo_turbo_txt.safetensors")]
+        );
     }
 
     #[test]

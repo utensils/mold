@@ -5339,8 +5339,8 @@ mod tests {
     }
 
     #[test]
-    fn visible_fields_excludes_lora_for_sdxl() {
-        let caps = crate::model_info::capabilities_for_family("sdxl");
+    fn visible_fields_excludes_lora_for_unsupported_family() {
+        let caps = crate::model_info::capabilities_for_family("wuerstchen");
         let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
         assert!(!fields.contains(&ParamField::Lora));
     }

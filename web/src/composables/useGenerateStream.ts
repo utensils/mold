@@ -41,6 +41,12 @@ export interface Job {
    * the user can dismiss / retry instead of staring at a frozen card
    * after the underlying connection silently dropped. */
   lastProgressAt: number;
+  /** True after the job has moved past server queue bookkeeping and
+   * produced progress from actual work (model download/load, cache hit,
+   * denoising, chain orchestration, etc.). Queued jobs can legitimately sit
+   * quiet for a long time, so stale-stream warnings must stay suppressed
+   * until this flips. */
+  workStarted: boolean;
   /** Server-assigned UUID, captured from the first `queued` SSE event.
    * `null` until that event arrives (e.g. between submit and HTTP
    * handshake), and stays `null` against legacy servers that predate
@@ -69,21 +75,33 @@ function emptyProgress(): JobProgress {
   };
 }
 
+function markWorkStarted(job: Job) {
+  job.workStarted = true;
+  job.progress.queuePosition = null;
+}
+
 function applyProgress(job: Job, evt: SseProgressEvent) {
   job.lastProgressAt = Date.now();
   const p = job.progress;
   switch (evt.type) {
     case "stage_start":
+      markWorkStarted(job);
       p.stage = evt.name;
       break;
     case "stage_done":
+      markWorkStarted(job);
       p.stage = `${evt.name} (done)`;
       p.elapsedMs = evt.elapsed_ms;
       break;
     case "info":
+      // Dimension warnings are emitted before the server queues the job, so
+      // an info event only proves real work has started if the job has
+      // already passed through a queued event.
+      if (p.queuePosition !== null || job.workStarted) markWorkStarted(job);
       p.stage = evt.message;
       break;
     case "denoise_step":
+      markWorkStarted(job);
       p.stage = "Denoising";
       p.step = evt.step;
       p.totalSteps = evt.total;
@@ -100,11 +118,13 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
       }
       break;
     case "weight_load":
+      markWorkStarted(job);
       p.stage = `Loading ${evt.component}`;
       p.weightBytesLoaded = evt.bytes_loaded;
       p.weightBytesTotal = evt.bytes_total;
       break;
     case "cache_hit":
+      markWorkStarted(job);
       p.stage = `Cache hit: ${evt.resource}`;
       break;
   }
@@ -116,6 +136,7 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
  * readout without the per-event UI layer needing to know about chaining. */
 function applyChainProgress(job: Job, evt: ChainProgressEvent) {
   job.lastProgressAt = Date.now();
+  markWorkStarted(job);
   const p = job.progress;
   const meta = job.chain;
   switch (evt.type) {
@@ -299,6 +320,8 @@ interface PersistedJob {
   /** May be missing on payloads persisted before lastProgressAt existed —
    * load path falls back to `startedAt`. */
   lastProgressAt?: number;
+  /** Optional — pre-queue-stale-fix payloads don't carry workStarted. */
+  workStarted?: boolean;
   /** Optional — pre-L3 payloads don't carry a serverId. */
   serverId?: string | null;
 }
@@ -361,6 +384,7 @@ function loadPersistedJobs(raw: string | null): Job[] {
         state,
         chain: p.chain,
         lastProgressAt: p.lastProgressAt ?? p.startedAt,
+        workStarted: p.workStarted ?? state !== "running",
         serverId: p.serverId ?? null,
       };
     });
@@ -391,6 +415,7 @@ function persistJobs(jobs: Job[]) {
       state: j.state,
       chain: j.chain,
       lastProgressAt: j.lastProgressAt,
+      workStarted: j.workStarted,
       serverId: j.serverId,
     }));
     localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
@@ -519,6 +544,7 @@ function submitJob(
         }
       : null,
     lastProgressAt: now,
+    workStarted: false,
     serverId: null,
   }) as Job;
   jobs.value = [job, ...jobs.value];

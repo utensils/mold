@@ -93,6 +93,15 @@ pub struct RecipeFile {
     pub dest: String,
     pub sha256: Option<String>,
     pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<RecipeFileRole>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecipeFileRole {
+    Vae,
+    TextEncoder,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

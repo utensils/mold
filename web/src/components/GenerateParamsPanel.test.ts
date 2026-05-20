@@ -1,7 +1,40 @@
 import { mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import GenerateParamsPanel from "./GenerateParamsPanel.vue";
 import type { GenerateFormState, ModelInfoExtended } from "../types";
+
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api")>();
+  return {
+    ...actual,
+    downloadsStreamUrl: vi.fn(() => "/api/downloads/stream"),
+    fetchDownloads: vi.fn(async () => ({
+      active: null,
+      queued: [],
+      history: [],
+    })),
+    fetchCatalogInstalled: vi.fn(async () => ({
+      entries: [],
+      page: 1,
+      page_size: 0,
+      total: 0,
+    })),
+  };
+});
+
+class MockEventSource {
+  onopen: (() => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: (() => void) | null = null;
+
+  constructor(_url: string) {}
+
+  addEventListener(_type: string, _listener: EventListener) {}
+
+  close() {}
+}
+
+vi.stubGlobal("EventSource", MockEventSource);
 
 const baseModel: ModelInfoExtended = {
   name: "flux-dev:q4",
@@ -141,6 +174,38 @@ describe("GenerateParamsPanel", () => {
     // Defaults from altModel are applied.
     expect(last.steps).toBe(30);
     expect(last.guidance).toBe(7.5);
+  });
+
+  it("renders the LoRA picker for Z-Image models", async () => {
+    const zImageModel: ModelInfoExtended = {
+      ...baseModel,
+      name: "z-image-turbo:q8",
+      family: "z-image",
+      hf_repo: "Tongyi-MAI/Z-Image-Turbo",
+      default_steps: 9,
+    };
+    const w = mount(GenerateParamsPanel, {
+      props: {
+        modelValue: makeForm({
+          model: "z-image-turbo:q8",
+          steps: 9,
+        }),
+        models: [zImageModel],
+      },
+      global: {
+        stubs: {
+          LoraPicker: {
+            props: ["family", "modelValue"],
+            template: '<div data-test="lora-picker-stub" />',
+          },
+        },
+      },
+    });
+
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    expect(w.find("[data-test='lora-picker-stub']").exists()).toBe(true);
+    w.unmount();
   });
 
   it("persists expanded state to localStorage and restores it on remount", async () => {

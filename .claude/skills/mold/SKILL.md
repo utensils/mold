@@ -20,14 +20,18 @@ mold run "watercolor" --image photo.png --strength 0.7  # img2img
 mold run qwen-image-edit-2511:q4 "make the chair red leather" --image chair.png --image swatch.png --qwen2-variant q4
 mold run qwen-image:q2 "a poster" --qwen2-variant q6    # Qwen-Image quantized text encoder
 mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # LoRA adapter
+mold mcp --host http://localhost:7680                # Stdio MCP bridge for LM Studio
 ```
+
+`mold mcp` exposes synchronous image generation, async generation with status
+polling, gallery search/fetch, model listing, and server status tools.
 
 ## How to Use This Skill
 
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `mcp`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images
@@ -437,7 +441,10 @@ hit the upstream APIs directly for the recipe. Phase-1 supports HF
 separated-bundling entries; phases 2 (SD1.5/SDXL), 3 (FLUX 1.x), 4
 (Z-Image), and 5 (LTX-Video / LTX-2 / LTX-2.3) single-file Civitai
 checkpoints are supported — downloaded with companions and runnable
-via `mold run cv:<id>`. Flux.2 fine-tunes pull `flux2-vae` (168 MB
+via `mold run cv:<id>`. Z-Image fine-tunes pull `z-image-te`
+(Tongyi-MAI Qwen3 shards + tokenizer + fallback VAE; satisfied by an existing
+`z-image-turbo` install) and use recipe-provided text-encoder files
+when the Civitai version publishes them. Flux.2 fine-tunes pull `flux2-vae` (168 MB
 Klein VAE, ungated) and either `flux2-te` (Qwen3-4B, ungated, for
 `sub_family=klein-4b`) or `flux2-te-9b` (Qwen3-8B, **HF_TOKEN required**,
 for `klein-9b` / `flux2-d`). Phase-5 LTX-Video entries pull
@@ -670,6 +677,9 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_VAE_TILED`            | `auto`                  | Tiled VAE decode for FLUX/FLUX2/SDXL/SD3: `auto` (retry on OOM), `force` (always tile), `off` (disable). Saves VRAM when transformer + LoRAs are still resident. |
 | `MOLD_LONG_PROMPTS`         | unset                   | Set `1` to enable ComfyUI-style chunked CLIP encoding (75-token windows; pooled outputs averaged into FLUX's 768-dim `vector_in`). Default off — pre-Tier-2 truncation at 77 preserved. |
 | `MOLD_ATTN`                 | `math`                  | Attention backend: `math` (hand-rolled SDP, default) or `flash` (candle-flash-attn v2; needs `--features cuda,flash-attn` + `RUSTFLAGS='--cfg mold_flash_attn_real'` — falls back to math otherwise) |
+| `MOLD_ATTN_CHUNK`           | auto                    | Override math-attention query chunk size. Positive integers below sequence length enable chunking; `0` / `off` disables. CUDA auto-chunks long queries at `512`. |
+| `MOLD_FLUX_DELTA_CACHE`     | `1`                     | Set `0` to disable FLUX LoRA delta caching, reducing standing host RAM during GGUF + LoRA rebuilds at the cost of recompute on the next rebuild. |
+| `MOLD_FLUX_KEEP_TRANSFORMER` | `0`                    | Set `1` to keep the FLUX transformer loaded through VAE decode when enough VRAM headroom remains; mold force-drops per request when decode headroom is too low. |
 | `MOLD_OFFLOAD_PREFETCH`     | `on`                    | FLUX offload async H2D prefetch stream (`off` reverts to synchronous)      |
 | `MOLD_PINNED_VRAM_MAX_GB`   | RAM × 0.5 (Linux)       | Cap on cumulative pinned host memory used by the FLUX offload path         |
 | `MOLD_EMBED_METADATA`       | `1`                     | Set `0` to disable PNG metadata                                            |
@@ -681,6 +691,11 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_VAE_DTYPE`            | `auto`                  | Override VAE precision: `auto` (per-pipeline default), `bf16`, `fp16`, `fp32`. Use `fp32` to fix banding artifacts on FLUX/SD3 finetuned VAEs (~2× decode VRAM; tiled VAE absorbs OOM). Wired into FLUX, FLUX2, SD3, SDXL, SD1.5; no-op for Z-Image CPU VAE / Wuerstchen / Qwen-Image (already F32). |
 | `MOLD_LTX2_GEMMA_DEVICE`    | `auto`                  | LTX-2 Gemma 3 12B prompt encoder placement: `auto` (active GPU → sibling GPUs → CPU based on free VRAM, threshold 24 GB), `cpu` (force system RAM, ~30–60 s encode vs ~1–3 s on GPU but no VRAM contention), `gpu` (force the active GPU, surface OOM rather than auto-offload). The deprecated `MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER=1` is a one-shot-warn alias for `cpu`. Server-side preflight uses the same resolver so cv:2752735 admits/rejects in lockstep with what the runtime will do. |
 | `MOLD_LTX2_GEMMA_VARIANT`   | `auto`                  | LTX-2 Gemma 3 12B weight format: `auto` (BF16 if both formats present, GGUF if only GGUF), `q4` (force Q4 GGUF — `google/gemma-3-12b-it-qat-q4_0-gguf`, ~7 GB; fits comfortably on a 24 GB card alongside the streaming transformer), `bf16` (force BF16 split — `google/gemma-3-12b-it-qat-q4_0-unquantized`, ~23 GB; historical default). Auto-detection scans the gemma_root for `*.gguf` and `model*.safetensors`. Place the Q4 GGUF manually in your gemma_root for V1 — manifest auto-fetch is deferred. |
+| `MOLD_MAX_CACHED_MODELS`    | `3`                     | Maximum cached engines, including the GPU-resident model and parked entries. Range: `1`-`16`. |
+| `MOLD_CACHE_IDLE_TTL_SECS`  | `1800`                  | Idle TTL for parked cache entries before background eviction. Range: `60`-`86400`; the GPU-resident model is never evicted for age. |
+| `MOLD_QUEUE_LOOKAHEAD_BUFFER` | `8`                   | Number of queued jobs considered for same-loaded-model locality reordering. Range: `1`-`64`. |
+| `MOLD_QUEUE_MAX_DEFERRALS`  | `3`                     | Maximum times the head job can be deferred for locality before force-dispatch. Range: `0`-`32`; `0` disables deferral. |
+| `MOLD_MALLOC_TRIM`          | `1`                     | Linux/glibc only: set `0` to skip `malloc_trim(0)` after generation. |
 | `MOLD_API_KEY`              | unset                   | API key for server auth (single, comma-separated, or `@/path/to/keys.txt`) |
 | `MOLD_RATE_LIMIT`           | unset                   | Per-IP rate limit for generation endpoints (e.g., `10/min`)                |
 | `MOLD_RATE_LIMIT_BURST`     | unset                   | Burst allowance override (defaults to 2x rate)                             |

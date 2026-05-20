@@ -36,7 +36,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_strength: true,
             supports_mask: true,
             supports_controlnet: true,
-            supports_lora: false,
+            supports_lora: true,
             supports_video: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
@@ -48,7 +48,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_strength: true,
             supports_mask: true,
             supports_controlnet: false,
-            supports_lora: false,
+            supports_lora: true,
             supports_video: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
@@ -60,7 +60,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
-            supports_lora: false,
+            supports_lora: true,
             supports_video: false,
             default_scheduler: None,
         },
@@ -96,7 +96,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
-            supports_lora: false,
+            supports_lora: true,
             supports_video: false,
             default_scheduler: None,
         },
@@ -108,7 +108,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
-            supports_lora: false,
+            supports_lora: true,
             supports_video: false,
             default_scheduler: None,
         },
@@ -120,7 +120,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
-            supports_lora: false,
+            supports_lora: true,
             supports_video: false,
             default_scheduler: None,
         },
@@ -132,11 +132,11 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
-            supports_lora: false,
+            supports_lora: true,
             supports_video: false,
             default_scheduler: None,
         },
-        "ltx-video" | "ltx2" => ModelCapabilities {
+        "ltx-video" => ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
             supports_img2img: false,
@@ -145,6 +145,18 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_mask: false,
             supports_controlnet: false,
             supports_lora: false,
+            supports_video: true,
+            default_scheduler: None,
+        },
+        "ltx2" => ModelCapabilities {
+            supports_negative_prompt: false,
+            supports_scheduler: false,
+            supports_img2img: false,
+            supports_source_image: false,
+            supports_strength: false,
+            supports_mask: false,
+            supports_controlnet: false,
+            supports_lora: true,
             supports_video: true,
             default_scheduler: None,
         },
@@ -205,13 +217,45 @@ mod tests {
     }
 
     #[test]
-    fn flux2_has_minimal_capabilities() {
+    fn lora_capabilities_match_server_gate() {
+        for family in [
+            "flux",
+            "flux2",
+            "ltx2",
+            "sd15",
+            "sd3",
+            "sdxl",
+            "qwen-image",
+            "qwen-image-edit",
+            "z-image",
+        ] {
+            assert!(
+                capabilities_for_family(family).supports_lora,
+                "{family} should expose LoRA controls",
+            );
+        }
+        assert!(!capabilities_for_family("wuerstchen").supports_lora);
+        assert!(!capabilities_for_family("ltx-video").supports_lora);
+    }
+
+    #[test]
+    fn zimage_supports_lora_without_cfg_controls() {
+        let caps = capabilities_for_family("z-image");
+        assert!(!caps.supports_negative_prompt);
+        assert!(!caps.supports_scheduler);
+        assert!(!caps.supports_img2img);
+        assert!(!caps.supports_controlnet);
+        assert!(caps.supports_lora);
+    }
+
+    #[test]
+    fn flux2_supports_lora_without_cfg_controls() {
         let caps = capabilities_for_family("flux2");
         assert!(!caps.supports_negative_prompt);
         assert!(!caps.supports_scheduler);
         assert!(!caps.supports_img2img);
         assert!(!caps.supports_controlnet);
-        assert!(!caps.supports_lora);
+        assert!(caps.supports_lora);
     }
 
     #[test]
@@ -228,7 +272,7 @@ mod tests {
         assert!(caps.supports_negative_prompt);
         assert!(caps.supports_scheduler);
         assert!(!caps.supports_controlnet);
-        assert!(!caps.supports_lora);
+        assert!(caps.supports_lora);
     }
 
     #[test]

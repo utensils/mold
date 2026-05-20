@@ -360,7 +360,17 @@ export const MAX_LORA_STACK = 4;
 /// server-side gate in `mold-core/src/validation.rs`. Keep all three in
 /// sync — divergence shows up as a UI that lets the user pick a LoRA the
 /// server then rejects.
-export const LORA_CAPABLE_FAMILIES = ["flux"] as const;
+export const LORA_CAPABLE_FAMILIES = [
+  "flux",
+  "flux2",
+  "ltx2",
+  "sd15",
+  "sd3",
+  "sdxl",
+  "qwen-image",
+  "qwen-image-edit",
+  "z-image",
+] as const;
 
 export function supportsLora(family: string): boolean {
   return (LORA_CAPABLE_FAMILIES as readonly string[]).includes(family);

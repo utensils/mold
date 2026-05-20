@@ -722,6 +722,21 @@ environment before starting mold serve.")]
         discord: bool,
     },
 
+    /// Start a stdio MCP server for LM Studio and other MCP hosts
+    #[command(after_long_help = "\
+Examples:
+  mold mcp
+  mold mcp --host http://localhost:7680
+
+Use with LM Studio by adding a stdio MCP entry whose command is the mold binary
+and whose args are [\"mcp\", \"--host\", \"http://localhost:7680\"]. Run
+`mold serve` separately before calling generation tools.")]
+    Mcp {
+        /// Server URL to connect to
+        #[arg(long, env = "MOLD_HOST")]
+        host: Option<String>,
+    },
+
     /// Manage a background mold server daemon (start, stop, status)
     #[command(after_long_help = "\
 Examples:
@@ -1479,6 +1494,9 @@ async fn run() -> anyhow::Result<()> {
 
             commands::serve::run(port, &bind, models_dir, gpus, queue_size, discord_enabled)
                 .await?;
+        }
+        Commands::Mcp { host } => {
+            commands::mcp::run(host).await?;
         }
         Commands::Server { action } => match action {
             ServerAction::Start {

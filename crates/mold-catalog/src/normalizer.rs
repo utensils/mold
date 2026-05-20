@@ -9,7 +9,7 @@ use crate::civitai_map::{engine_phase_for, map_base_model};
 use crate::companions::companions_for;
 use crate::entry::{
     Bundling, CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind, LicenseFlags,
-    Modality, RecipeFile, Source, TokenKind,
+    Modality, RecipeFile, RecipeFileRole, Source, TokenKind,
 };
 use crate::families::Family;
 
@@ -185,6 +185,7 @@ pub fn from_hf(
             dest: format!("{{family}}/{{author}}/{{name}}/{}", e.path),
             sha256: None,
             size_bytes: if e.size > 0 { Some(e.size) } else { None },
+            role: None,
         })
         .collect();
 
@@ -332,6 +333,8 @@ pub struct CivitaiVersion {
 pub struct CivitaiFile {
     pub id: u64,
     pub name: String,
+    #[serde(default, rename = "type")]
+    pub file_type: Option<String>,
     #[serde(default, rename = "sizeKB")]
     pub size_kb: Option<f64>,
     #[serde(default, rename = "downloadCount")]
@@ -375,21 +378,19 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
         _ => Modality::Image,
     };
 
-    let sha256 = file
-        .hashes
-        .get("SHA256")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let mut recipe_files = vec![civitai_recipe_file(version.id, file, None)];
+    if family == Family::ZImage {
+        if let Some(text_encoder_file) = pick_civitai_text_encoder(&version.files) {
+            recipe_files.push(civitai_recipe_file(
+                version.id,
+                text_encoder_file,
+                Some(RecipeFileRole::TextEncoder),
+            ));
+        }
+    }
 
     let recipe = DownloadRecipe {
-        files: vec![RecipeFile {
-            url: file.download_url.clone().unwrap_or_else(|| {
-                format!("https://civitai.com/api/download/models/{}", version.id)
-            }),
-            dest: format!("{{family}}/civitai/{}/{}", version.id, file.name),
-            sha256,
-            size_bytes: file.size_kb.map(|kb| (kb * 1000.0) as u64),
-        }],
+        files: recipe_files,
         needs_token: Some(TokenKind::Civitai),
     };
 
@@ -435,7 +436,47 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
 /// scanner. Arbitrary-code-execution risk on deserialization is not worth
 /// catalog completeness — only safetensors are surfaced.
 fn pick_safetensors(files: &[CivitaiFile]) -> Option<&CivitaiFile> {
+    let is_safetensors =
+        |file: &&CivitaiFile| file.metadata.format.as_deref() == Some("SafeTensor");
     files
         .iter()
-        .find(|f| f.metadata.format.as_deref() == Some("SafeTensor"))
+        .filter(is_safetensors)
+        .find(|file| {
+            file.file_type
+                .as_deref()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("Model"))
+        })
+        .or_else(|| files.iter().find(is_safetensors))
+}
+
+fn pick_civitai_text_encoder(files: &[CivitaiFile]) -> Option<&CivitaiFile> {
+    files.iter().find(|file| {
+        file.download_url.is_some()
+            && file.metadata.format.as_deref() == Some("SafeTensor")
+            && file
+                .file_type
+                .as_deref()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("Text Encoder"))
+    })
+}
+
+fn civitai_recipe_file(
+    version_id: u64,
+    file: &CivitaiFile,
+    role: Option<RecipeFileRole>,
+) -> RecipeFile {
+    RecipeFile {
+        url: file
+            .download_url
+            .clone()
+            .unwrap_or_else(|| format!("https://civitai.com/api/download/models/{version_id}")),
+        dest: format!("{{family}}/civitai/{}/{}", version_id, file.name),
+        sha256: file
+            .hashes
+            .get("SHA256")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        size_bytes: file.size_kb.map(|kb| (kb * 1000.0) as u64),
+        role,
+    }
 }

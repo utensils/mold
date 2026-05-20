@@ -131,52 +131,6 @@ fn rejection_suggestion(hint: Option<ActivationHint>) -> &'static str {
     }
 }
 
-const FLUX2_KLEIN_9B_BF16_MIN_VRAM: u64 = 32_000_000_000;
-const FLUX2_KLEIN_9B_TRANSFORMER_FLOOR: u64 = 16_000_000_000;
-const FLUX2_KLEIN_9B_TEXT_ENCODER_FLOOR: u64 = 14_000_000_000;
-
-fn transformer_file_size(paths: &ModelPaths) -> u64 {
-    let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-    if !paths.transformer_shards.is_empty() {
-        paths.transformer_shards.iter().map(|p| file_size(p)).sum()
-    } else {
-        file_size(&paths.transformer)
-    }
-}
-
-fn is_gguf_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
-}
-
-fn is_flux2_klein_9b_bf16_load(
-    model_name: &str,
-    paths: &ModelPaths,
-    hint: Option<ActivationHint>,
-) -> bool {
-    let lower = model_name.to_lowercase();
-    let family_matches = hint
-        .map(|h| h.family == ActivationFamily::Flux2Dit)
-        .unwrap_or_else(|| lower.contains("flux2"));
-    if !family_matches || is_gguf_path(&paths.transformer) {
-        return false;
-    }
-
-    let name_matches_9b = lower.contains("klein-9b") || lower.contains("9b");
-    let name_marks_full_precision = lower.contains(":bf16") || lower.contains(":fp16");
-    let transformer_size = transformer_file_size(paths);
-    let text_encoder_size: u64 = paths
-        .text_encoder_files
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-        .sum();
-    let size_matches_9b = transformer_size >= FLUX2_KLEIN_9B_TRANSFORMER_FLOOR
-        && text_encoder_size >= FLUX2_KLEIN_9B_TEXT_ENCODER_FLOOR;
-
-    (name_matches_9b && name_marks_full_precision) || size_matches_9b
-}
-
 /// Pure inner: given an `available_bytes` budget and the active model's
 /// reclaimable VRAM, decide whether the new model fits. Adding
 /// `active_vram_bytes` to `available_bytes` accounts for the currently-loaded
@@ -238,18 +192,6 @@ pub(crate) fn preflight_memory_guard_with_available(
     let peak_with_activation = peak.saturating_add(activation);
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
     let suggestion = rejection_suggestion(hint);
-
-    if is_flux2_klein_9b_bf16_load(model_name, paths, hint)
-        && effective_available < FLUX2_KLEIN_9B_BF16_MIN_VRAM
-    {
-        return Err(ApiError::insufficient_memory(format!(
-            "model '{}' requires a 32 GB GPU for the Flux.2 Klein-9B BF16 transformer \
-             ({:.1} GB effective budget detected). Use a quantized Klein-9B variant \
-             (e.g. ':q8' / ':q4') or run on a larger card.",
-            model_name,
-            effective_available as f64 / 1_000_000_000.0,
-        )));
-    }
 
     check_model_memory_budget(
         model_name,
@@ -409,6 +351,68 @@ pub(crate) fn preflight_memory_guard(
 
     // No memory info available on this platform — skip the guard.
     Ok(())
+}
+
+/// Effective memory budget to use when deciding whether a server engine can
+/// stay eager-loaded or should degrade to load-use-drop sequential mode.
+///
+/// This mirrors the budget shape in [`preflight_memory_guard`]: CUDA swaps can
+/// reclaim the whole primary context when an active model exists, while Metal
+/// uses unified system memory and adds the active footprint as reclaimable.
+pub(crate) fn effective_load_available_bytes(
+    active_vram_bytes: u64,
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+) -> Option<u64> {
+    #[cfg(feature = "cuda")]
+    {
+        if active_vram_bytes > 0 {
+            if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
+                return Some(total);
+            }
+        }
+        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
+            return Some(free);
+        }
+    }
+
+    mold_inference::device::available_system_memory_bytes()
+        .filter(|available| *available > 0)
+        .map(|available| available.saturating_add(active_vram_bytes))
+}
+
+/// Choose the server load strategy for the current memory budget.
+///
+/// The server normally prefers eager engines so the active model stays hot.
+/// When eager residency would exceed the same 90% cap used by preflight but
+/// the model fits under sequential load-use-drop, degrade to Sequential. This
+/// keeps preflight and the actual load path consistent: a model admitted only
+/// because text encoders can be dropped should not then OOM during eager
+/// startup before it gets a chance to generate.
+pub(crate) fn select_server_load_strategy_for_budget(
+    paths: &ModelPaths,
+    available_bytes: Option<u64>,
+    hint: Option<ActivationHint>,
+) -> mold_inference::LoadStrategy {
+    let Some(available_bytes) = available_bytes.filter(|v| *v > 0) else {
+        return mold_inference::LoadStrategy::Eager;
+    };
+
+    let activation = hint.map(|h| h.budget_bytes()).unwrap_or(0);
+    let eager_peak =
+        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
+            .saturating_add(activation);
+    let sequential_peak = mold_inference::device::estimate_peak_memory(
+        paths,
+        mold_inference::LoadStrategy::Sequential,
+    )
+    .saturating_add(activation);
+    let hard_limit = available_bytes.saturating_mul(9) / 10;
+
+    if eager_peak > hard_limit && sequential_peak <= hard_limit {
+        mold_inference::LoadStrategy::Sequential
+    } else {
+        mold_inference::LoadStrategy::Eager
+    }
 }
 pub(crate) type DownloadProgressCallback =
     Arc<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>;
@@ -604,12 +608,17 @@ fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, pat
             cfg.t5_tokenizer = paths.t5_tokenizer.as_ref().and_then(to_str);
         }
         "z-image-te" | "flux2-te" | "flux2-te-9b" => {
-            cfg.text_encoder_files = paths
-                .text_encoder_files
-                .iter()
-                .filter_map(to_str)
-                .collect::<Vec<_>>()
-                .into();
+            if companion == "z-image-te" && cfg.vae.is_none() {
+                cfg.vae = to_str(&paths.vae);
+            }
+            if companion != "z-image-te" || cfg.text_encoder_files.is_none() {
+                cfg.text_encoder_files = paths
+                    .text_encoder_files
+                    .iter()
+                    .filter_map(to_str)
+                    .collect::<Vec<_>>()
+                    .into();
+            }
             cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_str);
         }
         "ltx2-te" => {
@@ -753,6 +762,27 @@ pub(crate) fn resolve_intent_to_paths(
     };
     if probe_says_bundled == Some(true) {
         cfg.vae = Some(primary_str);
+    }
+    if let Some(vae_recipe_path) = &intent.vae_recipe_path {
+        cfg.vae = Some(
+            vae_recipe_path
+                .to_str()
+                .expect("synthesize_intent guarantees UTF-8 paths")
+                .to_string(),
+        );
+    }
+    if !intent.text_encoder_recipe_paths.is_empty() {
+        cfg.text_encoder_files = Some(
+            intent
+                .text_encoder_recipe_paths
+                .iter()
+                .map(|path| {
+                    path.to_str()
+                        .expect("synthesize_intent guarantees UTF-8 paths")
+                        .to_string()
+                })
+                .collect(),
+        );
     }
     // probe_says_bundled == Some(false) ⇒ leave cfg.vae None for the
     // VAE-companion arm in copy_catalog_companion to fill. None case
@@ -1194,8 +1224,25 @@ pub(crate) async fn ensure_model_ready(
             // Cached but not on GPU (Parked) — need to reload.
             // MPS memory guard: check before unloading the active model.
             // Include the active model's footprint as reclaimable memory.
-            if let Some(paths) = entry.engine.model_paths() {
+            let cached_paths = entry.engine.model_paths().cloned();
+            if let Some(paths) = cached_paths.as_ref() {
                 preflight_memory_guard(model_name, paths, active_vram, 0, hint)?;
+            }
+            let load_strategy = cached_paths
+                .as_ref()
+                .map(|paths| {
+                    select_server_load_strategy_for_budget(
+                        paths,
+                        effective_load_available_bytes(active_vram, 0),
+                        hint,
+                    )
+                })
+                .unwrap_or(mold_inference::LoadStrategy::Eager);
+            if load_strategy == mold_inference::LoadStrategy::Sequential {
+                tracing::info!(
+                    model = %model_name,
+                    "server load strategy degraded to sequential to fit memory budget"
+                );
             }
 
             // Parked engines retain tokenizers/caches for faster reload.
@@ -1226,6 +1273,46 @@ pub(crate) async fn ensure_model_ready(
             drop(cache);
 
             let mut engine = cached.engine;
+            if load_strategy == mold_inference::LoadStrategy::Sequential {
+                let Some(paths) = cached_paths else {
+                    let evicted = {
+                        let mut cache = state.model_cache.lock().await;
+                        cache.insert(engine, 0)
+                    };
+                    drop(evicted);
+                    return Err(ApiError::internal(format!(
+                        "cached engine for '{model_name}' does not expose model paths"
+                    )));
+                };
+                let config = state.config.read().await;
+                let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+                match mold_inference::create_engine_with_pool(
+                    model_name.to_string(),
+                    paths,
+                    &config,
+                    load_strategy,
+                    0,
+                    offload,
+                    Some(state.shared_pool.clone()),
+                ) {
+                    Ok(new_engine) => {
+                        drop(config);
+                        drop(engine);
+                        engine = new_engine;
+                    }
+                    Err(e) => {
+                        drop(config);
+                        let evicted = {
+                            let mut cache = state.model_cache.lock().await;
+                            cache.insert(engine, 0)
+                        };
+                        drop(evicted);
+                        return Err(ApiError::internal(format!(
+                            "failed to recreate cached engine for '{model_name}': {e}"
+                        )));
+                    }
+                }
+            }
 
             if let Some(callback) = progress.clone() {
                 engine.set_on_progress(Box::new(move |event| {
@@ -1417,6 +1504,17 @@ async fn create_and_load_engine(
         cache.active_vram_bytes()
     };
     preflight_memory_guard(model_name, &paths, active_vram, 0, hint)?;
+    let load_strategy = select_server_load_strategy_for_budget(
+        &paths,
+        effective_load_available_bytes(active_vram, 0),
+        hint,
+    );
+    if load_strategy == mold_inference::LoadStrategy::Sequential {
+        tracing::info!(
+            model = %model_name,
+            "server load strategy degraded to sequential to fit memory budget"
+        );
+    }
 
     // Unload the current active model to free GPU memory.
     // Only reclaim GPU memory if there was an active model — calling
@@ -1451,7 +1549,7 @@ async fn create_and_load_engine(
         model_name.to_string(),
         paths,
         &config,
-        mold_inference::LoadStrategy::Eager,
+        load_strategy,
         0,
         offload,
         Some(state.shared_pool.clone()),
@@ -1796,8 +1894,37 @@ mod tests {
         assert!(
             eager_peak > hard_limit,
             "Eager peak ({eager_peak}) should exceed hard limit ({hard_limit}) — \
-             this is the false-rejection the Sequential switch fixes"
+            this is the false-rejection the Sequential switch fixes"
         );
+    }
+
+    #[test]
+    fn server_load_strategy_degrades_when_only_sequential_fits() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(24 * GB), None);
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "server load should match the sequential preflight assumption instead \
+             of eager-loading a model whose summed components exceed the budget"
+        );
+    }
+
+    #[test]
+    fn server_load_strategy_stays_eager_when_eager_fits() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(8, 1, 2, 1);
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(24 * GB), None);
+
+        assert_eq!(strategy, mold_inference::LoadStrategy::Eager);
+    }
+
+    #[test]
+    fn server_load_strategy_stays_eager_when_no_budget_available() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
+        let strategy = select_server_load_strategy_for_budget(&paths, None, None);
+
+        assert_eq!(strategy, mold_inference::LoadStrategy::Eager);
     }
 
     /// Tier 2.3: the server-side preflight must consume the
@@ -1892,7 +2019,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_rejects_flux2_klein9b_bf16_on_24gb_card() {
+    fn preflight_allows_flux2_klein9b_bf16_on_24gb_when_sequential_budget_fits() {
         let (_dir, paths) = flux2_klein9b_bf16_paths();
         let hint = ActivationHint {
             width: 1024,
@@ -1911,18 +2038,19 @@ mod tests {
         );
 
         assert!(
-            result.is_err(),
-            "Klein-9B BF16 must not be admitted on a 24 GB card; \
-             the plain file-size sequential estimate undercounts its load-time peak, got {result:?}"
+            result.is_ok(),
+            "Klein-9B BF16 should be admitted on a 24 GB card when the \
+             sequential transformer/VAE phase plus activation budget fits; \
+             Qwen3 can be quantized/dropped before denoise, got {result:?}"
         );
     }
 
     #[test]
-    fn preflight_allows_flux2_klein9b_bf16_on_32gb_card() {
+    fn preflight_rejects_flux2_klein9b_bf16_on_24gb_when_activation_budget_exceeds_cap() {
         let (_dir, paths) = flux2_klein9b_bf16_paths();
         let hint = ActivationHint {
-            width: 1024,
-            height: 1024,
+            width: 2048,
+            height: 2048,
             batch: 1,
             dtype_bytes: 2,
             family: ActivationFamily::Flux2Dit,
@@ -1932,13 +2060,35 @@ mod tests {
             "flux2-klein-9b:bf16",
             &paths,
             0,
-            32 * GB,
+            24 * GB,
             Some(hint),
         );
 
         assert!(
-            result.is_ok(),
-            "Klein-9B BF16 should be allowed once the card budget reaches 32 GB, got {result:?}"
+            result.is_err(),
+            "Klein-9B BF16 should still reject when resolution-scaled \
+             activation budget pushes the sequential phase past the 90% cap, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn server_load_strategy_degrades_flux2_klein9b_bf16_on_24gb_to_sequential() {
+        let (_dir, paths) = flux2_klein9b_bf16_paths();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(24 * GB), Some(hint));
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "server must use load-use-drop for Klein-9B BF16 on 24 GB so the \
+             text encoder is not co-resident with the transformer"
         );
     }
 
@@ -2285,6 +2435,7 @@ mod tests {
                     dest: format!("{{family}}/civitai/{version_id}/{file_name}"),
                     sha256: Some("DEAD".repeat(16)),
                     size_bytes: Some(12_000_000_000),
+                    role: None,
                 }],
                 needs_token: Some(TokenKind::Civitai),
             },
@@ -2610,6 +2761,134 @@ mod tests {
         let vae_path = models_dir.join("flux-vae/ae.safetensors");
         assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
         assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
+
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_intent_uses_zimage_recipe_text_encoder_and_shared_companion_vae() {
+        use mold_catalog::entry::{
+            Bundling, CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat,
+            LicenseFlags, Modality, RecipeFile, RecipeFileRole, Source, TokenKind,
+        };
+        use mold_catalog::families::Family;
+
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let te_dir = models_dir.join("z-image-te");
+        config.models.insert(
+            "z-image-te".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(
+                    te_dir
+                        .join("text_encoder/model-00001-of-00003.safetensors")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                vae: Some(
+                    te_dir
+                        .join("vae/diffusion_pytorch_model.safetensors")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                text_encoder_files: Some(vec![
+                    te_dir
+                        .join("text_encoder/model-00001-of-00003.safetensors")
+                        .to_string_lossy()
+                        .into_owned(),
+                    te_dir
+                        .join("text_encoder/model-00002-of-00003.safetensors")
+                        .to_string_lossy()
+                        .into_owned(),
+                    te_dir
+                        .join("text_encoder/model-00003-of-00003.safetensors")
+                        .to_string_lossy()
+                        .into_owned(),
+                ]),
+                text_tokenizer: Some(
+                    te_dir
+                        .join("tokenizer/tokenizer.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
+        );
+        let entry = CatalogEntry {
+            id: CatalogId::from("cv:2442439"),
+            source: Source::Civitai,
+            source_id: "2442439".into(),
+            name: "Z Image Turbo".into(),
+            author: Some("z".into()),
+            family: Family::ZImage,
+            family_role: FamilyRole::Finetune,
+            sub_family: None,
+            modality: Modality::Image,
+            kind: mold_catalog::entry::Kind::Checkpoint,
+            file_format: FileFormat::Safetensors,
+            bundling: Bundling::SingleFile,
+            size_bytes: Some(12_021_353_906),
+            download_count: 0,
+            rating: None,
+            likes: 0,
+            nsfw: false,
+            thumbnail_url: None,
+            description: None,
+            license: None,
+            license_flags: LicenseFlags::default(),
+            tags: vec![],
+            companions: vec!["z-image-te".into()],
+            download_recipe: DownloadRecipe {
+                files: vec![
+                    RecipeFile {
+                        url: "https://civitai.example/model".into(),
+                        dest: "{family}/civitai/2442439/zImageTurbo_turbo.safetensors".into(),
+                        sha256: None,
+                        size_bytes: Some(12_021_353_906),
+                        role: None,
+                    },
+                    RecipeFile {
+                        url: "https://civitai.example/text".into(),
+                        dest: "{family}/civitai/2442439/zImageTurbo_turbo_txt.safetensors".into(),
+                        sha256: None,
+                        size_bytes: Some(8_044_982_048),
+                        role: Some(RecipeFileRole::TextEncoder),
+                    },
+                ],
+                needs_token: Some(TokenKind::Civitai),
+            },
+            engine_phase: 1,
+            created_at: None,
+            updated_at: None,
+            added_at: 0,
+            trained_words: vec![],
+        };
+
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let cfg = resolve_intent_to_paths("cv:2442439", &intent, &config).unwrap();
+
+        let recipe_text_encoder =
+            models_dir.join("cv-2442439/z-image/civitai/2442439/zImageTurbo_turbo_txt.safetensors");
+        let shared_vae = te_dir.join("vae/diffusion_pytorch_model.safetensors");
+        assert_eq!(cfg.vae.as_deref(), shared_vae.to_str());
+        let expected_text_encoder_files = vec![recipe_text_encoder.to_string_lossy().into_owned()];
+        assert_eq!(
+            cfg.text_encoder_files.as_deref(),
+            Some(expected_text_encoder_files.as_slice())
+        );
 
         unsafe {
             match _saved {
