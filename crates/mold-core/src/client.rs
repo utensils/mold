@@ -5,9 +5,9 @@ use crate::types::{
     LoraInfo, ModelInfo, ModelInfoExtended, ServerStatus, SseCompleteEvent, SseErrorEvent,
     SseProgressEvent, VideoData,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::Engine as _;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 
 #[derive(Clone)]
 pub struct MoldClient {
@@ -158,6 +158,21 @@ impl MoldClient {
 
     /// List installed LoRAs from the server, optionally filtered to a model's family.
     pub async fn list_loras(&self, model: Option<&str>) -> Result<Vec<LoraInfo>> {
+        match self.list_loras_endpoint(model).await {
+            Ok(loras) => Ok(loras),
+            Err(err) if should_fallback_loras_endpoint(&err) => self
+                .list_loras_from_installed_catalog(model)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to list LoRAs via /api/loras ({err}); fallback to /api/catalog/installed also failed"
+                    )
+                }),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn list_loras_endpoint(&self, model: Option<&str>) -> Result<Vec<LoraInfo>> {
         let req = self.client.get(format!("{}/api/loras", self.base_url));
         let req = if let Some(model) = model {
             req.query(&[("model", model)])
@@ -171,6 +186,41 @@ impl MoldClient {
             .json::<Vec<LoraInfo>>()
             .await?;
         Ok(resp)
+    }
+
+    async fn list_loras_from_installed_catalog(
+        &self,
+        model: Option<&str>,
+    ) -> Result<Vec<LoraInfo>> {
+        let family = model.and_then(lora_family_for_model_filter);
+        let mut req = self
+            .client
+            .get(format!("{}/api/catalog/installed", self.base_url))
+            .query(&[("kind", "lora")]);
+        if let Some(family) = family.as_deref() {
+            req = req.query(&[("family", family)]);
+        }
+
+        let resp = req
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<InstalledCatalogResponse>()
+            .await?;
+        let family = family.as_deref();
+        let mut loras = resp
+            .entries
+            .into_iter()
+            .filter_map(InstalledCatalogEntry::into_lora_info)
+            .filter(|lora| family.is_none_or(|family| lora.family == family))
+            .collect::<Vec<_>>();
+        loras.sort_by(|a, b| {
+            b.added_at
+                .cmp(&a.added_at)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(loras)
     }
 
     /// Check whether an error is a connection error (e.g. "connection refused").
@@ -774,6 +824,79 @@ impl MoldClient {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct InstalledCatalogResponse {
+    entries: Vec<InstalledCatalogEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct InstalledCatalogEntry {
+    id: String,
+    name: String,
+    family: String,
+    author: Option<String>,
+    primary_path: Option<String>,
+    #[serde(default)]
+    trained_words: Vec<String>,
+    size_bytes: Option<u64>,
+    thumbnail_url: Option<String>,
+    added_at: i64,
+    #[serde(default)]
+    installed: bool,
+    kind: String,
+}
+
+impl InstalledCatalogEntry {
+    fn into_lora_info(self) -> Option<LoraInfo> {
+        if self.kind != "lora" || !self.installed {
+            return None;
+        }
+        Some(LoraInfo {
+            id: self.id,
+            name: self.name,
+            family: self.family,
+            author: self.author,
+            path: self.primary_path?,
+            trained_words: self.trained_words,
+            size_bytes: self.size_bytes,
+            thumbnail_url: self.thumbnail_url,
+            added_at: self.added_at,
+        })
+    }
+}
+
+fn should_fallback_loras_endpoint(err: &anyhow::Error) -> bool {
+    let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() else {
+        return false;
+    };
+    reqwest_err.is_decode()
+        || reqwest_err.status().is_some_and(|status| {
+            matches!(
+                status,
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            )
+        })
+}
+
+fn lora_family_for_model_filter(model: &str) -> Option<String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let canonical = crate::manifest::resolve_model_name(model);
+    crate::manifest::find_manifest(&canonical)
+        .or_else(|| crate::manifest::find_manifest(model))
+        .map(|manifest| manifest.family.clone())
+        .or_else(|| {
+            let config = crate::Config::load_or_default();
+            config
+                .models
+                .get(model)
+                .or_else(|| config.models.get(&canonical))
+                .and_then(|model| model.family.clone())
+        })
+}
+
 /// Parsed video metadata from `x-mold-video-*` response headers.
 struct VideoMeta {
     frames: u32,
@@ -1038,6 +1161,61 @@ mod tests {
     fn test_is_connection_error_via_mold_error() {
         let err: anyhow::Error = MoldError::Client("connection refused".to_string()).into();
         assert!(MoldClient::is_connection_error(&err));
+    }
+
+    #[tokio::test]
+    async fn list_loras_falls_back_to_installed_catalog_for_older_servers() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/loras"))
+            .and(query_param("model", "flux-dev:q8"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<!doctype html><html></html>"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/catalog/installed"))
+            .and(query_param("kind", "lora"))
+            .and(query_param("family", "flux"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [
+                    {
+                        "id": "cv:827325",
+                        "name": "Flux Skin Texture",
+                        "family": "flux",
+                        "author": null,
+                        "primary_path": "/models/cv-827325/fluxRealSkin-V2.safetensors",
+                        "trained_words": ["realskin"],
+                        "size_bytes": 167938890,
+                        "thumbnail_url": null,
+                        "added_at": 1778268326,
+                        "installed": true,
+                        "kind": "lora"
+                    }
+                ],
+                "page": 1,
+                "page_size": 1,
+                "total": 1
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let loras = client.list_loras(Some("flux-dev:q8")).await.unwrap();
+
+        assert_eq!(loras.len(), 1);
+        assert_eq!(loras[0].id, "cv:827325");
+        assert_eq!(
+            loras[0].path,
+            "/models/cv-827325/fluxRealSkin-V2.safetensors"
+        );
+        assert_eq!(loras[0].trained_words, ["realskin"]);
     }
 
     #[test]
