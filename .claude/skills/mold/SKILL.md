@@ -24,7 +24,7 @@ mold mcp --host http://localhost:7680                # Stdio MCP bridge for LM S
 ```
 
 `mold mcp` exposes synchronous image generation, async generation with status
-polling, gallery search/fetch, model listing, and server status tools.
+polling, gallery search/fetch, model and LoRA listing, and server status tools.
 
 ## How to Use This Skill
 
@@ -125,8 +125,13 @@ mold run flux-dev:bf16 "epic shot" \
 searches (filter by **LoRAs** to narrow). Install with `mold pull cv:<id>`
 / `mold pull hf:<author>/<repo>` or the catalog tab's Download button.
 Once installed, the LoRA appears in the **Generate → Settings → LoRA**
-dropdown for any FLUX model. The CLI no longer ships a `mold catalog`
+dropdown for any compatible model family. The CLI no longer ships a `mold catalog`
 subcommand — every read is live, no scan to run.
+
+**MCP / REST discovery:** `GET /api/loras?model=<name>` and the MCP
+`list_loras` tool return installed compatible LoRAs with ids and server-side
+paths. MCP generation accepts ids, paths, or objects like `{ "id": "cv:827325" }`
+and `{ "path": "...", "scale": 0.8 }`; omitted scale defaults to `1.0`.
 
 **Web UI multi-LoRA + trigger words:** the LoRA picker stacks up to 4 adapters
 per generation (each with its own scale slider). Civitai LoRAs ship trigger
@@ -645,7 +650,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `POST /api/generate/chain` — chained arbitrary-length video (LTX-2 distilled); body is `mold_core::chain::ChainRequest` (canonical `stages[]` or auto-expand `prompt`+`total_frames`+`clip_frames`)
 - `POST /api/generate/chain/stream` — same as above, SSE progress with per-stage `denoise_step` events
 - `POST /api/expand` — LLM prompt expansion
-- `GET /api/models` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
+- `GET /api/models` · `GET /api/loras` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
 - `GET /api/gallery` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`
 - `POST /api/upscale` · `POST /api/upscale/stream`
 - `GET /api/queue` — authoritative server-side job listing for SPA reconciliation (queued + running jobs with UUIDv4 ids)

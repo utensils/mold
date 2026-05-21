@@ -7,6 +7,21 @@ use crate::{
 pub const MAX_PIXELS: u64 = 1_800_000;
 pub const MAX_INLINE_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_INLINE_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
+pub const LORA_CAPABLE_FAMILIES: &[&str] = &[
+    "flux",
+    "flux2",
+    "ltx2",
+    "sd15",
+    "sd3",
+    "sdxl",
+    "qwen-image",
+    "qwen-image-edit",
+    "z-image",
+];
+
+pub fn family_supports_lora(family: &str) -> bool {
+    LORA_CAPABLE_FAMILIES.contains(&family)
+}
 
 fn megapixel_limit_label() -> String {
     format!("{:.1}MP", MAX_PIXELS as f64 / 1_000_000.0)
@@ -186,8 +201,7 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
 /// user picks an unsupported model family + a LoRA.
 fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
-        Some("flux") | Some("flux2") | Some("ltx2") | Some("sd15") | Some("sd3") | Some("sdxl")
-        | Some("qwen-image") | Some("qwen-image-edit") | Some("z-image") => Ok(()),
+        Some(family) if family_supports_lora(family) => Ok(()),
         Some(other) => Err(format!(
             "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, and Z-Image models; got family {other:?}"
         )),

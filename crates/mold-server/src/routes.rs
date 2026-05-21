@@ -140,6 +140,7 @@ use crate::queue::clean_error_message;
         generate_stream,
         expand_prompt,
         list_models,
+        crate::catalog_api::list_loras,
         load_model,
         pull_model_endpoint,
         unload_model,
@@ -157,6 +158,7 @@ use crate::queue::clean_error_message;
         mold_core::ImageData,
         mold_core::OutputFormat,
         mold_core::ModelInfo,
+        mold_core::LoraInfo,
         mold_core::ServerStatus,
         mold_core::ActiveGenerationStatus,
         mold_core::GpuInfo,
@@ -202,6 +204,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/expand", post(expand_prompt))
         .route("/api/models", get(list_models))
+        .route("/api/loras", get(crate::catalog_api::list_loras))
         .route("/api/models/load", post(load_model))
         .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))

@@ -2,8 +2,8 @@ use crate::chain::{ChainProgressEvent, ChainRequest, ChainResponse, SseChainComp
 use crate::error::MoldError;
 use crate::types::{
     ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse, ImageData,
-    ModelInfo, ModelInfoExtended, ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
-    VideoData,
+    LoraInfo, ModelInfo, ModelInfoExtended, ServerStatus, SseCompleteEvent, SseErrorEvent,
+    SseProgressEvent, VideoData,
 };
 use anyhow::Result;
 use base64::Engine as _;
@@ -152,6 +152,23 @@ impl MoldClient {
             .await?
             .error_for_status()?
             .json::<Vec<ModelInfoExtended>>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// List installed LoRAs from the server, optionally filtered to a model's family.
+    pub async fn list_loras(&self, model: Option<&str>) -> Result<Vec<LoraInfo>> {
+        let req = self.client.get(format!("{}/api/loras", self.base_url));
+        let req = if let Some(model) = model {
+            req.query(&[("model", model)])
+        } else {
+            req
+        };
+        let resp = req
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<LoraInfo>>()
             .await?;
         Ok(resp)
     }

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
 use mold_core::{
-    Config, GalleryImage, GenerateRequest, GenerateResponse, MoldClient, OutputFormat,
-    SseProgressEvent,
+    Config, GalleryImage, GenerateRequest, GenerateResponse, LoraInfo, LoraWeight, MoldClient,
+    OutputFormat, SseProgressEvent,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -129,6 +129,7 @@ impl McpServer {
             "list_gallery" => self.tool_list_gallery(arguments).await,
             "get_gallery_image" => self.tool_get_gallery_image(arguments).await,
             "list_models" => self.tool_list_models(arguments).await,
+            "list_loras" => self.tool_list_loras(arguments).await,
             "server_status" => self.tool_server_status().await,
             other => Err(format!("unknown tool: {other}")),
         };
@@ -146,9 +147,10 @@ impl McpServer {
     }
 
     async fn tool_generate_image(&self, arguments: Value) -> std::result::Result<Value, String> {
-        let args: GenerateImageArgs =
+        let mut args: GenerateImageArgs =
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
-        let req = build_generate_request(args)?;
+        let loras = self.resolve_loras(args.loras.take()).await?;
+        let req = build_generate_request(args, loras)?;
         let response = self
             .client
             .generate(req)
@@ -188,9 +190,10 @@ impl McpServer {
         &self,
         arguments: Value,
     ) -> std::result::Result<Value, String> {
-        let args: GenerateImageArgs =
+        let mut args: GenerateImageArgs =
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
-        let req = build_generate_request(args)?;
+        let loras = self.resolve_loras(args.loras.take()).await?;
+        let req = build_generate_request(args, loras)?;
         let job_id = self.jobs.create(&req).await;
         let client = self.client.clone();
         let jobs = self.jobs.clone();
@@ -417,6 +420,46 @@ impl McpServer {
         Ok(text_result(lines.join("\n")))
     }
 
+    async fn tool_list_loras(&self, arguments: Value) -> std::result::Result<Value, String> {
+        let args: ListLorasArgs =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let loras = self
+            .client
+            .list_loras(args.model.as_deref())
+            .await
+            .map_err(|e| format!("failed to list LoRAs: {e}"))?;
+
+        if loras.is_empty() {
+            let scope = args
+                .model
+                .as_deref()
+                .map(|model| format!(" compatible with {model}"))
+                .unwrap_or_default();
+            return Ok(json!({
+                "content": [{ "type": "text", "text": format!("No installed LoRAs{scope} found.") }],
+                "structuredContent": { "loras": [] }
+            }));
+        }
+
+        let scope = args
+            .model
+            .as_deref()
+            .map(|model| format!(" compatible with {model}"))
+            .unwrap_or_default();
+        let lines = loras.iter().map(lora_line).collect::<Vec<_>>();
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Showing {} installed LoRAs{scope}:\n{}",
+                    loras.len(),
+                    lines.join("\n")
+                )
+            }],
+            "structuredContent": { "loras": loras }
+        }))
+    }
+
     async fn tool_server_status(&self) -> std::result::Result<Value, String> {
         let status = self
             .client
@@ -455,6 +498,32 @@ impl McpServer {
 
         Ok(text_result(lines.join("\n")))
     }
+
+    async fn resolve_loras(
+        &self,
+        loras: Option<Vec<McpLoraArg>>,
+    ) -> std::result::Result<Option<Vec<LoraWeight>>, String> {
+        let Some(loras) = loras else {
+            return Ok(None);
+        };
+        if loras.is_empty() {
+            return Ok(None);
+        }
+
+        let refs = loras
+            .into_iter()
+            .map(normalise_mcp_lora_arg)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let catalog = if refs.iter().any(|lora| is_lora_catalog_id(&lora.value)) {
+            self.client
+                .list_loras(None)
+                .await
+                .map_err(|e| format!("failed to resolve LoRA ids: {e}"))?
+        } else {
+            Vec::new()
+        };
+        Ok(Some(resolve_mcp_lora_refs(&refs, &catalog)?))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -469,6 +538,27 @@ struct GenerateImageArgs {
     negative_prompt: Option<String>,
     output_format: Option<String>,
     expand: Option<bool>,
+    loras: Option<Vec<McpLoraArg>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum McpLoraArg {
+    Ref(String),
+    Object(McpLoraObject),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct McpLoraObject {
+    id: Option<String>,
+    path: Option<String>,
+    scale: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct McpLoraRef {
+    value: String,
+    scale: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -476,6 +566,11 @@ struct ListModelsArgs {
     downloaded_only: Option<bool>,
     generation_only: Option<bool>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListLorasArgs {
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1046,6 +1141,23 @@ fn gallery_summary_json(image: &GalleryImage) -> Value {
     })
 }
 
+fn lora_line(lora: &LoraInfo) -> String {
+    let author = lora
+        .author
+        .as_deref()
+        .map(|author| format!(" by {author}"))
+        .unwrap_or_default();
+    let triggers = if lora.trained_words.is_empty() {
+        String::new()
+    } else {
+        format!("; triggers: {}", lora.trained_words.join(", "))
+    };
+    format!(
+        "- {}{} [{}] {}; path: {}{}",
+        lora.name, author, lora.family, lora.id, lora.path, triggers
+    )
+}
+
 fn format_gallery_timestamp(timestamp: u64) -> String {
     let secs = if timestamp > 1_000_000_000_000 {
         timestamp / 1000
@@ -1061,7 +1173,82 @@ fn format_gallery_timestamp(timestamp: u64) -> String {
         .unwrap_or_else(|| secs.to_string())
 }
 
-fn build_generate_request(args: GenerateImageArgs) -> std::result::Result<GenerateRequest, String> {
+fn normalise_mcp_lora_arg(arg: McpLoraArg) -> std::result::Result<McpLoraRef, String> {
+    match arg {
+        McpLoraArg::Ref(value) => {
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                return Err("loras entries must not be empty".to_string());
+            }
+            Ok(McpLoraRef { value, scale: 1.0 })
+        }
+        McpLoraArg::Object(object) => {
+            let id = non_empty_lora_ref(object.id);
+            let path = non_empty_lora_ref(object.path);
+            let value = match (id, path) {
+                (Some(_), Some(_)) => {
+                    return Err(
+                        "each loras object must provide either id or path, not both".to_string()
+                    );
+                }
+                (Some(id), None) => id,
+                (None, Some(path)) => path,
+                (None, None) => {
+                    return Err("each loras object must provide an id or path".to_string());
+                }
+            };
+            let scale = object.scale.unwrap_or(1.0);
+            if !scale.is_finite() {
+                return Err("LoRA scale must be a finite number".to_string());
+            }
+            Ok(McpLoraRef { value, scale })
+        }
+    }
+}
+
+fn non_empty_lora_ref(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+fn is_lora_catalog_id(value: &str) -> bool {
+    value.starts_with("cv:") || value.starts_with("hf:")
+}
+
+fn resolve_mcp_lora_refs(
+    refs: &[McpLoraRef],
+    catalog: &[LoraInfo],
+) -> std::result::Result<Vec<LoraWeight>, String> {
+    refs.iter()
+        .map(|lora| {
+            let path = if is_lora_catalog_id(&lora.value) {
+                catalog
+                    .iter()
+                    .find(|candidate| candidate.id == lora.value)
+                    .map(|candidate| candidate.path.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "installed LoRA id '{}' was not found; use list_loras to see installed ids",
+                            lora.value
+                        )
+                    })?
+            } else {
+                lora.value.clone()
+            };
+            Ok(LoraWeight {
+                path,
+                scale: lora.scale,
+            })
+        })
+        .collect()
+}
+
+fn build_generate_request(
+    args: GenerateImageArgs,
+    loras: Option<Vec<LoraWeight>>,
+) -> std::result::Result<GenerateRequest, String> {
     if args.prompt.trim().is_empty() {
         return Err("prompt must not be empty".to_string());
     }
@@ -1132,7 +1319,7 @@ fn build_generate_request(args: GenerateImageArgs) -> std::result::Result<Genera
         source_video: None,
         keyframes: None,
         pipeline: None,
-        loras: None,
+        loras,
         retake_range: None,
         spatial_upscale: None,
         temporal_upscale: None,
@@ -1224,6 +1411,38 @@ fn tool_definitions() -> Value {
                     "expand": {
                         "type": "boolean",
                         "description": "Ask the mold server to expand the prompt before generation."
+                    },
+                    "loras": {
+                        "type": "array",
+                        "description": "Optional LoRA stack to apply. Each item can be an installed LoRA id from list_loras, a server-side path, or an object with id/path and optional scale.",
+                        "items": {
+                            "oneOf": [
+                                {
+                                    "type": "string",
+                                    "description": "Installed LoRA id such as cv:827325, or a server-side .safetensors path. Scale defaults to 1.0."
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "description": "Installed LoRA catalog id, such as cv:827325."
+                                        },
+                                        "path": {
+                                            "type": "string",
+                                            "description": "Server-side path to a LoRA .safetensors file."
+                                        },
+                                        "scale": {
+                                            "type": "number",
+                                            "minimum": 0.0,
+                                            "maximum": 2.0,
+                                            "description": "LoRA strength. Defaults to 1.0."
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            ]
+                        }
                     }
                 },
                 "required": ["prompt"],
@@ -1282,6 +1501,38 @@ fn tool_definitions() -> Value {
                     "expand": {
                         "type": "boolean",
                         "description": "Ask the mold server to expand the prompt before generation."
+                    },
+                    "loras": {
+                        "type": "array",
+                        "description": "Optional LoRA stack to apply. Each item can be an installed LoRA id from list_loras, a server-side path, or an object with id/path and optional scale.",
+                        "items": {
+                            "oneOf": [
+                                {
+                                    "type": "string",
+                                    "description": "Installed LoRA id such as cv:827325, or a server-side .safetensors path. Scale defaults to 1.0."
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "description": "Installed LoRA catalog id, such as cv:827325."
+                                        },
+                                        "path": {
+                                            "type": "string",
+                                            "description": "Server-side path to a LoRA .safetensors file."
+                                        },
+                                        "scale": {
+                                            "type": "number",
+                                            "minimum": 0.0,
+                                            "maximum": 2.0,
+                                            "description": "LoRA strength. Defaults to 1.0."
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            ]
+                        }
                     }
                 },
                 "required": ["prompt"],
@@ -1424,6 +1675,20 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "list_loras",
+            "description": "List installed LoRA adapters. When model is provided, returns LoRAs compatible with that model family.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "model": {
+                        "type": "string",
+                        "description": "Optional mold model name, such as flux-dev:q8 or realistic-vision-v5:fp16. Filters LoRAs to the model's compatible family."
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "server_status",
             "description": "Show mold server health, queue, loaded model, and GPU status.",
             "inputSchema": {
@@ -1526,6 +1791,151 @@ mod tests {
         let tools = response["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|tool| tool["name"] == "list_gallery"));
         assert!(tools.iter().any(|tool| tool["name"] == "get_gallery_image"));
+    }
+
+    #[test]
+    fn tools_list_exposes_lora_stack_and_listing() {
+        let response = handle_protocol_message_for_test(json!({
+            "jsonrpc": "2.0",
+            "id": "tools",
+            "method": "tools/list"
+        }))
+        .expect("tools/list should produce a response");
+
+        let tools = response["result"]["tools"].as_array().unwrap();
+        let generate = tools
+            .iter()
+            .find(|tool| tool["name"] == "generate_image")
+            .expect("generate_image tool");
+        assert!(generate["inputSchema"]["properties"]["loras"].is_object());
+        assert!(
+            generate["inputSchema"]["properties"]["loras"]["items"]["oneOf"]
+                .as_array()
+                .is_some_and(|variants| variants.len() == 2)
+        );
+        assert!(tools.iter().any(|tool| tool["name"] == "list_loras"));
+    }
+
+    #[test]
+    fn normalise_lora_arg_accepts_ids_paths_and_default_scale() {
+        let parsed: GenerateImageArgs = serde_json::from_value(json!({
+            "prompt": "a cat",
+            "loras": [
+                "cv:827325",
+                { "path": "/models/a.safetensors" },
+                { "id": "cv:123", "scale": 0.65 }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(parsed.loras.as_ref().unwrap().len(), 3);
+        assert_eq!(
+            normalise_mcp_lora_arg(McpLoraArg::Ref("cv:827325".into())).unwrap(),
+            McpLoraRef {
+                value: "cv:827325".into(),
+                scale: 1.0,
+            }
+        );
+        assert_eq!(
+            normalise_mcp_lora_arg(McpLoraArg::Ref("/models/a.safetensors".into())).unwrap(),
+            McpLoraRef {
+                value: "/models/a.safetensors".into(),
+                scale: 1.0,
+            }
+        );
+        assert_eq!(
+            normalise_mcp_lora_arg(McpLoraArg::Object(McpLoraObject {
+                id: Some(" cv:123 ".into()),
+                path: None,
+                scale: Some(0.65),
+            }))
+            .unwrap(),
+            McpLoraRef {
+                value: "cv:123".into(),
+                scale: 0.65,
+            }
+        );
+        assert!(normalise_mcp_lora_arg(McpLoraArg::Object(McpLoraObject {
+            id: Some("cv:1".into()),
+            path: Some("/models/a.safetensors".into()),
+            scale: None,
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn resolve_lora_refs_maps_catalog_ids_and_keeps_paths() {
+        let catalog = vec![LoraInfo {
+            id: "cv:827325".into(),
+            name: "Detail".into(),
+            family: "flux".into(),
+            author: None,
+            path: "/models/cv-827325/detail.safetensors".into(),
+            trained_words: vec![],
+            size_bytes: Some(123),
+            thumbnail_url: None,
+            added_at: 10,
+        }];
+        let loras = resolve_mcp_lora_refs(
+            &[
+                McpLoraRef {
+                    value: "cv:827325".into(),
+                    scale: 0.7,
+                },
+                McpLoraRef {
+                    value: "/models/manual.safetensors".into(),
+                    scale: 1.0,
+                },
+            ],
+            &catalog,
+        )
+        .unwrap();
+
+        assert_eq!(loras[0].path, "/models/cv-827325/detail.safetensors");
+        assert_eq!(loras[0].scale, 0.7);
+        assert_eq!(loras[1].path, "/models/manual.safetensors");
+        assert!(resolve_mcp_lora_refs(
+            &[McpLoraRef {
+                value: "cv:missing".into(),
+                scale: 1.0,
+            }],
+            &catalog,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn build_generate_request_preserves_lora_stack() {
+        let req = build_generate_request(
+            GenerateImageArgs {
+                prompt: "a cat".into(),
+                model: Some("flux-dev:q8".into()),
+                width: Some(1024),
+                height: Some(1024),
+                steps: Some(4),
+                guidance: Some(1.0),
+                seed: Some(42),
+                negative_prompt: None,
+                output_format: Some("png".into()),
+                expand: None,
+                loras: None,
+            },
+            Some(vec![
+                LoraWeight {
+                    path: "/models/a.safetensors".into(),
+                    scale: 0.8,
+                },
+                LoraWeight {
+                    path: "/models/b.safetensors".into(),
+                    scale: 0.4,
+                },
+            ]),
+        )
+        .expect("valid generate request");
+
+        let loras = req.loras.expect("lora stack");
+        assert_eq!(loras.len(), 2);
+        assert_eq!(loras[0].path, "/models/a.safetensors");
+        assert_eq!(loras[1].scale, 0.4);
     }
 
     #[tokio::test]

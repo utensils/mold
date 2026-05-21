@@ -185,7 +185,12 @@ Available MCP tools:
 | `list_gallery`         | Search, filter, and sort saved gallery items                  |
 | `get_gallery_image`    | Fetch a gallery image by filename or the latest matching item |
 | `list_models`          | List models visible to the running mold server                |
+| `list_loras`           | List installed LoRAs, optionally filtered by model            |
 | `server_status`        | Show server health, queue, loaded model, and GPU              |
+
+Both `generate_image` tools accept `loras` entries as ids, server-side paths, or
+objects like `{ "id": "cv:827325" }` and `{ "path": "...", "scale": 0.8 }`;
+`scale` defaults to `1.0`. Use `list_loras` to discover installed ids and paths.
 
 Use `generate_image_async` in hosts with short tool-call timeouts. It uses the
 server's streaming endpoint for progress, then `generation_status` returns the

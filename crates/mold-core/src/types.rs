@@ -468,6 +468,34 @@ pub struct LoraWeight {
     pub scale: f64,
 }
 
+/// Installed LoRA adapter available to generation clients.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LoraInfo {
+    /// Catalog id, for example `cv:8001`.
+    #[schema(example = "cv:8001")]
+    pub id: String,
+    /// Human-readable LoRA name.
+    #[schema(example = "Skin Texture Detail")]
+    pub name: String,
+    /// Compatible model family slug.
+    #[schema(example = "flux")]
+    pub family: String,
+    /// Optional upstream author/creator.
+    pub author: Option<String>,
+    /// Absolute server-side path to pass as `loras[].path`.
+    #[schema(example = "/home/user/.mold/models/cv-8001/lora.safetensors")]
+    pub path: String,
+    /// Civitai trained words / trigger phrases, when known.
+    #[serde(default)]
+    pub trained_words: Vec<String>,
+    /// Size of the primary LoRA file, when known.
+    pub size_bytes: Option<u64>,
+    /// Preview image URL from the catalog sidecar, when known.
+    pub thumbnail_url: Option<String>,
+    /// Unix timestamp from the install sidecar.
+    pub added_at: i64,
+}
+
 fn default_lora_scale() -> f64 {
     1.0
 }
