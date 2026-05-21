@@ -55,19 +55,94 @@ pub(crate) fn is_cuda_oom(e: &anyhow::Error) -> bool {
     full.contains("CUDA_ERROR_OUT_OF_MEMORY") || full.contains("out of memory")
 }
 
-/// Build a user-friendly error message for a CUDA OOM that occurred during
-/// LTX-Video generation. The raw `DriverError(CUDA_ERROR_OUT_OF_MEMORY, …)`
-/// is opaque; replace it with actionable guidance.
+/// Build a user-friendly error message for a CUDA OOM. The raw
+/// `DriverError(CUDA_ERROR_OUT_OF_MEMORY, …)` is opaque; replace it with
+/// actionable guidance.
 pub(crate) fn oom_user_message(model_name: &str) -> String {
+    oom_user_message_for_request(model_name, None, None)
+}
+
+pub(crate) fn oom_user_message_for_request(
+    model_name: &str,
+    family_slug: Option<&str>,
+    req: Option<&mold_core::GenerateRequest>,
+) -> String {
+    let requested_size = req
+        .map(|r| format!(" Requested size: {}x{}.", r.width, r.height))
+        .unwrap_or_default();
+    let batch_hint = match req.map(|r| r.batch_size).unwrap_or(1) {
+        0 | 1 => "keep --batch 1".to_string(),
+        n => format!("reduce --batch {n} to --batch 1"),
+    };
+
+    if family_slug.is_some_and(is_video_family) || req.and_then(|r| r.frames).is_some() {
+        let frames_hint = req
+            .and_then(|r| r.frames)
+            .map(|frames| format!("reduce --frames below {frames} (e.g. 17 or 9)"))
+            .unwrap_or_else(|| "reduce --frames (e.g. 17 or 9)".to_string());
+        return format!(
+            "GPU ran out of memory loading or running '{model_name}'.{requested_size} \
+             Try: {frames_hint}, lower --width/--height, use a quantized variant \
+             if available, or close other GPU apps."
+        );
+    }
+
+    let family_note = match family_slug {
+        Some("sd15") => {
+            if req.is_some_and(|r| r.width == 1024 && r.height == 1024) {
+                " SD1.5 defaults to 512x512; 1024x1024 is 4x the pixels and can OOM \
+                 even when the checkpoint file is only a few GB."
+            } else {
+                " SD1.5 defaults to 512x512; larger sizes multiply activation and \
+                 VAE workspace beyond the checkpoint file size."
+            }
+        }
+        Some("sdxl") => {
+            " SDXL's usual 1024x1024 size still needs activation and VAE workspace \
+             beyond the checkpoint file size."
+        }
+        Some("sd3") => " SD3 needs activation and VAE workspace beyond the checkpoint file size.",
+        Some("flux")
+        | Some("flux2")
+        | Some("qwen-image")
+        | Some("qwen-image-edit")
+        | Some("z-image")
+        | Some("wuerstchen") => {
+            " The checkpoint size is only the weights; peak VRAM also includes \
+             activations, VAE decode workspace, CUDA workspaces, and resident cache."
+        }
+        _ => {
+            " The model file size is only the weights; peak VRAM also includes \
+             activations, decoder workspace, CUDA workspaces, and resident cache."
+        }
+    };
+    let resolution_hint = match family_slug {
+        Some("sd15") => "lower --width/--height (try 768x768 or 512x512)",
+        _ => "lower --width/--height",
+    };
+
     format!(
-        "GPU ran out of memory loading or running '{model_name}'. \
-         Try: reduce --frames (e.g. 17 or 9), lower --width/--height, \
-         use a quantized variant (e.g. ':q8'), or close other GPU apps."
+        "GPU ran out of memory loading or running '{model_name}'.{requested_size}{family_note} \
+         Try: {resolution_hint}, {batch_hint}, use a smaller/quantized variant if \
+         this model provides one, run mold unload, or close other GPU apps."
     )
 }
 
-fn cuda_oom_user_message(worker: &GpuWorker, model_name: &str) -> (String, bool) {
-    let base = oom_user_message(model_name);
+fn is_video_family(family_slug: &str) -> bool {
+    matches!(family_slug, "ltx-video" | "ltx2" | "ltx-2" | "ltx-2.3")
+}
+
+fn cuda_oom_user_message(
+    worker: &GpuWorker,
+    model_name: &str,
+    family_slug: Option<&str>,
+    req: Option<&mold_core::GenerateRequest>,
+) -> (String, bool) {
+    let base = if family_slug.is_none() && req.is_none() {
+        oom_user_message(model_name)
+    } else {
+        oom_user_message_for_request(model_name, family_slug, req)
+    };
     let outcome = crate::gpu_pool::record_model_cuda_oom(model_name, worker.gpu.ordinal);
     if outcome.is_unschedulable() {
         if let Some(cooldown) = crate::gpu_pool::model_unschedulable_message(model_name) {
@@ -121,6 +196,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
 
     // Ensure model is loaded on this GPU.
     let config_snapshot = job.config.blocking_read().clone();
+    let family_slug = crate::model_manager::family_for_model_sync(&model_name, &config_snapshot);
     let activation_hint =
         crate::model_manager::activation_hint_for_request_sync(&config_snapshot, &job.request);
     if let Err(e) = ensure_model_ready_sync(worker, &model_name, &config_snapshot, activation_hint)
@@ -132,7 +208,12 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         let is_oom = is_cuda_oom(&e);
         let (err_msg, count_worker_failure) = if is_oom {
             mold_inference::device::try_synchronize_device(ordinal);
-            cuda_oom_user_message(worker, &model_name)
+            cuda_oom_user_message(
+                worker,
+                &model_name,
+                family_slug.as_deref(),
+                Some(&job.request),
+            )
         } else {
             (
                 format!("model load error: {}", clean_error_message(&e)),
@@ -392,7 +473,12 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
             let is_oom = is_cuda_oom(&e);
             let (err_msg, count_worker_failure) = if is_oom {
                 mold_inference::device::try_synchronize_device(ordinal);
-                cuda_oom_user_message(worker, &model_name)
+                cuda_oom_user_message(
+                    worker,
+                    &model_name,
+                    family_slug.as_deref(),
+                    Some(&job.request),
+                )
             } else {
                 (
                     format!("generation error: {}", clean_error_message(&e)),
@@ -1065,7 +1151,58 @@ mod tests {
         assert!(
             msg.contains("ltx-video-0.9.8-13b-dev:bf16"),
             "OOM message must include the model name so the user knows what failed; \
-             got: {msg}",
+            got: {msg}",
+        );
+    }
+
+    #[test]
+    fn runtime_oom_message_for_sd15_1024_mentions_resolution_not_frames() {
+        let req: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"portrait","model":"realistic-vision-v5:fp16","width":1024,"height":1024,"steps":25,"guidance":7.5,"batch_size":1}"#,
+        )
+        .unwrap();
+
+        let msg =
+            oom_user_message_for_request("realistic-vision-v5:fp16", Some("sd15"), Some(&req));
+
+        assert!(
+            msg.contains("1024x1024"),
+            "image OOM message should mention the requested resolution; got: {msg}"
+        );
+        assert!(
+            msg.contains("512x512"),
+            "SD1.5 OOM message should point back to the native/default size; got: {msg}"
+        );
+        assert!(
+            msg.contains("checkpoint") || msg.contains("model file"),
+            "OOM message should explain why file size is not peak VRAM; got: {msg}"
+        );
+        assert!(
+            !msg.contains("--frames"),
+            "image OOM message must not suggest video frame-count fixes; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn runtime_oom_message_for_ltx_keeps_frame_guidance() {
+        let req: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"camera pan","model":"ltx-video-0.9.8-13b-dev:bf16","width":768,"height":512,"steps":25,"guidance":3.5,"batch_size":1,"frames":25}"#,
+        )
+        .unwrap();
+
+        let msg = oom_user_message_for_request(
+            "ltx-video-0.9.8-13b-dev:bf16",
+            Some("ltx-video"),
+            Some(&req),
+        );
+
+        assert!(
+            msg.contains("--frames") && msg.contains("25"),
+            "video OOM message should keep frame-count guidance; got: {msg}"
+        );
+        assert!(
+            msg.contains("768x512"),
+            "video OOM message should mention the requested resolution; got: {msg}"
         );
     }
 

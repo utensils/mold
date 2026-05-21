@@ -116,8 +116,9 @@ fn check_model_memory_budget(
 
 /// Build the suggestion text appended to preflight rejection messages.
 /// For LTX-Video (non-streaming full-weight load) the dominant knob is
-/// reducing `frames` or `width`/`height`; for other families a quantized
-/// variant or `--offload` (FLUX) is the typical escape.
+/// reducing `frames` or `width`/`height`; for image families, resolution and
+/// batch size are usually the first levers because activation and VAE
+/// workspace can dominate the checkpoint size.
 fn rejection_suggestion(hint: Option<ActivationHint>) -> &'static str {
     match hint.map(|h| h.family) {
         Some(ActivationFamily::LtxVideo) => {
@@ -125,8 +126,8 @@ fn rejection_suggestion(hint: Option<ActivationHint>) -> &'static str {
              (e.g. ':q8'), or close other GPU apps."
         }
         _ => {
-            "Try a smaller variant (e.g. ':q8' / ':q5'), enable --offload (FLUX), \
-             or close other GPU apps."
+            "Try lowering --width/--height, reduce --batch, use a smaller/quantized \
+             variant if available, enable --offload for FLUX, or close other GPU apps."
         }
     }
 }
@@ -3328,6 +3329,31 @@ mod tests {
             "LTX-Video rejection must not mention --offload (FLUX-only flag), \
              got: {}",
             err.error,
+        );
+    }
+
+    #[test]
+    fn preflight_rejection_message_for_image_suggests_resolution_not_frames() {
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 2,
+            dtype_bytes: 2,
+            family: ActivationFamily::SdxlUnet,
+        };
+        let suggestion = rejection_suggestion(Some(hint));
+
+        assert!(
+            suggestion.contains("--width/--height"),
+            "image preflight suggestion should mention resolution; got: {suggestion}"
+        );
+        assert!(
+            suggestion.contains("--batch"),
+            "image preflight suggestion should mention batch; got: {suggestion}"
+        );
+        assert!(
+            !suggestion.contains("--frames"),
+            "image preflight suggestion must not mention video frames; got: {suggestion}"
         );
     }
 }
