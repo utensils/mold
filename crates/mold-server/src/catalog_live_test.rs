@@ -216,6 +216,79 @@ async fn installed_endpoint_returns_only_kind_filtered_sidecars() {
 }
 
 #[tokio::test]
+async fn loras_endpoint_filters_by_model_family_and_returns_all_matches() {
+    let (state, _server, tmp) = build_state().await;
+
+    for idx in 0..=10 {
+        write_lora_sidecar(tmp.path(), idx, "flux", idx as i64);
+    }
+    write_lora_sidecar(tmp.path(), 99, "sdxl", 99);
+
+    let router = create_router(state);
+    let (status, body) = get(router.clone(), "/api/loras?model=flux-dev:q8").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entries = parsed.as_array().unwrap();
+    assert_eq!(entries.len(), 11);
+    assert!(entries.iter().all(|entry| entry["family"] == "flux"));
+    assert_eq!(entries[0]["id"], "cv:10");
+    assert_eq!(entries[0]["trained_words"][0], "trigger-10");
+    assert!(entries.iter().any(|entry| entry["id"] == "cv:0"));
+    assert!(entries.iter().all(|entry| entry["id"] != "cv:99"));
+    assert!(entries[0]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("cv-10/lora-10.safetensors"));
+
+    let (status, body) = get(router, "/api/loras").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entries = parsed.as_array().unwrap();
+    assert_eq!(entries.len(), 12);
+    assert!(entries.iter().any(|entry| entry["id"] == "cv:99"));
+}
+
+#[tokio::test]
+async fn loras_endpoint_rejects_unknown_model_filter() {
+    let (state, _server, _tmp) = build_state().await;
+    let router = create_router(state);
+
+    let (status, body) = get(router, "/api/loras?model=not-a-real-model").await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["code"], "UNKNOWN_MODEL");
+}
+
+fn write_lora_sidecar(root: &std::path::Path, idx: usize, family: &str, written_at: i64) {
+    let dir = root.join(format!("cv-{idx}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let filename = format!("lora-{idx}.safetensors");
+    let sidecar = CatalogSidecar {
+        schema: 1,
+        id: format!("cv:{idx}"),
+        source: "civitai".into(),
+        source_id: idx.to_string(),
+        name: format!("LoRA {idx}"),
+        author: Some("alice".into()),
+        family: family.into(),
+        family_role: "finetune".into(),
+        sub_family: None,
+        kind: "lora".into(),
+        modality: "image".into(),
+        thumbnail_url: None,
+        size_bytes: Some(10),
+        engine_phase: 3,
+        trained_words: vec![format!("trigger-{idx}")],
+        primary_filename_rel: filename.clone(),
+        written_at,
+    };
+    write_sidecar(&dir.join(SIDECAR_FILENAME), &sidecar).unwrap();
+    std::fs::write(dir.join(filename), b"x").unwrap();
+}
+
+#[tokio::test]
 async fn installed_endpoint_marks_uninstalled_when_primary_missing() {
     let (state, _server, tmp) = build_state().await;
 

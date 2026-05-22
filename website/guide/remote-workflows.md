@@ -65,10 +65,12 @@ an entry like this:
 
 The MCP server exposes synchronous `generate_image`, timeout-friendly
 `generate_image_async` / `generation_status`, gallery tools
-`list_gallery` / `get_gallery_image`, `list_models`, and `server_status`. Use
-the async generation flow for cold model loads or slow generations so LM Studio
-does not need to keep one tool call open until the image is finished. Set
-`MOLD_API_KEY` in the MCP process environment if your mold server requires one.
+`list_gallery` / `get_gallery_image`, `list_models`, `list_loras`, and
+`server_status`. Generation tools accept a `loras` array using ids or paths
+returned by `list_loras`; object entries can omit `scale` to use `1.0`. Use the
+async generation flow for cold model loads or slow generations so LM Studio does
+not need to keep one tool call open until the image is finished. Set
+`MOLD_API_KEY` in the MCP process environment when the mold server requires one.
 
 ## Remote Pulls vs Local Pulls
 

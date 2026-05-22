@@ -565,6 +565,13 @@ impl Flux2Engine {
         Ok(())
     }
 
+    fn should_delay_transformer_reload_for_prompt_encode(
+        load_strategy: LoadStrategy,
+        transformer_loaded: bool,
+    ) -> bool {
+        load_strategy == LoadStrategy::Eager && !transformer_loaded
+    }
+
     /// Get text encoder file paths (shards or single file).
     fn text_encoder_paths(&self) -> Vec<std::path::PathBuf> {
         if !self.base.paths.text_encoder_files.is_empty() {
@@ -1160,18 +1167,24 @@ impl Flux2Engine {
             return self.generate_sequential(req);
         }
 
-        // Eager mode: use pre-loaded components
-        // Reload transformer first (before taking the main `loaded` borrow)
-        // if it was dropped after a previous VAE decode.
-        self.reload_transformer_if_needed()?;
-
-        let progress = &self.base.progress;
-
-        let loaded = self
-            .base
-            .loaded
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
+        // Eager mode: use pre-loaded components. After a previous request we
+        // intentionally drop the transformer before VAE decode, but the VAE
+        // and Qwen3 shell remain resident. In that warm state, reloading the
+        // transformer before prompt encoding recreates the highest peak
+        // (transformer + Qwen3) and can OOM on 24 GB cards when queued
+        // requests arrive back-to-back. Encode/drop Qwen3 first, then reload
+        // the transformer for denoising.
+        let delay_transformer_reload = self.base.loaded.as_ref().is_some_and(|loaded| {
+            Self::should_delay_transformer_reload_for_prompt_encode(
+                self.base.load_strategy,
+                loaded.transformer.is_some(),
+            )
+        });
+        if delay_transformer_reload {
+            tracing::info!(
+                "delaying Flux.2 transformer reload until after prompt encode to reduce peak VRAM"
+            );
+        }
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -1187,66 +1200,83 @@ impl Flux2Engine {
         );
 
         // 1. Encode prompt with Qwen3 (check cache first to avoid unnecessary reload)
-        let cache_key = prompt_text_key(&req.prompt);
-        let txt_emb = if let Some(tensor) =
-            restore_cached_tensor(&self.prompt_cache, &cache_key, &loaded.device, loaded.dtype)?
-        {
-            progress.cache_hit("prompt conditioning");
-            tensor
-        } else {
-            // Cache miss — restore encoder if it was dropped or parked after
-            // a previous generation.
-            if loaded.text_encoder.model.is_none() {
-                let label = if loaded.text_encoder.is_parked() {
-                    "Unparking Qwen3 encoder (CPU→GPU)"
-                } else {
-                    "Reloading Qwen3 encoder"
-                };
-                progress.stage_start(label);
-                let reload_start = Instant::now();
-                if loaded.text_encoder.is_parked() {
-                    loaded.text_encoder.unpark_to_gpu(progress)?;
-                } else {
-                    loaded.text_encoder.reload(progress)?;
+        let txt_emb = {
+            let progress = &self.base.progress;
+            let loaded = self
+                .base
+                .loaded
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
+            let cache_key = prompt_text_key(&req.prompt);
+            if let Some(tensor) =
+                restore_cached_tensor(&self.prompt_cache, &cache_key, &loaded.device, loaded.dtype)?
+            {
+                progress.cache_hit("prompt conditioning");
+                tensor
+            } else {
+                // Cache miss — restore encoder if it was dropped or parked after
+                // a previous generation.
+                if loaded.text_encoder.model.is_none() {
+                    let label = if loaded.text_encoder.is_parked() {
+                        "Unparking Qwen3 encoder (CPU→GPU)"
+                    } else {
+                        "Reloading Qwen3 encoder"
+                    };
+                    progress.stage_start(label);
+                    let reload_start = Instant::now();
+                    if loaded.text_encoder.is_parked() {
+                        loaded.text_encoder.unpark_to_gpu(progress)?;
+                    } else {
+                        loaded.text_encoder.reload(progress)?;
+                    }
+                    progress.stage_done(label, reload_start.elapsed());
                 }
-                progress.stage_done(label, reload_start.elapsed());
-            }
 
-            let txt_emb = Self::encode_prompt_cached(
-                progress,
-                &self.prompt_cache,
-                &mut loaded.text_encoder,
-                &req.prompt,
-                &loaded.device,
-                loaded.dtype,
-            )?;
-            tracing::info!("Qwen3 encoding complete");
+                let txt_emb = Self::encode_prompt_cached(
+                    progress,
+                    &self.prompt_cache,
+                    &mut loaded.text_encoder,
+                    &req.prompt,
+                    &loaded.device,
+                    loaded.dtype,
+                )?;
+                tracing::info!("Qwen3 encoding complete");
 
-            // Free GPU VRAM for denoising. With `MOLD_KEEP_TE_RAM=1` and the
-            // BF16 encoder, parameters move to host RAM instead of being
-            // released — saves ~10 s on the next request. GGUF and Metal
-            // flow through the original drop path.
-            if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
-                let park_mode = crate::device::keep_te_in_ram()
-                    && !loaded.device.is_metal()
-                    && !loaded.text_encoder.is_quantized;
-                if park_mode {
-                    loaded.text_encoder.park_to_cpu()?;
-                    tracing::info!(
-                        on_gpu = loaded.text_encoder.on_gpu,
-                        "Qwen3 encoder parked to CPU host RAM"
-                    );
-                } else {
-                    loaded.text_encoder.drop_weights();
-                    tracing::info!(
-                        on_gpu = loaded.text_encoder.on_gpu,
-                        "Qwen3 encoder dropped to free memory for denoising"
-                    );
+                // Free GPU VRAM for denoising. With `MOLD_KEEP_TE_RAM=1` and the
+                // BF16 encoder, parameters move to host RAM instead of being
+                // released — saves ~10 s on the next request. GGUF and Metal
+                // flow through the original drop path.
+                if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
+                    let park_mode = crate::device::keep_te_in_ram()
+                        && !loaded.device.is_metal()
+                        && !loaded.text_encoder.is_quantized;
+                    if park_mode {
+                        loaded.text_encoder.park_to_cpu()?;
+                        tracing::info!(
+                            on_gpu = loaded.text_encoder.on_gpu,
+                            "Qwen3 encoder parked to CPU host RAM"
+                        );
+                    } else {
+                        loaded.text_encoder.drop_weights();
+                        tracing::info!(
+                            on_gpu = loaded.text_encoder.on_gpu,
+                            "Qwen3 encoder dropped to free memory for denoising"
+                        );
+                    }
                 }
-            }
 
-            txt_emb
+                txt_emb
+            }
         };
+
+        self.reload_transformer_if_needed()?;
+
+        let loaded = self
+            .base
+            .loaded
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
+        let progress = &self.base.progress;
 
         // 2. Prepare latent space dimensions and timestep schedule
         let latent_h = height.div_ceil(8);
@@ -1524,6 +1554,31 @@ mod tests {
         assert_eq!(
             Flux2Engine::img2img_source_normalize_range(),
             crate::img_utils::NormalizeRange::MinusOneToOne
+        );
+    }
+
+    #[test]
+    fn eager_warm_request_delays_transformer_reload_until_after_prompt_encode() {
+        assert!(
+            Flux2Engine::should_delay_transformer_reload_for_prompt_encode(
+                LoadStrategy::Eager,
+                false
+            ),
+            "warm eager requests with a dropped transformer must encode/drop Qwen3 before reload"
+        );
+        assert!(
+            !Flux2Engine::should_delay_transformer_reload_for_prompt_encode(
+                LoadStrategy::Eager,
+                true
+            ),
+            "fully loaded eager requests should keep the existing hot path"
+        );
+        assert!(
+            !Flux2Engine::should_delay_transformer_reload_for_prompt_encode(
+                LoadStrategy::Sequential,
+                false
+            ),
+            "sequential mode already handles load-use-drop ordering"
         );
     }
 

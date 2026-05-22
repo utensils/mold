@@ -12,6 +12,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `POST`   | `/api/generate/chain/stream`     | Chained video with SSE progress                                                                                   |
 | `POST`   | `/api/expand`                    | Expand a prompt using LLM                                                                                         |
 | `GET`    | `/api/models`                    | List available models                                                                                             |
+| `GET`    | `/api/loras`                     | List installed LoRAs, optionally filtered by `?model=` compatibility                                              |
 | `POST`   | `/api/models/load`               | Load/swap the active model                                                                                        |
 | `POST`   | `/api/models/pull`               | Pull/download a model                                                                                             |
 | `DELETE` | `/api/models/unload`             | Unload model to free GPU memory                                                                                   |
@@ -68,8 +69,8 @@ When `MOLD_RATE_LIMIT` is set, per-IP rate limiting is enforced with two tiers:
   `/api/generate/stream`, `/api/expand`, `/api/upscale`,
   `/api/upscale/stream`, `/api/models/load`, `/api/models/pull`,
   `/api/models/unload`
-- **Read tier** (10x the configured rate): `/api/models`, `/api/status`,
-  `/api/gallery/*`
+- **Read tier** (10x the configured rate): `/api/models`, `/api/loras`,
+  `/api/status`, `/api/gallery/*`
 
 Health, docs, and `/metrics` endpoints are exempt from rate limiting.
 
@@ -114,6 +115,9 @@ curl http://localhost:7680/api/status
 
 # List models
 curl http://localhost:7680/api/models
+
+# List installed LoRAs compatible with a model
+curl "http://localhost:7680/api/loras?model=flux-dev:q8"
 
 # Load a specific model
 curl -X POST http://localhost:7680/api/models/load \
@@ -179,15 +183,25 @@ were adjusted to fit model constraints (e.g. multiples of 16, pixel cap).
   "source_image": "<base64>",
   "strength": 0.75,
   "mask_image": "<base64>",
-  "lora": {
-    "path": "/path/to/adapter.safetensors",
-    "scale": 1.0
-  },
+  "loras": [
+    { "path": "/path/to/style.safetensors", "scale": 0.8 },
+    { "path": "/path/to/detail.safetensors", "scale": 0.4 }
+  ],
   "expand": false
 }
 ```
 
 Only `prompt` is required. All other fields have defaults.
+
+## `/api/loras`
+
+`GET /api/loras` returns installed LoRA adapters. Add `?model=<name>` to
+restrict the list to the model family's compatible LoRAs. Use the returned
+`path` values in `loras[].path` on `/api/generate` or `/api/generate/stream`.
+
+```bash
+curl "http://localhost:7680/api/loras?model=realistic-vision-v5:fp16"
+```
 
 ## `/api/generate/stream`
 

@@ -396,6 +396,11 @@ pub struct InstalledQuery {
     pub family: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct ListLorasQuery {
+    pub model: Option<String>,
+}
+
 /// `GET /api/catalog/installed` — enumerate installed catalog entries
 /// from the per-install sidecar files under `models_dir`. The LoRA
 /// picker uses this as its primary data source.
@@ -436,6 +441,125 @@ pub async fn list_installed_catalog(
         "total": total,
     }))
     .into_response()
+}
+
+/// `GET /api/loras` — list installed LoRA adapters, optionally filtered
+/// by model compatibility. This is a small MCP-friendly view over the
+/// catalog sidecars used by the web picker.
+#[utoipa::path(
+    get,
+    path = "/api/loras",
+    tag = "models",
+    params(
+        ("model" = Option<String>, Query, description = "Optional model name used to filter LoRAs by compatible family")
+    ),
+    responses(
+        (status = 200, description = "Installed LoRAs", body = Vec<mold_core::LoraInfo>),
+        (status = 400, description = "Unknown model")
+    )
+)]
+pub async fn list_loras(
+    State(state): State<crate::state::AppState>,
+    Query(q): Query<ListLorasQuery>,
+) -> Result<Json<Vec<mold_core::LoraInfo>>, crate::routes::ApiError> {
+    let family_filter = match q.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(model) => {
+            let family = lora_family_for_model(&state, model).await.ok_or_else(|| {
+                crate::routes::ApiError::unknown_model(format!(
+                    "unknown model '{model}'; cannot resolve compatible LoRAs"
+                ))
+            })?;
+            if !mold_core::family_supports_lora(&family) {
+                return Ok(Json(Vec::new()));
+            }
+            Some(family)
+        }
+        None => None,
+    };
+
+    let cfg = state.config.read().await;
+    let models_dir = cfg.resolved_models_dir();
+    drop(cfg);
+
+    let mut loras = mold_catalog::sidecar::walk_sidecars(&models_dir)
+        .into_iter()
+        .filter_map(|(dir, sidecar)| {
+            if sidecar.kind != "lora" {
+                return None;
+            }
+            if let Some(family) = family_filter.as_deref() {
+                if sidecar.family != family {
+                    return None;
+                }
+            }
+            sidecar_to_lora_info(&dir, sidecar)
+        })
+        .collect::<Vec<_>>();
+
+    loras.sort_by(|a, b| {
+        b.added_at
+            .cmp(&a.added_at)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(Json(loras))
+}
+
+async fn lora_family_for_model(state: &crate::state::AppState, model: &str) -> Option<String> {
+    let canonical = mold_core::manifest::resolve_model_name(model);
+    if let Some(manifest) = mold_core::manifest::find_manifest(&canonical) {
+        return Some(manifest.family.clone());
+    }
+    if let Some(manifest) = mold_core::manifest::find_manifest(model) {
+        return Some(manifest.family.clone());
+    }
+
+    {
+        let intents = state.catalog_intents.read().await;
+        if let Some(intent) = intents.get(model).or_else(|| intents.get(&canonical)) {
+            return Some(intent.family.clone());
+        }
+    }
+
+    let config = state.config.read().await;
+    let configured = config
+        .models
+        .get(model)
+        .or_else(|| config.models.get(&canonical))
+        .and_then(|m| m.family.clone());
+    if configured.is_some() {
+        return configured;
+    }
+    let models_dir = config.resolved_models_dir();
+    drop(config);
+
+    if model.starts_with("cv:") || model.starts_with("hf:") {
+        for (_, sidecar) in mold_catalog::sidecar::walk_sidecars(&models_dir) {
+            if sidecar.id == model {
+                return Some(sidecar.family);
+            }
+        }
+    }
+
+    None
+}
+
+fn sidecar_to_lora_info(
+    dir: &std::path::Path,
+    sidecar: mold_catalog::sidecar::CatalogSidecar,
+) -> Option<mold_core::LoraInfo> {
+    let path = mold_catalog::sidecar::primary_path_if_present(dir, &sidecar)?;
+    Some(mold_core::LoraInfo {
+        id: sidecar.id,
+        name: sidecar.name,
+        family: sidecar.family,
+        author: sidecar.author,
+        path: path.to_string_lossy().into_owned(),
+        trained_words: sidecar.trained_words,
+        size_bytes: sidecar.size_bytes,
+        thumbnail_url: sidecar.thumbnail_url,
+        added_at: sidecar.written_at,
+    })
 }
 
 fn parse_kind(s: &str) -> Option<mold_catalog::entry::Kind> {

@@ -40,9 +40,9 @@ pub use types::GenerateRequest;
 pub use types::Scheduler;
 pub use types::*;
 pub use validation::{
-    clamp_to_megapixel_limit, dimension_warning, fit_to_model_dimensions, fit_to_target_area,
-    recommended_dimensions, validate_generate_request, validate_generate_request_with_family,
-    validate_upscale_request,
+    clamp_to_megapixel_limit, dimension_warning, family_supports_lora, fit_to_model_dimensions,
+    fit_to_target_area, recommended_dimensions, validate_generate_request,
+    validate_generate_request_with_family, validate_upscale_request, LORA_CAPABLE_FAMILIES,
 };
 
 pub use expand::{
