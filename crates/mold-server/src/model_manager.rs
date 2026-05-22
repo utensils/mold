@@ -415,6 +415,22 @@ pub(crate) fn select_server_load_strategy_for_budget(
         mold_inference::LoadStrategy::Eager
     }
 }
+
+pub(crate) fn select_server_load_strategy_for_device(
+    model_name: &str,
+    paths: &ModelPaths,
+    available_bytes: Option<u64>,
+    device_total_bytes: Option<u64>,
+    hint: Option<ActivationHint>,
+) -> mold_inference::LoadStrategy {
+    if model_name == "flux2-klein-9b:bf16"
+        && device_total_bytes.is_some_and(|total| total < 32_000_000_000)
+    {
+        return mold_inference::LoadStrategy::Sequential;
+    }
+
+    select_server_load_strategy_for_budget(paths, available_bytes, hint)
+}
 pub(crate) type DownloadProgressCallback =
     Arc<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>;
 
@@ -1505,9 +1521,11 @@ async fn create_and_load_engine(
         cache.active_vram_bytes()
     };
     preflight_memory_guard(model_name, &paths, active_vram, 0, hint)?;
-    let load_strategy = select_server_load_strategy_for_budget(
+    let load_strategy = select_server_load_strategy_for_device(
+        model_name,
         &paths,
         effective_load_available_bytes(active_vram, 0),
+        mold_inference::device::total_vram_bytes(0),
         hint,
     );
     if load_strategy == mold_inference::LoadStrategy::Sequential {
@@ -2090,6 +2108,34 @@ mod tests {
             mold_inference::LoadStrategy::Sequential,
             "server must use load-use-drop for Klein-9B BF16 on 24 GB so the \
              text encoder is not co-resident with the transformer"
+        );
+    }
+
+    #[test]
+    fn server_load_strategy_forces_klein9b_bf16_sequential_on_24gb_even_with_overgenerous_budget() {
+        let (_dir, paths) = flux2_klein9b_bf16_paths();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        let strategy = select_server_load_strategy_for_device(
+            "flux2-klein-9b:bf16",
+            &paths,
+            Some(128 * GB),
+            Some(24 * GB),
+            Some(hint),
+        );
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "Klein-9B BF16 must not use eager loading on 24 GB cards even if \
+             the live free-memory query is over-generous or falls back to \
+             system memory"
         );
     }
 
