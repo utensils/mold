@@ -597,7 +597,6 @@ fn select_load_strategy_for_worker(
     let available =
         crate::model_manager::effective_load_available_bytes(active_vram, worker.gpu.ordinal);
     let strategy = crate::model_manager::select_server_load_strategy_for_device(
-        model_name,
         paths,
         available,
         Some(worker.gpu.total_vram_bytes),
