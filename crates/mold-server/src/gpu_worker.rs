@@ -596,8 +596,12 @@ fn select_load_strategy_for_worker(
         .active_vram_bytes();
     let available =
         crate::model_manager::effective_load_available_bytes(active_vram, worker.gpu.ordinal);
-    let strategy =
-        crate::model_manager::select_server_load_strategy_for_budget(paths, available, hint);
+    let strategy = crate::model_manager::select_server_load_strategy_for_device(
+        paths,
+        available,
+        Some(worker.gpu.total_vram_bytes),
+        hint,
+    );
     if strategy == mold_inference::LoadStrategy::Sequential {
         tracing::info!(
             gpu = worker.gpu.ordinal,
