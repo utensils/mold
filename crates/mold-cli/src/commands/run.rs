@@ -12,7 +12,7 @@ use mold_core::{
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 
-use crate::{Ltx2SpatialUpscaleArg, Ltx2TemporalUpscaleArg};
+use crate::{Ltx2PipelineArg, Ltx2SpatialUpscaleArg, Ltx2TemporalUpscaleArg};
 
 use super::generate;
 
@@ -291,20 +291,17 @@ fn validate_image_args_for_family(family: &str, image: &[String]) -> Result<()> 
     Ok(())
 }
 
-fn parse_pipeline(value: Option<String>) -> Result<Option<Ltx2PipelineMode>> {
-    value
-        .map(|value| match value.as_str() {
-            "one-stage" => Ok(Ltx2PipelineMode::OneStage),
-            "two-stage" => Ok(Ltx2PipelineMode::TwoStage),
-            "two-stage-hq" => Ok(Ltx2PipelineMode::TwoStageHq),
-            "distilled" => Ok(Ltx2PipelineMode::Distilled),
-            "ic-lora" => Ok(Ltx2PipelineMode::IcLora),
-            "keyframe" => Ok(Ltx2PipelineMode::Keyframe),
-            "a2vid" => Ok(Ltx2PipelineMode::A2Vid),
-            "retake" => Ok(Ltx2PipelineMode::Retake),
-            _ => anyhow::bail!("unsupported LTX-2 pipeline: {value}"),
-        })
-        .transpose()
+fn parse_pipeline(value: Option<Ltx2PipelineArg>) -> Option<Ltx2PipelineMode> {
+    value.map(|value| match value {
+        Ltx2PipelineArg::OneStage => Ltx2PipelineMode::OneStage,
+        Ltx2PipelineArg::TwoStage => Ltx2PipelineMode::TwoStage,
+        Ltx2PipelineArg::TwoStageHq => Ltx2PipelineMode::TwoStageHq,
+        Ltx2PipelineArg::Distilled => Ltx2PipelineMode::Distilled,
+        Ltx2PipelineArg::IcLora => Ltx2PipelineMode::IcLora,
+        Ltx2PipelineArg::Keyframe => Ltx2PipelineMode::Keyframe,
+        Ltx2PipelineArg::A2Vid => Ltx2PipelineMode::A2Vid,
+        Ltx2PipelineArg::Retake => Ltx2PipelineMode::Retake,
+    })
 }
 
 fn parse_spatial_upscale(value: Option<Ltx2SpatialUpscaleArg>) -> Option<Ltx2SpatialUpscale> {
@@ -460,7 +457,7 @@ pub async fn run(
     audio_file: Option<String>,
     video: Option<String>,
     keyframe: Vec<String>,
-    pipeline: Option<String>,
+    pipeline: Option<Ltx2PipelineArg>,
     retake: Option<String>,
     spatial_upscale: Option<Ltx2SpatialUpscaleArg>,
     temporal_upscale: Option<Ltx2TemporalUpscaleArg>,
@@ -580,7 +577,7 @@ pub async fn run(
     let audio_file_bytes = audio_file.as_deref().map(std::fs::read).transpose()?;
     let source_video_bytes = video.as_deref().map(std::fs::read).transpose()?;
     let keyframes = parse_keyframes(&keyframe)?;
-    let pipeline = parse_pipeline(pipeline)?;
+    let pipeline = parse_pipeline(pipeline);
     let retake_range = parse_retake_range(retake)?;
     let spatial_upscale = parse_spatial_upscale(spatial_upscale);
     let temporal_upscale = parse_temporal_upscale(temporal_upscale);
