@@ -471,6 +471,29 @@ fn run_mask_requires_image_flag() {
         .failure();
 }
 
+#[test]
+fn run_qwen_image_edit_rejects_batch_before_remote_generation() {
+    let env = TestEnv::new();
+    let image = env.home.join("edit.png");
+    let img = image::RgbImage::from_fn(16, 16, |_, _| image::Rgb([255, 0, 0]));
+    img.save(&image).unwrap();
+
+    env.cmd()
+        .args([
+            "run",
+            "qwen-image-edit-2511:q4",
+            "replace the background",
+            "--image",
+        ])
+        .arg(&image)
+        .args(["--batch", "2", "--output", "out.png"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "qwen-image-edit only supports --batch 1",
+        ));
+}
+
 // ── mold pull (error paths) ───────────────────────────────────────────────
 
 #[test]
