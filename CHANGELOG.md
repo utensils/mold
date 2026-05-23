@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **LTX-2 / LTX-2.3 frame counts now respect the temporal RoPE budget.** Requests whose stage-1 frame count exceeds 153 frames now fail validation with an explicit "temporal RoPE budget" error before inference starts, preventing over-budget 19B/22B runs from producing rainbow/static noise instead of prompt-relevant video. Long clips can still use `--temporal-upscale x2` when the stage-1 render stays within the budget ([#226](https://github.com/utensils/mold/issues/226)).
 - **Server OOM diagnostics are now family-aware.** Image requests no longer get video-only `--frames` advice; SD1.5 1024x1024 failures now call out the requested resolution, the 512x512 default/native target, and the fact that checkpoint size is not peak VRAM because activations, VAE decode workspace, CUDA workspaces, and resident cache also count. Preflight budget rejections likewise suggest lowering `--width`/`--height` and `--batch` before variant/offload advice.
 
 ## [0.10.0] - 2026-05-15
@@ -326,7 +327,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Remote pull progress bars dropped file names on completion**: completed download progress bars showed `done` as the prefix instead of the file name (e.g. `[1/20] config.json`), so only the in-flight file was identifiable. Completed bars now keep their `[i/N] <filename>` label both during and after download ([#223](https://github.com/utensils/mold/issues/223)).
 - **`.dockerignore` was dropping `web/public/logo.png`**: the blanket `*.png` / `*.jpeg` / `*.jpg` patterns excluded the SPA logo + favicon from the Docker build context, shipping a broken web gallery. Added `!web/public/**` / `!web/src/**` negations so the bundler stage gets the assets it needs.
 - **Docker image build resilient to transient apt flakes**: both the builder and runtime `apt-get install` steps now retry up to 5 times with exponential backoff. Main-branch build `24552477974` failed on an `archive.ubuntu.com` timeout fetching `tini`; future builds ride out similar mirror outages instead of hard-failing CI.
-
 
 ## [0.7.1] - 2026-04-16
 
