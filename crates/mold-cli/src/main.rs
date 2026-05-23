@@ -43,6 +43,26 @@ pub(crate) enum Ltx2TemporalUpscaleArg {
     X2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Ltx2PipelineArg {
+    #[value(name = "one-stage")]
+    OneStage,
+    #[value(name = "two-stage")]
+    TwoStage,
+    #[value(name = "two-stage-hq")]
+    TwoStageHq,
+    #[value(name = "distilled")]
+    Distilled,
+    #[value(name = "ic-lora")]
+    IcLora,
+    #[value(name = "keyframe")]
+    Keyframe,
+    #[value(name = "a2vid")]
+    A2Vid,
+    #[value(name = "retake")]
+    Retake,
+}
+
 /// Sentinel error: the command already printed diagnostics to stderr.
 /// The main handler should just exit(1) without printing anything extra.
 #[derive(Debug)]
@@ -464,12 +484,8 @@ Examples:
         keyframe: Vec<String>,
 
         /// LTX-2 pipeline mode.
-        #[arg(
-            long,
-            help_heading = "Video",
-            value_parser = ["one-stage", "two-stage", "two-stage-hq", "distilled", "ic-lora", "keyframe", "a2vid", "retake"]
-        )]
-        pipeline: Option<String>,
+        #[arg(long, help_heading = "Video", value_enum)]
+        pipeline: Option<Ltx2PipelineArg>,
 
         /// Retake time range in the form <start:end> seconds.
         #[arg(long, help_heading = "Video")]
@@ -1907,6 +1923,40 @@ mod tests {
             Commands::Run { steps, .. } => assert_eq!(steps, Some(20)),
             _ => panic!("expected Run"),
         }
+    }
+
+    #[test]
+    fn run_pipeline_uses_typed_value_enum() {
+        let cli = parse(&[
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "a clip",
+            "--pipeline",
+            "two-stage-hq",
+        ]);
+        match cli.command {
+            Commands::Run { pipeline, .. } => {
+                assert_eq!(pipeline, Some(Ltx2PipelineArg::TwoStageHq));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_pipeline_rejects_unknown_value_at_parse_time() {
+        let err = match try_parse(&[
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "a clip",
+            "--pipeline",
+            "unknown",
+        ]) {
+            Ok(_) => panic!("expected invalid pipeline value"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("invalid value 'unknown'"), "got: {msg}");
+        assert!(msg.contains("two-stage-hq"), "got: {msg}");
     }
 
     #[test]
