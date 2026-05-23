@@ -133,6 +133,15 @@ fn effective_negative_prompt(
     }
 }
 
+fn validate_cli_batch_for_family(family: Option<&str>, batch: u32) -> Result<()> {
+    if family == Some("qwen-image-edit") && batch > 1 {
+        anyhow::bail!(
+            "qwen-image-edit only supports --batch 1. Run separate commands for multiple edits."
+        );
+    }
+    Ok(())
+}
+
 #[cfg(any(feature = "cuda", feature = "metal", test))]
 fn apply_local_engine_env_overrides(
     t5_variant_override: Option<&str>,
@@ -254,6 +263,7 @@ pub async fn run(
     let effective_frames = frames.or_else(|| model_cfg.effective_frames());
     let effective_fps = fps.or_else(|| model_cfg.effective_fps());
     let is_ltx2 = family.as_deref() == Some("ltx2");
+    validate_cli_batch_for_family(family.as_deref(), batch)?;
 
     // Default video models to a sensible container unless the user explicitly picked one.
     let output_format = if format == OutputFormat::Png && effective_frames.is_some() {
@@ -2055,6 +2065,20 @@ mod tests {
             effective_negative_prompt(Some("qwen-image-edit"), 1.0, None),
             None
         );
+    }
+
+    #[test]
+    fn qwen_image_edit_rejects_cli_batch_above_one() {
+        let err = validate_cli_batch_for_family(Some("qwen-image-edit"), 2).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("qwen-image-edit only supports --batch 1"));
+    }
+
+    #[test]
+    fn cli_batch_guard_allows_single_edit_and_other_families() {
+        validate_cli_batch_for_family(Some("qwen-image-edit"), 1).unwrap();
+        validate_cli_batch_for_family(Some("flux"), 4).unwrap();
+        validate_cli_batch_for_family(None, 4).unwrap();
     }
 
     #[test]
