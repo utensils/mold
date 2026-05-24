@@ -304,11 +304,68 @@ pub async fn install_catalog_model_live(config: &mut Config, id: &str) -> Result
     if !looks_like_catalog_id(id) {
         return Ok(false);
     }
+    if let Some(synth) = synthesize_model_config_from_installed_sidecar(config, id)? {
+        config.models.insert(id.to_string(), synth);
+        return Ok(true);
+    }
     let entry = lookup_catalog_entry_live(id).await?;
     let models_dir = config.resolved_models_dir();
     let synth = synthesize_model_config(&entry, &models_dir, config)?;
     config.models.insert(id.to_string(), synth);
     Ok(true)
+}
+
+fn synthesize_model_config_from_installed_sidecar(
+    config: &Config,
+    id: &str,
+) -> Result<Option<ModelConfig>> {
+    let models_dir = config.resolved_models_dir();
+    let Some((sidecar_dir, sidecar)) = mold_catalog::sidecar::walk_sidecars(&models_dir)
+        .into_iter()
+        .find(|(_, sidecar)| sidecar.id == id)
+    else {
+        return Ok(None);
+    };
+    if sidecar.kind != "checkpoint" || sidecar_primary_looks_like_auxiliary(&sidecar) {
+        return Ok(None);
+    }
+    let Some(primary_recipe_path) =
+        mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar)
+    else {
+        return Ok(None);
+    };
+    let family = mold_catalog::families::Family::from_str(&sidecar.family)
+        .map_err(|e| anyhow::anyhow!("sidecar has unknown family slug: {e}"))?;
+    let companions = mold_catalog::companions::companions_for(
+        family,
+        sidecar.sub_family.as_deref(),
+        Bundling::SingleFile,
+        mold_catalog::entry::Kind::Checkpoint,
+    )
+    .into_iter()
+    .map(|name| mold_catalog::synthesis::CompanionIntent {
+        name,
+        required: true,
+    })
+    .collect();
+    let intent = mold_catalog::synthesis::CatalogModelIntent {
+        family: sidecar.family,
+        sub_family: sidecar.sub_family,
+        primary_recipe_path,
+        vae_recipe_path: None,
+        text_encoder_recipe_paths: Vec::new(),
+        companions,
+        bundling: Bundling::SingleFile,
+    };
+    intent_to_model_config(&intent, config).map(Some)
+}
+
+fn sidecar_primary_looks_like_auxiliary(sidecar: &mold_catalog::sidecar::CatalogSidecar) -> bool {
+    let rel = sidecar.primary_filename_rel.to_ascii_lowercase();
+    rel.contains("/text_encoder/")
+        || rel.contains("text_encoder")
+        || rel.contains("_txt.")
+        || rel.contains("-txt.")
 }
 
 #[cfg(test)]
@@ -719,6 +776,58 @@ mod tests {
         assert_eq!(
             synth.clip_tokenizer_2.as_deref(),
             Some(format!("{models_dir}/clip-g/tokenizer.json").as_str())
+        );
+    }
+
+    #[test]
+    fn installed_checkpoint_sidecar_synthesizes_config_without_live_lookup() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_models_dir_env();
+
+        let dir = tempfile::tempdir().unwrap();
+        let _home_guard = pin_mold_home(dir.path());
+        let models_dir = dir.path().to_str().unwrap();
+        let mut config = explicit_config(models_dir);
+        stub_companion_paths(&mut config, models_dir);
+
+        let sidecar_dir = dir.path().join("cv-1075446");
+        let primary_rel = "sdxl/civitai/1075446/realism.safetensors";
+        let primary_path = sidecar_dir.join(primary_rel);
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        std::fs::write(&primary_path, b"ok").unwrap();
+        mold_catalog::sidecar::write_sidecar(
+            &sidecar_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &mold_catalog::sidecar::CatalogSidecar {
+                schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+                id: "cv:1075446".into(),
+                source: "civitai".into(),
+                source_id: "1075446".into(),
+                name: "Realism By Stable Yogi".into(),
+                author: Some("Stable_Yogi".into()),
+                family: "sdxl".into(),
+                family_role: "finetune".into(),
+                sub_family: None,
+                kind: "checkpoint".into(),
+                modality: "image".into(),
+                thumbnail_url: None,
+                size_bytes: Some(2),
+                engine_phase: 2,
+                trained_words: Vec::new(),
+                primary_filename_rel: primary_rel.into(),
+                written_at: 0,
+            },
+        )
+        .unwrap();
+
+        let synth = synthesize_model_config_from_installed_sidecar(&config, "cv:1075446").unwrap();
+        let synth = synth.expect("installed sidecar should synthesize without live catalog");
+
+        assert_eq!(synth.family.as_deref(), Some("sdxl"));
+        assert_eq!(synth.transformer.as_deref(), primary_path.to_str());
+        assert_eq!(synth.vae.as_deref(), primary_path.to_str());
+        assert_eq!(
+            synth.clip_tokenizer.as_deref(),
+            Some(format!("{models_dir}/clip-l/tokenizer.json").as_str())
         );
     }
 
