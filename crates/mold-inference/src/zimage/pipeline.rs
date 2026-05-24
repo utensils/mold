@@ -599,17 +599,17 @@ impl ZImageEngine {
                     device,
                     &self.base.progress,
                 )?;
-                return Ok(ZImageTransformer::Quantized(
+                return Ok(ZImageTransformer::Quantized(Box::new(
                     super::quantized_transformer::QuantizedZImageTransformer2DModel::new(
                         cfg, dtype, vb,
                     )?,
-                ));
+                )));
             }
             let qvb =
                 quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
-            Ok(ZImageTransformer::Dense(load_gguf_dense_transformer(
-                cfg, dtype, qvb,
-            )?))
+            Ok(ZImageTransformer::Dense(Box::new(
+                load_gguf_dense_transformer(cfg, dtype, qvb)?,
+            )))
         } else if has_lora {
             // Build an mmap-backed SimpleBackend so we can layer a LoRA
             // wrapper on top. Drops the streaming progress bar that
@@ -635,9 +635,9 @@ impl ZImageEngine {
             let wrapped =
                 super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)?;
             let vb = candle_nn::VarBuilder::from_backend(wrapped, dtype, device.clone());
-            Ok(ZImageTransformer::Dense(MoldZImageTransformer2DModel::new(
-                cfg, vb,
-            )?))
+            Ok(ZImageTransformer::Dense(Box::new(
+                MoldZImageTransformer2DModel::new(cfg, vb)?,
+            )))
         } else {
             use candle_core::safetensors::MmapedSafetensors;
             let path_refs: Vec<&std::path::Path> =
@@ -658,9 +658,9 @@ impl ZImageEngine {
             self.base
                 .progress
                 .weight_load("Z-Image transformer", bytes_total, bytes_total);
-            Ok(ZImageTransformer::Dense(MoldZImageTransformer2DModel::new(
-                cfg, xformer_vb,
-            )?))
+            Ok(ZImageTransformer::Dense(Box::new(
+                MoldZImageTransformer2DModel::new(cfg, xformer_vb)?,
+            )))
         }
     }
 

@@ -230,8 +230,8 @@ impl MoldZImageTransformer2DModel {
 
 /// Dense Z-Image transformer, regardless of original weight source.
 pub(crate) enum ZImageTransformer {
-    Dense(MoldZImageTransformer2DModel),
-    Quantized(super::quantized_transformer::QuantizedZImageTransformer2DModel),
+    Dense(Box<MoldZImageTransformer2DModel>),
+    Quantized(Box<super::quantized_transformer::QuantizedZImageTransformer2DModel>),
 }
 
 impl ZImageTransformer {
