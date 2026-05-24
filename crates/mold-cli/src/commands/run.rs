@@ -304,6 +304,61 @@ fn parse_pipeline(value: Option<Ltx2PipelineArg>) -> Option<Ltx2PipelineMode> {
     })
 }
 
+fn resolve_effective_loras_for_family(
+    family: &str,
+    lora: &[String],
+    lora_scale: f64,
+    default_lora: Option<LoraWeight>,
+    camera_control: Option<String>,
+) -> Result<(Option<LoraWeight>, Option<Vec<LoraWeight>>)> {
+    if lora.len() > 1 && !mold_core::family_supports_lora(family) {
+        anyhow::bail!("multiple --lora values are only supported for LoRA-capable models");
+    }
+
+    let effective_lora = if let Some(lora_path) = lora.first() {
+        Some(LoraWeight {
+            path: lora_path.clone(),
+            scale: lora_scale,
+        })
+    } else {
+        default_lora
+    };
+
+    let mut stack = Vec::new();
+    if lora.len() > 1 {
+        stack.extend(lora.iter().cloned().map(|path| LoraWeight {
+            path,
+            scale: lora_scale,
+        }));
+    } else if family == "ltx2" {
+        if !lora.is_empty() {
+            stack.extend(lora.iter().cloned().map(|path| LoraWeight {
+                path,
+                scale: lora_scale,
+            }));
+        } else if let Some(lora) = effective_lora.clone() {
+            stack.push(lora);
+        }
+    }
+
+    if let Some(camera_control) = camera_control {
+        let path = if camera_control.ends_with(".safetensors") {
+            camera_control
+        } else {
+            format!("camera-control:{camera_control}")
+        };
+        stack.push(LoraWeight { path, scale: 1.0 });
+    }
+
+    let lora_stack = if stack.is_empty() { None } else { Some(stack) };
+    let effective_lora = if lora_stack.is_some() && lora.len() > 1 {
+        None
+    } else {
+        effective_lora
+    };
+    Ok((effective_lora, lora_stack))
+}
+
 fn parse_spatial_upscale(value: Option<Ltx2SpatialUpscaleArg>) -> Option<Ltx2SpatialUpscale> {
     value.map(|value| match value {
         Ltx2SpatialUpscaleArg::X1_5 => Ltx2SpatialUpscale::X1_5,
@@ -795,46 +850,18 @@ pub async fn run(
         model_cfg.effective_negative_prompt(&config)
     };
 
-    if family != "ltx2" && lora.len() > 1 {
-        anyhow::bail!("multiple --lora values are only supported for LTX-2 / LTX-2.3 models");
-    }
-
     // Resolve LoRA: explicit CLI values override config defaults.
-    let effective_lora = if let Some(lora_path) = lora.first() {
-        Some(LoraWeight {
-            path: lora_path.clone(),
-            scale: lora_scale,
-        })
-    } else {
-        let model_cfg = config.resolved_model_config(&model);
-        model_cfg
-            .effective_lora()
-            .map(|(path, scale)| LoraWeight { path, scale })
-    };
-    let loras = if family == "ltx2"
-        && (!lora.is_empty() || effective_lora.is_some() || camera_control.is_some())
-    {
-        let mut loras = Vec::new();
-        if !lora.is_empty() {
-            loras.extend(lora.iter().cloned().map(|path| LoraWeight {
-                path,
-                scale: lora_scale,
-            }));
-        } else if let Some(lora) = effective_lora.clone() {
-            loras.push(lora);
-        }
-        if let Some(camera_control) = camera_control {
-            let path = if camera_control.ends_with(".safetensors") {
-                camera_control
-            } else {
-                format!("camera-control:{camera_control}")
-            };
-            loras.push(LoraWeight { path, scale: 1.0 });
-        }
-        Some(loras)
-    } else {
-        None
-    };
+    let model_cfg = config.resolved_model_config(&model);
+    let default_lora = model_cfg
+        .effective_lora()
+        .map(|(path, scale)| LoraWeight { path, scale });
+    let (effective_lora, loras) = resolve_effective_loras_for_family(
+        &family,
+        &lora,
+        lora_scale,
+        default_lora,
+        camera_control,
+    )?;
 
     let placement = resolve_placement(&config, &model, &placement_flags)?;
 
@@ -1453,6 +1480,25 @@ mod tests {
             &[String::from("one.png"), String::from("two.png")]
         )
         .is_ok());
+    }
+
+    #[test]
+    fn flux_family_accepts_stacked_lora_args() {
+        let loras = vec![
+            String::from("/tmp/style-a.safetensors"),
+            String::from("/tmp/style-b.safetensors"),
+        ];
+
+        let (effective_lora, lora_stack) =
+            resolve_effective_loras_for_family("flux", &loras, 0.75, None, None).unwrap();
+
+        assert!(effective_lora.is_none());
+        let stack = lora_stack.expect("stacked CLI LoRAs should use loras plural");
+        assert_eq!(stack.len(), 2);
+        assert_eq!(stack[0].path, "/tmp/style-a.safetensors");
+        assert_eq!(stack[0].scale, 0.75);
+        assert_eq!(stack[1].path, "/tmp/style-b.safetensors");
+        assert_eq!(stack[1].scale, 0.75);
     }
 
     // -- --mask tests --

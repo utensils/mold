@@ -23,10 +23,10 @@
 //! * Non-attention leaves (`attention.out`, `feed_forward.w{1,2,3}`,
 //!   `adaLN_modulation.0`) map to `Direct` regardless of LoRA naming.
 //!
-//! Both BF16 (sharded safetensors) and GGUF (dense after re-build) flows
-//! end at the same `ZImageTransformer2DModel::new(cfg, vb)` call, so we
-//! wrap the `VarBuilder`'s backend once with [`ZImageLoraBackend`] and
-//! let every `vb.get()` carry the merged tensor.
+//! The BF16 path wraps the dense `VarBuilder` backend with
+//! [`ZImageLoraBackend`]. The GGUF path patches affected quantized tensors
+//! in place and hands the result to the quantized transformer, avoiding a
+//! full dense copy of the checkpoint.
 //!
 //! # Recognised LoRA-key shapes
 //!
@@ -47,6 +47,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
+use candle_transformers::quantized_var_builder::VarBuilder as QuantizedVarBuilder;
 
 use crate::flux::lora::{get_or_load_adapter, LoraAdapter, LoraDeltaCache};
 use crate::progress::ProgressReporter;
@@ -361,6 +362,124 @@ fn apply_patch_f32(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ZImageGgufLoraTarget {
+    Direct {
+        tensor_key: String,
+    },
+    FusedSlice {
+        tensor_key: String,
+        component: usize,
+        num_components: usize,
+    },
+}
+
+impl ZImageGgufLoraTarget {
+    fn tensor_key(&self) -> &str {
+        match self {
+            Self::Direct { tensor_key } | Self::FusedSlice { tensor_key, .. } => tensor_key,
+        }
+    }
+
+    #[cfg(test)]
+    fn component(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Direct { .. } => None,
+            Self::FusedSlice {
+                component,
+                num_components,
+                ..
+            } => Some((*component, *num_components)),
+        }
+    }
+}
+
+fn attention_qkv_component(candle_key: &str) -> Option<(String, usize)> {
+    for (needle, component) in [
+        (".attention.to_q.weight", 0),
+        (".attention.to_k.weight", 1),
+        (".attention.to_v.weight", 2),
+    ] {
+        if let Some(prefix) = candle_key.strip_suffix(needle) {
+            return Some((format!("{prefix}.attention.qkv.weight"), component));
+        }
+    }
+    None
+}
+
+fn map_gguf_lora_target(target: &ZImageLoraTarget) -> Option<ZImageGgufLoraTarget> {
+    let candle_key = target.candle_key();
+    if let Some((tensor_key, component)) = attention_qkv_component(candle_key) {
+        return Some(ZImageGgufLoraTarget::FusedSlice {
+            tensor_key,
+            component,
+            num_components: 3,
+        });
+    }
+
+    let tensor_key = candle_key.replace(".attention.to_out.0.weight", ".attention.out.weight");
+    Some(ZImageGgufLoraTarget::Direct { tensor_key })
+}
+
+fn gguf_patch_delta(delta_full: &Tensor, patch: &ZImageLoraPatch) -> candle_core::Result<Tensor> {
+    match &patch.target {
+        ZImageLoraTarget::Direct { .. } => Ok(delta_full.clone()),
+        ZImageLoraTarget::Splat { .. } => {
+            let (offset, size) = patch
+                .resolved_rows
+                .expect("Splat patch must have resolved_rows");
+            delta_full.narrow(0, offset, size)
+        }
+    }
+}
+
+fn apply_gguf_patch_f32(
+    base_f32: &Tensor,
+    delta_full: &Tensor,
+    patch: &ZImageLoraPatch,
+    target: &ZImageGgufLoraTarget,
+) -> candle_core::Result<Tensor> {
+    match target {
+        ZImageGgufLoraTarget::Direct { .. } => {
+            let delta = gguf_patch_delta(delta_full, patch)?;
+            base_f32 + &delta
+        }
+        ZImageGgufLoraTarget::FusedSlice {
+            component,
+            num_components,
+            ..
+        } => {
+            let delta = gguf_patch_delta(delta_full, patch)?;
+            let base_rows = base_f32.dim(0)?;
+            let slice_rows = base_rows / num_components;
+            let offset = component * slice_rows;
+            if offset + slice_rows > base_rows || delta.dim(0)? != slice_rows {
+                tracing::warn!(
+                    offset,
+                    slice_rows,
+                    base_rows,
+                    delta_rows = delta.dim(0).unwrap_or(0),
+                    "Z-Image GGUF LoRA fused slice shape mismatch, skipping"
+                );
+                return Ok(base_f32.clone());
+            }
+
+            let slice = base_f32.narrow(0, offset, slice_rows)?;
+            let updated_slice = (&slice + &delta)?;
+            let mut parts = Vec::new();
+            if offset > 0 {
+                parts.push(base_f32.narrow(0, 0, offset)?);
+            }
+            parts.push(updated_slice);
+            let after = offset + slice_rows;
+            if after < base_rows {
+                parts.push(base_f32.narrow(0, after, base_rows - after)?);
+            }
+            Tensor::cat(&parts, 0)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // `LoraBackend` — wraps a `SimpleBackend` and merges LoRAs at `vb.get()`.
 // ---------------------------------------------------------------------------
@@ -474,6 +593,120 @@ pub(crate) fn load_lora_adapters(
         .collect()
 }
 
+/// Build a quantized GGUF VarBuilder with Z-Image LoRA deltas merged into
+/// affected tensors. This keeps the transformer quantized instead of
+/// dequantizing the whole checkpoint into dense BF16 tensors first.
+pub(crate) fn gguf_lora_var_builder(
+    transformer_path: &Path,
+    specs: &[ZImageLoraSpec<'_>],
+    device: &Device,
+    progress: &ProgressReporter,
+) -> Result<QuantizedVarBuilder> {
+    use candle_core::quantized::{gguf_file, QTensor};
+
+    if specs.is_empty() {
+        bail!("gguf_lora_var_builder called with no LoraSpecs");
+    }
+
+    let mut file = std::fs::File::open(transformer_path)?;
+    let content = gguf_file::Content::read(&mut file)?;
+    let total_tensors = content.tensor_infos.len();
+    let mut data: HashMap<String, Arc<QTensor>> = HashMap::with_capacity(total_tensors);
+
+    let (patches, skipped) = build_patches(specs);
+    let patched_keys = patches.len();
+    let total_patches: usize = patches.values().map(|v| v.len()).sum();
+    let max_rank = specs.iter().map(|s| s.adapter.rank).max().unwrap_or(0);
+    progress.info(&format!(
+        "Z-Image LoRA (GGUF): {n} adapter(s), {total_patches} patches on {patched_keys} tensors, {skipped} skipped (max rank {max_rank})",
+        n = specs.len(),
+    ));
+
+    let gguf_bytes_total = std::fs::metadata(transformer_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    progress.weight_load("Z-Image transformer (GGUF)", 0, gguf_bytes_total);
+    for (i, tensor_name) in content.tensor_infos.keys().enumerate() {
+        let qtensor = content.tensor(&mut file, tensor_name, device)?;
+        data.insert(tensor_name.clone(), Arc::new(qtensor));
+        let approx_bytes = gguf_bytes_total * (i as u64 + 1) / total_tensors as u64;
+        progress.weight_load(
+            "Z-Image transformer (GGUF)",
+            approx_bytes.min(gguf_bytes_total),
+            gguf_bytes_total,
+        );
+    }
+    drop(file);
+
+    let mut native_patches: HashMap<String, Vec<(ZImageGgufLoraTarget, ZImageLoraPatch)>> =
+        HashMap::new();
+    for layer_patches in patches.values() {
+        for patch in layer_patches {
+            if let Some(target) = map_gguf_lora_target(&patch.target) {
+                native_patches
+                    .entry(target.tensor_key().to_string())
+                    .or_default()
+                    .push((target, patch.clone()));
+            }
+        }
+    }
+
+    let on_gpu = device.is_cuda() || device.is_metal();
+    let mut applied = 0usize;
+    let native_keys: Vec<String> = native_patches.keys().cloned().collect();
+    let native_total = native_keys.len();
+    for (i, tensor_key) in native_keys.iter().enumerate() {
+        let Some(layer_patches) = native_patches.get(tensor_key) else {
+            continue;
+        };
+        let Some(qtensor) = data.remove(tensor_key) else {
+            tracing::warn!(
+                key = tensor_key.as_str(),
+                "Z-Image GGUF LoRA target tensor not found, skipping"
+            );
+            continue;
+        };
+
+        let orig_dtype = qtensor.dtype();
+        let mut t = qtensor.dequantize(&Device::Cpu)?;
+        drop(qtensor);
+        if on_gpu {
+            device.synchronize()?;
+        }
+
+        for (target, patch) in layer_patches.iter() {
+            let matmul_dev = if on_gpu { device } else { &Device::Cpu };
+            let delta_full = compute_delta(patch, matmul_dev)?.to_device(&Device::Cpu)?;
+            t = apply_gguf_patch_f32(&t, &delta_full, patch, target)?;
+            applied += 1;
+        }
+
+        let patched = QTensor::quantize_onto(&t, orig_dtype, device)?;
+        drop(t);
+        data.insert(tensor_key.clone(), Arc::new(patched));
+
+        if (i + 1) % 16 == 0 || i + 1 == native_total {
+            progress.info(&format!(
+                "Z-Image LoRA GGUF merge: {}/{} tensors",
+                i + 1,
+                native_total,
+            ));
+        }
+    }
+
+    let total_layers: usize = specs.iter().map(|s| s.adapter.layers.len()).sum();
+    progress.info(&format!(
+        "Z-Image LoRA (GGUF): {applied} applied, {} skipped (max rank {max_rank}, {patched_keys} layers patched)",
+        total_layers.saturating_sub(applied),
+    ));
+
+    if on_gpu {
+        device.synchronize()?;
+    }
+
+    Ok(QuantizedVarBuilder::from_qtensors(data, device))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,6 +792,18 @@ mod tests {
                 _ => panic!("expected Direct for {leaf}"),
             }
         }
+    }
+
+    #[test]
+    fn gguf_lora_maps_split_attention_to_fused_qkv_slice() {
+        let target = ZImageLoraTarget::Direct {
+            candle_key: "layers.7.attention.to_k.weight".into(),
+        };
+
+        let mapped = map_gguf_lora_target(&target).expect("mapped GGUF target");
+
+        assert_eq!(mapped.tensor_key(), "layers.7.attention.qkv.weight");
+        assert_eq!(mapped.component(), Some((1, 3)));
     }
 
     /// PEFT canonical with the `diffusion_model.` prefix — the form

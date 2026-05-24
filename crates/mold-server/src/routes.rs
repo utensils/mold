@@ -1277,6 +1277,11 @@ async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if let Err(e) = model_manager::install_catalog_model(&state, &body.model).await {
+        return Err(model_manager::install_error_to_api_error(&e));
+    }
+    let _ = model_manager::check_model_available(&state, &body.model).await?;
+
     // Multi-GPU path: route through the pool.
     if state.gpu_pool.worker_count() > 0 {
         let worker = match body.gpu {
@@ -1349,6 +1354,59 @@ async fn pull_model_endpoint(
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("text/event-stream"));
+
+    if body.model.starts_with("cv:") || body.model.starts_with("hf:") {
+        if let Err(e) = model_manager::install_catalog_model(&state, &body.model).await {
+            return Err(model_manager::install_error_to_api_error(&e));
+        }
+        if model_manager::check_model_available(&state, &body.model)
+            .await
+            .is_ok()
+        {
+            return Ok(PullResponse::Text(format!(
+                "model '{}' is already present",
+                body.model
+            )));
+        }
+        let companion_names = {
+            let intents = state.catalog_intents.read().await;
+            intents
+                .get(&body.model)
+                .map(|intent| {
+                    intent
+                        .companions
+                        .iter()
+                        .map(|companion| companion.name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let models_dir = state.config.read().await.resolved_models_dir();
+        let companion_jobs = crate::catalog_api::enqueue_missing_companions(
+            &companion_names,
+            &models_dir,
+            &state.downloads,
+            Some(&body.model),
+        )
+        .await;
+        let primary_job = crate::catalog_api::enqueue_catalog_primary_repair(&state, &body.model)
+            .await
+            .map_err(|(status, msg)| ApiError::internal_with_status(msg, status))?;
+        if !companion_jobs.is_empty() || primary_job.is_some() {
+            let primary_count = usize::from(primary_job.is_some());
+            return Ok(PullResponse::Text(format!(
+                "queued repair for model '{}' ({} primary job(s), {} companion job(s))",
+                body.model,
+                primary_count,
+                companion_jobs.len()
+            )));
+        }
+        model_manager::check_model_available(&state, &body.model).await?;
+        return Ok(PullResponse::Text(format!(
+            "model '{}' is already present",
+            body.model
+        )));
+    }
 
     // Enqueue via the queue. Treat idempotent AlreadyPresent as success.
     let (job_id, _position) = match state.downloads.enqueue(body.model.clone()).await {

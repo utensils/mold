@@ -168,17 +168,29 @@ pub(crate) fn preflight_memory_guard_with_available(
     // plus the always-resident top-level weights (proj_in / proj_out /
     // time_embed / caption_projection / scale_shift_table / norms).
     let streaming = hint.is_some_and(|h| h.family.streaming_transformer());
+    let forced_flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
+        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
+        && paths
+            .transformer
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
     let peak = if streaming {
-        // LTX-2 also pays for a Gemma 3 12B prompt encoder. When the resolver
-        // determines the encoder will run on CPU (`MOLD_LTX2_GEMMA_DEVICE=cpu`
-        // or auto-placement on a card without enough free VRAM) the encoder
-        // phase doesn't compete with the transformer phase for GPU at all —
-        // collapse encoder_total out of the peak so the preflight admits the
-        // load. This must stay in lockstep with `resolve_prompt_encoder_device`
-        // in `mold-inference::ltx2::pipeline` or the preflight will admit
-        // loads that subsequently OOM (or reject loads that would have fit).
-        let gemma_will_be_cpu = ltx2_encoder_phase_will_be_cpu(0);
-        streaming_transformer_peak(paths, gemma_will_be_cpu)
+        // LTX-2 also pays for a Gemma 3 12B prompt encoder. Auto placement
+        // may try GPU first, but the runtime catches prompt-encoder CUDA OOMs
+        // and retries on CPU before loading the streamed transformer. Preflight
+        // must not reject that recoverable path. Only an explicit same-GPU pin
+        // (`MOLD_LTX2_GEMMA_DEVICE=gpu`) is counted against this GPU because
+        // the runtime will surface that OOM instead of rewriting the request.
+        let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
+        streaming_transformer_peak(paths, gemma_competes)
+    } else if forced_flux_offload {
+        streaming_transformer_peak(paths, false)
+    } else if hint.is_some_and(|h| h.family == ActivationFamily::Sd3Mmdit) {
+        sd3_sequential_peak(paths)
+    } else if qwen_quantized {
+        qwen_image_quantized_sequential_peak(paths, hint)
     } else {
         mold_inference::device::estimate_peak_memory(
             paths,
@@ -189,9 +201,16 @@ pub(crate) fn preflight_memory_guard_with_available(
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
     // is a generic "kernels + small state" constant that doesn't scale; the
     // hint is the resolution/dtype/arch-aware delta on top.
-    let activation = hint.map(|h| h.budget_bytes()).unwrap_or(0);
+    let activation = if qwen_quantized {
+        0
+    } else {
+        hint.map(|h| h.budget_bytes()).unwrap_or(0)
+    };
     let peak_with_activation = peak.saturating_add(activation);
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
+    if qwen_quantized && peak_with_activation <= effective_available {
+        return Ok(());
+    }
     let suggestion = rejection_suggestion(hint);
 
     check_model_memory_budget(
@@ -219,7 +238,10 @@ pub(crate) fn preflight_memory_guard_with_available(
 /// two blocks ≈ 1.83 GB + non-block fragments ≈ 200 MB + VAE ≈ 200 MB
 /// ≈ 2.3 GB. The 6 GB cap leaves room for activation workspace, OS
 /// fragmentation, and future LTX presets without revisiting this file.
-fn streaming_transformer_peak(paths: &ModelPaths, gemma_on_cpu: bool) -> u64 {
+fn streaming_transformer_peak(
+    paths: &ModelPaths,
+    gemma_competes_with_transformer_gpu: bool,
+) -> u64 {
     const STREAMING_TRANSFORMER_CAP: u64 = 6_000_000_000; // 6 GB
     const HEADROOM: u64 = 2_000_000_000; // 2 GB, mirrors device::MEMORY_BUDGET_HEADROOM
 
@@ -236,25 +258,90 @@ fn streaming_transformer_peak(paths: &ModelPaths, gemma_on_cpu: bool) -> u64 {
         .map(|p| file_size(p))
         .unwrap_or(0);
     let text_encoder_size: u64 = paths.text_encoder_files.iter().map(|p| file_size(p)).sum();
-    let encoder_total = if gemma_on_cpu {
-        0
-    } else {
+    let encoder_total = if gemma_competes_with_transformer_gpu {
         t5_size + clip_size + clip2_size + text_encoder_size
+    } else {
+        0
     };
 
     let inference_phase = STREAMING_TRANSFORMER_CAP;
     std::cmp::max(encoder_total, inference_phase) + HEADROOM
 }
 
-/// Resolve, for the preflight, whether the LTX-2 Gemma 3 12B prompt encoder
-/// is going to land on CPU. This is a thin wrapper around the inference-side
-/// `resolve_ltx2_gemma_placement` so the preflight and the load path reach
-/// the same conclusion under the same env state and the same observation of
-/// free VRAM.
-fn ltx2_encoder_phase_will_be_cpu(gpu_ordinal: usize) -> bool {
+/// Peak GPU residency for SD3's staged sequential runtime. SD3 loads the
+/// triple text encoder, drops it, optionally VAE-encodes the source image,
+/// drops VAE, loads MMDiT for denoise, drops it, then loads VAE again for
+/// decode. GGUF SD3 models use the monolithic Stability safetensors file as
+/// the VAE source, but only VAE tensors are materialized by the runtime.
+fn sd3_sequential_peak(paths: &ModelPaths) -> u64 {
+    const SD3_VAE_RESIDENCY_CAP: u64 = 1_000_000_000; // VAE portion is ~300 MB; keep slack.
+    const HEADROOM: u64 = 2_000_000_000; // mirrors device::MEMORY_BUDGET_HEADROOM
+
+    let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let transformer_size = if !paths.transformer_shards.is_empty() {
+        paths.transformer_shards.iter().map(|p| file_size(p)).sum()
+    } else {
+        file_size(&paths.transformer)
+    };
+    let vae_size = file_size(&paths.vae).min(SD3_VAE_RESIDENCY_CAP);
+    let t5_size = paths.t5_encoder.as_ref().map(|p| file_size(p)).unwrap_or(0);
+    let clip_size = paths
+        .clip_encoder
+        .as_ref()
+        .map(|p| file_size(p))
+        .unwrap_or(0);
+    let clip2_size = paths
+        .clip_encoder_2
+        .as_ref()
+        .map(|p| file_size(p))
+        .unwrap_or(0);
+    let text_encoder_size: u64 = paths.text_encoder_files.iter().map(|p| file_size(p)).sum();
+    let encoder_total = t5_size + clip_size + clip2_size + text_encoder_size;
+
+    transformer_size.max(vae_size).max(encoder_total) + HEADROOM
+}
+
+/// Peak GPU residency for Qwen-Image GGUF under its low-memory sequential
+/// runtime. The quantized CUDA path disables CFG batching under pressure, so
+/// the transformer phase is the quantized transformer plus a single-forward
+/// activation reserve. Text encoder and VAE run in separate phases.
+fn qwen_image_quantized_sequential_peak(paths: &ModelPaths, hint: Option<ActivationHint>) -> u64 {
+    const QWEN_GGUF_PHASE_HEADROOM: u64 = 128_000_000;
+
+    let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let transformer_size = if !paths.transformer_shards.is_empty() {
+        paths.transformer_shards.iter().map(|p| file_size(p)).sum()
+    } else {
+        file_size(&paths.transformer)
+    };
+    let text_encoder_size: u64 = paths.text_encoder_files.iter().map(|p| file_size(p)).sum();
+    let vae_size = file_size(&paths.vae);
+    let activation = hint
+        .map(|h| {
+            mold_inference::device::activation_bytes(
+                h.width,
+                h.height,
+                1,
+                h.dtype_bytes,
+                ActivationFamily::QwenImageDit,
+            )
+        })
+        .unwrap_or(0);
+
+    transformer_size
+        .saturating_add(activation)
+        .saturating_add(QWEN_GGUF_PHASE_HEADROOM)
+        .max(text_encoder_size)
+        .max(vae_size)
+}
+
+/// Whether preflight should count the LTX-2 Gemma prompt encoder against the
+/// transformer's GPU budget. Auto placement can recover from CUDA OOM by
+/// retrying the prompt path on CPU; explicit same-GPU placement cannot.
+fn ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal: usize) -> bool {
     matches!(
-        mold_inference::device::resolve_ltx2_gemma_placement(gpu_ordinal),
-        mold_inference::device::LtxGemmaPlacement::Cpu,
+        mold_inference::device::resolve_ltx2_gemma_device_override(gpu_ordinal),
+        Some(mold_inference::device::LtxGemmaPlacement::Gpu(ordinal)) if ordinal == gpu_ordinal
     )
 }
 
@@ -394,9 +481,26 @@ pub(crate) fn select_server_load_strategy_for_budget(
     available_bytes: Option<u64>,
     hint: Option<ActivationHint>,
 ) -> mold_inference::LoadStrategy {
+    if hint.is_some_and(|h| h.family == ActivationFamily::ZImageDit) {
+        return mold_inference::LoadStrategy::Sequential;
+    }
+    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
+        && paths
+            .transformer
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+
     let Some(available_bytes) = available_bytes.filter(|v| *v > 0) else {
         return mold_inference::LoadStrategy::Eager;
     };
+
+    if qwen_quantized {
+        let peak = qwen_image_quantized_sequential_peak(paths, hint);
+        if peak <= available_bytes {
+            return mold_inference::LoadStrategy::Sequential;
+        }
+    }
 
     let activation = hint.map(|h| h.budget_bytes()).unwrap_or(0);
     let eager_peak =
@@ -428,7 +532,7 @@ pub(crate) fn select_server_load_strategy_for_device(
     ) {
         (Some(available), Some(total)) => Some(available.min(total)),
         (available, None) => available,
-        (None, Some(_)) => None,
+        (None, Some(total)) => Some(total),
     };
 
     select_server_load_strategy_for_budget(paths, capped_available, hint)
@@ -543,7 +647,11 @@ pub(crate) async fn catalog_family_for(state: &AppState, model_name: &str) -> Op
         }
     }
     let config = state.config.read().await;
-    config.models.get(model_name).and_then(|m| m.family.clone())
+    if let Some(family) = config.models.get(model_name).and_then(|m| m.family.clone()) {
+        return Some(family);
+    }
+    installed_catalog_intent_from_sidecar(&config.resolved_models_dir(), model_name)
+        .map(|intent| intent.family)
 }
 
 /// Resolve the family slug for any model name — checks the static manifest
@@ -694,6 +802,15 @@ pub(crate) enum ResolveError {
         companion: &'static str,
     },
 
+    /// The catalog primary checkpoint is absent or only partially
+    /// downloaded. This is transient and should be repairable by
+    /// `mold pull <catalog-id>`.
+    #[error(
+        "catalog model '{model}' is missing its primary checkpoint.\n\
+         Run `mold pull {model}` to fetch or repair the primary checkpoint."
+    )]
+    PrimaryFileMissing { model: String },
+
     /// The FLUX bundled-VAE probe couldn't be run (e.g. malformed
     /// safetensors header). Surfaces the underlying inference-loader
     /// error so the user can act.
@@ -742,6 +859,12 @@ pub(crate) fn resolve_intent_to_paths(
     intent: &mold_catalog::synthesis::CatalogModelIntent,
     config: &mold_core::Config,
 ) -> Result<mold_core::ModelConfig, ResolveError> {
+    if !catalog_primary_is_complete(model_name, intent, config) {
+        return Err(ResolveError::PrimaryFileMissing {
+            model: model_name.to_string(),
+        });
+    }
+
     let primary_str = intent
         .primary_recipe_path
         .to_str()
@@ -773,10 +896,10 @@ pub(crate) fn resolve_intent_to_paths(
     } else if mold_catalog::synthesis::family_bundles_vae_unconditionally(flux_family_for_slug(
         &intent.family,
     )) {
-        // SDXL / SD1.5 always bundle the VAE.
+        // SDXL / SD1.5 / LTX-2 always bundle the VAE.
         Some(true)
     } else {
-        // Flux.2 / LTX-Video / LTX-2 always need a separate VAE companion.
+        // Flux.2 / Z-Image / LTX-Video always need a separate VAE companion.
         Some(false)
     };
     if probe_says_bundled == Some(true) {
@@ -835,6 +958,27 @@ pub(crate) fn resolve_intent_to_paths(
     }
 
     Ok(cfg)
+}
+
+fn catalog_primary_is_complete(
+    model_name: &str,
+    intent: &mold_catalog::synthesis::CatalogModelIntent,
+    config: &mold_core::Config,
+) -> bool {
+    if !intent.primary_recipe_path.is_file() {
+        return false;
+    }
+    if model_name.starts_with("cv:") {
+        let models_dir = config.resolved_models_dir();
+        let sc_path = mold_catalog::sidecar::civitai_sidecar_path(&models_dir, model_name);
+        if let Ok(sidecar) = mold_catalog::sidecar::read_sidecar(&sc_path) {
+            let Some(sidecar_dir) = sc_path.parent() else {
+                return false;
+            };
+            return mold_catalog::sidecar::primary_path_if_present(sidecar_dir, &sidecar).is_some();
+        }
+    }
+    true
 }
 
 fn flux_family_for_slug(slug: &str) -> mold_catalog::families::Family {
@@ -920,6 +1064,13 @@ pub(crate) async fn install_catalog_model(
         }
     }
 
+    let models_dir = state.config.read().await.resolved_models_dir();
+    if let Some(intent) = installed_catalog_intent_from_sidecar(&models_dir, model_name) {
+        let mut intents = state.catalog_intents.write().await;
+        intents.insert(model_name.to_string(), intent);
+        return Ok(());
+    }
+
     // Live single-id lookup. Tokens are picked up from env so
     // unauthenticated browsing still works.
     let civitai_base = state.catalog_live_civitai_base.as_str();
@@ -943,14 +1094,90 @@ pub(crate) async fn install_catalog_model(
         return Ok(());
     };
 
-    let models_dir = state.config.read().await.resolved_models_dir();
     let intent = mold_catalog::synthesis::synthesize_intent(&entry, &models_dir).map_err(|e| {
         mold_core::InstallError::RecipeMalformed(format!("synthesize intent for {model_name}: {e}"))
     })?;
+    if model_name.starts_with("cv:") {
+        write_catalog_sidecar_from_intent(&models_dir, &entry, &intent);
+    }
 
     let mut intents = state.catalog_intents.write().await;
     intents.insert(model_name.to_string(), intent);
     Ok(())
+}
+
+fn write_catalog_sidecar_from_intent(
+    models_dir: &std::path::Path,
+    entry: &mold_catalog::entry::CatalogEntry,
+    intent: &mold_catalog::synthesis::CatalogModelIntent,
+) {
+    let sc_path = mold_catalog::sidecar::civitai_sidecar_path(models_dir, entry.id.as_str());
+    let Some(sidecar_dir) = sc_path.parent() else {
+        return;
+    };
+    let Ok(primary_rel) = intent.primary_recipe_path.strip_prefix(sidecar_dir) else {
+        return;
+    };
+    let Some(primary_rel) = primary_rel.to_str() else {
+        return;
+    };
+    let sidecar = mold_catalog::sidecar::sidecar_from_entry(entry, primary_rel.to_string());
+    if let Err(e) = mold_catalog::sidecar::write_sidecar(&sc_path, &sidecar) {
+        tracing::warn!(
+            target: "catalog.sidecar",
+            catalog_id = %entry.id.as_str(),
+            error = %e,
+            "sidecar write failed after live catalog install",
+        );
+    }
+}
+
+fn installed_catalog_intent_from_sidecar(
+    models_dir: &std::path::Path,
+    model_name: &str,
+) -> Option<mold_catalog::synthesis::CatalogModelIntent> {
+    let (sidecar_dir, sidecar) = mold_catalog::sidecar::walk_sidecars(models_dir)
+        .into_iter()
+        .find(|(_, sidecar)| sidecar.id == model_name)?;
+    if sidecar.kind != "checkpoint" {
+        return None;
+    }
+    if sidecar_primary_looks_like_auxiliary(&sidecar) {
+        return None;
+    }
+    let primary_recipe_path =
+        mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar)?;
+    let family = mold_catalog::families::Family::from_str(&sidecar.family).ok()?;
+    let companions = mold_catalog::companions::companions_for(
+        family,
+        sidecar.sub_family.as_deref(),
+        mold_catalog::entry::Bundling::SingleFile,
+        mold_catalog::entry::Kind::Checkpoint,
+    )
+    .into_iter()
+    .map(|name| mold_catalog::synthesis::CompanionIntent {
+        name,
+        required: true,
+    })
+    .collect();
+
+    Some(mold_catalog::synthesis::CatalogModelIntent {
+        family: sidecar.family,
+        sub_family: sidecar.sub_family,
+        primary_recipe_path,
+        vae_recipe_path: None,
+        text_encoder_recipe_paths: Vec::new(),
+        companions,
+        bundling: mold_catalog::entry::Bundling::SingleFile,
+    })
+}
+
+fn sidecar_primary_looks_like_auxiliary(sidecar: &mold_catalog::sidecar::CatalogSidecar) -> bool {
+    let rel = sidecar.primary_filename_rel.to_ascii_lowercase();
+    rel.contains("/text_encoder/")
+        || rel.contains("text_encoder")
+        || rel.contains("_txt.")
+        || rel.contains("-txt.")
 }
 
 /// Translate a `LiveSearchError` into the user-facing `InstallError`
@@ -1677,6 +1904,118 @@ mod tests {
         }
     }
 
+    struct OffloadEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for OffloadEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("MOLD_OFFLOAD");
+                if let Some(v) = self.prior.take() {
+                    std::env::set_var("MOLD_OFFLOAD", v);
+                }
+            }
+        }
+    }
+
+    fn offload_env_guard(value: &str) -> OffloadEnvGuard {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var_os("MOLD_OFFLOAD");
+        unsafe {
+            std::env::set_var("MOLD_OFFLOAD", value);
+        }
+        OffloadEnvGuard { _lock: lock, prior }
+    }
+
+    #[test]
+    fn installed_catalog_intent_from_sidecar_resolves_downloaded_ltx2_checkpoint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let install_dir = dir.path().join("cv-2752735");
+        let primary_rel = "ltx2/civitai/2752735/ltx23_full.safetensors";
+        let primary = install_dir.join(primary_rel);
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::write(&primary, b"fake").unwrap();
+        let sidecar = mold_catalog::sidecar::CatalogSidecar {
+            schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+            id: "cv:2752735".to_string(),
+            source: "civitai".to_string(),
+            source_id: "2752735".to_string(),
+            name: "LTX-2.3".to_string(),
+            author: Some("clueless_engineer".to_string()),
+            family: "ltx2".to_string(),
+            family_role: "finetune".to_string(),
+            sub_family: Some("v2.3".to_string()),
+            kind: "checkpoint".to_string(),
+            modality: "video".to_string(),
+            thumbnail_url: None,
+            size_bytes: Some(4),
+            engine_phase: 5,
+            trained_words: Vec::new(),
+            primary_filename_rel: primary_rel.to_string(),
+            written_at: 0,
+        };
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &sidecar,
+        )
+        .unwrap();
+
+        let intent = installed_catalog_intent_from_sidecar(dir.path(), "cv:2752735")
+            .expect("installed sidecar should synthesize a catalog intent");
+        assert_eq!(intent.family, "ltx2");
+        assert_eq!(intent.primary_recipe_path, primary);
+        assert!(
+            intent.companions.iter().any(|c| c.name == "ltx2-te"),
+            "LTX-2 installed sidecars must still resolve the Gemma companion"
+        );
+    }
+
+    #[test]
+    fn installed_catalog_intent_from_sidecar_rejects_text_encoder_primary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let install_dir = dir.path().join("cv-2442439");
+        let primary_rel = "z-image/civitai/2442439/zImageTurbo_turbo_txt.safetensors";
+        let primary = install_dir.join(primary_rel);
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::write(&primary, b"fake").unwrap();
+        let sidecar = mold_catalog::sidecar::CatalogSidecar {
+            schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+            id: "cv:2442439".to_string(),
+            source: "civitai".to_string(),
+            source_id: "2442439".to_string(),
+            name: "Z Image Turbo".to_string(),
+            author: None,
+            family: "z-image".to_string(),
+            family_role: "finetune".to_string(),
+            sub_family: Some("turbo".to_string()),
+            kind: "checkpoint".to_string(),
+            modality: "image".to_string(),
+            thumbnail_url: None,
+            size_bytes: Some(4),
+            engine_phase: 4,
+            trained_words: Vec::new(),
+            primary_filename_rel: primary_rel.to_string(),
+            written_at: 0,
+        };
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &sidecar,
+        )
+        .unwrap();
+
+        assert!(
+            installed_catalog_intent_from_sidecar(dir.path(), "cv:2442439").is_none(),
+            "stale sidecars that point checkpoint primary at a text encoder must be ignored"
+        );
+    }
+
     /// Build a `ModelPaths` whose `transformer` and `vae` files exist on disk
     /// with a combined size of `total_bytes`. `estimate_peak_memory()` reads
     /// file sizes via `std::fs::metadata`, so the on-disk footprint is what
@@ -1899,6 +2238,166 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preflight_accepts_forced_flux_offload_bf16_layout_on_24gb() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = flux_shaped_paths_with_sizes(24, 1, 10, 1);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+
+        let result =
+            preflight_memory_guard_with_available("flux-dev:bf16", &paths, 0, 24 * GB, Some(hint));
+
+        assert!(
+            result.is_ok(),
+            "forced FLUX offload should use streaming-aware peak instead of \
+            full BF16 transformer residency, got {result:?}"
+        );
+    }
+
+    fn sd3_gguf_paths_with_monolithic_vae(
+        transformer_gb: u64,
+        vae_gb: u64,
+        t5_gb: u64,
+        clip_l_gb: u64,
+        clip_g_gb: u64,
+    ) -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk("sd3.5_large-Q8_0.gguf", transformer_gb);
+        let vae = mk("sd3.5_large.safetensors", vae_gb);
+        let t5 = mk("t5xxl_fp16.safetensors", t5_gb);
+        let clip_l = mk("clip_l.safetensors", clip_l_gb);
+        let clip_g = mk("clip_g.safetensors", clip_g_gb);
+        let paths = ModelPaths {
+            transformer,
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: Some(t5),
+            clip_encoder: Some(clip_l),
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: Some(clip_g),
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
+    #[test]
+    fn preflight_accepts_sd3_gguf_with_monolithic_vae_on_24gb() {
+        let (_dir, paths) = sd3_gguf_paths_with_monolithic_vae(9, 16, 10, 1, 1);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 2,
+            dtype_bytes: 2,
+            family: ActivationFamily::Sd3Mmdit,
+        };
+
+        let result =
+            preflight_memory_guard_with_available("sd3.5-large:q8", &paths, 0, 24 * GB, Some(hint));
+
+        assert!(
+            result.is_ok(),
+            "SD3 GGUF should not count the monolithic VAE checkpoint as \
+             co-resident with the transformer, got {result:?}"
+        );
+    }
+
+    fn qwen_image_q8_paths(
+        transformer_gb: u64,
+        vae_gb: u64,
+        text_encoder_gb: u64,
+    ) -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk("qwen-image-Q8_0.gguf", transformer_gb);
+        let vae = mk("qwen-image-vae.safetensors", vae_gb);
+        let text_encoder = mk("qwen2.5-vl.safetensors", text_encoder_gb);
+        let paths = ModelPaths {
+            transformer,
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![text_encoder],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
+    #[test]
+    fn preflight_accepts_quantized_qwen_image_q8_on_24gb() {
+        let (_dir, paths) = qwen_image_q8_paths(21, 1, 16);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 2,
+            dtype_bytes: 2,
+            family: ActivationFamily::QwenImageDit,
+        };
+
+        let result =
+            preflight_memory_guard_with_available("qwen-image:q8", &paths, 0, 24 * GB, Some(hint));
+
+        assert!(
+            result.is_ok(),
+            "Qwen-Image GGUF Q8 should be admitted on 24 GB because the runtime \
+             uses split-CFG and staged text/VAE phases instead of the generic \
+             full-headroom sequential estimate, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn server_load_strategy_uses_sequential_for_zimage_requests() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(6, 1, 8, 0);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::ZImageDit,
+        };
+
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(24 * GB), Some(hint));
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "Z-Image server requests should use staged loading so base/source/LoRA \
+             share the same memory contract"
+        );
+    }
+
     /// Companion: under the *old* Eager-strategy math the same model would
     /// have been rejected. Verifying explicitly so a regression that flips
     /// the strategy back gets caught.
@@ -2038,6 +2537,38 @@ mod tests {
         (dir, paths)
     }
 
+    fn flux2_large_bf16_paths_with_quantized_encoder() -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let shard_a = mk("diffusion_pytorch_model-00001-of-00002.safetensors", 10);
+        let shard_b = mk("diffusion_pytorch_model-00002-of-00002.safetensors", 8);
+        let vae = mk("flux2-vae.safetensors", 1);
+        let qwen3_q3 = mk("qwen3-q3.gguf", 3);
+        let paths = ModelPaths {
+            transformer: shard_a.clone(),
+            transformer_shards: vec![shard_a, shard_b],
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![qwen3_q3],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
     #[test]
     fn preflight_allows_flux2_klein9b_bf16_on_24gb_when_sequential_budget_fits() {
         let (_dir, paths) = flux2_klein9b_bf16_paths();
@@ -2113,6 +2644,27 @@ mod tests {
     }
 
     #[test]
+    fn server_load_strategy_degrades_large_flux2_bf16_even_with_quantized_encoder() {
+        let (_dir, paths) = flux2_large_bf16_paths_with_quantized_encoder();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(24 * GB), Some(hint));
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "large Flux.2 BF16 transformer shards need load-use-drop on 24 GB \
+             even when Qwen3 resolves to a small quantized encoder"
+        );
+    }
+
+    #[test]
     fn server_load_strategy_forces_klein9b_bf16_sequential_on_24gb_even_with_overgenerous_budget() {
         let (_dir, paths) = flux2_klein9b_bf16_paths();
         let hint = ActivationHint {
@@ -2163,6 +2715,28 @@ mod tests {
             "Klein-9B-shaped BF16 loads must use device VRAM as the budget cap \
              even when the live available-memory reading falls back to a larger \
              system-memory value"
+        );
+    }
+
+    #[test]
+    fn server_load_strategy_uses_device_total_when_live_available_missing() {
+        let (_dir, paths) = flux2_klein9b_bf16_paths();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        let strategy =
+            select_server_load_strategy_for_device(&paths, None, Some(24 * GB), Some(hint));
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "when live free-memory probing is unavailable, the worker should still \
+             use known device total VRAM instead of defaulting to eager"
         );
     }
 
@@ -2235,6 +2809,7 @@ mod tests {
     /// that flips the hint plumbing back is caught.
     #[test]
     fn preflight_rejects_ltx2_22b_when_hint_marks_non_streaming() {
+        let _guard = offload_env_guard("0");
         let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 0);
         // Use FluxDit family — same shape, no streaming flag — so the
         // preflight falls through to the file-size estimator and rejects
@@ -2279,6 +2854,32 @@ mod tests {
             "25 GB Gemma TE alone exceeds 90 %% of 24 GB during the encoder \
              phase — preflight must surface this even when the transformer \
              is streamed, got {result:?}",
+        );
+    }
+
+    /// In auto mode the LTX-2 runtime may try the prompt encoder on GPU first,
+    /// but CUDA OOM during that phase is recoverable: it reclaims the context
+    /// and retries the prompt encoder on CPU before streamed transformer load.
+    /// Preflight must admit that path instead of rejecting the request before
+    /// the runtime fallback can run.
+    #[test]
+    fn preflight_admits_ltx2_auto_gemma_even_when_gpu_encoder_would_exceed_cap() {
+        let _guard = ltx2_gemma_env_guard("auto");
+        let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 25);
+        let hint = ActivationHint {
+            width: 768,
+            height: 512,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Ltx2Video,
+        };
+        let result =
+            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        assert!(
+            result.is_ok(),
+            "auto Gemma placement can fall back to CPU at runtime, so preflight \
+             must not reject solely because a same-GPU prompt encoder phase \
+             would exceed the hard cap, got {result:?}",
         );
     }
 
@@ -2952,6 +3553,8 @@ mod tests {
         };
 
         let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        std::fs::create_dir_all(intent.primary_recipe_path.parent().unwrap()).unwrap();
+        std::fs::write(&intent.primary_recipe_path, b"primary").unwrap();
         let cfg = resolve_intent_to_paths("cv:2442439", &intent, &config).unwrap();
 
         let recipe_text_encoder =
@@ -3043,16 +3646,13 @@ mod tests {
 
         let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
 
-        // First resolve — primary not yet on disk. The flux-vae companion
-        // populates cfg.vae; the FLUX probe is short-circuited because
-        // the file doesn't exist. cfg.transformer points at the expected
-        // future location (intent-derived).
-        let cfg_first = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap();
+        // First resolve — primary not yet on disk, so the catalog model
+        // must not be advertised as loadable.
+        let err = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap_err();
+        assert!(matches!(err, ResolveError::PrimaryFileMissing { .. }));
         let primary_path = models_dir
             .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
         let vae_path = models_dir.join("flux-vae/ae.safetensors");
-        assert_eq!(cfg_first.transformer.as_deref(), primary_path.to_str());
-        assert_eq!(cfg_first.vae.as_deref(), vae_path.to_str());
 
         // File arrives mid-flight as a transformer-only checkpoint.
         std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
@@ -3067,6 +3667,49 @@ mod tests {
         let cfg_second = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap();
         assert_eq!(cfg_second.transformer.as_deref(), primary_path.to_str());
         assert_eq!(cfg_second.vae.as_deref(), vae_path.to_str());
+
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_intent_rejects_truncated_sidecar_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        let primary_path = models_dir
+            .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &primary_path,
+            &["double_blocks.0.img_attn.proj.weight", "img_in.weight"],
+        );
+        let entry =
+            flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");
+        let sidecar = mold_catalog::sidecar::sidecar_from_entry(
+            &entry,
+            "flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors".into(),
+        );
+        let mut sidecar = sidecar;
+        sidecar.size_bytes = Some(primary_path.metadata().unwrap().len() + 1);
+        let sidecar_path = mold_catalog::sidecar::civitai_sidecar_path(models_dir, "cv:994561");
+        mold_catalog::sidecar::write_sidecar(&sidecar_path, &sidecar).unwrap();
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        stub_flux_companion_paths_in_dir(&mut config, models_dir, true);
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+
+        let err = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap_err();
+        assert!(matches!(err, ResolveError::PrimaryFileMissing { .. }));
 
         unsafe {
             match _saved {

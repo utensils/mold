@@ -224,8 +224,10 @@ pub fn family_bundles_vae_unconditionally(family: Family) -> bool {
         Family::Sd15 | Family::Sdxl => true,
         // Mixed bundling — let the resolver probe the actual safetensors.
         Family::Flux => false,
+        // Always-bundled single-file checkpoints.
+        Family::Ltx2 => true,
         // Always-separate VAE.
-        Family::Flux2 | Family::ZImage | Family::LtxVideo | Family::Ltx2 => false,
+        Family::Flux2 | Family::ZImage | Family::LtxVideo => false,
         // Single-file unsupported — engine_phase: 99 entries. Doesn't
         // matter what we return; resolution will reject before VAE.
         Family::QwenImage | Family::Wuerstchen => true,
@@ -386,6 +388,12 @@ mod tests {
     #[test]
     fn zimage_catalog_primary_does_not_bundle_vae() {
         assert!(!family_bundles_vae_unconditionally(Family::ZImage));
+    }
+
+    #[test]
+    fn ltx2_catalog_primary_bundles_vae() {
+        assert!(family_bundles_vae_unconditionally(Family::Ltx2));
+        assert!(!family_bundles_vae_unconditionally(Family::LtxVideo));
     }
 
     #[test]

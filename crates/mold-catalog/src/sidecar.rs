@@ -171,12 +171,30 @@ pub fn walk_sidecars(models_dir: &Path) -> Vec<(PathBuf, CatalogSidecar)> {
     out
 }
 
-/// Returns the absolute path to a sidecar's primary file, when that
-/// file exists on disk. `None` indicates the sidecar is stale — the
-/// caller should treat the row as not installed.
+/// Returns the absolute path to a sidecar's primary file, when that file is
+/// complete enough to trust. `None` indicates the sidecar is stale or the
+/// primary was only partially downloaded — the caller should treat the row as
+/// not installed.
 pub fn primary_path_if_present(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> Option<PathBuf> {
+    if let Some(models_dir) = sidecar_dir.parent() {
+        if mold_core::download::pulling_marker_path_in(models_dir, &sidecar.id).exists() {
+            return None;
+        }
+    }
     let abs = sidecar_dir.join(&sidecar.primary_filename_rel);
-    abs.is_file().then_some(abs)
+    if !abs.is_file() {
+        return None;
+    }
+    if mold_core::download::has_sha256_marker(&abs) {
+        return Some(abs);
+    }
+    if let Some(expected) = sidecar.size_bytes {
+        let actual = abs.metadata().ok()?.len();
+        if actual != expected {
+            return None;
+        }
+    }
+    Some(abs)
 }
 
 #[cfg(test)]
@@ -279,18 +297,55 @@ mod tests {
     }
 
     #[test]
-    fn primary_path_returns_some_only_when_file_exists() {
+    fn primary_path_returns_some_only_when_file_exists_at_declared_size() {
         let tmp = tempfile::tempdir().unwrap();
         let mut sc = sidecar_from_entry(&fixture_entry(), "x.safetensors".into());
         sc.primary_filename_rel = "x.safetensors".into();
+        sc.size_bytes = Some(4);
 
         // No file yet → None.
         assert!(primary_path_if_present(tmp.path(), &sc).is_none());
 
-        // Touch the file → Some.
+        // Wrong size → still None.
+        fs::write(tmp.path().join("x.safetensors"), b"dat").unwrap();
+        assert!(primary_path_if_present(tmp.path(), &sc).is_none());
+
+        // Declared size → Some.
         fs::write(tmp.path().join("x.safetensors"), b"data").unwrap();
         let abs = primary_path_if_present(tmp.path(), &sc).unwrap();
         assert_eq!(abs, tmp.path().join("x.safetensors"));
+    }
+
+    #[test]
+    fn primary_path_accepts_marker_when_declared_size_is_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sc = sidecar_from_entry(&fixture_entry(), "x.safetensors".into());
+        sc.primary_filename_rel = "x.safetensors".into();
+        sc.size_bytes = Some(4);
+        let primary = tmp.path().join("x.safetensors");
+        fs::write(&primary, b"larger than catalog size").unwrap();
+        mold_core::download::write_sha256_marker(&primary, "deadbeef").unwrap();
+
+        let abs = primary_path_if_present(tmp.path(), &sc).unwrap();
+        assert_eq!(abs, primary);
+    }
+
+    #[test]
+    fn primary_path_returns_none_when_pulling_marker_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar_dir = tmp.path().join("cv-8001");
+        fs::create_dir_all(&sidecar_dir).unwrap();
+        let mut sc = sidecar_from_entry(&fixture_entry(), "x.safetensors".into());
+        sc.primary_filename_rel = "x.safetensors".into();
+        sc.size_bytes = Some(4);
+        fs::write(sidecar_dir.join("x.safetensors"), b"data").unwrap();
+        fs::write(
+            mold_core::download::pulling_marker_path_in(tmp.path(), &sc.id),
+            b"pulling",
+        )
+        .unwrap();
+
+        assert!(primary_path_if_present(&sidecar_dir, &sc).is_none());
     }
 
     #[test]

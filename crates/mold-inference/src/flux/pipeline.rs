@@ -1154,8 +1154,11 @@ impl FluxEngine {
             return Ok(());
         }
 
-        // Sequential mode defers loading to generate_sequential()
-        if self.base.load_strategy == LoadStrategy::Sequential {
+        // Sequential/offloaded mode defers loading to generate_sequential().
+        // The offloaded BF16 transformer is built per request after prompt
+        // encoding; eager preload would put the full transformer on GPU and
+        // bypass block streaming.
+        if self.defers_eager_load() {
             return Ok(());
         }
 
@@ -2117,13 +2120,25 @@ impl FluxEngine {
 }
 
 impl FluxEngine {
+    fn defers_eager_load(&mut self) -> bool {
+        self.base.load_strategy == LoadStrategy::Sequential
+            || (self.offload && !self.detect_is_quantized())
+    }
+
+    fn uses_sequential_generate_path(&mut self) -> bool {
+        self.defers_eager_load()
+    }
+
     fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         if req.scheduler.is_some() {
             tracing::warn!("scheduler selection not supported for FLUX (flow-matching), ignoring");
         }
 
-        // Sequential mode: load-use-drop each component
-        if self.base.load_strategy == LoadStrategy::Sequential {
+        // Sequential mode: load-use-drop each component. Forced FLUX offload
+        // also routes here because block streaming is chosen after prompt
+        // encoding; eager preload would put the full BF16 transformer on GPU
+        // before offload can take effect.
+        if self.uses_sequential_generate_path() {
             return self.generate_sequential(req);
         }
 
@@ -2768,10 +2783,12 @@ mod tests {
         effective_loras, flux_runtime_dtype, flux_transformer_var_builder, park_cond_to_cpu,
         LoraBypassMode,
     };
+    use crate::LoadStrategy;
     use candle_core::{DType, Device, Result, Tensor};
     use candle_nn::VarBuilder;
-    use mold_core::{GenerateRequest, LoraWeight, OutputFormat};
+    use mold_core::{GenerateRequest, LoraWeight, ModelPaths, OutputFormat};
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     /// `MOLD_LORA_BYPASS=on` and `=off` are the two boundaries we
     /// document. Any other value (including unset) must collapse to
@@ -2800,6 +2817,58 @@ mod tests {
         assert_eq!(with_env(Some("auto")), LoraBypassMode::Auto);
         assert_eq!(with_env(Some("garbage")), LoraBypassMode::Auto);
         assert_eq!(with_env(None), LoraBypassMode::Auto);
+    }
+
+    fn dummy_paths(transformer: &str) -> ModelPaths {
+        ModelPaths {
+            transformer: PathBuf::from(transformer),
+            transformer_shards: Vec::new(),
+            vae: PathBuf::from("ae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: Some(PathBuf::from("t5.safetensors")),
+            clip_encoder: Some(PathBuf::from("clip.safetensors")),
+            t5_tokenizer: Some(PathBuf::from("t5-tokenizer.json")),
+            clip_tokenizer: Some(PathBuf::from("clip-tokenizer.json")),
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        }
+    }
+
+    #[test]
+    fn forced_offload_uses_sequential_generation_path_for_bf16_flux() {
+        let mut engine = super::FluxEngine::new(
+            "flux-dev:bf16".to_string(),
+            dummy_paths("flux1-dev.safetensors"),
+            Some(false),
+            None,
+            LoadStrategy::Eager,
+            0,
+            true,
+            None,
+        );
+
+        assert!(engine.uses_sequential_generate_path());
+    }
+
+    #[test]
+    fn forced_offload_defers_eager_load_for_bf16_flux() {
+        let mut engine = super::FluxEngine::new(
+            "flux-dev:bf16".to_string(),
+            dummy_paths("flux1-dev.safetensors"),
+            Some(false),
+            None,
+            LoadStrategy::Eager,
+            0,
+            true,
+            None,
+        );
+
+        assert!(engine.defers_eager_load());
     }
 
     /// Minimal `GenerateRequest` carrying only the fields `effective_loras`

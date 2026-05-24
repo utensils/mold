@@ -256,6 +256,39 @@ impl Flux2Engine {
         crate::img_utils::NormalizeRange::MinusOneToOne
     }
 
+    #[cfg(test)]
+    fn sequential_img2img_preencodes_source() -> bool {
+        true
+    }
+
+    fn load_sequential_vae(
+        &self,
+        device: &Device,
+        gpu_dtype: DType,
+    ) -> Result<(Flux2AutoEncoder, DType)> {
+        let vae_ref =
+            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_device = crate::device::resolve_device(Some(vae_ref), || Ok(device.clone()))?;
+        self.base.progress.stage_start("Loading VAE (GPU)");
+        let vae_stage = Instant::now();
+        let vae_cfg = Flux2VaeConfig::klein();
+        // Sequential path resolves MOLD_VAE_DTYPE per request — env changes
+        // take effect on the next generate() without an engine reload.
+        let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
+        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            vae_dtype,
+            &vae_device,
+            "VAE",
+            &self.base.progress,
+        )?;
+        let vae = Flux2AutoEncoder::new(&vae_cfg, vae_vb)?;
+        self.base
+            .progress
+            .stage_done("Loading VAE (GPU)", vae_stage.elapsed());
+        Ok((vae, vae_dtype))
+    }
+
     /// Validate that all required paths exist.
     fn validate_paths(&self) -> Result<std::path::PathBuf> {
         let text_tokenizer_path = self
@@ -925,58 +958,6 @@ impl Flux2Engine {
             txt_emb
         };
 
-        // --- Phase 2: Load transformer + VAE, denoise ---
-        let xformer_size = std::fs::metadata(&self.base.paths.transformer)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let vae_file_size = std::fs::metadata(&self.base.paths.vae)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let xformer_activation_budget = crate::device::activation_bytes(
-            req.width,
-            req.height,
-            1,
-            crate::device::dtype_bytes(gpu_dtype),
-            crate::device::ActivationFamily::Flux2Dit,
-        );
-        preflight_memory_check(
-            "Flux.2 transformer + VAE",
-            xformer_size + vae_file_size,
-            xformer_activation_budget,
-        )?;
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
-
-        let flux2_cfg = self.resolve_config();
-        let xformer_stage = Instant::now();
-        let (transformer, xformer_label) = self.load_transformer(&flux2_cfg, gpu_dtype, &device)?;
-        self.base
-            .progress
-            .stage_done(xformer_label, xformer_stage.elapsed());
-
-        // Load VAE
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
-        let vae_device = crate::device::resolve_device(Some(vae_ref), || Ok(device.clone()))?;
-        self.base.progress.stage_start("Loading VAE (GPU)");
-        let vae_stage = Instant::now();
-        let vae_cfg = Flux2VaeConfig::klein();
-        // Sequential path resolves MOLD_VAE_DTYPE per request — env changes
-        // take effect on the next generate() without an engine reload.
-        let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&self.base.paths.vae),
-            vae_dtype,
-            &vae_device,
-            "VAE",
-            &self.base.progress,
-        )?;
-        let vae = Flux2AutoEncoder::new(&vae_cfg, vae_vb)?;
-        self.base
-            .progress
-            .stage_done("Loading VAE (GPU)", vae_stage.elapsed());
-
         let latent_h = height.div_ceil(8);
         let latent_w = width.div_ceil(8);
 
@@ -998,9 +979,13 @@ impl Flux2Engine {
             );
         }
 
-        // Generate noise / encode source image for img2img
+        // Generate noise / encode source image for img2img. Source-image
+        // requests pre-encode in a VAE-only phase, then drop VAE before the
+        // transformer load. Klein-9B BF16 cannot keep transformer+VAE
+        // co-resident on 24 GB cards.
         let (img, inpaint_ctx) = if let Some(ref source_bytes) = req.source_image {
             let start_t = timesteps[0];
+            let (vae, _vae_dtype) = self.load_sequential_vae(&device, gpu_dtype)?;
 
             self.base
                 .progress
@@ -1030,6 +1015,11 @@ impl Flux2Engine {
                 &device,
                 gpu_dtype,
             )?;
+            drop(vae);
+            drop(encoded);
+            drop(source_tensor);
+            device.synchronize()?;
+            self.base.progress.info("Freed VAE after source encoding");
             (prepared.initial_latents, prepared.inpaint_ctx)
         } else {
             let img = crate::engine::seeded_randn(
@@ -1042,6 +1032,33 @@ impl Flux2Engine {
         };
 
         let state = Flux2State::new(&txt_emb, &img)?;
+
+        // --- Phase 2: Load transformer, denoise ---
+        let xformer_size = std::fs::metadata(&self.base.paths.transformer)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let xformer_activation_budget = crate::device::activation_bytes(
+            req.width,
+            req.height,
+            1,
+            crate::device::dtype_bytes(gpu_dtype),
+            crate::device::ActivationFamily::Flux2Dit,
+        );
+        preflight_memory_check(
+            "Flux.2 transformer",
+            xformer_size,
+            xformer_activation_budget,
+        )?;
+        if let Some(status) = memory_status_string() {
+            self.base.progress.info(&status);
+        }
+
+        let flux2_cfg = self.resolve_config();
+        let xformer_stage = Instant::now();
+        let (transformer, xformer_label) = self.load_transformer(&flux2_cfg, gpu_dtype, &device)?;
+        self.base
+            .progress
+            .stage_done(xformer_label, xformer_stage.elapsed());
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         self.base.progress.stage_start(&denoise_label);
@@ -1073,6 +1090,8 @@ impl Flux2Engine {
         drop(txt_emb);
         device.synchronize()?;
         tracing::info!("Transformer dropped (sequential mode), decoding VAE...");
+
+        let (vae, vae_dtype) = self.load_sequential_vae(&device, gpu_dtype)?;
 
         // --- Phase 3: VAE decode ---
         self.base.progress.stage_start("VAE decode");
@@ -1554,6 +1573,14 @@ mod tests {
         assert_eq!(
             Flux2Engine::img2img_source_normalize_range(),
             crate::img_utils::NormalizeRange::MinusOneToOne
+        );
+    }
+
+    #[test]
+    fn sequential_img2img_encodes_source_before_transformer_load() {
+        assert!(
+            Flux2Engine::sequential_img2img_preencodes_source(),
+            "sequential Flux.2 img2img must not keep the VAE resident while loading the transformer"
         );
     }
 

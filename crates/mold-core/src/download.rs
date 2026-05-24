@@ -1497,7 +1497,19 @@ pub fn companion_present_on_disk(
     }
     manifest.files.iter().all(|f| {
         let storage = crate::manifest::storage_path(manifest, f);
-        models_dir.join(storage).exists()
+        let path = models_dir.join(storage);
+        if !path.exists() {
+            return false;
+        }
+        if f.sha256.is_some() {
+            return sha256_marker_path(&path).exists();
+        }
+        if f.size_bytes > 0 {
+            return std::fs::metadata(&path)
+                .map(|m| m.len() == f.size_bytes)
+                .unwrap_or(false);
+        }
+        true
     })
 }
 
@@ -1517,6 +1529,9 @@ pub fn companion_present_on_disk(
 fn recipe_file_is_placed(dest: &Path, file: &RecipeFetchFile<'_>) -> bool {
     if !dest.exists() {
         return false;
+    }
+    if has_sha256_marker(dest) {
+        return true;
     }
     match (file.sha256, file.size_bytes) {
         (Some(_), _) => sha256_marker_path(dest).exists(),
@@ -2766,7 +2781,13 @@ mod tests {
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            std::fs::write(&dest, b"stub").unwrap();
+            std::fs::File::create(&dest)
+                .unwrap()
+                .set_len(f.size_bytes)
+                .unwrap();
+            if f.sha256.is_some() {
+                std::fs::write(sha256_marker_path(&dest), "verified").unwrap();
+            }
         }
     }
 
@@ -2784,6 +2805,26 @@ mod tests {
         let models_dir = recipe_tmp_dir("companion_present");
         stage_complete_companion(&models_dir, "clip-l");
         let manifest = crate::manifest::find_manifest("clip-l").unwrap();
+        assert!(companion_present_on_disk(&models_dir, manifest));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn companion_present_returns_false_for_unverified_sha_file() {
+        let models_dir = recipe_tmp_dir("companion_unverified_sha");
+        let manifest = crate::manifest::find_manifest("sdxl-vae").unwrap();
+        let file = &manifest.files[0];
+        let dest = models_dir.join(crate::manifest::storage_path(manifest, file));
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::File::create(&dest)
+            .unwrap()
+            .set_len(file.size_bytes)
+            .unwrap();
+        assert!(
+            !companion_present_on_disk(&models_dir, manifest),
+            "SHA-declared companion files need the verification marker before repair skips them"
+        );
+        std::fs::write(sha256_marker_path(&dest), "verified").unwrap();
         assert!(companion_present_on_disk(&models_dir, manifest));
         let _ = std::fs::remove_dir_all(&models_dir);
     }
@@ -3290,6 +3331,30 @@ mod tests {
         assert!(!catalog_entry_installed(
             &models_dir,
             "cv:installed_c",
+            &files
+        ));
+        let _ = std::fs::remove_dir_all(&models_dir);
+    }
+
+    #[test]
+    fn catalog_entry_installed_accepts_marker_when_declared_size_is_stale() {
+        let models_dir = recipe_tmp_dir("installed_stale_size_marker");
+        let subdir = models_dir.join("cv-installed_c2");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let dest = subdir.join("m.safetensors");
+        std::fs::write(&dest, b"new larger bytes").unwrap();
+        write_sha256_marker(&dest, "deadbeef").unwrap();
+
+        let files = vec![RecipeFetchFile {
+            url: "https://example.invalid/m.safetensors",
+            dest: "m.safetensors",
+            sha256: None,
+            size_bytes: Some(5),
+        }];
+
+        assert!(catalog_entry_installed(
+            &models_dir,
+            "cv:installed_c2",
             &files
         ));
         let _ = std::fs::remove_dir_all(&models_dir);

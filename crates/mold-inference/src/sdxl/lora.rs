@@ -387,7 +387,26 @@ struct DeltaCacheKey {
 fn compute_delta(patch: &SdxlLoraPatch, target_dev: &Device) -> candle_core::Result<Tensor> {
     let a = patch.a.to_dtype(DType::F32)?.to_device(target_dev)?;
     let b = patch.b.to_dtype(DType::F32)?.to_device(target_dev)?;
-    let computed = b.matmul(&a)?;
+    let computed = if a.rank() == 4 && b.rank() == 4 && b.dim(2)? == 1 && b.dim(3)? == 1 {
+        let out_dim = b.dim(0)?;
+        let rank_dim = b.dim(1)?;
+        let a_rank = a.dim(0)?;
+        let in_dim = a.dim(1)?;
+        let kernel_h = a.dim(2)?;
+        let kernel_w = a.dim(3)?;
+        if rank_dim != a_rank {
+            candle_core::bail!(
+                "SDXL conv LoRA rank mismatch, up rank {rank_dim}, down rank {a_rank}"
+            );
+        }
+        let b_flat = b.reshape((out_dim, rank_dim))?;
+        let a_flat = a.reshape((a_rank, in_dim * kernel_h * kernel_w))?;
+        b_flat
+            .matmul(&a_flat)?
+            .reshape((out_dim, in_dim, kernel_h, kernel_w))?
+    } else {
+        b.matmul(&a)?
+    };
     &computed * patch.effective_scale
 }
 
@@ -931,6 +950,37 @@ mod tests {
         assert_eq!(bucket.len(), 2, "stack must keep distinct patches");
         assert_eq!(bucket[0].lora_path_hash, 0xAA);
         assert_eq!(bucket[1].lora_path_hash, 0xBB);
+    }
+
+    #[test]
+    fn compute_delta_handles_conv_lora_tensors() {
+        let dev = Device::Cpu;
+        let a = Tensor::from_vec(
+            vec![
+                1.0f32, 2.0, 3.0, 4.0, // rank 0, input 0, 2x2
+                5.0, 6.0, 7.0, 8.0, // rank 0, input 1, 2x2
+                10.0, 20.0, 30.0, 40.0, // rank 1, input 0, 2x2
+                50.0, 60.0, 70.0, 80.0, // rank 1, input 1, 2x2
+            ],
+            (2, 2, 2, 2),
+            &dev,
+        )
+        .unwrap();
+        let b = Tensor::from_vec(vec![2.0f32, 3.0], (1, 2, 1, 1), &dev).unwrap();
+        let patch = SdxlLoraPatch {
+            a,
+            b,
+            effective_scale: 0.5,
+            target: SdxlLoraTarget::Direct {
+                candle_key: "down_blocks.0.resnets.0.conv1.weight".to_string(),
+            },
+            lora_path_hash: 0,
+        };
+
+        let delta = compute_delta(&patch, &dev).unwrap();
+        assert_eq!(delta.dims(), &[1, 2, 2, 2]);
+        let vals: Vec<f32> = delta.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(vals, vec![16.0, 32.0, 48.0, 64.0, 80.0, 96.0, 112.0, 128.0]);
     }
 
     fn write_synthetic_safetensors_with_data(

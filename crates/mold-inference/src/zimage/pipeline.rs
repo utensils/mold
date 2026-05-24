@@ -581,11 +581,7 @@ impl ZImageEngine {
         let has_lora = !self.pending_loras.is_empty();
 
         if is_gguf {
-            let qvb =
-                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
             if has_lora {
-                let (tensors, dev) =
-                    super::gguf_dense::dequantize_gguf_dense_tensors(cfg, dtype, &qvb)?;
                 let adapters =
                     super::lora::load_lora_adapters(&self.pending_loras, &self.base.progress)?;
                 let specs: Vec<super::lora::ZImageLoraSpec<'_>> = adapters
@@ -597,14 +593,20 @@ impl ZImageEngine {
                         path_hash: super::lora::lora_path_hash(&w.path),
                     })
                     .collect();
-                let inner: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(tensors);
-                let wrapped =
-                    super::lora::wrap_backend_with_lora(inner, &specs, &self.base.progress, None)?;
-                let vb = candle_nn::VarBuilder::from_backend(wrapped, dtype, dev);
-                return Ok(ZImageTransformer::Dense(MoldZImageTransformer2DModel::new(
-                    cfg, vb,
-                )?));
+                let vb = super::lora::gguf_lora_var_builder(
+                    &self.base.paths.transformer,
+                    &specs,
+                    device,
+                    &self.base.progress,
+                )?;
+                return Ok(ZImageTransformer::Quantized(
+                    super::quantized_transformer::QuantizedZImageTransformer2DModel::new(
+                        cfg, dtype, vb,
+                    )?,
+                ));
             }
+            let qvb =
+                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
             Ok(ZImageTransformer::Dense(load_gguf_dense_transformer(
                 cfg, dtype, qvb,
             )?))
@@ -878,6 +880,10 @@ impl ZImageEngine {
             self.load_transformer(&loaded.device, loaded.dtype, &loaded.transformer_cfg)?;
         loaded.transformer = Some(transformer);
         Ok(())
+    }
+
+    fn uses_sequential_generate_path(&self) -> bool {
+        self.base.load_strategy == LoadStrategy::Sequential || !self.pending_loras.is_empty()
     }
 
     /// Generate an image using sequential loading strategy.
@@ -1344,8 +1350,11 @@ impl ZImageEngine {
                 "scheduler selection not supported for Z-Image (flow-matching), ignoring"
             );
         }
-        // Sequential mode: load-use-drop each component
-        if self.base.load_strategy == LoadStrategy::Sequential {
+        // Sequential mode: load-use-drop each component. LoRA requests also
+        // use this path because LoRA-merged transformer construction has
+        // higher transient memory and must not run while eager-mode VAE/text
+        // encoders are still GPU-resident.
+        if self.uses_sequential_generate_path() {
             return self.generate_sequential(req);
         }
 
@@ -2235,6 +2244,35 @@ mod tests {
             0,
         );
         assert!(quantized.detect_is_gguf());
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn zimage_lora_requests_use_sequential_generation_path() {
+        let dir = temp_test_dir("mold-zimage-lora-sequential");
+        let mut engine = ZImageEngine::new(
+            "z-image-turbo:q8".to_string(),
+            zimage_model_paths(
+                dir.join("transformer.gguf"),
+                vec![],
+                dir.join("vae.safetensors"),
+                Some(dir.join("tokenizer.json")),
+            ),
+            None,
+            LoadStrategy::Eager,
+            0,
+        );
+        engine.pending_loras = vec![LoraWeight {
+            path: dir.join("adapter.safetensors").display().to_string(),
+            scale: 1.0,
+        }];
+
+        assert!(
+            engine.uses_sequential_generate_path(),
+            "Z-Image LoRA requests should use staged load-use-drop generation \
+             so VAE/text encoders are not co-resident with the LoRA-merged transformer"
+        );
 
         fs::remove_dir_all(dir).ok();
     }

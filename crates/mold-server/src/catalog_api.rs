@@ -68,6 +68,131 @@ pub async fn post_catalog_dispatch(
     }
 }
 
+fn rendered_primary_recipe_dest(
+    entry: &mold_catalog::entry::CatalogEntry,
+    author: &str,
+    name: &str,
+) -> Option<String> {
+    entry
+        .download_recipe
+        .files
+        .iter()
+        .find(|file| file.role.is_none())
+        .or_else(|| entry.download_recipe.files.first())
+        .map(|file| {
+            mold_catalog::entry::render_recipe_dest(&file.dest, entry.family.as_str(), author, name)
+        })
+}
+
+pub(crate) async fn enqueue_catalog_primary_repair(
+    state: &crate::state::AppState,
+    id: &str,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let models_dir = state.config.read().await.resolved_models_dir();
+    if let Some(version_id) = id.strip_prefix("cv:") {
+        let sc_path = mold_catalog::sidecar::civitai_sidecar_path(&models_dir, id);
+        if let Ok(sidecar) = mold_catalog::sidecar::read_sidecar(&sc_path) {
+            if let Some(parent) = sc_path.parent() {
+                if mold_catalog::sidecar::primary_path_if_present(parent, &sidecar).is_some() {
+                    return Ok(None);
+                }
+            }
+        }
+
+        let entry = mold_catalog::live::fetch_civitai_version(
+            state.catalog_live_civitai_base.as_str(),
+            version_id,
+            std::env::var("CIVITAI_TOKEN").ok().as_deref(),
+        )
+        .await
+        .map_err(|e| match e {
+            mold_catalog::live::LiveSearchError::Upstream { status: 404, .. } => (
+                StatusCode::NOT_FOUND,
+                format!("{id}: upstream returned 404"),
+            ),
+            other => (StatusCode::BAD_GATEWAY, format!("upstream: {other}")),
+        })?;
+
+        let auth = match entry.download_recipe.needs_token {
+            Some(mold_catalog::entry::TokenKind::Civitai) => {
+                mold_core::download::civitai_auth_or_error(id)
+                    .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?
+            }
+            _ => mold_core::download::RecipeAuth::None,
+        };
+        let (author, name) = match entry.source_id.split_once('/') {
+            Some((a, n)) => (a.to_string(), n.to_string()),
+            None => (String::new(), entry.source_id.clone()),
+        };
+        let files: Vec<crate::downloads::OwnedRecipeFile> = entry
+            .download_recipe
+            .files
+            .iter()
+            .map(|f| crate::downloads::OwnedRecipeFile {
+                url: f.url.clone(),
+                dest: mold_catalog::entry::render_recipe_dest(
+                    &f.dest,
+                    entry.family.as_str(),
+                    &author,
+                    &name,
+                ),
+                sha256: f.sha256.clone(),
+                size_bytes: f.size_bytes,
+            })
+            .collect();
+        if let Some(primary_dest) = rendered_primary_recipe_dest(&entry, &author, &name) {
+            let sidecar = mold_catalog::sidecar::sidecar_from_entry(&entry, primary_dest);
+            if let Err(e) = mold_catalog::sidecar::write_sidecar(&sc_path, &sidecar) {
+                tracing::warn!(
+                    target: "catalog.sidecar",
+                    catalog_id = %id,
+                    error = %e,
+                    "sidecar write failed during primary repair",
+                );
+            }
+        }
+        let payload = crate::downloads::RecipePayload {
+            catalog_id: id.to_string(),
+            files,
+            auth,
+        };
+        let (job_id, _, _) = state
+            .downloads
+            .enqueue_recipe_in_group(payload, id)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        return Ok(Some(job_id));
+    }
+
+    if let Some(repo_id) = id.strip_prefix("hf:") {
+        let entry = mold_catalog::live::fetch_hf_repo(
+            "https://huggingface.co",
+            repo_id,
+            std::env::var("HF_TOKEN").ok().as_deref(),
+        )
+        .await
+        .map_err(|e| match e {
+            mold_catalog::live::LiveSearchError::Upstream { status: 404, .. } => (
+                StatusCode::NOT_FOUND,
+                format!("{id}: upstream returned 404"),
+            ),
+            other => (StatusCode::BAD_GATEWAY, format!("upstream: {other}")),
+        })?;
+        let model = match mold_core::manifest::find_manifest(&entry.source_id) {
+            Some(m) => m.name.clone(),
+            None => entry.source_id.clone(),
+        };
+        let (job_id, _, _) = state
+            .downloads
+            .enqueue_in_group(model, id)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        return Ok(Some(job_id));
+    }
+
+    Ok(None)
+}
+
 pub async fn list_families(State(_state): State<crate::state::AppState>) -> impl IntoResponse {
     // Live search hits one family per request, so the sidebar just gets
     // the static taxonomy. No per-family counts — that line is gone from
@@ -260,9 +385,8 @@ pub async fn post_catalog_download(
             // Sidecar write is best-effort: it lets the LoRA picker see
             // the entry as soon as the file lands without re-querying
             // the live catalog. Failure is not fatal.
-            if let Some(primary) = files.first() {
-                let sidecar =
-                    mold_catalog::sidecar::sidecar_from_entry(&entry, primary.dest.clone());
+            if let Some(primary_dest) = rendered_primary_recipe_dest(&entry, &author, &name) {
+                let sidecar = mold_catalog::sidecar::sidecar_from_entry(&entry, primary_dest);
                 let sc_path = mold_catalog::sidecar::civitai_sidecar_path(&models_dir, &entry_id);
                 if let Err(e) = mold_catalog::sidecar::write_sidecar(&sc_path, &sidecar) {
                     tracing::warn!(

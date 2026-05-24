@@ -125,8 +125,8 @@ fn intent_to_model_config(
     cfg.transformer = Some(primary_str.clone());
 
     // FLUX is the only family with mixed bundling — peek the safetensors
-    // header. SDXL/SD1.5 always bundle; Flux.2 / LTX-Video / LTX-2 always
-    // need a separate VAE companion.
+    // header. SDXL/SD1.5/LTX-2 always bundle; Flux.2 / Z-Image / LTX-Video
+    // always need a separate VAE companion.
     let family = mold_catalog::families::Family::from_str(&intent.family)
         .map_err(|e| anyhow::anyhow!("intent has unknown family slug: {e}"))?;
     let bundles = if family == mold_catalog::families::Family::Flux {
