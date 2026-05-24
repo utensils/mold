@@ -113,6 +113,17 @@ temperature = 0.7
 # file = false                # Enable file logging to ~/.mold/logs/
 # dir = "~/.mold/logs"        # Custom log directory
 # max_days = 7                # Days to retain rotated log files
+
+[lambda]
+# api_key = "..."             # Prefer LAMBDA_API_KEY for shells
+# endpoint = "https://cloud.lambda.ai/api/v1"
+# image_repository = "ghcr.io/utensils/mold"
+# ssh_key_name = "mold-laptop"
+# ssh_private_key_path = "~/.ssh/id_ed25519"
+# filesystem_prefix = "mold"
+# filesystem_mount_path = "/data/mold"
+# confirm_hourly_usd = 5.0
+# local_port = 7680
 ```
 
 ## Environment Variables
@@ -128,6 +139,7 @@ Environment variables take precedence over config file values.
 | `MOLD_HOST`          | `http://localhost:7680`            | Remote server URL                   |
 | `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`                | Model storage directory             |
 | `MOLD_PORT`          | `7680`                             | Server port                         |
+| `LAMBDA_API_KEY`     | unset                              | Overrides `lambda.api_key`          |
 | `MOLD_LOG`           | `info` (serve) / `warn` (cli, tui) | Log level                           |
 
 ### Generation

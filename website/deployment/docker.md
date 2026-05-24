@@ -36,6 +36,9 @@ docker pull ghcr.io/utensils/mold:latest
 # Ampere (A100)
 docker pull ghcr.io/utensils/mold:latest-sm80
 
+# Hopper (H100/H200)
+docker pull ghcr.io/utensils/mold:latest-sm90
+
 # Blackwell (RTX 5090)
 docker pull ghcr.io/utensils/mold:latest-sm120
 ```
@@ -65,6 +68,7 @@ GPU's compute capability:
 | -------------------------- | ------------------------------------ |
 | Ada (RTX 4090, L40S)       | `ghcr.io/utensils/mold:latest`       |
 | Ampere (A100, RTX 3090)    | `ghcr.io/utensils/mold:latest-sm80`  |
+| Hopper (H100, H200, GH200) | `ghcr.io/utensils/mold:latest-sm90`  |
 | Blackwell (RTX 5090, B200) | `ghcr.io/utensils/mold:latest-sm120` |
 
 ### Option 1 — Web Console

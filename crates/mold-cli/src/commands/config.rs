@@ -218,6 +218,61 @@ const ALL_KEYS: &[ConfigKeyInfo] = &[
         env_var: None,
         section: "RunPod",
     },
+    // Lambda
+    ConfigKeyInfo {
+        key: "lambda.api_key",
+        value_type: ValueType::OptionalString,
+        env_var: Some("LAMBDA_API_KEY"),
+        section: "Lambda",
+    },
+    ConfigKeyInfo {
+        key: "lambda.endpoint",
+        value_type: ValueType::OptionalString,
+        env_var: None,
+        section: "Lambda",
+    },
+    ConfigKeyInfo {
+        key: "lambda.image_repository",
+        value_type: ValueType::OptionalString,
+        env_var: None,
+        section: "Lambda",
+    },
+    ConfigKeyInfo {
+        key: "lambda.ssh_key_name",
+        value_type: ValueType::OptionalString,
+        env_var: None,
+        section: "Lambda",
+    },
+    ConfigKeyInfo {
+        key: "lambda.ssh_private_key_path",
+        value_type: ValueType::OptionalString,
+        env_var: None,
+        section: "Lambda",
+    },
+    ConfigKeyInfo {
+        key: "lambda.filesystem_prefix",
+        value_type: ValueType::OptionalString,
+        env_var: None,
+        section: "Lambda",
+    },
+    ConfigKeyInfo {
+        key: "lambda.filesystem_mount_path",
+        value_type: ValueType::String,
+        env_var: None,
+        section: "Lambda",
+    },
+    ConfigKeyInfo {
+        key: "lambda.confirm_hourly_usd",
+        value_type: ValueType::F64,
+        env_var: None,
+        section: "Lambda",
+    },
+    ConfigKeyInfo {
+        key: "lambda.local_port",
+        value_type: ValueType::U16,
+        env_var: None,
+        section: "Lambda",
+    },
 ];
 
 /// Per-model field names and their value types.
@@ -397,6 +452,36 @@ fn get_static_value(config: &Config, key: &str) -> Result<ConfigValue> {
             Some(s) => ConfigValue::String(s.clone()),
             None => ConfigValue::None,
         },
+        // Lambda
+        "lambda.api_key" => match &config.lambda.api_key {
+            Some(_) => ConfigValue::String("<set>".to_string()),
+            None => ConfigValue::None,
+        },
+        "lambda.endpoint" => match &config.lambda.endpoint {
+            Some(s) => ConfigValue::String(s.clone()),
+            None => ConfigValue::None,
+        },
+        "lambda.image_repository" => match &config.lambda.image_repository {
+            Some(s) => ConfigValue::String(s.clone()),
+            None => ConfigValue::None,
+        },
+        "lambda.ssh_key_name" => match &config.lambda.ssh_key_name {
+            Some(s) => ConfigValue::String(s.clone()),
+            None => ConfigValue::None,
+        },
+        "lambda.ssh_private_key_path" => match &config.lambda.ssh_private_key_path {
+            Some(s) => ConfigValue::String(s.clone()),
+            None => ConfigValue::None,
+        },
+        "lambda.filesystem_prefix" => match &config.lambda.filesystem_prefix {
+            Some(s) => ConfigValue::String(s.clone()),
+            None => ConfigValue::None,
+        },
+        "lambda.filesystem_mount_path" => {
+            ConfigValue::String(config.lambda.filesystem_mount_path.clone())
+        }
+        "lambda.confirm_hourly_usd" => ConfigValue::F64(config.lambda.confirm_hourly_usd),
+        "lambda.local_port" => ConfigValue::U16(config.lambda.local_port),
         _ => return Err(unknown_key_error(key)),
     })
 }
@@ -523,6 +608,20 @@ fn set_static_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
         }
         "runpod.cost_alert_usd" => config.runpod.cost_alert_usd = parse_f64(raw, 0.0, 1000.0, key)?,
         "runpod.endpoint" => config.runpod.endpoint = parse_optional_string(raw),
+        // Lambda
+        "lambda.api_key" => config.lambda.api_key = parse_optional_string(raw),
+        "lambda.endpoint" => config.lambda.endpoint = parse_optional_string(raw),
+        "lambda.image_repository" => config.lambda.image_repository = parse_optional_string(raw),
+        "lambda.ssh_key_name" => config.lambda.ssh_key_name = parse_optional_string(raw),
+        "lambda.ssh_private_key_path" => {
+            config.lambda.ssh_private_key_path = parse_optional_string(raw)
+        }
+        "lambda.filesystem_prefix" => config.lambda.filesystem_prefix = parse_optional_string(raw),
+        "lambda.filesystem_mount_path" => config.lambda.filesystem_mount_path = parse_string(raw)?,
+        "lambda.confirm_hourly_usd" => {
+            config.lambda.confirm_hourly_usd = parse_f64(raw, 0.0, 1000.0, key)?
+        }
+        "lambda.local_port" => config.lambda.local_port = parse_u16(raw, 1, 65535, key)?,
         _ => return Err(unknown_key_error(key)),
     }
     Ok(())
@@ -1321,6 +1420,7 @@ mod tests {
             expand: mold_core::ExpandSettings::default(),
             logging: mold_core::LoggingConfig::default(),
             runpod: mold_core::runpod::RunPodSettings::default(),
+            lambda: mold_core::lambda::LambdaSettings::default(),
             gpus: None,
             queue_size: None,
             models: HashMap::new(),
@@ -1380,8 +1480,8 @@ mod tests {
 
     #[test]
     fn all_keys_count() {
-        // 11 General + 8 Expand + 4 Logging + 8 RunPod = 31 static keys
-        assert_eq!(ALL_KEYS.len(), 31);
+        // 11 General + 8 Expand + 4 Logging + 8 RunPod + 9 Lambda = 40 static keys
+        assert_eq!(ALL_KEYS.len(), 40);
     }
 
     #[test]
@@ -1401,6 +1501,37 @@ mod tests {
                 "key {key} not registered in ALL_KEYS",
             );
         }
+    }
+
+    #[test]
+    fn lambda_keys_registered() {
+        for key in [
+            "lambda.api_key",
+            "lambda.endpoint",
+            "lambda.image_repository",
+            "lambda.ssh_key_name",
+            "lambda.ssh_private_key_path",
+            "lambda.filesystem_prefix",
+            "lambda.filesystem_mount_path",
+            "lambda.confirm_hourly_usd",
+            "lambda.local_port",
+        ] {
+            assert!(
+                find_static_key(key).is_some(),
+                "key {key} not registered in ALL_KEYS",
+            );
+        }
+    }
+
+    #[test]
+    fn lambda_api_key_roundtrip_is_redacted() {
+        let mut config = test_config();
+        set_value(&mut config, "lambda.api_key", "my-secret-key").unwrap();
+        assert_eq!(config.lambda.api_key.as_deref(), Some("my-secret-key"));
+        let v = get_value(&config, "lambda.api_key").unwrap();
+        assert_eq!(v.raw(), "<set>");
+        set_value(&mut config, "lambda.api_key", "none").unwrap();
+        assert!(config.lambda.api_key.is_none());
     }
 
     #[test]

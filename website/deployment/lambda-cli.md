@@ -1,0 +1,111 @@
+# `mold lambda` — Lambda Cloud web UI
+
+`mold lambda` deploys mold to Lambda Cloud as a private, Docker-first web UI.
+The local CLI creates or reuses Lambda resources, starts the mold container on
+the instance, opens an SSH tunnel to `127.0.0.1:7680`, and prints the matching
+`MOLD_HOST` export.
+
+## Setup
+
+Create a Lambda Cloud API key in the Lambda console, then configure mold:
+
+```bash
+mold config set lambda.api_key <your-key>
+# or, for shell-only use:
+export LAMBDA_API_KEY=<your-key>
+
+mold lambda doctor
+```
+
+Lambda access stays private by default. The remote container binds mold to
+`127.0.0.1:7680` on the instance, and your laptop reaches it through SSH:
+
+```bash
+mold lambda deploy --instance-type gpu_1x_a10 --region us-west-1
+eval "$(mold lambda tunnel)"
+open http://127.0.0.1:7680
+```
+
+## Discovery
+
+```bash
+mold lambda availability
+mold lambda availability --json
+```
+
+Availability shows the Lambda instance type, region, GPU description, GPU
+count, `generation_slots`, price per hour, memory/storage, and the selected
+Docker image tag. Slots equal GPU count: mold keeps one GPU-resident engine per
+worker/GPU and does not claim extra parallel slots on a single large GPU.
+
+Image selection follows the GPU family:
+
+| GPU family                  | Image tag       |
+| --------------------------- | --------------- |
+| Ampere / A100               | `:latest-sm80`  |
+| Ada / L40 / RTX 4090        | `:latest`       |
+| Hopper / H100 / H200 / GH   | `:latest-sm90`  |
+| Blackwell / B200 / RTX 5090 | `:latest-sm120` |
+
+## Persistent Storage
+
+`mold lambda deploy` creates or reuses one Lambda filesystem per region. The
+default name is `mold-<region>`, mounted at `/data/mold` and bound into the
+container as `/workspace`, so models, LoRAs, cache, the metadata DB, and gallery
+outputs survive instance replacement.
+
+```bash
+mold lambda filesystems
+mold lambda filesystems --json
+```
+
+Filesystems continue billing while they exist. Use `mold lambda reset --to-zero`
+when you want all mold-managed Lambda storage removed.
+
+## Secrets
+
+Secrets are not forwarded by default. To copy local `HF_TOKEN` and
+`CIVITAI_TOKEN` into the remote service env, opt in explicitly:
+
+```bash
+mold lambda deploy --instance-type gpu_1x_a10 --region us-west-1 --forward-secrets
+```
+
+The CLI writes a root-readable env file over SSH and restarts the remote
+`mold-lambda.service`.
+
+## Lifecycle
+
+```bash
+mold lambda status
+mold lambda logs --follow
+mold lambda ssh
+mold lambda terminate
+```
+
+`terminate` stops the instance and local tunnel but leaves the regional
+filesystem. To remove mold-managed instances, tunnels, and filesystems:
+
+```bash
+mold lambda reset --to-zero
+```
+
+The reset command requires typing `delete mold lambda resources` unless you pass
+that exact phrase through `--confirm`.
+
+## Configuration
+
+```toml
+[lambda]
+# api_key = "..."                         # Prefer LAMBDA_API_KEY for shells
+endpoint = "https://cloud.lambda.ai/api/v1"
+image_repository = "ghcr.io/utensils/mold"
+ssh_key_name = "mold-laptop"
+ssh_private_key_path = "~/.ssh/id_ed25519"
+filesystem_prefix = "mold"
+filesystem_mount_path = "/data/mold"
+confirm_hourly_usd = 5.0
+local_port = 7680
+```
+
+All keys are settable with `mold config set lambda.<key> <value>`.

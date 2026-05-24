@@ -10,6 +10,7 @@ pub mod error;
 pub mod expand;
 pub mod expand_prompts;
 pub mod install_error;
+pub mod lambda;
 pub mod manifest;
 pub mod runpod;
 pub mod types;

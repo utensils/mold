@@ -136,6 +136,7 @@ mod tests {
             expand: mold_core::ExpandSettings::default(),
             logging: mold_core::LoggingConfig::default(),
             runpod: mold_core::runpod::RunPodSettings::default(),
+            lambda: mold_core::lambda::LambdaSettings::default(),
             gpus: None,
             queue_size: None,
             models: HashMap::new(),

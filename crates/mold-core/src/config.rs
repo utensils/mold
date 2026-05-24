@@ -484,6 +484,10 @@ pub struct Config {
     #[serde(default)]
     pub runpod: crate::runpod::RunPodSettings,
 
+    /// Lambda Cloud integration settings.
+    #[serde(default)]
+    pub lambda: crate::lambda::LambdaSettings,
+
     /// GPU ordinals to use (None = all available).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpus: Option<Vec<usize>>,
@@ -581,6 +585,7 @@ impl Default for Config {
             expand: ExpandSettings::default(),
             logging: LoggingConfig::default(),
             runpod: crate::runpod::RunPodSettings::default(),
+            lambda: crate::lambda::LambdaSettings::default(),
             gpus: None,
             queue_size: None,
             models: HashMap::new(),

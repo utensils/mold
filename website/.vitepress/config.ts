@@ -103,6 +103,7 @@ export default defineConfig({
             { text: 'Overview', link: '/deployment/' },
             { text: 'Docker & RunPod', link: '/deployment/docker' },
             { text: 'mold runpod CLI', link: '/deployment/runpod-cli' },
+            { text: 'mold lambda CLI', link: '/deployment/lambda-cli' },
             { text: 'NixOS', link: '/deployment/nixos' },
           ],
         },

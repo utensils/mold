@@ -17,11 +17,12 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 
 ## Deployment Options
 
-| Method                                | Best For                         |
-| ------------------------------------- | -------------------------------- |
-| [Docker & RunPod](/deployment/docker) | Cloud GPUs, RunPod pods          |
-| [NixOS](/deployment/nixos)            | NixOS systems, declarative setup |
-| Systemd service                       | Any Linux with NVIDIA GPU        |
+| Method                                    | Best For                         |
+| ----------------------------------------- | -------------------------------- |
+| [Docker & RunPod](/deployment/docker)     | Cloud GPUs, RunPod pods          |
+| [mold lambda CLI](/deployment/lambda-cli) | Private Lambda Cloud web UI      |
+| [NixOS](/deployment/nixos)                | NixOS systems, declarative setup |
+| Systemd service                           | Any Linux with NVIDIA GPU        |
 
 ## Systemd Service
 

@@ -332,6 +332,80 @@ Examples:
 }
 
 #[derive(Subcommand)]
+enum LambdaAction {
+    /// Check Lambda auth, endpoint, and account basics
+    Doctor,
+    /// List live Lambda GPU capacity and selected mold image tags
+    Availability {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deploy or repair a private tunneled mold server on Lambda Cloud
+    Deploy {
+        /// Lambda instance type name, e.g. gpu_1x_a10
+        #[arg(long)]
+        instance_type: Option<String>,
+        /// Lambda region name, e.g. us-west-1
+        #[arg(long)]
+        region: Option<String>,
+        /// Force a new instance instead of reusing state
+        #[arg(long)]
+        new: bool,
+        /// Print launch request and exit
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable phase events
+        #[arg(long)]
+        json: bool,
+        /// Copy local HF_TOKEN/CIVITAI_TOKEN to the remote service env
+        #[arg(long)]
+        forward_secrets: bool,
+        /// Enqueue this model download after the tunnel is ready
+        #[arg(long, add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model: Option<String>,
+        /// Open the local tunneled web UI in a browser
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        open_browser: bool,
+    },
+    /// Show the state-tracked Lambda instance
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print remote mold service logs over SSH
+    Logs {
+        #[arg(long, short = 'f')]
+        follow: bool,
+    },
+    /// Start or refresh the local SSH tunnel for the state-tracked instance
+    Tunnel {
+        #[arg(long)]
+        local_port: Option<u16>,
+    },
+    /// SSH into the state-tracked instance
+    Ssh,
+    /// List Lambda filesystems and usage
+    Filesystems {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Terminate the state-tracked instance and kill its local tunnel
+    Terminate {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete mold-managed Lambda resources after typed confirmation
+    Reset {
+        #[arg(long = "to-zero")]
+        to_zero: bool,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ServerAction {
     /// Start the server as a background daemon
     #[command(after_long_help = "\
@@ -938,6 +1012,24 @@ Manage pods manually:
     Runpod {
         #[command(subcommand)]
         action: RunpodAction,
+    },
+
+    /// Deploy and manage private mold servers on Lambda Cloud
+    #[command(after_long_help = "\
+Set up once:
+  mold config set lambda.api_key <key>
+  mold lambda doctor
+
+Deploy a private tunneled web UI:
+  mold lambda availability
+  mold lambda deploy --instance-type gpu_1x_a10 --region us-west-1
+
+Clean up:
+  mold lambda terminate
+  mold lambda reset --to-zero")]
+    Lambda {
+        #[command(subcommand)]
+        action: LambdaAction,
     },
 
     /// Preview LLM prompt expansion without generating images
@@ -1690,6 +1782,48 @@ async fn run() -> anyhow::Result<()> {
                     wait_ready_timeout_secs: wait_timeout,
                 };
                 commands::runpod::run_run(opts).await?
+            }
+        },
+        Commands::Lambda { action } => match action {
+            LambdaAction::Doctor => commands::lambda::run_doctor().await?,
+            LambdaAction::Availability { json } => commands::lambda::run_availability(json).await?,
+            LambdaAction::Deploy {
+                instance_type,
+                region,
+                new,
+                dry_run,
+                json,
+                forward_secrets,
+                model,
+                open_browser,
+            } => {
+                commands::lambda::run_deploy(commands::lambda::DeployOptions {
+                    instance_type,
+                    region,
+                    new,
+                    dry_run,
+                    json,
+                    forward_secrets,
+                    model,
+                    open_browser,
+                })
+                .await?
+            }
+            LambdaAction::Status { json } => commands::lambda::run_status(json).await?,
+            LambdaAction::Logs { follow } => commands::lambda::run_logs(follow).await?,
+            LambdaAction::Tunnel { local_port } => commands::lambda::run_tunnel(local_port).await?,
+            LambdaAction::Ssh => commands::lambda::run_ssh().await?,
+            LambdaAction::Filesystems { json } => commands::lambda::run_filesystems(json).await?,
+            LambdaAction::Terminate { json } => commands::lambda::run_terminate(json).await?,
+            LambdaAction::Reset {
+                to_zero,
+                confirm,
+                json,
+            } => {
+                if !to_zero {
+                    anyhow::bail!("use `mold lambda reset --to-zero` to confirm the reset scope");
+                }
+                commands::lambda::run_reset_to_zero(confirm, json).await?
             }
         },
         Commands::Unload => {
