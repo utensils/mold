@@ -75,6 +75,30 @@ Slow generation is often expected when mold is preserving VRAM:
 If you want maximum speed, use a smaller model that fits fully on the card
 without offloading.
 
+## Temporarily Unschedulable Models
+
+On multi-GPU servers, a model that OOMs on more than one worker can be marked
+temporarily unschedulable. Generation returns an error naming that state instead
+of repeatedly cycling every queued job through the same failing GPUs.
+
+Check:
+
+```bash
+mold ps
+curl http://localhost:7680/api/status
+```
+
+Then wait for the cooldown, lower the request size, choose a smaller
+quantization, or force a lower-memory path such as `--offload` or
+`--device-text-encoders cpu`.
+
+## Worker Degraded State
+
+If `/api/status` shows a GPU worker with `"state": "degraded"`, that worker hit
+several consecutive failures and is cooling down briefly. New jobs route to
+healthy workers when possible. Server logs include the original error; inspect
+them before changing models or deleting files.
+
 ## Model Download Problems
 
 For gated Hugging Face repos, set `HF_TOKEN` before running `mold pull`:
@@ -106,3 +130,10 @@ nix build .#mold-sm120
 
 For local debugging, `MOLD_DEVICE=cpu` forces CPU execution. That is mostly
 useful for diagnosis, not for real image generation performance.
+
+## Advanced Performance Knobs
+
+The main opt-in knobs are documented in
+[Configuration → Performance knobs](/guide/configuration#performance-knobs).
+Start there for `MOLD_KEEP_TE_RAM`, `MOLD_LORA_BYPASS`, `MOLD_VAE_TILED`,
+`MOLD_ATTN`, and `MOLD_ATTN_CHUNK` instead of guessing from log messages.

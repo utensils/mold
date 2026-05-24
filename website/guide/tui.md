@@ -9,7 +9,9 @@ pixel-perfect image preview in terminals like Ghostty, kitty, and WezTerm. Falls
 back to halfblock rendering in other terminals.
 
 ::: warning Beta
-The TUI is under active development. Core generation, model management, gallery, and image preview work well. Some features (prompt expansion, theme customization) are planned but not yet implemented.
+The TUI is under active development. Core generation, script-mode video
+authoring, model management, gallery, settings, and image preview work well.
+Some features, such as theme customization, are still planned.
 :::
 
 ![mold TUI — Generate view with image preview](/gallery/tui-generate.png)
@@ -69,14 +71,15 @@ file = true
 
 ## Views
 
-The TUI has four main views, shown as tabs at the top of the screen:
+The TUI has five main views, shown as tabs at the top of the screen:
 
 | View     | Purpose                                               |
 | -------- | ----------------------------------------------------- |
 | Generate | Write prompts, tune parameters, generate images/video |
+| Script   | Author and validate multi-stage LTX-2 chain scripts   |
 | Gallery  | Browse generated images and videos with preview       |
 | Models   | View installed and available models                   |
-| Settings | View and edit all config.toml settings                |
+| Settings | View and edit file-backed and DB-backed settings      |
 
 Switch views with **Esc** then **1**/**2**/**3**/**4**, arrow keys, or click the
 tabs. **Alt+1**/**Alt+2**/**Alt+3**/**Alt+4** works from anywhere.
@@ -194,6 +197,13 @@ Thumbnails are cached at `~/.mold/cache/thumbnails/` and generated automatically
 on first scan and after each generation. Delete the cache directory to force
 regeneration.
 
+## Script View
+
+Script mode authors `mold.chain.v1` TOML for LTX-2 chains. It lets you build
+per-stage prompts, frame counts, source images, and `smooth` / `cut` / `fade`
+transitions, then submit the normalised script through the same chain endpoint
+used by `mold run --script`.
+
 ## Models View
 
 See all installed and available models with family, size, defaults, and status.
@@ -208,11 +218,10 @@ See all installed and available models with family, size, defaults, and status.
 
 ## Settings View
 
-Edit all `config.toml` settings without leaving the TUI. Settings are organized
-into four sections: **General**, **Expand**, **Logging**, and **Model
-Defaults**.
-
-Changes persist immediately to `config.toml` on each edit.
+Edit settings without leaving the TUI. Bootstrap values such as paths, ports,
+credentials, and logging persist to `config.toml`; user preferences and
+per-model generation defaults persist to the SQLite settings DB at
+`$MOLD_HOME/mold.db`.
 
 | Key        | Action                                       |
 | ---------- | -------------------------------------------- |
@@ -248,7 +257,8 @@ The TUI treats `qwen-image-edit` as a distinct edit family:
 - single source image only in the TUI
 - no img2img `strength`
 - no inpainting mask
-- no ControlNet or LoRA controls
+- no ControlNet controls
+- LoRA controls are available because `qwen-image-edit` is LoRA-capable
 - default width/height derived from the selected source image at roughly `1024x1024` area
 
 Local inference uses the Qwen2.5-VL multimodal edit encoder. In v1 the TUI

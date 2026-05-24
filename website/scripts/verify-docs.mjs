@@ -42,6 +42,18 @@ function resolveDocLink(link) {
   ].find(existsSync)
 }
 
+function readRel(relPath) {
+  return readFileSync(join(websiteDir, relPath), 'utf8')
+}
+
+function routeForDoc(relPath) {
+  if (relPath === 'index.md') return '/'
+  if (relPath.endsWith('/index.md')) {
+    return `/${relPath.replace(/\/index\.md$/u, '/')}`
+  }
+  return `/${relPath.replace(/\.md$/u, '')}`
+}
+
 const configSource = readFileSync(
   join(websiteDir, '.vitepress/config.ts'),
   'utf8'
@@ -53,6 +65,19 @@ const sidebarLinks = [...configSource.matchAll(/link:\s*'([^']+)'/g)]
 for (const link of sidebarLinks) {
   if (!resolveDocLink(link)) {
     fail(`sidebar link does not resolve: ${link}`)
+  }
+}
+
+if (!configSource.includes("hostname: 'https://utensils.io/mold/'")) {
+  fail('sitemap hostname must be https://utensils.io/mold/')
+}
+
+const visibleLinks = new Set(sidebarLinks)
+const requiredVisibleDocs = ['guide/video.md', 'docs/catalog.md']
+for (const relPath of requiredVisibleDocs) {
+  const route = routeForDoc(relPath)
+  if (!visibleLinks.has(route)) {
+    fail(`published docs page is not linked from sidebar: ${route}`)
   }
 }
 
@@ -101,6 +126,58 @@ for (const envVar of rustEnvVars) {
   if (ignoredEnvVars.has(envVar)) continue
   if (!docsText.includes(envVar)) {
     fail(`env var used in code but not documented in website/: ${envVar}`)
+  }
+}
+
+const websiteDocs = walk(websiteDir).filter((file) => /\.md$/u.test(file))
+for (const file of websiteDocs) {
+  const source = readFileSync(file, 'utf8')
+  if (/\bmold\s+catalog\b/u.test(source)) {
+    fail(
+      `stale removed catalog CLI reference found in ${file.replace(`${websiteDir}/`, '')}`
+    )
+  }
+}
+
+const validationSource = readFileSync(
+  join(repoRoot, 'crates/mold-core/src/validation.rs'),
+  'utf8'
+)
+const loraMatch = validationSource.match(
+  /pub const LORA_CAPABLE_FAMILIES: &\[&str\] = &\[\n(?<body>[\s\S]*?)\n\];/u
+)
+if (!loraMatch?.groups?.body) {
+  fail('could not parse LORA_CAPABLE_FAMILIES from validation.rs')
+} else {
+  const codeFamilies = [...loraMatch.groups.body.matchAll(/"([^"]+)"/gu)].map(
+    (m) => m[1]
+  )
+  const matrix = readRel('guide/feature-matrix.md')
+  for (const family of codeFamilies) {
+    if (!matrix.includes(`| ${family}`) && !matrix.includes(`| ${family} `)) {
+      fail(`LoRA-capable family missing from feature matrix: ${family}`)
+    }
+  }
+}
+
+const apiDocs = readRel('api/index.md')
+const requiredApiEndpoints = [
+  '/api/gallery/preview/:name',
+  '/api/downloads',
+  '/api/downloads/:id',
+  '/api/downloads/stream',
+  '/api/catalog/families',
+  '/api/catalog/search',
+  '/api/catalog/installed',
+  '/api/catalog/:id',
+  '/api/catalog/:id/download',
+  '/api/resources',
+  '/api/resources/stream',
+  '/api/config/model/:name/placement',
+]
+for (const endpoint of requiredApiEndpoints) {
+  if (!apiDocs.includes(endpoint)) {
+    fail(`API reference missing endpoint: ${endpoint}`)
   }
 }
 

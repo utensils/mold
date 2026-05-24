@@ -44,7 +44,7 @@ for day-to-day use.
 
 ## LoRA Defaults
 
-For FLUX models, you can keep a default adapter in config:
+For LoRA-capable models, you can keep a default adapter in config:
 
 ```toml
 [models."flux-dev:q4"]
@@ -76,21 +76,27 @@ gets its own scale slider and remove button.
 
 ## Browsing & Installing LoRAs
 
-`mold catalog` indexes LoRAs from Civitai (`types=LORA`) and Hugging Face
-(detected via tag / file-name / repo-id heuristics). To find FLUX LoRAs:
+The web Catalog tab searches Hugging Face and Civitai live. Open **Catalog**,
+choose a family, click the **LoRAs** chip, then **Install** on the LoRA you
+want. Once installed, it appears in compatible **Generate → Settings → LoRA**
+pickers.
+
+The same flow is available over the server API:
 
 ```bash
-# CLI: list installable FLUX LoRAs
-mold catalog refresh --family flux         # one-time scrape (or after a release)
-mold catalog list --family flux --kind lora --limit 20
+# Search installable FLUX LoRAs
+curl "http://localhost:7680/api/catalog/search?q=cinematic&family=flux&kind=lora"
 
-# Install a specific LoRA by catalog id
-mold pull cv:1234567
+# Install by catalog id; cv: and hf: ids are both supported
+curl -X POST "http://localhost:7680/api/catalog/cv:1234567/download"
+
+# List installed LoRAs for a family
+curl "http://localhost:7680/api/catalog/installed?kind=lora&family=flux"
 ```
 
-Or in the web UI: open the **Catalog** tab, click the **LoRAs** chip, then
-**Install** on the LoRA you want. Once installed, it appears in the
-**Generate → Settings → LoRA** picker.
+Catalog downloads may also queue companion files such as tokenizers, VAEs, text
+encoders, or LTX-2 support assets. See [Model Discovery Catalog](/docs/catalog)
+for the complete API surface.
 
 ## Civitai Trigger Words
 

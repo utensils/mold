@@ -26,7 +26,7 @@ export default defineConfig({
   },
 
   sitemap: {
-    hostname: 'https://utensils.github.io/mold/',
+    hostname: 'https://utensils.io/mold/',
   },
 
   themeConfig: {
@@ -54,6 +54,7 @@ export default defineConfig({
           text: 'Usage',
           items: [
             { text: 'Generating Images', link: '/guide/generating' },
+            { text: 'Video', link: '/guide/video' },
             { text: 'Terminal UI', link: '/guide/tui' },
             { text: 'Image-to-Image', link: '/guide/img2img' },
             { text: 'Upscaling', link: '/guide/upscaling' },
@@ -62,6 +63,7 @@ export default defineConfig({
             { text: 'Remote Workflows', link: '/guide/remote-workflows' },
             { text: 'Performance', link: '/guide/performance' },
             { text: 'Custom Models & LoRA', link: '/guide/custom-models' },
+            { text: 'Model Discovery Catalog', link: '/docs/catalog' },
             { text: 'Troubleshooting', link: '/guide/troubleshooting' },
             { text: 'OpenClaw', link: '/guide/openclaw' },
             { text: 'CLI Reference', link: '/guide/cli-reference' },

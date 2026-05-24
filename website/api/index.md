@@ -4,33 +4,47 @@ When running `mold serve`, you get a REST API for remote image generation.
 
 ## Endpoints
 
-| Method   | Path                             | Description                                                                                                       |
-| -------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `POST`   | `/api/generate`                  | Generate images from prompt                                                                                       |
-| `POST`   | `/api/generate/stream`           | Generate with SSE progress streaming                                                                              |
-| `POST`   | `/api/generate/chain`            | Chained video generation (LTX-2)                                                                                  |
-| `POST`   | `/api/generate/chain/stream`     | Chained video with SSE progress                                                                                   |
-| `POST`   | `/api/expand`                    | Expand a prompt using LLM                                                                                         |
-| `GET`    | `/api/models`                    | List available models                                                                                             |
-| `GET`    | `/api/loras`                     | List installed LoRAs, optionally filtered by `?model=` compatibility                                              |
-| `POST`   | `/api/models/load`               | Load/swap the active model                                                                                        |
-| `POST`   | `/api/models/pull`               | Pull/download a model                                                                                             |
-| `DELETE` | `/api/models/unload`             | Unload model to free GPU memory                                                                                   |
-| `GET`    | `/api/gallery`                   | List saved images                                                                                                 |
-| `GET`    | `/api/gallery/image/:name`       | Fetch a saved image                                                                                               |
-| `DELETE` | `/api/gallery/image/:name`       | Delete a saved image                                                                                              |
-| `GET`    | `/api/gallery/thumbnail/:name`   | Fetch a cached thumbnail                                                                                          |
-| `POST`   | `/api/upscale`                   | Upscale image with Real-ESRGAN                                                                                    |
-| `POST`   | `/api/upscale/stream`            | Upscale with SSE tile progress                                                                                    |
-| `GET`    | `/api/queue`                     | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
-| `GET`    | `/api/capabilities`              | Feature capabilities (gallery delete, chain limits, …)                                                            |
-| `GET`    | `/api/capabilities/chain-limits` | Chain-generation request limits                                                                                   |
-| `POST`   | `/api/shutdown`                  | Trigger graceful server shutdown                                                                                  |
-| `GET`    | `/api/status`                    | Server health + status                                                                                            |
-| `GET`    | `/health`                        | Simple 200 OK health check                                                                                        |
-| `GET`    | `/api/openapi.json`              | OpenAPI spec                                                                                                      |
-| `GET`    | `/api/docs`                      | Interactive API docs (Scalar)                                                                                     |
-| `GET`    | `/metrics`                       | Prometheus metrics (feature-gated)                                                                                |
+| Method   | Path                                | Description                                                                                                       |
+| -------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `POST`   | `/api/generate`                     | Generate images from prompt                                                                                       |
+| `POST`   | `/api/generate/stream`              | Generate with SSE progress streaming                                                                              |
+| `POST`   | `/api/generate/chain`               | Chained video generation (LTX-2)                                                                                  |
+| `POST`   | `/api/generate/chain/stream`        | Chained video with SSE progress                                                                                   |
+| `POST`   | `/api/expand`                       | Expand a prompt using LLM                                                                                         |
+| `GET`    | `/api/models`                       | List available models                                                                                             |
+| `GET`    | `/api/loras`                        | List installed LoRAs, optionally filtered by `?model=` compatibility                                              |
+| `POST`   | `/api/models/load`                  | Load/swap the active model                                                                                        |
+| `POST`   | `/api/models/pull`                  | Pull/download a model                                                                                             |
+| `DELETE` | `/api/models/unload`                | Unload model to free GPU memory                                                                                   |
+| `GET`    | `/api/gallery`                      | List saved images                                                                                                 |
+| `GET`    | `/api/gallery/image/:name`          | Fetch a saved image                                                                                               |
+| `DELETE` | `/api/gallery/image/:name`          | Delete a saved image                                                                                              |
+| `GET`    | `/api/gallery/thumbnail/:name`      | Fetch a cached thumbnail                                                                                          |
+| `GET`    | `/api/gallery/preview/:name`        | Fetch a cached GIF preview for video gallery rows                                                                 |
+| `GET`    | `/api/downloads`                    | List active, queued, failed, and completed downloads                                                              |
+| `POST`   | `/api/downloads`                    | Queue a manifest model download                                                                                   |
+| `DELETE` | `/api/downloads/:id`                | Cancel a queued or active download                                                                                |
+| `GET`    | `/api/downloads/stream`             | Download queue updates as SSE                                                                                     |
+| `GET`    | `/api/catalog/families`             | Live catalog family/kind metadata                                                                                 |
+| `GET`    | `/api/catalog/search`               | Search the live HF/Civitai catalog                                                                                |
+| `GET`    | `/api/catalog/installed`            | List installed catalog entries and LoRAs                                                                          |
+| `GET`    | `/api/catalog/:id`                  | Resolve one `hf:` or `cv:` catalog entry                                                                          |
+| `POST`   | `/api/catalog/:id/download`         | Queue a catalog entry plus missing companions                                                                     |
+| `POST`   | `/api/upscale`                      | Upscale image with Real-ESRGAN                                                                                    |
+| `POST`   | `/api/upscale/stream`               | Upscale with SSE tile progress                                                                                    |
+| `GET`    | `/api/resources`                    | Latest RAM/GPU resource snapshot                                                                                  |
+| `GET`    | `/api/resources/stream`             | Resource snapshots as SSE                                                                                         |
+| `GET`    | `/api/queue`                        | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
+| `GET`    | `/api/capabilities`                 | Feature capabilities (gallery delete, chain limits, …)                                                            |
+| `GET`    | `/api/capabilities/chain-limits`    | Chain-generation request limits                                                                                   |
+| `PUT`    | `/api/config/model/:name/placement` | Save model-specific device placement defaults                                                                     |
+| `DELETE` | `/api/config/model/:name/placement` | Clear model-specific device placement defaults                                                                    |
+| `POST`   | `/api/shutdown`                     | Trigger graceful server shutdown                                                                                  |
+| `GET`    | `/api/status`                       | Server health + status                                                                                            |
+| `GET`    | `/health`                           | Simple 200 OK health check                                                                                        |
+| `GET`    | `/api/openapi.json`                 | OpenAPI spec                                                                                                      |
+| `GET`    | `/api/docs`                         | Interactive API docs (Scalar)                                                                                     |
+| `GET`    | `/metrics`                          | Prometheus metrics (feature-gated)                                                                                |
 
 ## Authentication
 
@@ -181,17 +195,58 @@ were adjusted to fit model constraints (e.g. multiples of 16, pixel cap).
   "batch_size": 1,
   "negative_prompt": "",
   "source_image": "<base64>",
+  "edit_images": ["<base64>", "<base64 reference>"],
   "strength": 0.75,
   "mask_image": "<base64>",
+  "control_image": "<base64>",
+  "control_model": "controlnet-canny-sd15",
+  "control_scale": 1.0,
   "loras": [
     { "path": "/path/to/style.safetensors", "scale": 0.8 },
     { "path": "/path/to/detail.safetensors", "scale": 0.4 }
   ],
-  "expand": false
+  "frames": 97,
+  "fps": 24,
+  "enable_audio": true,
+  "audio_file": "<base64 wav>",
+  "source_video": "<base64 mp4>",
+  "keyframes": [{ "frame": 0, "image": "<base64 png>" }],
+  "pipeline": "keyframe",
+  "retake_range": { "start_seconds": 1.5, "end_seconds": 3.5 },
+  "spatial_upscale": "x2",
+  "temporal_upscale": "x2",
+  "placement": { "text_encoders": { "kind": "cpu" } },
+  "cfg_plus": true,
+  "embed_metadata": true,
+  "upscale_model": "real-esrgan-x4plus:fp16",
+  "expand": false,
+  "output_format": "png"
 }
 ```
 
-Only `prompt` is required. All other fields have defaults.
+Only `prompt` is required. All other fields have defaults or model-specific
+validation.
+
+Important fields:
+
+| Field                                             | Purpose                                                                                                                                          |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `source_image`, `mask_image`                      | img2img/inpainting source media as base64 PNG/JPEG bytes                                                                                         |
+| `edit_images`                                     | ordered Qwen-Image-Edit target/reference images; use this instead of `source_image` for `qwen-image-edit`                                        |
+| `control_image`, `control_model`, `control_scale` | SD1.5 ControlNet conditioning                                                                                                                    |
+| `lora`, `loras`                                   | singular legacy adapter or repeatable stack; `loras[]` wins when both are set                                                                    |
+| `frames`, `fps`, `output_format`                  | video/animation length and encoder selection                                                                                                     |
+| `enable_audio`, `audio_file`                      | LTX-2 synchronized audio toggle and audio-to-video input                                                                                         |
+| `source_video`, `retake_range`                    | LTX-2 retake/video-conditioning source and seconds range                                                                                         |
+| `keyframes`, `pipeline`                           | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake`) |
+| `spatial_upscale`, `temporal_upscale`             | LTX-2 latent upscaling modes such as `x1.5` and `x2`                                                                                             |
+| `placement`                                       | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                |
+| `cfg_plus`                                        | CFG++ guidance for supported SD-family scheduler paths                                                                                           |
+| `embed_metadata`                                  | override config/env metadata embedding for this request                                                                                          |
+| `upscale_model`                                   | post-generation Real-ESRGAN model applied before returning images                                                                                |
+
+The exhaustive schema for enums and nested objects is served by the running
+server at `/api/docs` and `/api/openapi.json`.
 
 ## `/api/loras`
 
@@ -403,19 +458,39 @@ Example response:
 
 ```json
 {
-  "version": "0.3.1",
+  "version": "0.10.0",
   "git_sha": "da039e1",
-  "build_date": "2026-03-25",
-  "models_loaded": ["flux-schnell:q8"],
-  "busy": false,
-  "gpu_info": {
-    "name": "NVIDIA GeForce RTX 4090",
-    "vram_total_mb": 24564,
-    "vram_used_mb": 8192
-  },
-  "uptime_secs": 3600
+  "build_date": "2026-05-24",
+  "models_loaded": ["flux-schnell:q8", "ltx-2-19b-distilled:fp8"],
+  "busy": true,
+  "gpu_info": null,
+  "gpus": [
+    {
+      "ordinal": 0,
+      "name": "NVIDIA GeForce RTX 4090",
+      "vram_total_bytes": 25757220864,
+      "vram_used_bytes": 12918456320,
+      "loaded_model": "flux-schnell:q8",
+      "state": "idle"
+    },
+    {
+      "ordinal": 1,
+      "name": "NVIDIA GeForce RTX 4090",
+      "vram_total_bytes": 25757220864,
+      "vram_used_bytes": 21474836480,
+      "loaded_model": "ltx-2-19b-distilled:fp8",
+      "state": "generating"
+    }
+  ],
+  "queue_depth": 1,
+  "queue_capacity": 200,
+  "uptime_secs": 3600,
+  "hostname": "gpu-box"
 }
 ```
+
+Older single-GPU clients can still read `gpu_info`; multi-GPU-aware clients
+should prefer `gpus[]`, `queue_depth`, and `queue_capacity`.
 
 ## `/api/models/pull`
 

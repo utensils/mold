@@ -59,7 +59,8 @@ features:
     details:
       Transform existing images, run multimodal Qwen edit workflows, inpaint
       regions with masks, and guide generation with ControlNet conditioning.
-      LoRA adapters for FLUX.
+      LoRA adapters for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image,
+      Qwen-Image-Edit, and Z-Image.
   - icon:
       src: /icons/runpod.svg
     title: Deploy Anywhere

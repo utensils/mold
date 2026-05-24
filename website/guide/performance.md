@@ -91,6 +91,14 @@ building edit conditioning. Quantized `--qwen2-variant` values reduce the
 language-side footprint further, so short edit runs do not keep the full
 multimodal stack resident between requests.
 
+### Tier 1 knobs
+
+For edge cases, mold exposes opt-in runtime knobs in
+[Configuration → Performance knobs](/guide/configuration#performance-knobs):
+`MOLD_KEEP_TE_RAM`, `MOLD_LORA_BYPASS`, `MOLD_VAE_TILED`, `MOLD_ATTN`, and
+`MOLD_ATTN_CHUNK`. Treat them as targeted controls after you have tried model
+quantization, `--device-text-encoders cpu`, and `--offload`.
+
 ### Cold starts
 
 The first request for a model pays for:

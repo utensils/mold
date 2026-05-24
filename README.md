@@ -8,7 +8,7 @@
 
 Generate images and short video clips on your own GPU. No cloud, no Python, no fuss.
 
-**[Documentation](https://utensils.github.io/mold/)** | **[Getting Started](https://utensils.github.io/mold/guide/)** | **[Models](https://utensils.github.io/mold/models/)** | **[API](https://utensils.github.io/mold/api/)**
+**[Documentation](https://utensils.io/mold/)** | **[Getting Started](https://utensils.io/mold/guide/)** | **[Models](https://utensils.io/mold/models/)** | **[API](https://utensils.io/mold/api/)**
 
 ```bash
 mold run "a cat riding a motorcycle through neon-lit streets"
@@ -154,11 +154,11 @@ mold runpod run "a cat on a skateboard"       # creates pod → generates → sa
 `mold runpod run` picks the cheapest available GPU, falls back across
 datacenters if scheduling stalls, streams SSE progress over RunPod's
 Cloudflare proxy, and leaves the pod warm for reuse on the next call.
-See the [RunPod CLI guide](https://utensils.github.io/mold/deployment/runpod-cli)
+See the [RunPod CLI guide](https://utensils.io/mold/deployment/runpod-cli)
 for full subcommand reference (`doctor`, `gpus`, `list`, `create`, `stop`,
 `delete`, `logs`, `usage`, …).
 
-See the full [CLI reference](https://utensils.github.io/mold/guide/cli-reference), [configuration guide](https://utensils.github.io/mold/guide/configuration), and [model catalog](https://utensils.github.io/mold/models/) in the documentation.
+See the full [CLI reference](https://utensils.io/mold/guide/cli-reference), [configuration guide](https://utensils.io/mold/guide/configuration), and [model catalog](https://utensils.io/mold/models/) in the documentation.
 
 ## Models
 
@@ -180,7 +180,7 @@ Supports 11 model families with 80+ variants:
 
 Bare names auto-resolve: `mold run flux-schnell "a cat"` picks the best available variant.
 
-See the full [model catalog](https://utensils.github.io/mold/models/) for sizes, VRAM requirements, and recommended settings.
+See the full [model catalog](https://utensils.io/mold/models/) for sizes, VRAM requirements, and recommended settings.
 
 ### LTX Video
 
@@ -233,7 +233,8 @@ requests without changing server config.
 
 - **txt2img, img2img, multimodal edit, inpainting** — full generation pipeline
 - **Image upscaling** — Real-ESRGAN super-resolution (2x/4x) via `mold upscale`, server API, or TUI
-- **LoRA adapters** — FLUX BF16 and GGUF quantized
+- **LoRA adapters** — FLUX, Flux.2, LTX-2, SD1.5, SD3/SD3.5, SDXL,
+  Qwen-Image, Qwen-Image-Edit, and Z-Image
 - **ControlNet** — canny, depth, openpose (SD1.5)
 - **Prompt expansion** — local LLM (Qwen3-1.7B) enriches short prompts
 - **Negative prompts** — CFG-based models (SD1.5, SDXL, SD3, Wuerstchen)
@@ -251,10 +252,10 @@ requests without changing server config.
 
 | Method              | Guide                                                                          |
 | ------------------- | ------------------------------------------------------------------------------ |
-| **NixOS module**    | [Deployment: NixOS](https://utensils.github.io/mold/deployment/nixos)          |
-| **Docker / RunPod** | [Deployment: Docker](https://utensils.github.io/mold/deployment/docker)        |
-| **mold runpod CLI** | [Deployment: RunPod CLI](https://utensils.github.io/mold/deployment/runpod-cli) |
-| **Systemd**         | [Deployment: Overview](https://utensils.github.io/mold/deployment/)            |
+| **NixOS module**    | [Deployment: NixOS](https://utensils.io/mold/deployment/nixos)          |
+| **Docker / RunPod** | [Deployment: Docker](https://utensils.io/mold/deployment/docker)        |
+| **mold runpod CLI** | [Deployment: RunPod CLI](https://utensils.io/mold/deployment/runpod-cli) |
+| **Systemd**         | [Deployment: Overview](https://utensils.io/mold/deployment/)            |
 
 ## How it works
 

@@ -5,13 +5,13 @@ features today?
 
 ## Quick Picks
 
-| Need                          | Best Starting Point |
-| ----------------------------- | ------------------- |
-| LoRA adapters                 | FLUX.1              |
-| ControlNet                    | SD 1.5              |
-| img2img at 1024 output        | FLUX.1 or SDXL      |
-| broadest feature surface      | SD 1.5 or SDXL      |
-| best prompt-following quality | FLUX.1 or SD 3.5    |
+| Need                          | Best Starting Point         |
+| ----------------------------- | --------------------------- |
+| LoRA adapters                 | FLUX.1, SDXL, or Qwen-Image |
+| ControlNet                    | SD 1.5                      |
+| img2img at 1024 output        | FLUX.1 or SDXL              |
+| broadest feature surface      | SD 1.5 or SDXL              |
+| best prompt-following quality | FLUX.1 or SD 3.5            |
 
 ## Source Image Workflows
 
@@ -31,18 +31,19 @@ features today?
 
 ## Control and Adapters
 
-| Family        | ControlNet | LoRA |
-| ------------- | ---------- | ---- |
-| FLUX.1        | No         | Yes  |
-| SDXL          | No         | No   |
-| SD 1.5        | Yes        | No   |
-| SD 3.5        | No         | No   |
-| Z-Image       | No         | No   |
-| Flux.2 Klein  | No         | No   |
-| Wuerstchen v2 | No         | No   |
-| Qwen-Image    | No         | No   |
-| LTX Video     | No         | No   |
-| LTX-2         | No         | Yes  |
+| Family          | Internal family | ControlNet | LoRA |
+| --------------- | --------------- | ---------- | ---- |
+| FLUX.1          | flux            | No         | Yes  |
+| Flux.2 Klein    | flux2           | No         | Yes  |
+| LTX-2           | ltx2            | No         | Yes  |
+| SD 1.5          | sd15            | Yes        | Yes  |
+| SD 3.5          | sd3             | No         | Yes  |
+| SDXL            | sdxl            | No         | Yes  |
+| Qwen-Image      | qwen-image      | No         | Yes  |
+| Qwen-Image-Edit | qwen-image-edit | No         | Yes  |
+| Z-Image         | z-image         | No         | Yes  |
+| Wuerstchen v2   | wuerstchen      | No         | No   |
+| LTX Video       | ltx-video       | No         | No   |
 
 ## Prompt Conditioning
 
@@ -101,9 +102,11 @@ the Metal backend — LTX-2 is the only family that is currently CUDA-gated.
 ## Notes
 
 - ControlNet is currently available only for SD 1.5.
-- General LoRA adapters are currently available only for FLUX models; LTX-2 has
-  its own stacked video-adapter path plus camera-control presets.
-- LTX-2 adds stacked LoRAs plus camera-control presets for the published 19B adapters.
+- LoRA-capable families are `flux`, `flux2`, `ltx2`, `sd15`, `sd3`, `sdxl`,
+  `qwen-image`, `qwen-image-edit`, and `z-image`. Wuerstchen and LTX Video are
+  not wired for LoRA yet.
+- LTX-2 adds stacked LoRAs plus camera-control presets for the published 19B
+  adapters.
 - `--scheduler` applies only to SD 1.5 and SDXL.
 - Negative prompts are meaningful for CFG-based families and ignored by FLUX,
   Z-Image, and Flux.2 Klein.

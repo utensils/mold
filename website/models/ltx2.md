@@ -167,9 +167,11 @@ at the head stays intact.
   onto — multi-GPU stage fan-out is a v2 movie-maker feature.
 - **Fail-closed.** If any stage errors, the whole chain returns `502` and
   nothing is written to the gallery. There is no partial-resume in v1.
-- **Single prompt per chain from the CLI.** The server already accepts
-  per-stage prompts (see [`POST /api/generate/chain`](/api/#api-generate-chain)),
-  but `mold run` replicates one prompt across every stage for now.
+- **Multiple CLI authoring modes.** A large `--frames` request still replicates
+  the main prompt across stages, but `mold run --prompt ... --prompt ...` builds
+  one stage per prompt and `mold run --script shot.toml` sends the canonical
+  `mold.chain.v1` script with per-stage prompts, source images, frame counts,
+  and transitions.
 
 The rest of the LTX-2 surface — `--image`, `--audio-file`, `--lora`,
 `--camera-control`, `--spatial-upscale`, `--temporal-upscale`, and so on —

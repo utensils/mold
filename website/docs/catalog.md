@@ -1,43 +1,82 @@
 # Model Discovery Catalog
 
-mold ships a built-in catalog of every model family it can run, scanned from
-Hugging Face and Civitai. Browse it through the web UI at `/catalog`, the
-`mold catalog` CLI, or directly via `mold pull <catalog-id>`.
+mold's catalog is a live discovery proxy over Hugging Face and Civitai, backed
+by a short in-process cache and the installed-state sidecars in your models
+directory. It is not an offline shard database and there is no separate catalog
+CLI surface.
 
-## CLI
+Use it from the web UI's **Catalog** tab, or call the `/api/catalog/*` routes
+from a running `mold serve` instance.
+
+## What You Can Install
+
+Catalog entries use stable install IDs:
+
+| Prefix | Source       | Example                           |
+| ------ | ------------ | --------------------------------- |
+| `hf:`  | Hugging Face | `hf:black-forest-labs/FLUX.1-dev` |
+| `cv:`  | Civitai      | `cv:618692`                       |
+
+The web UI can install base checkpoints, fine-tunes, LoRAs, and supported
+single-file checkpoints. When an entry needs shared components, mold queues the
+primary file and any missing companions in the same catalog group. Examples
+include text encoders, tokenizers, VAEs, and LTX-2 companion assets.
+
+## Web UI Flow
+
+1. Start the server with `mold serve`.
+2. Open `http://localhost:7680/catalog`.
+3. Search or filter by family, kind, source, rating, downloads, and NSFW state.
+4. Click **Install** on the entry you want.
+
+The downloads drawer tracks queued and running jobs. Installed LoRAs then appear
+in compatible LoRA pickers in Generate, and installed models appear in the model
+picker and `mold list`.
+
+## API
+
+| Method | Path                        | Purpose                                     |
+| ------ | --------------------------- | ------------------------------------------- |
+| `GET`  | `/api/catalog/families`     | Families/kinds surfaced by the live catalog |
+| `GET`  | `/api/catalog/search`       | Search HF/Civitai with filters              |
+| `GET`  | `/api/catalog/installed`    | Installed catalog entries and LoRAs         |
+| `GET`  | `/api/catalog/:id`          | Resolve one `hf:` or `cv:` entry            |
+| `POST` | `/api/catalog/:id/download` | Queue the entry and missing companions      |
+| `GET`  | `/api/downloads`            | Current download queue/listing              |
+| `GET`  | `/api/downloads/stream`     | SSE stream for download queue updates       |
+
+Examples:
 
 ```bash
-mold catalog list --family flux --limit 10
-mold catalog show hf:black-forest-labs/FLUX.1-dev
-mold catalog refresh --family flux        # re-scan one family
-mold catalog where cv:618692              # path on disk if downloaded
+# Search installable FLUX LoRAs from Civitai
+curl "http://localhost:7680/api/catalog/search?q=cinematic&family=flux&kind=lora&source=civitai"
+
+# Show installed FLUX LoRAs
+curl "http://localhost:7680/api/catalog/installed?kind=lora&family=flux"
+
+# Queue a catalog install
+curl -X POST "http://localhost:7680/api/catalog/cv:618692/download"
 ```
 
-## Web UI
+Use the returned installed `path` or catalog `id` in generation clients that
+accept LoRA references. The MCP `list_loras` tool also reads the installed
+catalog route when the legacy LoRA endpoint is not available.
 
-Visit `/catalog` to browse the full catalog with filters by family,
-modality, source, sub-family, and FTS5-backed search. The detail drawer
-shows the download recipe; the Download button is disabled with a phase
-badge for entries that need a single-file loader (mold v0.10+).
+## Tokens
 
-## Auth
+| Variable        | Purpose                                                     |
+| --------------- | ----------------------------------------------------------- |
+| `HF_TOKEN`      | Hugging Face gated/private repository access                |
+| `CIVITAI_TOKEN` | Civitai bearer token for gated, early-access, and NSFW rows |
 
-Set `HF_TOKEN` and `CIVITAI_TOKEN` as env vars, or paste them in
-`Settings → Model Discovery`. Both are stored in `mold.db` `settings`
-(`huggingface.token`, `civitai.token`).
+Set tokens in the server environment before `mold serve`, or save them in the
+web Settings panel. The web settings persist to `mold.db` as
+`huggingface.token` and `civitai.token`.
 
-## Refresh
+## Disabling Catalog
 
-The catalog is global per mold install. Run `mold catalog refresh` weekly
-(or whenever you want fresh discovery); the scanner is incremental and
-deterministic — no-op refreshes produce byte-identical shard files.
+Set `MOLD_CATALOG_DISABLE=1` to report catalog functionality as unavailable in
+`/api/capabilities` and disable catalog-backed UI flows.
 
-## Environment Variables
-
-| Variable                    | Default              | Purpose                                                           |
-| --------------------------- | -------------------- | ----------------------------------------------------------------- |
-| `CIVITAI_TOKEN`             | unset                | Civitai bearer token for early-access and NSFW model access       |
-| `MOLD_CATALOG_DIR`          | `$MOLD_HOME/catalog` | Override the directory where catalog shards are stored on disk    |
-| `MOLD_CATALOG_DISABLE`      | unset                | Set `1` to flag the catalog as unavailable in `/api/capabilities` |
-| `MOLD_CATALOG_HF_BASE`      | unset                | Override the Hugging Face base URL (test-only)                    |
-| `MOLD_CATALOG_CIVITAI_BASE` | unset                | Override the Civitai base URL (test-only)                         |
+The test-only upstream override variables (`MOLD_CATALOG_HF_BASE` and
+`MOLD_CATALOG_CIVITAI_BASE`) are intentionally not normal user configuration.

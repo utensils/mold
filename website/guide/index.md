@@ -44,7 +44,7 @@ mold run "a sunset over mountains"
 - **Pipe-friendly** — `mold run "a cat" | viu -` just works
 - **Client-server** — run the GPU part on one machine, generate from anywhere
 - **Prompt expansion** — short prompts become detailed via local LLM
-- **LoRA adapters** — apply fine-tuned styles across FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, and Z-Image
+- **LoRA adapters** — apply fine-tuned styles across FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Qwen-Image-Edit, and Z-Image
 - **PNG metadata** — generation parameters embedded for reproducibility
 
 ## Requirements
