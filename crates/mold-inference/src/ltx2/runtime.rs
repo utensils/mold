@@ -42,8 +42,10 @@ use crate::device::{fmt_gb, free_vram_bytes};
 use crate::engine::{gpu_dtype, seeded_randn};
 use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
-use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
-use crate::weight_loader::load_fp8_safetensors;
+use crate::progress::{ProgressCallback, ProgressEvent};
+use crate::weight_loader::{
+    load_fp8_safetensors_with_callback, load_safetensors_with_progress_callback,
+};
 use mold_core::{LoraWeight, Ltx2SpatialUpscale, TimeRange};
 
 pub const LTX2_VIDEO_LATENT_CHANNELS: usize = 128;
@@ -1416,6 +1418,7 @@ fn maybe_load_stage_video_conditioning(
     device: &candle_core::Device,
     dtype: DType,
     include_reference_video: bool,
+    progress: Option<&ProgressCallback>,
 ) -> Result<StageVideoConditioning> {
     if plan.conditioning.images.is_empty()
         && plan.conditioning.latents.is_empty()
@@ -1433,7 +1436,7 @@ fn maybe_load_stage_video_conditioning(
         || include_reference_video
         || !plan.conditioning.latents.is_empty();
     let mut vae = if need_vae {
-        let mut loaded = load_ltx2_video_vae(plan, device, dtype)?;
+        let mut loaded = load_ltx2_video_vae(plan, device, dtype, progress)?;
         loaded.use_tiling = false;
         loaded.use_framewise_decoding = false;
         Some(loaded)
@@ -2024,12 +2027,13 @@ fn render_real_distilled_av(
         device,
         dtype,
         false,
+        progress,
     )?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
     let stage1_transformer_load_start = Instant::now();
-    let stage1_transformer = load_ltx2_av_transformer(plan, device)?;
+    let stage1_transformer = load_ltx2_av_transformer(plan, device, progress)?;
     log_timing(
         "distilled.stage1.transformer_load",
         stage1_transformer_load_start,
@@ -2080,7 +2084,7 @@ fn render_real_distilled_av(
         log_debug_vram("after_stage1_transformer_drop");
     }
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
-        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
         debug_vae.use_tiling = false;
         debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
@@ -2118,10 +2122,16 @@ fn render_real_distilled_av(
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
-    let stage2_video_conditioning =
-        maybe_load_stage_video_conditioning(plan, stage2_pixel_shape, device, dtype, false)?;
+    let stage2_video_conditioning = maybe_load_stage_video_conditioning(
+        plan,
+        stage2_pixel_shape,
+        device,
+        dtype,
+        false,
+        progress,
+    )?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
-        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
         debug_vae.use_tiling = false;
         debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
@@ -2181,7 +2191,7 @@ fn render_real_distilled_av(
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
     let stage2_transformer_load_start = Instant::now();
-    let stage2_transformer = load_ltx2_av_transformer(plan, device)?;
+    let stage2_transformer = load_ltx2_av_transformer(plan, device, progress)?;
     log_timing(
         "distilled.stage2.transformer_load",
         stage2_transformer_load_start,
@@ -2238,7 +2248,7 @@ fn render_real_distilled_av(
     if debug_enabled {
         log_tensor_stats("final_video_latents", &latents)?;
     }
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let decode_start = Instant::now();
@@ -2367,13 +2377,14 @@ fn render_real_two_stage_av(
         device,
         dtype,
         matches!(plan.pipeline, PipelineKind::IcLora),
+        progress,
     )?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
     let stage1_transformer_load_start = Instant::now();
     let stage1_transformer =
-        load_ltx2_av_transformer_with_loras(plan, device, &stage1_context.loras)?;
+        load_ltx2_av_transformer_with_loras(plan, device, &stage1_context.loras, progress)?;
     log_timing(
         "two_stage.stage1.transformer_load",
         stage1_transformer_load_start,
@@ -2429,7 +2440,7 @@ fn render_real_two_stage_av(
     drop(stage1_transformer);
     device.synchronize()?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
-        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
         debug_vae.use_tiling = false;
         debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
@@ -2466,10 +2477,16 @@ fn render_real_two_stage_av(
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
-    let stage2_video_conditioning =
-        maybe_load_stage_video_conditioning(plan, stage2_pixel_shape, device, dtype, false)?;
+    let stage2_video_conditioning = maybe_load_stage_video_conditioning(
+        plan,
+        stage2_pixel_shape,
+        device,
+        dtype,
+        false,
+        progress,
+    )?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
-        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
         debug_vae.use_tiling = false;
         debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
@@ -2534,7 +2551,7 @@ fn render_real_two_stage_av(
     }
     let stage2_transformer_load_start = Instant::now();
     let stage2_transformer =
-        load_ltx2_av_transformer_with_loras(plan, device, &stage2_context.loras)?;
+        load_ltx2_av_transformer_with_loras(plan, device, &stage2_context.loras, progress)?;
     log_timing(
         "two_stage.stage2.transformer_load",
         stage2_transformer_load_start,
@@ -2587,7 +2604,7 @@ fn render_real_two_stage_av(
     device.synchronize()?;
     let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
 
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let decode_start = Instant::now();
@@ -2707,11 +2724,12 @@ fn render_real_one_stage_av(
         device,
         dtype,
         false,
+        progress,
     )?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading one-stage transformer");
     }
-    let transformer = load_ltx2_av_transformer(plan, device)?;
+    let transformer = load_ltx2_av_transformer(plan, device, progress)?;
     if debug_enabled {
         log_debug_vram("after_one_stage_transformer_load");
     }
@@ -2766,7 +2784,7 @@ fn render_real_one_stage_av(
         log_debug_vram("after_one_stage_transformer_drop");
     }
 
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
@@ -2834,6 +2852,7 @@ fn render_real_retake_av(
         prepared.video_latent_shape,
         device,
         dtype,
+        progress,
     )?
     .context("native LTX-2 retake requires a source_video")?;
     let stage_video_conditioning = maybe_load_stage_video_conditioning(
@@ -2842,6 +2861,7 @@ fn render_real_retake_av(
         device,
         dtype,
         false,
+        progress,
     )?;
     let video_retake_mask =
         build_temporal_token_denoise_mask(retake_range, &prompt_inputs.video_positions, device)?;
@@ -2888,7 +2908,7 @@ fn render_real_retake_av(
     if debug_enabled {
         eprintln!("[ltx2-debug] loading retake transformer");
     }
-    let transformer = load_ltx2_av_transformer(plan, device)?;
+    let transformer = load_ltx2_av_transformer(plan, device, progress)?;
     let (latents, audio_latents) = run_real_distilled_stage(
         &transformer,
         prepared.video_latent_shape,
@@ -2926,7 +2946,7 @@ fn render_real_retake_av(
         device.synchronize()?;
     }
 
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
@@ -3758,6 +3778,7 @@ fn maybe_load_native_conditioning_video(
     latent_shape: VideoLatentShape,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Option<NativeConditioningVideo>> {
     let Some(video_path) = plan.conditioning.video_path.as_ref() else {
         return Ok(None);
@@ -3788,7 +3809,7 @@ fn maybe_load_native_conditioning_video(
         })
         .collect::<Vec<_>>();
     let video = video_tensor_from_frames(&resized, device, dtype)?;
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let latents = conform_video_latent_length(&vae.encode(&video)?, latent_shape)?;
@@ -4411,35 +4432,37 @@ fn guided_velocity_from_cfg(
 fn load_ltx2_av_transformer(
     plan: &Ltx2GeneratePlan,
     device: &candle_core::Device,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Ltx2AvTransformer3DModel> {
-    load_ltx2_av_transformer_with_loras(plan, device, &[])
+    load_ltx2_av_transformer_with_loras(plan, device, &[], progress)
 }
 
 fn load_ltx2_av_transformer_with_loras(
     plan: &Ltx2GeneratePlan,
     device: &candle_core::Device,
     loras: &[LoraWeight],
+    progress: Option<&ProgressCallback>,
 ) -> Result<Ltx2AvTransformer3DModel> {
     let force_streaming = std::env::var_os("MOLD_LTX2_FORCE_STREAMING").is_some();
     let force_eager = std::env::var_os("MOLD_LTX2_FORCE_EAGER").is_some();
     let config = ltx2_video_transformer_config(plan);
     let lora_registry = super::lora::load_lora_registry(loras)?;
     let vb = if ltx2_checkpoint_is_fp8(plan) {
-        load_fp8_safetensors(
+        load_fp8_safetensors_with_callback(
             std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
             device,
             "LTX-2 transformer",
-            &ProgressReporter::default(),
+            progress,
         )?
     } else {
         let dtype = transformer_weight_dtype(plan, device);
-        unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
-                dtype,
-                device,
-            )?
-        }
+        load_safetensors_with_progress_callback(
+            std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
+            dtype,
+            device,
+            "LTX-2 transformer",
+            progress,
+        )?
     };
     let vb = vb.rename_f(remap_ltx2_transformer_key);
     if device.is_cuda() && ltx2_checkpoint_is_fp8(plan) && force_eager && !force_streaming {
@@ -4457,14 +4480,15 @@ fn load_ltx2_video_vae(
     plan: &Ltx2GeneratePlan,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<AutoencoderKLLtx2Video> {
-    let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(
-            std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
-            dtype,
-            device,
-        )?
-    };
+    let vb = load_safetensors_with_progress_callback(
+        std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
+        dtype,
+        device,
+        "LTX-2 VAE",
+        progress,
+    )?;
     Ok(AutoencoderKLLtx2Video::new(
         ltx2_video_vae_config(plan),
         vb.pp("vae"),
