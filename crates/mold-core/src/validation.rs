@@ -435,17 +435,35 @@ pub fn validate_generate_request_with_family(
     }
     if let Some(audio) = &req.audio_file {
         require_ltx2_family(family, "audio_file")?;
+        if req.audio_file_path.is_some() {
+            return Err("audio_file_path cannot be combined with audio_file".to_string());
+        }
         if audio.is_empty() {
             return Err("audio_file must not be empty".to_string());
         }
         validate_inline_media_size(audio, "audio_file", MAX_INLINE_AUDIO_BYTES)?;
     }
+    if let Some(path) = &req.audio_file_path {
+        require_ltx2_family(family, "audio_file_path")?;
+        if path.trim().is_empty() {
+            return Err("audio_file_path must not be empty".to_string());
+        }
+    }
     if let Some(video) = &req.source_video {
         require_ltx2_family(family, "source_video")?;
+        if req.source_video_path.is_some() {
+            return Err("source_video_path cannot be combined with source_video".to_string());
+        }
         if video.is_empty() {
             return Err("source_video must not be empty".to_string());
         }
         validate_inline_media_size(video, "source_video", MAX_INLINE_SOURCE_VIDEO_BYTES)?;
+    }
+    if let Some(path) = &req.source_video_path {
+        require_ltx2_family(family, "source_video_path")?;
+        if path.trim().is_empty() {
+            return Err("source_video_path must not be empty".to_string());
+        }
     }
     // Only enforce the LTX-2 family gate when audio is actually requested
     // (`Some(true)`). The web form serializes its tri-state checkbox as
@@ -478,7 +496,10 @@ pub fn validate_generate_request_with_family(
             return Err("audio-enabled LTX-2 outputs must use mp4 format".to_string());
         }
 
-        if req.retake_range.is_some() && req.source_video.is_none() {
+        if req.retake_range.is_some()
+            && req.source_video.is_none()
+            && req.source_video_path.is_none()
+        {
             return Err("retake_range requires source_video to also be provided".to_string());
         }
 
@@ -499,12 +520,12 @@ pub fn validate_generate_request_with_family(
         if let Some(pipeline) = req.pipeline {
             match pipeline {
                 Ltx2PipelineMode::A2Vid => {
-                    if req.audio_file.is_none() {
+                    if req.audio_file.is_none() && req.audio_file_path.is_none() {
                         return Err("pipeline=a2vid requires audio_file".to_string());
                     }
                 }
                 Ltx2PipelineMode::Retake => {
-                    if req.source_video.is_none() {
+                    if req.source_video.is_none() && req.source_video_path.is_none() {
                         return Err("pipeline=retake requires source_video".to_string());
                     }
                     if req.retake_range.is_none() {
@@ -518,7 +539,7 @@ pub fn validate_generate_request_with_family(
                     }
                 }
                 Ltx2PipelineMode::IcLora => {
-                    if req.source_video.is_none() {
+                    if req.source_video.is_none() && req.source_video_path.is_none() {
                         return Err("pipeline=ic-lora requires source_video".to_string());
                     }
                     if req.lora.is_none() && req.loras.as_ref().is_none_or(Vec::is_empty) {
@@ -718,7 +739,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -914,6 +937,52 @@ mod tests {
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("source_video exceeds"), "got: {err}");
         assert!(err.contains("64 MiB"), "got: {err}");
+    }
+
+    #[test]
+    fn ltx2_audio_file_path_is_family_gated_and_preserves_inline_limit() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.audio_file_path = Some("/srv/mold-media/voice.wav".to_string());
+        assert!(validate_generate_request(&req).is_ok());
+
+        req.audio_file = Some(vec![0; MAX_INLINE_AUDIO_BYTES + 1]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("audio_file_path cannot be combined"),
+            "got: {err}"
+        );
+
+        let mut wrong_family = valid_req();
+        wrong_family.model = "flux-schnell:q8".to_string();
+        wrong_family.audio_file_path = Some("/srv/mold-media/voice.wav".to_string());
+        let err = validate_generate_request(&wrong_family).unwrap_err();
+        assert!(
+            err.contains("audio_file_path is only supported"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn ltx2_source_video_path_satisfies_retake_requirements() {
+        let mut req = valid_req();
+        req.model = "ltx-2-19b-distilled:fp8".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.source_video_path = Some("/srv/mold-media/clip.mp4".to_string());
+        req.retake_range = Some(crate::TimeRange {
+            start_seconds: 0.0,
+            end_seconds: 1.0,
+        });
+
+        assert!(validate_generate_request(&req).is_ok());
+
+        req.source_video = Some(vec![0; MAX_INLINE_SOURCE_VIDEO_BYTES + 1]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(
+            err.contains("source_video_path cannot be combined"),
+            "got: {err}"
+        );
     }
 
     #[test]

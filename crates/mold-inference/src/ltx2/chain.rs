@@ -451,7 +451,9 @@ fn build_stage_generate_request(
         // `chain.enable_audio = Some(true)` explicitly.
         enable_audio: Some(chain.enable_audio.unwrap_or(false)),
         audio_file: None,
+        audio_file_path: None,
         source_video: None,
+        source_video_path: None,
         keyframes: None,
         pipeline: None,
         loras: None,

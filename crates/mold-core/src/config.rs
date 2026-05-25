@@ -467,6 +467,11 @@ pub struct Config {
     #[serde(default)]
     pub output_dir: Option<String>,
 
+    /// Allow roots for trusted server-local media request paths.
+    /// Override with `MOLD_MEDIA_ROOTS` using the platform path-list separator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_roots: Option<Vec<String>>,
+
     /// Global default negative prompt for CFG-based models (SD1.5, SDXL, SD3, Wuerstchen).
     /// Overridden by per-model `negative_prompt` or CLI `--negative-prompt`.
     #[serde(default)]
@@ -581,6 +586,7 @@ impl Default for Config {
             t5_variant: None,
             qwen3_variant: None,
             output_dir: None,
+            media_roots: None,
             default_negative_prompt: None,
             expand: ExpandSettings::default(),
             logging: LoggingConfig::default(),
@@ -883,6 +889,16 @@ impl Config {
                 .unwrap_or_else(|| PathBuf::from(".mold"))
                 .join("output")
         })
+    }
+
+    pub fn resolved_media_roots(&self) -> Vec<PathBuf> {
+        if let Ok(roots) = std::env::var("MOLD_MEDIA_ROOTS") {
+            return crate::parse_media_roots_env(&roots);
+        }
+        self.media_roots
+            .as_deref()
+            .map(crate::configured_media_roots)
+            .unwrap_or_default()
     }
 
     /// Resolved log directory from config or default (~/.mold/logs/).

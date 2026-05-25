@@ -75,6 +75,10 @@ should compare generated contact sheets or clips from that fixed seed.
 - When you send source media through `mold serve`, the built-in request body
   limit is `64 MiB`, which covers common inline retake and audio-to-video
   requests.
+- Trusted server deployments can use `audio_file_path` and `source_video_path`
+  instead of inline base64 for larger local media. Configure `media_roots` or
+  `MOLD_MEDIA_ROOTS`; mold canonicalizes the target and rejects missing files,
+  directories, traversal, or symlink escapes outside the allow roots.
 - On CUDA, explicit LTX-2 unload drops the retained native runtime before
   resetting the assigned CUDA primary context. To manually verify OOM recovery,
   run a GPU-resident LTX-2 request, force unload by switching models or using
