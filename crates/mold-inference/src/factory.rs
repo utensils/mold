@@ -350,6 +350,7 @@ pub fn create_engine_with_pool(
             paths,
             load_strategy,
             gpu_ordinal,
+            shared_pool,
         ))),
         other => bail!(
             "unknown model family '{}' for model '{}'. Supported: flux, flux2, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wuerstchen",
