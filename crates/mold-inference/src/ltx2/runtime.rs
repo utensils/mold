@@ -5418,6 +5418,222 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy)]
+    struct Ltx2ParityCase {
+        workflow: &'static str,
+        model: &'static str,
+        pipeline: PipelineKind,
+        enable_audio: Option<bool>,
+        seed: u64,
+        configure: fn(&mut GenerateRequest),
+    }
+
+    impl Ltx2ParityCase {
+        fn apply(self, req: &mut GenerateRequest) {
+            (self.configure)(req);
+        }
+    }
+
+    fn parity_noop(_req: &mut GenerateRequest) {}
+
+    fn parity_source_image(req: &mut GenerateRequest) {
+        req.source_image = Some(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+    }
+
+    fn parity_audio_file(req: &mut GenerateRequest) {
+        req.audio_file = Some(b"RIFFtestWAVEfmt ".to_vec());
+    }
+
+    fn parity_keyframes(req: &mut GenerateRequest) {
+        req.keyframes = Some(vec![
+            mold_core::KeyframeCondition {
+                frame: 8,
+                image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            },
+            mold_core::KeyframeCondition {
+                frame: 48,
+                image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            },
+        ]);
+    }
+
+    fn parity_retake(req: &mut GenerateRequest) {
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.retake_range = Some(TimeRange {
+            start_seconds: 0.5,
+            end_seconds: 1.25,
+        });
+    }
+
+    fn parity_ic_lora(req: &mut GenerateRequest) {
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/ic-lora.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+    }
+
+    fn parity_spatial_x2(req: &mut GenerateRequest) {
+        req.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
+    }
+
+    fn parity_spatial_x1_5(req: &mut GenerateRequest) {
+        req.spatial_upscale = Some(Ltx2SpatialUpscale::X1_5);
+    }
+
+    fn parity_temporal_x2(req: &mut GenerateRequest) {
+        req.temporal_upscale = Some(Ltx2TemporalUpscale::X2);
+    }
+
+    fn ltx2_native_parity_matrix() -> Vec<Ltx2ParityCase> {
+        vec![
+            Ltx2ParityCase {
+                workflow: "text-audio-video-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(true),
+                seed: 424_301,
+                configure: parity_noop,
+            },
+            Ltx2ParityCase {
+                workflow: "fixed-seed-cuda-reference",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(true),
+                seed: 424_303,
+                configure: parity_noop,
+            },
+            Ltx2ParityCase {
+                workflow: "image-to-video-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(false),
+                seed: 424_311,
+                configure: parity_source_image,
+            },
+            Ltx2ParityCase {
+                workflow: "image-to-video-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(false),
+                seed: 424_312,
+                configure: parity_source_image,
+            },
+            Ltx2ParityCase {
+                workflow: "audio-to-video-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::A2Vid,
+                enable_audio: Some(true),
+                seed: 424_321,
+                configure: parity_audio_file,
+            },
+            Ltx2ParityCase {
+                workflow: "audio-to-video-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::A2Vid,
+                enable_audio: Some(true),
+                seed: 424_322,
+                configure: parity_audio_file,
+            },
+            Ltx2ParityCase {
+                workflow: "keyframe-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::Keyframe,
+                enable_audio: Some(false),
+                seed: 424_331,
+                configure: parity_keyframes,
+            },
+            Ltx2ParityCase {
+                workflow: "keyframe-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Keyframe,
+                enable_audio: Some(false),
+                seed: 424_332,
+                configure: parity_keyframes,
+            },
+            Ltx2ParityCase {
+                workflow: "retake-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::Retake,
+                enable_audio: Some(true),
+                seed: 424_341,
+                configure: parity_retake,
+            },
+            Ltx2ParityCase {
+                workflow: "retake-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Retake,
+                enable_audio: Some(true),
+                seed: 424_342,
+                configure: parity_retake,
+            },
+            Ltx2ParityCase {
+                workflow: "public-ic-lora-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::IcLora,
+                enable_audio: Some(true),
+                seed: 424_351,
+                configure: parity_ic_lora,
+            },
+            Ltx2ParityCase {
+                workflow: "two-stage-dev-19b",
+                model: "ltx-2-19b-dev:fp8",
+                pipeline: PipelineKind::TwoStage,
+                enable_audio: Some(false),
+                seed: 424_361,
+                configure: parity_noop,
+            },
+            Ltx2ParityCase {
+                workflow: "two-stage-dev-22b",
+                model: "ltx-2.3-22b-dev:fp8",
+                pipeline: PipelineKind::TwoStage,
+                enable_audio: Some(false),
+                seed: 424_362,
+                configure: parity_noop,
+            },
+            Ltx2ParityCase {
+                workflow: "two-stage-hq-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::TwoStageHq,
+                enable_audio: Some(false),
+                seed: 424_363,
+                configure: parity_noop,
+            },
+            Ltx2ParityCase {
+                workflow: "spatial-x2-19b",
+                model: "ltx-2-19b-dev:fp8",
+                pipeline: PipelineKind::TwoStage,
+                enable_audio: Some(false),
+                seed: 424_371,
+                configure: parity_spatial_x2,
+            },
+            Ltx2ParityCase {
+                workflow: "spatial-x1.5-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(false),
+                seed: 424_372,
+                configure: parity_spatial_x1_5,
+            },
+            Ltx2ParityCase {
+                workflow: "temporal-x2-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(false),
+                seed: 424_381,
+                configure: parity_temporal_x2,
+            },
+            Ltx2ParityCase {
+                workflow: "temporal-x2-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(false),
+                seed: 424_382,
+                configure: parity_temporal_x2,
+            },
+        ]
+    }
+
     #[test]
     fn runtime_prepare_tracks_audio_and_video_latent_shapes() {
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(true));
@@ -6762,6 +6978,34 @@ mod tests {
         rebuild_execution_graph(&mut plan, &req);
 
         assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn ltx2_native_parity_matrix_cases_stay_on_real_runtime_path() {
+        let cases = ltx2_native_parity_matrix();
+        assert!(cases.iter().any(|case| case.model.contains("2.3-22b")));
+        assert!(cases
+            .iter()
+            .any(|case| case.workflow == "fixed-seed-cuda-reference"));
+
+        for case in cases {
+            let mut req = req(case.model, OutputFormat::Mp4, case.enable_audio);
+            req.seed = Some(case.seed);
+            case.apply(&mut req);
+            let temp_dir = tempfile::tempdir().unwrap();
+            let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+            let preset = preset_for_model(&req.model).unwrap();
+            let mut plan = build_plan(&req, preset, conditioning);
+            plan.pipeline = case.pipeline;
+            rebuild_execution_graph(&mut plan, &req);
+
+            assert!(
+                super::supports_real_video_path(&plan),
+                "{} ({}) should stay on the native runtime path",
+                case.workflow,
+                case.model
+            );
+        }
     }
 
     #[test]

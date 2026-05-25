@@ -35,6 +35,32 @@ audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` /
 - Spatial upscale `x2` across the family and `x1.5` for `ltx-2.3-*`
 - Temporal upscale `x2`
 
+## Native Parity Matrix
+
+The in-tree test matrix in `crates/mold-inference/src/ltx2/runtime.rs` keeps
+the supported native planning surface explicit without requiring full weights.
+It covers the real-runtime route for these published workflow combinations:
+
+| Workflow                      | 19B                                   | 22B / LTX-2.3                   | Coverage                                                  |
+| ----------------------------- | ------------------------------------- | ------------------------------- | --------------------------------------------------------- |
+| Text-to-audio+video           | Yes                                   | Yes                             | Planning test + manual CUDA smoke                         |
+| First-frame image-to-video    | Yes                                   | Yes                             | Planning test                                             |
+| Audio-to-video                | Yes                                   | Yes                             | Planning test                                             |
+| Keyframe interpolation        | Yes                                   | Yes                             | Planning test                                             |
+| Retake / partial regeneration | Yes                                   | Yes                             | Planning test                                             |
+| Public IC-LoRA                | Yes                                   | Not published as preset aliases | Planning test for 19B; explicit LoRA paths still accepted |
+| Two-stage dev checkpoint      | Yes                                   | Yes                             | Planning test                                             |
+| Two-stage HQ                  | Not published as the default 19B path | Yes                             | Planning test                                             |
+| Spatial upscale `x2`          | Yes                                   | Yes                             | Planning test                                             |
+| Spatial upscale `x1.5`        | Not published                         | Yes                             | Planning test                                             |
+| Temporal upscale `x2`         | Yes                                   | Yes                             | Planning test                                             |
+
+The fixed-seed CUDA reference case is tracked in the matrix with the 22B
+distilled docs-gallery seed (`424303`). Full numeric comparisons still require
+installed gated weights, CUDA, and checked-in reference artifacts; the unit
+matrix therefore validates routing and configuration, while manual parity runs
+should compare generated contact sheets or clips from that fixed seed.
+
 ## Current Constraints
 
 - Default output is `mp4` for this family. `gif`, `apng`, and `webp` are also
