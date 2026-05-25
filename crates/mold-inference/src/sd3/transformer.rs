@@ -8,6 +8,7 @@ use super::quantized_mmdit::QuantizedMMDiT;
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum SD3Transformer {
     BF16(MMDiT),
+    Offloaded(Box<super::offload::OffloadedMMDiT>),
     Quantized(QuantizedMMDiT),
 }
 
@@ -36,6 +37,7 @@ impl SD3Transformer {
     ) -> Result<Tensor> {
         match self {
             Self::BF16(m) => Ok(m.forward(x, t, y, context, skip_layers)?),
+            Self::Offloaded(m) => m.forward(x, t, y, context, skip_layers),
             Self::Quantized(m) => m.forward(x, t, y, context, skip_layers),
         }
     }

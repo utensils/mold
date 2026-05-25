@@ -290,6 +290,21 @@ impl SD3Engine {
             .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
     }
 
+    fn load_transformer_cpu_tensors(&self) -> Result<Arc<HashMap<String, Tensor>>> {
+        if let Some(shared_pool) = &self.shared_pool {
+            if let Some(tensors) = shared_pool
+                .lock()
+                .unwrap()
+                .load_safetensors_cpu_tensors(std::slice::from_ref(&self.base.paths.transformer))?
+            {
+                return Ok(tensors);
+            }
+        }
+        Ok(Arc::new(crate::encoders::park::load_tensors_to_cpu(
+            std::slice::from_ref(&self.base.paths.transformer),
+        )?))
+    }
+
     fn load_vae_var_builder<'a>(
         &self,
         vae_path: &Path,
@@ -671,11 +686,7 @@ impl SD3Engine {
         match sd3_offload_decision(self.offload, is_quantized, !active_loras.is_empty()) {
             SD3OffloadDecision::Disabled => {}
             SD3OffloadDecision::Unsupported(reason) => bail!("{reason}"),
-            SD3OffloadDecision::Selected => bail!(
-                "SD3 block-level offload was selected, but MMDiT transformer block \
-                 streaming is not implemented yet; use a quantized SD3 variant or \
-                 run without --offload"
-            ),
+            SD3OffloadDecision::Selected => {}
         }
 
         let (
@@ -910,9 +921,13 @@ impl SD3Engine {
         // --- Phase 3: Load transformer + denoise ---
         let mmdit_config = self.mmdit_config();
 
-        let xformer_size = std::fs::metadata(&self.base.paths.transformer)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let xformer_size = if self.offload && !is_quantized && active_loras.is_empty() {
+            0
+        } else {
+            std::fs::metadata(&self.base.paths.transformer)
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
         // SD3 runs CFG by default → batch=2 if guidance > 1, else batch=1.
         let xformer_batch = if req.guidance > 1.0 { 2 } else { 1 };
         let xformer_activation_budget = crate::device::activation_bytes(
@@ -933,11 +948,12 @@ impl SD3Engine {
 
         let active_loras = effective_loras(req);
         let lora_delta_cache = self.lora_delta_cache.clone();
-        let xformer_label = match (is_quantized, active_loras.is_empty()) {
-            (true, true) => "Loading SD3 MMDiT transformer (GPU, quantized)",
-            (true, false) => "Loading SD3 MMDiT transformer (GPU, quantized, with LoRA)",
-            (false, true) => "Loading SD3 MMDiT transformer (GPU, FP16)",
-            (false, false) => "Loading SD3 MMDiT transformer (GPU, FP16, with LoRA)",
+        let xformer_label = match (is_quantized, active_loras.is_empty(), self.offload) {
+            (true, true, _) => "Loading SD3 MMDiT transformer (GPU, quantized)",
+            (true, false, _) => "Loading SD3 MMDiT transformer (GPU, quantized, with LoRA)",
+            (false, true, true) => "Loading SD3 MMDiT transformer (offload, FP16)",
+            (false, true, false) => "Loading SD3 MMDiT transformer (GPU, FP16)",
+            (false, false, _) => "Loading SD3 MMDiT transformer (GPU, FP16, with LoRA)",
         };
         self.base.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
@@ -955,6 +971,14 @@ impl SD3Engine {
                 )?
             };
             SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
+        } else if active_loras.is_empty() && self.offload {
+            let tensors = self.load_transformer_cpu_tensors()?;
+            SD3Transformer::Offloaded(Box::new(super::offload::OffloadedMMDiT::new(
+                &mmdit_config,
+                tensors,
+                gpu_dtype,
+                &device,
+            )?))
         } else if active_loras.is_empty() {
             // BF16 safetensors from stabilityai use "model.diffusion_model." prefix
             let vb = crate::weight_loader::load_safetensors_with_progress(
@@ -1723,6 +1747,94 @@ mod tests {
             SD3OffloadDecision::Unsupported(reason)
                 if reason.contains("LoRA")
         ));
+    }
+
+    #[test]
+    fn sd3_selected_bf16_offload_reaches_runtime_loader() {
+        use crate::cache::store_cached_tensor_pair;
+
+        let dir = temp_test_dir("mold-sd3-offload-loader");
+        let transformer = touch(&dir, "transformer.safetensors");
+        let vae = touch(&dir, "vae.safetensors");
+        let clip_l = touch(&dir, "clip-l.safetensors");
+        let clip_l_tok = touch(&dir, "clip-l-tokenizer.json");
+        let clip_g = touch(&dir, "clip-g.safetensors");
+        let clip_g_tok = touch(&dir, "clip-g-tokenizer.json");
+        let t5 = touch(&dir, "t5.safetensors");
+        let t5_tok = touch(&dir, "t5-tokenizer.json");
+        let mut engine = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                transformer,
+                vae,
+                Some(clip_l),
+                Some(clip_l_tok),
+                Some(clip_g),
+                Some(clip_g_tok),
+                Some(t5),
+                Some(t5_tok),
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+            0,
+            true,
+            None,
+        );
+        let context = Tensor::zeros((1, 1, 4096), DType::F32, &Device::Cpu).unwrap();
+        let y = Tensor::zeros((1, 2048), DType::F32, &Device::Cpu).unwrap();
+        let key = cfg_prompt_cache_key("a cat", "", 1.0);
+        store_cached_tensor_pair(&engine.prompt_cache, key, &context, &y).unwrap();
+        let req = GenerateRequest {
+            prompt: "a cat".to_string(),
+            negative_prompt: None,
+            model: "sd3.5-large:bf16".to_string(),
+            width: 64,
+            height: 64,
+            steps: 1,
+            guidance: 1.0,
+            seed: Some(1),
+            batch_size: 1,
+            output_format: None,
+            embed_metadata: None,
+            scheduler: None,
+            cfg_plus: None,
+            source_image: None,
+            edit_images: None,
+            strength: 1.0,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            audio_file_path: None,
+            source_video: None,
+            source_video_path: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: None,
+        };
+
+        let err = engine.generate_sequential(&req).unwrap_err().to_string();
+
+        assert!(
+            !err.contains("streaming is not implemented yet"),
+            "selected BF16 offload must reach the runtime loader, got: {err}"
+        );
+        fs::remove_dir_all(dir).ok();
     }
 
     /// Regression test for the SD3 prompt-cache key bug: when the cache is
