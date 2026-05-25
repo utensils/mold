@@ -69,6 +69,10 @@ pub struct Flux2Engine {
     base: EngineBase<LoadedFlux2>,
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
+    /// Force block-level transformer offload once the Flux.2 runtime supports
+    /// streaming BF16 blocks. Plumbed now so the request is explicit instead
+    /// of being silently treated as a regular dense load.
+    offload: bool,
     prompt_cache: Mutex<LruCache<String, CachedTensor>>,
     /// Per-request placement override. Set at the start of `generate()`,
     /// cleared on exit. `None` preserves the existing VRAM-aware auto logic.
@@ -113,6 +117,36 @@ pub(crate) fn effective_flux2_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
         .collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Flux2OffloadDecision {
+    Disabled,
+    Selected,
+    Unsupported(&'static str),
+}
+
+fn flux2_offload_decision(
+    forced_offload: bool,
+    is_gguf: bool,
+    has_lora: bool,
+) -> Flux2OffloadDecision {
+    if !forced_offload {
+        return Flux2OffloadDecision::Disabled;
+    }
+    if is_gguf {
+        return Flux2OffloadDecision::Unsupported(
+            "Flux.2 block-level offload is only planned for BF16/FP transformers; \
+             GGUF variants already use quantized transformer paths",
+        );
+    }
+    if has_lora {
+        return Flux2OffloadDecision::Unsupported(
+            "Flux.2 block-level offload with LoRA is not wired yet; \
+             LoRA merge/bypass semantics need a dedicated offload design",
+        );
+    }
+    Flux2OffloadDecision::Selected
+}
+
 impl Flux2Engine {
     /// Create a new Flux2Engine. Does not load models until `load()` is called.
     pub fn new(
@@ -121,11 +155,13 @@ impl Flux2Engine {
         qwen3_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        offload: bool,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             qwen3_variant,
+            offload,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             pending_loras: Vec::new(),
@@ -153,6 +189,7 @@ impl Flux2Engine {
         qwen3_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        offload: bool,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Result<Self> {
         if !transformer_path.exists() {
@@ -183,6 +220,7 @@ impl Flux2Engine {
         Ok(Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             qwen3_variant,
+            offload,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             pending_loras: Vec::new(),
@@ -309,6 +347,12 @@ impl Flux2Engine {
     #[cfg(test)]
     fn sequential_img2img_preencodes_source() -> bool {
         true
+    }
+
+    fn uses_sequential_generate_path(&self) -> bool {
+        self.base.load_strategy == LoadStrategy::Sequential
+            || self.offload
+            || !self.pending_loras.is_empty()
     }
 
     fn load_sequential_vae(
@@ -865,6 +909,17 @@ impl Flux2Engine {
     /// Generate an image using sequential loading strategy (load-use-drop).
     fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let text_tokenizer_path = self.validate_paths()?;
+        let is_gguf = self.is_gguf_transformer();
+
+        match flux2_offload_decision(self.offload, is_gguf, !self.pending_loras.is_empty()) {
+            Flux2OffloadDecision::Disabled => {}
+            Flux2OffloadDecision::Unsupported(reason) => bail!("{reason}"),
+            Flux2OffloadDecision::Selected => bail!(
+                "Flux.2 block-level offload was selected, but BF16 transformer block \
+                 streaming is not implemented yet; use a quantized Flux.2 variant or \
+                 run without --offload"
+            ),
+        }
 
         if let Some(warning) = check_memory_budget(&self.base.paths, LoadStrategy::Sequential) {
             self.base.progress.info(&warning);
@@ -1226,7 +1281,7 @@ impl Flux2Engine {
             );
         }
         // Sequential mode: load-use-drop each component
-        if self.base.load_strategy == LoadStrategy::Sequential {
+        if self.uses_sequential_generate_path() {
             return self.generate_sequential(req);
         }
 
@@ -1667,6 +1722,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
         let nine_b = Flux2Engine::new(
@@ -1675,6 +1731,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
 
@@ -1712,6 +1769,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
         assert_eq!(sharded.text_encoder_paths(), vec![shard_a, shard_b]);
@@ -1722,6 +1780,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
         assert_eq!(fallback_engine.text_encoder_paths(), vec![fallback]);
@@ -1750,6 +1809,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             Some(shared_pool),
         );
 
@@ -1757,6 +1817,50 @@ mod tests {
 
         assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flux2_forced_offload_uses_sequential_generation_path() {
+        let dir = temp_test_dir("mold-flux2-offload-sequential");
+        let engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            flux2_model_paths(&dir, "transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            true,
+            None,
+        );
+
+        assert!(
+            engine.uses_sequential_generate_path(),
+            "Flux.2 --offload requests must reach the engine and select the \
+             staged generation path instead of being silently ignored"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flux2_offload_decision_gates_current_unsupported_cases() {
+        assert_eq!(
+            flux2_offload_decision(false, false, false),
+            Flux2OffloadDecision::Disabled
+        );
+        assert_eq!(
+            flux2_offload_decision(true, false, false),
+            Flux2OffloadDecision::Selected
+        );
+        assert!(matches!(
+            flux2_offload_decision(true, true, false),
+            Flux2OffloadDecision::Unsupported(reason)
+                if reason.contains("GGUF variants")
+        ));
+        assert!(matches!(
+            flux2_offload_decision(true, false, true),
+            Flux2OffloadDecision::Unsupported(reason)
+                if reason.contains("LoRA")
+        ));
     }
 
     #[test]
@@ -1785,6 +1889,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             Some(shared_pool),
         );
 
@@ -1824,6 +1929,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
 
@@ -1862,6 +1968,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
 
