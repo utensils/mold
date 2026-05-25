@@ -1397,7 +1397,14 @@ impl LtxAttention {
                 .as_ref()
                 .map(|mask| mask.to_dtype(DType::F32))
                 .transpose()?;
-            let out_f32 = if should_chunk_attention(q_len, k_len) {
+            let out_f32 = if should_chunk_attention(
+                b,
+                self.heads,
+                q_len,
+                k_len,
+                dtype,
+                hidden_states.device(),
+            ) {
                 let q_t = q.transpose(1, 2)?;
                 let k_t = k.transpose(1, 2)?;
                 let v_t = v.transpose(1, 2)?;
@@ -1456,8 +1463,41 @@ impl LtxAttention {
     }
 }
 
-fn should_chunk_attention(q_len: usize, k_len: usize) -> bool {
-    q_len.saturating_mul(k_len) > 1_048_576
+const CUDA_ATTENTION_CHUNK_THRESHOLD_BYTES: u64 = 1_048_576 * 4;
+const CPU_ATTENTION_CHUNK_THRESHOLD_BYTES: u64 = CUDA_ATTENTION_CHUNK_THRESHOLD_BYTES * 4;
+
+fn attention_work_bytes(
+    batch: usize,
+    heads: usize,
+    q_len: usize,
+    k_len: usize,
+    dtype: DType,
+) -> u64 {
+    (batch.max(1) as u64)
+        .saturating_mul(heads.max(1) as u64)
+        .saturating_mul(q_len as u64)
+        .saturating_mul(k_len as u64)
+        .saturating_mul(crate::device::dtype_bytes(dtype) as u64)
+}
+
+fn attention_chunk_threshold_bytes(device: &Device) -> u64 {
+    if device.is_cuda() {
+        CUDA_ATTENTION_CHUNK_THRESHOLD_BYTES
+    } else {
+        CPU_ATTENTION_CHUNK_THRESHOLD_BYTES
+    }
+}
+
+fn should_chunk_attention(
+    batch: usize,
+    heads: usize,
+    q_len: usize,
+    k_len: usize,
+    dtype: DType,
+    device: &Device,
+) -> bool {
+    attention_work_bytes(batch, heads, q_len, k_len, dtype)
+        > attention_chunk_threshold_bytes(device)
 }
 
 fn attention_query_chunk_size(q_len: usize) -> usize {
@@ -4815,6 +4855,62 @@ mod tests {
         let chunked = super::chunked_attention(&q, &k, &v, None, scale, 2, 3).unwrap();
 
         assert_tensors_close(&full, &chunked, 1e-5);
+    }
+
+    #[test]
+    fn attention_chunk_policy_accounts_for_batch_and_heads() {
+        let device = Device::Cpu;
+
+        assert!(!super::should_chunk_attention(
+            1,
+            1,
+            512,
+            512,
+            DType::F32,
+            &device
+        ));
+        assert!(super::should_chunk_attention(
+            8,
+            8,
+            512,
+            512,
+            DType::F32,
+            &device
+        ));
+    }
+
+    #[test]
+    fn attention_chunk_policy_accounts_for_dtype_width() {
+        let device = Device::Cpu;
+
+        assert!(super::should_chunk_attention(
+            4,
+            4,
+            600,
+            500,
+            DType::F32,
+            &device
+        ));
+        assert!(!super::should_chunk_attention(
+            4,
+            4,
+            600,
+            500,
+            DType::BF16,
+            &device
+        ));
+    }
+
+    #[test]
+    fn attention_work_bytes_uses_saturating_math() {
+        assert_eq!(
+            super::attention_work_bytes(2, 3, 5, 7, DType::F32),
+            2 * 3 * 5 * 7 * 4
+        );
+        assert_eq!(
+            super::attention_work_bytes(usize::MAX, usize::MAX, usize::MAX, usize::MAX, DType::F32),
+            u64::MAX
+        );
     }
 
     #[test]
