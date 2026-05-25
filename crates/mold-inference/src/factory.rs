@@ -153,6 +153,7 @@ pub fn create_engine_with_pool(
                     scheduler,
                     load_strategy,
                     gpu_ordinal,
+                    shared_pool,
                 )?))
             } else {
                 Ok(Box::new(SD15Engine::new(
@@ -161,6 +162,7 @@ pub fn create_engine_with_pool(
                     scheduler,
                     load_strategy,
                     gpu_ordinal,
+                    shared_pool,
                 )))
             }
         }

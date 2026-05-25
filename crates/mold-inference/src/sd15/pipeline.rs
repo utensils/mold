@@ -4,7 +4,7 @@ use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::cache::{
@@ -37,7 +37,7 @@ struct LoadedSD15 {
     unet: Option<stable_diffusion::unet_2d::UNet2DConditionModel>,
     vae: stable_diffusion::vae::AutoEncoderKL,
     clip: stable_diffusion::clip::ClipTextTransformer,
-    tokenizer: tokenizers::Tokenizer,
+    tokenizer: Arc<tokenizers::Tokenizer>,
     sd_config: stable_diffusion::StableDiffusionConfig,
     device: Device,
     /// Device the CLIP-L weights live on. May differ from `device` when the
@@ -55,6 +55,7 @@ struct LoadedSD15 {
 pub struct SD15Engine {
     base: EngineBase<LoadedSD15>,
     scheduler: Scheduler,
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensor>>,
     source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
@@ -99,10 +100,12 @@ impl SD15Engine {
         scheduler: Scheduler,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             scheduler,
+            shared_pool,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
@@ -137,6 +140,7 @@ impl SD15Engine {
         scheduler: Scheduler,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Result<Self> {
         if !single_file_path.exists() {
             bail!(
@@ -184,6 +188,7 @@ impl SD15Engine {
         Ok(Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             scheduler,
+            shared_pool,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
@@ -224,6 +229,19 @@ impl SD15Engine {
         }
 
         Ok((clip_encoder, clip_tokenizer))
+    }
+
+    fn load_clip_tokenizer(
+        &self,
+        clip_tokenizer: &std::path::Path,
+    ) -> Result<Arc<tokenizers::Tokenizer>> {
+        if let Some(ref pool) = self.shared_pool {
+            return pool.lock().unwrap().load_tokenizer(clip_tokenizer);
+        }
+        Ok(Arc::new(
+            tokenizers::Tokenizer::from_file(clip_tokenizer)
+                .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?,
+        ))
     }
 
     /// Create the SD1.5 config.
@@ -569,8 +587,7 @@ impl SD15Engine {
             )?
         };
 
-        let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
+        let tokenizer = self.load_clip_tokenizer(&clip_tokenizer)?;
 
         self.base.loaded = Some(LoadedSD15 {
             unet: Some(unet),
@@ -1137,8 +1154,7 @@ impl SD15Engine {
                 self.base.progress.info(&status);
             }
 
-            let tokenizer = tokenizers::Tokenizer::from_file(&clip_tokenizer)
-                .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
+            let tokenizer = self.load_clip_tokenizer(&clip_tokenizer)?;
 
             let tier1 = self
                 .pending_placement
@@ -1655,9 +1671,12 @@ impl InferenceEngine for SD15Engine {
 mod tests {
     use super::*;
     use crate::engine::InferenceEngine;
+    use crate::shared_pool::SharedPool;
     use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use tokenizers::models::bpe::BPE;
 
     /// Synthesise a minimal SD1.5-shaped single-file safetensors with one
     /// representative key per component bucket. Tensor data is one zero
@@ -1713,6 +1732,7 @@ mod tests {
             Scheduler::default(),
             LoadStrategy::Eager,
             0,
+            None,
         )
         .expect("constructor must accept a valid SD1.5 single-file layout");
 
@@ -1728,6 +1748,54 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(single_file);
+    }
+
+    #[test]
+    fn sd15_loads_clip_tokenizer_through_shared_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer_path = dir.path().join("clip-tokenizer.json");
+        tokenizers::Tokenizer::new(BPE::default())
+            .save(&tokenizer_path, false)
+            .unwrap();
+        let weights_path = dir.path().join("weights.safetensors");
+        std::fs::write(&weights_path, b"stub").unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&tokenizer_path)
+            .unwrap();
+
+        let paths = ModelPaths {
+            transformer: weights_path.clone(),
+            transformer_shards: Vec::new(),
+            vae: weights_path.clone(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: Some(weights_path),
+            t5_tokenizer: None,
+            clip_tokenizer: Some(tokenizer_path.clone()),
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let engine = SD15Engine::new(
+            "sd15-test".to_string(),
+            paths,
+            Scheduler::default(),
+            LoadStrategy::Eager,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_clip_tokenizer(&tokenizer_path).unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
     }
 
     #[test]
@@ -1759,6 +1827,7 @@ mod tests {
             Scheduler::Ddim,
             LoadStrategy::Eager,
             0,
+            None,
         )
         .expect("constructor");
 
@@ -1874,6 +1943,7 @@ mod tests {
             Scheduler::default(),
             LoadStrategy::Eager,
             0,
+            None,
         );
 
         assert!(
