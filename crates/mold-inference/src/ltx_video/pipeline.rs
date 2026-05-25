@@ -1290,12 +1290,18 @@ impl LtxVideoEngine {
             .map(|p| p.text_encoders)
             .unwrap_or_default();
         let t5_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
-        let mut t5 = crate::encoders::t5::T5Encoder::load(
+        let cached_t5_tokenizer = self
+            .shared_pool
+            .as_ref()
+            .map(|pool| pool.lock().unwrap().load_tokenizer(t5_tokenizer_path))
+            .transpose()?;
+        let mut t5 = crate::encoders::t5::T5Encoder::load_with_tokenizer(
             t5_encoder_path,
             t5_tokenizer_path,
             &t5_device,
             dtype,
             progress,
+            cached_t5_tokenizer,
         )?;
         progress.stage_done("Loading T5-XXL encoder", t5_start.elapsed());
 
