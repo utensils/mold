@@ -19,6 +19,7 @@ use candle_core::{DType, Device, IndexOp, Tensor, D};
 use candle_transformers::models::z_image::postprocess_image;
 use candle_transformers::quantized_var_builder;
 use mold_core::{fit_to_target_area, GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -1220,12 +1221,40 @@ impl QwenImageEngine {
 
     /// Load VAE from disk.
     fn load_vae(&self, device: &Device, dtype: DType) -> Result<QwenImageVae> {
-        Ok(QwenImageVae::load(
-            &self.base.paths.vae,
-            device,
+        let vb = self.load_vae_var_builder(device, dtype)?;
+        Ok(QwenImageVae::from_var_builder(vb, device, dtype)?)
+    }
+
+    fn load_vae_cpu_tensors(&self) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(shared_pool) = &self.shared_pool else {
+            return Ok(None);
+        };
+        shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&self.base.paths.vae))
+    }
+
+    fn load_vae_var_builder<'a>(
+        &self,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<candle_nn::VarBuilder<'a>> {
+        if let Some(tensors) = self.load_vae_cpu_tensors()? {
+            return Ok(encoders::park::varbuilder_from_parked(
+                tensors.as_ref(),
+                dtype,
+                device,
+            ));
+        }
+
+        crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
             dtype,
+            device,
+            "Qwen-Image VAE",
             &self.base.progress,
-        )?)
+        )
     }
 
     /// Load text encoder from disk.
@@ -3134,6 +3163,8 @@ mod tests {
     use crate::shared_pool::SharedPool;
     use candle_core::Shape;
     use mold_core::ModelPaths;
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -3991,6 +4022,46 @@ mod tests {
         );
 
         let loaded = engine.load_text_tokenizer(&tokenizer_path).unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn qwen_image_loads_vae_tensors_through_shared_pool() {
+        let dir = temp_test_dir("mold-qwen-vae-pool");
+        let vae_path = dir.join("vae.safetensors");
+        let weight = 1.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "encoder.conv_in.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &weight).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &vae_path).unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+            .unwrap()
+            .unwrap();
+
+        let engine = QwenImageEngine::new(
+            "qwen-image:q4".to_string(),
+            qwen_image_model_paths(
+                dir.join("transformer.gguf"),
+                vec![],
+                vae_path.clone(),
+                Some(dir.join("tokenizer.json")),
+            ),
+            LoadStrategy::Sequential,
+            0,
+            false,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_vae_cpu_tensors().unwrap().unwrap();
 
         assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
