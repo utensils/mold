@@ -16,9 +16,10 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokenizers::Tokenizer;
 
 use super::sampling::{self, Flux2State};
 use super::transformer::{Flux2Config, Flux2TransformerWrapper};
@@ -75,6 +76,7 @@ pub struct Flux2Engine {
     /// `load_transformer` / `reload_transformer_if_needed` to decide whether
     /// to wrap the transformer's `VarBuilder` with a `Flux2LoraBackend`.
     pending_loras: Vec<LoraWeight>,
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
 }
 
 /// Resolve the effective LoRA list for a request. Mirrors the FLUX helper of
@@ -117,6 +119,7 @@ impl Flux2Engine {
         qwen3_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
@@ -124,6 +127,7 @@ impl Flux2Engine {
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             pending_loras: Vec::new(),
+            shared_pool,
         }
     }
 
@@ -147,6 +151,7 @@ impl Flux2Engine {
         qwen3_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Result<Self> {
         if !transformer_path.exists() {
             bail!(
@@ -179,6 +184,7 @@ impl Flux2Engine {
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             pending_loras: Vec::new(),
+            shared_pool,
         })
     }
 
@@ -250,6 +256,15 @@ impl Flux2Engine {
         } else {
             encoders::qwen3_bf16::Qwen3BF16Config::qwen3_4b()
         }
+    }
+
+    fn load_text_tokenizer(&self, tokenizer_path: &Path) -> Result<Arc<Tokenizer>> {
+        if let Some(shared_pool) = &self.shared_pool {
+            return shared_pool.lock().unwrap().load_tokenizer(tokenizer_path);
+        }
+        Tokenizer::from_file(tokenizer_path)
+            .map(Arc::new)
+            .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))
     }
 
     fn img2img_source_normalize_range() -> crate::img_utils::NormalizeRange {
@@ -785,18 +800,21 @@ impl Flux2Engine {
         let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
         self.base.progress.stage_start(&enc_stage_label);
         let enc_stage = Instant::now();
+        let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
 
         let text_encoder = if is_gguf {
-            encoders::qwen3::Qwen3Encoder::load_gguf(
+            encoders::qwen3::Qwen3Encoder::load_gguf_with_tokenizer(
                 &encoder_paths[0],
                 &text_tokenizer_path,
+                Some(text_tokenizer),
                 enc_device,
                 &bf16_cfg,
             )?
         } else {
-            encoders::qwen3::Qwen3Encoder::load_bf16(
+            encoders::qwen3::Qwen3Encoder::load_bf16_with_tokenizer(
                 &encoder_paths,
                 &text_tokenizer_path,
+                Some(text_tokenizer),
                 enc_device,
                 enc_dtype,
                 &bf16_cfg,
@@ -919,18 +937,21 @@ impl Flux2Engine {
             let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
             self.base.progress.stage_start(&enc_stage_label);
             let enc_stage = Instant::now();
+            let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
 
             let mut text_encoder = if is_gguf {
-                encoders::qwen3::Qwen3Encoder::load_gguf(
+                encoders::qwen3::Qwen3Encoder::load_gguf_with_tokenizer(
                     &encoder_paths[0],
                     &text_tokenizer_path,
+                    Some(text_tokenizer),
                     enc_device,
                     &bf16_cfg,
                 )?
             } else {
-                encoders::qwen3::Qwen3Encoder::load_bf16(
+                encoders::qwen3::Qwen3Encoder::load_bf16_with_tokenizer(
                     &encoder_paths,
                     &text_tokenizer_path,
+                    Some(text_tokenizer),
                     enc_device,
                     enc_dtype,
                     &bf16_cfg,
@@ -1522,10 +1543,13 @@ mod tests {
     use super::*;
     use crate::encoders::variant_resolution::Qwen3Size;
     use crate::engine::LoadStrategy;
+    use crate::shared_pool::SharedPool;
     use mold_core::ModelPaths;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokenizers::models::bpe::BPE;
 
     fn temp_test_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1618,6 +1642,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
         let nine_b = Flux2Engine::new(
             "flux2-klein-9b:q8".to_string(),
@@ -1625,6 +1650,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
 
         let standard_cfg = standard.resolve_config();
@@ -1661,6 +1687,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
         assert_eq!(sharded.text_encoder_paths(), vec![shard_a, shard_b]);
 
@@ -1670,9 +1697,40 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
         assert_eq!(fallback_engine.text_encoder_paths(), vec![fallback]);
 
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flux2_loads_qwen3_tokenizer_through_shared_pool() {
+        let dir = temp_test_dir("mold-flux2-tokenizer-pool");
+        let tokenizer_path = dir.join("tokenizer.json");
+        tokenizers::Tokenizer::new(BPE::default())
+            .save(&tokenizer_path, false)
+            .unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&tokenizer_path)
+            .unwrap();
+
+        let engine = Flux2Engine::new(
+            "flux2-klein:q8".to_string(),
+            flux2_model_paths(&dir, "transformer.gguf", vec![], None),
+            None,
+            LoadStrategy::Sequential,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_text_tokenizer(&tokenizer_path).unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
     }
 
@@ -1706,6 +1764,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
 
         assert_eq!(engine.validate_paths().unwrap(), tokenizer);
@@ -1743,6 +1802,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
 
         let err = engine.validate_paths().unwrap_err();
