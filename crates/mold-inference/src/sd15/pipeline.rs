@@ -3,7 +3,8 @@ use candle_core::{DType, Device, Module, Tensor};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -435,8 +436,65 @@ impl SD15Engine {
             let remap = Self::load_sd15_remap(single_file)?;
             Self::build_vae_single_file(single_file, &remap, sd_config, device, dtype)
         } else {
-            Ok(sd_config.build_vae(&self.base.paths.vae, device, dtype)?)
+            self.build_vae_diffusers(sd_config, device, dtype)
         }
+    }
+
+    #[cfg(test)]
+    fn load_vae_cpu_tensors(&self) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        self.load_vae_cpu_tensors_for_path(&self.base.paths.vae)
+    }
+
+    fn load_vae_cpu_tensors_for_path(
+        &self,
+        vae_path: &Path,
+    ) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(shared_pool) = &self.shared_pool else {
+            return Ok(None);
+        };
+        shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+    }
+
+    fn load_vae_var_builder<'a>(
+        &self,
+        vae_path: &Path,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+    ) -> Result<candle_nn::VarBuilder<'a>> {
+        if let Some(tensors) = self.load_vae_cpu_tensors_for_path(vae_path)? {
+            return Ok(crate::encoders::park::varbuilder_from_parked(
+                tensors.as_ref(),
+                dtype,
+                device,
+            ));
+        }
+
+        crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&vae_path),
+            dtype,
+            device,
+            component,
+            &self.base.progress,
+        )
+    }
+
+    fn build_vae_diffusers(
+        &self,
+        sd_config: &stable_diffusion::StableDiffusionConfig,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<stable_diffusion::vae::AutoEncoderKL> {
+        let vb = self.load_vae_var_builder(&self.base.paths.vae, dtype, device, "VAE")?;
+        Ok(stable_diffusion::vae::AutoEncoderKL::new(
+            vb,
+            3,
+            3,
+            sd_config.autoencoder().clone(),
+        )?)
     }
 
     /// Header-parse the single-file checkpoint and build the SD1.5
@@ -635,7 +693,7 @@ impl SD15Engine {
 
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_start = Instant::now();
-        let vae = sd_config.build_vae(&self.base.paths.vae, device, vae_dtype)?;
+        let vae = self.build_vae_diffusers(sd_config, device, vae_dtype)?;
         self.base
             .progress
             .stage_done("Loading VAE (GPU)", vae_start.elapsed());
@@ -1794,6 +1852,57 @@ mod tests {
         );
 
         let loaded = engine.load_clip_tokenizer(&tokenizer_path).unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
+    }
+
+    #[test]
+    fn sd15_loads_vae_tensors_through_shared_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let vae_path = dir.path().join("vae.safetensors");
+        let weight = 1.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "encoder.conv_in.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &weight).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &vae_path).unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+            .unwrap()
+            .unwrap();
+
+        let paths = ModelPaths {
+            transformer: dir.path().join("unet.safetensors"),
+            transformer_shards: Vec::new(),
+            vae: vae_path.clone(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: Some(dir.path().join("clip.safetensors")),
+            t5_tokenizer: None,
+            clip_tokenizer: Some(dir.path().join("clip-tokenizer.json")),
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let engine = SD15Engine::new(
+            "sd15-test".to_string(),
+            paths,
+            Scheduler::default(),
+            LoadStrategy::Eager,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_vae_cpu_tensors().unwrap().unwrap();
 
         assert!(Arc::ptr_eq(&pooled, &loaded));
     }
