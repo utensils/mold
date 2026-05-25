@@ -426,6 +426,10 @@ pub struct ZImageEngine {
     base: EngineBase<LoadedZImage>,
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
+    /// Force block-level transformer offload once the Z-Image runtime supports
+    /// streaming BF16 blocks. For now this is plumbed so requests are explicit
+    /// instead of being silently treated as ordinary eager loads.
+    offload: bool,
     prompt_cache: Mutex<LruCache<String, CachedTensor>>,
     /// Per-request placement override.
     pending_placement: Option<mold_core::types::DevicePlacement>,
@@ -470,6 +474,36 @@ pub(crate) fn effective_zimage_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
         .collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ZImageOffloadDecision {
+    Disabled,
+    Selected,
+    Unsupported(&'static str),
+}
+
+fn zimage_offload_decision(
+    forced_offload: bool,
+    is_gguf: bool,
+    has_lora: bool,
+) -> ZImageOffloadDecision {
+    if !forced_offload {
+        return ZImageOffloadDecision::Disabled;
+    }
+    if is_gguf {
+        return ZImageOffloadDecision::Unsupported(
+            "Z-Image block-level offload is only planned for BF16/FP transformers; \
+             GGUF variants already use quantized/dense GGUF-specific paths",
+        );
+    }
+    if has_lora {
+        return ZImageOffloadDecision::Unsupported(
+            "Z-Image block-level offload with LoRA is not wired yet; \
+             LoRA merge/bypass semantics need a dedicated offload design",
+        );
+    }
+    ZImageOffloadDecision::Selected
+}
+
 impl ZImageEngine {
     pub fn new(
         model_name: String,
@@ -477,11 +511,13 @@ impl ZImageEngine {
         qwen3_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        offload: bool,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             qwen3_variant,
+            offload,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             pending_loras: Vec::new(),
@@ -900,7 +936,9 @@ impl ZImageEngine {
     }
 
     fn uses_sequential_generate_path(&self) -> bool {
-        self.base.load_strategy == LoadStrategy::Sequential || !self.pending_loras.is_empty()
+        self.base.load_strategy == LoadStrategy::Sequential
+            || self.offload
+            || !self.pending_loras.is_empty()
     }
 
     /// Generate an image using sequential loading strategy.
@@ -915,6 +953,16 @@ impl ZImageEngine {
         let text_tokenizer_path = self.validate_paths()?;
         let is_gguf = self.detect_is_gguf();
         let transformer_cfg = Config::z_image_turbo();
+
+        match zimage_offload_decision(self.offload, is_gguf, !self.pending_loras.is_empty()) {
+            ZImageOffloadDecision::Disabled => {}
+            ZImageOffloadDecision::Unsupported(reason) => bail!("{reason}"),
+            ZImageOffloadDecision::Selected => bail!(
+                "Z-Image block-level offload was selected, but BF16 transformer block \
+                 streaming is not implemented yet; use a quantized Z-Image variant or \
+                 run without --offload"
+            ),
+        }
 
         // Check memory budget
         if let Some(warning) = check_memory_budget(&self.base.paths, LoadStrategy::Sequential) {
@@ -2228,6 +2276,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
 
@@ -2256,6 +2305,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
         assert_eq!(sharded.validate_paths().unwrap(), tokenizer);
@@ -2267,6 +2317,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
         assert!(quantized.detect_is_gguf());
@@ -2288,6 +2339,7 @@ mod tests {
             None,
             LoadStrategy::Eager,
             0,
+            false,
             None,
         );
         engine.pending_loras = vec![LoraWeight {
@@ -2305,6 +2357,55 @@ mod tests {
     }
 
     #[test]
+    fn zimage_forced_offload_uses_sequential_generation_path() {
+        let dir = temp_test_dir("mold-zimage-offload-sequential");
+        let engine = ZImageEngine::new(
+            "z-image-turbo:bf16".to_string(),
+            zimage_model_paths(
+                dir.join("transformer.safetensors"),
+                vec![],
+                dir.join("vae.safetensors"),
+                Some(dir.join("tokenizer.json")),
+            ),
+            None,
+            LoadStrategy::Eager,
+            0,
+            true,
+            None,
+        );
+
+        assert!(
+            engine.uses_sequential_generate_path(),
+            "Z-Image --offload requests must reach the engine and select the \
+             staged generation path instead of being silently ignored"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn zimage_offload_decision_gates_current_unsupported_cases() {
+        assert_eq!(
+            zimage_offload_decision(false, false, false),
+            ZImageOffloadDecision::Disabled
+        );
+        assert_eq!(
+            zimage_offload_decision(true, false, false),
+            ZImageOffloadDecision::Selected
+        );
+        assert!(matches!(
+            zimage_offload_decision(true, true, false),
+            ZImageOffloadDecision::Unsupported(reason)
+                if reason.contains("GGUF variants")
+        ));
+        assert!(matches!(
+            zimage_offload_decision(true, false, true),
+            ZImageOffloadDecision::Unsupported(reason)
+                if reason.contains("LoRA")
+        ));
+    }
+
+    #[test]
     fn zimage_validate_paths_requires_text_tokenizer() {
         let dir = temp_test_dir("mold-zimage-validate-missing");
         let engine = ZImageEngine::new(
@@ -2318,6 +2419,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
 
@@ -2353,6 +2455,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             Some(shared_pool),
         );
 
