@@ -1,8 +1,9 @@
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, IndexOp};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_transformers::models::mmdit::model::{Config as MMDiTConfig, MMDiT};
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -233,6 +234,70 @@ impl SD3Engine {
             load(clip_g_tokenizer, "CLIP-G")?,
             load(t5_tokenizer, "T5")?,
         ))
+    }
+
+    #[cfg(test)]
+    fn load_vae_cpu_tensors(
+        &self,
+        vae_path: &Path,
+    ) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        Self::load_vae_cpu_tensors_from_pool(self.shared_pool.as_ref(), vae_path)
+    }
+
+    fn load_vae_cpu_tensors_from_pool(
+        shared_pool: Option<&Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        vae_path: &Path,
+    ) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(shared_pool) = shared_pool else {
+            return Ok(None);
+        };
+        shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+    }
+
+    fn load_vae_var_builder<'a>(
+        &self,
+        vae_path: &Path,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+        progress: &ProgressReporter,
+    ) -> Result<candle_nn::VarBuilder<'a>> {
+        Self::load_vae_var_builder_from_pool(
+            self.shared_pool.as_ref(),
+            vae_path,
+            dtype,
+            device,
+            component,
+            progress,
+        )
+    }
+
+    fn load_vae_var_builder_from_pool<'a>(
+        shared_pool: Option<&Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        vae_path: &Path,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+        progress: &ProgressReporter,
+    ) -> Result<candle_nn::VarBuilder<'a>> {
+        if let Some(tensors) = Self::load_vae_cpu_tensors_from_pool(shared_pool, vae_path)? {
+            return Ok(crate::encoders::park::varbuilder_from_parked(
+                tensors.as_ref(),
+                dtype,
+                device,
+            ));
+        }
+
+        crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&vae_path),
+            dtype,
+            device,
+            component,
+            progress,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -737,8 +802,8 @@ impl SD3Engine {
             self.base.progress.stage_start("Loading VAE for encoding");
             let vae_stage = Instant::now();
             let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                std::slice::from_ref(&self.base.paths.vae),
+            let vae_vb = self.load_vae_var_builder(
+                &self.base.paths.vae,
                 vae_dtype,
                 &device,
                 "VAE",
@@ -916,8 +981,8 @@ impl SD3Engine {
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&self.base.paths.vae),
+        let vae_vb = self.load_vae_var_builder(
+            &self.base.paths.vae,
             vae_dtype,
             &device,
             "VAE",
@@ -1007,6 +1072,7 @@ impl SD3Engine {
         let transformer_path = self.base.paths.transformer.clone();
         let active_loras = effective_loras(req);
         let lora_delta_cache = self.lora_delta_cache.clone();
+        let shared_pool = self.shared_pool.clone();
 
         let mut loaded = OptionRestoreGuard::take(&mut self.base.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded -- call load() first"))?;
@@ -1131,8 +1197,9 @@ impl SD3Engine {
                     progress.stage_start("Loading VAE for encoding");
                     let vae_stage = Instant::now();
                     let vae_dtype = crate::device::resolve_vae_dtype(loaded_dtype);
-                    let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                        std::slice::from_ref(&loaded.vae_vb_path),
+                    let vae_vb = Self::load_vae_var_builder_from_pool(
+                        shared_pool.as_ref(),
+                        &loaded.vae_vb_path,
                         vae_dtype,
                         &loaded.device,
                         "VAE",
@@ -1290,8 +1357,9 @@ impl SD3Engine {
             let vae_decode_start = Instant::now();
 
             let vae_dtype = crate::device::resolve_vae_dtype(loaded.dtype);
-            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                std::slice::from_ref(&loaded.vae_vb_path),
+            let vae_vb = Self::load_vae_var_builder_from_pool(
+                shared_pool.as_ref(),
+                &loaded.vae_vb_path,
                 vae_dtype,
                 &loaded.device,
                 "VAE",
@@ -1393,6 +1461,8 @@ mod tests {
     use crate::engine::LoadStrategy;
     use crate::shared_pool::SharedPool;
     use mold_core::ModelPaths;
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -1669,6 +1739,52 @@ mod tests {
         assert!(Arc::ptr_eq(&pooled_clip_l, &loaded_clip_l));
         assert!(Arc::ptr_eq(&pooled_clip_g, &loaded_clip_g));
         assert!(Arc::ptr_eq(&pooled_t5, &loaded_t5));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sd3_loads_vae_tensors_through_shared_pool() {
+        let dir = temp_test_dir("mold-sd3-vae-pool");
+        let vae_path = dir.join("vae.safetensors");
+        let weight = 1.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "first_stage_model.encoder.conv_in.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &weight).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &vae_path).unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+            .unwrap()
+            .unwrap();
+
+        let engine = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                dir.join("transformer.safetensors"),
+                vae_path.clone(),
+                Some(dir.join("clip-l.safetensors")),
+                Some(dir.join("clip-l-tokenizer.json")),
+                Some(dir.join("clip-g.safetensors")),
+                Some(dir.join("clip-g-tokenizer.json")),
+                Some(dir.join("t5.safetensors")),
+                Some(dir.join("t5-tokenizer.json")),
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_vae_cpu_tensors(&vae_path).unwrap().unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
     }
 
