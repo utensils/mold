@@ -240,6 +240,7 @@ pub fn create_engine_with_pool(
                 qwen3_variant,
                 load_strategy,
                 gpu_ordinal,
+                offload,
                 shared_pool,
             )))
         }
