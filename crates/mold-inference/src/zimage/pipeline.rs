@@ -7,7 +7,7 @@ use candle_transformers::models::z_image::{
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -162,25 +162,45 @@ impl candle_nn::var_builder::SimpleBackend for ZImageSafetensorsBackend {
     }
 }
 
+enum ZImageVaeTensorSource {
+    Mmap(candle_core::safetensors::MmapedSafetensors),
+    Cpu(Arc<HashMap<String, Tensor>>),
+}
+
+/// Z-Image VAE accepts both diffusers keys and LDM/Civitai aliases, plus a
+/// narrow `[out, in, 1, 1]` to `[out, in]` reshape. Keep both mmap and cached
+/// CPU tensor sources behind this backend so those rules cannot be bypassed.
 struct ZImageVaeSafetensorsBackend {
-    st: candle_core::safetensors::MmapedSafetensors,
+    source: ZImageVaeTensorSource,
     aliases: BTreeMap<String, String>,
 }
 
 impl ZImageVaeSafetensorsBackend {
     fn new(st: candle_core::safetensors::MmapedSafetensors) -> Self {
-        let aliases = st
-            .tensors()
+        let aliases = Self::aliases_from_names(st.tensors().into_iter().map(|(name, _)| name));
+        Self {
+            source: ZImageVaeTensorSource::Mmap(st),
+            aliases,
+        }
+    }
+
+    fn from_cpu_tensors(tensors: Arc<HashMap<String, Tensor>>) -> Self {
+        let aliases = Self::aliases_from_names(tensors.keys().cloned());
+        Self {
+            source: ZImageVaeTensorSource::Cpu(tensors),
+            aliases,
+        }
+    }
+
+    fn aliases_from_names(names: impl IntoIterator<Item = String>) -> BTreeMap<String, String> {
+        names
             .into_iter()
-            .filter_map(|(name, _)| {
-                zimage_vae_diffusers_name(&name).map(|diffusers| (diffusers, name))
-            })
-            .collect();
-        Self { st, aliases }
+            .filter_map(|name| zimage_vae_diffusers_name(&name).map(|diffusers| (diffusers, name)))
+            .collect()
     }
 
     fn resolve_stored_name<'a>(&'a self, name: &'a str) -> Cow<'a, str> {
-        if self.st.get(name).is_ok() {
+        if self.contains_stored_tensor(name) {
             return Cow::Borrowed(name);
         }
         self.aliases
@@ -189,9 +209,27 @@ impl ZImageVaeSafetensorsBackend {
             .unwrap_or(Cow::Borrowed(name))
     }
 
+    fn contains_stored_tensor(&self, name: &str) -> bool {
+        match &self.source {
+            ZImageVaeTensorSource::Mmap(st) => st.get(name).is_ok(),
+            ZImageVaeTensorSource::Cpu(tensors) => tensors.contains_key(name),
+        }
+    }
+
     fn load_cast(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
         let stored_name = self.resolve_stored_name(name);
-        let tensor = self.st.load(stored_name.as_ref(), dev)?;
+        let tensor = match &self.source {
+            ZImageVaeTensorSource::Mmap(st) => st.load(stored_name.as_ref(), dev)?,
+            ZImageVaeTensorSource::Cpu(tensors) => tensors
+                .get(stored_name.as_ref())
+                .ok_or_else(|| {
+                    candle_core::Error::msg(format!(
+                        "missing Z-Image VAE tensor {}",
+                        stored_name.as_ref()
+                    ))
+                })?
+                .to_device(dev)?,
+        };
         if tensor.dtype() != dtype {
             tensor.to_dtype(dtype)
         } else {
@@ -235,7 +273,7 @@ impl candle_nn::var_builder::SimpleBackend for ZImageVaeSafetensorsBackend {
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
-        self.st.get(name).is_ok() || self.aliases.contains_key(name)
+        self.contains_stored_tensor(name) || self.aliases.contains_key(name)
     }
 }
 
@@ -346,17 +384,19 @@ fn load_zimage_vae(
     dtype: DType,
     device: &Device,
     progress: &ProgressReporter,
+    cached_tensors: Option<Arc<HashMap<String, Tensor>>>,
 ) -> Result<AutoEncoderKL> {
     use candle_core::safetensors::MmapedSafetensors;
 
     let bytes_total = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     progress.weight_load("VAE", 0, bytes_total);
-    let st = unsafe { MmapedSafetensors::multi(&[path])? };
-    let vae_vb = candle_nn::VarBuilder::from_backend(
-        Box::new(ZImageVaeSafetensorsBackend::new(st)),
-        dtype,
-        device.clone(),
-    );
+    let backend = if let Some(tensors) = cached_tensors {
+        ZImageVaeSafetensorsBackend::from_cpu_tensors(tensors)
+    } else {
+        let st = unsafe { MmapedSafetensors::multi(&[path])? };
+        ZImageVaeSafetensorsBackend::new(st)
+    };
+    let vae_vb = candle_nn::VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
     progress.weight_load("VAE", bytes_total, bytes_total);
     AutoEncoderKL::new(&VaeConfig::z_image(), vae_vb).map_err(Into::into)
 }
@@ -716,12 +756,24 @@ impl ZImageEngine {
 
     /// Load VAE from disk.
     fn load_vae(&self, device: &Device, dtype: DType) -> Result<AutoEncoderKL> {
+        let cached_tensors = self.load_vae_cpu_tensors()?;
         load_zimage_vae(
             self.base.paths.vae.as_path(),
             dtype,
             device,
             &self.base.progress,
+            cached_tensors,
         )
+    }
+
+    fn load_vae_cpu_tensors(&self) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(shared_pool) = &self.shared_pool else {
+            return Ok(None);
+        };
+        shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&self.base.paths.vae))
     }
 
     /// Load all model components (Eager mode).
@@ -1750,6 +1802,7 @@ impl ZImageEngine {
                             DType::F32,
                             &Device::Cpu,
                             progress,
+                            None,
                         )?;
                         let cpu_latents =
                             latents_4d.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
@@ -2061,6 +2114,96 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn zimage_vae_cpu_tensor_backend_preserves_aliases_and_reshape() {
+        use candle_nn::var_builder::SimpleBackend;
+        use std::collections::HashMap;
+
+        let device = Device::Cpu;
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "encoder.down.0.block.0.norm1.weight".to_string(),
+            Tensor::new(&[5.0f32], &device).unwrap(),
+        );
+        tensors.insert(
+            "encoder.mid.attn_1.q.weight".to_string(),
+            Tensor::new(&[1.0f32, 2.0, 3.0, 4.0], &device)
+                .unwrap()
+                .reshape((2, 2, 1, 1))
+                .unwrap(),
+        );
+
+        let backend = ZImageVaeSafetensorsBackend::from_cpu_tensors(Arc::new(tensors));
+
+        assert!(backend.contains_tensor("encoder.down_blocks.0.resnets.0.norm1.weight"));
+        let norm = backend
+            .get_unchecked(
+                "encoder.down_blocks.0.resnets.0.norm1.weight",
+                DType::F32,
+                &device,
+            )
+            .unwrap();
+        assert_eq!(norm.to_vec1::<f32>().unwrap(), vec![5.0]);
+
+        let q = backend
+            .get(
+                Shape::from((2, 2)),
+                "encoder.mid_block.attentions.0.to_q.weight",
+                candle_nn::Init::Const(0.0),
+                DType::F32,
+                &device,
+            )
+            .unwrap();
+        assert_eq!(
+            q.to_vec2::<f32>().unwrap(),
+            vec![vec![1.0, 2.0], vec![3.0, 4.0]]
+        );
+    }
+
+    #[test]
+    fn zimage_loads_vae_tensors_through_shared_pool() {
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+        use std::collections::HashMap;
+
+        let dir = temp_test_dir("mold-zimage-vae-pool");
+        let vae_path = dir.join("vae.safetensors");
+        let weight = 1.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "encoder.conv_in.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], weight.as_slice()).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &vae_path).unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+            .unwrap()
+            .unwrap();
+
+        let engine = ZImageEngine::new(
+            "z-image-turbo:q4".to_string(),
+            zimage_model_paths(
+                dir.join("transformer.gguf"),
+                vec![],
+                vae_path,
+                Some(dir.join("tokenizer.json")),
+            ),
+            None,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_vae_cpu_tensors().unwrap().unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
