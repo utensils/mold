@@ -6,6 +6,7 @@ use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelP
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokenizers::Tokenizer;
 
 use crate::cache::{
     cfg_prompt_cache_key, clear_cache, get_or_insert_cached_tensor_pair,
@@ -179,10 +180,12 @@ pub struct SD3Engine {
     /// transformer rebuilds. Saves the `B @ A * scale` matmul when the
     /// same LoRA stack reappears on a later generate.
     lora_delta_cache: Arc<Mutex<sd3_lora::LoraDeltaCache>>,
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
 }
 
 impl SD3Engine {
     /// Create a new SD3Engine. Does not load models until `load()` is called.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model_name: String,
         paths: ModelPaths,
@@ -191,6 +194,7 @@ impl SD3Engine {
         t5_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
@@ -200,7 +204,35 @@ impl SD3Engine {
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             lora_delta_cache: Arc::new(Mutex::new(sd3_lora::LoraDeltaCache::new())),
+            shared_pool,
         }
+    }
+
+    fn load_text_tokenizers(
+        &self,
+        clip_l_tokenizer: &Path,
+        clip_g_tokenizer: &Path,
+        t5_tokenizer: &Path,
+    ) -> Result<(Arc<Tokenizer>, Arc<Tokenizer>, Arc<Tokenizer>)> {
+        if let Some(shared_pool) = &self.shared_pool {
+            let mut pool = shared_pool.lock().unwrap();
+            return Ok((
+                pool.load_tokenizer(clip_l_tokenizer)?,
+                pool.load_tokenizer(clip_g_tokenizer)?,
+                pool.load_tokenizer(t5_tokenizer)?,
+            ));
+        }
+
+        let load = |path: &Path, label: &str| {
+            Tokenizer::from_file(path)
+                .map(Arc::new)
+                .map_err(|e| anyhow::anyhow!("failed to load {label} tokenizer: {e}"))
+        };
+        Ok((
+            load(clip_l_tokenizer, "CLIP-L")?,
+            load(clip_g_tokenizer, "CLIP-G")?,
+            load(t5_tokenizer, "T5")?,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -479,14 +511,19 @@ impl SD3Engine {
         let encoder_label = format!("Loading SD3 triple encoder ({t5_device_label})");
         self.base.progress.stage_start(&encoder_label);
         let encoder_stage = Instant::now();
+        let (clip_l_tokenizer_handle, clip_g_tokenizer_handle, t5_tokenizer_handle) =
+            self.load_text_tokenizers(&clip_l_tokenizer, &clip_g_tokenizer, &t5_tokenizer_path)?;
 
-        let triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load(
+        let triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load_with_tokenizers(
             &clip_l_path,
             &clip_l_tokenizer,
+            Some(clip_l_tokenizer_handle),
             &clip_g_path,
             &clip_g_tokenizer,
+            Some(clip_g_tokenizer_handle),
             &resolved_t5_path,
             &t5_tokenizer_path,
+            Some(t5_tokenizer_handle),
             encoder_device,
             encoder_dtype,
             &self.base.progress,
@@ -627,13 +664,18 @@ impl SD3Engine {
             let encoder_label = format!("Loading SD3 triple encoder ({t5_device_label})");
             self.base.progress.stage_start(&encoder_label);
             let encoder_stage = Instant::now();
-            let mut triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load(
+            let (clip_l_tokenizer_handle, clip_g_tokenizer_handle, t5_tokenizer_handle) = self
+                .load_text_tokenizers(&clip_l_tokenizer, &clip_g_tokenizer, &t5_tokenizer_path)?;
+            let mut triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load_with_tokenizers(
                 &clip_l_path,
                 &clip_l_tokenizer,
+                Some(clip_l_tokenizer_handle),
                 &clip_g_path,
                 &clip_g_tokenizer,
+                Some(clip_g_tokenizer_handle),
                 &resolved_t5_path,
                 &t5_tokenizer_path,
+                Some(t5_tokenizer_handle),
                 encoder_device,
                 encoder_dtype,
                 &self.base.progress,
@@ -1349,10 +1391,13 @@ impl InferenceEngine for SD3Engine {
 mod tests {
     use super::*;
     use crate::engine::LoadStrategy;
+    use crate::shared_pool::SharedPool;
     use mold_core::ModelPaths;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokenizers::models::bpe::BPE;
 
     fn temp_test_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1428,6 +1473,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
         let medium = SD3Engine::new(
             "sd3.5-medium:bf16".to_string(),
@@ -1446,6 +1492,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
 
         let large_cfg = large.mmdit_config();
@@ -1492,6 +1539,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
 
         let (_, _, _, _, _, resolved_t5_tok) = engine.validate_paths().unwrap();
@@ -1559,12 +1607,68 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
 
         let err = engine.validate_paths().unwrap_err();
         assert!(err.to_string().contains("T5 encoder path required"));
         assert!(!engine.detect_is_quantized());
 
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sd3_loads_text_tokenizers_through_shared_pool() {
+        let dir = temp_test_dir("mold-sd3-tokenizer-pool");
+        let clip_l_tok = dir.join("clip-l-tokenizer.json");
+        let clip_g_tok = dir.join("clip-g-tokenizer.json");
+        let t5_tok = dir.join("t5-tokenizer.json");
+        for path in [&clip_l_tok, &clip_g_tok, &t5_tok] {
+            tokenizers::Tokenizer::new(BPE::default())
+                .save(path, false)
+                .unwrap();
+        }
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled_clip_l = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&clip_l_tok)
+            .unwrap();
+        let pooled_clip_g = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&clip_g_tok)
+            .unwrap();
+        let pooled_t5 = shared_pool.lock().unwrap().load_tokenizer(&t5_tok).unwrap();
+
+        let engine = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                dir.join("transformer.safetensors"),
+                dir.join("vae.safetensors"),
+                Some(dir.join("clip-l.safetensors")),
+                Some(clip_l_tok.clone()),
+                Some(dir.join("clip-g.safetensors")),
+                Some(clip_g_tok.clone()),
+                Some(dir.join("t5.safetensors")),
+                Some(t5_tok.clone()),
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+            0,
+            Some(shared_pool),
+        );
+
+        let (loaded_clip_l, loaded_clip_g, loaded_t5) = engine
+            .load_text_tokenizers(&clip_l_tok, &clip_g_tok, &t5_tok)
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&pooled_clip_l, &loaded_clip_l));
+        assert!(Arc::ptr_eq(&pooled_clip_g, &loaded_clip_g));
+        assert!(Arc::ptr_eq(&pooled_t5, &loaded_t5));
         fs::remove_dir_all(dir).ok();
     }
 

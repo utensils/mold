@@ -19,6 +19,7 @@ use candle_transformers::models::stable_diffusion::clip::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokenizers::Tokenizer;
 
 use super::park;
@@ -28,7 +29,7 @@ use super::t5::T5Encoder;
 struct ClipWithTokenizer {
     model: Option<ClipTextTransformer>,
     config: ClipConfig,
-    tokenizer: Tokenizer,
+    tokenizer: Arc<Tokenizer>,
     max_position_embeddings: usize,
     device: candle_core::Device,
     /// Parameters parked on CPU host RAM for fast unpark. `None` when the
@@ -37,10 +38,36 @@ struct ClipWithTokenizer {
 }
 
 impl ClipWithTokenizer {
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     fn load(
         encoder_path: &PathBuf,
         tokenizer_path: &PathBuf,
+        config: ClipConfig,
+        max_position_embeddings: usize,
+        device: &candle_core::Device,
+        dtype: DType,
+        component: &str,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<Self> {
+        Self::load_with_tokenizer(
+            encoder_path,
+            tokenizer_path,
+            None,
+            config,
+            max_position_embeddings,
+            device,
+            dtype,
+            component,
+            progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_with_tokenizer(
+        encoder_path: &PathBuf,
+        tokenizer_path: &PathBuf,
+        cached_tokenizer: Option<Arc<Tokenizer>>,
         config: ClipConfig,
         max_position_embeddings: usize,
         device: &candle_core::Device,
@@ -56,8 +83,11 @@ impl ClipWithTokenizer {
             progress,
         )?;
         let model = ClipTextTransformer::new(vb, &config)?;
-        let tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))?;
+        let tokenizer = cached_tokenizer.map(Ok).unwrap_or_else(|| {
+            Tokenizer::from_file(tokenizer_path)
+                .map(Arc::new)
+                .map_err(|e| anyhow::anyhow!("failed to load CLIP tokenizer: {e}"))
+        })?;
 
         Ok(Self {
             model: Some(model),
@@ -202,6 +232,7 @@ pub(crate) struct SD3TripleEncoder {
 
 impl SD3TripleEncoder {
     /// Load all three encoders from separate weight files.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub fn load(
         clip_l_path: &PathBuf,
@@ -214,12 +245,45 @@ impl SD3TripleEncoder {
         dtype: DType,
         progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
+        Self::load_with_tokenizers(
+            clip_l_path,
+            clip_l_tokenizer_path,
+            None,
+            clip_g_path,
+            clip_g_tokenizer_path,
+            None,
+            t5_path,
+            t5_tokenizer_path,
+            None,
+            device,
+            dtype,
+            progress,
+        )
+    }
+
+    /// Load all three encoders, reusing cached tokenizers when provided.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_with_tokenizers(
+        clip_l_path: &PathBuf,
+        clip_l_tokenizer_path: &PathBuf,
+        clip_l_tokenizer: Option<Arc<Tokenizer>>,
+        clip_g_path: &PathBuf,
+        clip_g_tokenizer_path: &PathBuf,
+        clip_g_tokenizer: Option<Arc<Tokenizer>>,
+        t5_path: &PathBuf,
+        t5_tokenizer_path: &PathBuf,
+        t5_tokenizer: Option<Arc<Tokenizer>>,
+        device: &candle_core::Device,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<Self> {
         let max_position_embeddings = 77usize;
 
         // CLIP-L uses SDXL config (768-dim)
-        let clip_l = ClipWithTokenizer::load(
+        let clip_l = ClipWithTokenizer::load_with_tokenizer(
             clip_l_path,
             clip_l_tokenizer_path,
+            clip_l_tokenizer,
             clip::Config::sdxl(),
             max_position_embeddings,
             device,
@@ -240,9 +304,10 @@ impl SD3TripleEncoder {
             candle_nn::linear_no_bias(1280, 1280, clip_g_vb.pp("text_projection"))?;
 
         // CLIP-G uses SDXL2 config (1280-dim)
-        let clip_g = ClipWithTokenizer::load(
+        let clip_g = ClipWithTokenizer::load_with_tokenizer(
             clip_g_path,
             clip_g_tokenizer_path,
+            clip_g_tokenizer,
             clip::Config::sdxl2(),
             max_position_embeddings,
             device,
@@ -254,7 +319,14 @@ impl SD3TripleEncoder {
         let on_gpu = crate::device::is_gpu(device);
 
         // T5 encoder
-        let t5 = T5Encoder::load(t5_path, t5_tokenizer_path, device, dtype, progress)?;
+        let t5 = T5Encoder::load_with_tokenizer(
+            t5_path,
+            t5_tokenizer_path,
+            device,
+            dtype,
+            progress,
+            t5_tokenizer,
+        )?;
 
         Ok(Self {
             clip_l,
