@@ -84,6 +84,7 @@ pub(crate) struct T5Encoder {
 impl T5Encoder {
     /// Load T5 encoder weights and tokenizer.
     /// Auto-detects `.gguf` extension to choose quantized vs FP16 loading.
+    #[allow(dead_code)]
     pub fn load(
         encoder_path: &PathBuf,
         tokenizer_path: &PathBuf,
