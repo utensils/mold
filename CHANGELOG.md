@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **LTX-2 multimodal guidance now prebatches static stage contexts.** Native LTX-2 audio/video guidance builds the batched cond/uncond/perturbed/modality context, mask, RoPE, and static transformer inputs once at stage entry, then reuses them across denoise steps while keeping latents, sigma, and timestep dynamic per step.
 - **LTX-2 native denoise and VAE paths now cache stable helper tensors.** Timestep inverse-frequency tensors, rotary base-index tensors, and VAE latent-stat broadcast tensors are reused by shape/device/dtype across repeated denoise/decode calls, reducing per-step/per-call allocations without requiring real LTX-2 weights for the cache tests.
 - **Qwen-Image hot server prompt-cache misses can keep the Qwen2.5 encoder resident when measured headroom allows.** After encoding a cache miss, CUDA hot-path runs now compare actual free VRAM against denoise plus VAE decode reserves before deciding whether to keep the text encoder on GPU for short-interval follow-up misses; cache hits and pressure cases keep the existing drop/park behavior, with compact progress messages exposing the decision.
 - **Qwen-Image CUDA local cold runs now avoid the heavy BF16 Qwen2.5 CPU fallback.** When CUDA `auto` lacks BF16 encoder headroom, local sequential Qwen-Image now falls back to the quantized Q4 GGUF text encoder, using GPU if the quantized encoder fits and CPU otherwise. Explicit `--qwen2-variant bf16` keeps the old BF16 path for comparisons.

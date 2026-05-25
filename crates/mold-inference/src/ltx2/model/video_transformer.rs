@@ -2013,6 +2013,7 @@ impl Ltx2VideoTransformer3DModel {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn forward(
         &self,
         hidden_states: &Tensor,
@@ -3533,6 +3534,7 @@ impl Ltx2AvTransformer3DModel {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn forward(
         &self,
         video_hidden_states: &Tensor,
@@ -5047,7 +5049,11 @@ mod tests {
             .unwrap();
 
         assert_tensors_close(&full_video, &static_video, 1e-4);
-        assert_tensors_close(&full_audio.unwrap(), &static_audio.unwrap(), 1e-4);
+        let full_audio = full_audio.unwrap();
+        let static_audio = static_audio.unwrap();
+        assert_eq!(static_video.dims(), video_hidden_states.dims());
+        assert_eq!(static_audio.dims(), audio_hidden_states.dims());
+        assert_tensors_close(&full_audio, &static_audio, 1e-4);
     }
 
     #[test]
