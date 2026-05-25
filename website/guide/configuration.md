@@ -307,9 +307,9 @@ the Advanced disclosure for those families so it isn't misleading).
 
 For Qwen-Image and Qwen-Image-Edit:
 
-- CUDA `auto` prefers BF16 when enough headroom remains after the transformer
-  load, and falls back to quantized GGUF variants when a resident encoder or
-  edit-conditioning path would otherwise be too heavy.
+- CUDA `auto` prefers BF16 when enough text-encoder headroom remains, and
+  falls back to quantized GGUF variants for local sequential, resident, and
+  edit-conditioning paths when BF16 would be too heavy.
 - Metal/MPS `auto` prefers the quantized Qwen2.5-VL GGUF encoder path to reduce
   memory pressure during prompt encoding.
 - `qwen-image-edit` still loads the Qwen2.5-VL vision tower for image

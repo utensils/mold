@@ -324,7 +324,7 @@ Default model if none specified: `flux2-klein:q8`
 - `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`
 - `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu`
 - On Apple Metal/MPS, `auto` prefers quantized Qwen2.5-VL GGUF text encoders (`q6`, then `q4`) to reduce memory pressure
-- On CUDA, `auto` prefers BF16 when there is enough post-transformer headroom and falls back to quantized GGUF variants for resident/edit paths when BF16 would be too heavy
+- On CUDA, `auto` prefers BF16 when there is enough text-encoder headroom and falls back to quantized GGUF variants for local sequential, resident, and edit paths when BF16 would be too heavy
 - `qwen-image-edit-2511:*` uses repeatable `--image` inputs and a distinct `qwen-image-edit` family. Local inference is implemented with the Qwen2.5-VL vision tower, packed edit latents, and true-CFG norm rescaling. Quantized `--qwen2-variant` values are supported for the edit family through a GGUF language path plus staged vision sidecar.
   **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 

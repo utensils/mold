@@ -712,7 +712,7 @@ impl QwenImageEngine {
         is_metal: bool,
         free_vram: u64,
         bf16_size_bytes: u64,
-        usage: Qwen2TextEncoderUsage,
+        _usage: Qwen2TextEncoderUsage,
     ) -> Result<ResolvedQwen2TextEncoder> {
         match preference {
             Some(tag) if tag != "auto" && tag != "bf16" => {
@@ -795,17 +795,6 @@ impl QwenImageEngine {
                 }
 
                 if is_cuda {
-                    if matches!(usage, Qwen2TextEncoderUsage::Sequential) {
-                        return Ok(ResolvedQwen2TextEncoder {
-                            paths: vec![],
-                            vision_paths: vec![],
-                            is_gguf: false,
-                            variant_label: "bf16".to_string(),
-                            size_bytes: bf16_size_bytes,
-                            auto_use_gpu: false,
-                        });
-                    }
-
                     let fallback_tag = "q4";
                     let fallback = mold_core::manifest::find_qwen2_vl_variant(fallback_tag)
                         .expect("known CUDA fallback qwen2 variant missing");
@@ -815,13 +804,12 @@ impl QwenImageEngine {
                         is_gguf: true,
                         variant_label: fallback.tag.to_string(),
                         size_bytes: fallback.size_bytes,
-                        auto_use_gpu: matches!(usage, Qwen2TextEncoderUsage::Resident)
-                            && fits_in_memory(
-                                is_cuda,
-                                is_metal,
-                                free_vram,
-                                qwen2_vram_threshold(fallback.size_bytes),
-                            ),
+                        auto_use_gpu: fits_in_memory(
+                            is_cuda,
+                            is_metal,
+                            free_vram,
+                            qwen2_vram_threshold(fallback.size_bytes),
+                        ),
                     });
                 }
 
@@ -3622,7 +3610,23 @@ mod tests {
     }
 
     #[test]
-    fn qwen_image_auto_keeps_bf16_cpu_on_cuda_for_sequential_mode() {
+    fn qwen_image_auto_prefers_quantized_gpu_on_cuda_for_sequential_mode_when_it_fits() {
+        let resolved = QwenImageEngine::choose_text_encoder_source(
+            Some("auto"),
+            true,
+            false,
+            QWEN2_FP16_VRAM_THRESHOLD - 1,
+            16_600_000_000,
+            Qwen2TextEncoderUsage::Sequential,
+        )
+        .unwrap();
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q4");
+        assert!(resolved.auto_use_gpu);
+    }
+
+    #[test]
+    fn qwen_image_auto_uses_quantized_cpu_fallback_on_cuda_for_sequential_mode() {
         let resolved = QwenImageEngine::choose_text_encoder_source(
             Some("auto"),
             true,
@@ -3632,8 +3636,8 @@ mod tests {
             Qwen2TextEncoderUsage::Sequential,
         )
         .unwrap();
-        assert!(!resolved.is_gguf);
-        assert_eq!(resolved.variant_label, "bf16");
+        assert!(resolved.is_gguf);
+        assert_eq!(resolved.variant_label, "q4");
         assert!(!resolved.auto_use_gpu);
     }
 

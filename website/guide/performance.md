@@ -82,9 +82,11 @@ for the full matrix.
 If your GPU has headroom, `--eager` can improve repeat generation speed by
 keeping more components resident.
 
-For Qwen-Image on Apple Metal/MPS, `auto` now prefers quantized Qwen2.5-VL
-GGUF text encoders before falling back to the heavier BF16 text stack. That is
-mainly a memory-responsiveness improvement, not a promise of higher throughput.
+For Qwen-Image, `auto` uses quantized Qwen2.5-VL GGUF text encoders when the
+heavier BF16 text stack would be a poor fit. On CUDA local one-shot runs, that
+avoids loading the full BF16 encoder on CPU when BF16 does not fit on GPU. On
+Apple Metal/MPS, it is mainly a memory-responsiveness improvement, not a
+promise of higher throughput.
 
 For `qwen-image-edit`, mold also stages the Qwen2.5-VL vision tower only while
 building edit conditioning. Quantized `--qwen2-variant` values reduce the
