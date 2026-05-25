@@ -197,6 +197,7 @@ pub fn create_engine_with_pool(
                     is_turbo,
                     load_strategy,
                     gpu_ordinal,
+                    shared_pool,
                 )?))
             } else {
                 Ok(Box::new(SDXLEngine::new(
@@ -206,6 +207,7 @@ pub fn create_engine_with_pool(
                     is_turbo,
                     load_strategy,
                     gpu_ordinal,
+                    shared_pool,
                 )))
             }
         }
