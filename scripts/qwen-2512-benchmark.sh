@@ -26,6 +26,7 @@ Options:
   --metrics PATH      Defaults to <out-dir>/metrics.ndjson
   --skip-local        Do not run the local cold CLI phase
   --skip-server       Do not run the server load/warm phases
+  --smoke             Enable seeded output sanity checks; fails near-black outputs
   --dry-run           Print planned phases as NDJSON without running mold/curl
   --self-test         Run formatting/parser self-tests without model weights
   -h, --help          Show this help
@@ -45,6 +46,7 @@ out_dir=""
 metrics_path=""
 skip_local=0
 skip_server=0
+smoke=0
 dry_run=0
 
 die() {
@@ -119,6 +121,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-server)
       skip_server=1
+      shift
+      ;;
+    --smoke)
+      smoke=1
       shift
       ;;
     --dry-run)
@@ -247,6 +253,42 @@ detect_vae_mode() {
   fi
 }
 
+image_sanity_values() {
+  local image_path="$1"
+  magick "$image_path" -colorspace RGB -format '%[fx:mean] %[fx:maxima]' info:
+}
+
+image_is_near_black() {
+  local image_path="$1"
+  local mean max
+  read -r mean max < <(image_sanity_values "$image_path")
+  awk -v mean="$mean" -v max="$max" 'BEGIN { exit !(max <= 0.02 && mean <= 0.01) }'
+}
+
+validate_smoke_image() {
+  local image_path="$1"
+  local label="$2"
+  [[ "$smoke" -eq 1 ]] || return 0
+  [[ -s "$image_path" ]] || die "$label smoke output missing or empty: $image_path"
+  command -v magick >/dev/null 2>&1 || die "--smoke requires ImageMagick 'magick'"
+  local mean max
+  read -r mean max < <(image_sanity_values "$image_path")
+  if awk -v mean="$mean" -v max="$max" 'BEGIN { exit !(max <= 0.02 && mean <= 0.01) }'; then
+    die "$label smoke output is near-black (mean=$mean max=$max): $image_path"
+  fi
+  echo "$label smoke sanity ok (mean=$mean max=$max)"
+}
+
+validate_qwen_debug_log() {
+  local log_path="$1"
+  local label="$2"
+  [[ "$smoke" -eq 1 ]] || return 0
+  [[ -f "$log_path" ]] || return 0
+  if grep -Eq 'NaN=[1-9]|[+]Inf=[1-9]|-Inf=[1-9]|near-black' "$log_path"; then
+    die "$label smoke log reported Qwen tensor corruption or near-black decode: $log_path"
+  fi
+}
+
 event_data_lines() {
   awk '
     /^data: / {
@@ -306,14 +348,25 @@ run_local_cold() {
 
   start="$(now_ms)"
   set +e
-  "$mold_bin" run "$model" "$prompt" \
-    --local \
-    --width "$width" \
-    --height "$height" \
-    --steps "$steps" \
-    --seed "$seed" \
-    --output "$output_path" \
-    2> "$log_path"
+  if [[ "$smoke" -eq 1 ]]; then
+    MOLD_QWEN_DEBUG=1 "$mold_bin" run "$model" "$prompt" \
+      --local \
+      --width "$width" \
+      --height "$height" \
+      --steps "$steps" \
+      --seed "$seed" \
+      --output "$output_path" \
+      2> "$log_path"
+  else
+    "$mold_bin" run "$model" "$prompt" \
+      --local \
+      --width "$width" \
+      --height "$height" \
+      --steps "$steps" \
+      --seed "$seed" \
+      --output "$output_path" \
+      2> "$log_path"
+  fi
   status=$?
   set -e
   end="$(now_ms)"
@@ -332,6 +385,8 @@ run_local_cold() {
     "$(count_encoder_loads "$log_path")"
 
   [[ "$status" -eq 0 ]] || return "$status"
+  validate_smoke_image "$output_path" "local_cold"
+  validate_qwen_debug_log "$log_path" "local_cold"
 }
 
 run_server_load() {
@@ -406,6 +461,8 @@ run_server_warm() {
     "$encoder_count"
 
   [[ "$code" -ge 200 && "$code" -lt 300 ]] && [[ -s "$output_path" ]]
+  validate_smoke_image "$output_path" "server_warm_request"
+  validate_qwen_debug_log "$progress_path" "server_warm_request"
 }
 
 emit_plan() {
@@ -442,6 +499,14 @@ EOF
   [[ "$(count_encoder_loads "$tmp/progress.jsonl")" == "1" ]] || die "self-test encoder count failed"
   [[ "$(detect_vae_mode "$tmp/progress.jsonl")" == "gpu" ]] || die "self-test VAE mode failed"
   json_row "self_test" "dry" "$tmp/out.bin" "$tmp/progress.jsonl" "gpu" 1 3 200 5 1 1 | jq -e '.duration_ms == 2 and .transformer_reload_count == 1' >/dev/null
+  if command -v magick >/dev/null 2>&1; then
+    magick -size 2x2 xc:black "$tmp/black.png"
+    magick -size 2x2 xc:white "$tmp/white.png"
+    image_is_near_black "$tmp/black.png" || die "self-test near-black detection failed"
+    if image_is_near_black "$tmp/white.png"; then
+      die "self-test non-black detection failed"
+    fi
+  fi
   echo "self-test ok"
 }
 

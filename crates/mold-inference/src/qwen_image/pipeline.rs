@@ -131,6 +131,17 @@ struct Qwen2TextEncoderResidencyInput {
     required_vram_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct QwenTensorStats {
+    min: f32,
+    max: f32,
+    mean: f32,
+    nan_count: u64,
+    pos_inf_count: u64,
+    neg_inf_count: u64,
+    total: usize,
+}
+
 /// Check if a Qwen-Image safetensors checkpoint stores weights in FP8 (F8_E4M3).
 /// Uses filename pattern first, then dtype probing as fallback.
 fn safetensors_is_fp8(path: &Path) -> bool {
@@ -885,35 +896,101 @@ impl QwenImageEngine {
         }
     }
 
+    fn tensor_stats(tensor: &Tensor) -> Result<QwenTensorStats> {
+        let t = tensor.to_dtype(DType::F32)?;
+        let values = t.flatten_all()?.to_vec1::<f32>()?;
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        let mut sum = 0.0f64;
+        let mut finite_count = 0usize;
+        let mut nan_count = 0u64;
+        let mut pos_inf_count = 0u64;
+        let mut neg_inf_count = 0u64;
+        for value in &values {
+            if value.is_nan() {
+                nan_count += 1;
+            } else if *value == f32::INFINITY {
+                pos_inf_count += 1;
+            } else if *value == f32::NEG_INFINITY {
+                neg_inf_count += 1;
+            } else {
+                min = min.min(*value);
+                max = max.max(*value);
+                sum += *value as f64;
+                finite_count += 1;
+            }
+        }
+        let mean = if finite_count == 0 {
+            f32::NAN
+        } else {
+            (sum / finite_count as f64) as f32
+        };
+        if finite_count == 0 {
+            min = f32::NAN;
+            max = f32::NAN;
+        }
+        Ok(QwenTensorStats {
+            min,
+            max,
+            mean,
+            nan_count,
+            pos_inf_count,
+            neg_inf_count,
+            total: values.len(),
+        })
+    }
+
+    fn format_tensor_stats(name: &str, stats: QwenTensorStats) -> String {
+        format!(
+            "[qwen-debug] {name}: min={:.4} max={:.4} mean={:.4} NaN={}/{} ({:.1}%) +Inf={} -Inf={}",
+            stats.min,
+            stats.max,
+            stats.mean,
+            stats.nan_count,
+            stats.total,
+            stats.nan_count as f64 / stats.total.max(1) as f64 * 100.0,
+            stats.pos_inf_count,
+            stats.neg_inf_count
+        )
+    }
+
+    fn near_black_image_stats(stats: QwenTensorStats) -> bool {
+        if stats.nan_count > 0
+            || stats.pos_inf_count > 0
+            || stats.neg_inf_count > 0
+            || !stats.min.is_finite()
+            || !stats.max.is_finite()
+            || !stats.mean.is_finite()
+        {
+            return false;
+        }
+        let scale = if stats.max <= 1.0 { 1.0 } else { 255.0 };
+        stats.max <= 0.02 * scale && stats.mean <= 0.01 * scale
+    }
+
+    fn validate_qwen_tensor_boundary(name: &str, tensor: &Tensor) -> Result<QwenTensorStats> {
+        let stats = Self::tensor_stats(tensor)?;
+        if stats.nan_count > 0
+            || stats.pos_inf_count > 0
+            || stats.neg_inf_count > 0
+            || !stats.min.is_finite()
+            || !stats.max.is_finite()
+            || !stats.mean.is_finite()
+        {
+            bail!(
+                "Qwen diagnostic boundary '{name}' contains non-finite values: {}",
+                Self::format_tensor_stats(name, stats)
+            );
+        }
+        Ok(stats)
+    }
+
     fn debug_tensor_stats(name: &str, tensor: &Tensor) {
         if std::env::var_os("MOLD_QWEN_DEBUG").is_none() {
             return;
         }
-        let stats = || -> Result<String> {
-            let t = tensor.to_dtype(DType::F32)?;
-            let min = t.min_all()?.to_scalar::<f32>()?;
-            let max = t.max_all()?.to_scalar::<f32>()?;
-            let mean = t.mean_all()?.to_scalar::<f32>()?;
-            // NaN detection: x != x is true for NaN (IEEE 754)
-            let nan_count = t
-                .ne(&t)?
-                .to_dtype(DType::F32)?
-                .sum_all()?
-                .to_scalar::<f32>()? as u64;
-            let total = t.elem_count();
-            if nan_count > 0 {
-                Ok(format!(
-                    "[qwen-debug] {name}: min={min:.4} max={max:.4} mean={mean:.4} NaN={nan_count}/{total} ({:.1}%)",
-                    nan_count as f64 / total as f64 * 100.0
-                ))
-            } else {
-                Ok(format!(
-                    "[qwen-debug] {name}: min={min:.4} max={max:.4} mean={mean:.4}"
-                ))
-            }
-        };
-        match stats() {
-            Ok(msg) => eprintln!("{msg}"),
+        match Self::tensor_stats(tensor) {
+            Ok(stats) => eprintln!("{}", Self::format_tensor_stats(name, stats)),
             Err(err) => eprintln!("[qwen-debug] {name}: <failed: {err}>"),
         }
     }
@@ -2300,7 +2377,13 @@ impl QwenImageEngine {
                 Self::debug_tensor_stats(&format!("noise_pred[{step}]"), &noise_pred);
                 Self::debug_tensor_stats(&format!("latents[{step}]"), &latents);
             }
+            if step == 0 {
+                Self::validate_qwen_tensor_boundary("noise_pred[0]", &noise_pred)?;
+            }
             latents = scheduler.step(&noise_pred, &latents)?;
+            if step == num_steps - 1 {
+                Self::validate_qwen_tensor_boundary("latents_final", &latents)?;
+            }
 
             // Inpainting: blend preserved regions back at current noise level
             if let Some(ref ctx) = inpaint_ctx {
@@ -2399,10 +2482,23 @@ impl QwenImageEngine {
             prefer_tiled,
             || self.load_vae(&Device::Cpu, DType::F32),
         )?;
+        Self::validate_qwen_tensor_boundary("image_pre_postprocess", &image)?;
         Self::debug_tensor_stats("image_pre_postprocess", &image);
         let image = postprocess_image(&image)?;
+        let post_stats = Self::validate_qwen_tensor_boundary("image_postprocess", &image)?;
         Self::debug_tensor_stats("image_postprocess", &image);
         let image = image.i(0)?;
+        if Self::near_black_image_stats(post_stats) {
+            self.base.progress.info(
+                "Qwen diagnostic: decoded image is near-black after VAE postprocess; inspect MOLD_QWEN_DEBUG tensor stats to separate denoise math from VAE decode",
+            );
+            tracing::warn!(
+                min = post_stats.min,
+                max = post_stats.max,
+                mean = post_stats.mean,
+                "Qwen decoded image is near-black after VAE postprocess"
+            );
+        }
 
         self.base
             .progress
@@ -3159,10 +3255,17 @@ impl QwenImageEngine {
                         &encoder_attention_mask,
                     )?
                 };
+                if step == 0 || step == num_steps / 2 || step == num_steps - 1 {
+                    Self::debug_tensor_stats(&format!("noise_pred[{step}]"), &noise_pred);
+                    Self::debug_tensor_stats(&format!("latents[{step}]"), &latents);
+                }
                 if step == 0 {
-                    Self::debug_tensor_stats("noise_pred", &noise_pred);
+                    Self::validate_qwen_tensor_boundary("noise_pred[0]", &noise_pred)?;
                 }
                 latents = scheduler.step(&noise_pred, &latents)?;
+                if step == num_steps - 1 {
+                    Self::validate_qwen_tensor_boundary("latents_final", &latents)?;
+                }
 
                 // Inpainting: blend preserved regions back at current noise level
                 if let Some(ref ctx) = inpaint_ctx {
@@ -3255,10 +3358,23 @@ impl QwenImageEngine {
                 },
             )?
         };
+        Self::validate_qwen_tensor_boundary("image_pre_postprocess", &image)?;
         Self::debug_tensor_stats("image_pre_postprocess", &image);
         let image = postprocess_image(&image)?;
+        let post_stats = Self::validate_qwen_tensor_boundary("image_postprocess", &image)?;
         Self::debug_tensor_stats("image_postprocess", &image);
         let image = image.i(0)?;
+        if Self::near_black_image_stats(post_stats) {
+            progress.info(
+                "Qwen diagnostic: decoded image is near-black after VAE postprocess; inspect MOLD_QWEN_DEBUG tensor stats to separate denoise math from VAE decode",
+            );
+            tracing::warn!(
+                min = post_stats.min,
+                max = post_stats.max,
+                mean = post_stats.mean,
+                "Qwen decoded image is near-black after VAE postprocess"
+            );
+        }
 
         progress.stage_done("VAE decode", vae_start.elapsed());
 
@@ -3909,6 +4025,75 @@ mod tests {
     #[test]
     fn qwen_is_oom_error_matches_cuda_memory_allocation_string() {
         assert!(QwenImageEngine::is_oom_error(&"cudaErrorMemoryAllocation"));
+    }
+
+    #[test]
+    fn qwen_debug_stats_counts_nan_and_inf() {
+        let tensor = Tensor::from_vec(
+            vec![0.0f32, 1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
+            Shape::from((5,)),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let stats = QwenImageEngine::tensor_stats(&tensor).unwrap();
+
+        assert_eq!(stats.total, 5);
+        assert_eq!(stats.nan_count, 1);
+        assert_eq!(stats.pos_inf_count, 1);
+        assert_eq!(stats.neg_inf_count, 1);
+        assert_eq!(stats.min, 0.0);
+        assert_eq!(stats.max, 1.0);
+        assert_eq!(stats.mean, 0.5);
+    }
+
+    #[test]
+    fn qwen_debug_stats_detects_near_black_postprocessed_image() {
+        let stats = QwenTensorStats {
+            min: 0.0,
+            max: 0.01,
+            mean: 0.004,
+            nan_count: 0,
+            pos_inf_count: 0,
+            neg_inf_count: 0,
+            total: 1024,
+        };
+
+        assert!(QwenImageEngine::near_black_image_stats(stats));
+    }
+
+    #[test]
+    fn qwen_debug_stats_does_not_flag_non_black_image() {
+        let stats = QwenTensorStats {
+            min: 0.0,
+            max: 0.75,
+            mean: 0.18,
+            nan_count: 0,
+            pos_inf_count: 0,
+            neg_inf_count: 0,
+            total: 1024,
+        };
+
+        assert!(!QwenImageEngine::near_black_image_stats(stats));
+    }
+
+    #[test]
+    fn qwen_debug_stats_formats_progress_message() {
+        let stats = QwenTensorStats {
+            min: 0.0,
+            max: 1.0,
+            mean: 0.5,
+            nan_count: 2,
+            pos_inf_count: 1,
+            neg_inf_count: 1,
+            total: 10,
+        };
+
+        let message = QwenImageEngine::format_tensor_stats("sample", stats);
+
+        assert!(message.contains("NaN=2/10"));
+        assert!(message.contains("+Inf=1"));
+        assert!(message.contains("-Inf=1"));
     }
 
     #[test]
