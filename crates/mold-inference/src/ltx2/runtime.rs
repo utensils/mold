@@ -26,7 +26,9 @@ use super::model::{
     audio_temporal_positions, cross_modal_temporal_positions, derive_stage1_render_shape,
     get_pixel_coords, scale_video_time_to_seconds, spatially_upsample_frames,
     temporally_upsample_frames_x2, video_token_positions,
-    video_transformer::{Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig},
+    video_transformer::{
+        Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig, LtxPreparedStaticInputs,
+    },
     video_vae::{AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig},
     AudioLatentShape, AudioPatchifier, DecodedAudio, Ltx2AudioDecoder, Ltx2AudioEncoder,
     Ltx2VocoderWithBwe, SpatioTemporalScaleFactors, VideoLatentPatchifier, VideoLatentShape,
@@ -3045,6 +3047,21 @@ fn run_real_distilled_stage(
             MultiModalGuider::new(audio_params, uncond_audio_context.cloned()),
         )
     });
+    let multimodal_static_batch = match multimodal_guiders.as_ref() {
+        Some((video_guider, audio_guider)) => Some(prepare_static_multimodal_guidance_batch(
+            transformer,
+            cond_context,
+            audio_context,
+            cond_mask,
+            uncond_mask,
+            video_self_attention_mask.as_ref(),
+            video_positions,
+            audio_positions,
+            video_guider,
+            audio_guider,
+        )?),
+        None => None,
+    };
     let cond_static_inputs = if multimodal_guiders.is_none() {
         Some(transformer.prepare_static_inputs(
             cond_context,
@@ -3139,21 +3156,18 @@ fn run_real_distilled_stage(
             Option<Tensor>,
             Option<Tensor>,
         ) = if let Some((video_guider, audio_guider)) = multimodal_guiders.as_ref() {
+            let static_batch = multimodal_static_batch
+                .as_ref()
+                .context("missing static multimodal guidance batch")?;
             let (video_denoised, audio_denoised) = multimodal_guided_denoise_step(
                 transformer,
                 &video_latents,
                 audio_latents.as_ref(),
-                cond_context,
-                audio_context,
-                cond_mask,
-                uncond_mask,
+                static_batch,
                 &video_sigma,
                 &video_timestep,
                 audio_sigma.as_ref(),
                 audio_timestep.as_ref(),
-                video_self_attention_mask.as_ref(),
-                video_positions,
-                audio_positions,
                 video_guider,
                 audio_guider,
                 step_idx,
@@ -4020,64 +4034,28 @@ fn cat_optional_batches(parts: &[Option<Tensor>]) -> Result<Option<Tensor>> {
     Tensor::cat(&tensors, 0).map(Some).map_err(Into::into)
 }
 
-fn split_batch_chunk(tensor: &Tensor, index: usize, chunk: usize) -> Result<Tensor> {
-    tensor.narrow(0, index * chunk, chunk).map_err(Into::into)
+struct StaticMultimodalGuidanceBatch {
+    batched_video_context: Tensor,
+    batched_audio_context: Option<Tensor>,
+    batched_video_mask: Option<Tensor>,
+    batched_audio_mask: Option<Tensor>,
+    perturbations: BatchedPerturbationConfig,
+    repeat_count: usize,
+    cond_index: usize,
+    uncond_index: Option<usize>,
+    perturbed_index: Option<usize>,
+    modality_index: Option<usize>,
+    static_inputs: Option<LtxPreparedStaticInputs>,
 }
 
-fn sigma_scale_for_sample(sample: &Tensor, sigma: &Tensor) -> Result<Tensor> {
-    match sigma.rank() {
-        1 => sigma
-            .reshape((sample.dim(0)?, 1, 1))?
-            .to_device(sample.device())?
-            .to_dtype(sample.dtype())
-            .map_err(Into::into),
-        2 => sigma
-            .reshape((sample.dim(0)?, sample.dim(1)?, 1))?
-            .to_device(sample.device())?
-            .to_dtype(sample.dtype())
-            .map_err(Into::into),
-        other => anyhow::bail!("expected sigma rank 1 or 2, got rank {other}"),
-    }
-}
-
-fn denoised_from_velocity_with_sigma(
-    sample: &Tensor,
-    velocity: &Tensor,
-    sigma: &Tensor,
-) -> Result<Tensor> {
-    let sigma = sigma_scale_for_sample(sample, sigma)?;
-    let velocity = if velocity.dtype() == sample.dtype() {
-        velocity.clone()
-    } else {
-        velocity.to_dtype(sample.dtype())?
-    };
-    sample
-        .broadcast_sub(&velocity.broadcast_mul(&sigma)?)
-        .map_err(Into::into)
-}
-
-fn multimodal_guided_denoise_step(
-    transformer: &Ltx2AvTransformer3DModel,
-    video_latents: &Tensor,
-    audio_latents: Option<&Tensor>,
+fn build_static_multimodal_guidance_batch(
     cond_context: &Tensor,
     audio_context: Option<&Tensor>,
     cond_mask: Option<&Tensor>,
     uncond_mask: Option<&Tensor>,
-    video_sigma: &Tensor,
-    video_timestep: &Tensor,
-    audio_sigma: Option<&Tensor>,
-    audio_timestep: Option<&Tensor>,
-    video_self_attention_mask: Option<&Tensor>,
-    video_positions: &Tensor,
-    audio_positions: Option<&Tensor>,
     video_guider: &MultiModalGuider,
     audio_guider: &MultiModalGuider,
-    step_idx: usize,
-) -> Result<(Tensor, Option<Tensor>)> {
-    let video_skip = video_guider.should_skip_step(step_idx);
-    let audio_skip = audio_guider.should_skip_step(step_idx);
-
+) -> Result<StaticMultimodalGuidanceBatch> {
     let mut video_contexts = vec![cond_context.clone()];
     let mut audio_contexts = vec![audio_context.cloned()];
     let mut video_masks = vec![cond_mask.cloned()];
@@ -4142,55 +4120,154 @@ fn multimodal_guided_denoise_step(
     }
 
     let repeat_count = perturbations.len();
-    let batch = video_latents.dim(0)?;
     let batched_video_context = Tensor::cat(&video_contexts.iter().collect::<Vec<_>>(), 0)?;
     let batched_audio_context = cat_optional_batches(&audio_contexts)?;
     let batched_video_mask = cat_optional_batches(&video_masks)?;
     let batched_audio_mask = cat_optional_batches(&audio_masks)?;
-    let batched_video_latents = repeat_batch(video_latents, repeat_count)?;
-    let batched_video_sigma = repeat_batch(video_sigma, repeat_count)?;
-    let batched_video_timestep = repeat_batch(video_timestep, repeat_count)?;
-    let batched_video_positions = repeat_batch(video_positions, repeat_count)?;
-    let batched_video_self_attention_mask = video_self_attention_mask
-        .map(|mask| repeat_batch(mask, repeat_count))
-        .transpose()?;
-    let batched_audio_latents = audio_latents
-        .map(|latents| repeat_batch(latents, repeat_count))
-        .transpose()?;
-    let batched_audio_sigma = audio_sigma
-        .map(|sigma| repeat_batch(sigma, repeat_count))
-        .transpose()?;
-    let batched_audio_timestep = audio_timestep
-        .map(|timestep| repeat_batch(timestep, repeat_count))
-        .transpose()?;
-    let batched_audio_positions = audio_positions
-        .map(|positions| repeat_batch(positions, repeat_count))
-        .transpose()?;
+    Ok(StaticMultimodalGuidanceBatch {
+        batched_video_context,
+        batched_audio_context,
+        batched_video_mask,
+        batched_audio_mask,
+        perturbations: BatchedPerturbationConfig::new(perturbations),
+        repeat_count,
+        cond_index,
+        uncond_index,
+        perturbed_index,
+        modality_index,
+        static_inputs: None,
+    })
+}
 
-    let (all_video_velocity, all_audio_velocity) = transformer.forward(
-        &batched_video_latents,
-        batched_audio_latents.as_ref(),
-        &batched_video_context,
-        batched_audio_context.as_ref(),
-        &batched_video_sigma,
-        &batched_video_timestep,
-        batched_audio_sigma.as_ref(),
-        batched_audio_timestep.as_ref(),
-        batched_video_mask.as_ref(),
-        batched_audio_mask.as_ref(),
+#[allow(clippy::too_many_arguments)]
+fn prepare_static_multimodal_guidance_batch(
+    transformer: &Ltx2AvTransformer3DModel,
+    cond_context: &Tensor,
+    audio_context: Option<&Tensor>,
+    cond_mask: Option<&Tensor>,
+    uncond_mask: Option<&Tensor>,
+    video_self_attention_mask: Option<&Tensor>,
+    video_positions: &Tensor,
+    audio_positions: Option<&Tensor>,
+    video_guider: &MultiModalGuider,
+    audio_guider: &MultiModalGuider,
+) -> Result<StaticMultimodalGuidanceBatch> {
+    let mut batch = build_static_multimodal_guidance_batch(
+        cond_context,
+        audio_context,
+        cond_mask,
+        uncond_mask,
+        video_guider,
+        audio_guider,
+    )?;
+    let batched_video_self_attention_mask = video_self_attention_mask
+        .map(|mask| repeat_batch(mask, batch.repeat_count))
+        .transpose()?;
+    let batched_video_positions = repeat_batch(video_positions, batch.repeat_count)?;
+    let batched_audio_positions = audio_positions
+        .map(|positions| repeat_batch(positions, batch.repeat_count))
+        .transpose()?;
+    let static_inputs = transformer.prepare_static_inputs(
+        &batch.batched_video_context,
+        batch.batched_audio_context.as_ref(),
+        batch.batched_video_mask.as_ref(),
+        batch.batched_audio_mask.as_ref(),
         batched_video_self_attention_mask.as_ref(),
         None,
         &batched_video_positions,
         batched_audio_positions.as_ref(),
-        Some(&BatchedPerturbationConfig::new(perturbations)),
+    )?;
+    batch.static_inputs = Some(static_inputs);
+    Ok(batch)
+}
+
+fn split_batch_chunk(tensor: &Tensor, index: usize, chunk: usize) -> Result<Tensor> {
+    tensor.narrow(0, index * chunk, chunk).map_err(Into::into)
+}
+
+fn sigma_scale_for_sample(sample: &Tensor, sigma: &Tensor) -> Result<Tensor> {
+    match sigma.rank() {
+        1 => sigma
+            .reshape((sample.dim(0)?, 1, 1))?
+            .to_device(sample.device())?
+            .to_dtype(sample.dtype())
+            .map_err(Into::into),
+        2 => sigma
+            .reshape((sample.dim(0)?, sample.dim(1)?, 1))?
+            .to_device(sample.device())?
+            .to_dtype(sample.dtype())
+            .map_err(Into::into),
+        other => anyhow::bail!("expected sigma rank 1 or 2, got rank {other}"),
+    }
+}
+
+fn denoised_from_velocity_with_sigma(
+    sample: &Tensor,
+    velocity: &Tensor,
+    sigma: &Tensor,
+) -> Result<Tensor> {
+    let sigma = sigma_scale_for_sample(sample, sigma)?;
+    let velocity = if velocity.dtype() == sample.dtype() {
+        velocity.clone()
+    } else {
+        velocity.to_dtype(sample.dtype())?
+    };
+    sample
+        .broadcast_sub(&velocity.broadcast_mul(&sigma)?)
+        .map_err(Into::into)
+}
+
+fn multimodal_guided_denoise_step(
+    transformer: &Ltx2AvTransformer3DModel,
+    video_latents: &Tensor,
+    audio_latents: Option<&Tensor>,
+    static_batch: &StaticMultimodalGuidanceBatch,
+    video_sigma: &Tensor,
+    video_timestep: &Tensor,
+    audio_sigma: Option<&Tensor>,
+    audio_timestep: Option<&Tensor>,
+    video_guider: &MultiModalGuider,
+    audio_guider: &MultiModalGuider,
+    step_idx: usize,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let video_skip = video_guider.should_skip_step(step_idx);
+    let audio_skip = audio_guider.should_skip_step(step_idx);
+
+    let batch = video_latents.dim(0)?;
+    let batched_video_latents = repeat_batch(video_latents, static_batch.repeat_count)?;
+    let batched_video_sigma = repeat_batch(video_sigma, static_batch.repeat_count)?;
+    let batched_video_timestep = repeat_batch(video_timestep, static_batch.repeat_count)?;
+    let batched_audio_latents = audio_latents
+        .map(|latents| repeat_batch(latents, static_batch.repeat_count))
+        .transpose()?;
+    let batched_audio_sigma = audio_sigma
+        .map(|sigma| repeat_batch(sigma, static_batch.repeat_count))
+        .transpose()?;
+    let batched_audio_timestep = audio_timestep
+        .map(|timestep| repeat_batch(timestep, static_batch.repeat_count))
+        .transpose()?;
+    let static_inputs = static_batch
+        .static_inputs
+        .as_ref()
+        .context("missing prepared static multimodal guidance inputs")?;
+
+    let (all_video_velocity, all_audio_velocity) = transformer.forward_with_static_inputs(
+        &batched_video_latents,
+        batched_audio_latents.as_ref(),
+        &batched_video_sigma,
+        &batched_video_timestep,
+        batched_audio_sigma.as_ref(),
+        batched_audio_timestep.as_ref(),
+        static_inputs,
+        Some(&static_batch.perturbations),
     )?;
 
     let cond_video = denoised_from_velocity_with_sigma(
         video_latents,
-        &split_batch_chunk(&all_video_velocity, cond_index, batch)?,
+        &split_batch_chunk(&all_video_velocity, static_batch.cond_index, batch)?,
         video_timestep,
     )?;
-    let uncond_video = if let Some(index) = uncond_index {
+    let uncond_video = if let Some(index) = static_batch.uncond_index {
         denoised_from_velocity_with_sigma(
             video_latents,
             &split_batch_chunk(&all_video_velocity, index, batch)?,
@@ -4199,7 +4276,7 @@ fn multimodal_guided_denoise_step(
     } else {
         cond_video.clone()
     };
-    let perturbed_video = if let Some(index) = perturbed_index {
+    let perturbed_video = if let Some(index) = static_batch.perturbed_index {
         denoised_from_velocity_with_sigma(
             video_latents,
             &split_batch_chunk(&all_video_velocity, index, batch)?,
@@ -4208,7 +4285,7 @@ fn multimodal_guided_denoise_step(
     } else {
         cond_video.clone()
     };
-    let modality_video = if let Some(index) = modality_index {
+    let modality_video = if let Some(index) = static_batch.modality_index {
         denoised_from_velocity_with_sigma(
             video_latents,
             &split_batch_chunk(&all_video_velocity, index, batch)?,
@@ -4228,19 +4305,14 @@ fn multimodal_guided_denoise_step(
         )?
     };
 
-    let audio_denoised = match (
-        audio_latents,
-        all_audio_velocity.as_ref(),
-        audio_timestep,
-        batched_audio_positions.as_ref(),
-    ) {
-        (Some(audio_latents), Some(all_audio_velocity), Some(audio_timestep), Some(_)) => {
+    let audio_denoised = match (audio_latents, all_audio_velocity.as_ref(), audio_timestep) {
+        (Some(audio_latents), Some(all_audio_velocity), Some(audio_timestep)) => {
             let cond_audio = denoised_from_velocity_with_sigma(
                 audio_latents,
-                &split_batch_chunk(all_audio_velocity, cond_index, batch)?,
+                &split_batch_chunk(all_audio_velocity, static_batch.cond_index, batch)?,
                 audio_timestep,
             )?;
-            let uncond_audio = if let Some(index) = uncond_index {
+            let uncond_audio = if let Some(index) = static_batch.uncond_index {
                 denoised_from_velocity_with_sigma(
                     audio_latents,
                     &split_batch_chunk(all_audio_velocity, index, batch)?,
@@ -4249,7 +4321,7 @@ fn multimodal_guided_denoise_step(
             } else {
                 cond_audio.clone()
             };
-            let perturbed_audio = if let Some(index) = perturbed_index {
+            let perturbed_audio = if let Some(index) = static_batch.perturbed_index {
                 denoised_from_velocity_with_sigma(
                     audio_latents,
                     &split_batch_chunk(all_audio_velocity, index, batch)?,
@@ -4258,7 +4330,7 @@ fn multimodal_guided_denoise_step(
             } else {
                 cond_audio.clone()
             };
-            let modality_audio = if let Some(index) = modality_index {
+            let modality_audio = if let Some(index) = static_batch.modality_index {
                 denoised_from_velocity_with_sigma(
                     audio_latents,
                     &split_batch_chunk(all_audio_velocity, index, batch)?,
@@ -4941,10 +5013,10 @@ mod tests {
 
     use super::{
         apply_stage_video_conditioning, apply_video_token_replacements,
-        build_video_conditioning_self_attention_mask, clean_latents_for_conditioning,
-        convert_velocity_to_x0, convert_x0_to_velocity, decoded_video_to_frames,
-        effective_native_guidance_scale, emit_denoise_progress, guided_velocity_from_cfg,
-        keyframe_only_conditioning, ltx2_video_transformer_config,
+        build_static_multimodal_guidance_batch, build_video_conditioning_self_attention_mask,
+        clean_latents_for_conditioning, convert_velocity_to_x0, convert_x0_to_velocity,
+        decoded_video_to_frames, effective_native_guidance_scale, emit_denoise_progress,
+        guided_velocity_from_cfg, keyframe_only_conditioning, ltx2_video_transformer_config,
         reapply_stage_video_conditioning, resize_tail_frames_to_pixel_shape,
         should_inspect_step_velocity, source_image_only_conditioning,
         strip_appended_video_conditioning, Ltx2RuntimeSession, Ltx2VaeLatentStats,
@@ -5729,6 +5801,96 @@ mod tests {
 
         assert!(super::stage_requires_unconditional_context(&plan, 0).unwrap());
         assert!(!super::stage_requires_unconditional_context(&plan, 1).unwrap());
+    }
+
+    #[test]
+    fn multimodal_guidance_batch_prebuilds_static_contexts_once() {
+        let device = Device::Cpu;
+        let cond_video = Tensor::zeros((1, 2, 3), DType::F32, &device).unwrap();
+        let uncond_video = Tensor::ones((1, 2, 3), DType::F32, &device).unwrap();
+        let cond_audio = Tensor::zeros((1, 4, 5), DType::F32, &device).unwrap();
+        let video_guider = crate::ltx2::guidance::MultiModalGuider::new(
+            crate::ltx2::guidance::MultiModalGuiderParams {
+                cfg_scale: 4.0,
+                stg_scale: 1.5,
+                stg_blocks: vec![2, 3],
+                modality_scale: 1.25,
+                ..Default::default()
+            },
+            Some(uncond_video),
+        );
+        let audio_guider = crate::ltx2::guidance::MultiModalGuider::new(
+            crate::ltx2::guidance::MultiModalGuiderParams {
+                stg_scale: 0.5,
+                stg_blocks: vec![7],
+                ..Default::default()
+            },
+            None,
+        );
+
+        let batch = build_static_multimodal_guidance_batch(
+            &cond_video,
+            Some(&cond_audio),
+            None,
+            None,
+            &video_guider,
+            &audio_guider,
+        )
+        .unwrap();
+
+        assert_eq!(batch.repeat_count, 4);
+        assert_eq!(batch.cond_index, 0);
+        assert_eq!(batch.uncond_index, Some(1));
+        assert_eq!(batch.perturbed_index, Some(2));
+        assert_eq!(batch.modality_index, Some(3));
+        assert_eq!(batch.batched_video_context.dims3().unwrap(), (4, 2, 3));
+        assert_eq!(
+            batch
+                .batched_audio_context
+                .as_ref()
+                .unwrap()
+                .dims3()
+                .unwrap(),
+            (4, 4, 5)
+        );
+        assert_eq!(
+            batch.perturbations.mask_values(
+                crate::ltx2::guidance::PerturbationType::SkipVideoSelfAttention,
+                2
+            ),
+            vec![1.0, 1.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn multimodal_guidance_batch_omits_unneeded_optional_contexts() {
+        let device = Device::Cpu;
+        let cond_video = Tensor::zeros((1, 2, 3), DType::F32, &device).unwrap();
+        let video_guider = crate::ltx2::guidance::MultiModalGuider::new(
+            crate::ltx2::guidance::MultiModalGuiderParams::default(),
+            None,
+        );
+        let audio_guider = crate::ltx2::guidance::MultiModalGuider::new(
+            crate::ltx2::guidance::MultiModalGuiderParams::default(),
+            None,
+        );
+
+        let batch = build_static_multimodal_guidance_batch(
+            &cond_video,
+            None,
+            None,
+            None,
+            &video_guider,
+            &audio_guider,
+        )
+        .unwrap();
+
+        assert_eq!(batch.repeat_count, 1);
+        assert_eq!(batch.uncond_index, None);
+        assert_eq!(batch.batched_video_context.dims3().unwrap(), (1, 2, 3));
+        assert!(batch.batched_audio_context.is_none());
+        assert!(batch.batched_video_mask.is_none());
+        assert!(batch.batched_audio_mask.is_none());
     }
 
     #[test]
