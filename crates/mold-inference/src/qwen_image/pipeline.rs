@@ -20,8 +20,9 @@ use candle_transformers::models::z_image::postprocess_image;
 use candle_transformers::quantized_var_builder;
 use mold_core::{fit_to_target_area, GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokenizers::Tokenizer;
 
 use super::quantized_transformer::QuantizedQwenImageTransformer2DModel;
 use super::sampling::{image_seq_len, QwenImageScheduler};
@@ -330,6 +331,7 @@ pub struct QwenImageEngine {
     /// rebuild-elision follow-up.
     #[allow(dead_code)]
     active_lora_fingerprint: Vec<QwenImageLoraFingerprint>,
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
 }
 
 /// Order-sensitive fingerprint of a single LoRA adapter (path-hash + scale).
@@ -829,6 +831,7 @@ impl QwenImageEngine {
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
         offload: bool,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
@@ -837,7 +840,17 @@ impl QwenImageEngine {
             pending_placement: None,
             pending_loras: Vec::new(),
             active_lora_fingerprint: Vec::new(),
+            shared_pool,
         }
+    }
+
+    fn load_text_tokenizer(&self, tokenizer_path: &Path) -> Result<Arc<Tokenizer>> {
+        if let Some(shared_pool) = &self.shared_pool {
+            return shared_pool.lock().unwrap().load_tokenizer(tokenizer_path);
+        }
+        Tokenizer::from_file(tokenizer_path)
+            .map(Arc::new)
+            .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))
     }
 
     fn encode_prompt_cached(
@@ -1375,24 +1388,27 @@ impl QwenImageEngine {
         &self,
         resolved: &ResolvedQwen2TextEncoder,
         tokenizer_path: &std::path::PathBuf,
+        tokenizer: Arc<Tokenizer>,
         device: &Device,
         dtype: DType,
         preload_weights: bool,
     ) -> Result<encoders::qwen2_text::Qwen2TextEncoder> {
         if resolved.is_gguf {
             if preload_weights {
-                encoders::qwen2_text::Qwen2TextEncoder::load_gguf(
+                encoders::qwen2_text::Qwen2TextEncoder::load_gguf_with_tokenizer(
                     &resolved.paths[0],
                     tokenizer_path,
+                    Some(tokenizer),
                     device,
                     dtype,
                     &resolved.vision_paths,
                     &self.base.progress,
                 )
             } else {
-                encoders::qwen2_text::Qwen2TextEncoder::prepare_gguf(
+                encoders::qwen2_text::Qwen2TextEncoder::prepare_gguf_with_tokenizer(
                     &resolved.paths[0],
                     tokenizer_path,
+                    Some(tokenizer),
                     device,
                     dtype,
                     &resolved.vision_paths,
@@ -1406,18 +1422,20 @@ impl QwenImageEngine {
                     .info("Detected FP8 text encoder — loading as BF16 on GPU");
             }
             if preload_weights {
-                encoders::qwen2_text::Qwen2TextEncoder::load_bf16(
+                encoders::qwen2_text::Qwen2TextEncoder::load_bf16_with_tokenizer(
                     &resolved.paths,
                     tokenizer_path,
+                    Some(tokenizer),
                     device,
                     dtype,
                     self.is_edit_family(),
                     &self.base.progress,
                 )
             } else {
-                encoders::qwen2_text::Qwen2TextEncoder::prepare_bf16(
+                encoders::qwen2_text::Qwen2TextEncoder::prepare_bf16_with_tokenizer(
                     &resolved.paths,
                     tokenizer_path,
+                    Some(tokenizer),
                     device,
                     dtype,
                     self.is_edit_family(),
@@ -1637,9 +1655,11 @@ impl QwenImageEngine {
         };
         self.base.progress.stage_start(&te_label);
         let te_start = Instant::now();
+        let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
         let text_encoder = self.load_text_encoder(
             &resolved_text_encoder,
             &text_tokenizer_path,
+            text_tokenizer,
             &te_device,
             te_dtype,
             preload_text_encoder,
@@ -1819,9 +1839,11 @@ impl QwenImageEngine {
 
                 self.base.progress.stage_start(&te_label);
                 let te_start = Instant::now();
+                let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
                 let mut text_encoder = self.load_text_encoder(
                     &resolved_text_encoder,
                     &text_tokenizer_path,
+                    text_tokenizer,
                     &te_device,
                     te_dtype,
                     true,
@@ -3109,11 +3131,14 @@ impl InferenceEngine for QwenImageEngine {
 mod tests {
     use super::*;
     use crate::engine::LoadStrategy;
+    use crate::shared_pool::SharedPool;
     use candle_core::Shape;
     use mold_core::ModelPaths;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokenizers::models::bpe::BPE;
 
     fn temp_test_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -3333,6 +3358,7 @@ mod tests {
             LoadStrategy::Sequential,
             0,
             false,
+            None,
         );
 
         assert!(engine.detect_is_quantized());
@@ -3534,6 +3560,7 @@ mod tests {
             LoadStrategy::Sequential,
             0,
             false,
+            None,
         );
 
         let resolved = engine
@@ -3865,6 +3892,7 @@ mod tests {
             LoadStrategy::Sequential,
             0,
             false,
+            None,
         );
 
         assert_eq!(engine.transformer_paths(), vec![shard_a, shard_b]);
@@ -3892,6 +3920,7 @@ mod tests {
             LoadStrategy::Sequential,
             0,
             false,
+            None,
         );
         assert_eq!(sharded.validate_paths().unwrap(), tokenizer);
         assert!(!sharded.detect_is_quantized());
@@ -3902,6 +3931,7 @@ mod tests {
             LoadStrategy::Sequential,
             0,
             false,
+            None,
         );
         assert!(quantized.detect_is_quantized());
 
@@ -3922,11 +3952,47 @@ mod tests {
             LoadStrategy::Sequential,
             0,
             false,
+            None,
         );
 
         let err = engine.validate_paths().unwrap_err();
         assert!(err.to_string().contains("text tokenizer path required"));
 
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn qwen_image_loads_text_tokenizer_through_shared_pool() {
+        let dir = temp_test_dir("mold-qwen-tokenizer-pool");
+        let tokenizer_path = dir.join("tokenizer.json");
+        tokenizers::Tokenizer::new(BPE::default())
+            .save(&tokenizer_path, false)
+            .unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&tokenizer_path)
+            .unwrap();
+
+        let engine = QwenImageEngine::new(
+            "qwen-image:q4".to_string(),
+            qwen_image_model_paths(
+                dir.join("transformer.gguf"),
+                vec![],
+                dir.join("vae.safetensors"),
+                Some(tokenizer_path.clone()),
+            ),
+            LoadStrategy::Sequential,
+            0,
+            false,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_text_tokenizer(&tokenizer_path).unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
     }
 

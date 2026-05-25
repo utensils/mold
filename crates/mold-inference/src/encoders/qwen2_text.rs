@@ -13,6 +13,7 @@ use candle_nn::VarBuilder;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokenizers::Tokenizer;
 
 use super::park;
 use super::qwen2_text_gguf::GgufQwen2TextEncoder;
@@ -586,7 +587,7 @@ impl Qwen2TextModel {
 pub(crate) struct Qwen2TextEncoder {
     pub model: Option<Qwen2TextModel>,
     vision: Option<Qwen2VisionModel>,
-    pub tokenizer: tokenizers::Tokenizer,
+    pub tokenizer: Arc<Tokenizer>,
     pub device: Device,
     pub on_gpu: bool,
     pub is_quantized: bool,
@@ -602,8 +603,9 @@ pub(crate) struct Qwen2TextEncoder {
 }
 
 impl Qwen2TextEncoder {
-    fn load_tokenizer(tokenizer_path: &PathBuf) -> Result<tokenizers::Tokenizer> {
-        tokenizers::Tokenizer::from_file(tokenizer_path)
+    fn load_tokenizer(tokenizer_path: &PathBuf) -> Result<Arc<Tokenizer>> {
+        Tokenizer::from_file(tokenizer_path)
+            .map(Arc::new)
             .map_err(|e| anyhow::anyhow!("failed to load Qwen2.5 tokenizer: {e}"))
     }
 
@@ -628,6 +630,7 @@ impl Qwen2TextEncoder {
         Self::build_vision(vb)
     }
 
+    #[allow(dead_code)]
     pub fn prepare_bf16(
         encoder_paths: &[PathBuf],
         tokenizer_path: &PathBuf,
@@ -635,8 +638,28 @@ impl Qwen2TextEncoder {
         dtype: DType,
         enable_vision: bool,
     ) -> Result<Self> {
+        Self::prepare_bf16_with_tokenizer(
+            encoder_paths,
+            tokenizer_path,
+            None,
+            device,
+            dtype,
+            enable_vision,
+        )
+    }
+
+    pub fn prepare_bf16_with_tokenizer(
+        encoder_paths: &[PathBuf],
+        tokenizer_path: &PathBuf,
+        cached_tokenizer: Option<Arc<Tokenizer>>,
+        device: &Device,
+        dtype: DType,
+        enable_vision: bool,
+    ) -> Result<Self> {
         let config = Qwen2TextEncoderConfig::qwen_image();
-        let tokenizer = Self::load_tokenizer(tokenizer_path)?;
+        let tokenizer = cached_tokenizer
+            .map(Ok)
+            .unwrap_or_else(|| Self::load_tokenizer(tokenizer_path))?;
         let on_gpu = crate::device::is_gpu(device);
         Ok(Self {
             model: None,
@@ -657,6 +680,7 @@ impl Qwen2TextEncoder {
         })
     }
 
+    #[allow(dead_code)]
     pub fn prepare_gguf(
         gguf_path: &Path,
         tokenizer_path: &PathBuf,
@@ -664,8 +688,28 @@ impl Qwen2TextEncoder {
         dtype: DType,
         vision_encoder_paths: &[PathBuf],
     ) -> Result<Self> {
+        Self::prepare_gguf_with_tokenizer(
+            gguf_path,
+            tokenizer_path,
+            None,
+            device,
+            dtype,
+            vision_encoder_paths,
+        )
+    }
+
+    pub fn prepare_gguf_with_tokenizer(
+        gguf_path: &Path,
+        tokenizer_path: &PathBuf,
+        cached_tokenizer: Option<Arc<Tokenizer>>,
+        device: &Device,
+        dtype: DType,
+        vision_encoder_paths: &[PathBuf],
+    ) -> Result<Self> {
         let config = Qwen2TextEncoderConfig::qwen_image();
-        let tokenizer = Self::load_tokenizer(tokenizer_path)?;
+        let tokenizer = cached_tokenizer
+            .map(Ok)
+            .unwrap_or_else(|| Self::load_tokenizer(tokenizer_path))?;
         let on_gpu = crate::device::is_gpu(device);
         Ok(Self {
             model: None,
@@ -682,9 +726,31 @@ impl Qwen2TextEncoder {
         })
     }
 
+    #[allow(dead_code)]
     pub fn load_bf16(
         encoder_paths: &[PathBuf],
         tokenizer_path: &PathBuf,
+        device: &Device,
+        dtype: DType,
+        enable_vision: bool,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<Self> {
+        Self::load_bf16_with_tokenizer(
+            encoder_paths,
+            tokenizer_path,
+            None,
+            device,
+            dtype,
+            enable_vision,
+            progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_bf16_with_tokenizer(
+        encoder_paths: &[PathBuf],
+        tokenizer_path: &PathBuf,
+        cached_tokenizer: Option<Arc<Tokenizer>>,
         device: &Device,
         dtype: DType,
         enable_vision: bool,
@@ -697,8 +763,14 @@ impl Qwen2TextEncoder {
             "Qwen2.5-VL encoder",
             progress,
         )?;
-        let mut encoder =
-            Self::prepare_bf16(encoder_paths, tokenizer_path, device, dtype, enable_vision)?;
+        let mut encoder = Self::prepare_bf16_with_tokenizer(
+            encoder_paths,
+            tokenizer_path,
+            cached_tokenizer,
+            device,
+            dtype,
+            enable_vision,
+        )?;
         if enable_vision {
             encoder.vision = Some(Self::build_vision(vb.clone())?);
         }
@@ -709,6 +781,7 @@ impl Qwen2TextEncoder {
         Ok(encoder)
     }
 
+    #[allow(dead_code)]
     pub fn load_gguf(
         gguf_path: &Path,
         tokenizer_path: &PathBuf,
@@ -717,9 +790,30 @@ impl Qwen2TextEncoder {
         vision_encoder_paths: &[PathBuf],
         progress: &crate::progress::ProgressReporter,
     ) -> Result<Self> {
-        let mut encoder = Self::prepare_gguf(
+        Self::load_gguf_with_tokenizer(
             gguf_path,
             tokenizer_path,
+            None,
+            device,
+            dtype,
+            vision_encoder_paths,
+            progress,
+        )
+    }
+
+    pub fn load_gguf_with_tokenizer(
+        gguf_path: &Path,
+        tokenizer_path: &PathBuf,
+        cached_tokenizer: Option<Arc<Tokenizer>>,
+        device: &Device,
+        dtype: DType,
+        vision_encoder_paths: &[PathBuf],
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<Self> {
+        let mut encoder = Self::prepare_gguf_with_tokenizer(
+            gguf_path,
+            tokenizer_path,
+            cached_tokenizer,
             device,
             dtype,
             vision_encoder_paths,

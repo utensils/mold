@@ -280,6 +280,7 @@ pub fn create_engine_with_pool(
             load_strategy,
             gpu_ordinal,
             offload,
+            shared_pool,
         ))),
         "qwen-image-edit" => Ok(Box::new(QwenImageEngine::new(
             model_name,
@@ -287,6 +288,7 @@ pub fn create_engine_with_pool(
             load_strategy,
             gpu_ordinal,
             offload,
+            shared_pool,
         ))),
         "ltx-video" | "ltx_video" => {
             let t5_variant = std::env::var("MOLD_T5_VARIANT")
