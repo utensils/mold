@@ -54,8 +54,8 @@ explicitly unsupported for this family.
 
 ### Offloading
 
-`--offload` can drop FLUX, Flux.2, and Z-Image BF16 VRAM usage from roughly
-18-24 GB to roughly 2-4 GB, but it is usually 3-5x slower.
+`--offload` can drop FLUX, Flux.2, Z-Image, and SD3 BF16 VRAM usage from
+roughly 18-24 GB to roughly 2-4 GB, but it is usually 3-5x slower.
 
 Use it when a model otherwise would not fit. Do not use it when the model
 already fits comfortably in VRAM.
