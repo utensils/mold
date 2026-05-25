@@ -1004,6 +1004,34 @@ impl FluxEngine {
         }
     }
 
+    /// Load VAE weights through the shared CPU tensor cache when available.
+    fn load_vae_var_builder<'a>(
+        &self,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+    ) -> Result<VarBuilder<'a>> {
+        if let Some(pool) = &self.shared_pool {
+            let cached = pool
+                .lock()
+                .unwrap()
+                .load_cpu_tensors(std::slice::from_ref(&self.base.paths.vae))?;
+            return Ok(crate::encoders::park::varbuilder_from_parked(
+                cached.as_ref(),
+                dtype,
+                device,
+            ));
+        }
+
+        crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            dtype,
+            device,
+            component,
+            &self.base.progress,
+        )
+    }
+
     fn restore_prompt_cache(
         progress: &ProgressReporter,
         prompt_cache: &Mutex<LruCache<String, CachedTensorPair>>,
@@ -1270,13 +1298,7 @@ impl FluxEngine {
         tracing::info!(path = %self.base.paths.vae.display(), "loading VAE on GPU...");
         // Resolve VAE precision once at load time — see LoadedFlux::vae_dtype.
         let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&self.base.paths.vae),
-            vae_dtype,
-            &vae_device,
-            "VAE",
-            &self.base.progress,
-        )?;
+        let vae_vb = self.load_vae_var_builder(vae_dtype, &vae_device, "VAE")?;
         let vae_cfg = if is_schnell {
             flux::autoencoder::Config::schnell()
         } else {
@@ -2053,13 +2075,7 @@ impl FluxEngine {
         } else {
             self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_stage = Instant::now();
-            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                std::slice::from_ref(&self.base.paths.vae),
-                vae_dtype,
-                &device,
-                "VAE",
-                &self.base.progress,
-            )?;
+            let vae_vb = self.load_vae_var_builder(vae_dtype, &device, "VAE")?;
             let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
             self.base
                 .progress

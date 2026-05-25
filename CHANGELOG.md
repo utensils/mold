@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **LTX-Video now actually reuses the server shared tokenizer pool.** The factory already passed `SharedPool` into `LtxVideoEngine`; its T5-XXL load path now consumes the pooled tokenizer handle so switching back into LTX-Video avoids reparsing the shared T5 tokenizer, matching the FLUX tokenizer-cache behavior.
+- **FLUX VAE loads now use a shared CPU tensor cache.** When the server provides `SharedPool`, FLUX loads the shared VAE safetensors into CPU RAM once and rebuilds the VAE from that cached tensor map on later engine loads, avoiding repeat disk reads while still placing tensors on the requested runtime device.
 - **`.envrc` now sources `nix-direnv` 3.1.1 for cached devshell loads.** Replaces the stdlib `use flake` (which re-evaluates the flake on every `cd` into the project) with the nix-direnv variant that hashes `flake.nix` + `flake.lock` and caches the resolved environment under `.direnv/`. Warm-path shell entry on this repo drops from ~10.6 s to ~0.3 s (35× faster on macOS). Cold path (first entry, or after `flake.lock` changes) is unchanged. The `.envrc` follows upstream's self-bootstrap pattern: `has nix_direnv_version || source_url …` — contributors who already have nix-direnv installed via home-manager (`programs.direnv.nix-direnv.enable = true;`) skip the network fetch; everyone else gets it pinned by SRI hash on first entry and cached under `~/.config/direnv/`.
 
 ### Added
