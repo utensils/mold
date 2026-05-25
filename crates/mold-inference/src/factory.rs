@@ -259,6 +259,7 @@ pub fn create_engine_with_pool(
                     qwen3_variant,
                     load_strategy,
                     gpu_ordinal,
+                    shared_pool,
                 )?))
             } else {
                 Ok(Box::new(Flux2Engine::new(
@@ -267,6 +268,7 @@ pub fn create_engine_with_pool(
                     qwen3_variant,
                     load_strategy,
                     gpu_ordinal,
+                    shared_pool,
                 )))
             }
         }
