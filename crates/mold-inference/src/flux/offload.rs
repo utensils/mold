@@ -232,6 +232,20 @@ fn tensor_bytes(t: &Tensor) -> usize {
     t.elem_count() * t.dtype().size_in_bytes()
 }
 
+fn prefetch_status_label(requested: bool, stream_ready: bool, buffer_ready: bool) -> &'static str {
+    if !requested {
+        return "off";
+    }
+    if stream_ready && buffer_ready {
+        // The CUDA stream and destination buffer exist, but candle-core-mold
+        // still routes Tensor::to_device() through the primary stream. Until
+        // a stream-aware tensor copy API exists, this is not real async H2D.
+        "scaffold-only"
+    } else {
+        "unavailable"
+    }
+}
+
 // ── Prefetch stream + buffer init ────────────────────────────────────────────
 
 /// Bring up a non-default CUDA stream + a reusable byte buffer sized to the
@@ -918,13 +932,28 @@ impl OffloadedFluxTransformer {
             (None, None)
         };
 
+        let prefetch_label = {
+            #[cfg(feature = "cuda")]
+            {
+                prefetch_status_label(
+                    prefetch_on,
+                    prefetch_stream.is_some(),
+                    prefetch_buffer.is_some(),
+                )
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                prefetch_status_label(prefetch_on, false, false)
+            }
+        };
+
         // Single-line INFO so users can confirm both levers are running.
         let pinned_gb = tracker.used_bytes() as f64 / 1_000_000_000.0;
         if pinned_regions.is_empty() {
             progress.info(&format!(
                 "FLUX offload: prefetch={} (largest block {:.1} MB) — pinning skipped \
                  (no CUDA / unsupported tensors)",
-                if prefetch_on { "on" } else { "off" },
+                prefetch_label,
                 largest_block as f64 / 1_000_000.0,
             ));
         } else {
@@ -933,7 +962,7 @@ impl OffloadedFluxTransformer {
                  (largest block {:.1} MB)",
                 pinned_gb,
                 pinned_regions.len(),
-                if prefetch_on { "on" } else { "off" },
+                prefetch_label,
                 largest_block as f64 / 1_000_000.0,
             ));
         }
@@ -1066,5 +1095,18 @@ impl StemMlpEmbedder {
 impl Module for StemMlpEmbedder {
     fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
         xs.apply(&self.in_layer)?.silu()?.apply(&self.out_layer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prefetch_status_label;
+
+    #[test]
+    fn prefetch_status_label_distinguishes_scaffold_from_real_async() {
+        assert_eq!(prefetch_status_label(false, false, false), "off");
+        assert_eq!(prefetch_status_label(true, false, false), "unavailable");
+        assert_eq!(prefetch_status_label(true, true, false), "unavailable");
+        assert_eq!(prefetch_status_label(true, true, true), "scaffold-only");
     }
 }
