@@ -12,7 +12,7 @@
 //! Loads from HuggingFace diffusers `Flux2Transformer2DModel` safetensors format.
 
 use candle_core::{DType, IndexOp, Module, Result, Tensor, D};
-use candle_nn::{LayerNorm, RmsNorm, VarBuilder};
+use candle_nn::{LayerNorm, Linear, RmsNorm, VarBuilder};
 use std::sync::{Arc, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -188,6 +188,46 @@ impl Flux2Linear {
             Ok(Self::Standard(candle_nn::Linear::new(weight, bias)))
         }
     }
+
+    fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
+        match self {
+            Self::Standard(linear) => Ok(Self::Standard(linear_to_device(linear, device)?)),
+            Self::Fp8 {
+                weight,
+                scale,
+                bias,
+            } => Ok(Self::Fp8 {
+                weight: weight.to_device(device)?,
+                scale: scale.as_ref().map(|t| t.to_device(device)).transpose()?,
+                bias: bias.as_ref().map(|t| t.to_device(device)).transpose()?,
+            }),
+            Self::Nvfp4Streaming { .. } => {
+                candle_core::bail!("Flux.2 block offload does not support NVFP4 streaming layers")
+            }
+        }
+    }
+}
+
+fn linear_to_device(linear: &Linear, device: &candle_core::Device) -> Result<Linear> {
+    let weight = linear.weight().to_device(device)?;
+    let bias = linear
+        .bias()
+        .map(|bias| bias.to_device(device))
+        .transpose()?;
+    Ok(Linear::new(weight, bias))
+}
+
+fn layer_norm_to_device(norm: &LayerNorm, device: &candle_core::Device) -> Result<LayerNorm> {
+    let weight = norm.weight().to_device(device)?;
+    match norm.bias() {
+        Some(bias) => Ok(LayerNorm::new(weight, bias.to_device(device)?, 1e-6)),
+        None => Ok(LayerNorm::new_no_bias(weight, 1e-6)),
+    }
+}
+
+fn rms_norm_to_device(norm: &RmsNorm, device: &candle_core::Device) -> Result<RmsNorm> {
+    let inner = norm.clone().into_inner();
+    Ok(RmsNorm::new(inner.weight().to_device(device)?, 1e-6))
 }
 
 /// Dequantize the FULL un-sliced NVFP4 weight to a BF16 tensor on CPU. Pure
@@ -515,6 +555,13 @@ impl MlpEmbedder {
             out_layer,
         })
     }
+
+    fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
+        Ok(Self {
+            in_layer: self.in_layer.to_device(device)?,
+            out_layer: self.out_layer.to_device(device)?,
+        })
+    }
 }
 
 impl candle_core::Module for MlpEmbedder {
@@ -551,6 +598,12 @@ impl Modulation1 {
         Ok(Self { lin })
     }
 
+    fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
+        Ok(Self {
+            lin: self.lin.to_device(device)?,
+        })
+    }
+
     fn forward(&self, vec_: &Tensor) -> Result<ModulationOut> {
         let ys = vec_
             .silu()?
@@ -577,6 +630,12 @@ impl Modulation2 {
     fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
         let lin = flux2_linear_no_bias(dim, 6 * dim, vb.pp("linear"))?;
         Ok(Self { lin })
+    }
+
+    fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
+        Ok(Self {
+            lin: self.lin.to_device(device)?,
+        })
     }
 
     fn forward(&self, vec_: &Tensor) -> Result<(ModulationOut, ModulationOut)> {
@@ -616,6 +675,14 @@ impl Mlp {
         let lin1 = flux2_linear_no_bias(in_sz, mlp_sz * 2, vb.pp("linear_in"))?;
         let lin2 = flux2_linear_no_bias(mlp_sz, in_sz, vb.pp("linear_out"))?;
         Ok(Self { lin1, lin2, mlp_sz })
+    }
+
+    fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
+        Ok(Self {
+            lin1: self.lin1.to_device(device)?,
+            lin2: self.lin2.to_device(device)?,
+            mlp_sz: self.mlp_sz,
+        })
     }
 }
 
@@ -691,6 +758,18 @@ impl DoubleAttention {
             .transpose(1, 2)?;
         Ok((q, k, v))
     }
+
+    fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
+        Ok(Self {
+            to_q: self.to_q.to_device(device)?,
+            to_k: self.to_k.to_device(device)?,
+            to_v: self.to_v.to_device(device)?,
+            to_out: self.to_out.to_device(device)?,
+            norm_q: rms_norm_to_device(&self.norm_q, device)?,
+            norm_k: rms_norm_to_device(&self.norm_k, device)?,
+            num_heads: self.num_heads,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -719,6 +798,19 @@ impl DoubleStreamBlock {
             txt_norm1: layer_norm(h_sz, &vb)?,
             txt_norm2: layer_norm(h_sz, &vb)?,
             txt_mlp: Mlp::new(h_sz, mlp_sz, vb.pp("ff_context"))?,
+        })
+    }
+
+    fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
+        Ok(Self {
+            img_norm1: layer_norm_to_device(&self.img_norm1, device)?,
+            img_attn: self.img_attn.to_device(device)?,
+            img_norm2: layer_norm_to_device(&self.img_norm2, device)?,
+            img_mlp: self.img_mlp.to_device(device)?,
+            txt_attn: self.txt_attn.to_device(device)?,
+            txt_norm1: layer_norm_to_device(&self.txt_norm1, device)?,
+            txt_norm2: layer_norm_to_device(&self.txt_norm2, device)?,
+            txt_mlp: self.txt_mlp.to_device(device)?,
         })
     }
 
@@ -806,6 +898,19 @@ impl SingleStreamBlock {
         })
     }
 
+    fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
+        Ok(Self {
+            linear1: self.linear1.to_device(device)?,
+            linear2: self.linear2.to_device(device)?,
+            norm_q: rms_norm_to_device(&self.norm_q, device)?,
+            norm_k: rms_norm_to_device(&self.norm_k, device)?,
+            pre_norm: layer_norm_to_device(&self.pre_norm, device)?,
+            h_sz: self.h_sz,
+            mlp_sz: self.mlp_sz,
+            num_heads: self.num_heads,
+        })
+    }
+
     fn forward(&self, xs: &Tensor, mod_out: &ModulationOut, pe: &Tensor) -> Result<Tensor> {
         let x_mod = mod_out.scale_shift(&xs.apply(&self.pre_norm)?)?;
         let x_mod = x_mod.apply(&self.linear1)?;
@@ -849,6 +954,14 @@ impl LastLayer {
         })
     }
 
+    fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
+        Ok(Self {
+            norm_final: layer_norm_to_device(&self.norm_final, device)?,
+            linear: self.linear.to_device(device)?,
+            ada_ln_modulation: self.ada_ln_modulation.to_device(device)?,
+        })
+    }
+
     fn forward(&self, xs: &Tensor, vec: &Tensor) -> Result<Tensor> {
         let chunks = vec.silu()?.apply(&self.ada_ln_modulation)?.chunk(2, 1)?;
         // Diffusers `AdaLayerNormContinuous` convention: scale first, shift second.
@@ -887,6 +1000,140 @@ pub struct Flux2Transformer {
     double_blocks: Vec<DoubleStreamBlock>,
     single_blocks: Vec<SingleStreamBlock>,
     final_layer: LastLayer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flux2StreamingBlock {
+    Double(usize),
+    Single(usize),
+}
+
+pub(crate) fn flux2_streaming_block_plan(cfg: &Flux2Config) -> Vec<Flux2StreamingBlock> {
+    let mut blocks = Vec::with_capacity(cfg.depth + cfg.depth_single_blocks);
+    blocks.extend((0..cfg.depth).map(Flux2StreamingBlock::Double));
+    blocks.extend((0..cfg.depth_single_blocks).map(Flux2StreamingBlock::Single));
+    blocks
+}
+
+pub(crate) struct OffloadedFlux2Transformer {
+    block_plan: Vec<Flux2StreamingBlock>,
+    img_in: Flux2Linear,
+    txt_in: Flux2Linear,
+    time_in: MlpEmbedder,
+    vector_in: Option<MlpEmbedder>,
+    guidance_in: Option<MlpEmbedder>,
+    pe_embedder: EmbedNd,
+    double_mod_img: Modulation2,
+    double_mod_txt: Modulation2,
+    single_mod: Modulation1,
+    double_blocks: Vec<DoubleStreamBlock>,
+    single_blocks: Vec<SingleStreamBlock>,
+    final_layer: LastLayer,
+    device: candle_core::Device,
+}
+
+impl OffloadedFlux2Transformer {
+    pub(crate) fn new(
+        cfg: &Flux2Config,
+        cpu_vb: VarBuilder,
+        device: &candle_core::Device,
+    ) -> Result<Self> {
+        let block_plan = flux2_streaming_block_plan(cfg);
+        let dense = Flux2Transformer::new(cfg, cpu_vb)?;
+        Self::from_dense(dense, block_plan, device)
+    }
+
+    fn from_dense(
+        dense: Flux2Transformer,
+        block_plan: Vec<Flux2StreamingBlock>,
+        device: &candle_core::Device,
+    ) -> Result<Self> {
+        Ok(Self {
+            block_plan,
+            img_in: dense.img_in.to_device(device)?,
+            txt_in: dense.txt_in.to_device(device)?,
+            time_in: dense.time_in.to_device(device)?,
+            vector_in: dense
+                .vector_in
+                .as_ref()
+                .map(|embedder| embedder.to_device(device))
+                .transpose()?,
+            guidance_in: dense
+                .guidance_in
+                .as_ref()
+                .map(|embedder| embedder.to_device(device))
+                .transpose()?,
+            pe_embedder: dense.pe_embedder,
+            double_mod_img: dense.double_mod_img.to_device(device)?,
+            double_mod_txt: dense.double_mod_txt.to_device(device)?,
+            single_mod: dense.single_mod.to_device(device)?,
+            double_blocks: dense.double_blocks,
+            single_blocks: dense.single_blocks,
+            final_layer: dense.final_layer.to_device(device)?,
+            device: device.clone(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward(
+        &self,
+        img: &Tensor,
+        img_ids: &Tensor,
+        txt: &Tensor,
+        txt_ids: &Tensor,
+        timesteps: &Tensor,
+        y: &Tensor,
+        guidance: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        if txt.rank() != 3 || img.rank() != 3 {
+            candle_core::bail!("expected rank 3, got txt={} img={}", txt.rank(), img.rank())
+        }
+        let device = &self.device;
+        let dtype = img.dtype();
+        let img = img.to_device(device)?;
+        let txt = txt.to_device(device)?;
+        let img_ids = img_ids.to_device(device)?;
+        let txt_ids = txt_ids.to_device(device)?;
+        let timesteps = timesteps.to_device(device)?;
+        let y = y.to_device(device)?;
+        let guidance = guidance.map(|g| g.to_device(device)).transpose()?;
+        let pe = {
+            let ids = Tensor::cat(&[&txt_ids, &img_ids], 1)?;
+            ids.apply(&self.pe_embedder)?
+        };
+        let mut txt = txt.apply(&self.txt_in)?;
+        let mut img = img.apply(&self.img_in)?;
+        let mut vec_ = timestep_embedding(&timesteps, 256, dtype)?.apply(&self.time_in)?;
+
+        if let (Some(g_in), Some(guidance)) = (self.guidance_in.as_ref(), guidance.as_ref()) {
+            vec_ = (vec_ + timestep_embedding(guidance, 256, dtype)?.apply(g_in))?;
+        }
+        if let Some(vec_in) = self.vector_in.as_ref() {
+            vec_ = (vec_ + y.apply(vec_in))?;
+        }
+
+        let (img_mod1, img_mod2) = self.double_mod_img.forward(&vec_)?;
+        let (txt_mod1, txt_mod2) = self.double_mod_txt.forward(&vec_)?;
+        debug_assert_eq!(
+            self.block_plan.len(),
+            self.double_blocks.len() + self.single_blocks.len()
+        );
+
+        for block in &self.double_blocks {
+            let block = block.to_device(device)?;
+            (img, txt) =
+                block.forward(&img, &txt, &img_mod1, &img_mod2, &txt_mod1, &txt_mod2, &pe)?;
+        }
+
+        let single_mod = self.single_mod.forward(&vec_)?;
+        let mut img = Tensor::cat(&[&txt, &img], 1)?;
+        for block in &self.single_blocks {
+            let block = block.to_device(device)?;
+            img = block.forward(&img, &single_mod, &pe)?;
+        }
+        let img = img.i((.., txt.dim(1)?..))?;
+        self.final_layer.forward(&img, &vec_)
+    }
 }
 
 impl Flux2Transformer {
@@ -1018,6 +1265,7 @@ impl Flux2Transformer {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Flux2TransformerWrapper {
     BF16(Flux2Transformer),
+    Offloaded(OffloadedFlux2Transformer),
     Quantized(super::quantized_transformer::QuantizedFlux2Transformer),
 }
 
@@ -1054,6 +1302,15 @@ impl Flux2TransformerWrapper {
 
             let pred = match self {
                 Self::BF16(m) => m.forward(
+                    &img,
+                    img_ids,
+                    txt,
+                    txt_ids,
+                    &t_vec,
+                    vec_,
+                    Some(&guidance_tensor),
+                )?,
+                Self::Offloaded(m) => m.forward(
                     &img,
                     img_ids,
                     txt,
@@ -1138,6 +1395,24 @@ mod tests {
         assert_eq!(cfg.context_in_dim, 12288);
         assert_eq!(cfg.context_in_dim, 4096 * 3); // Qwen3 hidden_size=4096, stacked 3x
         assert!(!cfg.guidance_embed); // distilled
+    }
+
+    #[test]
+    fn flux2_streaming_block_plan_preserves_reference_order() {
+        let mut cfg = Flux2Config::klein();
+        cfg.depth = 2;
+        cfg.depth_single_blocks = 3;
+
+        assert_eq!(
+            flux2_streaming_block_plan(&cfg),
+            vec![
+                Flux2StreamingBlock::Double(0),
+                Flux2StreamingBlock::Double(1),
+                Flux2StreamingBlock::Single(0),
+                Flux2StreamingBlock::Single(1),
+                Flux2StreamingBlock::Single(2),
+            ]
+        );
     }
 
     #[test]

@@ -150,7 +150,7 @@ selected LoRA — clicking a chip appends the phrase to the active prompt.
   diffusers (PEFT canonical), Kohya/sd-scripts, OneTrainer, and PEFT
   default-adapter naming. Z-Image fused-QKV LoRAs (cv:2904324) splat
   across the split `attention.to_q/to_k/to_v` candle tensors automatically.
-- BF16 models on 24GB cards auto-use block-level offloading (3-5x slower but fits in VRAM)
+- FLUX, Flux.2, and Z-Image BF16 models can use block-level offloading (3-5x slower but fits in VRAM)
 - GGUF Q4/Q6 work at 1024x1024; Q8 works at 512x512 (Q8 + LoRA at 1024x1024 is tight on 24GB, see #95)
 
 **Per-model config defaults** (config.toml):
@@ -677,7 +677,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_PORT`                 | `7680`                  | Server port                                                                |
 | `MOLD_LOG`                  | `warn`                  | Log level (trace/debug/info/warn/error)                                    |
 | `MOLD_EAGER`                | unset                   | Set `1` to keep all components loaded                                      |
-| `MOLD_OFFLOAD`              | unset                   | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower)           |
+| `MOLD_OFFLOAD`              | unset                   | Set `1` to force CPU↔GPU block streaming for FLUX, Flux.2, and Z-Image BF16 paths (reduces VRAM, slower) |
 | `MOLD_RESERVE_VRAM_MB`      | 400 (Linux), 600 (Win), 0 (macOS) | OS / cuBLAS workspace reserve subtracted from `free_vram_bytes` before any budget decision. `0` disables |
 | `MOLD_KEEP_TE_RAM`          | unset                   | Set `1` to park text encoders on CPU between requests instead of dropping them (FP16/BF16 only; GGUF falls through to drop+reload). Disabled on Metal. |
 | `MOLD_LORA_BYPASS`          | `auto`                  | FLUX LoRA application path: `auto` (bypass when LoRAs present, covers offload AND GGUF/quantized via `quantized_transformer.rs`), `on` (always bypass), `off` (legacy merge / `gguf_lora_var_builder`) |

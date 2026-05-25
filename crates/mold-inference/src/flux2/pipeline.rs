@@ -500,6 +500,15 @@ impl Flux2Engine {
                     cfg,
                 )?;
             let backend: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(backend);
+            if self.offload && !has_lora {
+                let flux_vb = candle_nn::VarBuilder::from_backend(backend, gpu_dtype, Device::Cpu);
+                return Ok((
+                    Flux2TransformerWrapper::Offloaded(
+                        super::transformer::OffloadedFlux2Transformer::new(cfg, flux_vb, device)?,
+                    ),
+                    "Loading Flux.2 transformer (offload, BF16, single-file remap)",
+                ));
+            }
             let backend = if has_lora {
                 let adapters =
                     super::lora::load_lora_adapters(&self.pending_loras, &self.base.progress)?;
@@ -540,7 +549,7 @@ impl Flux2Engine {
             } else {
                 vec![self.base.paths.transformer.clone()]
             };
-            let flux_vb = if has_lora {
+            let (flux_vb, offloaded_label) = if has_lora {
                 // Build our own mmap-backed SimpleBackend so we can wrap with
                 // `Flux2LoraBackend`. The progress reporting drops to a single
                 // info line — the legacy progress bar is keyed to candle's
@@ -605,16 +614,41 @@ impl Flux2Engine {
                     &self.base.progress,
                     None,
                 )?;
-                candle_nn::VarBuilder::from_backend(wrapped, gpu_dtype, device.clone())
+                (
+                    candle_nn::VarBuilder::from_backend(wrapped, gpu_dtype, device.clone()),
+                    None,
+                )
+            } else if self.offload {
+                (
+                    crate::weight_loader::load_safetensors_with_progress(
+                        &xformer_paths,
+                        gpu_dtype,
+                        &Device::Cpu,
+                        "Flux.2 transformer (offload blocks)",
+                        &self.base.progress,
+                    )?,
+                    Some("Loading Flux.2 transformer (offload, BF16)"),
+                )
             } else {
-                crate::weight_loader::load_safetensors_with_progress(
-                    &xformer_paths,
-                    gpu_dtype,
-                    device,
-                    "Flux.2 transformer",
-                    &self.base.progress,
-                )?
+                (
+                    crate::weight_loader::load_safetensors_with_progress(
+                        &xformer_paths,
+                        gpu_dtype,
+                        device,
+                        "Flux.2 transformer",
+                        &self.base.progress,
+                    )?,
+                    None,
+                )
             };
+            if let Some(label) = offloaded_label {
+                return Ok((
+                    Flux2TransformerWrapper::Offloaded(
+                        super::transformer::OffloadedFlux2Transformer::new(cfg, flux_vb, device)?,
+                    ),
+                    label,
+                ));
+            }
             let label = if has_lora {
                 "Loading Flux.2 transformer (GPU, BF16 + LoRA)"
             } else {
@@ -914,11 +948,7 @@ impl Flux2Engine {
         match flux2_offload_decision(self.offload, is_gguf, !self.pending_loras.is_empty()) {
             Flux2OffloadDecision::Disabled => {}
             Flux2OffloadDecision::Unsupported(reason) => bail!("{reason}"),
-            Flux2OffloadDecision::Selected => bail!(
-                "Flux.2 block-level offload was selected, but BF16 transformer block \
-                 streaming is not implemented yet; use a quantized Flux.2 variant or \
-                 run without --offload"
-            ),
+            Flux2OffloadDecision::Selected => {}
         }
 
         if let Some(warning) = check_memory_budget(&self.base.paths, LoadStrategy::Sequential) {
@@ -1861,6 +1891,102 @@ mod tests {
             Flux2OffloadDecision::Unsupported(reason)
                 if reason.contains("LoRA")
         ));
+    }
+
+    #[test]
+    fn flux2_selected_bf16_offload_reaches_runtime_loader() {
+        let dir = temp_test_dir("mold-flux2-offload-loader");
+        let transformer = touch(&dir, "transformer.safetensors");
+        let vae = touch(&dir, "vae.safetensors");
+        let encoder = touch(&dir, "encoder.safetensors");
+        let tokenizer = touch(&dir, "tokenizer.json");
+        let mut engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            ModelPaths {
+                transformer,
+                transformer_shards: vec![],
+                vae,
+                spatial_upscaler: None,
+                temporal_upscaler: None,
+                distilled_lora: None,
+                t5_encoder: None,
+                clip_encoder: None,
+                t5_tokenizer: None,
+                clip_tokenizer: None,
+                clip_encoder_2: None,
+                clip_tokenizer_2: None,
+                text_encoder_files: vec![encoder],
+                text_tokenizer: Some(tokenizer),
+                decoder: None,
+            },
+            None,
+            LoadStrategy::Sequential,
+            0,
+            true,
+            None,
+        );
+        let cfg = engine.resolve_config();
+        let txt_emb = Tensor::zeros((1, 1, cfg.context_in_dim), DType::F32, &Device::Cpu).unwrap();
+        engine.prompt_cache.lock().unwrap().insert(
+            prompt_text_key("a cat"),
+            CachedTensor::from_tensor(&txt_emb).unwrap(),
+        );
+        let req = GenerateRequest {
+            prompt: "a cat".to_string(),
+            negative_prompt: None,
+            model: "flux2-klein:bf16".to_string(),
+            width: 64,
+            height: 64,
+            steps: 1,
+            guidance: 0.0,
+            seed: Some(1),
+            batch_size: 1,
+            output_format: None,
+            embed_metadata: None,
+            scheduler: None,
+            cfg_plus: None,
+            source_image: None,
+            edit_images: None,
+            strength: 1.0,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            audio_file_path: None,
+            source_video: None,
+            source_video_path: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: Some(mold_core::types::DevicePlacement {
+                text_encoders: mold_core::types::DeviceRef::Cpu,
+                advanced: Some(mold_core::types::AdvancedPlacement {
+                    transformer: mold_core::types::DeviceRef::Cpu,
+                    vae: mold_core::types::DeviceRef::Cpu,
+                    ..Default::default()
+                }),
+            }),
+        };
+
+        let err = engine.generate_sequential(&req).unwrap_err().to_string();
+
+        assert!(
+            !err.contains("streaming is not implemented yet"),
+            "selected BF16 offload must reach the runtime loader, got: {err}"
+        );
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
