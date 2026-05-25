@@ -3,6 +3,7 @@
 //! Architecture: T5-XXL text encoder → LTXVideoTransformer3DModel → 3D Causal VAE → APNG/GIF/WebP/MP4
 //! Follows the same patterns as Flux2Engine (drop-and-reload, VRAM management, progress).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -995,6 +996,32 @@ impl LtxVideoEngine {
         device: &Device,
         dtype: DType,
     ) -> Result<AutoencoderKLLtxVideo> {
+        let vb = self.load_vae_var_builder(dtype, device)?;
+        Ok(AutoencoderKLLtxVideo::new(preset.vae_config.clone(), vb)?)
+    }
+
+    fn load_vae_cpu_tensors(&self) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        if self.vae_in_checkpoint {
+            return Ok(None);
+        }
+        let Some(shared_pool) = &self.shared_pool else {
+            return Ok(None);
+        };
+        shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&self.base.paths.vae))
+    }
+
+    fn load_vae_var_builder<'a>(&self, dtype: DType, device: &Device) -> Result<VarBuilder<'a>> {
+        if let Some(tensors) = self.load_vae_cpu_tensors()? {
+            return Ok(crate::encoders::park::varbuilder_from_parked(
+                tensors.as_ref(),
+                dtype,
+                device,
+            ));
+        }
+
         // SAFETY: mmap'd safetensors file is immutable model data.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
@@ -1010,7 +1037,7 @@ impl LtxVideoEngine {
         } else {
             vb
         };
-        Ok(AutoencoderKLLtxVideo::new(preset.vae_config.clone(), vb)?)
+        Ok(vb)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1783,11 +1810,49 @@ mod tests {
     use super::{
         cast_latents_for_multiscale_upsampler, is_official_ltx_transformer_checkpoint,
         pack_initial_latents_for_second_pass, remap_official_ltx_transformer_key, unpack_latents,
-        LtxModelPreset, LtxPipelineMode, LATENT_CHANNELS, LTX_098_DISTILLED_SECOND_PASS_SIGMAS,
-        PATCH_SIZE, PATCH_SIZE_T,
+        LtxModelPreset, LtxPipelineMode, LtxVideoEngine, LATENT_CHANNELS,
+        LTX_098_DISTILLED_SECOND_PASS_SIGMAS, PATCH_SIZE, PATCH_SIZE_T,
     };
+    use crate::engine::LoadStrategy;
+    use crate::shared_pool::SharedPool;
     use candle_core::{DType, Device, Tensor};
-    use std::path::Path;
+    use mold_core::ModelPaths;
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn ltx_video_model_paths(dir: &Path, vae: PathBuf) -> ModelPaths {
+        ModelPaths {
+            transformer: dir.join("transformer.safetensors"),
+            transformer_shards: vec![],
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: Some(dir.join("t5.safetensors")),
+            clip_encoder: None,
+            t5_tokenizer: Some(dir.join("tokenizer.json")),
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![],
+            text_tokenizer: None,
+            decoder: None,
+        }
+    }
 
     #[test]
     fn decode_apng_round_trips_rgb_frames() {
@@ -1854,6 +1919,41 @@ mod tests {
             remap_official_ltx_transformer_key("caption_projection.linear_2.bias"),
             "model.diffusion_model.caption_projection.linear_2.bias"
         );
+    }
+
+    #[test]
+    fn ltx_video_loads_standalone_vae_tensors_through_shared_pool() {
+        let dir = temp_test_dir("mold-ltx-video-vae-pool");
+        let vae_path = dir.join("vae.safetensors");
+        let weight = 1.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "encoder.conv_in.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &weight).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &vae_path).unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+            .unwrap()
+            .unwrap();
+
+        let engine = LtxVideoEngine::new(
+            "ltx-video-0.9.6:bf16".to_string(),
+            ltx_video_model_paths(&dir, vae_path),
+            None,
+            LoadStrategy::Sequential,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_vae_cpu_tensors().unwrap().unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
