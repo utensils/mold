@@ -8,6 +8,7 @@ use candle_transformers::models::ltx_video::sampling::{
 };
 use image::{imageops, GenericImage, Rgb, RgbImage};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -217,9 +218,23 @@ fn prepare_render_prompt_inputs(
 struct Ltx2VaeLatentStats {
     mean: Tensor,
     std: Tensor,
+    broadcast_cache: Mutex<HashMap<Ltx2VaeLatentStatsBroadcastKey, (Tensor, Tensor)>>,
 }
 
 impl Ltx2VaeLatentStats {
+    fn from_tensors(mean: Tensor, std: Tensor) -> Self {
+        Self {
+            mean,
+            std,
+            broadcast_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_tensors_for_test(mean: Tensor, std: Tensor) -> Self {
+        Self::from_tensors(mean, std)
+    }
+
     fn load(plan: &Ltx2GeneratePlan, device: &candle_core::Device, dtype: DType) -> Result<Self> {
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
@@ -248,21 +263,53 @@ impl Ltx2VaeLatentStats {
             );
             Tensor::new(config.latents_std.as_slice(), device)?.to_dtype(dtype)?
         };
-        Ok(Self { mean, std })
+        Ok(Self::from_tensors(mean, std))
     }
 
-    fn normalize(&self, latents: &Tensor) -> Result<Tensor> {
+    fn broadcast_tensors_for(&self, latents: &Tensor) -> Result<((Tensor, Tensor), bool)> {
         let channels = latents.dim(1)?;
+        let key = Ltx2VaeLatentStatsBroadcastKey {
+            channels,
+            dtype: format!("{:?}", latents.dtype()),
+            device: format!("{:?}", latents.device()),
+        };
+        if let Some((mean, std)) = self
+            .broadcast_cache
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return Ok(((mean, std), true));
+        }
+
         let mean = self
             .mean
             .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+            .to_device(latents.device())?;
+        let mean = if mean.dtype() == latents.dtype() {
+            mean
+        } else {
+            mean.to_dtype(latents.dtype())?
+        };
         let std = self
             .std
             .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+            .to_device(latents.device())?;
+        let std = if std.dtype() == latents.dtype() {
+            std
+        } else {
+            std.to_dtype(latents.dtype())?
+        };
+        self.broadcast_cache
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(key, (mean.clone(), std.clone()));
+        Ok(((mean, std), false))
+    }
+
+    fn normalize(&self, latents: &Tensor) -> Result<Tensor> {
+        let ((mean, std), _) = self.broadcast_tensors_for(latents)?;
         latents
             .broadcast_sub(&mean)?
             .broadcast_div(&std)
@@ -270,22 +317,19 @@ impl Ltx2VaeLatentStats {
     }
 
     fn denormalize(&self, latents: &Tensor) -> Result<Tensor> {
-        let channels = latents.dim(1)?;
-        let mean = self
-            .mean
-            .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
-        let std = self
-            .std
-            .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+        let ((mean, std), _) = self.broadcast_tensors_for(latents)?;
         latents
             .broadcast_mul(&std)?
             .broadcast_add(&mean)
             .map_err(Into::into)
     }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct Ltx2VaeLatentStatsBroadcastKey {
+    channels: usize,
+    dtype: String,
+    device: String,
 }
 
 pub struct Ltx2RuntimeSession {
@@ -4903,9 +4947,9 @@ mod tests {
         keyframe_only_conditioning, ltx2_video_transformer_config,
         reapply_stage_video_conditioning, resize_tail_frames_to_pixel_shape,
         should_inspect_step_velocity, source_image_only_conditioning,
-        strip_appended_video_conditioning, Ltx2RuntimeSession, StageVideoConditioning,
-        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
-        LTX2_VIDEO_LATENT_CHANNELS,
+        strip_appended_video_conditioning, Ltx2RuntimeSession, Ltx2VaeLatentStats,
+        StageVideoConditioning, VideoTokenAppendCondition, VideoTokenReplacement,
+        LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoPixelShape;
@@ -5226,6 +5270,31 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn ltx2_vae_latent_stats_cache_reuses_broadcast_tensors() {
+        let device = candle_core::Device::Cpu;
+        let stats = Ltx2VaeLatentStats::from_tensors_for_test(
+            Tensor::new(&[1.0f32, 2.0], &device).unwrap(),
+            Tensor::new(&[2.0f32, 4.0], &device).unwrap(),
+        );
+        let latents = Tensor::from_vec(vec![3.0f32, 10.0], (1, 2, 1, 1, 1), &device).unwrap();
+
+        let ((mean, std), first_hit) = stats.broadcast_tensors_for(&latents).unwrap();
+        let ((mean_again, std_again), second_hit) = stats.broadcast_tensors_for(&latents).unwrap();
+        let normalized = stats.normalize(&latents).unwrap();
+
+        assert!(!first_hit);
+        assert!(second_hit);
+        assert_eq!(mean.dims5().unwrap(), (1, 2, 1, 1, 1));
+        assert_eq!(std.dims5().unwrap(), (1, 2, 1, 1, 1));
+        assert_eq!(format!("{:?}", mean_again.device()), format!("{device:?}"));
+        assert_eq!(std_again.dtype(), DType::F32);
+        assert_eq!(
+            normalized.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![1.0, 2.0]
+        );
     }
 
     fn rebuild_execution_graph(plan: &mut Ltx2GeneratePlan, req: &GenerateRequest) {
