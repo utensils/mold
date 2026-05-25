@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **LTX-2 CUDA unload now runs a reclaim rung after dropping runtime state.** Native LTX-2 unload drops the retained runtime session before resetting the assigned CUDA primary context, giving OOM recovery and explicit model eviction the same hard reclaim path while CPU fallback unloads remain no-ops.
 - **LTX-2 / LTX-2.3 frame counts now respect the temporal RoPE budget.** Requests whose stage-1 frame count exceeds 153 frames now fail validation with an explicit "temporal RoPE budget" error before inference starts, preventing over-budget 19B/22B runs from producing rainbow/static noise instead of prompt-relevant video. Long clips can still use `--temporal-upscale x2` when the stage-1 render stays within the budget ([#226](https://github.com/utensils/mold/issues/226)).
 - **Server OOM diagnostics are now family-aware.** Image requests no longer get video-only `--frames` advice; SD1.5 1024x1024 failures now call out the requested resolution, the 512x512 default/native target, and the fact that checkpoint size is not peak VRAM because activations, VAE decode workspace, CUDA workspaces, and resident cache also count. Preflight budget rejections likewise suggest lowering `--width`/`--height` and `--batch` before variant/offload advice.
 

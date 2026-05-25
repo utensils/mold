@@ -356,6 +356,10 @@ pub struct Ltx2RuntimeSession {
     /// GPU ordinal inherited from `Ltx2Engine`. Used for the deferred CUDA
     /// device creation in `prepare()` and for post-OOM context reset.
     gpu_ordinal: usize,
+    /// True when this session has owned, or will lazily create, CUDA state
+    /// that should be followed by a primary-context reset after unload drops
+    /// all tensors and devices.
+    cuda_reclaim_on_unload: bool,
 }
 
 /// Remembers the last `encode_prompt_pair_with_unconditional` call so
@@ -376,6 +380,7 @@ impl Ltx2RuntimeSession {
         gpu_ordinal: usize,
     ) -> Self {
         Self {
+            cuda_reclaim_on_unload: device.is_cuda(),
             device: Some(device),
             prompt_encoder: Some(prompt_encoder),
             cached_prompt_encoding: None,
@@ -391,7 +396,12 @@ impl Ltx2RuntimeSession {
             cached_prompt_encoding: None,
             tail_capture: None,
             gpu_ordinal,
+            cuda_reclaim_on_unload: true,
         }
+    }
+
+    pub(crate) fn needs_cuda_reclaim_on_unload(&self) -> bool {
+        self.cuda_reclaim_on_unload
     }
 
     /// Arm the pre-VAE-decode latent capture slot. The distilled render

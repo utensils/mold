@@ -75,6 +75,11 @@ should compare generated contact sheets or clips from that fixed seed.
 - When you send source media through `mold serve`, the built-in request body
   limit is `64 MiB`, which covers common inline retake and audio-to-video
   requests.
+- On CUDA, explicit LTX-2 unload drops the retained native runtime before
+  resetting the assigned CUDA primary context. To manually verify OOM recovery,
+  run a GPU-resident LTX-2 request, force unload by switching models or using
+  the server unload/admin path, then confirm the next LTX-2 request logs a fresh
+  runtime load rather than reusing stale CUDA allocations.
 - On 24 GB Ada GPUs such as the RTX 4090, mold keeps the native runtime on the
   compatible `fp8-cast` path rather than Hopper-only `fp8-scaled-mm`.
 
