@@ -67,6 +67,36 @@ pub(crate) fn effective_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
         .collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SD3OffloadDecision {
+    Disabled,
+    Selected,
+    Unsupported(&'static str),
+}
+
+fn sd3_offload_decision(
+    forced_offload: bool,
+    is_quantized: bool,
+    has_lora: bool,
+) -> SD3OffloadDecision {
+    if !forced_offload {
+        return SD3OffloadDecision::Disabled;
+    }
+    if is_quantized {
+        return SD3OffloadDecision::Unsupported(
+            "SD3 block-level offload is only planned for BF16/FP transformers; \
+             GGUF variants already use quantized transformer paths",
+        );
+    }
+    if has_lora {
+        return SD3OffloadDecision::Unsupported(
+            "SD3 block-level offload with LoRA is not wired yet; \
+             LoRA merge/cache semantics need a dedicated offload design",
+        );
+    }
+    SD3OffloadDecision::Selected
+}
+
 /// Build a LoRA-aware SD3 `VarBuilder` from BF16 safetensors. Caller
 /// is responsible for short-circuiting to the non-LoRA mmap path when
 /// `loras` is empty — this function errors on an empty stack so a stray
@@ -175,6 +205,7 @@ pub struct SD3Engine {
     is_turbo: bool,
     is_medium: bool,
     t5_variant: Option<String>,
+    offload: bool,
     prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensorPair>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
     /// CPU-resident cache of pre-computed LoRA deltas, shared across
@@ -195,6 +226,7 @@ impl SD3Engine {
         t5_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        offload: bool,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
@@ -202,6 +234,7 @@ impl SD3Engine {
             is_turbo,
             is_medium,
             t5_variant,
+            offload,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             lora_delta_cache: Arc::new(Mutex::new(sd3_lora::LoraDeltaCache::new())),
@@ -354,6 +387,10 @@ impl SD3Engine {
 
     fn img2img_source_normalize_range() -> img_utils::NormalizeRange {
         img_utils::NormalizeRange::MinusOneToOne
+    }
+
+    fn uses_sequential_generate_path(&self) -> bool {
+        self.base.load_strategy == LoadStrategy::Sequential || self.offload
     }
 
     /// Detect if the transformer is quantized (GGUF).
@@ -629,6 +666,18 @@ impl SD3Engine {
 
     /// Generate an image using sequential loading strategy.
     fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        let is_quantized = self.detect_is_quantized();
+        let active_loras = effective_loras(req);
+        match sd3_offload_decision(self.offload, is_quantized, !active_loras.is_empty()) {
+            SD3OffloadDecision::Disabled => {}
+            SD3OffloadDecision::Unsupported(reason) => bail!("{reason}"),
+            SD3OffloadDecision::Selected => bail!(
+                "SD3 block-level offload was selected, but MMDiT transformer block \
+                 streaming is not implemented yet; use a quantized SD3 variant or \
+                 run without --offload"
+            ),
+        }
+
         let (
             clip_l_path,
             clip_l_tokenizer,
@@ -649,7 +698,6 @@ impl SD3Engine {
             DType::F32
         };
 
-        let is_quantized = self.detect_is_quantized();
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
 
@@ -1061,7 +1109,7 @@ impl SD3Engine {
         }
 
         // Sequential mode: load-use-drop each component
-        if self.base.load_strategy == LoadStrategy::Sequential {
+        if self.uses_sequential_generate_path() {
             return self.generate_sequential(req);
         }
 
@@ -1543,6 +1591,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
         let medium = SD3Engine::new(
@@ -1562,6 +1611,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
 
@@ -1609,6 +1659,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
 
@@ -1617,6 +1668,61 @@ mod tests {
         assert!(engine.detect_is_quantized());
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sd3_forced_offload_uses_sequential_generation_path() {
+        let dir = temp_test_dir("mold-sd3-offload-sequential");
+        let engine = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                dir.join("transformer.safetensors"),
+                dir.join("vae.safetensors"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Eager,
+            0,
+            true,
+            None,
+        );
+
+        assert!(
+            engine.uses_sequential_generate_path(),
+            "SD3 --offload requests must reach the engine and select the \
+             staged generation path instead of being silently ignored"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sd3_offload_decision_gates_current_unsupported_cases() {
+        assert_eq!(
+            sd3_offload_decision(false, false, false),
+            SD3OffloadDecision::Disabled
+        );
+        assert_eq!(
+            sd3_offload_decision(true, false, false),
+            SD3OffloadDecision::Selected
+        );
+        assert!(matches!(
+            sd3_offload_decision(true, true, false),
+            SD3OffloadDecision::Unsupported(reason)
+                if reason.contains("GGUF variants")
+        ));
+        assert!(matches!(
+            sd3_offload_decision(true, false, true),
+            SD3OffloadDecision::Unsupported(reason)
+                if reason.contains("LoRA")
+        ));
     }
 
     /// Regression test for the SD3 prompt-cache key bug: when the cache is
@@ -1677,6 +1783,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             None,
         );
 
@@ -1729,6 +1836,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             Some(shared_pool),
         );
 
@@ -1779,6 +1887,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
             Some(shared_pool),
         );
 
