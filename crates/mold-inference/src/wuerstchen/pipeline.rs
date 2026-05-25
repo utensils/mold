@@ -1,11 +1,13 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
+use candle_nn::VarBuilder;
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::wuerstchen::ddpm::{DDPMWScheduler, DDPMWSchedulerConfig};
 use candle_transformers::models::wuerstchen::diffnext::WDiffNeXt;
 use candle_transformers::models::wuerstchen::paella_vq::PaellaVQ;
 use candle_transformers::models::wuerstchen::prior::WPrior;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -224,6 +226,39 @@ impl WuerstchenEngine {
         Tokenizer::from_file(path)
             .map(Arc::new)
             .map_err(|e| anyhow::anyhow!("failed to load {label} tokenizer: {e}"))
+    }
+
+    fn load_vqgan_cpu_tensors(&self) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(shared_pool) = &self.shared_pool else {
+            return Ok(None);
+        };
+        shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&self.base.paths.vae))
+    }
+
+    fn load_vqgan_var_builder<'a>(
+        &self,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+    ) -> Result<VarBuilder<'a>> {
+        if let Some(tensors) = self.load_vqgan_cpu_tensors()? {
+            return Ok(crate::encoders::park::varbuilder_from_parked(
+                tensors.as_ref(),
+                dtype,
+                device,
+            ));
+        }
+
+        crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            dtype,
+            device,
+            component,
+            &self.base.progress,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -539,13 +574,7 @@ impl WuerstchenEngine {
         // Load VQ-GAN (Stage A) — always F32 for pixel-space decoding
         self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
         let vqgan_start = Instant::now();
-        let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
-            &[&self.base.paths.vae],
-            DType::F32,
-            &device,
-            "VQ-GAN",
-            &self.base.progress,
-        )?;
+        let vqgan_vb = self.load_vqgan_var_builder(DType::F32, &device, "VQ-GAN")?;
         let vqgan = PaellaVQ::new(vqgan_vb)?;
         self.base
             .progress
@@ -996,13 +1025,7 @@ impl WuerstchenEngine {
                 // Load VQ-GAN for encoding
                 self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
                 let vqgan_start = Instant::now();
-                let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
-                    &[&self.base.paths.vae],
-                    DType::F32,
-                    &device,
-                    "VQ-GAN",
-                    &self.base.progress,
-                )?;
+                let vqgan_vb = self.load_vqgan_var_builder(DType::F32, &device, "VQ-GAN")?;
                 let vqgan = PaellaVQ::new(vqgan_vb)?;
                 self.base
                     .progress
@@ -1205,13 +1228,7 @@ impl WuerstchenEngine {
         };
         self.base.progress.stage_start(vqgan_load_label);
         let vqgan_start = Instant::now();
-        let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
-            &[&self.base.paths.vae],
-            DType::F32,
-            &device,
-            "VQ-GAN",
-            &self.base.progress,
-        )?;
+        let vqgan_vb = self.load_vqgan_var_builder(DType::F32, &device, "VQ-GAN")?;
         let vqgan = PaellaVQ::new(vqgan_vb)?;
         self.base
             .progress
@@ -1535,6 +1552,7 @@ mod tests {
     use crate::engine::LoadStrategy;
     use crate::shared_pool::SharedPool;
     use mold_core::ModelPaths;
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -1763,6 +1781,45 @@ mod tests {
         let loaded = engine
             .load_clip_tokenizer(&tokenizer_path, "Prior CLIP-G")
             .unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn wuerstchen_loads_vqgan_tensors_through_shared_pool() {
+        let dir = temp_test_dir("mold-wuerstchen-vqgan-pool");
+        let vqgan_path = dir.join("vqgan.safetensors");
+        let data = [1.0f32, 2.0, 3.0, 4.0];
+        let bytes: Vec<u8> = data.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let view = TensorView::new(SafeDtype::F32, vec![2, 2], &bytes).unwrap();
+        serialize_to_file([("decoder.0.weight", view)], &None, &vqgan_path).unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vqgan_path))
+            .unwrap()
+            .unwrap();
+
+        let engine = WuerstchenEngine::new(
+            "wuerstchen-v2:fp16".to_string(),
+            wuerstchen_model_paths(
+                dir.join("prior.safetensors"),
+                Some(dir.join("decoder.safetensors")),
+                vqgan_path,
+                Some(dir.join("prior-clip.safetensors")),
+                Some(dir.join("prior-tokenizer.json")),
+                None,
+                None,
+            ),
+            LoadStrategy::Sequential,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_vqgan_cpu_tensors().unwrap().unwrap();
 
         assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
