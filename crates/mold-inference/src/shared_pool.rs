@@ -57,6 +57,24 @@ impl SharedPool {
         self.cpu_tensors.insert(key, tensors.clone());
         Ok(tensors)
     }
+
+    /// Load CPU tensors only when every component path is safetensors-backed.
+    pub(crate) fn load_safetensors_cpu_tensors(
+        &mut self,
+        paths: &[impl AsRef<Path>],
+    ) -> anyhow::Result<Option<Arc<HashMap<String, Tensor>>>> {
+        if paths.iter().any(|path| {
+            path.as_ref()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| !ext.eq_ignore_ascii_case("safetensors"))
+                .unwrap_or(true)
+        }) {
+            return Ok(None);
+        }
+
+        self.load_cpu_tensors(paths).map(Some)
+    }
 }
 
 fn cpu_tensor_cache_key(paths: &[impl AsRef<Path>]) -> anyhow::Result<String> {
@@ -127,5 +145,70 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(first.contains_key("weight"));
+    }
+
+    #[test]
+    fn load_safetensors_cpu_tensors_skips_non_safetensors_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let gguf_path = dir.path().join("t5-q8.gguf");
+        std::fs::write(&gguf_path, b"not safetensors").unwrap();
+
+        let mut pool = SharedPool::new();
+
+        assert!(pool
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&gguf_path))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn load_cpu_var_builder_reuses_cached_tensor_map_for_same_encoder_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let weights_path = dir.path().join("encoder.safetensors");
+        let weight = [1.0f32, 2.0, 3.0, 4.0];
+        let bias = [0.5f32, -0.5];
+        let mut weight_bytes = Vec::with_capacity(weight.len() * 4);
+        for value in weight {
+            weight_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut bias_bytes = Vec::with_capacity(bias.len() * 4);
+        for value in bias {
+            bias_bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2, 2], &weight_bytes).unwrap(),
+        );
+        tensors.insert(
+            "bias".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2], &bias_bytes).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &weights_path).unwrap();
+
+        let mut pool = SharedPool::new();
+        let first = pool
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&weights_path))
+            .unwrap()
+            .unwrap();
+        let second = pool
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&weights_path))
+            .unwrap()
+            .unwrap();
+        let vb = crate::encoders::park::varbuilder_from_parked(
+            first.as_ref(),
+            candle_core::DType::F32,
+            &candle_core::Device::Cpu,
+        );
+        let linear = candle_nn::linear(2, 2, vb).unwrap();
+        let input = candle_core::Tensor::new(&[10.0f32, 20.0], &candle_core::Device::Cpu)
+            .unwrap()
+            .unsqueeze(0)
+            .unwrap();
+        let output = candle_nn::Module::forward(&linear, &input).unwrap();
+        let values = output.squeeze(0).unwrap().to_vec1::<f32>().unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(values, vec![50.5, 109.5]);
     }
 }
