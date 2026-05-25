@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Qwen-Image CUDA VAE decode now chooses tiled decode proactively under memory pressure.** Native-size CUDA requests use the existing tiled GPU decode path before trying a full-frame VAE decode when free VRAM predicts the full decode would OOM, while smaller requests and CPU VAE placement keep the existing path.
 - **LTX-Video now actually reuses the server shared tokenizer pool.** The factory already passed `SharedPool` into `LtxVideoEngine`; its T5-XXL load path now consumes the pooled tokenizer handle so switching back into LTX-Video avoids reparsing the shared T5 tokenizer, matching the FLUX tokenizer-cache behavior.
 - **FLUX VAE loads now use a shared CPU tensor cache.** When the server provides `SharedPool`, FLUX loads the shared VAE safetensors into CPU RAM once and rebuilds the VAE from that cached tensor map on later engine loads, avoiding repeat disk reads while still placing tensors on the requested runtime device.
 - **FLUX T5 / CLIP safetensors loads now use the shared CPU tensor cache.** The tokenizer pool still handles tokenizer reuse, while safetensors-backed encoder weights can be rebuilt from `SharedPool` CPU tensors across FLUX engine instances; GGUF T5 variants keep the existing quantized load path.

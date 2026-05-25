@@ -510,6 +510,7 @@ impl QwenImageEngine {
         tiled: FTiled,
         cpu_fallback: FCpu,
         is_cuda: bool,
+        prefer_tiled: bool,
         sync_device: &Device,
         progress: &ProgressReporter,
         tiled_message: &str,
@@ -522,6 +523,19 @@ impl QwenImageEngine {
         FCpu: FnOnce() -> Result<T>,
         FOom: Fn(&anyhow::Error) -> bool,
     {
+        if is_cuda && prefer_tiled {
+            progress.info("Selecting tiled GPU VAE decode proactively");
+            match tiled() {
+                Ok(value) => return Ok(value),
+                Err(tile_err) if is_oom(&tile_err) => {
+                    progress.info(cpu_message);
+                    sync_device.synchronize()?;
+                    return cpu_fallback();
+                }
+                Err(tile_err) => return Err(tile_err),
+            }
+        }
+
         match primary() {
             Ok(value) => Ok(value),
             Err(err) if is_cuda && is_oom(&err) => {
@@ -539,6 +553,34 @@ impl QwenImageEngine {
             }
             Err(err) => Err(err),
         }
+    }
+
+    fn qwen_vae_decode_workspace_bytes(width: u32, height: u32) -> u64 {
+        let pixels = width as u64 * height as u64;
+        // Qwen's 3D causal VAE decode has a much larger transient workspace
+        // than the final RGB tensor. This factor is intentionally conservative:
+        // native 1328² requests reserve ~7.2 GB, while small 512² requests stay
+        // below the proactive tiling threshold.
+        pixels.saturating_mul(4).saturating_mul(1024)
+    }
+
+    fn should_proactively_tile_vae_decode(
+        width: u32,
+        height: u32,
+        vae_is_cuda: bool,
+        free_vram_bytes: u64,
+    ) -> bool {
+        if !vae_is_cuda || free_vram_bytes == 0 {
+            return false;
+        }
+        let native_pixels = (QWEN_NATIVE_WIDTH * QWEN_NATIVE_HEIGHT) as u64;
+        let pixels = width as u64 * height as u64;
+        if pixels < native_pixels.saturating_mul(3) / 4 {
+            return false;
+        }
+        let required = VAE_DECODE_VRAM_THRESHOLD
+            .saturating_add(Self::qwen_vae_decode_workspace_bytes(width, height));
+        free_vram_bytes < required
     }
 
     fn decode_vae_tiled(
@@ -588,6 +630,7 @@ impl QwenImageEngine {
         vae_device: &Device,
         sync_device: &Device,
         progress: &ProgressReporter,
+        prefer_tiled: bool,
         load_cpu_vae: F,
     ) -> Result<Tensor>
     where
@@ -604,6 +647,7 @@ impl QwenImageEngine {
                 cpu_vae.decode(&cpu_latents).map_err(Into::into)
             },
             vae_device.is_cuda(),
+            prefer_tiled,
             sync_device,
             progress,
             "VAE decode OOM on GPU — retrying with tiled GPU decode",
@@ -1398,7 +1442,13 @@ impl QwenImageEngine {
         vae_device: &Device,
         sync_device: &Device,
         progress: &ProgressReporter,
+        prefer_tiled: bool,
     ) -> Result<Tensor> {
+        if vae_device.is_cuda() && prefer_tiled {
+            progress.info("Selecting tiled GPU VAE decode proactively");
+            return Self::decode_vae_tiled(latents, vae, vae_device, progress);
+        }
+
         let decode_latents = latents.to_device(vae_device)?.to_dtype(DType::F32)?;
         match vae.decode(&decode_latents) {
             Ok(image) => Ok(image),
@@ -2274,6 +2324,13 @@ impl QwenImageEngine {
 
         self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
+        let free_for_decode = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let prefer_tiled = Self::should_proactively_tile_vae_decode(
+            req.width,
+            req.height,
+            vae_device.is_cuda(),
+            free_for_decode,
+        );
 
         let image = Self::decode_vae_with_fallback(
             &latents,
@@ -2281,6 +2338,7 @@ impl QwenImageEngine {
             &vae_device,
             &device,
             &self.base.progress,
+            prefer_tiled,
             || self.load_vae(&Device::Cpu, DType::F32),
         )?;
         Self::debug_tensor_stats("image_pre_postprocess", &image);
@@ -2610,12 +2668,20 @@ impl QwenImageEngine {
         progress.stage_done(&denoise_label, denoise_start.elapsed());
 
         let latents = Self::unpack_latents_packed(&latents, height / 8, width / 8)?;
+        let free_for_decode = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let prefer_tiled = Self::should_proactively_tile_vae_decode(
+            req.width,
+            req.height,
+            loaded.vae_device.is_cuda(),
+            free_for_decode,
+        );
         let image = Self::decode_vae_with_fallback(
             &latents,
             &loaded.vae,
             &loaded.vae_device,
             &loaded.device,
             progress,
+            prefer_tiled,
             || {
                 Ok(QwenImageVae::load(
                     &loaded.vae_path,
@@ -3026,6 +3092,13 @@ impl QwenImageEngine {
         // 8. VAE decode
         progress.stage_start("VAE decode");
         let vae_start = Instant::now();
+        let free_for_decode = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let prefer_tiled = Self::should_proactively_tile_vae_decode(
+            req.width,
+            req.height,
+            loaded.vae_device.is_cuda(),
+            free_for_decode,
+        );
 
         // Always decode in F32 — matches sequential path and diffusers' force_upcast.
         let keep_transformer_hot = Self::can_keep_transformer_hot_for_vae(loaded);
@@ -3036,6 +3109,7 @@ impl QwenImageEngine {
                 &loaded.vae_device,
                 &loaded.device,
                 progress,
+                prefer_tiled,
             ) {
                 Ok(image) => {
                     progress.info(
@@ -3055,6 +3129,7 @@ impl QwenImageEngine {
                         &loaded.vae_device,
                         &loaded.device,
                         progress,
+                        prefer_tiled,
                         || {
                             QwenImageVae::load(&loaded.vae_path, &Device::Cpu, DType::F32, progress)
                                 .map_err(Into::into)
@@ -3073,6 +3148,7 @@ impl QwenImageEngine {
                 &loaded.vae_device,
                 &loaded.device,
                 progress,
+                prefer_tiled,
                 || {
                     QwenImageVae::load(&loaded.vae_path, &Device::Cpu, DType::F32, progress)
                         .map_err(Into::into)
@@ -3813,6 +3889,7 @@ mod tests {
                 Ok(9usize)
             },
             true,
+            false,
             &Device::Cpu,
             &progress,
             "tiled",
@@ -3847,6 +3924,7 @@ mod tests {
                 Ok(17usize)
             },
             true,
+            false,
             &Device::Cpu,
             &progress,
             "tiled",
@@ -3876,6 +3954,7 @@ mod tests {
             || Err(anyhow::anyhow!("OUT_OF_MEMORY")),
             || Ok(19usize),
             true,
+            false,
             &Device::Cpu,
             &progress,
             "tiled",
@@ -3896,6 +3975,7 @@ mod tests {
             || Err(anyhow::anyhow!("bad tiled decode")),
             || Ok(19usize),
             true,
+            false,
             &Device::Cpu,
             &progress,
             "tiled",
@@ -3905,6 +3985,72 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("bad tiled decode"));
+    }
+
+    #[test]
+    fn qwen_proactive_tiled_policy_selects_native_cuda_under_pressure() {
+        assert!(QwenImageEngine::should_proactively_tile_vae_decode(
+            1328,
+            1328,
+            true,
+            6_000_000_000
+        ));
+        assert!(!QwenImageEngine::should_proactively_tile_vae_decode(
+            512,
+            512,
+            true,
+            6_000_000_000
+        ));
+        assert!(!QwenImageEngine::should_proactively_tile_vae_decode(
+            1328,
+            1328,
+            false,
+            6_000_000_000
+        ));
+        assert!(!QwenImageEngine::should_proactively_tile_vae_decode(
+            1328,
+            1328,
+            true,
+            16_000_000_000
+        ));
+    }
+
+    #[test]
+    fn qwen_proactive_tiled_decode_skips_primary_full_decode() {
+        let mut progress = ProgressReporter::default();
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let messages_clone = messages.clone();
+        progress.set_callback(Box::new(move |event| {
+            if let ProgressEvent::Info { message } = event {
+                messages_clone.lock().unwrap().push(message);
+            }
+        }));
+
+        let primary_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let primary_called_clone = primary_called.clone();
+        let value = QwenImageEngine::with_cuda_tiled_then_cpu_fallback(
+            || {
+                primary_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(3usize)
+            },
+            || Ok(7usize),
+            || Ok(9usize),
+            true,
+            true,
+            &Device::Cpu,
+            &progress,
+            "tiled after oom",
+            "cpu",
+            QwenImageEngine::is_oom_error,
+        )
+        .unwrap();
+
+        assert_eq!(value, 7);
+        assert!(!primary_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            messages.lock().unwrap().as_slice(),
+            ["Selecting tiled GPU VAE decode proactively"]
+        );
     }
 
     #[test]
