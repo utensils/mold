@@ -178,13 +178,38 @@ impl ClipEncoder {
         progress: &crate::progress::ProgressReporter,
         cached_tokenizer: Option<Arc<Tokenizer>>,
     ) -> Result<Self> {
-        let vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(encoder_path),
-            dtype,
+        Self::load_with_tokenizer_and_tensors(
+            encoder_path,
+            tokenizer_path,
             device,
-            "CLIP-L",
+            dtype,
             progress,
-        )?;
+            cached_tokenizer,
+            None,
+        )
+    }
+
+    /// Load CLIP encoder weights, reusing cached tokenizer and CPU tensors when provided.
+    pub fn load_with_tokenizer_and_tensors(
+        encoder_path: &PathBuf,
+        tokenizer_path: &PathBuf,
+        device: &Device,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+        cached_tokenizer: Option<Arc<Tokenizer>>,
+        cached_tensors: Option<Arc<HashMap<String, Tensor>>>,
+    ) -> Result<Self> {
+        let vb = if let Some(tensors) = cached_tensors {
+            park::varbuilder_from_parked(tensors.as_ref(), dtype, device)
+        } else {
+            crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(encoder_path),
+                dtype,
+                device,
+                "CLIP-L",
+                progress,
+            )?
+        };
         let model = clip::text_model::ClipTextTransformer::new(vb.pp("text_model"), &config())?;
         let tokenizer = match cached_tokenizer {
             Some(tok) => tok,

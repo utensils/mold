@@ -1,9 +1,10 @@
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, IndexOp};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::flux;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -1032,6 +1033,14 @@ impl FluxEngine {
         )
     }
 
+    fn get_cached_safetensors(&self, path: &Path) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(pool) = &self.shared_pool else {
+            return Ok(None);
+        };
+        let paths = [path];
+        pool.lock().unwrap().load_safetensors_cpu_tensors(&paths)
+    }
+
     fn restore_prompt_cache(
         progress: &ProgressReporter,
         prompt_cache: &Mutex<LruCache<String, CachedTensorPair>>,
@@ -1368,13 +1377,15 @@ impl FluxEngine {
             "loading T5 encoder..."
         );
         let cached_t5_tok = self.get_cached_tokenizer(&t5_tokenizer_path);
-        let t5 = encoders::t5::T5Encoder::load_with_tokenizer(
+        let cached_t5_tensors = self.get_cached_safetensors(&resolved_t5_path)?;
+        let t5 = encoders::t5::T5Encoder::load_with_tokenizer_and_tensors(
             &resolved_t5_path,
             &t5_tokenizer_path,
             t5_device,
             t5_dtype,
             &self.base.progress,
             cached_t5_tok,
+            cached_t5_tensors,
         )?;
         self.cache_tokenizer(&t5_tokenizer_path, t5.tokenizer_arc());
         self.base
@@ -1415,13 +1426,15 @@ impl FluxEngine {
             "loading CLIP encoder..."
         );
         let cached_clip_tok = self.get_cached_tokenizer(&clip_tokenizer_path);
-        let clip = encoders::clip::ClipEncoder::load_with_tokenizer(
+        let cached_clip_tensors = self.get_cached_safetensors(&clip_encoder_path)?;
+        let clip = encoders::clip::ClipEncoder::load_with_tokenizer_and_tensors(
             &clip_encoder_path,
             &clip_tokenizer_path,
             clip_device,
             clip_dtype,
             &self.base.progress,
             cached_clip_tok,
+            cached_clip_tensors,
         )?;
         self.cache_tokenizer(&clip_tokenizer_path, clip.tokenizer_arc());
         self.base
@@ -1587,13 +1600,15 @@ impl FluxEngine {
             self.base.progress.stage_start(&t5_stage_label);
             let t5_stage = Instant::now();
             let cached_t5_tok = self.get_cached_tokenizer(&t5_tokenizer_path);
-            let mut t5 = encoders::t5::T5Encoder::load_with_tokenizer(
+            let cached_t5_tensors = self.get_cached_safetensors(&resolved_t5_path)?;
+            let mut t5 = encoders::t5::T5Encoder::load_with_tokenizer_and_tensors(
                 &resolved_t5_path,
                 &t5_tokenizer_path,
                 t5_device,
                 t5_dtype,
                 &self.base.progress,
                 cached_t5_tok,
+                cached_t5_tensors,
             )?;
             self.cache_tokenizer(&t5_tokenizer_path, t5.tokenizer_arc());
             self.base
@@ -1643,13 +1658,15 @@ impl FluxEngine {
             self.base.progress.stage_start(&clip_stage_label);
             let clip_stage = Instant::now();
             let cached_clip_tok = self.get_cached_tokenizer(&clip_tokenizer_path);
-            let clip = encoders::clip::ClipEncoder::load_with_tokenizer(
+            let cached_clip_tensors = self.get_cached_safetensors(&clip_encoder_path)?;
+            let clip = encoders::clip::ClipEncoder::load_with_tokenizer_and_tensors(
                 &clip_encoder_path,
                 &clip_tokenizer_path,
                 clip_device,
                 clip_dtype,
                 &self.base.progress,
                 cached_clip_tok,
+                cached_clip_tensors,
             )?;
             self.cache_tokenizer(&clip_tokenizer_path, clip.tokenizer_arc());
             self.base
