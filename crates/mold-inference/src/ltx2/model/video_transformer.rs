@@ -7,7 +7,9 @@
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn as nn;
 use nn::{Module, VarBuilder};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use crate::ltx2::guidance::{BatchedPerturbationConfig, PerturbationType};
 use crate::ltx2::lora::{LinearLoraAdapter, Ltx2LoraRegistry};
@@ -713,17 +715,22 @@ impl TimestepEmbedding {
 #[derive(Clone, Debug)]
 pub struct PixArtAlphaCombinedTimestepSizeEmbeddings {
     timestep_embedder: TimestepEmbedding,
+    inv_freq_cache: Arc<TimestepEmbeddingInvFreqCache>,
 }
 
 impl PixArtAlphaCombinedTimestepSizeEmbeddings {
     pub fn new(embedding_dim: usize, vb: VarBuilder) -> Result<Self> {
         let timestep_embedder =
             TimestepEmbedding::new(256, embedding_dim, vb.pp("timestep_embedder"))?;
-        Ok(Self { timestep_embedder })
+        Ok(Self {
+            timestep_embedder,
+            inv_freq_cache: Arc::new(TimestepEmbeddingInvFreqCache::default()),
+        })
     }
 
     pub fn forward(&self, timestep: &Tensor) -> Result<Tensor> {
-        let timesteps_proj = get_timestep_embedding(timestep, 256, true)?;
+        let timesteps_proj =
+            get_timestep_embedding_cached(timestep, 256, true, &self.inv_freq_cache)?;
         self.timestep_embedder.forward(&timesteps_proj)
     }
 }
@@ -766,11 +773,81 @@ impl AdaLayerNormSingle {
 // Sinusoidal timestep embedding (DDPM-style)
 // ---------------------------------------------------------------------------
 
-fn get_timestep_embedding(
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct TimestepEmbeddingInvFreqCacheKey {
+    embedding_dim: usize,
+    device: String,
+}
+
+impl TimestepEmbeddingInvFreqCacheKey {
+    pub(crate) fn new(embedding_dim: usize, device: &Device) -> Self {
+        Self {
+            embedding_dim,
+            device: tensor_device_cache_key(device),
+        }
+    }
+}
+
+pub(crate) type TimestepEmbeddingInvFreqCache =
+    Mutex<HashMap<TimestepEmbeddingInvFreqCacheKey, Tensor>>;
+
+fn tensor_device_cache_key(device: &Device) -> String {
+    format!("{device:?}")
+}
+
+pub(crate) fn cached_timestep_embedding_inv_freq(
+    cache: &TimestepEmbeddingInvFreqCache,
+    key: TimestepEmbeddingInvFreqCacheKey,
+    device: &Device,
+    half: usize,
+) -> Result<(Tensor, bool)> {
+    if let Some(tensor) = cache
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(&key)
+        .cloned()
+    {
+        return Ok((tensor, true));
+    }
+
+    let inv_freq: Vec<_> = (0..half)
+        .map(|i| 1.0 / 10000f32.powf(i as f32 / (half as f32)))
+        .collect();
+    let tensor = Tensor::new(inv_freq.as_slice(), device)?.to_dtype(DType::F32)?;
+    cache
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(key, tensor.clone());
+    Ok((tensor, false))
+}
+
+fn get_timestep_embedding_cached(
     timesteps: &Tensor,
     embedding_dim: usize,
     flip_sin_to_cos: bool,
+    inv_freq_cache: &TimestepEmbeddingInvFreqCache,
 ) -> Result<Tensor> {
+    get_timestep_embedding_with_inv_freq(
+        timesteps,
+        embedding_dim,
+        flip_sin_to_cos,
+        |device, half| {
+            let key = TimestepEmbeddingInvFreqCacheKey::new(embedding_dim, device);
+            cached_timestep_embedding_inv_freq(inv_freq_cache, key, device, half)
+                .map(|(tensor, _)| tensor)
+        },
+    )
+}
+
+fn get_timestep_embedding_with_inv_freq<F>(
+    timesteps: &Tensor,
+    embedding_dim: usize,
+    flip_sin_to_cos: bool,
+    inv_freq: F,
+) -> Result<Tensor>
+where
+    F: FnOnce(&Device, usize) -> Result<Tensor>,
+{
     let device = timesteps.device();
     let original_dtype = timesteps.dtype();
     let dtype = DType::F32;
@@ -781,10 +858,7 @@ fn get_timestep_embedding(
     let t = timesteps.to_dtype(dtype)?;
     let t = t.unsqueeze(1)?;
 
-    let inv_freq: Vec<_> = (0..half)
-        .map(|i| 1.0 / 10000f32.powf(i as f32 / (half as f32)))
-        .collect();
-    let inv_freq = Tensor::new(inv_freq.as_slice(), device)?.to_dtype(dtype)?;
+    let inv_freq = inv_freq(device, half)?.to_dtype(dtype)?;
     let freqs = t.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
 
     let sin = freqs.sin()?;
@@ -904,6 +978,13 @@ pub struct Ltx2VideoRotaryPosEmbed {
     num_attention_heads: usize,
     rope_type: LtxRopeType,
     double_precision_rope: bool,
+    base_indices_cache: Arc<Mutex<HashMap<Ltx2RotaryBaseIndicesCacheKey, Tensor>>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct Ltx2RotaryBaseIndicesCacheKey {
+    position_dims: usize,
+    device: String,
 }
 
 impl Ltx2VideoRotaryPosEmbed {
@@ -924,6 +1005,7 @@ impl Ltx2VideoRotaryPosEmbed {
             num_attention_heads,
             rope_type,
             double_precision_rope,
+            base_indices_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -953,7 +1035,7 @@ impl Ltx2VideoRotaryPosEmbed {
         Tensor::stack(&normalized, 2)?.reshape((batch, seq, pos_dims))
     }
 
-    fn base_indices(&self, device: &Device, position_dims: usize) -> Result<Tensor> {
+    fn base_indices_cached(&self, device: &Device, position_dims: usize) -> Result<(Tensor, bool)> {
         let steps = self.dim / (2 * position_dims);
         if steps == 0 {
             candle_core::bail!(
@@ -962,8 +1044,26 @@ impl Ltx2VideoRotaryPosEmbed {
                 position_dims
             );
         }
+        let key = Ltx2RotaryBaseIndicesCacheKey {
+            position_dims,
+            device: tensor_device_cache_key(device),
+        };
+        if let Some(tensor) = self
+            .base_indices_cache
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return Ok((tensor, true));
+        }
         if steps == 1 {
-            Tensor::zeros((1,), DType::F32, device)
+            let tensor = Tensor::zeros((1,), DType::F32, device)?;
+            self.base_indices_cache
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .insert(key, tensor.clone());
+            Ok((tensor, false))
         } else {
             let denom = (steps - 1) as f64;
             let values: Vec<f32> = (0..steps)
@@ -977,8 +1077,18 @@ impl Ltx2VideoRotaryPosEmbed {
                     (power * std::f64::consts::PI / 2.0) as f32
                 })
                 .collect();
-            Tensor::from_vec(values, (steps,), device)
+            let tensor = Tensor::from_vec(values, (steps,), device)?;
+            self.base_indices_cache
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .insert(key, tensor.clone());
+            Ok((tensor, false))
         }
+    }
+
+    fn base_indices(&self, device: &Device, position_dims: usize) -> Result<Tensor> {
+        self.base_indices_cached(device, position_dims)
+            .map(|(tensor, _)| tensor)
     }
 
     fn repeat_interleave_2(freqs: &Tensor) -> Result<Tensor> {
@@ -3473,9 +3583,10 @@ mod tests {
     use candle_nn::{Linear, Module, VarBuilder};
 
     use super::{
-        emulate_static_fp8_input_quantization, gate_tokens, modulate_tokens, LayerNormNoParams,
-        LinearLoraAdapter, Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig,
-        LtxAttention, LtxLinear, LtxRopeType,
+        cached_timestep_embedding_inv_freq, emulate_static_fp8_input_quantization, gate_tokens,
+        modulate_tokens, LayerNormNoParams, LinearLoraAdapter, Ltx2AvTransformer3DModel,
+        Ltx2VideoRotaryPosEmbed, Ltx2VideoTransformer3DModelConfig, LtxAttention, LtxLinear,
+        LtxRopeType, TimestepEmbeddingInvFreqCache, TimestepEmbeddingInvFreqCacheKey,
     };
 
     fn fp8_input_scale_env_lock() -> &'static Mutex<()> {
@@ -3574,6 +3685,51 @@ mod tests {
         (0..len)
             .map(|index| (((index + offset) % 19) as f32 - 9.0) / 16.0)
             .collect()
+    }
+
+    #[test]
+    fn ltx2_timestep_inv_freq_cache_reuses_shape_device_entry() {
+        let cache = TimestepEmbeddingInvFreqCache::default();
+        let device = Device::Cpu;
+        let key = TimestepEmbeddingInvFreqCacheKey::new(256, &device);
+
+        let (first, first_hit) =
+            cached_timestep_embedding_inv_freq(&cache, key.clone(), &device, 128).unwrap();
+        let (second, second_hit) =
+            cached_timestep_embedding_inv_freq(&cache, key, &device, 128).unwrap();
+
+        assert!(!first_hit);
+        assert!(second_hit);
+        assert_eq!(first.dims1().unwrap(), 128);
+        assert_eq!(second.dims1().unwrap(), 128);
+        assert_eq!(second.dtype(), DType::F32);
+        assert_eq!(format!("{:?}", second.device()), format!("{device:?}"));
+    }
+
+    #[test]
+    fn ltx2_rotary_base_indices_cache_distinguishes_position_dims() {
+        let device = Device::Cpu;
+        let rope = Ltx2VideoRotaryPosEmbed::new(
+            16,
+            10_000.0,
+            vec![20, 2048, 2048],
+            true,
+            2,
+            LtxRopeType::Split,
+            false,
+        );
+
+        let (first, first_hit) = rope.base_indices_cached(&device, 2).unwrap();
+        let (second, second_hit) = rope.base_indices_cached(&device, 2).unwrap();
+        let (third, third_hit) = rope.base_indices_cached(&device, 1).unwrap();
+
+        assert!(!first_hit);
+        assert!(second_hit);
+        assert!(!third_hit);
+        assert_eq!(first.dims1().unwrap(), 4);
+        assert_eq!(second.dims1().unwrap(), 4);
+        assert_eq!(third.dims1().unwrap(), 8);
+        assert_eq!(format!("{:?}", second.device()), format!("{device:?}"));
     }
 
     fn insert_linear(
