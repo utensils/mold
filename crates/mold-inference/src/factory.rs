@@ -239,6 +239,7 @@ pub fn create_engine_with_pool(
                 qwen3_variant,
                 load_strategy,
                 gpu_ordinal,
+                shared_pool,
             )))
         }
         "flux2" | "flux.2" | "flux2-klein" => {

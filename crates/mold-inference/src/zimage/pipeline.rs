@@ -8,8 +8,10 @@ use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokenizers::Tokenizer;
 
 use super::gguf_dense::load_gguf_dense_transformer;
 use super::transformer::{MoldZImageTransformer2DModel, ZImageTransformer};
@@ -434,6 +436,7 @@ pub struct ZImageEngine {
     /// decide whether to wrap the constructed `VarBuilder` with a
     /// `ZImageLoraBackend`.
     pending_loras: Vec<LoraWeight>,
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
 }
 
 /// Resolve the effective LoRA list for a request: `loras` (plural) wins
@@ -474,6 +477,7 @@ impl ZImageEngine {
         qwen3_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
@@ -481,7 +485,17 @@ impl ZImageEngine {
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             pending_loras: Vec::new(),
+            shared_pool,
         }
+    }
+
+    fn load_text_tokenizer(&self, tokenizer_path: &Path) -> Result<Arc<Tokenizer>> {
+        if let Some(shared_pool) = &self.shared_pool {
+            return shared_pool.lock().unwrap().load_tokenizer(tokenizer_path);
+        }
+        Tokenizer::from_file(tokenizer_path)
+            .map(Arc::new)
+            .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))
     }
 
     fn encode_prompt_cached(
@@ -835,18 +849,21 @@ impl ZImageEngine {
         };
         self.base.progress.stage_start(&te_label);
         let te_start = Instant::now();
+        let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
 
         let text_encoder = if is_qwen3_gguf {
-            encoders::qwen3::Qwen3Encoder::load_gguf(
+            encoders::qwen3::Qwen3Encoder::load_gguf_with_tokenizer(
                 &resolved_paths[0],
                 &text_tokenizer_path,
+                Some(text_tokenizer),
                 &te_device,
                 &bf16_cfg,
             )?
         } else {
-            encoders::qwen3::Qwen3Encoder::load_bf16(
+            encoders::qwen3::Qwen3Encoder::load_bf16_with_tokenizer(
                 &resolved_paths,
                 &text_tokenizer_path,
+                Some(text_tokenizer),
                 &te_device,
                 te_dtype,
                 &bf16_cfg,
@@ -1010,18 +1027,21 @@ impl ZImageEngine {
 
             self.base.progress.stage_start(&te_label);
             let te_start = Instant::now();
+            let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
 
             let mut text_encoder = if is_qwen3_gguf {
-                encoders::qwen3::Qwen3Encoder::load_gguf(
+                encoders::qwen3::Qwen3Encoder::load_gguf_with_tokenizer(
                     &resolved_paths[0],
                     &text_tokenizer_path,
+                    Some(text_tokenizer),
                     &te_device,
                     &bf16_cfg,
                 )?
             } else {
-                encoders::qwen3::Qwen3Encoder::load_bf16(
+                encoders::qwen3::Qwen3Encoder::load_bf16_with_tokenizer(
                     &resolved_paths,
                     &text_tokenizer_path,
+                    Some(text_tokenizer),
                     &te_device,
                     te_dtype,
                     &bf16_cfg,
@@ -1776,10 +1796,13 @@ mod tests {
     use super::*;
     use crate::device::should_use_gpu;
     use crate::engine::LoadStrategy;
+    use crate::shared_pool::SharedPool;
     use mold_core::ModelPaths;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokenizers::models::bpe::BPE;
 
     fn temp_test_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -2205,6 +2228,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
 
         assert_eq!(engine.transformer_paths(), vec![shard_a, shard_b]);
@@ -2232,6 +2256,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
         assert_eq!(sharded.validate_paths().unwrap(), tokenizer);
         assert!(!sharded.detect_is_gguf());
@@ -2242,6 +2267,7 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
         assert!(quantized.detect_is_gguf());
 
@@ -2262,6 +2288,7 @@ mod tests {
             None,
             LoadStrategy::Eager,
             0,
+            None,
         );
         engine.pending_loras = vec![LoraWeight {
             path: dir.join("adapter.safetensors").display().to_string(),
@@ -2291,11 +2318,47 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            None,
         );
 
         let err = engine.validate_paths().unwrap_err();
         assert!(err.to_string().contains("text tokenizer path required"));
 
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn zimage_loads_qwen3_tokenizer_through_shared_pool() {
+        let dir = temp_test_dir("mold-zimage-tokenizer-pool");
+        let tokenizer_path = dir.join("tokenizer.json");
+        tokenizers::Tokenizer::new(BPE::default())
+            .save(&tokenizer_path, false)
+            .unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&tokenizer_path)
+            .unwrap();
+
+        let engine = ZImageEngine::new(
+            "z-image-turbo:q4".to_string(),
+            zimage_model_paths(
+                dir.join("transformer.gguf"),
+                vec![],
+                dir.join("vae.safetensors"),
+                Some(tokenizer_path.clone()),
+            ),
+            None,
+            LoadStrategy::Sequential,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_text_tokenizer(&tokenizer_path).unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
     }
 }
