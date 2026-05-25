@@ -1,5 +1,6 @@
 mod gguf_dense;
 pub(crate) mod lora;
+mod offload;
 mod pipeline;
 mod quantized_transformer;
 pub(crate) mod transformer;
