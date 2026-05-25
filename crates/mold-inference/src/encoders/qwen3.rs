@@ -90,6 +90,7 @@ impl Qwen3Encoder {
     ///
     /// The `bf16_config` selects the architecture variant: `Qwen3BF16Config::qwen3_4b()`
     /// for Klein-4B / Z-Image, or `Qwen3BF16Config::qwen3_8b()` for Klein-9B.
+    #[allow(dead_code)]
     pub fn load_bf16(
         encoder_paths: &[PathBuf],
         tokenizer_path: &PathBuf,
@@ -153,6 +154,7 @@ impl Qwen3Encoder {
     ///
     /// The `bf16_config` is stored for potential BF16 fallback reload but is not
     /// used during GGUF loading (GGUF reads dimensions from file metadata).
+    #[allow(dead_code)]
     pub fn load_gguf(
         gguf_path: &Path,
         tokenizer_path: &PathBuf,
