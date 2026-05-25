@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **LTX-2 two-stage runtime now uses a typed stage render context.** Native two-stage orchestration collects per-stage guidance, sampler mode, sigma schedule, LoRA stack, multimodal guidance, and unconditional-context needs through `prepare_stage_context`, reducing duplicated stage setup without changing generated outputs.
 - **LTX-2 attention chunking now accounts for effective attention work.** Native LTX-2 attention chunking decisions include batch size, head count, sequence lengths, dtype width, and device threshold instead of only `q_len * k_len`, so batched or many-head attention chunks before full attention score tensors become too large.
 - **LTX-2 multimodal guidance now prebatches static stage contexts.** Native LTX-2 audio/video guidance builds the batched cond/uncond/perturbed/modality context, mask, RoPE, and static transformer inputs once at stage entry, then reuses them across denoise steps while keeping latents, sigma, and timestep dynamic per step.
 - **LTX-2 native denoise and VAE paths now cache stable helper tensors.** Timestep inverse-frequency tensors, rotary base-index tensors, and VAE latent-stat broadcast tensors are reused by shape/device/dtype across repeated denoise/decode calls, reducing per-step/per-call allocations without requiring real LTX-2 weights for the cache tests.

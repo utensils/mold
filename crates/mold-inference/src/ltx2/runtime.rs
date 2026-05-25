@@ -1297,6 +1297,34 @@ fn stage_sigmas_no_terminal(
     Ok(sigmas[..sigmas.len().saturating_sub(1)].to_vec())
 }
 
+#[derive(Debug, Clone)]
+struct StageRenderContext {
+    #[allow(dead_code)]
+    stage_index: usize,
+    guidance_scale: f64,
+    sampler_mode: SamplerMode,
+    sigmas_no_terminal: Vec<f32>,
+    loras: Vec<LoraWeight>,
+    multimodal_guidance: Option<(MultiModalGuiderParams, MultiModalGuiderParams)>,
+    requires_unconditional_context: bool,
+}
+
+fn prepare_stage_context(
+    plan: &Ltx2GeneratePlan,
+    stage_index: usize,
+    device: &candle_core::Device,
+) -> Result<StageRenderContext> {
+    Ok(StageRenderContext {
+        stage_index,
+        guidance_scale: stage_guidance_scale(plan, stage_index)?,
+        sampler_mode: stage_sampler_mode(plan, stage_index)?,
+        sigmas_no_terminal: stage_sigmas_no_terminal(plan, stage_index, device)?,
+        loras: stage_lora_stack(plan, stage_index)?,
+        multimodal_guidance: stage_multimodal_guider_params(plan, stage_index),
+        requires_unconditional_context: stage_requires_unconditional_context(plan, stage_index)?,
+    })
+}
+
 fn video_latent_shape_from_tensor(latents: &Tensor) -> Result<VideoLatentShape> {
     let (batch, channels, frames, height, width) = latents.dims5()?;
     Ok(VideoLatentShape {
@@ -2331,11 +2359,8 @@ fn render_real_two_stage_av(
             None => None,
         }
     };
-    let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
+    let stage1_context = prepare_stage_context(plan, 0, device)?;
     let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
-    let stage1_sigmas = stage_sigmas_no_terminal(plan, 0, device)?;
-    let stage1_sampler = stage_sampler_mode(plan, 0)?;
-    let stage1_loras = stage_lora_stack(plan, 0)?;
     let stage1_video_conditioning = maybe_load_stage_video_conditioning(
         plan,
         prepared.video_pixel_shape,
@@ -2347,7 +2372,8 @@ fn render_real_two_stage_av(
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
     let stage1_transformer_load_start = Instant::now();
-    let stage1_transformer = load_ltx2_av_transformer_with_loras(plan, device, &stage1_loras)?;
+    let stage1_transformer =
+        load_ltx2_av_transformer_with_loras(plan, device, &stage1_context.loras)?;
     log_timing(
         "two_stage.stage1.transformer_load",
         stage1_transformer_load_start,
@@ -2357,7 +2383,6 @@ fn render_real_two_stage_av(
         .map(|audio| &audio.latents)
         .or(stage1_audio_noise.as_ref());
     let stage1_denoise_start = Instant::now();
-    let stage1_requires_uncond = stage_requires_unconditional_context(plan, 0)?;
     let (stage1_video_latents, stage1_audio_latents) = run_real_distilled_stage(
         &stage1_transformer,
         prepared.video_latent_shape,
@@ -2370,26 +2395,28 @@ fn render_real_two_stage_av(
         &prompt_inputs.video_positions,
         prompt_inputs.audio_positions.as_ref(),
         &prompt_inputs.cond_context,
-        stage1_requires_uncond
+        stage1_context
+            .requires_unconditional_context
             .then_some(prompt_inputs.uncond_context.as_ref())
             .flatten(),
         prompt_inputs.alt_context.as_ref(),
         prompt_inputs.audio_context.as_ref(),
-        stage1_requires_uncond
+        stage1_context
+            .requires_unconditional_context
             .then_some(prompt_inputs.uncond_audio_context.as_ref())
             .flatten(),
         prompt_inputs.alt_audio_context.as_ref(),
         cond_mask,
-        if stage1_requires_uncond {
+        if stage1_context.requires_unconditional_context {
             uncond_mask
         } else {
             None
         },
         alt_mask,
-        stage_multimodal_guider_params(plan, 0),
-        stage1_guidance_scale,
-        &stage1_sigmas,
-        stage1_sampler,
+        stage1_context.multimodal_guidance.clone(),
+        stage1_context.guidance_scale,
+        &stage1_context.sigmas_no_terminal,
+        stage1_context.sampler_mode,
         Some(&stage1_video_noise),
         stage1_audio_noise.as_ref(),
         None,
@@ -2482,8 +2509,9 @@ fn render_real_two_stage_av(
         )?),
         None => None,
     };
-    let stage2_sigmas = stage_sigmas_no_terminal(plan, 1, device)?;
-    let stage2_sigma = *stage2_sigmas
+    let stage2_context = prepare_stage_context(plan, 1, device)?;
+    let stage2_sigma = *stage2_context
+        .sigmas_no_terminal
         .first()
         .context("stage2 sigma schedule must contain at least one step")?;
     let stage2_video_start = mix_clean_latents_with_noise(
@@ -2501,20 +2529,17 @@ fn render_real_two_stage_av(
         }
         _ => None,
     };
-    let stage2_sampler = stage_sampler_mode(plan, 1)?;
-    let stage2_loras = stage_lora_stack(plan, 1)?;
-    let stage2_guidance_scale = stage_guidance_scale(plan, 1)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
     let stage2_transformer_load_start = Instant::now();
-    let stage2_transformer = load_ltx2_av_transformer_with_loras(plan, device, &stage2_loras)?;
+    let stage2_transformer =
+        load_ltx2_av_transformer_with_loras(plan, device, &stage2_context.loras)?;
     log_timing(
         "two_stage.stage2.transformer_load",
         stage2_transformer_load_start,
     );
     let stage2_denoise_start = Instant::now();
-    let stage2_requires_uncond = stage_requires_unconditional_context(plan, 1)?;
     let (latents, audio_latents) = run_real_distilled_stage(
         &stage2_transformer,
         stage2_video_latent_shape,
@@ -2527,26 +2552,28 @@ fn render_real_two_stage_av(
         &stage2_video_positions,
         prompt_inputs.audio_positions.as_ref(),
         &prompt_inputs.cond_context,
-        stage2_requires_uncond
+        stage2_context
+            .requires_unconditional_context
             .then_some(prompt_inputs.uncond_context.as_ref())
             .flatten(),
         prompt_inputs.alt_context.as_ref(),
         prompt_inputs.audio_context.as_ref(),
-        stage2_requires_uncond
+        stage2_context
+            .requires_unconditional_context
             .then_some(prompt_inputs.uncond_audio_context.as_ref())
             .flatten(),
         prompt_inputs.alt_audio_context.as_ref(),
         cond_mask,
-        if stage2_requires_uncond {
+        if stage2_context.requires_unconditional_context {
             uncond_mask
         } else {
             None
         },
         alt_mask,
-        stage_multimodal_guider_params(plan, 1),
-        stage2_guidance_scale,
-        &stage2_sigmas,
-        stage2_sampler,
+        stage2_context.multimodal_guidance.clone(),
+        stage2_context.guidance_scale,
+        &stage2_context.sigmas_no_terminal,
+        stage2_context.sampler_mode,
         Some(&stage2_video_noise),
         stage2_audio_noise.as_ref(),
         None,
@@ -6580,6 +6607,57 @@ mod tests {
         let sigmas = super::stage_sigmas_no_terminal(&plan, 1, &Device::Cpu).unwrap();
 
         assert_eq!(sigmas, vec![0.909375, 0.725, 0.421875]);
+    }
+
+    #[test]
+    fn prepare_stage_context_collects_two_stage_stage2_selection() {
+        let req = req("ltx-2.3-22b-dev:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        plan.num_inference_steps = 30;
+        plan.distilled_lora_path = Some("/tmp/distilled-lora.safetensors".to_string());
+        rebuild_execution_graph(&mut plan, &req);
+
+        let ctx = super::prepare_stage_context(&plan, 1, &Device::Cpu).unwrap();
+
+        assert_eq!(ctx.stage_index, 1);
+        assert_eq!(ctx.guidance_scale, 1.0);
+        assert_eq!(ctx.sampler_mode, crate::ltx2::execution::SamplerMode::Euler);
+        assert_eq!(ctx.sigmas_no_terminal, vec![0.909375, 0.725, 0.421875]);
+        assert_eq!(ctx.loras.len(), 1);
+        assert_eq!(ctx.loras[0].path, "/tmp/distilled-lora.safetensors");
+        assert!(ctx.multimodal_guidance.is_none());
+        assert!(!ctx.requires_unconditional_context);
+    }
+
+    #[test]
+    fn prepare_stage_context_collects_two_stage_hq_res2s_defaults() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStageHq;
+        plan.num_inference_steps = 6;
+        plan.distilled_lora_path = Some("/tmp/distilled-lora.safetensors".to_string());
+        rebuild_execution_graph(&mut plan, &req);
+
+        let ctx = super::prepare_stage_context(&plan, 0, &Device::Cpu).unwrap();
+
+        assert_eq!(ctx.stage_index, 0);
+        assert_eq!(ctx.sampler_mode, crate::ltx2::execution::SamplerMode::Res2S);
+        assert_eq!(ctx.sigmas_no_terminal.len(), 6);
+        assert!(ctx
+            .sigmas_no_terminal
+            .windows(2)
+            .all(|pair| pair[0] >= pair[1]));
+        assert_eq!(ctx.loras.len(), 1);
+        assert_eq!(ctx.loras[0].scale, 0.25);
+        assert!(ctx.multimodal_guidance.is_some());
+        assert!(ctx.requires_unconditional_context);
     }
 
     #[test]
