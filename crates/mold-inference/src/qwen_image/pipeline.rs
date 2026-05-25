@@ -61,6 +61,10 @@ const QWEN_IMAGE_EDIT_SYSTEM_PROMPT: &str = "Describe the key features of the in
 /// Minimum free VRAM for BF16 Qwen2.5-VL 7B text encoder on GPU.
 /// ~14GB model + 2GB headroom.
 const QWEN2_FP16_VRAM_THRESHOLD: u64 = 16_000_000_000;
+/// Extra residual VRAM required before keeping Qwen2.5 on GPU after a prompt
+/// cache miss. The denoise/VAE reserves cover known workspaces; this absorbs
+/// allocator fragmentation and backend scratch buffers.
+const QWEN2_HOT_TE_RESIDENCY_HEADROOM: u64 = 1_000_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Qwen2TextEncoderMode {
@@ -106,6 +110,25 @@ struct ResolvedQwen2TextEncoder {
 enum Qwen2TextEncoderUsage {
     Sequential,
     Resident,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Qwen2TextEncoderPostEncodeAction {
+    KeepGpu,
+    ParkCpu,
+    Drop,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Qwen2TextEncoderResidencyInput {
+    on_gpu: bool,
+    is_quantized: bool,
+    is_metal: bool,
+    keep_te_ram: bool,
+    prompt_cache_miss: bool,
+    transformer_resident: bool,
+    free_vram_bytes: u64,
+    required_vram_bytes: u64,
 }
 
 /// Check if a Qwen-Image safetensors checkpoint stores weights in FP8 (F8_E4M3).
@@ -581,6 +604,43 @@ impl QwenImageEngine {
         let required = VAE_DECODE_VRAM_THRESHOLD
             .saturating_add(Self::qwen_vae_decode_workspace_bytes(width, height));
         free_vram_bytes < required
+    }
+
+    fn qwen2_text_encoder_post_encode_action(
+        input: Qwen2TextEncoderResidencyInput,
+    ) -> Qwen2TextEncoderPostEncodeAction {
+        if !input.on_gpu {
+            return Qwen2TextEncoderPostEncodeAction::Drop;
+        }
+        if input.prompt_cache_miss
+            && input.transformer_resident
+            && !input.is_metal
+            && input.free_vram_bytes >= input.required_vram_bytes
+        {
+            return Qwen2TextEncoderPostEncodeAction::KeepGpu;
+        }
+        if input.keep_te_ram && !input.is_metal && !input.is_quantized {
+            return Qwen2TextEncoderPostEncodeAction::ParkCpu;
+        }
+        Qwen2TextEncoderPostEncodeAction::Drop
+    }
+
+    fn qwen2_hot_text_encoder_required_vram(
+        width: u32,
+        height: u32,
+        cfg_batch: u32,
+        dtype: DType,
+    ) -> u64 {
+        crate::device::activation_bytes(
+            width,
+            height,
+            cfg_batch,
+            crate::device::dtype_bytes(dtype),
+            crate::device::ActivationFamily::QwenImageDit,
+        )
+        .saturating_add(VAE_DECODE_VRAM_THRESHOLD)
+        .saturating_add(Self::qwen_vae_decode_workspace_bytes(width, height))
+        .saturating_add(QWEN2_HOT_TE_RESIDENCY_HEADROOM)
     }
 
     fn decode_vae_tiled(
@@ -1416,12 +1476,22 @@ impl QwenImageEngine {
     }
 
     fn can_keep_transformer_hot_for_vae(loaded: &LoadedQwenImage) -> bool {
-        loaded.device.is_cuda()
-            && loaded.vae_device.is_cuda()
-            && matches!(
+        Self::qwen_transformer_can_stay_hot_for_vae(
+            loaded.device.is_cuda(),
+            loaded.vae_device.is_cuda(),
+            matches!(
                 loaded.transformer.as_ref(),
                 Some(QwenImageTransformer::Quantized(_))
-            )
+            ),
+        )
+    }
+
+    fn qwen_transformer_can_stay_hot_for_vae(
+        transformer_is_cuda: bool,
+        vae_is_cuda: bool,
+        transformer_is_quantized: bool,
+    ) -> bool {
+        transformer_is_cuda && vae_is_cuda && transformer_is_quantized
     }
 
     fn decode_vae_gpu_only(
@@ -2744,6 +2814,7 @@ impl QwenImageEngine {
         }
 
         let progress = &self.base.progress;
+        let gpu_ordinal = self.base.gpu_ordinal;
         let start = Instant::now();
 
         // Reload transformer if it was dropped after previous VAE decode
@@ -2878,15 +2949,56 @@ impl QwenImageEngine {
 
         // Drop or park text encoder to free VRAM for denoising.
         if loaded.text_encoder.on_gpu {
-            let park_mode = crate::device::keep_te_in_ram()
-                && !loaded.device.is_metal()
-                && !loaded.text_encoder.is_quantized;
-            if park_mode {
-                loaded.text_encoder.park_to_cpu()?;
-                tracing::info!("Qwen2.5 text encoder parked to CPU host RAM");
-            } else {
-                loaded.text_encoder.drop_weights();
-                tracing::info!("Qwen2.5 text encoder dropped from GPU");
+            let free_after_encode = usable_free_vram_bytes(gpu_ordinal).unwrap_or(0);
+            let required_for_residency = Self::qwen2_hot_text_encoder_required_vram(
+                req.width,
+                req.height,
+                if req.guidance > 1.0 { 2 } else { 1 },
+                loaded.dtype,
+            );
+            let action =
+                Self::qwen2_text_encoder_post_encode_action(Qwen2TextEncoderResidencyInput {
+                    on_gpu: loaded.text_encoder.on_gpu,
+                    is_quantized: loaded.text_encoder.is_quantized,
+                    is_metal: loaded.device.is_metal(),
+                    keep_te_ram: crate::device::keep_te_in_ram(),
+                    prompt_cache_miss: !both_cached,
+                    transformer_resident: loaded.transformer.is_some(),
+                    free_vram_bytes: free_after_encode,
+                    required_vram_bytes: required_for_residency,
+                });
+            match action {
+                Qwen2TextEncoderPostEncodeAction::KeepGpu => {
+                    progress.info(&format!(
+                        "Keeping Qwen2.5 text encoder on GPU for hot prompt-cache misses ({} free >= {} reserve)",
+                        fmt_gb(free_after_encode),
+                        fmt_gb(required_for_residency)
+                    ));
+                    tracing::info!(
+                        free_vram_bytes = free_after_encode,
+                        required_vram_bytes = required_for_residency,
+                        is_quantized = loaded.text_encoder.is_quantized,
+                        "Qwen2.5 text encoder kept on GPU after cache miss"
+                    );
+                }
+                Qwen2TextEncoderPostEncodeAction::ParkCpu => {
+                    loaded.text_encoder.park_to_cpu()?;
+                    progress.info(&format!(
+                        "Parked Qwen2.5 text encoder to CPU host RAM before denoise ({} free < {} reserve)",
+                        fmt_gb(free_after_encode),
+                        fmt_gb(required_for_residency)
+                    ));
+                    tracing::info!("Qwen2.5 text encoder parked to CPU host RAM");
+                }
+                Qwen2TextEncoderPostEncodeAction::Drop => {
+                    loaded.text_encoder.drop_weights();
+                    progress.info(&format!(
+                        "Dropped Qwen2.5 text encoder before denoise ({} free < {} reserve or cache hit)",
+                        fmt_gb(free_after_encode),
+                        fmt_gb(required_for_residency)
+                    ));
+                    tracing::info!("Qwen2.5 text encoder dropped from GPU");
+                }
             }
         }
 
@@ -4055,6 +4167,130 @@ mod tests {
             messages.lock().unwrap().as_slice(),
             ["Selecting tiled GPU VAE decode proactively"]
         );
+    }
+
+    #[test]
+    fn qwen_hot_text_encoder_keeps_gpu_after_cache_miss_with_headroom() {
+        let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
+            Qwen2TextEncoderResidencyInput {
+                on_gpu: true,
+                is_quantized: true,
+                is_metal: false,
+                keep_te_ram: false,
+                prompt_cache_miss: true,
+                transformer_resident: true,
+                free_vram_bytes: 10_000_000_000,
+                required_vram_bytes: 8_000_000_000,
+            },
+        );
+
+        assert_eq!(action, Qwen2TextEncoderPostEncodeAction::KeepGpu);
+    }
+
+    #[test]
+    fn qwen_hot_text_encoder_drops_after_cache_hit_even_with_headroom() {
+        let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
+            Qwen2TextEncoderResidencyInput {
+                on_gpu: true,
+                is_quantized: true,
+                is_metal: false,
+                keep_te_ram: false,
+                prompt_cache_miss: false,
+                transformer_resident: true,
+                free_vram_bytes: 10_000_000_000,
+                required_vram_bytes: 8_000_000_000,
+            },
+        );
+
+        assert_eq!(action, Qwen2TextEncoderPostEncodeAction::Drop);
+    }
+
+    #[test]
+    fn qwen_hot_text_encoder_drops_under_transformer_pressure() {
+        let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
+            Qwen2TextEncoderResidencyInput {
+                on_gpu: true,
+                is_quantized: true,
+                is_metal: false,
+                keep_te_ram: false,
+                prompt_cache_miss: true,
+                transformer_resident: true,
+                free_vram_bytes: 7_999_999_999,
+                required_vram_bytes: 8_000_000_000,
+            },
+        );
+
+        assert_eq!(action, Qwen2TextEncoderPostEncodeAction::Drop);
+    }
+
+    #[test]
+    fn qwen_hot_text_encoder_parks_bf16_when_keep_ram_enabled() {
+        let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
+            Qwen2TextEncoderResidencyInput {
+                on_gpu: true,
+                is_quantized: false,
+                is_metal: false,
+                keep_te_ram: true,
+                prompt_cache_miss: true,
+                transformer_resident: true,
+                free_vram_bytes: 7_999_999_999,
+                required_vram_bytes: 8_000_000_000,
+            },
+        );
+
+        assert_eq!(action, Qwen2TextEncoderPostEncodeAction::ParkCpu);
+    }
+
+    #[test]
+    fn qwen_hot_text_encoder_never_parks_quantized() {
+        let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
+            Qwen2TextEncoderResidencyInput {
+                on_gpu: true,
+                is_quantized: true,
+                is_metal: false,
+                keep_te_ram: true,
+                prompt_cache_miss: true,
+                transformer_resident: true,
+                free_vram_bytes: 7_999_999_999,
+                required_vram_bytes: 8_000_000_000,
+            },
+        );
+
+        assert_eq!(action, Qwen2TextEncoderPostEncodeAction::Drop);
+    }
+
+    #[test]
+    fn qwen_hot_text_encoder_drops_when_transformer_not_resident() {
+        let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
+            Qwen2TextEncoderResidencyInput {
+                on_gpu: true,
+                is_quantized: true,
+                is_metal: false,
+                keep_te_ram: false,
+                prompt_cache_miss: true,
+                transformer_resident: false,
+                free_vram_bytes: 10_000_000_000,
+                required_vram_bytes: 8_000_000_000,
+            },
+        );
+
+        assert_eq!(action, Qwen2TextEncoderPostEncodeAction::Drop);
+    }
+
+    #[test]
+    fn qwen_transformer_hot_vae_eligibility_requires_quantized_cuda_components() {
+        assert!(QwenImageEngine::qwen_transformer_can_stay_hot_for_vae(
+            true, true, true
+        ));
+        assert!(!QwenImageEngine::qwen_transformer_can_stay_hot_for_vae(
+            false, true, true
+        ));
+        assert!(!QwenImageEngine::qwen_transformer_can_stay_hot_for_vae(
+            true, false, true
+        ));
+        assert!(!QwenImageEngine::qwen_transformer_can_stay_hot_for_vae(
+            true, true, false
+        ));
     }
 
     #[test]

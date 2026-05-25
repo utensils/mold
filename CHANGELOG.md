@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Qwen-Image hot server prompt-cache misses can keep the Qwen2.5 encoder resident when measured headroom allows.** After encoding a cache miss, CUDA hot-path runs now compare actual free VRAM against denoise plus VAE decode reserves before deciding whether to keep the text encoder on GPU for short-interval follow-up misses; cache hits and pressure cases keep the existing drop/park behavior, with compact progress messages exposing the decision.
 - **Qwen-Image CUDA local cold runs now avoid the heavy BF16 Qwen2.5 CPU fallback.** When CUDA `auto` lacks BF16 encoder headroom, local sequential Qwen-Image now falls back to the quantized Q4 GGUF text encoder, using GPU if the quantized encoder fits and CPU otherwise. Explicit `--qwen2-variant bf16` keeps the old BF16 path for comparisons.
 - **Qwen-Image CUDA VAE decode now chooses tiled decode proactively under memory pressure.** Native-size CUDA requests use the existing tiled GPU decode path before trying a full-frame VAE decode when free VRAM predicts the full decode would OOM, while smaller requests and CPU VAE placement keep the existing path.
 - **LTX-Video now actually reuses the server shared tokenizer pool.** The factory already passed `SharedPool` into `LtxVideoEngine`; its T5-XXL load path now consumes the pooled tokenizer handle so switching back into LTX-Video avoids reparsing the shared T5 tokenizer, matching the FLUX tokenizer-cache behavior.
