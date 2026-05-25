@@ -7,14 +7,14 @@ use candle_transformers::models::z_image::transformer::{
     TimestepEmbedder, ZImageTransformerBlock, ADALN_EMBED_DIM, SEQ_MULTI_OF,
 };
 
-fn pad_extra_to_multiple(len: usize, multiple: usize) -> usize {
+pub(crate) fn pad_extra_to_multiple(len: usize, multiple: usize) -> usize {
     if multiple == 0 {
         return 0;
     }
     (multiple - (len % multiple)) % multiple
 }
 
-fn pad_token_sequence(
+pub(crate) fn pad_token_sequence(
     xs: &Tensor,
     pad_token: &Tensor,
     multiple: usize,
@@ -33,7 +33,10 @@ fn pad_token_sequence(
     Ok((Tensor::cat(&[xs, &pad], 1)?, pad_extra))
 }
 
-fn pad_position_ids_with_zeros(pos_ids: &Tensor, pad_extra: usize) -> CandleResult<Tensor> {
+pub(crate) fn pad_position_ids_with_zeros(
+    pos_ids: &Tensor,
+    pad_extra: usize,
+) -> CandleResult<Tensor> {
     if pad_extra == 0 {
         return Ok(pos_ids.clone());
     }
@@ -41,7 +44,7 @@ fn pad_position_ids_with_zeros(pos_ids: &Tensor, pad_extra: usize) -> CandleResu
     Tensor::cat(&[pos_ids, &pad], 0)
 }
 
-fn build_basic_unified_sequence(
+pub(crate) fn build_basic_unified_sequence(
     image: &Tensor,
     cap: &Tensor,
     image_pos_ids: &Tensor,
@@ -231,6 +234,7 @@ impl MoldZImageTransformer2DModel {
 /// Dense Z-Image transformer, regardless of original weight source.
 pub(crate) enum ZImageTransformer {
     Dense(Box<MoldZImageTransformer2DModel>),
+    Offloaded(Box<super::offload::OffloadedZImageTransformer>),
     Quantized(Box<super::quantized_transformer::QuantizedZImageTransformer2DModel>),
 }
 
@@ -244,6 +248,7 @@ impl ZImageTransformer {
     ) -> Result<Tensor> {
         match self {
             Self::Dense(m) => Ok(m.forward(x, t, cap_feats, cap_mask)?),
+            Self::Offloaded(m) => Ok(m.forward(x, t, cap_feats, cap_mask)?),
             Self::Quantized(m) => Ok(m.forward(x, t, cap_feats, cap_mask)?),
         }
     }

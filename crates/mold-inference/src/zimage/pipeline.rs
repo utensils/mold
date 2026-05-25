@@ -728,6 +728,37 @@ impl ZImageEngine {
             Ok(ZImageTransformer::Dense(Box::new(
                 MoldZImageTransformer2DModel::new(cfg, vb)?,
             )))
+        } else if self.offload {
+            use candle_core::safetensors::MmapedSafetensors;
+            let path_refs: Vec<&std::path::Path> =
+                xformer_paths.iter().map(|p| p.as_path()).collect();
+            let bytes_total: u64 = xformer_paths
+                .iter()
+                .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+                .sum();
+            self.base
+                .progress
+                .weight_load("Z-Image transformer (offload stems)", 0, bytes_total);
+            let gpu_st = unsafe { MmapedSafetensors::multi(&path_refs)? };
+            let cpu_st = unsafe { MmapedSafetensors::multi(&path_refs)? };
+            let gpu_vb = candle_nn::VarBuilder::from_backend(
+                Box::new(ZImageSafetensorsBackend::new(gpu_st)),
+                dtype,
+                device.clone(),
+            );
+            let cpu_vb = candle_nn::VarBuilder::from_backend(
+                Box::new(ZImageSafetensorsBackend::new(cpu_st)),
+                dtype,
+                Device::Cpu,
+            );
+            self.base.progress.weight_load(
+                "Z-Image transformer (offload stems)",
+                bytes_total,
+                bytes_total,
+            );
+            Ok(ZImageTransformer::Offloaded(Box::new(
+                super::offload::OffloadedZImageTransformer::new(cfg, gpu_vb, cpu_vb)?,
+            )))
         } else {
             use candle_core::safetensors::MmapedSafetensors;
             let path_refs: Vec<&std::path::Path> =
@@ -1009,11 +1040,7 @@ impl ZImageEngine {
         match zimage_offload_decision(self.offload, is_gguf, !self.pending_loras.is_empty()) {
             ZImageOffloadDecision::Disabled => {}
             ZImageOffloadDecision::Unsupported(reason) => bail!("{reason}"),
-            ZImageOffloadDecision::Selected => bail!(
-                "Z-Image block-level offload was selected, but BF16 transformer block \
-                 streaming is not implemented yet; use a quantized Z-Image variant or \
-                 run without --offload"
-            ),
+            ZImageOffloadDecision::Selected => {}
         }
 
         // Check memory budget
@@ -2546,6 +2573,74 @@ mod tests {
             ZImageOffloadDecision::Unsupported(reason)
                 if reason.contains("LoRA")
         ));
+    }
+
+    #[test]
+    fn zimage_selected_bf16_offload_reaches_runtime_loader() {
+        let dir = temp_test_dir("mold-zimage-offload-loader");
+        let mut engine = ZImageEngine::new(
+            "z-image-turbo:bf16".to_string(),
+            zimage_model_paths(
+                touch(&dir, "transformer.safetensors"),
+                vec![],
+                touch(&dir, "vae.safetensors"),
+                Some(touch(&dir, "tokenizer.json")),
+            ),
+            None,
+            LoadStrategy::Sequential,
+            0,
+            true,
+            None,
+        );
+        let req = GenerateRequest {
+            prompt: "a cat".to_string(),
+            negative_prompt: None,
+            model: "z-image-turbo:bf16".to_string(),
+            width: 64,
+            height: 64,
+            steps: 1,
+            guidance: 0.0,
+            seed: Some(1),
+            batch_size: 1,
+            output_format: None,
+            embed_metadata: None,
+            scheduler: None,
+            cfg_plus: None,
+            source_image: None,
+            edit_images: None,
+            strength: 1.0,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            audio_file_path: None,
+            source_video: None,
+            source_video_path: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: None,
+        };
+
+        let err = engine.generate_sequential(&req).unwrap_err().to_string();
+
+        assert!(
+            !err.contains("streaming is not implemented yet"),
+            "selected BF16 offload must reach the runtime loader, got: {err}"
+        );
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
