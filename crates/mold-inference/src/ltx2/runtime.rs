@@ -35,7 +35,7 @@ use super::model::{
     VideoPixelShape,
 };
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
-use super::sampler::{euler_step, res2s_step};
+use super::sampler::sampler_step;
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
 use crate::device::{fmt_gb, free_vram_bytes};
@@ -3469,21 +3469,15 @@ fn run_real_distilled_stage(
                 &video_denoise_mask,
             )?;
         }
-        video_latents = match sampler_mode {
-            SamplerMode::Euler => {
-                euler_step(&video_latents, &video_denoised, &run_sigmas, step_idx)?
-            }
-            SamplerMode::Res2S => res2s_step(
-                &video_latents,
-                &video_denoised,
-                sigma as f64,
-                run_sigmas[step_idx + 1] as f64,
-                video_sampler_noise
-                    .as_ref()
-                    .context("video sampler noise missing for Res2S stage")?,
-                0.5,
-            )?,
-        };
+        video_latents = sampler_step(
+            sampler_mode,
+            &video_latents,
+            &video_denoised,
+            &run_sigmas,
+            step_idx,
+            video_sampler_noise.as_ref(),
+            "video sampler noise missing for Res2S stage",
+        )?;
         if !video_conditioning.is_empty() {
             video_latents = reapply_stage_video_conditioning(
                 &video_latents,
@@ -3502,21 +3496,15 @@ fn run_real_distilled_stage(
             } else {
                 audio_velocity.clone()
             };
-            *audio_latents = match sampler_mode {
-                SamplerMode::Euler => {
-                    euler_step(audio_latents, &audio_velocity, &run_sigmas, step_idx)?
-                }
-                SamplerMode::Res2S => res2s_step(
-                    audio_latents,
-                    &audio_velocity,
-                    sigma as f64,
-                    run_sigmas[step_idx + 1] as f64,
-                    audio_sampler_noise
-                        .as_ref()
-                        .context("audio sampler noise missing for Res2S stage")?,
-                    0.5,
-                )?,
-            };
+            *audio_latents = sampler_step(
+                sampler_mode,
+                audio_latents,
+                &audio_velocity,
+                &run_sigmas,
+                step_idx,
+                audio_sampler_noise.as_ref(),
+                "audio sampler noise missing for Res2S stage",
+            )?;
         }
         update_secs += update_start.elapsed().as_secs_f64();
         emit_denoise_progress(
