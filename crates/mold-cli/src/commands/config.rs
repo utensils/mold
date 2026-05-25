@@ -1416,6 +1416,7 @@ mod tests {
             t5_variant: None,
             qwen3_variant: None,
             output_dir: None,
+            media_roots: None,
             default_negative_prompt: None,
             expand: mold_core::ExpandSettings::default(),
             logging: mold_core::LoggingConfig::default(),

@@ -209,7 +209,9 @@ were adjusted to fit model constraints (e.g. multiples of 16, pixel cap).
   "fps": 24,
   "enable_audio": true,
   "audio_file": "<base64 wav>",
+  "audio_file_path": "/srv/mold-media/voice.wav",
   "source_video": "<base64 mp4>",
+  "source_video_path": "/srv/mold-media/clip.mp4",
   "keyframes": [{ "frame": 0, "image": "<base64 png>" }],
   "pipeline": "keyframe",
   "retake_range": { "start_seconds": 1.5, "end_seconds": 3.5 },
@@ -229,21 +231,21 @@ validation.
 
 Important fields:
 
-| Field                                             | Purpose                                                                                                                                          |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `source_image`, `mask_image`                      | img2img/inpainting source media as base64 PNG/JPEG bytes                                                                                         |
-| `edit_images`                                     | ordered Qwen-Image-Edit target/reference images; use this instead of `source_image` for `qwen-image-edit`                                        |
-| `control_image`, `control_model`, `control_scale` | SD1.5 ControlNet conditioning                                                                                                                    |
-| `lora`, `loras`                                   | singular legacy adapter or repeatable stack; `loras[]` wins when both are set                                                                    |
-| `frames`, `fps`, `output_format`                  | video/animation length and encoder selection                                                                                                     |
-| `enable_audio`, `audio_file`                      | LTX-2 synchronized audio toggle and audio-to-video input                                                                                         |
-| `source_video`, `retake_range`                    | LTX-2 retake/video-conditioning source and seconds range                                                                                         |
-| `keyframes`, `pipeline`                           | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake`) |
-| `spatial_upscale`, `temporal_upscale`             | LTX-2 latent upscaling modes such as `x1.5` and `x2`                                                                                             |
-| `placement`                                       | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                |
-| `cfg_plus`                                        | CFG++ guidance for supported SD-family scheduler paths                                                                                           |
-| `embed_metadata`                                  | override config/env metadata embedding for this request                                                                                          |
-| `upscale_model`                                   | post-generation Real-ESRGAN model applied before returning images                                                                                |
+| Field                                               | Purpose                                                                                                                                          |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `source_image`, `mask_image`                        | img2img/inpainting source media as base64 PNG/JPEG bytes                                                                                         |
+| `edit_images`                                       | ordered Qwen-Image-Edit target/reference images; use this instead of `source_image` for `qwen-image-edit`                                        |
+| `control_image`, `control_model`, `control_scale`   | SD1.5 ControlNet conditioning                                                                                                                    |
+| `lora`, `loras`                                     | singular legacy adapter or repeatable stack; `loras[]` wins when both are set                                                                    |
+| `frames`, `fps`, `output_format`                    | video/animation length and encoder selection                                                                                                     |
+| `enable_audio`, `audio_file`, `audio_file_path`     | LTX-2 synchronized audio toggle and audio-to-video input. Path input is server-local and requires configured `media_roots` / `MOLD_MEDIA_ROOTS`. |
+| `source_video`, `source_video_path`, `retake_range` | LTX-2 retake/video-conditioning source and seconds range. Path input is server-local and cannot be combined with inline base64 bytes.            |
+| `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake`) |
+| `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1.5` and `x2`                                                                                             |
+| `placement`                                         | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                |
+| `cfg_plus`                                          | CFG++ guidance for supported SD-family scheduler paths                                                                                           |
+| `embed_metadata`                                    | override config/env metadata embedding for this request                                                                                          |
+| `upscale_model`                                     | post-generation Real-ESRGAN model applied before returning images                                                                                |
 
 The exhaustive schema for enums and nested objects is served by the running
 server at `/api/docs` and `/api/openapi.json`.

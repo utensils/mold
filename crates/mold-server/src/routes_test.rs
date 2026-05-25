@@ -817,6 +817,89 @@ mod tests {
         assert_eq!(body["code"], "VALIDATION_ERROR");
     }
 
+    #[tokio::test]
+    async fn server_local_media_paths_require_configured_roots() {
+        let state = AppState::with_engine(MockEngine::ready());
+        let mut req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "mock-model",
+            "width": 768,
+            "height": 768,
+            "steps": 4,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "source_video_path": "/tmp/clip.mp4"
+        }))
+        .unwrap();
+        {
+            let mut config = state.config.write().await;
+            config.models.insert(
+                "mock-model".to_string(),
+                mold_core::ModelConfig {
+                    family: Some("ltx2".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+
+        let err = crate::routes::resolve_server_local_media_paths(&state, &mut req)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, "VALIDATION_ERROR");
+        assert!(err.error.contains("media_roots"), "got: {}", err.error);
+    }
+
+    #[tokio::test]
+    async fn server_local_media_paths_are_canonicalized_before_queueing() {
+        let root = tempfile::tempdir().unwrap();
+        let clip = root.path().join("clip.mp4");
+        let audio = root.path().join("voice.wav");
+        std::fs::write(&clip, b"mp4").unwrap();
+        std::fs::write(&audio, b"wav").unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let clip_with_parent = nested.join("..").join("clip.mp4");
+
+        let state = AppState::with_engine(MockEngine::ready());
+        {
+            let mut config = state.config.write().await;
+            config.media_roots = Some(vec![root.path().to_string_lossy().to_string()]);
+            config.models.insert(
+                "mock-model".to_string(),
+                mold_core::ModelConfig {
+                    family: Some("ltx2".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "mock-model",
+            "width": 768,
+            "height": 768,
+            "steps": 4,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "audio_file_path": audio,
+            "source_video_path": clip_with_parent
+        }))
+        .unwrap();
+
+        crate::routes::resolve_server_local_media_paths(&state, &mut req)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            req.audio_file_path.as_deref(),
+            Some(audio.canonicalize().unwrap().to_str().unwrap())
+        );
+        assert_eq!(
+            req.source_video_path.as_deref(),
+            Some(clip.canonicalize().unwrap().to_str().unwrap())
+        );
+    }
+
     // ── /api/generate — success path ─────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

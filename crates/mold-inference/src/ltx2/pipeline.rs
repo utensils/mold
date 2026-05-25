@@ -232,13 +232,13 @@ impl Ltx2Engine {
         if req.retake_range.is_some() {
             return Ok(PipelineKind::Retake);
         }
-        if req.audio_file.is_some() {
+        if req.audio_file.is_some() || req.audio_file_path.is_some() {
             return Ok(PipelineKind::A2Vid);
         }
         if req.keyframes.as_ref().is_some_and(|items| items.len() > 1) {
             return Ok(PipelineKind::Keyframe);
         }
-        if req.source_video.is_some() {
+        if req.source_video.is_some() || req.source_video_path.is_some() {
             return Ok(PipelineKind::IcLora);
         }
         if self.model_name.contains("distilled") {
@@ -1243,7 +1243,9 @@ mod tests {
             gif_preview: true,
             enable_audio,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1324,7 +1326,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1373,7 +1377,9 @@ mod tests {
             gif_preview: false,
             enable_audio: Some(true),
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1525,7 +1531,9 @@ mod tests {
             gif_preview: false,
             enable_audio: Some(true),
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,

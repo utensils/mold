@@ -349,9 +349,17 @@ pub struct GenerateRequest {
     /// Optional conditioning audio file for audio-to-video generation.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
     pub audio_file: Option<Vec<u8>>,
+    /// Optional server-local conditioning audio path for trusted LTX-2 deployments.
+    /// Resolved only by `mold serve` against configured allow roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_file_path: Option<String>,
     /// Optional source video for video-to-video / retake generation.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
     pub source_video: Option<Vec<u8>>,
+    /// Optional server-local source video path for trusted LTX-2 deployments.
+    /// Resolved only by `mold serve` against configured allow roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_video_path: Option<String>,
     /// Optional keyframe conditioning images for LTX-2 keyframe interpolation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyframes: Option<Vec<KeyframeCondition>>,
@@ -1250,7 +1258,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1266,6 +1276,25 @@ mod tests {
         assert_eq!(back.seed, req.seed);
         assert_eq!(back.embed_metadata, req.embed_metadata);
         assert_eq!(back.scheduler, None);
+    }
+
+    #[test]
+    fn generate_request_server_local_media_paths_serde_roundtrip() {
+        let json = r#"{"prompt":"test","model":"ltx-2-19b-distilled:fp8","width":960,"height":576,"steps":8,"batch_size":1,"output_format":"mp4","audio_file_path":"/srv/mold-media/voice.wav","source_video_path":"/srv/mold-media/clip.mp4"}"#;
+        let req: GenerateRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            req.audio_file_path.as_deref(),
+            Some("/srv/mold-media/voice.wav")
+        );
+        assert_eq!(
+            req.source_video_path.as_deref(),
+            Some("/srv/mold-media/clip.mp4")
+        );
+
+        let encoded = serde_json::to_string(&req).unwrap();
+        assert!(encoded.contains(r#""audio_file_path":"/srv/mold-media/voice.wav""#));
+        assert!(encoded.contains(r#""source_video_path":"/srv/mold-media/clip.mp4""#));
     }
 
     #[test]
@@ -1411,7 +1440,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1459,7 +1490,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1504,7 +1537,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1551,7 +1586,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1596,7 +1633,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1830,7 +1869,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1881,7 +1922,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1945,7 +1988,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1994,7 +2039,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -2064,7 +2111,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,

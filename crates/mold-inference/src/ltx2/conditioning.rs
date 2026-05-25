@@ -125,14 +125,16 @@ pub(crate) fn stage_conditioning(
         .as_ref()
         .map(|bytes| stage_input_file(work_dir, "conditioning-audio", bytes, "wav"))
         .transpose()?
-        .map(|path| path.to_string_lossy().to_string());
+        .map(|path| path.to_string_lossy().to_string())
+        .or_else(|| req.audio_file_path.clone());
 
     let video_path = req
         .source_video
         .as_ref()
         .map(|bytes| stage_input_file(work_dir, "source-video", bytes, "mp4"))
         .transpose()?
-        .map(|path| path.to_string_lossy().to_string());
+        .map(|path| path.to_string_lossy().to_string())
+        .or_else(|| req.source_video_path.clone());
 
     Ok(StagedConditioning {
         images,
@@ -219,7 +221,9 @@ mod tests {
             gif_preview: false,
             enable_audio: Some(true),
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -338,6 +342,27 @@ mod tests {
             .video_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source-video.mp4")));
+    }
+
+    #[test]
+    fn stage_conditioning_uses_server_local_media_paths_without_copying() {
+        let work_dir = tempfile::tempdir().unwrap();
+        let mut req = req();
+        req.audio_file_path = Some("/srv/mold-media/voice.wav".to_string());
+        req.source_video_path = Some("/srv/mold-media/clip.mp4".to_string());
+
+        let staged = stage_conditioning(&req, work_dir.path()).unwrap();
+
+        assert_eq!(
+            staged.audio_path.as_deref(),
+            Some("/srv/mold-media/voice.wav")
+        );
+        assert_eq!(
+            staged.video_path.as_deref(),
+            Some("/srv/mold-media/clip.mp4")
+        );
+        assert!(!work_dir.path().join("conditioning-audio.wav").exists());
+        assert!(!work_dir.path().join("source-video.mp4").exists());
     }
 
     #[test]
