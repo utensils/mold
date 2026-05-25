@@ -15,7 +15,9 @@
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_nn::VarBuilder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -267,6 +269,39 @@ impl Flux2Engine {
             .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))
     }
 
+    fn load_vae_cpu_tensors(&self) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(shared_pool) = &self.shared_pool else {
+            return Ok(None);
+        };
+        shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&self.base.paths.vae))
+    }
+
+    fn load_vae_var_builder<'a>(
+        &self,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+    ) -> Result<VarBuilder<'a>> {
+        if let Some(tensors) = self.load_vae_cpu_tensors()? {
+            return Ok(crate::encoders::park::varbuilder_from_parked(
+                tensors.as_ref(),
+                dtype,
+                device,
+            ));
+        }
+
+        crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            dtype,
+            device,
+            component,
+            &self.base.progress,
+        )
+    }
+
     fn img2img_source_normalize_range() -> crate::img_utils::NormalizeRange {
         crate::img_utils::NormalizeRange::MinusOneToOne
     }
@@ -290,13 +325,7 @@ impl Flux2Engine {
         // Sequential path resolves MOLD_VAE_DTYPE per request — env changes
         // take effect on the next generate() without an engine reload.
         let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&self.base.paths.vae),
-            vae_dtype,
-            &vae_device,
-            "VAE",
-            &self.base.progress,
-        )?;
+        let vae_vb = self.load_vae_var_builder(vae_dtype, &vae_device, "VAE")?;
         let vae = Flux2AutoEncoder::new(&vae_cfg, vae_vb)?;
         self.base
             .progress
@@ -742,13 +771,7 @@ impl Flux2Engine {
         let vae_cfg = Flux2VaeConfig::klein();
         // Resolve VAE precision once at load — see LoadedFlux2::vae_dtype.
         let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&self.base.paths.vae),
-            vae_dtype,
-            &vae_device,
-            "VAE",
-            &self.base.progress,
-        )?;
+        let vae_vb = self.load_vae_var_builder(vae_dtype, &vae_device, "VAE")?;
         let vae = Flux2AutoEncoder::new(&vae_cfg, vae_vb)?;
         self.base
             .progress
@@ -1545,6 +1568,8 @@ mod tests {
     use crate::engine::LoadStrategy;
     use crate::shared_pool::SharedPool;
     use mold_core::ModelPaths;
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -1729,6 +1754,41 @@ mod tests {
         );
 
         let loaded = engine.load_text_tokenizer(&tokenizer_path).unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flux2_loads_vae_tensors_through_shared_pool() {
+        let dir = temp_test_dir("mold-flux2-vae-pool");
+        let vae_path = dir.join("vae.safetensors");
+        let weight = 1.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "encoder.conv_in.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &weight).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &vae_path).unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+            .unwrap()
+            .unwrap();
+
+        let engine = Flux2Engine::new(
+            "flux2-klein:q8".to_string(),
+            flux2_model_paths(&dir, "transformer.gguf", vec![], None),
+            None,
+            LoadStrategy::Sequential,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_vae_cpu_tensors().unwrap().unwrap();
 
         assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
