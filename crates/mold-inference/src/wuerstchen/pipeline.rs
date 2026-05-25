@@ -6,8 +6,10 @@ use candle_transformers::models::wuerstchen::diffnext::WDiffNeXt;
 use candle_transformers::models::wuerstchen::paella_vq::PaellaVQ;
 use candle_transformers::models::wuerstchen::prior::WPrior;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
-use std::sync::Mutex;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokenizers::Tokenizer;
 
 use crate::cache::{
     clear_cache, get_or_insert_cached_tensor_pair, restore_cached_tensor_pair, CachedTensorPair,
@@ -56,8 +58,8 @@ struct LoadedWuerstchen {
     vqgan: PaellaVQ,
     prior_clip: stable_diffusion::clip::ClipTextTransformer,
     decoder_clip: stable_diffusion::clip::ClipTextTransformer,
-    prior_tokenizer: tokenizers::Tokenizer,
-    decoder_tokenizer: tokenizers::Tokenizer,
+    prior_tokenizer: Arc<Tokenizer>,
+    decoder_tokenizer: Arc<Tokenizer>,
     device: Device,
     clip_device: Device,
     dtype: DType,
@@ -70,6 +72,7 @@ pub struct WuerstchenEngine {
     base: EngineBase<LoadedWuerstchen>,
     prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
 }
 
 impl WuerstchenEngine {
@@ -204,12 +207,23 @@ impl WuerstchenEngine {
         paths: ModelPaths,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
+            shared_pool,
         }
+    }
+
+    fn load_clip_tokenizer(&self, path: &Path, label: &str) -> Result<Arc<Tokenizer>> {
+        if let Some(shared_pool) = &self.shared_pool {
+            return shared_pool.lock().unwrap().load_tokenizer(path);
+        }
+        Tokenizer::from_file(path)
+            .map(Arc::new)
+            .map_err(|e| anyhow::anyhow!("failed to load {label} tokenizer: {e}"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -580,10 +594,8 @@ impl WuerstchenEngine {
         );
 
         // Load tokenizers
-        let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
-        let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
+        let prior_tokenizer = self.load_clip_tokenizer(&prior_clip_tok_path, "Prior CLIP-G")?;
+        let decoder_tokenizer = self.load_clip_tokenizer(&dec_clip_tok_path, "Decoder CLIP")?;
 
         self.base.loaded = Some(LoadedWuerstchen {
             prior: Some(prior),
@@ -902,8 +914,8 @@ impl WuerstchenEngine {
                     self.base.progress.info(&status);
                 }
 
-                let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
-                    .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
+                let prior_tokenizer =
+                    self.load_clip_tokenizer(&prior_clip_tok_path, "Prior CLIP-G")?;
 
                 let tier1 = self
                     .pending_placement
@@ -929,8 +941,8 @@ impl WuerstchenEngine {
                     clip_start.elapsed(),
                 );
 
-                let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
-                    .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
+                let decoder_tokenizer =
+                    self.load_clip_tokenizer(&dec_clip_tok_path, "Decoder CLIP")?;
 
                 self.base
                     .progress
@@ -1521,10 +1533,13 @@ impl InferenceEngine for WuerstchenEngine {
 mod tests {
     use super::*;
     use crate::engine::LoadStrategy;
+    use crate::shared_pool::SharedPool;
     use mold_core::ModelPaths;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokenizers::models::bpe::BPE;
 
     fn temp_test_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1691,6 +1706,7 @@ mod tests {
             ),
             LoadStrategy::Sequential,
             0,
+            None,
         );
 
         let (
@@ -1710,6 +1726,45 @@ mod tests {
             resolved_prior_clip_tokenizer
         );
 
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn wuerstchen_loads_clip_tokenizers_through_shared_pool() {
+        let dir = temp_test_dir("mold-wuerstchen-tokenizer-pool");
+        let tokenizer_path = dir.join("tokenizer.json");
+        tokenizers::Tokenizer::new(BPE::default())
+            .save(&tokenizer_path, false)
+            .unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&tokenizer_path)
+            .unwrap();
+
+        let engine = WuerstchenEngine::new(
+            "wuerstchen-v2:fp16".to_string(),
+            wuerstchen_model_paths(
+                dir.join("prior.safetensors"),
+                Some(dir.join("decoder.safetensors")),
+                dir.join("vqgan.safetensors"),
+                Some(dir.join("prior-clip.safetensors")),
+                Some(tokenizer_path.clone()),
+                None,
+                None,
+            ),
+            LoadStrategy::Sequential,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine
+            .load_clip_tokenizer(&tokenizer_path, "Prior CLIP-G")
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
     }
 
@@ -1734,6 +1789,7 @@ mod tests {
             ),
             LoadStrategy::Sequential,
             0,
+            None,
         );
         let err = missing_decoder_engine.validate_paths().unwrap_err();
         assert!(err.to_string().contains("Decoder (Stage B) path required"));
@@ -1751,6 +1807,7 @@ mod tests {
             ),
             LoadStrategy::Sequential,
             0,
+            None,
         );
         let err = missing_file_engine.validate_paths().unwrap_err();
         assert!(err.to_string().contains("decoder (Stage B) file not found"));
