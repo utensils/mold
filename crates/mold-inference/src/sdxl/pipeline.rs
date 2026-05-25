@@ -4,7 +4,7 @@ use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::schedulers::PredictionType;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths, Scheduler};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::cache::{
@@ -27,8 +27,8 @@ struct LoadedSDXL {
     vae: stable_diffusion::vae::AutoEncoderKL,
     clip_l: stable_diffusion::clip::ClipTextTransformer,
     clip_g: stable_diffusion::clip::ClipTextTransformer,
-    tokenizer_l: tokenizers::Tokenizer,
-    tokenizer_g: tokenizers::Tokenizer,
+    tokenizer_l: Arc<tokenizers::Tokenizer>,
+    tokenizer_g: Arc<tokenizers::Tokenizer>,
     sd_config: stable_diffusion::StableDiffusionConfig,
     device: Device,
     /// Device the CLIP-L / CLIP-G weights live on (shared — Tier 1 groups them).
@@ -45,6 +45,7 @@ pub struct SDXLEngine {
     base: EngineBase<LoadedSDXL>,
     scheduler: Scheduler,
     is_turbo: bool,
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensor>>,
     source_latent_cache: Mutex<LruCache<ImageSizeCacheKey, CachedTensor>>,
     mask_cache: Mutex<LruCache<LatentSizeCacheKey, CachedTensor>>,
@@ -94,11 +95,13 @@ impl SDXLEngine {
         is_turbo: bool,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             scheduler,
             is_turbo,
+            shared_pool,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
@@ -144,6 +147,7 @@ impl SDXLEngine {
         is_turbo: bool,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Result<Self> {
         if !single_file_path.exists() {
             bail!(
@@ -201,6 +205,7 @@ impl SDXLEngine {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             scheduler,
             is_turbo,
+            shared_pool,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             source_latent_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
             mask_cache: Mutex::new(LruCache::new(DEFAULT_IMAGE_CACHE_CAPACITY)),
@@ -267,6 +272,20 @@ impl SDXLEngine {
             clip_tokenizer,
             clip_encoder_2,
             clip_tokenizer_2,
+        ))
+    }
+
+    fn load_clip_tokenizer(
+        &self,
+        clip_tokenizer: &std::path::Path,
+        label: &str,
+    ) -> Result<Arc<tokenizers::Tokenizer>> {
+        if let Some(ref pool) = self.shared_pool {
+            return pool.lock().unwrap().load_tokenizer(clip_tokenizer);
+        }
+        Ok(Arc::new(
+            tokenizers::Tokenizer::from_file(clip_tokenizer)
+                .map_err(|e| anyhow::anyhow!("failed to load {label} tokenizer: {e}"))?,
         ))
     }
 
@@ -536,10 +555,8 @@ impl SDXLEngine {
             )?
         };
 
-        let tokenizer_l = tokenizers::Tokenizer::from_file(&clip_tokenizer)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
-        let tokenizer_g = tokenizers::Tokenizer::from_file(&clip_tokenizer_2)
-            .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
+        let tokenizer_l = self.load_clip_tokenizer(&clip_tokenizer, "CLIP-L")?;
+        let tokenizer_g = self.load_clip_tokenizer(&clip_tokenizer_2, "CLIP-G")?;
 
         self.base.loaded = Some(LoadedSDXL {
             unet: Some(unet),
@@ -1157,10 +1174,8 @@ impl SDXLEngine {
                 self.base.progress.info(&status);
             }
 
-            let tokenizer_l = tokenizers::Tokenizer::from_file(&clip_tokenizer)
-                .map_err(|e| anyhow::anyhow!("failed to load CLIP-L tokenizer: {e}"))?;
-            let tokenizer_g = tokenizers::Tokenizer::from_file(&clip_tokenizer_2)
-                .map_err(|e| anyhow::anyhow!("failed to load CLIP-G tokenizer: {e}"))?;
+            let tokenizer_l = self.load_clip_tokenizer(&clip_tokenizer, "CLIP-L")?;
+            let tokenizer_g = self.load_clip_tokenizer(&clip_tokenizer_2, "CLIP-G")?;
 
             let tier1 = self
                 .pending_placement
@@ -1714,8 +1729,11 @@ impl InferenceEngine for SDXLEngine {
 mod tests {
     use super::*;
     use crate::engine::InferenceEngine;
+    use crate::shared_pool::SharedPool;
     use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokenizers::models::bpe::BPE;
 
     /// Synthesise a minimal SDXL-shaped single-file safetensors with one
     /// representative key per component bucket. Tensor data is one zero
@@ -1779,6 +1797,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
         )
         .expect("constructor must accept a valid SDXL single-file layout");
 
@@ -1794,6 +1813,70 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(single_file);
+    }
+
+    #[test]
+    fn sdxl_loads_clip_tokenizers_through_shared_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip_l_tokenizer = dir.path().join("clip-l-tokenizer.json");
+        let clip_g_tokenizer = dir.path().join("clip-g-tokenizer.json");
+        tokenizers::Tokenizer::new(BPE::default())
+            .save(&clip_l_tokenizer, false)
+            .unwrap();
+        tokenizers::Tokenizer::new(BPE::default())
+            .save(&clip_g_tokenizer, false)
+            .unwrap();
+        let weights_path = dir.path().join("weights.safetensors");
+        std::fs::write(&weights_path, b"stub").unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled_l = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&clip_l_tokenizer)
+            .unwrap();
+        let pooled_g = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&clip_g_tokenizer)
+            .unwrap();
+
+        let paths = ModelPaths {
+            transformer: weights_path.clone(),
+            transformer_shards: Vec::new(),
+            vae: weights_path.clone(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: Some(weights_path.clone()),
+            t5_tokenizer: None,
+            clip_tokenizer: Some(clip_l_tokenizer.clone()),
+            clip_encoder_2: Some(weights_path),
+            clip_tokenizer_2: Some(clip_g_tokenizer.clone()),
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let engine = SDXLEngine::new(
+            "sdxl-test".to_string(),
+            paths,
+            Scheduler::default(),
+            false,
+            LoadStrategy::Eager,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded_l = engine
+            .load_clip_tokenizer(&clip_l_tokenizer, "CLIP-L")
+            .unwrap();
+        let loaded_g = engine
+            .load_clip_tokenizer(&clip_g_tokenizer, "CLIP-G")
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&pooled_l, &loaded_l));
+        assert!(Arc::ptr_eq(&pooled_g, &loaded_g));
     }
 
     #[test]
@@ -1816,6 +1899,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
         );
 
         assert!(
@@ -1861,6 +1945,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
         )
         .expect("constructor");
 
@@ -2001,6 +2086,7 @@ mod tests {
             true,
             LoadStrategy::Eager,
             0,
+            None,
         )
         .expect("constructor must accept is_turbo = true");
 
@@ -2027,6 +2113,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
         )
         .expect("constructor must accept is_turbo = false");
 
