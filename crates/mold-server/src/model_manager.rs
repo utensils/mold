@@ -1008,6 +1008,7 @@ pub(crate) fn resolve_intent_to_paths(
         family: Some(intent.family.clone()),
         ..Default::default()
     };
+    apply_catalog_runtime_defaults(&mut cfg, intent);
     cfg.transformer = Some(primary_str.clone());
 
     // FLUX is the only family with mixed bundling — peek the safetensors
@@ -1091,6 +1092,25 @@ pub(crate) fn resolve_intent_to_paths(
     }
 
     Ok(cfg)
+}
+
+fn apply_catalog_runtime_defaults(
+    cfg: &mut mold_core::ModelConfig,
+    intent: &mold_catalog::synthesis::CatalogModelIntent,
+) {
+    if intent.family == "flux" {
+        match intent.sub_family.as_deref() {
+            Some("flux1-s") => {
+                cfg.is_schnell.get_or_insert(true);
+                cfg.default_steps.get_or_insert(4);
+                cfg.default_guidance.get_or_insert(0.0);
+            }
+            Some("flux1-d" | "flux1-krea" | "flux1-kontext") => {
+                cfg.is_schnell.get_or_insert(false);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn catalog_primary_is_complete(
@@ -4048,6 +4068,51 @@ mod tests {
         let vae_path = models_dir.join("flux-vae/ae.safetensors");
         assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
         assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
+
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_intent_preserves_flux_schnell_subfamily() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        let primary_path = models_dir
+            .join("cv-1153358/flux/civitai/1153358/agfluxSchnell_realistic23.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &primary_path,
+            &[
+                "model.diffusion_model.double_blocks.0.img_attn.proj.weight",
+                "model.diffusion_model.img_in.weight",
+            ],
+        );
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        stub_flux_companion_paths_in_dir(&mut config, models_dir, true);
+
+        let mut entry =
+            flux_unet_only_catalog_entry("1153358", "agfluxSchnell_realistic23.safetensors");
+        entry.sub_family = Some("flux1-s".into());
+
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let cfg = resolve_intent_to_paths("cv:1153358", &intent, &config).unwrap();
+
+        assert_eq!(
+            cfg.is_schnell,
+            Some(true),
+            "flux1-s catalog entries must select FLUX schnell config, not dev guidance config"
+        );
 
         unsafe {
             match _saved {

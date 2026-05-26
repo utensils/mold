@@ -128,6 +128,12 @@ fn fp8_cache_should_skip_tensor(name: &str, dims: &[usize]) -> bool {
     dims.is_empty() || name.starts_with("text_encoders.")
 }
 
+fn fp8_gguf_tmp_path(cache_path: &Path) -> PathBuf {
+    static NEXT_TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = NEXT_TMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    cache_path.with_extension(format!("tmp.{}.{}", std::process::id(), seq))
+}
+
 /// Convert an FP8 safetensors checkpoint to Q8_0 GGUF (one-time).
 ///
 /// FP8 safetensors cannot run directly through candle on a 24 GB card because
@@ -248,7 +254,7 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
     }
 
     // Write GGUF cache (clean up temp file on error)
-    let tmp_path = cache_path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp_path = fp8_gguf_tmp_path(&cache_path);
     let write_result = (|| -> Result<()> {
         let file = std::fs::File::create(&tmp_path)?;
         let mut writer = std::io::BufWriter::new(file);
@@ -260,6 +266,11 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
     if let Err(e) = write_result {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e);
+    }
+    if cache_path.exists() {
+        let _ = std::fs::remove_file(&tmp_path);
+        progress.info(&format!("Using cached Q8 GGUF: {}", cache_path.display()));
+        return Ok(cache_path);
     }
     std::fs::rename(&tmp_path, &cache_path)?;
 
@@ -1108,7 +1119,7 @@ impl FluxEngine {
                     .transformer
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .map(|n| n.contains("schnell"))
+                    .map(|n| n.to_ascii_lowercase().contains("schnell"))
                     .unwrap_or(false)
         })
     }
@@ -3170,6 +3181,35 @@ mod tests {
             cache_str.contains("cache/flux-q8"),
             "cache should be under cache/flux-q8: {cache_str}"
         );
+    }
+
+    #[test]
+    fn fp8_cache_temp_paths_are_unique_per_writer() {
+        let cache_path =
+            std::path::Path::new("/tmp/agfluxSchnell_realistic23-1234-deadbeef.q8_0.gguf");
+
+        let first = super::fp8_gguf_tmp_path(cache_path);
+        let second = super::fp8_gguf_tmp_path(cache_path);
+
+        assert_ne!(first, second);
+        assert_ne!(first, cache_path);
+        assert_ne!(second, cache_path);
+    }
+
+    #[test]
+    fn detects_schnell_from_uppercase_filename() {
+        let engine = super::FluxEngine::new(
+            "cv:1153358".to_string(),
+            dummy_paths("agfluxSchnell_realistic23.safetensors"),
+            None,
+            None,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            None,
+        );
+
+        assert!(engine.detect_is_schnell());
     }
 
     // ── Embedding patching tests ────────────────────────────────────────
