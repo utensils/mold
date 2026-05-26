@@ -3243,7 +3243,7 @@ mod tests {
         serialize_to_file(&tensors, &None, &path).unwrap();
 
         let vb = crate::weight_loader::load_safetensors_with_progress(
-            &[path.clone()],
+            std::slice::from_ref(&path),
             DType::F32,
             &Device::Cpu,
             "test VAE",

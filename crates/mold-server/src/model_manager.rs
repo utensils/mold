@@ -185,8 +185,9 @@ pub(crate) fn preflight_memory_guard_with_available(
     // plus the always-resident top-level weights (proj_in / proj_out /
     // time_embed / caption_projection / scale_shift_table / norms).
     let transformer_path = transformer_path_lower(paths);
-    let streaming = hint.is_some_and(|h| h.family.streaming_transformer())
-        || transformer_path_looks_ltx2(&transformer_path);
+    let streaming = hint
+        .map(|h| h.family.streaming_transformer())
+        .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
     let forced_flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
         && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
     let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
@@ -3045,6 +3046,7 @@ mod tests {
     /// at 2048² (where the budget grows past 1 GB) on the same card.
     #[test]
     fn preflight_memory_guard_accepts_resolution_for_activation_budget() {
+        let _guard = offload_env_guard("0");
         // Shape: 23 GB transformer, 1 GB VAE, 9 GB T5, 1 GB CLIP. Sequential
         // peak = max(10, 24) + 2 GB headroom = 26 GB. On a 30 GB card the
         // 90 % hard limit is 27 GB:
