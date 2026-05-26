@@ -573,7 +573,9 @@ pub(crate) fn server_offload_enabled_for_paths(
         && hint.is_some_and(|h| {
             matches!(
                 h.family,
-                ActivationFamily::Sd3Mmdit | ActivationFamily::ZImageDit
+                ActivationFamily::Sd3Mmdit
+                    | ActivationFamily::ZImageDit
+                    | ActivationFamily::Flux2Dit
             )
         }))
 }
@@ -2539,6 +2541,32 @@ mod tests {
         assert!(
             server_offload_enabled_for_paths(&paths, Some(hint), false),
             "plain Flux.2 requests should still receive explicit offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_flux2_gguf() {
+        let _guard = offload_env_guard("1");
+        let (dir, mut paths) = flux2_klein9b_bf16_paths();
+        let gguf = dir.path().join("flux2-klein-9b-q8.gguf");
+        std::fs::File::create(&gguf)
+            .unwrap()
+            .set_len(12 * GB)
+            .unwrap();
+        paths.transformer = gguf;
+        paths.transformer_shards.clear();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            "global MOLD_OFFLOAD must not force Flux.2 GGUF block offload \
+             because GGUF variants use quantized transformer paths"
         );
     }
 
