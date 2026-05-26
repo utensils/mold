@@ -124,6 +124,10 @@ fn q8_0_can_quantize_dims(dims: &[usize]) -> bool {
         .is_some_and(|last_dim| *last_dim >= block_size && *last_dim % block_size == 0)
 }
 
+fn fp8_cache_should_skip_tensor(name: &str, dims: &[usize]) -> bool {
+    dims.is_empty() || name.starts_with("text_encoders.")
+}
+
 /// Convert an FP8 safetensors checkpoint to Q8_0 GGUF (one-time).
 ///
 /// FP8 safetensors cannot run directly through candle on a 24 GB card because
@@ -221,6 +225,10 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
         } else {
             name.clone()
         };
+
+        if fp8_cache_should_skip_tensor(&out_name, tensor.dims()) {
+            continue;
+        }
 
         let can_quantize = q8_0_can_quantize_dims(tensor.dims());
 
@@ -3133,6 +3141,23 @@ mod tests {
         );
         assert!(!super::q8_0_can_quantize_dims(&[512, 512, 1, 1]));
         assert!(!super::q8_0_can_quantize_dims(&[3072]));
+    }
+
+    #[test]
+    fn fp8_q8_cache_skips_bundled_text_encoder_and_scalar_tensors() {
+        assert!(super::fp8_cache_should_skip_tensor(
+            "text_encoders.clip_l.logit_scale",
+            &[]
+        ));
+        assert!(super::fp8_cache_should_skip_tensor(
+            "text_encoders.t5xxl.encoder.block.0.layer.0.SelfAttention.q.weight",
+            &[4096, 4096]
+        ));
+        assert!(super::fp8_cache_should_skip_tensor("some.scalar", &[]));
+        assert!(!super::fp8_cache_should_skip_tensor(
+            "double_blocks.0.img_attn.qkv.weight",
+            &[9216, 3072]
+        ));
     }
 
     #[test]
