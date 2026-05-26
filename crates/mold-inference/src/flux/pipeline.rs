@@ -1997,13 +1997,7 @@ impl FluxEngine {
             // Load VAE early for source image encoding
             self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_stage = Instant::now();
-            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                std::slice::from_ref(&self.base.paths.vae),
-                early_vae_dtype,
-                &device,
-                "VAE",
-                &self.base.progress,
-            )?;
+            let vae_vb = self.load_vae_var_builder(early_vae_dtype, &device, "VAE")?;
             let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
             self.base
                 .progress
