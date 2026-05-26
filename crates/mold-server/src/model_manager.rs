@@ -10,6 +10,22 @@ use crate::{routes::ApiError, state::AppState};
 
 pub(crate) type EngineProgressCallback = Arc<dyn Fn(mold_inference::ProgressEvent) + Send + Sync>;
 
+fn transformer_path_lower(paths: &ModelPaths) -> String {
+    paths.transformer.to_string_lossy().to_ascii_lowercase()
+}
+
+fn transformer_path_looks_flux2(path: &str) -> bool {
+    path.contains("/flux2/") || path.contains("flux2")
+}
+
+fn transformer_path_looks_ltx2(path: &str) -> bool {
+    path.contains("/ltx2/") || path.contains("ltx2")
+}
+
+fn transformer_path_looks_zimage(path: &str) -> bool {
+    path.contains("/z-image/") || path.contains("zimage")
+}
+
 /// Per-request shape hint passed into [`preflight_memory_guard`] so the
 /// activation budget can scale with resolution / dtype / arch. `None`
 /// degrades to the previous fixed-headroom approximation (the
@@ -167,7 +183,9 @@ pub(crate) fn preflight_memory_guard_with_available(
     // generous fixed cap that covers `streaming_prefetch_count` blocks
     // plus the always-resident top-level weights (proj_in / proj_out /
     // time_embed / caption_projection / scale_shift_table / norms).
-    let streaming = hint.is_some_and(|h| h.family.streaming_transformer());
+    let transformer_path = transformer_path_lower(paths);
+    let streaming = hint.is_some_and(|h| h.family.streaming_transformer())
+        || transformer_path_looks_ltx2(&transformer_path);
     let forced_flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
         && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
     let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
@@ -559,12 +577,13 @@ pub(crate) fn server_offload_enabled_for_paths(
         return false;
     }
 
-    let transformer_path = paths.transformer.to_string_lossy().to_ascii_lowercase();
-    let transformer_looks_zimage =
-        transformer_path.contains("/z-image/") || transformer_path.contains("zimage");
+    let transformer_path = transformer_path_lower(paths);
+    let transformer_looks_flux2 = transformer_path_looks_flux2(&transformer_path);
+    let transformer_looks_zimage = transformer_path_looks_zimage(&transformer_path);
 
     if request_has_lora
-        && (transformer_looks_zimage
+        && (transformer_looks_flux2
+            || transformer_looks_zimage
             || hint.is_some_and(|h| {
                 matches!(
                     h.family,
@@ -2587,6 +2606,53 @@ mod tests {
     }
 
     #[test]
+    fn offload_env_is_ignored_for_flux2_lora_with_ambiguous_family_hint() {
+        let _guard = offload_env_guard("1");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk(
+            "flux2/civitai/2669986/darkBeast_dbkBlitzV15.safetensors",
+            18,
+        );
+        let paths = ModelPaths {
+            transformer: transformer.clone(),
+            transformer_shards: vec![transformer],
+            vae: mk("flux2/civitai/2669986/flux2-vae.safetensors", 1),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![mk("flux2/civitai/2669986/qwen3.safetensors", 16)],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            "Flux.2 LoRA requests must not receive global MOLD_OFFLOAD even \
+             when the catalog family hint is missing or ambiguous"
+        );
+    }
+
+    #[test]
     fn offload_env_is_preserved_for_plain_flux2_request() {
         let _guard = offload_env_guard("1");
         let (_dir, paths) = flux2_klein9b_bf16_paths();
@@ -3110,7 +3176,44 @@ mod tests {
             result.is_ok(),
             "22B LTX-2 must fit on a 24 GB card under streaming-aware peak \
              (only ~2 blocks co-resident; runtime handles its own memory), \
-             got {result:?}",
+            got {result:?}",
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_ltx2_22b_by_catalog_path_when_hint_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk("ltx2/civitai/2752735/ltx23_full.safetensors", 46);
+        let paths = ModelPaths {
+            transformer: transformer.clone(),
+            transformer_shards: Vec::new(),
+            vae: transformer,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let result = preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, None);
+
+        assert!(
+            result.is_ok(),
+            "LTX-2 catalog paths should use the streaming-transformer peak even \
+             when the multi-GPU worker cannot resolve a family hint, got {result:?}"
         );
     }
 
