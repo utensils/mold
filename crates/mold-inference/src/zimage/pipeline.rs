@@ -1508,6 +1508,9 @@ impl ZImageEngine {
 
         // Eager mode: use pre-loaded components
         if self.base.loaded.is_none() {
+            self.load()?;
+        }
+        if self.base.loaded.is_none() {
             bail!("model not loaded — call load() first");
         }
 
@@ -2540,6 +2543,27 @@ mod tests {
                 && sequential_branch.contains("return self.generate_sequential(req);"),
             "Z-Image LoRA/offload sequential generation must drop eager-loaded \
              components before loading staged components"
+        );
+    }
+
+    #[test]
+    fn zimage_eager_path_reloads_after_sequential_generation_unloads_components() {
+        let source = include_str!("pipeline.rs");
+        let eager_branch = source
+            .split("// Eager mode: use pre-loaded components")
+            .nth(1)
+            .expect("generate_inner should contain eager-mode branch");
+        let reload_idx = eager_branch
+            .find("self.load()?;")
+            .expect("eager branch should reload an unloaded cached engine");
+        let guard_idx = eager_branch
+            .find("bail!(\"model not loaded")
+            .expect("eager branch should retain a final loaded-state guard");
+
+        assert!(
+            reload_idx < guard_idx,
+            "Z-Image eager generation must reload after a prior LoRA/offload \
+             sequential request unloads cached components"
         );
     }
 
