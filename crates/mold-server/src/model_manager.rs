@@ -481,15 +481,27 @@ pub(crate) fn select_server_load_strategy_for_budget(
     available_bytes: Option<u64>,
     hint: Option<ActivationHint>,
 ) -> mold_inference::LoadStrategy {
-    if hint.is_some_and(|h| h.family == ActivationFamily::ZImageDit) {
+    let transformer_is_gguf = paths
+        .transformer
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+
+    if hint.is_some_and(|h| h.family == ActivationFamily::ZImageDit) && !transformer_is_gguf {
         return mold_inference::LoadStrategy::Sequential;
     }
-    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
-        && paths
-            .transformer
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+    if transformer_is_gguf
+        && hint.is_some_and(|h| {
+            matches!(
+                h.family,
+                ActivationFamily::Sd3Mmdit | ActivationFamily::ZImageDit
+            )
+        })
+    {
+        return mold_inference::LoadStrategy::Eager;
+    }
+    let qwen_quantized =
+        hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit) && transformer_is_gguf;
 
     let Some(available_bytes) = available_bytes.filter(|v| *v > 0) else {
         return mold_inference::LoadStrategy::Eager;
@@ -2317,6 +2329,83 @@ mod tests {
             result.is_ok(),
             "SD3 GGUF should not count the monolithic VAE checkpoint as \
              co-resident with the transformer, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn server_load_strategy_keeps_sd3_gguf_eager() {
+        let (_dir, paths) = sd3_gguf_paths_with_monolithic_vae(9, 16, 10, 1, 1);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 2,
+            dtype_bytes: 2,
+            family: ActivationFamily::Sd3Mmdit,
+        };
+
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(32 * GB), Some(hint));
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Eager,
+            "SD3 GGUF has its own quantized runtime path; selecting Sequential \
+             asks the runtime for unsupported block offload"
+        );
+    }
+
+    fn zimage_gguf_paths(
+        transformer_gb: u64,
+        vae_gb: u64,
+        text_encoder_gb: u64,
+    ) -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk("z-image-turbo-Q8_0.gguf", transformer_gb);
+        let vae = mk("vae.safetensors", vae_gb);
+        let text_encoder = mk("qwen3.safetensors", text_encoder_gb);
+        let paths = ModelPaths {
+            transformer,
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![text_encoder],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
+    #[test]
+    fn server_load_strategy_keeps_zimage_gguf_eager() {
+        let (_dir, paths) = zimage_gguf_paths(12, 1, 8);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::ZImageDit,
+        };
+
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(24 * GB), Some(hint));
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Eager,
+            "Z-Image GGUF has a quantized/dense runtime path; selecting Sequential \
+             asks the runtime for unsupported block offload"
         );
     }
 
