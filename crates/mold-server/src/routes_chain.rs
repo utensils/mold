@@ -709,7 +709,7 @@ async fn run_chain_legacy(
     } else {
         None
     };
-    model_manager::ensure_model_ready(state, &req.model, None, chain_hint)
+    model_manager::ensure_model_ready(state, &req.model, None, chain_hint, false)
         .await
         .map_err(|e| ChainRunError::CacheMiss(e.error))?;
 

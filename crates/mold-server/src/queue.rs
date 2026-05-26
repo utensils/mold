@@ -569,11 +569,13 @@ async fn process_job(state: &AppState, job: GenerationJob) {
     });
 
     let activation_hint = model_manager::activation_hint_for_request(state, &job.request).await;
+    let request_has_lora = model_manager::request_has_effective_lora(&job.request);
     if let Err(api_err) = model_manager::ensure_model_ready(
         state,
         &job.request.model,
         progress_callback,
         activation_hint,
+        request_has_lora,
     )
     .await
     {

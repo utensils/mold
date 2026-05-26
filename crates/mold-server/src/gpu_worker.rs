@@ -199,8 +199,14 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
     let family_slug = crate::model_manager::family_for_model_sync(&model_name, &config_snapshot);
     let activation_hint =
         crate::model_manager::activation_hint_for_request_sync(&config_snapshot, &job.request);
-    if let Err(e) = ensure_model_ready_sync(worker, &model_name, &config_snapshot, activation_hint)
-    {
+    let request_has_lora = crate::model_manager::request_has_effective_lora(&job.request);
+    if let Err(e) = ensure_model_ready_sync(
+        worker,
+        &model_name,
+        &config_snapshot,
+        activation_hint,
+        request_has_lora,
+    ) {
         tracing::error!(gpu = ordinal, model = %model_name, "Failed to load model: {e}");
         // Detect CUDA OOM during load: synchronize the device so subsequent
         // allocations don't inherit a poisoned context, then surface a
@@ -624,6 +630,7 @@ pub fn ensure_model_ready_sync(
     model_name: &str,
     config: &Config,
     hint: Option<crate::model_manager::ActivationHint>,
+    request_has_lora: bool,
 ) -> anyhow::Result<()> {
     let cache = worker.model_cache.lock().unwrap();
 
@@ -689,7 +696,11 @@ pub fn ensure_model_ready_sync(
                     .ok_or_else(|| anyhow::anyhow!("cache race: model '{model_name}' vanished"))?
             };
 
-            let offload = crate::model_manager::server_offload_enabled_for_paths(&paths, hint);
+            let offload = crate::model_manager::server_offload_enabled_for_paths(
+                &paths,
+                hint,
+                request_has_lora,
+            );
             let mut engine = match mold_inference::create_engine_with_pool(
                 model_name.to_string(),
                 paths,
@@ -804,7 +815,8 @@ pub fn ensure_model_ready_sync(
     }
     device::reclaim_gpu_memory(worker.gpu.ordinal);
 
-    let offload = crate::model_manager::server_offload_enabled_for_paths(&paths, hint);
+    let offload =
+        crate::model_manager::server_offload_enabled_for_paths(&paths, hint, request_has_lora);
     let mut engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,
@@ -845,7 +857,7 @@ pub fn ensure_model_ready_sync(
 /// don't carry a request shape.
 pub fn load_blocking(worker: &GpuWorker, model_name: &str, config: &Config) -> anyhow::Result<()> {
     let _lock = worker.model_load_lock.lock().unwrap();
-    ensure_model_ready_sync(worker, model_name, config, None)
+    ensure_model_ready_sync(worker, model_name, config, None, false)
 }
 
 /// Synchronously unload the currently active model on this GPU worker.
@@ -936,7 +948,7 @@ pub fn run_chain_blocking<T, E>(
 
     // Ensure the model is GPU-resident on this worker. Handles load-from-disk,
     // parked-reload, and the reclaim-on-swap path using worker.gpu.ordinal.
-    ensure_model_ready_sync(worker, model_name, config, hint)?;
+    ensure_model_ready_sync(worker, model_name, config, hint, false)?;
 
     // Take the engine out of the worker's cache so the closure can mutate it.
     let cached = {

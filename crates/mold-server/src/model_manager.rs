@@ -553,8 +553,13 @@ pub(crate) fn select_server_load_strategy_for_device(
 pub(crate) fn server_offload_enabled_for_paths(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
+    request_has_lora: bool,
 ) -> bool {
     if !std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1") {
+        return false;
+    }
+
+    if request_has_lora && hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit) {
         return false;
     }
 
@@ -571,6 +576,18 @@ pub(crate) fn server_offload_enabled_for_paths(
                 ActivationFamily::Sd3Mmdit | ActivationFamily::ZImageDit
             )
         }))
+}
+
+pub(crate) fn request_has_effective_lora(req: &GenerateRequest) -> bool {
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+    if let Some(loras) = &req.loras {
+        if !loras.is_empty() {
+            return loras.iter().any(|lora| lora.scale.abs() > ZERO_SCALE_EPS);
+        }
+    }
+    req.lora
+        .as_ref()
+        .is_some_and(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
 }
 
 pub(crate) type DownloadProgressCallback =
@@ -1482,6 +1499,7 @@ pub(crate) async fn ensure_model_ready(
     model_name: &str,
     progress: Option<EngineProgressCallback>,
     hint: Option<ActivationHint>,
+    request_has_lora: bool,
 ) -> Result<(), ApiError> {
     let _guard = state.model_load_lock.lock().await;
 
@@ -1567,7 +1585,7 @@ pub(crate) async fn ensure_model_ready(
                     )));
                 };
                 let config = state.config.read().await;
-                let offload = server_offload_enabled_for_paths(&paths, hint);
+                let offload = server_offload_enabled_for_paths(&paths, hint, request_has_lora);
                 match mold_inference::create_engine_with_pool(
                     model_name.to_string(),
                     paths,
@@ -1827,7 +1845,7 @@ async fn create_and_load_engine(
     }
 
     let config = state.config.read().await;
-    let offload = server_offload_enabled_for_paths(&paths, hint);
+    let offload = server_offload_enabled_for_paths(&paths, hint, false);
     let mut new_engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,
@@ -2446,7 +2464,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint)),
+            !server_offload_enabled_for_paths(&paths, Some(hint), false),
             "global MOLD_OFFLOAD must not force unsupported SD3 GGUF block offload"
         );
     }
@@ -2464,7 +2482,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint)),
+            !server_offload_enabled_for_paths(&paths, Some(hint), false),
             "global MOLD_OFFLOAD must not force unsupported Z-Image GGUF block offload"
         );
     }
@@ -2482,8 +2500,45 @@ mod tests {
         };
 
         assert!(
-            server_offload_enabled_for_paths(&paths, Some(hint)),
+            server_offload_enabled_for_paths(&paths, Some(hint), false),
             "BF16/FP Z-Image paths should still receive explicit offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_flux2_lora_request() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = flux2_klein9b_bf16_paths();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            "global MOLD_OFFLOAD must not force Flux.2 block offload for LoRA \
+             requests because Flux.2 offload+LoRA is not supported"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_preserved_for_plain_flux2_request() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = flux2_klein9b_bf16_paths();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        assert!(
+            server_offload_enabled_for_paths(&paths, Some(hint), false),
+            "plain Flux.2 requests should still receive explicit offload"
         );
     }
 
