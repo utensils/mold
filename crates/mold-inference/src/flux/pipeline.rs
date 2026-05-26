@@ -115,6 +115,15 @@ fn fp8_gguf_cache_path(path: &Path) -> PathBuf {
     cache_root.join(format!("{stem}-{size}-{content_hash}.q8_0.gguf"))
 }
 
+fn q8_0_can_quantize_dims(dims: &[usize]) -> bool {
+    if dims.len() < 2 {
+        return false;
+    }
+    let block_size = candle_core::quantized::GgmlDType::Q8_0.block_size();
+    dims.last()
+        .is_some_and(|last_dim| *last_dim >= block_size && *last_dim % block_size == 0)
+}
+
 /// Convert an FP8 safetensors checkpoint to Q8_0 GGUF (one-time).
 ///
 /// FP8 safetensors cannot run directly through candle on a 24 GB card because
@@ -197,7 +206,6 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
         .map(|(name, _)| name)
         .collect();
 
-    let block_size = candle_core::quantized::GgmlDType::Q8_0.block_size();
     let mut qtensors: Vec<(String, candle_core::quantized::QTensor)> = Vec::new();
 
     let total = all_names.len();
@@ -214,8 +222,7 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
             name.clone()
         };
 
-        let elem_count = tensor.elem_count();
-        let can_quantize = elem_count >= block_size && elem_count % block_size == 0;
+        let can_quantize = q8_0_can_quantize_dims(tensor.dims());
 
         let qt = if can_quantize {
             candle_core::quantized::QTensor::quantize(
@@ -3113,6 +3120,19 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fp8_q8_cache_quantizes_only_block_aligned_last_dim() {
+        assert!(super::q8_0_can_quantize_dims(&[3072, 3072]));
+        assert!(super::q8_0_can_quantize_dims(&[1, 64]));
+        assert!(
+            !super::q8_0_can_quantize_dims(&[256, 256, 3, 3]),
+            "conv kernels have total elements divisible by 32, but Q8_0 \
+             requires the last dimension itself to be block-aligned"
+        );
+        assert!(!super::q8_0_can_quantize_dims(&[512, 512, 1, 1]));
+        assert!(!super::q8_0_can_quantize_dims(&[3072]));
     }
 
     #[test]
