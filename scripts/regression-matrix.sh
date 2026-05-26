@@ -24,6 +24,7 @@ START_AFTER_MODEL="${MOLD_REGRESSION_START_AFTER_MODEL:-}"
 START_AFTER_CASE="${MOLD_REGRESSION_START_AFTER_CASE:-}"
 MIXED_JOBS="${MOLD_REGRESSION_MIXED_JOBS:-12}"
 MIXED_PARALLEL="${MOLD_REGRESSION_MIXED_PARALLEL:-6}"
+MATRIX_BATCH="${MOLD_REGRESSION_BATCH:-4}"
 INCLUDE_OVER_BUDGET="${MOLD_REGRESSION_INCLUDE_OVER_BUDGET:-0}"
 
 if [[ -n "$START_AFTER_MODEL" || -n "$START_AFTER_CASE" ]]; then
@@ -85,27 +86,33 @@ json_log() {
     '{ts:$ts,status:$status,model:$model,family:$family,case:$case,output:$output,cmd:$cmd}'
 }
 
-run_case() {
-  local model="$1" family="$2" case_name="$3" output="$4" timeout_s="$5"
-  shift 5
-  local -a cmd=("$@")
-  local cmd_text
-  printf -v cmd_text '%q ' "${cmd[@]}"
+case_selected() {
+  local model="$1" case_name="$2"
   if [[ -n "$ONLY_MODEL" && "$model" != "$ONLY_MODEL" ]]; then
-    return 0
+    return 1
   fi
   if [[ -n "$ONLY_CASE" && "$case_name" != "$ONLY_CASE" ]]; then
-    return 0
+    return 1
   fi
   if [[ "$RESUME_READY" != true ]]; then
     if [[ "$model" == "$START_AFTER_MODEL" && ( -z "$START_AFTER_CASE" || "$case_name" == "$START_AFTER_CASE" ) ]]; then
       RESUME_READY=true
     fi
-    return 0
+    return 1
   fi
+  return 0
+}
+
+execute_case() {
+  local model="$1" family="$2" case_name="$3" output="$4" timeout_s="$5"
+  shift 5
+  local -a cmd=("$@")
+  local cmd_text artifact
+  printf -v cmd_text '%q ' "${cmd[@]}"
+  artifact="$(tr ':/ ' '---' <<< "$model.$case_name")"
   echo "RUN $case_name $model -> $output"
   json_log start "$model" "$family" "$case_name" "$output" "$cmd_text" >> "$LOG"
-  if timeout "$timeout_s" "${cmd[@]}" > "$RUN_DIR/${case_name//[^A-Za-z0-9_.-]/_}.stdout" 2> "$RUN_DIR/${case_name//[^A-Za-z0-9_.-]/_}.stderr"; then
+  if timeout "$timeout_s" "${cmd[@]}" > "$RUN_DIR/$artifact.stdout" 2> "$RUN_DIR/$artifact.stderr"; then
     if [[ ! -s "$output" ]]; then
       echo "empty output for $case_name $model: $output" >&2
       json_log empty-output "$model" "$family" "$case_name" "$output" "$cmd_text" >> "$LOG"
@@ -116,9 +123,37 @@ run_case() {
     local code=$?
     echo "FAILED $case_name $model (exit $code)" >&2
     echo "$cmd_text" > "$RUN_DIR/FAILED_COMMAND.txt"
-    cp "$RUN_DIR/${case_name//[^A-Za-z0-9_.-]/_}.stderr" "$RUN_DIR/FAILED_STDERR.txt"
+    cp "$RUN_DIR/$artifact.stderr" "$RUN_DIR/FAILED_STDERR.txt"
     json_log "failed:$code" "$model" "$family" "$case_name" "$output" "$cmd_text" >> "$LOG"
     exit "$code"
+  fi
+}
+
+queue_case() {
+  local model="$1" family="$2" case_name="$3"
+  if ! case_selected "$model" "$case_name"; then
+    return 0
+  fi
+  execute_case "$@" &
+  MATRIX_ACTIVE=$((MATRIX_ACTIVE + 1))
+  if (( MATRIX_ACTIVE >= MATRIX_BATCH )); then
+    wait_for_matrix_batch
+  fi
+}
+
+MATRIX_ACTIVE=0
+
+wait_for_matrix_batch() {
+  local failures=0
+  while (( MATRIX_ACTIVE > 0 )); do
+    if ! wait -n; then
+      failures=$((failures + 1))
+    fi
+    MATRIX_ACTIVE=$((MATRIX_ACTIVE - 1))
+  done
+  if (( failures > 0 )); then
+    echo "matrix batch failed with $failures failed case(s): $RUN_DIR" >&2
+    exit 1
   fi
 }
 
@@ -317,20 +352,20 @@ while IFS=$'\t' read -r model family default_steps default_width default_height;
 
   if [[ "$family" == ltx-video || "$family" == ltx2 ]]; then
     base_out="$RUN_DIR/${safe_model}.base.mp4"
-    run_case "$model" "$family" base "$base_out" "$TIMEOUT_VIDEO" \
+    queue_case "$model" "$family" base "$base_out" "$TIMEOUT_VIDEO" \
       "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
       --output "$base_out" --format mp4 --frames "$FRAMES_VIDEO" --fps "$FPS_VIDEO" \
       --width "$width" --height "$height" --steps "$steps"
 
     if [[ "$family" == ltx2 ]]; then
       audio_out="$RUN_DIR/${safe_model}.audio.mp4"
-      run_case "$model" "$family" audio "$audio_out" "$TIMEOUT_VIDEO" \
+      queue_case "$model" "$family" audio "$audio_out" "$TIMEOUT_VIDEO" \
         "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
         --output "$audio_out" --format mp4 --frames "$FRAMES_VIDEO" --fps "$FPS_VIDEO" \
         --width "$width" --height "$height" --steps "$steps" --audio
 
       src_out="$RUN_DIR/${safe_model}.source.mp4"
-      run_case "$model" "$family" source "$src_out" "$TIMEOUT_VIDEO" \
+      queue_case "$model" "$family" source "$src_out" "$TIMEOUT_VIDEO" \
         "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
         --output "$src_out" --format mp4 --frames "$FRAMES_VIDEO" --fps "$FPS_VIDEO" \
         --width "$width" --height "$height" --steps "$steps" --image "$SOURCE_IMAGE"
@@ -340,7 +375,7 @@ while IFS=$'\t' read -r model family default_steps default_width default_height;
       chain_script="$RUN_DIR/${safe_model}.chain.toml"
       write_chain_script "$chain_script" "$model" "$family" "$width" "$height" "$steps" false false
       chain_out="$RUN_DIR/${safe_model}.chain.mp4"
-      run_case "$model" "$family" chain "$chain_out" "$TIMEOUT_VIDEO" \
+      queue_case "$model" "$family" chain "$chain_out" "$TIMEOUT_VIDEO" \
         "$MOLD_BIN" run --host "$HOST" --script "$chain_script" --output "$chain_out"
     fi
 
@@ -348,49 +383,51 @@ while IFS=$'\t' read -r model family default_steps default_width default_height;
       chain_source_script="$RUN_DIR/${safe_model}.chain-source.toml"
       write_chain_script "$chain_source_script" "$model" "$family" "$width" "$height" "$steps" false true
       chain_source_out="$RUN_DIR/${safe_model}.chain-source.mp4"
-      run_case "$model" "$family" chain-source "$chain_source_out" "$TIMEOUT_VIDEO" \
+      queue_case "$model" "$family" chain-source "$chain_source_out" "$TIMEOUT_VIDEO" \
         "$MOLD_BIN" run --host "$HOST" --script "$chain_source_script" --output "$chain_source_out"
 
       chain_audio_script="$RUN_DIR/${safe_model}.chain-audio.toml"
       write_chain_script "$chain_audio_script" "$model" "$family" "$width" "$height" "$steps" true false
       chain_audio_out="$RUN_DIR/${safe_model}.chain-audio.mp4"
-      run_case "$model" "$family" chain-audio "$chain_audio_out" "$TIMEOUT_VIDEO" \
+      queue_case "$model" "$family" chain-audio "$chain_audio_out" "$TIMEOUT_VIDEO" \
         "$MOLD_BIN" run --host "$HOST" --script "$chain_audio_script" --output "$chain_audio_out"
 
       chain_audio_source_script="$RUN_DIR/${safe_model}.chain-audio-source.toml"
       write_chain_script "$chain_audio_source_script" "$model" "$family" "$width" "$height" "$steps" true true
       chain_audio_source_out="$RUN_DIR/${safe_model}.chain-audio-source.mp4"
-      run_case "$model" "$family" chain-audio-source "$chain_audio_source_out" "$TIMEOUT_VIDEO" \
+      queue_case "$model" "$family" chain-audio-source "$chain_audio_source_out" "$TIMEOUT_VIDEO" \
         "$MOLD_BIN" run --host "$HOST" --script "$chain_audio_source_script" --output "$chain_audio_source_out"
     fi
   else
     base_out="$RUN_DIR/${safe_model}.base.png"
-    run_case "$model" "$family" base "$base_out" "$TIMEOUT_IMAGE" \
+    queue_case "$model" "$family" base "$base_out" "$TIMEOUT_IMAGE" \
       "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
       --output "$base_out" --format png --width "$width" --height "$height" --steps "$steps"
 
     mapfile -t loras < <(lora_paths_for_model "$model" "$family")
     if (( ${#loras[@]} >= 1 )); then
       lora1_out="$RUN_DIR/${safe_model}.lora1.png"
-      run_case "$model" "$family" lora1 "$lora1_out" "$TIMEOUT_IMAGE" \
+      queue_case "$model" "$family" lora1 "$lora1_out" "$TIMEOUT_IMAGE" \
         "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
         --output "$lora1_out" --format png --width "$width" --height "$height" --steps "$steps" \
         --lora "${loras[0]}"
     fi
     if (( ${#loras[@]} >= 2 )); then
       lora2_out="$RUN_DIR/${safe_model}.lora2.png"
-      run_case "$model" "$family" lora2 "$lora2_out" "$TIMEOUT_IMAGE" \
+      queue_case "$model" "$family" lora2 "$lora2_out" "$TIMEOUT_IMAGE" \
         "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
         --output "$lora2_out" --format png --width "$width" --height "$height" --steps "$steps" \
         --lora "${loras[0]}" --lora "${loras[1]}"
     fi
 
     src_out="$RUN_DIR/${safe_model}.source.png"
-    run_case "$model" "$family" source "$src_out" "$TIMEOUT_IMAGE" \
+    queue_case "$model" "$family" source "$src_out" "$TIMEOUT_IMAGE" \
       "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
       --output "$src_out" --format png --width "$width" --height "$height" --steps "$steps" \
       --image "$SOURCE_IMAGE"
   fi
 done < "$RUN_DIR/models.tsv"
+
+wait_for_matrix_batch
 
 echo "all regression cases passed: $RUN_DIR"
