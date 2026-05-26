@@ -14,7 +14,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use crate::progress::ProgressReporter;
+use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
 /// VarBuilder backend for FP8 safetensors that preserves native dtypes.
 ///
@@ -129,6 +129,26 @@ pub fn load_fp8_safetensors<'a>(
     Ok(vb)
 }
 
+pub(crate) fn load_fp8_safetensors_with_callback<'a>(
+    paths: &[impl AsRef<Path>],
+    device: &Device,
+    component: &str,
+    progress: Option<&ProgressCallback>,
+) -> Result<VarBuilder<'a>> {
+    let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_ref()).collect();
+    let bytes_total = total_file_bytes(paths);
+
+    emit_weight_load(progress, component, 0, bytes_total);
+
+    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&path_refs)? };
+    let backend = NativeFp8Backend { inner: tensors };
+    let vb = VarBuilder::from_backend(Box::new(backend), DType::BF16, device.clone());
+
+    emit_weight_load(progress, component, bytes_total, bytes_total);
+
+    Ok(vb)
+}
+
 fn load_safetensors_with_progress_total<'a>(
     paths: &[impl AsRef<Path>],
     dtype: DType,
@@ -146,6 +166,21 @@ fn load_safetensors_with_progress_total<'a>(
     progress.weight_load(component, bytes_total, bytes_total);
 
     Ok(vb)
+}
+
+fn emit_weight_load(
+    progress: Option<&ProgressCallback>,
+    component: &str,
+    bytes_loaded: u64,
+    bytes_total: u64,
+) {
+    if let Some(progress) = progress {
+        progress(ProgressEvent::WeightLoad {
+            bytes_loaded,
+            bytes_total,
+            component: component.to_string(),
+        });
+    }
 }
 
 /// Load safetensors via lazy mmap but report progress for only the tensors that
@@ -181,11 +216,32 @@ pub fn load_safetensors_with_progress<'a>(
     load_safetensors_with_progress_total(paths, dtype, device, component, progress, bytes_total)
 }
 
+pub(crate) fn load_safetensors_with_progress_callback<'a>(
+    paths: &[impl AsRef<Path>],
+    dtype: DType,
+    device: &Device,
+    component: &str,
+    progress: Option<&ProgressCallback>,
+) -> Result<VarBuilder<'a>> {
+    let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_ref()).collect();
+    let bytes_total = total_file_bytes(paths);
+
+    emit_weight_load(progress, component, 0, bytes_total);
+
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&path_refs, dtype, device)? };
+
+    emit_weight_load(progress, component, bytes_total, bytes_total);
+
+    Ok(vb)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::progress::ProgressEvent;
     use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     fn temp_file(name: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
@@ -222,6 +278,105 @@ mod tests {
         })
         .unwrap();
         assert_eq!(total, visual_data.len() as u64);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_safetensors_with_progress_callback_emits_weight_load_events() {
+        let path = temp_file("callback-progress");
+        let data = vec![0u8; 16];
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2, 2], &data).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let callback: crate::progress::ProgressCallback = Box::new(move |event| {
+            sink.lock().unwrap().push(event);
+        });
+
+        let _vb = load_safetensors_with_progress_callback(
+            std::slice::from_ref(&path),
+            DType::F32,
+            &Device::Cpu,
+            "test component",
+            Some(&callback),
+        )
+        .unwrap();
+
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ProgressEvent::WeightLoad {
+                    bytes_loaded: 0,
+                    bytes_total,
+                    component
+                },
+                ProgressEvent::WeightLoad {
+                    bytes_loaded,
+                    bytes_total: bytes_total_done,
+                    component: component_done
+                }
+            ] if *bytes_total >= data.len() as u64
+                && bytes_loaded == bytes_total_done
+                && bytes_total == bytes_total_done
+                && component == "test component"
+                && component_done == "test component"
+        ));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_fp8_safetensors_with_callback_emits_weight_load_events() {
+        let path = temp_file("fp8-callback-progress");
+        let data = vec![0u8; 16];
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2, 2], &data).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let callback: crate::progress::ProgressCallback = Box::new(move |event| {
+            sink.lock().unwrap().push(event);
+        });
+
+        let _vb = load_fp8_safetensors_with_callback(
+            std::slice::from_ref(&path),
+            &Device::Cpu,
+            "test fp8 component",
+            Some(&callback),
+        )
+        .unwrap();
+
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ProgressEvent::WeightLoad {
+                    bytes_loaded: 0,
+                    bytes_total,
+                    component
+                },
+                ProgressEvent::WeightLoad {
+                    bytes_loaded,
+                    bytes_total: bytes_total_done,
+                    component: component_done
+                }
+            ] if *bytes_total >= data.len() as u64
+                && bytes_loaded == bytes_total_done
+                && bytes_total == bytes_total_done
+                && component == "test fp8 component"
+                && component_done == "test fp8 component"
+        ));
 
         let _ = std::fs::remove_file(path);
     }

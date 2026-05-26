@@ -2,6 +2,8 @@
 
 use candle_core::{bail, DType, IndexOp, Result, Tensor};
 use candle_nn::{group_norm, ops, Conv2d, Conv2dConfig, GroupNorm, VarBuilder};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 fn cat_dim(xs: &[Tensor], dim: usize) -> Result<Tensor> {
     let refs = xs.iter().collect::<Vec<_>>();
@@ -1183,6 +1185,7 @@ pub struct AutoencoderKLLtx2Video {
     decoder: Ltx2VideoDecoder,
     latents_mean: Tensor,
     latents_std: Tensor,
+    latent_stats_cache: Arc<Mutex<HashMap<VideoVaeLatentStatsCacheKey, (Tensor, Tensor)>>>,
     #[allow(dead_code)]
     scaling_factor: f64,
     #[allow(dead_code)]
@@ -1192,6 +1195,13 @@ pub struct AutoencoderKLLtx2Video {
     config: AutoencoderKLLtx2VideoConfig,
     pub use_tiling: bool,
     pub use_framewise_decoding: bool,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct VideoVaeLatentStatsCacheKey {
+    channels: usize,
+    dtype: String,
+    device: String,
 }
 
 impl AutoencoderKLLtx2Video {
@@ -1215,6 +1225,7 @@ impl AutoencoderKLLtx2Video {
             decoder,
             latents_mean,
             latents_std,
+            latent_stats_cache: Arc::new(Mutex::new(HashMap::new())),
             scaling_factor: config.scaling_factor,
             spatial_compression_ratio: config.spatial_compression_ratio,
             temporal_compression_ratio: config.temporal_compression_ratio,
@@ -1224,33 +1235,55 @@ impl AutoencoderKLLtx2Video {
         })
     }
 
-    pub(crate) fn normalize_latents(&self, latents: &Tensor) -> Result<Tensor> {
+    fn broadcast_latent_stats(&self, latents: &Tensor) -> Result<((Tensor, Tensor), bool)> {
         let channels = latents.dim(1)?;
+        let key = VideoVaeLatentStatsCacheKey {
+            channels,
+            dtype: format!("{:?}", latents.dtype()),
+            device: format!("{:?}", latents.device()),
+        };
+        if let Some((mean, std)) = self
+            .latent_stats_cache
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return Ok(((mean, std), true));
+        }
+
         let mean = self
             .latents_mean
             .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+            .to_device(latents.device())?;
+        let mean = if mean.dtype() == latents.dtype() {
+            mean
+        } else {
+            mean.to_dtype(latents.dtype())?
+        };
         let std = self
             .latents_std
             .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+            .to_device(latents.device())?;
+        let std = if std.dtype() == latents.dtype() {
+            std
+        } else {
+            std.to_dtype(latents.dtype())?
+        };
+        self.latent_stats_cache
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(key, (mean.clone(), std.clone()));
+        Ok(((mean, std), false))
+    }
+
+    pub(crate) fn normalize_latents(&self, latents: &Tensor) -> Result<Tensor> {
+        let ((mean, std), _) = self.broadcast_latent_stats(latents)?;
         latents.broadcast_sub(&mean)?.broadcast_div(&std)
     }
 
     pub(crate) fn denormalize_latents(&self, latents: &Tensor) -> Result<Tensor> {
-        let channels = latents.dim(1)?;
-        let mean = self
-            .latents_mean
-            .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
-        let std = self
-            .latents_std
-            .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+        let ((mean, std), _) = self.broadcast_latent_stats(latents)?;
         latents.broadcast_mul(&std)?.broadcast_add(&mean)
     }
 
@@ -1555,6 +1588,44 @@ mod tests {
                 .unwrap();
         assert_eq!(vae.encoder.norm_out.eps, eps);
         assert_eq!(vae.decoder.norm_out.eps, eps);
+    }
+
+    #[test]
+    fn video_vae_latent_stats_cache_reuses_broadcast_tensors() {
+        let config = AutoencoderKLLtx2VideoConfig {
+            latent_channels: 4,
+            encoder_base_channels: 4,
+            decoder_base_channels: 4,
+            encoder_blocks: vec![VaeBlockConfig::res_x(1)],
+            decoder_blocks: vec![VaeBlockConfig::res_x(1)],
+            latents_mean: vec![1.0, 2.0, 3.0, 4.0],
+            latents_std: vec![2.0, 4.0, 8.0, 16.0],
+            ..Default::default()
+        };
+        let vae =
+            AutoencoderKLLtx2Video::new(config.clone(), tiny_autoencoder_var_builder(&config))
+                .unwrap();
+        let latents = Tensor::from_vec(
+            vec![3.0f32, 10.0, 19.0, 36.0],
+            (1, 4, 1, 1, 1),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let ((mean, std), first_hit) = vae.broadcast_latent_stats(&latents).unwrap();
+        let ((mean_again, std_again), second_hit) = vae.broadcast_latent_stats(&latents).unwrap();
+        let normalized = vae.normalize_latents(&latents).unwrap();
+
+        assert!(!first_hit);
+        assert!(second_hit);
+        assert_eq!(mean.dims5().unwrap(), (1, 4, 1, 1, 1));
+        assert_eq!(std.dims5().unwrap(), (1, 4, 1, 1, 1));
+        assert_eq!(format!("{:?}", mean_again.device()), "Cpu");
+        assert_eq!(std_again.dtype(), DType::F32);
+        assert_eq!(
+            normalized.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![3.0, 10.0, 19.0, 36.0]
+        );
     }
 
     #[test]

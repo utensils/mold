@@ -153,6 +153,7 @@ pub fn create_engine_with_pool(
                     scheduler,
                     load_strategy,
                     gpu_ordinal,
+                    shared_pool,
                 )?))
             } else {
                 Ok(Box::new(SD15Engine::new(
@@ -161,6 +162,7 @@ pub fn create_engine_with_pool(
                     scheduler,
                     load_strategy,
                     gpu_ordinal,
+                    shared_pool,
                 )))
             }
         }
@@ -195,6 +197,7 @@ pub fn create_engine_with_pool(
                     is_turbo,
                     load_strategy,
                     gpu_ordinal,
+                    shared_pool,
                 )?))
             } else {
                 Ok(Box::new(SDXLEngine::new(
@@ -204,6 +207,7 @@ pub fn create_engine_with_pool(
                     is_turbo,
                     load_strategy,
                     gpu_ordinal,
+                    shared_pool,
                 )))
             }
         }
@@ -223,6 +227,8 @@ pub fn create_engine_with_pool(
                 t5_variant,
                 load_strategy,
                 gpu_ordinal,
+                offload,
+                shared_pool,
             )))
         }
         "z-image" => {
@@ -235,6 +241,8 @@ pub fn create_engine_with_pool(
                 qwen3_variant,
                 load_strategy,
                 gpu_ordinal,
+                offload,
+                shared_pool,
             )))
         }
         "flux2" | "flux.2" | "flux2-klein" => {
@@ -255,6 +263,8 @@ pub fn create_engine_with_pool(
                     qwen3_variant,
                     load_strategy,
                     gpu_ordinal,
+                    offload,
+                    shared_pool,
                 )?))
             } else {
                 Ok(Box::new(Flux2Engine::new(
@@ -263,6 +273,8 @@ pub fn create_engine_with_pool(
                     qwen3_variant,
                     load_strategy,
                     gpu_ordinal,
+                    offload,
+                    shared_pool,
                 )))
             }
         }
@@ -272,6 +284,7 @@ pub fn create_engine_with_pool(
             load_strategy,
             gpu_ordinal,
             offload,
+            shared_pool,
         ))),
         "qwen-image-edit" => Ok(Box::new(QwenImageEngine::new(
             model_name,
@@ -279,6 +292,7 @@ pub fn create_engine_with_pool(
             load_strategy,
             gpu_ordinal,
             offload,
+            shared_pool,
         ))),
         "ltx-video" | "ltx_video" => {
             let t5_variant = std::env::var("MOLD_T5_VARIANT")
@@ -344,6 +358,7 @@ pub fn create_engine_with_pool(
             paths,
             load_strategy,
             gpu_ordinal,
+            shared_pool,
         ))),
         other => bail!(
             "unknown model family '{}' for model '{}'. Supported: flux, flux2, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wuerstchen",

@@ -1,5 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use candle_core::{DType, Tensor};
+
+use crate::ltx2::execution::SamplerMode;
 
 #[allow(dead_code)]
 pub const DISTILLED_SIGMA_VALUES: &[f32] = &[
@@ -45,6 +47,33 @@ pub fn euler_step(
         .broadcast_add(&(velocity * dt)?)?)
 }
 
+pub(crate) fn sampler_step(
+    sampler_mode: SamplerMode,
+    sample: &Tensor,
+    denoised_sample: &Tensor,
+    sigmas: &[f32],
+    step_index: usize,
+    noise: Option<&Tensor>,
+    missing_noise_context: &'static str,
+) -> Result<Tensor> {
+    match sampler_mode {
+        SamplerMode::Euler => euler_step(sample, denoised_sample, sigmas, step_index),
+        SamplerMode::Res2S => {
+            if step_index + 1 >= sigmas.len() {
+                bail!("Res2S sampler step requires a sigma and next sigma");
+            }
+            res2s_step(
+                sample,
+                denoised_sample,
+                sigmas[step_index] as f64,
+                sigmas[step_index + 1] as f64,
+                noise.context(missing_noise_context)?,
+                0.5,
+            )
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub fn apply_denoise_mask(
     denoised: &Tensor,
@@ -79,7 +108,15 @@ where
     for step_index in 0..(sigmas.len() - 1) {
         let denoised = denoiser(&sample, step_index)?;
         let denoised = apply_denoise_mask(&denoised, denoise_mask, clean_latent)?;
-        sample = euler_step(&sample, &denoised, sigmas, step_index)?;
+        sample = sampler_step(
+            SamplerMode::Euler,
+            &sample,
+            &denoised,
+            sigmas,
+            step_index,
+            None,
+            "Euler sampler does not require noise",
+        )?;
     }
     Ok(sample)
 }
@@ -162,13 +199,14 @@ where
     for step_index in 0..(sigmas.len() - 1) {
         let denoised = denoiser(&sample, step_index)?;
         let denoised = apply_denoise_mask(&denoised, denoise_mask, clean_latent)?;
-        sample = res2s_step(
+        sample = sampler_step(
+            SamplerMode::Res2S,
             &sample,
             &denoised,
-            sigmas[step_index] as f64,
-            sigmas[step_index + 1] as f64,
-            noise,
-            0.5,
+            sigmas,
+            step_index,
+            Some(noise),
+            "Res2S sampler noise missing",
         )?;
     }
     Ok(sample)
@@ -183,9 +221,12 @@ fn factorial(n: usize) -> usize {
 mod tests {
     use candle_core::{Device, Tensor};
 
+    use crate::ltx2::execution::SamplerMode;
+
     use super::{
         euler_denoising_loop, euler_step, phi, res2s_coefficients, res2s_denoising_loop,
-        res2s_sde_coefficients, DISTILLED_SIGMA_VALUES, STAGE_2_DISTILLED_SIGMA_VALUES,
+        res2s_sde_coefficients, sampler_step, DISTILLED_SIGMA_VALUES,
+        STAGE_2_DISTILLED_SIGMA_VALUES,
     };
 
     #[test]
@@ -211,6 +252,79 @@ mod tests {
             .to_vec1::<f32>()
             .unwrap();
         assert_eq!(out, vec![1.5]);
+    }
+
+    #[test]
+    fn sampler_step_matches_euler_step_for_schedule_index() {
+        let device = Device::Cpu;
+        let sample = Tensor::new(&[2f32], &device).unwrap();
+        let denoised = Tensor::new(&[1f32], &device).unwrap();
+
+        let direct = euler_step(&sample, &denoised, &[1.0, 0.5], 0)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let via_helper = sampler_step(
+            SamplerMode::Euler,
+            &sample,
+            &denoised,
+            &[1.0, 0.5],
+            0,
+            None,
+            "test sampler noise missing",
+        )
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+
+        assert_eq!(via_helper, direct);
+    }
+
+    #[test]
+    fn sampler_step_matches_res2s_step_for_schedule_index() {
+        let device = Device::Cpu;
+        let sample = Tensor::new(&[2f32], &device).unwrap();
+        let denoised = Tensor::new(&[1f32], &device).unwrap();
+        let noise = Tensor::zeros((1,), candle_core::DType::F32, &device).unwrap();
+
+        let direct = super::res2s_step(&sample, &denoised, 0.5, 0.0, &noise, 0.5)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let via_helper = sampler_step(
+            SamplerMode::Res2S,
+            &sample,
+            &denoised,
+            &[0.5, 0.0],
+            0,
+            Some(&noise),
+            "test sampler noise missing",
+        )
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+
+        assert_eq!(via_helper, direct);
+    }
+
+    #[test]
+    fn sampler_step_requires_noise_for_res2s() {
+        let device = Device::Cpu;
+        let sample = Tensor::new(&[2f32], &device).unwrap();
+        let denoised = Tensor::new(&[1f32], &device).unwrap();
+
+        let err = sampler_step(
+            SamplerMode::Res2S,
+            &sample,
+            &denoised,
+            &[0.5, 0.0],
+            0,
+            None,
+            "test sampler noise missing",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("test sampler noise missing"));
     }
 
     #[test]

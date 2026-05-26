@@ -199,8 +199,14 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
     let family_slug = crate::model_manager::family_for_model_sync(&model_name, &config_snapshot);
     let activation_hint =
         crate::model_manager::activation_hint_for_request_sync(&config_snapshot, &job.request);
-    if let Err(e) = ensure_model_ready_sync(worker, &model_name, &config_snapshot, activation_hint)
-    {
+    let request_has_lora = crate::model_manager::request_has_effective_lora(&job.request);
+    if let Err(e) = ensure_model_ready_sync(
+        worker,
+        &model_name,
+        &config_snapshot,
+        activation_hint,
+        request_has_lora,
+    ) {
         tracing::error!(gpu = ordinal, model = %model_name, "Failed to load model: {e}");
         // Detect CUDA OOM during load: synchronize the device so subsequent
         // allocations don't inherit a poisoned context, then surface a
@@ -624,13 +630,23 @@ pub fn ensure_model_ready_sync(
     model_name: &str,
     config: &Config,
     hint: Option<crate::model_manager::ActivationHint>,
+    request_has_lora: bool,
 ) -> anyhow::Result<()> {
     let cache = worker.model_cache.lock().unwrap();
 
     // Already loaded?
     if let Some(entry) = cache.get(model_name) {
         if entry.residency == ModelResidency::Gpu {
-            return Ok(());
+            let must_recreate = entry.engine.model_paths().is_some_and(|paths| {
+                crate::model_manager::request_requires_fresh_engine_for_offload_policy(
+                    paths,
+                    hint,
+                    request_has_lora,
+                )
+            });
+            if !must_recreate {
+                return Ok(());
+            }
         }
     }
 
@@ -689,11 +705,22 @@ pub fn ensure_model_ready_sync(
                     .ok_or_else(|| anyhow::anyhow!("cache race: model '{model_name}' vanished"))?
             };
 
-            let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+            let offload = crate::model_manager::server_offload_enabled_for_paths(
+                &paths,
+                hint,
+                request_has_lora,
+            );
+            let resolved_catalog_config =
+                crate::model_manager::resolve_installed_catalog_paths_for_worker(
+                    model_name, config,
+                )
+                .map_err(|e| anyhow::anyhow!(e.error))?
+                .map(|(_, config)| config);
+            let engine_config = resolved_catalog_config.as_ref().unwrap_or(config);
             let mut engine = match mold_inference::create_engine_with_pool(
                 model_name.to_string(),
                 paths,
-                config,
+                engine_config,
                 load_strategy,
                 worker.gpu.ordinal,
                 offload,
@@ -765,24 +792,37 @@ pub fn ensure_model_ready_sync(
 
     // Not in cache — need to create from scratch.
     // Resolve model paths.
-    let paths = ModelPaths::resolve(model_name, config).ok_or_else(|| {
-        // Catalog IDs (cv:/hf:) reach this path through the bridge in
-        // `model_manager::install_catalog_model`, which can synthesize a
-        // ModelConfig that's missing a required field (notably `vae`)
-        // when a canonical companion was never pulled. The legacy
-        // "Run: mold pull <id>" message is misleading there because the
-        // primary checkpoint IS on disk — the companion is what's
-        // missing. Surface the catalog-specific guidance instead.
-        if model_name.starts_with("cv:") || model_name.starts_with("hf:") {
-            anyhow::anyhow!(
-                "catalog model '{model_name}' has missing required components. \
+    let mut resolved_catalog_config = None;
+    let paths = if let Some(paths) = ModelPaths::resolve(model_name, config) {
+        paths
+    } else if let Some((paths, config)) =
+        crate::model_manager::resolve_installed_catalog_paths_for_worker(model_name, config)
+            .map_err(|e| anyhow::anyhow!(e.error))?
+    {
+        resolved_catalog_config = Some(config);
+        paths
+    } else {
+        return Err(
+            if model_name.starts_with("cv:") || model_name.starts_with("hf:") {
+                // Catalog IDs (cv:/hf:) reach this path through the bridge in
+                // `model_manager::install_catalog_model`, which can synthesize a
+                // ModelConfig that's missing a required field (notably `vae`)
+                // when a canonical companion was never pulled. The legacy
+                // "Run: mold pull <id>" message is misleading there because the
+                // primary checkpoint IS on disk — the companion is what's
+                // missing. Surface the catalog-specific guidance instead.
+                anyhow::anyhow!(
+                    "catalog model '{model_name}' has missing required components. \
                  Re-pull the entry from the catalog so its companions \
                  (CLIP-L / T5 / VAE) are fetched alongside the primary checkpoint."
-            )
-        } else {
-            anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
-        }
-    })?;
+                )
+            } else {
+                anyhow::anyhow!(
+                    "model '{model_name}' is not downloaded. Run: mold pull {model_name}"
+                )
+            },
+        );
+    };
 
     // Preflight before unloading the active model. Evict-to-fit drops parked
     // entries on budget failure and retries before giving up.
@@ -804,11 +844,13 @@ pub fn ensure_model_ready_sync(
     }
     device::reclaim_gpu_memory(worker.gpu.ordinal);
 
-    let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let offload =
+        crate::model_manager::server_offload_enabled_for_paths(&paths, hint, request_has_lora);
+    let engine_config = resolved_catalog_config.as_ref().unwrap_or(config);
     let mut engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,
-        config,
+        engine_config,
         load_strategy,
         worker.gpu.ordinal,
         offload,
@@ -845,7 +887,7 @@ pub fn ensure_model_ready_sync(
 /// don't carry a request shape.
 pub fn load_blocking(worker: &GpuWorker, model_name: &str, config: &Config) -> anyhow::Result<()> {
     let _lock = worker.model_load_lock.lock().unwrap();
-    ensure_model_ready_sync(worker, model_name, config, None)
+    ensure_model_ready_sync(worker, model_name, config, None, false)
 }
 
 /// Synchronously unload the currently active model on this GPU worker.
@@ -936,7 +978,7 @@ pub fn run_chain_blocking<T, E>(
 
     // Ensure the model is GPU-resident on this worker. Handles load-from-disk,
     // parked-reload, and the reclaim-on-swap path using worker.gpu.ordinal.
-    ensure_model_ready_sync(worker, model_name, config, hint)?;
+    ensure_model_ready_sync(worker, model_name, config, hint, false)?;
 
     // Take the engine out of the worker's cache so the closure can mutate it.
     let cached = {

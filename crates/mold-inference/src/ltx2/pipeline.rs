@@ -201,6 +201,16 @@ impl Ltx2Engine {
             || msg.contains("cudaerrormemoryallocation")
     }
 
+    fn unload_runtime_state(&mut self) -> Option<usize> {
+        self.loaded = false;
+        let should_reclaim = self
+            .native_runtime
+            .as_ref()
+            .is_some_and(Ltx2RuntimeSession::needs_cuda_reclaim_on_unload);
+        self.native_runtime = None;
+        should_reclaim.then_some(self.gpu_ordinal)
+    }
+
     fn gemma_root(&self) -> Result<PathBuf> {
         assets::gemma_root(&self.paths)
     }
@@ -222,13 +232,13 @@ impl Ltx2Engine {
         if req.retake_range.is_some() {
             return Ok(PipelineKind::Retake);
         }
-        if req.audio_file.is_some() {
+        if req.audio_file.is_some() || req.audio_file_path.is_some() {
             return Ok(PipelineKind::A2Vid);
         }
         if req.keyframes.as_ref().is_some_and(|items| items.len() > 1) {
             return Ok(PipelineKind::Keyframe);
         }
-        if req.source_video.is_some() {
+        if req.source_video.is_some() || req.source_video_path.is_some() {
             return Ok(PipelineKind::IcLora);
         }
         if self.model_name.contains("distilled") {
@@ -858,8 +868,9 @@ impl InferenceEngine for Ltx2Engine {
     }
 
     fn unload(&mut self) {
-        self.loaded = false;
-        self.native_runtime = None;
+        if let Some(ordinal) = self.unload_runtime_state() {
+            crate::reclaim_gpu_memory(ordinal);
+        }
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
@@ -1154,10 +1165,10 @@ mod tests {
         VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
     }
 
-    fn runtime_session() -> Ltx2RuntimeSession {
+    fn runtime_prompt_encoder() -> NativePromptEncoder {
         let cfg = tiny_gemma_config();
         let gemma = GemmaHiddenStateEncoder::new(&cfg, zero_gemma_var_builder(&cfg)).unwrap();
-        let prompt_encoder = NativePromptEncoder::new(
+        NativePromptEncoder::new(
             gemma,
             build_embeddings_processor(
                 zero_connector_source_var_builder(),
@@ -1193,7 +1204,11 @@ mod tests {
             )
             .unwrap(),
             PaddingSide::Left,
-        );
+        )
+    }
+
+    fn runtime_session() -> Ltx2RuntimeSession {
+        let prompt_encoder = runtime_prompt_encoder();
         Ltx2RuntimeSession::new(Device::Cpu, prompt_encoder, 0)
     }
 
@@ -1228,7 +1243,9 @@ mod tests {
             gif_preview: true,
             enable_audio,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1309,7 +1326,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1358,7 +1377,9 @@ mod tests {
             gif_preview: false,
             enable_audio: Some(true),
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1510,7 +1531,9 @@ mod tests {
             gif_preview: false,
             enable_audio: Some(true),
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -1552,6 +1575,35 @@ mod tests {
 
         engine.load().unwrap();
         assert!(engine.is_loaded());
+    }
+
+    #[test]
+    fn ltx2_unload_drops_runtime_and_requests_cuda_reclaim() {
+        let mut engine = Ltx2Engine::with_runtime_session(
+            "ltx-2-19b-distilled:fp8".to_string(),
+            dummy_paths(),
+            Ltx2RuntimeSession::new_deferred_cuda(runtime_prompt_encoder(), 3),
+        );
+        engine.loaded = true;
+        engine.gpu_ordinal = 3;
+
+        assert_eq!(engine.unload_runtime_state(), Some(3));
+        assert!(!engine.loaded);
+        assert!(engine.native_runtime.is_none());
+    }
+
+    #[test]
+    fn ltx2_unload_cpu_runtime_skips_cuda_reclaim() {
+        let mut engine = Ltx2Engine::with_runtime_session(
+            "ltx-2-19b-distilled:fp8".to_string(),
+            dummy_paths(),
+            runtime_session(),
+        );
+        engine.loaded = true;
+
+        assert_eq!(engine.unload_runtime_state(), None);
+        assert!(!engine.loaded);
+        assert!(engine.native_runtime.is_none());
     }
 
     #[test]

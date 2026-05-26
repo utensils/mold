@@ -362,6 +362,8 @@ async fn prepare_generation(
         return Err(ApiError::validation(e));
     }
 
+    resolve_server_local_media_paths(state, request).await?;
+
     let _ = model_manager::check_model_available(state, &request.model).await?;
 
     let (output_dir, dim_warning) = {
@@ -379,6 +381,29 @@ async fn prepare_generation(
     };
 
     Ok((output_dir, dim_warning))
+}
+
+pub(crate) async fn resolve_server_local_media_paths(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+) -> Result<(), ApiError> {
+    if request.audio_file_path.is_none() && request.source_video_path.is_none() {
+        return Ok(());
+    }
+
+    let roots = state.config.read().await.resolved_media_roots();
+    if let Some(path) = request.audio_file_path.as_deref() {
+        let resolved = mold_core::resolve_server_media_path(path, &roots)
+            .map_err(|e| ApiError::validation(format!("audio_file_path: {e}")))?;
+        request.audio_file_path = Some(resolved.to_string_lossy().to_string());
+    }
+    if let Some(path) = request.source_video_path.as_deref() {
+        let resolved = mold_core::resolve_server_media_path(path, &roots)
+            .map_err(|e| ApiError::validation(format!("source_video_path: {e}")))?;
+        request.source_video_path = Some(resolved.to_string_lossy().to_string());
+    }
+
+    Ok(())
 }
 
 fn active_gpu_selection(state: &AppState) -> GpuSelection {
@@ -1327,7 +1352,7 @@ async fn load_model(
 
     // Legacy single-GPU path (no workers discovered). No resolution context
     // here — admin load uses size-only peak via the `None` hint.
-    model_manager::ensure_model_ready(&state, &body.model, None, None).await?;
+    model_manager::ensure_model_ready(&state, &body.model, None, None, false).await?;
     tracing::info!(model = %body.model, gpu = ?body.gpu, "model loaded via API (legacy)");
     Ok(StatusCode::OK)
 }

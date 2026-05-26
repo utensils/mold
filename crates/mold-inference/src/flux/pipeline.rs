@@ -1,9 +1,10 @@
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, IndexOp};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::flux;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -34,6 +35,21 @@ fn flux_transformer_var_builder<'a>(vb: VarBuilder<'a>) -> VarBuilder<'a> {
         vb.pp("model.diffusion_model")
     } else if vb.contains_tensor("diffusion_model.img_in.weight") {
         vb.pp("diffusion_model")
+    } else {
+        vb
+    }
+}
+
+/// Some FLUX single-file checkpoints bundle the VAE under a wrapper prefix
+/// while the candle FLUX autoencoder expects root `encoder.*` / `decoder.*`
+/// keys.
+fn flux_vae_var_builder<'a>(vb: VarBuilder<'a>) -> VarBuilder<'a> {
+    if vb.contains_tensor("encoder.conv_in.weight") {
+        vb
+    } else if vb.contains_tensor("first_stage_model.encoder.conv_in.weight") {
+        vb.pp("first_stage_model")
+    } else if vb.contains_tensor("vae.encoder.conv_in.weight") {
+        vb.pp("vae")
     } else {
         vb
     }
@@ -112,6 +128,25 @@ fn fp8_gguf_cache_path(path: &Path) -> PathBuf {
         .join("cache")
         .join("flux-q8");
     cache_root.join(format!("{stem}-{size}-{content_hash}.q8_0.gguf"))
+}
+
+fn q8_0_can_quantize_dims(dims: &[usize]) -> bool {
+    if dims.len() < 2 {
+        return false;
+    }
+    let block_size = candle_core::quantized::GgmlDType::Q8_0.block_size();
+    dims.last()
+        .is_some_and(|last_dim| *last_dim >= block_size && *last_dim % block_size == 0)
+}
+
+fn fp8_cache_should_skip_tensor(name: &str, dims: &[usize]) -> bool {
+    dims.is_empty() || name.starts_with("text_encoders.")
+}
+
+fn fp8_gguf_tmp_path(cache_path: &Path) -> PathBuf {
+    static NEXT_TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = NEXT_TMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    cache_path.with_extension(format!("tmp.{}.{}", std::process::id(), seq))
 }
 
 /// Convert an FP8 safetensors checkpoint to Q8_0 GGUF (one-time).
@@ -196,7 +231,6 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
         .map(|(name, _)| name)
         .collect();
 
-    let block_size = candle_core::quantized::GgmlDType::Q8_0.block_size();
     let mut qtensors: Vec<(String, candle_core::quantized::QTensor)> = Vec::new();
 
     let total = all_names.len();
@@ -213,8 +247,11 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
             name.clone()
         };
 
-        let elem_count = tensor.elem_count();
-        let can_quantize = elem_count >= block_size && elem_count % block_size == 0;
+        if fp8_cache_should_skip_tensor(&out_name, tensor.dims()) {
+            continue;
+        }
+
+        let can_quantize = q8_0_can_quantize_dims(tensor.dims());
 
         let qt = if can_quantize {
             candle_core::quantized::QTensor::quantize(
@@ -232,7 +269,7 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
     }
 
     // Write GGUF cache (clean up temp file on error)
-    let tmp_path = cache_path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp_path = fp8_gguf_tmp_path(&cache_path);
     let write_result = (|| -> Result<()> {
         let file = std::fs::File::create(&tmp_path)?;
         let mut writer = std::io::BufWriter::new(file);
@@ -244,6 +281,11 @@ fn ensure_fp8_gguf_cache(path: &Path, progress: &ProgressReporter) -> Result<Pat
     if let Err(e) = write_result {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e);
+    }
+    if cache_path.exists() {
+        let _ = std::fs::remove_file(&tmp_path);
+        progress.info(&format!("Using cached Q8 GGUF: {}", cache_path.display()));
+        return Ok(cache_path);
     }
     std::fs::rename(&tmp_path, &cache_path)?;
 
@@ -1004,6 +1046,40 @@ impl FluxEngine {
         }
     }
 
+    /// Load VAE weights through the shared CPU tensor cache when available.
+    fn load_vae_var_builder<'a>(
+        &self,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+    ) -> Result<VarBuilder<'a>> {
+        if let Some(pool) = &self.shared_pool {
+            let cached = pool
+                .lock()
+                .unwrap()
+                .load_cpu_tensors(std::slice::from_ref(&self.base.paths.vae))?;
+            let vb = crate::encoders::park::varbuilder_from_parked(cached.as_ref(), dtype, device);
+            return Ok(flux_vae_var_builder(vb));
+        }
+
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            dtype,
+            device,
+            component,
+            &self.base.progress,
+        )?;
+        Ok(flux_vae_var_builder(vb))
+    }
+
+    fn get_cached_safetensors(&self, path: &Path) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(pool) = &self.shared_pool else {
+            return Ok(None);
+        };
+        let paths = [path];
+        pool.lock().unwrap().load_safetensors_cpu_tensors(&paths)
+    }
+
     fn restore_prompt_cache(
         progress: &ProgressReporter,
         prompt_cache: &Mutex<LruCache<String, CachedTensorPair>>,
@@ -1056,7 +1132,7 @@ impl FluxEngine {
                     .transformer
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .map(|n| n.contains("schnell"))
+                    .map(|n| n.to_ascii_lowercase().contains("schnell"))
                     .unwrap_or(false)
         })
     }
@@ -1270,13 +1346,7 @@ impl FluxEngine {
         tracing::info!(path = %self.base.paths.vae.display(), "loading VAE on GPU...");
         // Resolve VAE precision once at load time — see LoadedFlux::vae_dtype.
         let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&self.base.paths.vae),
-            vae_dtype,
-            &vae_device,
-            "VAE",
-            &self.base.progress,
-        )?;
+        let vae_vb = self.load_vae_var_builder(vae_dtype, &vae_device, "VAE")?;
         let vae_cfg = if is_schnell {
             flux::autoencoder::Config::schnell()
         } else {
@@ -1346,13 +1416,15 @@ impl FluxEngine {
             "loading T5 encoder..."
         );
         let cached_t5_tok = self.get_cached_tokenizer(&t5_tokenizer_path);
-        let t5 = encoders::t5::T5Encoder::load_with_tokenizer(
+        let cached_t5_tensors = self.get_cached_safetensors(&resolved_t5_path)?;
+        let t5 = encoders::t5::T5Encoder::load_with_tokenizer_and_tensors(
             &resolved_t5_path,
             &t5_tokenizer_path,
             t5_device,
             t5_dtype,
             &self.base.progress,
             cached_t5_tok,
+            cached_t5_tensors,
         )?;
         self.cache_tokenizer(&t5_tokenizer_path, t5.tokenizer_arc());
         self.base
@@ -1393,13 +1465,15 @@ impl FluxEngine {
             "loading CLIP encoder..."
         );
         let cached_clip_tok = self.get_cached_tokenizer(&clip_tokenizer_path);
-        let clip = encoders::clip::ClipEncoder::load_with_tokenizer(
+        let cached_clip_tensors = self.get_cached_safetensors(&clip_encoder_path)?;
+        let clip = encoders::clip::ClipEncoder::load_with_tokenizer_and_tensors(
             &clip_encoder_path,
             &clip_tokenizer_path,
             clip_device,
             clip_dtype,
             &self.base.progress,
             cached_clip_tok,
+            cached_clip_tensors,
         )?;
         self.cache_tokenizer(&clip_tokenizer_path, clip.tokenizer_arc());
         self.base
@@ -1565,13 +1639,15 @@ impl FluxEngine {
             self.base.progress.stage_start(&t5_stage_label);
             let t5_stage = Instant::now();
             let cached_t5_tok = self.get_cached_tokenizer(&t5_tokenizer_path);
-            let mut t5 = encoders::t5::T5Encoder::load_with_tokenizer(
+            let cached_t5_tensors = self.get_cached_safetensors(&resolved_t5_path)?;
+            let mut t5 = encoders::t5::T5Encoder::load_with_tokenizer_and_tensors(
                 &resolved_t5_path,
                 &t5_tokenizer_path,
                 t5_device,
                 t5_dtype,
                 &self.base.progress,
                 cached_t5_tok,
+                cached_t5_tensors,
             )?;
             self.cache_tokenizer(&t5_tokenizer_path, t5.tokenizer_arc());
             self.base
@@ -1621,13 +1697,15 @@ impl FluxEngine {
             self.base.progress.stage_start(&clip_stage_label);
             let clip_stage = Instant::now();
             let cached_clip_tok = self.get_cached_tokenizer(&clip_tokenizer_path);
-            let clip = encoders::clip::ClipEncoder::load_with_tokenizer(
+            let cached_clip_tensors = self.get_cached_safetensors(&clip_encoder_path)?;
+            let clip = encoders::clip::ClipEncoder::load_with_tokenizer_and_tensors(
                 &clip_encoder_path,
                 &clip_tokenizer_path,
                 clip_device,
                 clip_dtype,
                 &self.base.progress,
                 cached_clip_tok,
+                cached_clip_tensors,
             )?;
             self.cache_tokenizer(&clip_tokenizer_path, clip.tokenizer_arc());
             self.base
@@ -1919,13 +1997,7 @@ impl FluxEngine {
             // Load VAE early for source image encoding
             self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_stage = Instant::now();
-            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                std::slice::from_ref(&self.base.paths.vae),
-                early_vae_dtype,
-                &device,
-                "VAE",
-                &self.base.progress,
-            )?;
+            let vae_vb = self.load_vae_var_builder(early_vae_dtype, &device, "VAE")?;
             let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
             self.base
                 .progress
@@ -2053,13 +2125,7 @@ impl FluxEngine {
         } else {
             self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_stage = Instant::now();
-            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                std::slice::from_ref(&self.base.paths.vae),
-                vae_dtype,
-                &device,
-                "VAE",
-                &self.base.progress,
-            )?;
+            let vae_vb = self.load_vae_var_builder(vae_dtype, &device, "VAE")?;
             let vae = flux::autoencoder::AutoEncoder::new(&vae_cfg, vae_vb)?;
             self.base
                 .progress
@@ -2909,7 +2975,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: plural,
@@ -3081,6 +3149,36 @@ mod tests {
     }
 
     #[test]
+    fn fp8_q8_cache_quantizes_only_block_aligned_last_dim() {
+        assert!(super::q8_0_can_quantize_dims(&[3072, 3072]));
+        assert!(super::q8_0_can_quantize_dims(&[1, 64]));
+        assert!(
+            !super::q8_0_can_quantize_dims(&[256, 256, 3, 3]),
+            "conv kernels have total elements divisible by 32, but Q8_0 \
+             requires the last dimension itself to be block-aligned"
+        );
+        assert!(!super::q8_0_can_quantize_dims(&[512, 512, 1, 1]));
+        assert!(!super::q8_0_can_quantize_dims(&[3072]));
+    }
+
+    #[test]
+    fn fp8_q8_cache_skips_bundled_text_encoder_and_scalar_tensors() {
+        assert!(super::fp8_cache_should_skip_tensor(
+            "text_encoders.clip_l.logit_scale",
+            &[]
+        ));
+        assert!(super::fp8_cache_should_skip_tensor(
+            "text_encoders.t5xxl.encoder.block.0.layer.0.SelfAttention.q.weight",
+            &[4096, 4096]
+        ));
+        assert!(super::fp8_cache_should_skip_tensor("some.scalar", &[]));
+        assert!(!super::fp8_cache_should_skip_tensor(
+            "double_blocks.0.img_attn.qkv.weight",
+            &[9216, 3072]
+        ));
+    }
+
+    #[test]
     fn fp8_cache_path_lives_under_cache_flux_q8() {
         let path = std::path::Path::new("/some/model/my-model.safetensors");
         // File doesn't exist so size will be 0
@@ -3090,6 +3188,73 @@ mod tests {
             cache_str.contains("cache/flux-q8"),
             "cache should be under cache/flux-q8: {cache_str}"
         );
+    }
+
+    #[test]
+    fn fp8_cache_temp_paths_are_unique_per_writer() {
+        let cache_path =
+            std::path::Path::new("/tmp/agfluxSchnell_realistic23-1234-deadbeef.q8_0.gguf");
+
+        let first = super::fp8_gguf_tmp_path(cache_path);
+        let second = super::fp8_gguf_tmp_path(cache_path);
+
+        assert_ne!(first, second);
+        assert_ne!(first, cache_path);
+        assert_ne!(second, cache_path);
+    }
+
+    #[test]
+    fn detects_schnell_from_uppercase_filename() {
+        let engine = super::FluxEngine::new(
+            "cv:1153358".to_string(),
+            dummy_paths("agfluxSchnell_realistic23.safetensors"),
+            None,
+            None,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            None,
+        );
+
+        assert!(engine.detect_is_schnell());
+    }
+
+    #[test]
+    fn flux_vae_var_builder_accepts_vae_prefix() {
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+        use std::collections::HashMap;
+
+        let dir = std::env::temp_dir().join(format!(
+            "mold-flux-vae-prefix-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vae-prefix.safetensors");
+
+        let data = vec![0u8; 128 * 3 * 3 * 3 * std::mem::size_of::<f32>()];
+        let shape = vec![128, 3, 3, 3];
+        let view = TensorView::new(SafeDtype::F32, shape, &data).unwrap();
+        let mut tensors = HashMap::new();
+        tensors.insert("vae.encoder.conv_in.weight".to_string(), view);
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&path),
+            DType::F32,
+            &Device::Cpu,
+            "test VAE",
+            &crate::progress::ProgressReporter::default(),
+        )
+        .unwrap();
+        let vb = super::flux_vae_var_builder(vb);
+
+        assert!(vb.contains_tensor("encoder.conv_in.weight"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── Embedding patching tests ────────────────────────────────────────

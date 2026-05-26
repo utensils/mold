@@ -54,7 +54,8 @@ vs Klein-4B's Qwen3-4B (hidden_size=2560).
 
 > **Note**: GGUF quantized variants (Q4/Q6/Q8) use ~6-10GB VRAM. The BF16
 > variant requires ~18GB VRAM, is gated on HuggingFace, and requires license
-> acceptance before download.
+> acceptance before download. Use `--offload` with BF16 when VRAM is tight;
+> GGUF and LoRA offload are rejected.
 
 ## Recommended Dimensions
 

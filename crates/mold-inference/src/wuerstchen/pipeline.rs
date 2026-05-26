@@ -1,13 +1,17 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
+use candle_nn::VarBuilder;
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::wuerstchen::ddpm::{DDPMWScheduler, DDPMWSchedulerConfig};
 use candle_transformers::models::wuerstchen::diffnext::WDiffNeXt;
 use candle_transformers::models::wuerstchen::paella_vq::PaellaVQ;
 use candle_transformers::models::wuerstchen::prior::WPrior;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokenizers::Tokenizer;
 
 use crate::cache::{
     clear_cache, get_or_insert_cached_tensor_pair, restore_cached_tensor_pair, CachedTensorPair,
@@ -56,8 +60,8 @@ struct LoadedWuerstchen {
     vqgan: PaellaVQ,
     prior_clip: stable_diffusion::clip::ClipTextTransformer,
     decoder_clip: stable_diffusion::clip::ClipTextTransformer,
-    prior_tokenizer: tokenizers::Tokenizer,
-    decoder_tokenizer: tokenizers::Tokenizer,
+    prior_tokenizer: Arc<Tokenizer>,
+    decoder_tokenizer: Arc<Tokenizer>,
     device: Device,
     clip_device: Device,
     dtype: DType,
@@ -70,6 +74,7 @@ pub struct WuerstchenEngine {
     base: EngineBase<LoadedWuerstchen>,
     prompt_cache: Mutex<LruCache<String, CachedTensorPair>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
 }
 
 impl WuerstchenEngine {
@@ -204,12 +209,56 @@ impl WuerstchenEngine {
         paths: ModelPaths,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
+            shared_pool,
         }
+    }
+
+    fn load_clip_tokenizer(&self, path: &Path, label: &str) -> Result<Arc<Tokenizer>> {
+        if let Some(shared_pool) = &self.shared_pool {
+            return shared_pool.lock().unwrap().load_tokenizer(path);
+        }
+        Tokenizer::from_file(path)
+            .map(Arc::new)
+            .map_err(|e| anyhow::anyhow!("failed to load {label} tokenizer: {e}"))
+    }
+
+    fn load_vqgan_cpu_tensors(&self) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(shared_pool) = &self.shared_pool else {
+            return Ok(None);
+        };
+        shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&self.base.paths.vae))
+    }
+
+    fn load_vqgan_var_builder<'a>(
+        &self,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+    ) -> Result<VarBuilder<'a>> {
+        if let Some(tensors) = self.load_vqgan_cpu_tensors()? {
+            return Ok(crate::encoders::park::varbuilder_from_parked(
+                tensors.as_ref(),
+                dtype,
+                device,
+            ));
+        }
+
+        crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            dtype,
+            device,
+            component,
+            &self.base.progress,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -525,13 +574,7 @@ impl WuerstchenEngine {
         // Load VQ-GAN (Stage A) — always F32 for pixel-space decoding
         self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
         let vqgan_start = Instant::now();
-        let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
-            &[&self.base.paths.vae],
-            DType::F32,
-            &device,
-            "VQ-GAN",
-            &self.base.progress,
-        )?;
+        let vqgan_vb = self.load_vqgan_var_builder(DType::F32, &device, "VQ-GAN")?;
         let vqgan = PaellaVQ::new(vqgan_vb)?;
         self.base
             .progress
@@ -580,10 +623,8 @@ impl WuerstchenEngine {
         );
 
         // Load tokenizers
-        let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
-        let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
+        let prior_tokenizer = self.load_clip_tokenizer(&prior_clip_tok_path, "Prior CLIP-G")?;
+        let decoder_tokenizer = self.load_clip_tokenizer(&dec_clip_tok_path, "Decoder CLIP")?;
 
         self.base.loaded = Some(LoadedWuerstchen {
             prior: Some(prior),
@@ -902,8 +943,8 @@ impl WuerstchenEngine {
                     self.base.progress.info(&status);
                 }
 
-                let prior_tokenizer = tokenizers::Tokenizer::from_file(&prior_clip_tok_path)
-                    .map_err(|e| anyhow::anyhow!("failed to load Prior CLIP-G tokenizer: {e}"))?;
+                let prior_tokenizer =
+                    self.load_clip_tokenizer(&prior_clip_tok_path, "Prior CLIP-G")?;
 
                 let tier1 = self
                     .pending_placement
@@ -929,8 +970,8 @@ impl WuerstchenEngine {
                     clip_start.elapsed(),
                 );
 
-                let decoder_tokenizer = tokenizers::Tokenizer::from_file(&dec_clip_tok_path)
-                    .map_err(|e| anyhow::anyhow!("failed to load Decoder CLIP tokenizer: {e}"))?;
+                let decoder_tokenizer =
+                    self.load_clip_tokenizer(&dec_clip_tok_path, "Decoder CLIP")?;
 
                 self.base
                     .progress
@@ -984,13 +1025,7 @@ impl WuerstchenEngine {
                 // Load VQ-GAN for encoding
                 self.base.progress.stage_start("Loading VQ-GAN (Stage A)");
                 let vqgan_start = Instant::now();
-                let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
-                    &[&self.base.paths.vae],
-                    DType::F32,
-                    &device,
-                    "VQ-GAN",
-                    &self.base.progress,
-                )?;
+                let vqgan_vb = self.load_vqgan_var_builder(DType::F32, &device, "VQ-GAN")?;
                 let vqgan = PaellaVQ::new(vqgan_vb)?;
                 self.base
                     .progress
@@ -1193,13 +1228,7 @@ impl WuerstchenEngine {
         };
         self.base.progress.stage_start(vqgan_load_label);
         let vqgan_start = Instant::now();
-        let vqgan_vb = crate::weight_loader::load_safetensors_with_progress(
-            &[&self.base.paths.vae],
-            DType::F32,
-            &device,
-            "VQ-GAN",
-            &self.base.progress,
-        )?;
+        let vqgan_vb = self.load_vqgan_var_builder(DType::F32, &device, "VQ-GAN")?;
         let vqgan = PaellaVQ::new(vqgan_vb)?;
         self.base
             .progress
@@ -1521,10 +1550,14 @@ impl InferenceEngine for WuerstchenEngine {
 mod tests {
     use super::*;
     use crate::engine::LoadStrategy;
+    use crate::shared_pool::SharedPool;
     use mold_core::ModelPaths;
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokenizers::models::bpe::BPE;
 
     fn temp_test_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1691,6 +1724,7 @@ mod tests {
             ),
             LoadStrategy::Sequential,
             0,
+            None,
         );
 
         let (
@@ -1710,6 +1744,84 @@ mod tests {
             resolved_prior_clip_tokenizer
         );
 
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn wuerstchen_loads_clip_tokenizers_through_shared_pool() {
+        let dir = temp_test_dir("mold-wuerstchen-tokenizer-pool");
+        let tokenizer_path = dir.join("tokenizer.json");
+        tokenizers::Tokenizer::new(BPE::default())
+            .save(&tokenizer_path, false)
+            .unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&tokenizer_path)
+            .unwrap();
+
+        let engine = WuerstchenEngine::new(
+            "wuerstchen-v2:fp16".to_string(),
+            wuerstchen_model_paths(
+                dir.join("prior.safetensors"),
+                Some(dir.join("decoder.safetensors")),
+                dir.join("vqgan.safetensors"),
+                Some(dir.join("prior-clip.safetensors")),
+                Some(tokenizer_path.clone()),
+                None,
+                None,
+            ),
+            LoadStrategy::Sequential,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine
+            .load_clip_tokenizer(&tokenizer_path, "Prior CLIP-G")
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn wuerstchen_loads_vqgan_tensors_through_shared_pool() {
+        let dir = temp_test_dir("mold-wuerstchen-vqgan-pool");
+        let vqgan_path = dir.join("vqgan.safetensors");
+        let data = [1.0f32, 2.0, 3.0, 4.0];
+        let bytes: Vec<u8> = data.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let view = TensorView::new(SafeDtype::F32, vec![2, 2], &bytes).unwrap();
+        serialize_to_file([("decoder.0.weight", view)], &None, &vqgan_path).unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vqgan_path))
+            .unwrap()
+            .unwrap();
+
+        let engine = WuerstchenEngine::new(
+            "wuerstchen-v2:fp16".to_string(),
+            wuerstchen_model_paths(
+                dir.join("prior.safetensors"),
+                Some(dir.join("decoder.safetensors")),
+                vqgan_path,
+                Some(dir.join("prior-clip.safetensors")),
+                Some(dir.join("prior-tokenizer.json")),
+                None,
+                None,
+            ),
+            LoadStrategy::Sequential,
+            0,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_vqgan_cpu_tensors().unwrap().unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
     }
 
@@ -1734,6 +1846,7 @@ mod tests {
             ),
             LoadStrategy::Sequential,
             0,
+            None,
         );
         let err = missing_decoder_engine.validate_paths().unwrap_err();
         assert!(err.to_string().contains("Decoder (Stage B) path required"));
@@ -1751,6 +1864,7 @@ mod tests {
             ),
             LoadStrategy::Sequential,
             0,
+            None,
         );
         let err = missing_file_engine.validate_paths().unwrap_err();
         assert!(err.to_string().contains("decoder (Stage B) file not found"));

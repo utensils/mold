@@ -1,4 +1,5 @@
 pub(crate) mod lora;
+pub(crate) mod offload;
 mod pipeline;
 mod quantized_mmdit;
 pub(crate) mod sampling;

@@ -84,6 +84,7 @@ pub(crate) struct T5Encoder {
 impl T5Encoder {
     /// Load T5 encoder weights and tokenizer.
     /// Auto-detects `.gguf` extension to choose quantized vs FP16 loading.
+    #[allow(dead_code)]
     pub fn load(
         encoder_path: &PathBuf,
         tokenizer_path: &PathBuf,
@@ -103,6 +104,27 @@ impl T5Encoder {
         progress: &crate::progress::ProgressReporter,
         cached_tokenizer: Option<Arc<Tokenizer>>,
     ) -> Result<Self> {
+        Self::load_with_tokenizer_and_tensors(
+            encoder_path,
+            tokenizer_path,
+            device,
+            dtype,
+            progress,
+            cached_tokenizer,
+            None,
+        )
+    }
+
+    /// Load T5 encoder weights, reusing cached tokenizer and CPU tensors when provided.
+    pub fn load_with_tokenizer_and_tensors(
+        encoder_path: &PathBuf,
+        tokenizer_path: &PathBuf,
+        device: &Device,
+        dtype: DType,
+        progress: &crate::progress::ProgressReporter,
+        cached_tokenizer: Option<Arc<Tokenizer>>,
+        cached_tensors: Option<Arc<HashMap<String, Tensor>>>,
+    ) -> Result<Self> {
         let is_quantized = encoder_path
             .extension()
             .and_then(|e| e.to_str())
@@ -111,6 +133,9 @@ impl T5Encoder {
 
         let model = if is_quantized {
             T5Model::Quantized(GgufT5Encoder::load(encoder_path, device)?)
+        } else if let Some(tensors) = cached_tensors {
+            let vb = park::varbuilder_from_parked(tensors.as_ref(), dtype, device);
+            T5Model::FP16(t5::T5EncoderModel::load(vb, &config())?)
         } else {
             let vb = crate::weight_loader::load_safetensors_with_progress(
                 std::slice::from_ref(encoder_path),

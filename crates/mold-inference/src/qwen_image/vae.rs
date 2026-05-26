@@ -485,6 +485,14 @@ impl QwenImageVae {
             progress,
         )
         .map_err(candle_core::Error::msg)?;
+        Self::from_var_builder(vb, device, dtype)
+    }
+
+    pub(crate) fn from_var_builder(
+        vb: VarBuilder<'_>,
+        device: &candle_core::Device,
+        dtype: DType,
+    ) -> Result<Self> {
         let encoder = QwenImageEncoder2d::new(vb.pp("encoder"))?;
         let quant_conv = load_3d_conv1x1_as_2d(
             2 * LATENT_CHANNELS,

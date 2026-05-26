@@ -8,6 +8,7 @@ use candle_transformers::models::ltx_video::sampling::{
 };
 use image::{imageops, GenericImage, Rgb, RgbImage};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -25,22 +26,26 @@ use super::model::{
     audio_temporal_positions, cross_modal_temporal_positions, derive_stage1_render_shape,
     get_pixel_coords, scale_video_time_to_seconds, spatially_upsample_frames,
     temporally_upsample_frames_x2, video_token_positions,
-    video_transformer::{Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig},
+    video_transformer::{
+        Ltx2AvTransformer3DModel, Ltx2VideoTransformer3DModelConfig, LtxPreparedStaticInputs,
+    },
     video_vae::{AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig},
     AudioLatentShape, AudioPatchifier, DecodedAudio, Ltx2AudioDecoder, Ltx2AudioEncoder,
     Ltx2VocoderWithBwe, SpatioTemporalScaleFactors, VideoLatentPatchifier, VideoLatentShape,
     VideoPixelShape,
 };
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
-use super::sampler::{euler_step, res2s_step};
+use super::sampler::sampler_step;
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
 use crate::device::{fmt_gb, free_vram_bytes};
 use crate::engine::{gpu_dtype, seeded_randn};
 use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
-use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
-use crate::weight_loader::load_fp8_safetensors;
+use crate::progress::{ProgressCallback, ProgressEvent};
+use crate::weight_loader::{
+    load_fp8_safetensors_with_callback, load_safetensors_with_progress_callback,
+};
 use mold_core::{LoraWeight, Ltx2SpatialUpscale, TimeRange};
 
 pub const LTX2_VIDEO_LATENT_CHANNELS: usize = 128;
@@ -217,9 +222,23 @@ fn prepare_render_prompt_inputs(
 struct Ltx2VaeLatentStats {
     mean: Tensor,
     std: Tensor,
+    broadcast_cache: Mutex<HashMap<Ltx2VaeLatentStatsBroadcastKey, (Tensor, Tensor)>>,
 }
 
 impl Ltx2VaeLatentStats {
+    fn from_tensors(mean: Tensor, std: Tensor) -> Self {
+        Self {
+            mean,
+            std,
+            broadcast_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_tensors_for_test(mean: Tensor, std: Tensor) -> Self {
+        Self::from_tensors(mean, std)
+    }
+
     fn load(plan: &Ltx2GeneratePlan, device: &candle_core::Device, dtype: DType) -> Result<Self> {
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
@@ -248,21 +267,53 @@ impl Ltx2VaeLatentStats {
             );
             Tensor::new(config.latents_std.as_slice(), device)?.to_dtype(dtype)?
         };
-        Ok(Self { mean, std })
+        Ok(Self::from_tensors(mean, std))
     }
 
-    fn normalize(&self, latents: &Tensor) -> Result<Tensor> {
+    fn broadcast_tensors_for(&self, latents: &Tensor) -> Result<((Tensor, Tensor), bool)> {
         let channels = latents.dim(1)?;
+        let key = Ltx2VaeLatentStatsBroadcastKey {
+            channels,
+            dtype: format!("{:?}", latents.dtype()),
+            device: format!("{:?}", latents.device()),
+        };
+        if let Some((mean, std)) = self
+            .broadcast_cache
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return Ok(((mean, std), true));
+        }
+
         let mean = self
             .mean
             .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+            .to_device(latents.device())?;
+        let mean = if mean.dtype() == latents.dtype() {
+            mean
+        } else {
+            mean.to_dtype(latents.dtype())?
+        };
         let std = self
             .std
             .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+            .to_device(latents.device())?;
+        let std = if std.dtype() == latents.dtype() {
+            std
+        } else {
+            std.to_dtype(latents.dtype())?
+        };
+        self.broadcast_cache
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(key, (mean.clone(), std.clone()));
+        Ok(((mean, std), false))
+    }
+
+    fn normalize(&self, latents: &Tensor) -> Result<Tensor> {
+        let ((mean, std), _) = self.broadcast_tensors_for(latents)?;
         latents
             .broadcast_sub(&mean)?
             .broadcast_div(&std)
@@ -270,22 +321,19 @@ impl Ltx2VaeLatentStats {
     }
 
     fn denormalize(&self, latents: &Tensor) -> Result<Tensor> {
-        let channels = latents.dim(1)?;
-        let mean = self
-            .mean
-            .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
-        let std = self
-            .std
-            .reshape((1, channels, 1, 1, 1))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+        let ((mean, std), _) = self.broadcast_tensors_for(latents)?;
         latents
             .broadcast_mul(&std)?
             .broadcast_add(&mean)
             .map_err(Into::into)
     }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct Ltx2VaeLatentStatsBroadcastKey {
+    channels: usize,
+    dtype: String,
+    device: String,
 }
 
 pub struct Ltx2RuntimeSession {
@@ -308,6 +356,10 @@ pub struct Ltx2RuntimeSession {
     /// GPU ordinal inherited from `Ltx2Engine`. Used for the deferred CUDA
     /// device creation in `prepare()` and for post-OOM context reset.
     gpu_ordinal: usize,
+    /// True when this session has owned, or will lazily create, CUDA state
+    /// that should be followed by a primary-context reset after unload drops
+    /// all tensors and devices.
+    cuda_reclaim_on_unload: bool,
 }
 
 /// Remembers the last `encode_prompt_pair_with_unconditional` call so
@@ -328,6 +380,7 @@ impl Ltx2RuntimeSession {
         gpu_ordinal: usize,
     ) -> Self {
         Self {
+            cuda_reclaim_on_unload: device.is_cuda(),
             device: Some(device),
             prompt_encoder: Some(prompt_encoder),
             cached_prompt_encoding: None,
@@ -343,7 +396,12 @@ impl Ltx2RuntimeSession {
             cached_prompt_encoding: None,
             tail_capture: None,
             gpu_ordinal,
+            cuda_reclaim_on_unload: true,
         }
+    }
+
+    pub(crate) fn needs_cuda_reclaim_on_unload(&self) -> bool {
+        self.cuda_reclaim_on_unload
     }
 
     /// Arm the pre-VAE-decode latent capture slot. The distilled render
@@ -1251,6 +1309,34 @@ fn stage_sigmas_no_terminal(
     Ok(sigmas[..sigmas.len().saturating_sub(1)].to_vec())
 }
 
+#[derive(Debug, Clone)]
+struct StageRenderContext {
+    #[allow(dead_code)]
+    stage_index: usize,
+    guidance_scale: f64,
+    sampler_mode: SamplerMode,
+    sigmas_no_terminal: Vec<f32>,
+    loras: Vec<LoraWeight>,
+    multimodal_guidance: Option<(MultiModalGuiderParams, MultiModalGuiderParams)>,
+    requires_unconditional_context: bool,
+}
+
+fn prepare_stage_context(
+    plan: &Ltx2GeneratePlan,
+    stage_index: usize,
+    device: &candle_core::Device,
+) -> Result<StageRenderContext> {
+    Ok(StageRenderContext {
+        stage_index,
+        guidance_scale: stage_guidance_scale(plan, stage_index)?,
+        sampler_mode: stage_sampler_mode(plan, stage_index)?,
+        sigmas_no_terminal: stage_sigmas_no_terminal(plan, stage_index, device)?,
+        loras: stage_lora_stack(plan, stage_index)?,
+        multimodal_guidance: stage_multimodal_guider_params(plan, stage_index),
+        requires_unconditional_context: stage_requires_unconditional_context(plan, stage_index)?,
+    })
+}
+
 fn video_latent_shape_from_tensor(latents: &Tensor) -> Result<VideoLatentShape> {
     let (batch, channels, frames, height, width) = latents.dims5()?;
     Ok(VideoLatentShape {
@@ -1342,6 +1428,7 @@ fn maybe_load_stage_video_conditioning(
     device: &candle_core::Device,
     dtype: DType,
     include_reference_video: bool,
+    progress: Option<&ProgressCallback>,
 ) -> Result<StageVideoConditioning> {
     if plan.conditioning.images.is_empty()
         && plan.conditioning.latents.is_empty()
@@ -1359,7 +1446,7 @@ fn maybe_load_stage_video_conditioning(
         || include_reference_video
         || !plan.conditioning.latents.is_empty();
     let mut vae = if need_vae {
-        let mut loaded = load_ltx2_video_vae(plan, device, dtype)?;
+        let mut loaded = load_ltx2_video_vae(plan, device, dtype, progress)?;
         loaded.use_tiling = false;
         loaded.use_framewise_decoding = false;
         Some(loaded)
@@ -1950,12 +2037,13 @@ fn render_real_distilled_av(
         device,
         dtype,
         false,
+        progress,
     )?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
     let stage1_transformer_load_start = Instant::now();
-    let stage1_transformer = load_ltx2_av_transformer(plan, device)?;
+    let stage1_transformer = load_ltx2_av_transformer(plan, device, progress)?;
     log_timing(
         "distilled.stage1.transformer_load",
         stage1_transformer_load_start,
@@ -2006,7 +2094,7 @@ fn render_real_distilled_av(
         log_debug_vram("after_stage1_transformer_drop");
     }
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
-        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
         debug_vae.use_tiling = false;
         debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
@@ -2044,10 +2132,16 @@ fn render_real_distilled_av(
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
-    let stage2_video_conditioning =
-        maybe_load_stage_video_conditioning(plan, stage2_pixel_shape, device, dtype, false)?;
+    let stage2_video_conditioning = maybe_load_stage_video_conditioning(
+        plan,
+        stage2_pixel_shape,
+        device,
+        dtype,
+        false,
+        progress,
+    )?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
-        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
         debug_vae.use_tiling = false;
         debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
@@ -2107,7 +2201,7 @@ fn render_real_distilled_av(
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
     let stage2_transformer_load_start = Instant::now();
-    let stage2_transformer = load_ltx2_av_transformer(plan, device)?;
+    let stage2_transformer = load_ltx2_av_transformer(plan, device, progress)?;
     log_timing(
         "distilled.stage2.transformer_load",
         stage2_transformer_load_start,
@@ -2164,7 +2258,7 @@ fn render_real_distilled_av(
     if debug_enabled {
         log_tensor_stats("final_video_latents", &latents)?;
     }
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let decode_start = Instant::now();
@@ -2285,23 +2379,22 @@ fn render_real_two_stage_av(
             None => None,
         }
     };
-    let stage1_guidance_scale = stage_guidance_scale(plan, 0)?;
+    let stage1_context = prepare_stage_context(plan, 0, device)?;
     let latent_stats = Ltx2VaeLatentStats::load(plan, device, dtype)?;
-    let stage1_sigmas = stage_sigmas_no_terminal(plan, 0, device)?;
-    let stage1_sampler = stage_sampler_mode(plan, 0)?;
-    let stage1_loras = stage_lora_stack(plan, 0)?;
     let stage1_video_conditioning = maybe_load_stage_video_conditioning(
         plan,
         prepared.video_pixel_shape,
         device,
         dtype,
         matches!(plan.pipeline, PipelineKind::IcLora),
+        progress,
     )?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage1 transformer");
     }
     let stage1_transformer_load_start = Instant::now();
-    let stage1_transformer = load_ltx2_av_transformer_with_loras(plan, device, &stage1_loras)?;
+    let stage1_transformer =
+        load_ltx2_av_transformer_with_loras(plan, device, &stage1_context.loras, progress)?;
     log_timing(
         "two_stage.stage1.transformer_load",
         stage1_transformer_load_start,
@@ -2311,7 +2404,6 @@ fn render_real_two_stage_av(
         .map(|audio| &audio.latents)
         .or(stage1_audio_noise.as_ref());
     let stage1_denoise_start = Instant::now();
-    let stage1_requires_uncond = stage_requires_unconditional_context(plan, 0)?;
     let (stage1_video_latents, stage1_audio_latents) = run_real_distilled_stage(
         &stage1_transformer,
         prepared.video_latent_shape,
@@ -2324,26 +2416,28 @@ fn render_real_two_stage_av(
         &prompt_inputs.video_positions,
         prompt_inputs.audio_positions.as_ref(),
         &prompt_inputs.cond_context,
-        stage1_requires_uncond
+        stage1_context
+            .requires_unconditional_context
             .then_some(prompt_inputs.uncond_context.as_ref())
             .flatten(),
         prompt_inputs.alt_context.as_ref(),
         prompt_inputs.audio_context.as_ref(),
-        stage1_requires_uncond
+        stage1_context
+            .requires_unconditional_context
             .then_some(prompt_inputs.uncond_audio_context.as_ref())
             .flatten(),
         prompt_inputs.alt_audio_context.as_ref(),
         cond_mask,
-        if stage1_requires_uncond {
+        if stage1_context.requires_unconditional_context {
             uncond_mask
         } else {
             None
         },
         alt_mask,
-        stage_multimodal_guider_params(plan, 0),
-        stage1_guidance_scale,
-        &stage1_sigmas,
-        stage1_sampler,
+        stage1_context.multimodal_guidance.clone(),
+        stage1_context.guidance_scale,
+        &stage1_context.sigmas_no_terminal,
+        stage1_context.sampler_mode,
         Some(&stage1_video_noise),
         stage1_audio_noise.as_ref(),
         None,
@@ -2356,7 +2450,7 @@ fn render_real_two_stage_av(
     drop(stage1_transformer);
     device.synchronize()?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
-        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
         debug_vae.use_tiling = false;
         debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
@@ -2393,10 +2487,16 @@ fn render_real_two_stage_av(
     let stage2_video_latent_shape = video_latent_shape_from_tensor(&stage2_clean_video_latents)?;
     let stage2_pixel_shape =
         pixel_shape_for_video_latents(stage2_video_latent_shape, plan.frame_rate);
-    let stage2_video_conditioning =
-        maybe_load_stage_video_conditioning(plan, stage2_pixel_shape, device, dtype, false)?;
+    let stage2_video_conditioning = maybe_load_stage_video_conditioning(
+        plan,
+        stage2_pixel_shape,
+        device,
+        dtype,
+        false,
+        progress,
+    )?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
-        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype)?;
+        let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
         debug_vae.use_tiling = false;
         debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
@@ -2436,8 +2536,9 @@ fn render_real_two_stage_av(
         )?),
         None => None,
     };
-    let stage2_sigmas = stage_sigmas_no_terminal(plan, 1, device)?;
-    let stage2_sigma = *stage2_sigmas
+    let stage2_context = prepare_stage_context(plan, 1, device)?;
+    let stage2_sigma = *stage2_context
+        .sigmas_no_terminal
         .first()
         .context("stage2 sigma schedule must contain at least one step")?;
     let stage2_video_start = mix_clean_latents_with_noise(
@@ -2455,20 +2556,17 @@ fn render_real_two_stage_av(
         }
         _ => None,
     };
-    let stage2_sampler = stage_sampler_mode(plan, 1)?;
-    let stage2_loras = stage_lora_stack(plan, 1)?;
-    let stage2_guidance_scale = stage_guidance_scale(plan, 1)?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading stage2 transformer");
     }
     let stage2_transformer_load_start = Instant::now();
-    let stage2_transformer = load_ltx2_av_transformer_with_loras(plan, device, &stage2_loras)?;
+    let stage2_transformer =
+        load_ltx2_av_transformer_with_loras(plan, device, &stage2_context.loras, progress)?;
     log_timing(
         "two_stage.stage2.transformer_load",
         stage2_transformer_load_start,
     );
     let stage2_denoise_start = Instant::now();
-    let stage2_requires_uncond = stage_requires_unconditional_context(plan, 1)?;
     let (latents, audio_latents) = run_real_distilled_stage(
         &stage2_transformer,
         stage2_video_latent_shape,
@@ -2481,26 +2579,28 @@ fn render_real_two_stage_av(
         &stage2_video_positions,
         prompt_inputs.audio_positions.as_ref(),
         &prompt_inputs.cond_context,
-        stage2_requires_uncond
+        stage2_context
+            .requires_unconditional_context
             .then_some(prompt_inputs.uncond_context.as_ref())
             .flatten(),
         prompt_inputs.alt_context.as_ref(),
         prompt_inputs.audio_context.as_ref(),
-        stage2_requires_uncond
+        stage2_context
+            .requires_unconditional_context
             .then_some(prompt_inputs.uncond_audio_context.as_ref())
             .flatten(),
         prompt_inputs.alt_audio_context.as_ref(),
         cond_mask,
-        if stage2_requires_uncond {
+        if stage2_context.requires_unconditional_context {
             uncond_mask
         } else {
             None
         },
         alt_mask,
-        stage_multimodal_guider_params(plan, 1),
-        stage2_guidance_scale,
-        &stage2_sigmas,
-        stage2_sampler,
+        stage2_context.multimodal_guidance.clone(),
+        stage2_context.guidance_scale,
+        &stage2_context.sigmas_no_terminal,
+        stage2_context.sampler_mode,
         Some(&stage2_video_noise),
         stage2_audio_noise.as_ref(),
         None,
@@ -2514,7 +2614,7 @@ fn render_real_two_stage_av(
     device.synchronize()?;
     let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
 
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let decode_start = Instant::now();
@@ -2634,11 +2734,12 @@ fn render_real_one_stage_av(
         device,
         dtype,
         false,
+        progress,
     )?;
     if debug_enabled {
         eprintln!("[ltx2-debug] loading one-stage transformer");
     }
-    let transformer = load_ltx2_av_transformer(plan, device)?;
+    let transformer = load_ltx2_av_transformer(plan, device, progress)?;
     if debug_enabled {
         log_debug_vram("after_one_stage_transformer_load");
     }
@@ -2693,7 +2794,7 @@ fn render_real_one_stage_av(
         log_debug_vram("after_one_stage_transformer_drop");
     }
 
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
@@ -2761,6 +2862,7 @@ fn render_real_retake_av(
         prepared.video_latent_shape,
         device,
         dtype,
+        progress,
     )?
     .context("native LTX-2 retake requires a source_video")?;
     let stage_video_conditioning = maybe_load_stage_video_conditioning(
@@ -2769,6 +2871,7 @@ fn render_real_retake_av(
         device,
         dtype,
         false,
+        progress,
     )?;
     let video_retake_mask =
         build_temporal_token_denoise_mask(retake_range, &prompt_inputs.video_positions, device)?;
@@ -2815,7 +2918,7 @@ fn render_real_retake_av(
     if debug_enabled {
         eprintln!("[ltx2-debug] loading retake transformer");
     }
-    let transformer = load_ltx2_av_transformer(plan, device)?;
+    let transformer = load_ltx2_av_transformer(plan, device, progress)?;
     let (latents, audio_latents) = run_real_distilled_stage(
         &transformer,
         prepared.video_latent_shape,
@@ -2853,7 +2956,7 @@ fn render_real_retake_av(
         device.synchronize()?;
     }
 
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
@@ -3001,6 +3104,21 @@ fn run_real_distilled_stage(
             MultiModalGuider::new(audio_params, uncond_audio_context.cloned()),
         )
     });
+    let multimodal_static_batch = match multimodal_guiders.as_ref() {
+        Some((video_guider, audio_guider)) => Some(prepare_static_multimodal_guidance_batch(
+            transformer,
+            cond_context,
+            audio_context,
+            cond_mask,
+            uncond_mask,
+            video_self_attention_mask.as_ref(),
+            video_positions,
+            audio_positions,
+            video_guider,
+            audio_guider,
+        )?),
+        None => None,
+    };
     let cond_static_inputs = if multimodal_guiders.is_none() {
         Some(transformer.prepare_static_inputs(
             cond_context,
@@ -3095,21 +3213,18 @@ fn run_real_distilled_stage(
             Option<Tensor>,
             Option<Tensor>,
         ) = if let Some((video_guider, audio_guider)) = multimodal_guiders.as_ref() {
+            let static_batch = multimodal_static_batch
+                .as_ref()
+                .context("missing static multimodal guidance batch")?;
             let (video_denoised, audio_denoised) = multimodal_guided_denoise_step(
                 transformer,
                 &video_latents,
                 audio_latents.as_ref(),
-                cond_context,
-                audio_context,
-                cond_mask,
-                uncond_mask,
+                static_batch,
                 &video_sigma,
                 &video_timestep,
                 audio_sigma.as_ref(),
                 audio_timestep.as_ref(),
-                video_self_attention_mask.as_ref(),
-                video_positions,
-                audio_positions,
                 video_guider,
                 audio_guider,
                 step_idx,
@@ -3384,21 +3499,15 @@ fn run_real_distilled_stage(
                 &video_denoise_mask,
             )?;
         }
-        video_latents = match sampler_mode {
-            SamplerMode::Euler => {
-                euler_step(&video_latents, &video_denoised, &run_sigmas, step_idx)?
-            }
-            SamplerMode::Res2S => res2s_step(
-                &video_latents,
-                &video_denoised,
-                sigma as f64,
-                run_sigmas[step_idx + 1] as f64,
-                video_sampler_noise
-                    .as_ref()
-                    .context("video sampler noise missing for Res2S stage")?,
-                0.5,
-            )?,
-        };
+        video_latents = sampler_step(
+            sampler_mode,
+            &video_latents,
+            &video_denoised,
+            &run_sigmas,
+            step_idx,
+            video_sampler_noise.as_ref(),
+            "video sampler noise missing for Res2S stage",
+        )?;
         if !video_conditioning.is_empty() {
             video_latents = reapply_stage_video_conditioning(
                 &video_latents,
@@ -3417,21 +3526,15 @@ fn run_real_distilled_stage(
             } else {
                 audio_velocity.clone()
             };
-            *audio_latents = match sampler_mode {
-                SamplerMode::Euler => {
-                    euler_step(audio_latents, &audio_velocity, &run_sigmas, step_idx)?
-                }
-                SamplerMode::Res2S => res2s_step(
-                    audio_latents,
-                    &audio_velocity,
-                    sigma as f64,
-                    run_sigmas[step_idx + 1] as f64,
-                    audio_sampler_noise
-                        .as_ref()
-                        .context("audio sampler noise missing for Res2S stage")?,
-                    0.5,
-                )?,
-            };
+            *audio_latents = sampler_step(
+                sampler_mode,
+                audio_latents,
+                &audio_velocity,
+                &run_sigmas,
+                step_idx,
+                audio_sampler_noise.as_ref(),
+                "audio sampler noise missing for Res2S stage",
+            )?;
         }
         update_secs += update_start.elapsed().as_secs_f64();
         emit_denoise_progress(
@@ -3685,6 +3788,7 @@ fn maybe_load_native_conditioning_video(
     latent_shape: VideoLatentShape,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Option<NativeConditioningVideo>> {
     let Some(video_path) = plan.conditioning.video_path.as_ref() else {
         return Ok(None);
@@ -3715,7 +3819,7 @@ fn maybe_load_native_conditioning_video(
         })
         .collect::<Vec<_>>();
     let video = video_tensor_from_frames(&resized, device, dtype)?;
-    let mut vae = load_ltx2_video_vae(plan, device, dtype)?;
+    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     vae.use_tiling = false;
     vae.use_framewise_decoding = false;
     let latents = conform_video_latent_length(&vae.encode(&video)?, latent_shape)?;
@@ -3976,64 +4080,28 @@ fn cat_optional_batches(parts: &[Option<Tensor>]) -> Result<Option<Tensor>> {
     Tensor::cat(&tensors, 0).map(Some).map_err(Into::into)
 }
 
-fn split_batch_chunk(tensor: &Tensor, index: usize, chunk: usize) -> Result<Tensor> {
-    tensor.narrow(0, index * chunk, chunk).map_err(Into::into)
+struct StaticMultimodalGuidanceBatch {
+    batched_video_context: Tensor,
+    batched_audio_context: Option<Tensor>,
+    batched_video_mask: Option<Tensor>,
+    batched_audio_mask: Option<Tensor>,
+    perturbations: BatchedPerturbationConfig,
+    repeat_count: usize,
+    cond_index: usize,
+    uncond_index: Option<usize>,
+    perturbed_index: Option<usize>,
+    modality_index: Option<usize>,
+    static_inputs: Option<LtxPreparedStaticInputs>,
 }
 
-fn sigma_scale_for_sample(sample: &Tensor, sigma: &Tensor) -> Result<Tensor> {
-    match sigma.rank() {
-        1 => sigma
-            .reshape((sample.dim(0)?, 1, 1))?
-            .to_device(sample.device())?
-            .to_dtype(sample.dtype())
-            .map_err(Into::into),
-        2 => sigma
-            .reshape((sample.dim(0)?, sample.dim(1)?, 1))?
-            .to_device(sample.device())?
-            .to_dtype(sample.dtype())
-            .map_err(Into::into),
-        other => anyhow::bail!("expected sigma rank 1 or 2, got rank {other}"),
-    }
-}
-
-fn denoised_from_velocity_with_sigma(
-    sample: &Tensor,
-    velocity: &Tensor,
-    sigma: &Tensor,
-) -> Result<Tensor> {
-    let sigma = sigma_scale_for_sample(sample, sigma)?;
-    let velocity = if velocity.dtype() == sample.dtype() {
-        velocity.clone()
-    } else {
-        velocity.to_dtype(sample.dtype())?
-    };
-    sample
-        .broadcast_sub(&velocity.broadcast_mul(&sigma)?)
-        .map_err(Into::into)
-}
-
-fn multimodal_guided_denoise_step(
-    transformer: &Ltx2AvTransformer3DModel,
-    video_latents: &Tensor,
-    audio_latents: Option<&Tensor>,
+fn build_static_multimodal_guidance_batch(
     cond_context: &Tensor,
     audio_context: Option<&Tensor>,
     cond_mask: Option<&Tensor>,
     uncond_mask: Option<&Tensor>,
-    video_sigma: &Tensor,
-    video_timestep: &Tensor,
-    audio_sigma: Option<&Tensor>,
-    audio_timestep: Option<&Tensor>,
-    video_self_attention_mask: Option<&Tensor>,
-    video_positions: &Tensor,
-    audio_positions: Option<&Tensor>,
     video_guider: &MultiModalGuider,
     audio_guider: &MultiModalGuider,
-    step_idx: usize,
-) -> Result<(Tensor, Option<Tensor>)> {
-    let video_skip = video_guider.should_skip_step(step_idx);
-    let audio_skip = audio_guider.should_skip_step(step_idx);
-
+) -> Result<StaticMultimodalGuidanceBatch> {
     let mut video_contexts = vec![cond_context.clone()];
     let mut audio_contexts = vec![audio_context.cloned()];
     let mut video_masks = vec![cond_mask.cloned()];
@@ -4098,55 +4166,154 @@ fn multimodal_guided_denoise_step(
     }
 
     let repeat_count = perturbations.len();
-    let batch = video_latents.dim(0)?;
     let batched_video_context = Tensor::cat(&video_contexts.iter().collect::<Vec<_>>(), 0)?;
     let batched_audio_context = cat_optional_batches(&audio_contexts)?;
     let batched_video_mask = cat_optional_batches(&video_masks)?;
     let batched_audio_mask = cat_optional_batches(&audio_masks)?;
-    let batched_video_latents = repeat_batch(video_latents, repeat_count)?;
-    let batched_video_sigma = repeat_batch(video_sigma, repeat_count)?;
-    let batched_video_timestep = repeat_batch(video_timestep, repeat_count)?;
-    let batched_video_positions = repeat_batch(video_positions, repeat_count)?;
-    let batched_video_self_attention_mask = video_self_attention_mask
-        .map(|mask| repeat_batch(mask, repeat_count))
-        .transpose()?;
-    let batched_audio_latents = audio_latents
-        .map(|latents| repeat_batch(latents, repeat_count))
-        .transpose()?;
-    let batched_audio_sigma = audio_sigma
-        .map(|sigma| repeat_batch(sigma, repeat_count))
-        .transpose()?;
-    let batched_audio_timestep = audio_timestep
-        .map(|timestep| repeat_batch(timestep, repeat_count))
-        .transpose()?;
-    let batched_audio_positions = audio_positions
-        .map(|positions| repeat_batch(positions, repeat_count))
-        .transpose()?;
+    Ok(StaticMultimodalGuidanceBatch {
+        batched_video_context,
+        batched_audio_context,
+        batched_video_mask,
+        batched_audio_mask,
+        perturbations: BatchedPerturbationConfig::new(perturbations),
+        repeat_count,
+        cond_index,
+        uncond_index,
+        perturbed_index,
+        modality_index,
+        static_inputs: None,
+    })
+}
 
-    let (all_video_velocity, all_audio_velocity) = transformer.forward(
-        &batched_video_latents,
-        batched_audio_latents.as_ref(),
-        &batched_video_context,
-        batched_audio_context.as_ref(),
-        &batched_video_sigma,
-        &batched_video_timestep,
-        batched_audio_sigma.as_ref(),
-        batched_audio_timestep.as_ref(),
-        batched_video_mask.as_ref(),
-        batched_audio_mask.as_ref(),
+#[allow(clippy::too_many_arguments)]
+fn prepare_static_multimodal_guidance_batch(
+    transformer: &Ltx2AvTransformer3DModel,
+    cond_context: &Tensor,
+    audio_context: Option<&Tensor>,
+    cond_mask: Option<&Tensor>,
+    uncond_mask: Option<&Tensor>,
+    video_self_attention_mask: Option<&Tensor>,
+    video_positions: &Tensor,
+    audio_positions: Option<&Tensor>,
+    video_guider: &MultiModalGuider,
+    audio_guider: &MultiModalGuider,
+) -> Result<StaticMultimodalGuidanceBatch> {
+    let mut batch = build_static_multimodal_guidance_batch(
+        cond_context,
+        audio_context,
+        cond_mask,
+        uncond_mask,
+        video_guider,
+        audio_guider,
+    )?;
+    let batched_video_self_attention_mask = video_self_attention_mask
+        .map(|mask| repeat_batch(mask, batch.repeat_count))
+        .transpose()?;
+    let batched_video_positions = repeat_batch(video_positions, batch.repeat_count)?;
+    let batched_audio_positions = audio_positions
+        .map(|positions| repeat_batch(positions, batch.repeat_count))
+        .transpose()?;
+    let static_inputs = transformer.prepare_static_inputs(
+        &batch.batched_video_context,
+        batch.batched_audio_context.as_ref(),
+        batch.batched_video_mask.as_ref(),
+        batch.batched_audio_mask.as_ref(),
         batched_video_self_attention_mask.as_ref(),
         None,
         &batched_video_positions,
         batched_audio_positions.as_ref(),
-        Some(&BatchedPerturbationConfig::new(perturbations)),
+    )?;
+    batch.static_inputs = Some(static_inputs);
+    Ok(batch)
+}
+
+fn split_batch_chunk(tensor: &Tensor, index: usize, chunk: usize) -> Result<Tensor> {
+    tensor.narrow(0, index * chunk, chunk).map_err(Into::into)
+}
+
+fn sigma_scale_for_sample(sample: &Tensor, sigma: &Tensor) -> Result<Tensor> {
+    match sigma.rank() {
+        1 => sigma
+            .reshape((sample.dim(0)?, 1, 1))?
+            .to_device(sample.device())?
+            .to_dtype(sample.dtype())
+            .map_err(Into::into),
+        2 => sigma
+            .reshape((sample.dim(0)?, sample.dim(1)?, 1))?
+            .to_device(sample.device())?
+            .to_dtype(sample.dtype())
+            .map_err(Into::into),
+        other => anyhow::bail!("expected sigma rank 1 or 2, got rank {other}"),
+    }
+}
+
+fn denoised_from_velocity_with_sigma(
+    sample: &Tensor,
+    velocity: &Tensor,
+    sigma: &Tensor,
+) -> Result<Tensor> {
+    let sigma = sigma_scale_for_sample(sample, sigma)?;
+    let velocity = if velocity.dtype() == sample.dtype() {
+        velocity.clone()
+    } else {
+        velocity.to_dtype(sample.dtype())?
+    };
+    sample
+        .broadcast_sub(&velocity.broadcast_mul(&sigma)?)
+        .map_err(Into::into)
+}
+
+fn multimodal_guided_denoise_step(
+    transformer: &Ltx2AvTransformer3DModel,
+    video_latents: &Tensor,
+    audio_latents: Option<&Tensor>,
+    static_batch: &StaticMultimodalGuidanceBatch,
+    video_sigma: &Tensor,
+    video_timestep: &Tensor,
+    audio_sigma: Option<&Tensor>,
+    audio_timestep: Option<&Tensor>,
+    video_guider: &MultiModalGuider,
+    audio_guider: &MultiModalGuider,
+    step_idx: usize,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let video_skip = video_guider.should_skip_step(step_idx);
+    let audio_skip = audio_guider.should_skip_step(step_idx);
+
+    let batch = video_latents.dim(0)?;
+    let batched_video_latents = repeat_batch(video_latents, static_batch.repeat_count)?;
+    let batched_video_sigma = repeat_batch(video_sigma, static_batch.repeat_count)?;
+    let batched_video_timestep = repeat_batch(video_timestep, static_batch.repeat_count)?;
+    let batched_audio_latents = audio_latents
+        .map(|latents| repeat_batch(latents, static_batch.repeat_count))
+        .transpose()?;
+    let batched_audio_sigma = audio_sigma
+        .map(|sigma| repeat_batch(sigma, static_batch.repeat_count))
+        .transpose()?;
+    let batched_audio_timestep = audio_timestep
+        .map(|timestep| repeat_batch(timestep, static_batch.repeat_count))
+        .transpose()?;
+    let static_inputs = static_batch
+        .static_inputs
+        .as_ref()
+        .context("missing prepared static multimodal guidance inputs")?;
+
+    let (all_video_velocity, all_audio_velocity) = transformer.forward_with_static_inputs(
+        &batched_video_latents,
+        batched_audio_latents.as_ref(),
+        &batched_video_sigma,
+        &batched_video_timestep,
+        batched_audio_sigma.as_ref(),
+        batched_audio_timestep.as_ref(),
+        static_inputs,
+        Some(&static_batch.perturbations),
     )?;
 
     let cond_video = denoised_from_velocity_with_sigma(
         video_latents,
-        &split_batch_chunk(&all_video_velocity, cond_index, batch)?,
+        &split_batch_chunk(&all_video_velocity, static_batch.cond_index, batch)?,
         video_timestep,
     )?;
-    let uncond_video = if let Some(index) = uncond_index {
+    let uncond_video = if let Some(index) = static_batch.uncond_index {
         denoised_from_velocity_with_sigma(
             video_latents,
             &split_batch_chunk(&all_video_velocity, index, batch)?,
@@ -4155,7 +4322,7 @@ fn multimodal_guided_denoise_step(
     } else {
         cond_video.clone()
     };
-    let perturbed_video = if let Some(index) = perturbed_index {
+    let perturbed_video = if let Some(index) = static_batch.perturbed_index {
         denoised_from_velocity_with_sigma(
             video_latents,
             &split_batch_chunk(&all_video_velocity, index, batch)?,
@@ -4164,7 +4331,7 @@ fn multimodal_guided_denoise_step(
     } else {
         cond_video.clone()
     };
-    let modality_video = if let Some(index) = modality_index {
+    let modality_video = if let Some(index) = static_batch.modality_index {
         denoised_from_velocity_with_sigma(
             video_latents,
             &split_batch_chunk(&all_video_velocity, index, batch)?,
@@ -4184,19 +4351,14 @@ fn multimodal_guided_denoise_step(
         )?
     };
 
-    let audio_denoised = match (
-        audio_latents,
-        all_audio_velocity.as_ref(),
-        audio_timestep,
-        batched_audio_positions.as_ref(),
-    ) {
-        (Some(audio_latents), Some(all_audio_velocity), Some(audio_timestep), Some(_)) => {
+    let audio_denoised = match (audio_latents, all_audio_velocity.as_ref(), audio_timestep) {
+        (Some(audio_latents), Some(all_audio_velocity), Some(audio_timestep)) => {
             let cond_audio = denoised_from_velocity_with_sigma(
                 audio_latents,
-                &split_batch_chunk(all_audio_velocity, cond_index, batch)?,
+                &split_batch_chunk(all_audio_velocity, static_batch.cond_index, batch)?,
                 audio_timestep,
             )?;
-            let uncond_audio = if let Some(index) = uncond_index {
+            let uncond_audio = if let Some(index) = static_batch.uncond_index {
                 denoised_from_velocity_with_sigma(
                     audio_latents,
                     &split_batch_chunk(all_audio_velocity, index, batch)?,
@@ -4205,7 +4367,7 @@ fn multimodal_guided_denoise_step(
             } else {
                 cond_audio.clone()
             };
-            let perturbed_audio = if let Some(index) = perturbed_index {
+            let perturbed_audio = if let Some(index) = static_batch.perturbed_index {
                 denoised_from_velocity_with_sigma(
                     audio_latents,
                     &split_batch_chunk(all_audio_velocity, index, batch)?,
@@ -4214,7 +4376,7 @@ fn multimodal_guided_denoise_step(
             } else {
                 cond_audio.clone()
             };
-            let modality_audio = if let Some(index) = modality_index {
+            let modality_audio = if let Some(index) = static_batch.modality_index {
                 denoised_from_velocity_with_sigma(
                     audio_latents,
                     &split_batch_chunk(all_audio_velocity, index, batch)?,
@@ -4280,35 +4442,37 @@ fn guided_velocity_from_cfg(
 fn load_ltx2_av_transformer(
     plan: &Ltx2GeneratePlan,
     device: &candle_core::Device,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Ltx2AvTransformer3DModel> {
-    load_ltx2_av_transformer_with_loras(plan, device, &[])
+    load_ltx2_av_transformer_with_loras(plan, device, &[], progress)
 }
 
 fn load_ltx2_av_transformer_with_loras(
     plan: &Ltx2GeneratePlan,
     device: &candle_core::Device,
     loras: &[LoraWeight],
+    progress: Option<&ProgressCallback>,
 ) -> Result<Ltx2AvTransformer3DModel> {
     let force_streaming = std::env::var_os("MOLD_LTX2_FORCE_STREAMING").is_some();
     let force_eager = std::env::var_os("MOLD_LTX2_FORCE_EAGER").is_some();
     let config = ltx2_video_transformer_config(plan);
     let lora_registry = super::lora::load_lora_registry(loras)?;
     let vb = if ltx2_checkpoint_is_fp8(plan) {
-        load_fp8_safetensors(
+        load_fp8_safetensors_with_callback(
             std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
             device,
             "LTX-2 transformer",
-            &ProgressReporter::default(),
+            progress,
         )?
     } else {
         let dtype = transformer_weight_dtype(plan, device);
-        unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
-                dtype,
-                device,
-            )?
-        }
+        load_safetensors_with_progress_callback(
+            std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
+            dtype,
+            device,
+            "LTX-2 transformer",
+            progress,
+        )?
     };
     let vb = vb.rename_f(remap_ltx2_transformer_key);
     if device.is_cuda() && ltx2_checkpoint_is_fp8(plan) && force_eager && !force_streaming {
@@ -4326,14 +4490,15 @@ fn load_ltx2_video_vae(
     plan: &Ltx2GeneratePlan,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<AutoencoderKLLtx2Video> {
-    let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(
-            std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
-            dtype,
-            device,
-        )?
-    };
+    let vb = load_safetensors_with_progress_callback(
+        std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
+        dtype,
+        device,
+        "LTX-2 VAE",
+        progress,
+    )?;
     Ok(AutoencoderKLLtx2Video::new(
         ltx2_video_vae_config(plan),
         vb.pp("vae"),
@@ -4897,15 +5062,15 @@ mod tests {
 
     use super::{
         apply_stage_video_conditioning, apply_video_token_replacements,
-        build_video_conditioning_self_attention_mask, clean_latents_for_conditioning,
-        convert_velocity_to_x0, convert_x0_to_velocity, decoded_video_to_frames,
-        effective_native_guidance_scale, emit_denoise_progress, guided_velocity_from_cfg,
-        keyframe_only_conditioning, ltx2_video_transformer_config,
+        build_static_multimodal_guidance_batch, build_video_conditioning_self_attention_mask,
+        clean_latents_for_conditioning, convert_velocity_to_x0, convert_x0_to_velocity,
+        decoded_video_to_frames, effective_native_guidance_scale, emit_denoise_progress,
+        guided_velocity_from_cfg, keyframe_only_conditioning, ltx2_video_transformer_config,
         reapply_stage_video_conditioning, resize_tail_frames_to_pixel_shape,
         should_inspect_step_velocity, source_image_only_conditioning,
-        strip_appended_video_conditioning, Ltx2RuntimeSession, StageVideoConditioning,
-        VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
-        LTX2_VIDEO_LATENT_CHANNELS,
+        strip_appended_video_conditioning, Ltx2RuntimeSession, Ltx2VaeLatentStats,
+        StageVideoConditioning, VideoTokenAppendCondition, VideoTokenReplacement,
+        LTX2_AUDIO_LATENT_CHANNELS, LTX2_VIDEO_LATENT_CHANNELS,
     };
     use crate::ltx2::conditioning::{self, StagedConditioning};
     use crate::ltx2::model::VideoPixelShape;
@@ -4950,7 +5115,9 @@ mod tests {
             gif_preview: false,
             enable_audio,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -5228,6 +5395,31 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn ltx2_vae_latent_stats_cache_reuses_broadcast_tensors() {
+        let device = candle_core::Device::Cpu;
+        let stats = Ltx2VaeLatentStats::from_tensors_for_test(
+            Tensor::new(&[1.0f32, 2.0], &device).unwrap(),
+            Tensor::new(&[2.0f32, 4.0], &device).unwrap(),
+        );
+        let latents = Tensor::from_vec(vec![3.0f32, 10.0], (1, 2, 1, 1, 1), &device).unwrap();
+
+        let ((mean, std), first_hit) = stats.broadcast_tensors_for(&latents).unwrap();
+        let ((mean_again, std_again), second_hit) = stats.broadcast_tensors_for(&latents).unwrap();
+        let normalized = stats.normalize(&latents).unwrap();
+
+        assert!(!first_hit);
+        assert!(second_hit);
+        assert_eq!(mean.dims5().unwrap(), (1, 2, 1, 1, 1));
+        assert_eq!(std.dims5().unwrap(), (1, 2, 1, 1, 1));
+        assert_eq!(format!("{:?}", mean_again.device()), format!("{device:?}"));
+        assert_eq!(std_again.dtype(), DType::F32);
+        assert_eq!(
+            normalized.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            vec![1.0, 2.0]
+        );
+    }
+
     fn rebuild_execution_graph(plan: &mut Ltx2GeneratePlan, req: &GenerateRequest) {
         plan.execution_graph = crate::ltx2::execution::build_execution_graph(
             req,
@@ -5236,6 +5428,222 @@ mod tests {
             &plan.preset,
             plan.loras.len(),
         );
+    }
+
+    #[derive(Clone, Copy)]
+    struct Ltx2ParityCase {
+        workflow: &'static str,
+        model: &'static str,
+        pipeline: PipelineKind,
+        enable_audio: Option<bool>,
+        seed: u64,
+        configure: fn(&mut GenerateRequest),
+    }
+
+    impl Ltx2ParityCase {
+        fn apply(self, req: &mut GenerateRequest) {
+            (self.configure)(req);
+        }
+    }
+
+    fn parity_noop(_req: &mut GenerateRequest) {}
+
+    fn parity_source_image(req: &mut GenerateRequest) {
+        req.source_image = Some(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+    }
+
+    fn parity_audio_file(req: &mut GenerateRequest) {
+        req.audio_file = Some(b"RIFFtestWAVEfmt ".to_vec());
+    }
+
+    fn parity_keyframes(req: &mut GenerateRequest) {
+        req.keyframes = Some(vec![
+            mold_core::KeyframeCondition {
+                frame: 8,
+                image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            },
+            mold_core::KeyframeCondition {
+                frame: 48,
+                image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            },
+        ]);
+    }
+
+    fn parity_retake(req: &mut GenerateRequest) {
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.retake_range = Some(TimeRange {
+            start_seconds: 0.5,
+            end_seconds: 1.25,
+        });
+    }
+
+    fn parity_ic_lora(req: &mut GenerateRequest) {
+        req.source_video = Some(vec![0, 0, 0, 0, b'f', b't', b'y', b'p', 0, 0, 0, 0]);
+        req.loras = Some(vec![LoraWeight {
+            path: "/tmp/ic-lora.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+    }
+
+    fn parity_spatial_x2(req: &mut GenerateRequest) {
+        req.spatial_upscale = Some(Ltx2SpatialUpscale::X2);
+    }
+
+    fn parity_spatial_x1_5(req: &mut GenerateRequest) {
+        req.spatial_upscale = Some(Ltx2SpatialUpscale::X1_5);
+    }
+
+    fn parity_temporal_x2(req: &mut GenerateRequest) {
+        req.temporal_upscale = Some(Ltx2TemporalUpscale::X2);
+    }
+
+    fn ltx2_native_parity_matrix() -> Vec<Ltx2ParityCase> {
+        vec![
+            Ltx2ParityCase {
+                workflow: "text-audio-video-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(true),
+                seed: 424_301,
+                configure: parity_noop,
+            },
+            Ltx2ParityCase {
+                workflow: "fixed-seed-cuda-reference",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(true),
+                seed: 424_303,
+                configure: parity_noop,
+            },
+            Ltx2ParityCase {
+                workflow: "image-to-video-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(false),
+                seed: 424_311,
+                configure: parity_source_image,
+            },
+            Ltx2ParityCase {
+                workflow: "image-to-video-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(false),
+                seed: 424_312,
+                configure: parity_source_image,
+            },
+            Ltx2ParityCase {
+                workflow: "audio-to-video-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::A2Vid,
+                enable_audio: Some(true),
+                seed: 424_321,
+                configure: parity_audio_file,
+            },
+            Ltx2ParityCase {
+                workflow: "audio-to-video-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::A2Vid,
+                enable_audio: Some(true),
+                seed: 424_322,
+                configure: parity_audio_file,
+            },
+            Ltx2ParityCase {
+                workflow: "keyframe-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::Keyframe,
+                enable_audio: Some(false),
+                seed: 424_331,
+                configure: parity_keyframes,
+            },
+            Ltx2ParityCase {
+                workflow: "keyframe-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Keyframe,
+                enable_audio: Some(false),
+                seed: 424_332,
+                configure: parity_keyframes,
+            },
+            Ltx2ParityCase {
+                workflow: "retake-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::Retake,
+                enable_audio: Some(true),
+                seed: 424_341,
+                configure: parity_retake,
+            },
+            Ltx2ParityCase {
+                workflow: "retake-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Retake,
+                enable_audio: Some(true),
+                seed: 424_342,
+                configure: parity_retake,
+            },
+            Ltx2ParityCase {
+                workflow: "public-ic-lora-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::IcLora,
+                enable_audio: Some(true),
+                seed: 424_351,
+                configure: parity_ic_lora,
+            },
+            Ltx2ParityCase {
+                workflow: "two-stage-dev-19b",
+                model: "ltx-2-19b-dev:fp8",
+                pipeline: PipelineKind::TwoStage,
+                enable_audio: Some(false),
+                seed: 424_361,
+                configure: parity_noop,
+            },
+            Ltx2ParityCase {
+                workflow: "two-stage-dev-22b",
+                model: "ltx-2.3-22b-dev:fp8",
+                pipeline: PipelineKind::TwoStage,
+                enable_audio: Some(false),
+                seed: 424_362,
+                configure: parity_noop,
+            },
+            Ltx2ParityCase {
+                workflow: "two-stage-hq-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::TwoStageHq,
+                enable_audio: Some(false),
+                seed: 424_363,
+                configure: parity_noop,
+            },
+            Ltx2ParityCase {
+                workflow: "spatial-x2-19b",
+                model: "ltx-2-19b-dev:fp8",
+                pipeline: PipelineKind::TwoStage,
+                enable_audio: Some(false),
+                seed: 424_371,
+                configure: parity_spatial_x2,
+            },
+            Ltx2ParityCase {
+                workflow: "spatial-x1.5-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(false),
+                seed: 424_372,
+                configure: parity_spatial_x1_5,
+            },
+            Ltx2ParityCase {
+                workflow: "temporal-x2-19b",
+                model: "ltx-2-19b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(false),
+                seed: 424_381,
+                configure: parity_temporal_x2,
+            },
+            Ltx2ParityCase {
+                workflow: "temporal-x2-22b",
+                model: "ltx-2.3-22b-distilled:fp8",
+                pipeline: PipelineKind::Distilled,
+                enable_audio: Some(false),
+                seed: 424_382,
+                configure: parity_temporal_x2,
+            },
+        ]
     }
 
     #[test]
@@ -5660,6 +6068,96 @@ mod tests {
 
         assert!(super::stage_requires_unconditional_context(&plan, 0).unwrap());
         assert!(!super::stage_requires_unconditional_context(&plan, 1).unwrap());
+    }
+
+    #[test]
+    fn multimodal_guidance_batch_prebuilds_static_contexts_once() {
+        let device = Device::Cpu;
+        let cond_video = Tensor::zeros((1, 2, 3), DType::F32, &device).unwrap();
+        let uncond_video = Tensor::ones((1, 2, 3), DType::F32, &device).unwrap();
+        let cond_audio = Tensor::zeros((1, 4, 5), DType::F32, &device).unwrap();
+        let video_guider = crate::ltx2::guidance::MultiModalGuider::new(
+            crate::ltx2::guidance::MultiModalGuiderParams {
+                cfg_scale: 4.0,
+                stg_scale: 1.5,
+                stg_blocks: vec![2, 3],
+                modality_scale: 1.25,
+                ..Default::default()
+            },
+            Some(uncond_video),
+        );
+        let audio_guider = crate::ltx2::guidance::MultiModalGuider::new(
+            crate::ltx2::guidance::MultiModalGuiderParams {
+                stg_scale: 0.5,
+                stg_blocks: vec![7],
+                ..Default::default()
+            },
+            None,
+        );
+
+        let batch = build_static_multimodal_guidance_batch(
+            &cond_video,
+            Some(&cond_audio),
+            None,
+            None,
+            &video_guider,
+            &audio_guider,
+        )
+        .unwrap();
+
+        assert_eq!(batch.repeat_count, 4);
+        assert_eq!(batch.cond_index, 0);
+        assert_eq!(batch.uncond_index, Some(1));
+        assert_eq!(batch.perturbed_index, Some(2));
+        assert_eq!(batch.modality_index, Some(3));
+        assert_eq!(batch.batched_video_context.dims3().unwrap(), (4, 2, 3));
+        assert_eq!(
+            batch
+                .batched_audio_context
+                .as_ref()
+                .unwrap()
+                .dims3()
+                .unwrap(),
+            (4, 4, 5)
+        );
+        assert_eq!(
+            batch.perturbations.mask_values(
+                crate::ltx2::guidance::PerturbationType::SkipVideoSelfAttention,
+                2
+            ),
+            vec![1.0, 1.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn multimodal_guidance_batch_omits_unneeded_optional_contexts() {
+        let device = Device::Cpu;
+        let cond_video = Tensor::zeros((1, 2, 3), DType::F32, &device).unwrap();
+        let video_guider = crate::ltx2::guidance::MultiModalGuider::new(
+            crate::ltx2::guidance::MultiModalGuiderParams::default(),
+            None,
+        );
+        let audio_guider = crate::ltx2::guidance::MultiModalGuider::new(
+            crate::ltx2::guidance::MultiModalGuiderParams::default(),
+            None,
+        );
+
+        let batch = build_static_multimodal_guidance_batch(
+            &cond_video,
+            None,
+            None,
+            None,
+            &video_guider,
+            &audio_guider,
+        )
+        .unwrap();
+
+        assert_eq!(batch.repeat_count, 1);
+        assert_eq!(batch.uncond_index, None);
+        assert_eq!(batch.batched_video_context.dims3().unwrap(), (1, 2, 3));
+        assert!(batch.batched_audio_context.is_none());
+        assert!(batch.batched_video_mask.is_none());
+        assert!(batch.batched_audio_mask.is_none());
     }
 
     #[test]
@@ -6352,6 +6850,57 @@ mod tests {
     }
 
     #[test]
+    fn prepare_stage_context_collects_two_stage_stage2_selection() {
+        let req = req("ltx-2.3-22b-dev:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStage;
+        plan.num_inference_steps = 30;
+        plan.distilled_lora_path = Some("/tmp/distilled-lora.safetensors".to_string());
+        rebuild_execution_graph(&mut plan, &req);
+
+        let ctx = super::prepare_stage_context(&plan, 1, &Device::Cpu).unwrap();
+
+        assert_eq!(ctx.stage_index, 1);
+        assert_eq!(ctx.guidance_scale, 1.0);
+        assert_eq!(ctx.sampler_mode, crate::ltx2::execution::SamplerMode::Euler);
+        assert_eq!(ctx.sigmas_no_terminal, vec![0.909375, 0.725, 0.421875]);
+        assert_eq!(ctx.loras.len(), 1);
+        assert_eq!(ctx.loras[0].path, "/tmp/distilled-lora.safetensors");
+        assert!(ctx.multimodal_guidance.is_none());
+        assert!(!ctx.requires_unconditional_context);
+    }
+
+    #[test]
+    fn prepare_stage_context_collects_two_stage_hq_res2s_defaults() {
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let mut plan = build_plan(&req, preset, conditioning);
+        plan.pipeline = PipelineKind::TwoStageHq;
+        plan.num_inference_steps = 6;
+        plan.distilled_lora_path = Some("/tmp/distilled-lora.safetensors".to_string());
+        rebuild_execution_graph(&mut plan, &req);
+
+        let ctx = super::prepare_stage_context(&plan, 0, &Device::Cpu).unwrap();
+
+        assert_eq!(ctx.stage_index, 0);
+        assert_eq!(ctx.sampler_mode, crate::ltx2::execution::SamplerMode::Res2S);
+        assert_eq!(ctx.sigmas_no_terminal.len(), 6);
+        assert!(ctx
+            .sigmas_no_terminal
+            .windows(2)
+            .all(|pair| pair[0] >= pair[1]));
+        assert_eq!(ctx.loras.len(), 1);
+        assert_eq!(ctx.loras[0].scale, 0.25);
+        assert!(ctx.multimodal_guidance.is_some());
+        assert!(ctx.requires_unconditional_context);
+    }
+
+    #[test]
     fn two_stage_hq_stage_defaults_match_upstream_runtime() {
         let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
         let temp_dir = tempfile::tempdir().unwrap();
@@ -6441,6 +6990,34 @@ mod tests {
         rebuild_execution_graph(&mut plan, &req);
 
         assert!(super::supports_real_video_path(&plan));
+    }
+
+    #[test]
+    fn ltx2_native_parity_matrix_cases_stay_on_real_runtime_path() {
+        let cases = ltx2_native_parity_matrix();
+        assert!(cases.iter().any(|case| case.model.contains("2.3-22b")));
+        assert!(cases
+            .iter()
+            .any(|case| case.workflow == "fixed-seed-cuda-reference"));
+
+        for case in cases {
+            let mut req = req(case.model, OutputFormat::Mp4, case.enable_audio);
+            req.seed = Some(case.seed);
+            case.apply(&mut req);
+            let temp_dir = tempfile::tempdir().unwrap();
+            let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+            let preset = preset_for_model(&req.model).unwrap();
+            let mut plan = build_plan(&req, preset, conditioning);
+            plan.pipeline = case.pipeline;
+            rebuild_execution_graph(&mut plan, &req);
+
+            assert!(
+                super::supports_real_video_path(&plan),
+                "{} ({}) should stay on the native runtime path",
+                case.workflow,
+                case.model
+            );
+        }
     }
 
     #[test]

@@ -121,6 +121,14 @@ mold run qwen-image:q2 "your prompt here" --qwen2-variant q4
 
 :::
 
+::: tip CUDA local runs
+On CUDA, `auto` keeps BF16 for the Qwen2.5-VL text encoder when there is enough
+headroom. If not, local one-shot runs use the quantized Q4 GGUF encoder instead
+of loading the full BF16 text stack on CPU.
+
+Use `--qwen2-variant bf16` only when you deliberately want the BF16 comparison.
+:::
+
 ## Defaults
 
 - **Resolution**: 1328x1328

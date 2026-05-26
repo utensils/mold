@@ -15,10 +15,13 @@
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_nn::VarBuilder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokenizers::Tokenizer;
 
 use super::sampling::{self, Flux2State};
 use super::transformer::{Flux2Config, Flux2TransformerWrapper};
@@ -66,6 +69,10 @@ pub struct Flux2Engine {
     base: EngineBase<LoadedFlux2>,
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
+    /// Force block-level transformer offload once the Flux.2 runtime supports
+    /// streaming BF16 blocks. Plumbed now so the request is explicit instead
+    /// of being silently treated as a regular dense load.
+    offload: bool,
     prompt_cache: Mutex<LruCache<String, CachedTensor>>,
     /// Per-request placement override. Set at the start of `generate()`,
     /// cleared on exit. `None` preserves the existing VRAM-aware auto logic.
@@ -75,6 +82,7 @@ pub struct Flux2Engine {
     /// `load_transformer` / `reload_transformer_if_needed` to decide whether
     /// to wrap the transformer's `VarBuilder` with a `Flux2LoraBackend`.
     pending_loras: Vec<LoraWeight>,
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
 }
 
 /// Resolve the effective LoRA list for a request. Mirrors the FLUX helper of
@@ -109,6 +117,36 @@ pub(crate) fn effective_flux2_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
         .collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Flux2OffloadDecision {
+    Disabled,
+    Selected,
+    Unsupported(&'static str),
+}
+
+fn flux2_offload_decision(
+    forced_offload: bool,
+    is_gguf: bool,
+    has_lora: bool,
+) -> Flux2OffloadDecision {
+    if !forced_offload {
+        return Flux2OffloadDecision::Disabled;
+    }
+    if is_gguf {
+        return Flux2OffloadDecision::Unsupported(
+            "Flux.2 block-level offload is only planned for BF16/FP transformers; \
+             GGUF variants already use quantized transformer paths",
+        );
+    }
+    if has_lora {
+        return Flux2OffloadDecision::Unsupported(
+            "Flux.2 block-level offload with LoRA is not wired yet; \
+             LoRA merge/bypass semantics need a dedicated offload design",
+        );
+    }
+    Flux2OffloadDecision::Selected
+}
+
 impl Flux2Engine {
     /// Create a new Flux2Engine. Does not load models until `load()` is called.
     pub fn new(
@@ -117,13 +155,17 @@ impl Flux2Engine {
         qwen3_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        offload: bool,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             qwen3_variant,
+            offload,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             pending_loras: Vec::new(),
+            shared_pool,
         }
     }
 
@@ -147,6 +189,8 @@ impl Flux2Engine {
         qwen3_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        offload: bool,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Result<Self> {
         if !transformer_path.exists() {
             bail!(
@@ -176,9 +220,11 @@ impl Flux2Engine {
         Ok(Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             qwen3_variant,
+            offload,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             pending_loras: Vec::new(),
+            shared_pool,
         })
     }
 
@@ -252,6 +298,48 @@ impl Flux2Engine {
         }
     }
 
+    fn load_text_tokenizer(&self, tokenizer_path: &Path) -> Result<Arc<Tokenizer>> {
+        if let Some(shared_pool) = &self.shared_pool {
+            return shared_pool.lock().unwrap().load_tokenizer(tokenizer_path);
+        }
+        Tokenizer::from_file(tokenizer_path)
+            .map(Arc::new)
+            .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))
+    }
+
+    fn load_vae_cpu_tensors(&self) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(shared_pool) = &self.shared_pool else {
+            return Ok(None);
+        };
+        shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&self.base.paths.vae))
+    }
+
+    fn load_vae_var_builder<'a>(
+        &self,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+    ) -> Result<VarBuilder<'a>> {
+        if let Some(tensors) = self.load_vae_cpu_tensors()? {
+            return Ok(crate::encoders::park::varbuilder_from_parked(
+                tensors.as_ref(),
+                dtype,
+                device,
+            ));
+        }
+
+        crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&self.base.paths.vae),
+            dtype,
+            device,
+            component,
+            &self.base.progress,
+        )
+    }
+
     fn img2img_source_normalize_range() -> crate::img_utils::NormalizeRange {
         crate::img_utils::NormalizeRange::MinusOneToOne
     }
@@ -259,6 +347,12 @@ impl Flux2Engine {
     #[cfg(test)]
     fn sequential_img2img_preencodes_source() -> bool {
         true
+    }
+
+    fn uses_sequential_generate_path(&self) -> bool {
+        self.base.load_strategy == LoadStrategy::Sequential
+            || self.offload
+            || !self.pending_loras.is_empty()
     }
 
     fn load_sequential_vae(
@@ -275,13 +369,7 @@ impl Flux2Engine {
         // Sequential path resolves MOLD_VAE_DTYPE per request — env changes
         // take effect on the next generate() without an engine reload.
         let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&self.base.paths.vae),
-            vae_dtype,
-            &vae_device,
-            "VAE",
-            &self.base.progress,
-        )?;
+        let vae_vb = self.load_vae_var_builder(vae_dtype, &vae_device, "VAE")?;
         let vae = Flux2AutoEncoder::new(&vae_cfg, vae_vb)?;
         self.base
             .progress
@@ -412,6 +500,15 @@ impl Flux2Engine {
                     cfg,
                 )?;
             let backend: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(backend);
+            if self.offload && !has_lora {
+                let flux_vb = candle_nn::VarBuilder::from_backend(backend, gpu_dtype, Device::Cpu);
+                return Ok((
+                    Flux2TransformerWrapper::Offloaded(
+                        super::transformer::OffloadedFlux2Transformer::new(cfg, flux_vb, device)?,
+                    ),
+                    "Loading Flux.2 transformer (offload, BF16, single-file remap)",
+                ));
+            }
             let backend = if has_lora {
                 let adapters =
                     super::lora::load_lora_adapters(&self.pending_loras, &self.base.progress)?;
@@ -452,7 +549,7 @@ impl Flux2Engine {
             } else {
                 vec![self.base.paths.transformer.clone()]
             };
-            let flux_vb = if has_lora {
+            let (flux_vb, offloaded_label) = if has_lora {
                 // Build our own mmap-backed SimpleBackend so we can wrap with
                 // `Flux2LoraBackend`. The progress reporting drops to a single
                 // info line — the legacy progress bar is keyed to candle's
@@ -517,16 +614,41 @@ impl Flux2Engine {
                     &self.base.progress,
                     None,
                 )?;
-                candle_nn::VarBuilder::from_backend(wrapped, gpu_dtype, device.clone())
+                (
+                    candle_nn::VarBuilder::from_backend(wrapped, gpu_dtype, device.clone()),
+                    None,
+                )
+            } else if self.offload {
+                (
+                    crate::weight_loader::load_safetensors_with_progress(
+                        &xformer_paths,
+                        gpu_dtype,
+                        &Device::Cpu,
+                        "Flux.2 transformer (offload blocks)",
+                        &self.base.progress,
+                    )?,
+                    Some("Loading Flux.2 transformer (offload, BF16)"),
+                )
             } else {
-                crate::weight_loader::load_safetensors_with_progress(
-                    &xformer_paths,
-                    gpu_dtype,
-                    device,
-                    "Flux.2 transformer",
-                    &self.base.progress,
-                )?
+                (
+                    crate::weight_loader::load_safetensors_with_progress(
+                        &xformer_paths,
+                        gpu_dtype,
+                        device,
+                        "Flux.2 transformer",
+                        &self.base.progress,
+                    )?,
+                    None,
+                )
             };
+            if let Some(label) = offloaded_label {
+                return Ok((
+                    Flux2TransformerWrapper::Offloaded(
+                        super::transformer::OffloadedFlux2Transformer::new(cfg, flux_vb, device)?,
+                    ),
+                    label,
+                ));
+            }
             let label = if has_lora {
                 "Loading Flux.2 transformer (GPU, BF16 + LoRA)"
             } else {
@@ -727,13 +849,7 @@ impl Flux2Engine {
         let vae_cfg = Flux2VaeConfig::klein();
         // Resolve VAE precision once at load — see LoadedFlux2::vae_dtype.
         let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&self.base.paths.vae),
-            vae_dtype,
-            &vae_device,
-            "VAE",
-            &self.base.progress,
-        )?;
+        let vae_vb = self.load_vae_var_builder(vae_dtype, &vae_device, "VAE")?;
         let vae = Flux2AutoEncoder::new(&vae_cfg, vae_vb)?;
         self.base
             .progress
@@ -785,18 +901,21 @@ impl Flux2Engine {
         let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
         self.base.progress.stage_start(&enc_stage_label);
         let enc_stage = Instant::now();
+        let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
 
         let text_encoder = if is_gguf {
-            encoders::qwen3::Qwen3Encoder::load_gguf(
+            encoders::qwen3::Qwen3Encoder::load_gguf_with_tokenizer(
                 &encoder_paths[0],
                 &text_tokenizer_path,
+                Some(text_tokenizer),
                 enc_device,
                 &bf16_cfg,
             )?
         } else {
-            encoders::qwen3::Qwen3Encoder::load_bf16(
+            encoders::qwen3::Qwen3Encoder::load_bf16_with_tokenizer(
                 &encoder_paths,
                 &text_tokenizer_path,
+                Some(text_tokenizer),
                 enc_device,
                 enc_dtype,
                 &bf16_cfg,
@@ -824,6 +943,13 @@ impl Flux2Engine {
     /// Generate an image using sequential loading strategy (load-use-drop).
     fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let text_tokenizer_path = self.validate_paths()?;
+        let is_gguf = self.is_gguf_transformer();
+
+        match flux2_offload_decision(self.offload, is_gguf, !self.pending_loras.is_empty()) {
+            Flux2OffloadDecision::Disabled => {}
+            Flux2OffloadDecision::Unsupported(reason) => bail!("{reason}"),
+            Flux2OffloadDecision::Selected => {}
+        }
 
         if let Some(warning) = check_memory_budget(&self.base.paths, LoadStrategy::Sequential) {
             self.base.progress.info(&warning);
@@ -919,18 +1045,21 @@ impl Flux2Engine {
             let enc_stage_label = format!("Loading Qwen3 encoder ({device_label})");
             self.base.progress.stage_start(&enc_stage_label);
             let enc_stage = Instant::now();
+            let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
 
             let mut text_encoder = if is_gguf {
-                encoders::qwen3::Qwen3Encoder::load_gguf(
+                encoders::qwen3::Qwen3Encoder::load_gguf_with_tokenizer(
                     &encoder_paths[0],
                     &text_tokenizer_path,
+                    Some(text_tokenizer),
                     enc_device,
                     &bf16_cfg,
                 )?
             } else {
-                encoders::qwen3::Qwen3Encoder::load_bf16(
+                encoders::qwen3::Qwen3Encoder::load_bf16_with_tokenizer(
                     &encoder_paths,
                     &text_tokenizer_path,
+                    Some(text_tokenizer),
                     enc_device,
                     enc_dtype,
                     &bf16_cfg,
@@ -1182,7 +1311,7 @@ impl Flux2Engine {
             );
         }
         // Sequential mode: load-use-drop each component
-        if self.base.load_strategy == LoadStrategy::Sequential {
+        if self.uses_sequential_generate_path() {
             return self.generate_sequential(req);
         }
 
@@ -1522,10 +1651,15 @@ mod tests {
     use super::*;
     use crate::encoders::variant_resolution::Qwen3Size;
     use crate::engine::LoadStrategy;
+    use crate::shared_pool::SharedPool;
     use mold_core::ModelPaths;
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokenizers::models::bpe::BPE;
 
     fn temp_test_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1618,6 +1752,8 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
+            None,
         );
         let nine_b = Flux2Engine::new(
             "flux2-klein-9b:q8".to_string(),
@@ -1625,6 +1761,8 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
+            None,
         );
 
         let standard_cfg = standard.resolve_config();
@@ -1661,6 +1799,8 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
+            None,
         );
         assert_eq!(sharded.text_encoder_paths(), vec![shard_a, shard_b]);
 
@@ -1670,9 +1810,218 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
+            None,
         );
         assert_eq!(fallback_engine.text_encoder_paths(), vec![fallback]);
 
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flux2_loads_qwen3_tokenizer_through_shared_pool() {
+        let dir = temp_test_dir("mold-flux2-tokenizer-pool");
+        let tokenizer_path = dir.join("tokenizer.json");
+        tokenizers::Tokenizer::new(BPE::default())
+            .save(&tokenizer_path, false)
+            .unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&tokenizer_path)
+            .unwrap();
+
+        let engine = Flux2Engine::new(
+            "flux2-klein:q8".to_string(),
+            flux2_model_paths(&dir, "transformer.gguf", vec![], None),
+            None,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_text_tokenizer(&tokenizer_path).unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flux2_forced_offload_uses_sequential_generation_path() {
+        let dir = temp_test_dir("mold-flux2-offload-sequential");
+        let engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            flux2_model_paths(&dir, "transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            true,
+            None,
+        );
+
+        assert!(
+            engine.uses_sequential_generate_path(),
+            "Flux.2 --offload requests must reach the engine and select the \
+             staged generation path instead of being silently ignored"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flux2_offload_decision_gates_current_unsupported_cases() {
+        assert_eq!(
+            flux2_offload_decision(false, false, false),
+            Flux2OffloadDecision::Disabled
+        );
+        assert_eq!(
+            flux2_offload_decision(true, false, false),
+            Flux2OffloadDecision::Selected
+        );
+        assert!(matches!(
+            flux2_offload_decision(true, true, false),
+            Flux2OffloadDecision::Unsupported(reason)
+                if reason.contains("GGUF variants")
+        ));
+        assert!(matches!(
+            flux2_offload_decision(true, false, true),
+            Flux2OffloadDecision::Unsupported(reason)
+                if reason.contains("LoRA")
+        ));
+    }
+
+    #[test]
+    fn flux2_selected_bf16_offload_reaches_runtime_loader() {
+        let dir = temp_test_dir("mold-flux2-offload-loader");
+        let transformer = touch(&dir, "transformer.safetensors");
+        let vae = touch(&dir, "vae.safetensors");
+        let encoder = touch(&dir, "encoder.safetensors");
+        let tokenizer = touch(&dir, "tokenizer.json");
+        let mut engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            ModelPaths {
+                transformer,
+                transformer_shards: vec![],
+                vae,
+                spatial_upscaler: None,
+                temporal_upscaler: None,
+                distilled_lora: None,
+                t5_encoder: None,
+                clip_encoder: None,
+                t5_tokenizer: None,
+                clip_tokenizer: None,
+                clip_encoder_2: None,
+                clip_tokenizer_2: None,
+                text_encoder_files: vec![encoder],
+                text_tokenizer: Some(tokenizer),
+                decoder: None,
+            },
+            None,
+            LoadStrategy::Sequential,
+            0,
+            true,
+            None,
+        );
+        let cfg = engine.resolve_config();
+        let txt_emb = Tensor::zeros((1, 1, cfg.context_in_dim), DType::F32, &Device::Cpu).unwrap();
+        engine.prompt_cache.lock().unwrap().insert(
+            prompt_text_key("a cat"),
+            CachedTensor::from_tensor(&txt_emb).unwrap(),
+        );
+        let req = GenerateRequest {
+            prompt: "a cat".to_string(),
+            negative_prompt: None,
+            model: "flux2-klein:bf16".to_string(),
+            width: 64,
+            height: 64,
+            steps: 1,
+            guidance: 0.0,
+            seed: Some(1),
+            batch_size: 1,
+            output_format: None,
+            embed_metadata: None,
+            scheduler: None,
+            cfg_plus: None,
+            source_image: None,
+            edit_images: None,
+            strength: 1.0,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            audio_file_path: None,
+            source_video: None,
+            source_video_path: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: Some(mold_core::types::DevicePlacement {
+                text_encoders: mold_core::types::DeviceRef::Cpu,
+                advanced: Some(mold_core::types::AdvancedPlacement {
+                    transformer: mold_core::types::DeviceRef::Cpu,
+                    vae: mold_core::types::DeviceRef::Cpu,
+                    ..Default::default()
+                }),
+            }),
+        };
+
+        let err = engine.generate_sequential(&req).unwrap_err().to_string();
+
+        assert!(
+            !err.contains("streaming is not implemented yet"),
+            "selected BF16 offload must reach the runtime loader, got: {err}"
+        );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flux2_loads_vae_tensors_through_shared_pool() {
+        let dir = temp_test_dir("mold-flux2-vae-pool");
+        let vae_path = dir.join("vae.safetensors");
+        let weight = 1.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "encoder.conv_in.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &weight).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &vae_path).unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+            .unwrap()
+            .unwrap();
+
+        let engine = Flux2Engine::new(
+            "flux2-klein:q8".to_string(),
+            flux2_model_paths(&dir, "transformer.gguf", vec![], None),
+            None,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_vae_cpu_tensors().unwrap().unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
     }
 
@@ -1706,6 +2055,8 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
+            None,
         );
 
         assert_eq!(engine.validate_paths().unwrap(), tokenizer);
@@ -1743,6 +2094,8 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
+            None,
         );
 
         let err = engine.validate_paths().unwrap_err();

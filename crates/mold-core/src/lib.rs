@@ -12,6 +12,7 @@ pub mod expand_prompts;
 pub mod install_error;
 pub mod lambda;
 pub mod manifest;
+pub mod media_paths;
 pub mod runpod;
 pub mod types;
 pub mod validation;
@@ -37,6 +38,7 @@ pub use control::{
 };
 pub use error::{MoldError, Result as MoldResult};
 pub use install_error::InstallError;
+pub use media_paths::{configured_media_roots, parse_media_roots_env, resolve_server_media_path};
 pub use types::GenerateRequest;
 pub use types::Scheduler;
 pub use types::*;

@@ -8,6 +8,8 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokenizers::Tokenizer;
 
 use super::park;
 use super::qwen3_bf16::{Bf16Qwen3Encoder, Qwen3BF16Config};
@@ -52,7 +54,7 @@ impl Qwen3Model {
 /// through to drop/reload (QTensor storage is device-tied).
 pub(crate) struct Qwen3Encoder {
     pub model: Option<Qwen3Model>,
-    pub tokenizer: tokenizers::Tokenizer,
+    pub tokenizer: Arc<Tokenizer>,
     pub device: Device,
     pub on_gpu: bool,
     pub is_quantized: bool,
@@ -88,9 +90,32 @@ impl Qwen3Encoder {
     ///
     /// The `bf16_config` selects the architecture variant: `Qwen3BF16Config::qwen3_4b()`
     /// for Klein-4B / Z-Image, or `Qwen3BF16Config::qwen3_8b()` for Klein-9B.
+    #[allow(dead_code)]
     pub fn load_bf16(
         encoder_paths: &[PathBuf],
         tokenizer_path: &PathBuf,
+        device: &Device,
+        dtype: DType,
+        bf16_config: &Qwen3BF16Config,
+        progress: &crate::progress::ProgressReporter,
+    ) -> Result<Self> {
+        Self::load_bf16_with_tokenizer(
+            encoder_paths,
+            tokenizer_path,
+            None,
+            device,
+            dtype,
+            bf16_config,
+            progress,
+        )
+    }
+
+    /// Load a BF16 Qwen3 encoder using a preloaded tokenizer when available.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_bf16_with_tokenizer(
+        encoder_paths: &[PathBuf],
+        tokenizer_path: &PathBuf,
+        tokenizer: Option<Arc<Tokenizer>>,
         device: &Device,
         dtype: DType,
         bf16_config: &Qwen3BF16Config,
@@ -105,8 +130,11 @@ impl Qwen3Encoder {
         )?;
         let model = Qwen3Model::BF16(Bf16Qwen3Encoder::load(bf16_config, vb)?);
 
-        let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))?;
+        let tokenizer = tokenizer.map(Ok).unwrap_or_else(|| {
+            Tokenizer::from_file(tokenizer_path)
+                .map(Arc::new)
+                .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))
+        })?;
         let on_gpu = crate::device::is_gpu(device);
 
         Ok(Self {
@@ -126,15 +154,30 @@ impl Qwen3Encoder {
     ///
     /// The `bf16_config` is stored for potential BF16 fallback reload but is not
     /// used during GGUF loading (GGUF reads dimensions from file metadata).
+    #[allow(dead_code)]
     pub fn load_gguf(
         gguf_path: &Path,
         tokenizer_path: &PathBuf,
         device: &Device,
         bf16_config: &Qwen3BF16Config,
     ) -> Result<Self> {
+        Self::load_gguf_with_tokenizer(gguf_path, tokenizer_path, None, device, bf16_config)
+    }
+
+    /// Load a quantized Qwen3 encoder using a preloaded tokenizer when available.
+    pub fn load_gguf_with_tokenizer(
+        gguf_path: &Path,
+        tokenizer_path: &PathBuf,
+        tokenizer: Option<Arc<Tokenizer>>,
+        device: &Device,
+        bf16_config: &Qwen3BF16Config,
+    ) -> Result<Self> {
         let model = Qwen3Model::Quantized(GgufQwen3Encoder::load(gguf_path, device)?);
-        let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))?;
+        let tokenizer = tokenizer.map(Ok).unwrap_or_else(|| {
+            Tokenizer::from_file(tokenizer_path)
+                .map(Arc::new)
+                .map_err(|e| anyhow::anyhow!("failed to load Qwen3 tokenizer: {e}"))
+        })?;
         let on_gpu = crate::device::is_gpu(device);
 
         Ok(Self {

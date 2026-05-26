@@ -139,6 +139,10 @@ export interface GenerateRequestWire {
    * `false` skips audio decode; omit for "no preference" (server defaults
    * to on for MP4 output). The server rejects `true` for non-AV families. */
   enable_audio?: boolean | null;
+  audio_file?: string | null;
+  audio_file_path?: string | null;
+  source_video?: string | null;
+  source_video_path?: string | null;
 }
 
 export interface ModelDefaults {

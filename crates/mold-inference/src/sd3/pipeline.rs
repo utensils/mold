@@ -1,11 +1,13 @@
 use anyhow::{bail, Result};
-use candle_core::{DType, Device, IndexOp};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_transformers::models::mmdit::model::{Config as MMDiTConfig, MMDiT};
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokenizers::Tokenizer;
 
 use crate::cache::{
     cfg_prompt_cache_key, clear_cache, get_or_insert_cached_tensor_pair,
@@ -63,6 +65,36 @@ pub(crate) fn effective_loras(req: &GenerateRequest) -> Vec<LoraWeight> {
             keep
         })
         .collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SD3OffloadDecision {
+    Disabled,
+    Selected,
+    Unsupported(&'static str),
+}
+
+fn sd3_offload_decision(
+    forced_offload: bool,
+    is_quantized: bool,
+    has_lora: bool,
+) -> SD3OffloadDecision {
+    if !forced_offload {
+        return SD3OffloadDecision::Disabled;
+    }
+    if is_quantized {
+        return SD3OffloadDecision::Unsupported(
+            "SD3 block-level offload is only planned for BF16/FP transformers; \
+             GGUF variants already use quantized transformer paths",
+        );
+    }
+    if has_lora {
+        return SD3OffloadDecision::Unsupported(
+            "SD3 block-level offload with LoRA is not wired yet; \
+             LoRA merge/cache semantics need a dedicated offload design",
+        );
+    }
+    SD3OffloadDecision::Selected
 }
 
 /// Build a LoRA-aware SD3 `VarBuilder` from BF16 safetensors. Caller
@@ -173,16 +205,19 @@ pub struct SD3Engine {
     is_turbo: bool,
     is_medium: bool,
     t5_variant: Option<String>,
+    offload: bool,
     prompt_cache: Mutex<LruCache<CfgPromptCacheKey, CachedTensorPair>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
     /// CPU-resident cache of pre-computed LoRA deltas, shared across
     /// transformer rebuilds. Saves the `B @ A * scale` matmul when the
     /// same LoRA stack reappears on a later generate.
     lora_delta_cache: Arc<Mutex<sd3_lora::LoraDeltaCache>>,
+    shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
 }
 
 impl SD3Engine {
     /// Create a new SD3Engine. Does not load models until `load()` is called.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model_name: String,
         paths: ModelPaths,
@@ -191,16 +226,126 @@ impl SD3Engine {
         t5_variant: Option<String>,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+        offload: bool,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             is_turbo,
             is_medium,
             t5_variant,
+            offload,
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
             pending_placement: None,
             lora_delta_cache: Arc::new(Mutex::new(sd3_lora::LoraDeltaCache::new())),
+            shared_pool,
         }
+    }
+
+    fn load_text_tokenizers(
+        &self,
+        clip_l_tokenizer: &Path,
+        clip_g_tokenizer: &Path,
+        t5_tokenizer: &Path,
+    ) -> Result<(Arc<Tokenizer>, Arc<Tokenizer>, Arc<Tokenizer>)> {
+        if let Some(shared_pool) = &self.shared_pool {
+            let mut pool = shared_pool.lock().unwrap();
+            return Ok((
+                pool.load_tokenizer(clip_l_tokenizer)?,
+                pool.load_tokenizer(clip_g_tokenizer)?,
+                pool.load_tokenizer(t5_tokenizer)?,
+            ));
+        }
+
+        let load = |path: &Path, label: &str| {
+            Tokenizer::from_file(path)
+                .map(Arc::new)
+                .map_err(|e| anyhow::anyhow!("failed to load {label} tokenizer: {e}"))
+        };
+        Ok((
+            load(clip_l_tokenizer, "CLIP-L")?,
+            load(clip_g_tokenizer, "CLIP-G")?,
+            load(t5_tokenizer, "T5")?,
+        ))
+    }
+
+    #[cfg(test)]
+    fn load_vae_cpu_tensors(
+        &self,
+        vae_path: &Path,
+    ) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        Self::load_vae_cpu_tensors_from_pool(self.shared_pool.as_ref(), vae_path)
+    }
+
+    fn load_vae_cpu_tensors_from_pool(
+        shared_pool: Option<&Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        vae_path: &Path,
+    ) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
+        let Some(shared_pool) = shared_pool else {
+            return Ok(None);
+        };
+        shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+    }
+
+    fn load_transformer_cpu_tensors(&self) -> Result<Arc<HashMap<String, Tensor>>> {
+        if let Some(shared_pool) = &self.shared_pool {
+            if let Some(tensors) = shared_pool
+                .lock()
+                .unwrap()
+                .load_safetensors_cpu_tensors(std::slice::from_ref(&self.base.paths.transformer))?
+            {
+                return Ok(tensors);
+            }
+        }
+        Ok(Arc::new(crate::encoders::park::load_tensors_to_cpu(
+            std::slice::from_ref(&self.base.paths.transformer),
+        )?))
+    }
+
+    fn load_vae_var_builder<'a>(
+        &self,
+        vae_path: &Path,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+        progress: &ProgressReporter,
+    ) -> Result<candle_nn::VarBuilder<'a>> {
+        Self::load_vae_var_builder_from_pool(
+            self.shared_pool.as_ref(),
+            vae_path,
+            dtype,
+            device,
+            component,
+            progress,
+        )
+    }
+
+    fn load_vae_var_builder_from_pool<'a>(
+        shared_pool: Option<&Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        vae_path: &Path,
+        dtype: DType,
+        device: &Device,
+        component: &str,
+        progress: &ProgressReporter,
+    ) -> Result<candle_nn::VarBuilder<'a>> {
+        if let Some(tensors) = Self::load_vae_cpu_tensors_from_pool(shared_pool, vae_path)? {
+            return Ok(crate::encoders::park::varbuilder_from_parked(
+                tensors.as_ref(),
+                dtype,
+                device,
+            ));
+        }
+
+        crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&vae_path),
+            dtype,
+            device,
+            component,
+            progress,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -257,6 +402,10 @@ impl SD3Engine {
 
     fn img2img_source_normalize_range() -> img_utils::NormalizeRange {
         img_utils::NormalizeRange::MinusOneToOne
+    }
+
+    fn uses_sequential_generate_path(&self) -> bool {
+        self.base.load_strategy == LoadStrategy::Sequential || self.offload
     }
 
     /// Detect if the transformer is quantized (GGUF).
@@ -479,14 +628,19 @@ impl SD3Engine {
         let encoder_label = format!("Loading SD3 triple encoder ({t5_device_label})");
         self.base.progress.stage_start(&encoder_label);
         let encoder_stage = Instant::now();
+        let (clip_l_tokenizer_handle, clip_g_tokenizer_handle, t5_tokenizer_handle) =
+            self.load_text_tokenizers(&clip_l_tokenizer, &clip_g_tokenizer, &t5_tokenizer_path)?;
 
-        let triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load(
+        let triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load_with_tokenizers(
             &clip_l_path,
             &clip_l_tokenizer,
+            Some(clip_l_tokenizer_handle),
             &clip_g_path,
             &clip_g_tokenizer,
+            Some(clip_g_tokenizer_handle),
             &resolved_t5_path,
             &t5_tokenizer_path,
+            Some(t5_tokenizer_handle),
             encoder_device,
             encoder_dtype,
             &self.base.progress,
@@ -527,6 +681,14 @@ impl SD3Engine {
 
     /// Generate an image using sequential loading strategy.
     fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        let is_quantized = self.detect_is_quantized();
+        let active_loras = effective_loras(req);
+        match sd3_offload_decision(self.offload, is_quantized, !active_loras.is_empty()) {
+            SD3OffloadDecision::Disabled => {}
+            SD3OffloadDecision::Unsupported(reason) => bail!("{reason}"),
+            SD3OffloadDecision::Selected => {}
+        }
+
         let (
             clip_l_path,
             clip_l_tokenizer,
@@ -547,7 +709,6 @@ impl SD3Engine {
             DType::F32
         };
 
-        let is_quantized = self.detect_is_quantized();
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
 
@@ -627,13 +788,18 @@ impl SD3Engine {
             let encoder_label = format!("Loading SD3 triple encoder ({t5_device_label})");
             self.base.progress.stage_start(&encoder_label);
             let encoder_stage = Instant::now();
-            let mut triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load(
+            let (clip_l_tokenizer_handle, clip_g_tokenizer_handle, t5_tokenizer_handle) = self
+                .load_text_tokenizers(&clip_l_tokenizer, &clip_g_tokenizer, &t5_tokenizer_path)?;
+            let mut triple_encoder = encoders::sd3_clip::SD3TripleEncoder::load_with_tokenizers(
                 &clip_l_path,
                 &clip_l_tokenizer,
+                Some(clip_l_tokenizer_handle),
                 &clip_g_path,
                 &clip_g_tokenizer,
+                Some(clip_g_tokenizer_handle),
                 &resolved_t5_path,
                 &t5_tokenizer_path,
+                Some(t5_tokenizer_handle),
                 encoder_device,
                 encoder_dtype,
                 &self.base.progress,
@@ -695,8 +861,8 @@ impl SD3Engine {
             self.base.progress.stage_start("Loading VAE for encoding");
             let vae_stage = Instant::now();
             let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                std::slice::from_ref(&self.base.paths.vae),
+            let vae_vb = self.load_vae_var_builder(
+                &self.base.paths.vae,
                 vae_dtype,
                 &device,
                 "VAE",
@@ -755,9 +921,13 @@ impl SD3Engine {
         // --- Phase 3: Load transformer + denoise ---
         let mmdit_config = self.mmdit_config();
 
-        let xformer_size = std::fs::metadata(&self.base.paths.transformer)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let xformer_size = if self.offload && !is_quantized && active_loras.is_empty() {
+            0
+        } else {
+            std::fs::metadata(&self.base.paths.transformer)
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
         // SD3 runs CFG by default → batch=2 if guidance > 1, else batch=1.
         let xformer_batch = if req.guidance > 1.0 { 2 } else { 1 };
         let xformer_activation_budget = crate::device::activation_bytes(
@@ -778,11 +948,12 @@ impl SD3Engine {
 
         let active_loras = effective_loras(req);
         let lora_delta_cache = self.lora_delta_cache.clone();
-        let xformer_label = match (is_quantized, active_loras.is_empty()) {
-            (true, true) => "Loading SD3 MMDiT transformer (GPU, quantized)",
-            (true, false) => "Loading SD3 MMDiT transformer (GPU, quantized, with LoRA)",
-            (false, true) => "Loading SD3 MMDiT transformer (GPU, FP16)",
-            (false, false) => "Loading SD3 MMDiT transformer (GPU, FP16, with LoRA)",
+        let xformer_label = match (is_quantized, active_loras.is_empty(), self.offload) {
+            (true, true, _) => "Loading SD3 MMDiT transformer (GPU, quantized)",
+            (true, false, _) => "Loading SD3 MMDiT transformer (GPU, quantized, with LoRA)",
+            (false, true, true) => "Loading SD3 MMDiT transformer (offload, FP16)",
+            (false, true, false) => "Loading SD3 MMDiT transformer (GPU, FP16)",
+            (false, false, _) => "Loading SD3 MMDiT transformer (GPU, FP16, with LoRA)",
         };
         self.base.progress.stage_start(xformer_label);
         let xformer_stage = Instant::now();
@@ -800,6 +971,14 @@ impl SD3Engine {
                 )?
             };
             SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
+        } else if active_loras.is_empty() && self.offload {
+            let tensors = self.load_transformer_cpu_tensors()?;
+            SD3Transformer::Offloaded(Box::new(super::offload::OffloadedMMDiT::new(
+                &mmdit_config,
+                tensors,
+                gpu_dtype,
+                &device,
+            )?))
         } else if active_loras.is_empty() {
             // BF16 safetensors from stabilityai use "model.diffusion_model." prefix
             let vb = crate::weight_loader::load_safetensors_with_progress(
@@ -874,8 +1053,8 @@ impl SD3Engine {
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
         let vae_dtype = crate::device::resolve_vae_dtype(gpu_dtype);
-        let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&self.base.paths.vae),
+        let vae_vb = self.load_vae_var_builder(
+            &self.base.paths.vae,
             vae_dtype,
             &device,
             "VAE",
@@ -954,7 +1133,7 @@ impl SD3Engine {
         }
 
         // Sequential mode: load-use-drop each component
-        if self.base.load_strategy == LoadStrategy::Sequential {
+        if self.uses_sequential_generate_path() {
             return self.generate_sequential(req);
         }
 
@@ -965,6 +1144,7 @@ impl SD3Engine {
         let transformer_path = self.base.paths.transformer.clone();
         let active_loras = effective_loras(req);
         let lora_delta_cache = self.lora_delta_cache.clone();
+        let shared_pool = self.shared_pool.clone();
 
         let mut loaded = OptionRestoreGuard::take(&mut self.base.loaded)
             .ok_or_else(|| anyhow::anyhow!("model not loaded -- call load() first"))?;
@@ -1089,8 +1269,9 @@ impl SD3Engine {
                     progress.stage_start("Loading VAE for encoding");
                     let vae_stage = Instant::now();
                     let vae_dtype = crate::device::resolve_vae_dtype(loaded_dtype);
-                    let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                        std::slice::from_ref(&loaded.vae_vb_path),
+                    let vae_vb = Self::load_vae_var_builder_from_pool(
+                        shared_pool.as_ref(),
+                        &loaded.vae_vb_path,
                         vae_dtype,
                         &loaded.device,
                         "VAE",
@@ -1248,8 +1429,9 @@ impl SD3Engine {
             let vae_decode_start = Instant::now();
 
             let vae_dtype = crate::device::resolve_vae_dtype(loaded.dtype);
-            let vae_vb = crate::weight_loader::load_safetensors_with_progress(
-                std::slice::from_ref(&loaded.vae_vb_path),
+            let vae_vb = Self::load_vae_var_builder_from_pool(
+                shared_pool.as_ref(),
+                &loaded.vae_vb_path,
                 vae_dtype,
                 &loaded.device,
                 "VAE",
@@ -1349,10 +1531,15 @@ impl InferenceEngine for SD3Engine {
 mod tests {
     use super::*;
     use crate::engine::LoadStrategy;
+    use crate::shared_pool::SharedPool;
     use mold_core::ModelPaths;
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokenizers::models::bpe::BPE;
 
     fn temp_test_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1428,6 +1615,8 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
+            None,
         );
         let medium = SD3Engine::new(
             "sd3.5-medium:bf16".to_string(),
@@ -1446,6 +1635,8 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
+            None,
         );
 
         let large_cfg = large.mmdit_config();
@@ -1492,12 +1683,157 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
+            None,
         );
 
         let (_, _, _, _, _, resolved_t5_tok) = engine.validate_paths().unwrap();
         assert_eq!(resolved_t5_tok, t5_tok);
         assert!(engine.detect_is_quantized());
 
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sd3_forced_offload_uses_sequential_generation_path() {
+        let dir = temp_test_dir("mold-sd3-offload-sequential");
+        let engine = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                dir.join("transformer.safetensors"),
+                dir.join("vae.safetensors"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Eager,
+            0,
+            true,
+            None,
+        );
+
+        assert!(
+            engine.uses_sequential_generate_path(),
+            "SD3 --offload requests must reach the engine and select the \
+             staged generation path instead of being silently ignored"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sd3_offload_decision_gates_current_unsupported_cases() {
+        assert_eq!(
+            sd3_offload_decision(false, false, false),
+            SD3OffloadDecision::Disabled
+        );
+        assert_eq!(
+            sd3_offload_decision(true, false, false),
+            SD3OffloadDecision::Selected
+        );
+        assert!(matches!(
+            sd3_offload_decision(true, true, false),
+            SD3OffloadDecision::Unsupported(reason)
+                if reason.contains("GGUF variants")
+        ));
+        assert!(matches!(
+            sd3_offload_decision(true, false, true),
+            SD3OffloadDecision::Unsupported(reason)
+                if reason.contains("LoRA")
+        ));
+    }
+
+    #[test]
+    fn sd3_selected_bf16_offload_reaches_runtime_loader() {
+        use crate::cache::store_cached_tensor_pair;
+
+        let dir = temp_test_dir("mold-sd3-offload-loader");
+        let transformer = touch(&dir, "transformer.safetensors");
+        let vae = touch(&dir, "vae.safetensors");
+        let clip_l = touch(&dir, "clip-l.safetensors");
+        let clip_l_tok = touch(&dir, "clip-l-tokenizer.json");
+        let clip_g = touch(&dir, "clip-g.safetensors");
+        let clip_g_tok = touch(&dir, "clip-g-tokenizer.json");
+        let t5 = touch(&dir, "t5.safetensors");
+        let t5_tok = touch(&dir, "t5-tokenizer.json");
+        let mut engine = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                transformer,
+                vae,
+                Some(clip_l),
+                Some(clip_l_tok),
+                Some(clip_g),
+                Some(clip_g_tok),
+                Some(t5),
+                Some(t5_tok),
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+            0,
+            true,
+            None,
+        );
+        let context = Tensor::zeros((1, 1, 4096), DType::F32, &Device::Cpu).unwrap();
+        let y = Tensor::zeros((1, 2048), DType::F32, &Device::Cpu).unwrap();
+        let key = cfg_prompt_cache_key("a cat", "", 1.0);
+        store_cached_tensor_pair(&engine.prompt_cache, key, &context, &y).unwrap();
+        let req = GenerateRequest {
+            prompt: "a cat".to_string(),
+            negative_prompt: None,
+            model: "sd3.5-large:bf16".to_string(),
+            width: 64,
+            height: 64,
+            steps: 1,
+            guidance: 1.0,
+            seed: Some(1),
+            batch_size: 1,
+            output_format: None,
+            embed_metadata: None,
+            scheduler: None,
+            cfg_plus: None,
+            source_image: None,
+            edit_images: None,
+            strength: 1.0,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            audio_file_path: None,
+            source_video: None,
+            source_video_path: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: None,
+        };
+
+        let err = engine.generate_sequential(&req).unwrap_err().to_string();
+
+        assert!(
+            !err.contains("streaming is not implemented yet"),
+            "selected BF16 offload must reach the runtime loader, got: {err}"
+        );
         fs::remove_dir_all(dir).ok();
     }
 
@@ -1559,12 +1895,117 @@ mod tests {
             None,
             LoadStrategy::Sequential,
             0,
+            false,
+            None,
         );
 
         let err = engine.validate_paths().unwrap_err();
         assert!(err.to_string().contains("T5 encoder path required"));
         assert!(!engine.detect_is_quantized());
 
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sd3_loads_text_tokenizers_through_shared_pool() {
+        let dir = temp_test_dir("mold-sd3-tokenizer-pool");
+        let clip_l_tok = dir.join("clip-l-tokenizer.json");
+        let clip_g_tok = dir.join("clip-g-tokenizer.json");
+        let t5_tok = dir.join("t5-tokenizer.json");
+        for path in [&clip_l_tok, &clip_g_tok, &t5_tok] {
+            tokenizers::Tokenizer::new(BPE::default())
+                .save(path, false)
+                .unwrap();
+        }
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled_clip_l = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&clip_l_tok)
+            .unwrap();
+        let pooled_clip_g = shared_pool
+            .lock()
+            .unwrap()
+            .load_tokenizer(&clip_g_tok)
+            .unwrap();
+        let pooled_t5 = shared_pool.lock().unwrap().load_tokenizer(&t5_tok).unwrap();
+
+        let engine = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                dir.join("transformer.safetensors"),
+                dir.join("vae.safetensors"),
+                Some(dir.join("clip-l.safetensors")),
+                Some(clip_l_tok.clone()),
+                Some(dir.join("clip-g.safetensors")),
+                Some(clip_g_tok.clone()),
+                Some(dir.join("t5.safetensors")),
+                Some(t5_tok.clone()),
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            Some(shared_pool),
+        );
+
+        let (loaded_clip_l, loaded_clip_g, loaded_t5) = engine
+            .load_text_tokenizers(&clip_l_tok, &clip_g_tok, &t5_tok)
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&pooled_clip_l, &loaded_clip_l));
+        assert!(Arc::ptr_eq(&pooled_clip_g, &loaded_clip_g));
+        assert!(Arc::ptr_eq(&pooled_t5, &loaded_t5));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sd3_loads_vae_tensors_through_shared_pool() {
+        let dir = temp_test_dir("mold-sd3-vae-pool");
+        let vae_path = dir.join("vae.safetensors");
+        let weight = 1.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "first_stage_model.encoder.conv_in.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &weight).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &vae_path).unwrap();
+
+        let shared_pool = Arc::new(Mutex::new(SharedPool::new()));
+        let pooled = shared_pool
+            .lock()
+            .unwrap()
+            .load_safetensors_cpu_tensors(std::slice::from_ref(&vae_path))
+            .unwrap()
+            .unwrap();
+
+        let engine = SD3Engine::new(
+            "sd3.5-large:bf16".to_string(),
+            sd3_model_paths(
+                dir.join("transformer.safetensors"),
+                vae_path.clone(),
+                Some(dir.join("clip-l.safetensors")),
+                Some(dir.join("clip-l-tokenizer.json")),
+                Some(dir.join("clip-g.safetensors")),
+                Some(dir.join("clip-g-tokenizer.json")),
+                Some(dir.join("t5.safetensors")),
+                Some(dir.join("t5-tokenizer.json")),
+            ),
+            false,
+            false,
+            None,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            Some(shared_pool),
+        );
+
+        let loaded = engine.load_vae_cpu_tensors(&vae_path).unwrap().unwrap();
+
+        assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
     }
 

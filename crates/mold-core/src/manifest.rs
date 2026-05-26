@@ -7032,56 +7032,59 @@ mod tests {
     /// on batch iterations when the prompt is identical.
     #[test]
     fn sequential_pipelines_check_cache_before_encoder_load() {
-        // Each entry: (family, path, cache_check_pattern, encoder_load_pattern)
+        // Each entry: (family, path, cache_check_pattern, encoder_load_patterns)
         // The cache check must appear BEFORE the encoder load in generate_sequential().
         let pipelines = [
             (
                 "flux2",
                 "crates/mold-inference/src/flux2/pipeline.rs",
                 "restore_cached_tensor(",
-                "Qwen3Encoder::load_",
+                &["Qwen3Encoder::load_"][..],
             ),
             (
                 "flux",
                 "crates/mold-inference/src/flux/pipeline.rs",
                 "restore_prompt_cache(",
-                "T5Encoder::load",
+                &["T5Encoder::load"][..],
             ),
             (
                 "sd15",
                 "crates/mold-inference/src/sd15/pipeline.rs",
                 "restore_cached_tensor(",
-                "build_clip_transformer(",
+                &["build_clip_transformer("][..],
             ),
             (
                 "sdxl",
                 "crates/mold-inference/src/sdxl/pipeline.rs",
                 "restore_cached_tensor(",
-                "build_clip_transformer(",
+                &["build_clip_transformer("][..],
             ),
             (
                 "sd3",
                 "crates/mold-inference/src/sd3/pipeline.rs",
                 "restore_cached_tensor_pair(",
-                "SD3TripleEncoder::load(",
+                &[
+                    "SD3TripleEncoder::load(",
+                    "SD3TripleEncoder::load_with_tokenizers(",
+                ][..],
             ),
             (
                 "zimage",
                 "crates/mold-inference/src/zimage/pipeline.rs",
                 "restore_cached_tensor(",
-                "Qwen3Encoder::load_",
+                &["Qwen3Encoder::load_"][..],
             ),
             (
                 "qwen_image",
                 "crates/mold-inference/src/qwen_image/pipeline.rs",
                 "get_cloned(&prompt_key)",
-                "load_text_encoder(",
+                &["load_text_encoder("][..],
             ),
             (
                 "wuerstchen",
                 "crates/mold-inference/src/wuerstchen/pipeline.rs",
                 "restore_cached_tensor_pair(",
-                "build_clip_transformer(",
+                &["build_clip_transformer("][..],
             ),
         ];
 
@@ -7090,7 +7093,7 @@ mod tests {
             .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-core"))
             .unwrap_or(env!("CARGO_MANIFEST_DIR"));
 
-        for (family, path, cache_pattern, load_pattern) in pipelines {
+        for (family, path, cache_pattern, load_patterns) in pipelines {
             let full_path = format!("{workspace}/{path}");
             let source = std::fs::read_to_string(&full_path)
                 .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
@@ -7106,11 +7109,16 @@ mod tests {
                     "{family} pipeline ({path}) generate_sequential() missing cache check '{cache_pattern}'"
                 )
             });
-            let load_pos = seq_body.find(load_pattern).unwrap_or_else(|| {
-                panic!(
-                    "{family} pipeline ({path}) generate_sequential() missing encoder load '{load_pattern}'"
-                )
-            });
+            let (load_pattern, load_pos) = load_patterns
+                .iter()
+                .filter_map(|pattern| seq_body.find(pattern).map(|pos| (*pattern, pos)))
+                .min_by_key(|(_, pos)| *pos)
+                .unwrap_or_else(|| {
+                    let expected = load_patterns.join("' or '");
+                    panic!(
+                        "{family} pipeline ({path}) generate_sequential() missing encoder load '{expected}'"
+                    )
+                });
 
             assert!(
                 cache_pos < load_pos,

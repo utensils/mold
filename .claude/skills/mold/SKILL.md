@@ -150,7 +150,7 @@ selected LoRA — clicking a chip appends the phrase to the active prompt.
   diffusers (PEFT canonical), Kohya/sd-scripts, OneTrainer, and PEFT
   default-adapter naming. Z-Image fused-QKV LoRAs (cv:2904324) splat
   across the split `attention.to_q/to_k/to_v` candle tensors automatically.
-- BF16 models on 24GB cards auto-use block-level offloading (3-5x slower but fits in VRAM)
+- FLUX, Flux.2, Z-Image, and SD3 BF16 models can use block-level offloading (3-5x slower but fits in VRAM)
 - GGUF Q4/Q6 work at 1024x1024; Q8 works at 512x512 (Q8 + LoRA at 1024x1024 is tight on 24GB, see #95)
 
 **Per-model config defaults** (config.toml):
@@ -216,7 +216,7 @@ mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control do
 
 **Chained (arbitrary-length) video output:** for LTX-2 19B and 22B distilled models, `--frames` above the 97-frame per-clip cap automatically renders multiple clips with a motion-tail of latents carried across each clip boundary, then stitches them into a single MP4. The CLI picks this path transparently — `mold run ltx-2-19b-distilled:fp8 "a cat walking" --frames 400` produces one 400-frame MP4 from 5 chained stages. Advanced callers can override the per-clip length via `--clip-frames N` (must be `8k+1`, clamped to the model cap) and the overlap via `--motion-tail N` (default 4 pixel frames, 0 disables carryover). Chains fail closed on mid-stage failure (no partial output) and run on a single GPU. Other model families reject `--frames > 97` with an actionable error.
 
-**Current constraints:** `x2` spatial upscaling is wired across the family, `x1.5` spatial upscaling is wired for `ltx-2.3-*`, and `x2` temporal upscaling is wired in the native runtime. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. The family runs through the native Rust stack in `mold-inference`, with CUDA as the supported backend for real local generation, CPU as a correctness-only fallback, and Metal unsupported. On 24 GB Ada GPUs such as the RTX 4090, the validated path stays on the compatible `fp8-cast` mode rather than Hopper-only `fp8-scaled-mm`. The native CUDA matrix is validated across 19B/22B text+audio-video, image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`). When requests go through `mold serve`, the built-in body limit is `64 MiB`, which is enough for common inline source-video and source-audio workflows.
+**Current constraints:** `x2` spatial upscaling is wired across the family, `x1.5` spatial upscaling is wired for `ltx-2.3-*`, and `x2` temporal upscaling is wired in the native runtime. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. The family runs through the native Rust stack in `mold-inference`, with CUDA as the supported backend for real local generation, CPU as a correctness-only fallback, and Metal unsupported. On 24 GB Ada GPUs such as the RTX 4090, the validated path stays on the compatible `fp8-cast` mode rather than Hopper-only `fp8-scaled-mm`. The native CUDA matrix is validated across 19B/22B text+audio-video, image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`). Explicit LTX-2 unload drops the retained runtime before resetting the assigned CUDA primary context; CPU fallback unload remains a plain state clear. When requests go through `mold serve`, the built-in body limit is `64 MiB`, which is enough for common inline source-video and source-audio workflows.
 
 ## Multi-prompt Chain (v2)
 
@@ -324,7 +324,8 @@ Default model if none specified: `flux2-klein:q8`
 - `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`
 - `--qwen2-text-encoder-mode auto|gpu|cpu-stage|cpu`
 - On Apple Metal/MPS, `auto` prefers quantized Qwen2.5-VL GGUF text encoders (`q6`, then `q4`) to reduce memory pressure
-- On CUDA, `auto` prefers BF16 when there is enough post-transformer headroom and falls back to quantized GGUF variants for resident/edit paths when BF16 would be too heavy
+- On CUDA, `auto` prefers BF16 when there is enough text-encoder headroom and falls back to quantized GGUF variants for local sequential, resident, and edit paths when BF16 would be too heavy
+- Hot CUDA Qwen-Image may keep Qwen2.5 on GPU after a prompt-cache miss only when measured free VRAM still covers denoise and VAE decode reserves; cache hits and pressure cases drop/park before denoise
 - `qwen-image-edit-2511:*` uses repeatable `--image` inputs and a distinct `qwen-image-edit` family. Local inference is implemented with the Qwen2.5-VL vision tower, packed edit latents, and true-CFG norm rescaling. Quantized `--qwen2-variant` values are supported for the edit family through a GGUF language path plus staged vision sidecar.
   **ControlNet (SD1.5)**: `controlnet-canny-sd15:fp16`, `controlnet-depth-sd15:fp16`, `controlnet-openpose-sd15:fp16`
 
@@ -676,7 +677,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_PORT`                 | `7680`                  | Server port                                                                |
 | `MOLD_LOG`                  | `warn`                  | Log level (trace/debug/info/warn/error)                                    |
 | `MOLD_EAGER`                | unset                   | Set `1` to keep all components loaded                                      |
-| `MOLD_OFFLOAD`              | unset                   | Set `1` to force CPU↔GPU block streaming (reduces VRAM, slower)           |
+| `MOLD_OFFLOAD`              | unset                   | Set `1` to force CPU↔GPU block streaming for FLUX, Flux.2, Z-Image, and SD3 BF16 paths (reduces VRAM, slower) |
 | `MOLD_RESERVE_VRAM_MB`      | 400 (Linux), 600 (Win), 0 (macOS) | OS / cuBLAS workspace reserve subtracted from `free_vram_bytes` before any budget decision. `0` disables |
 | `MOLD_KEEP_TE_RAM`          | unset                   | Set `1` to park text encoders on CPU between requests instead of dropping them (FP16/BF16 only; GGUF falls through to drop+reload). Disabled on Metal. |
 | `MOLD_LORA_BYPASS`          | `auto`                  | FLUX LoRA application path: `auto` (bypass when LoRAs present, covers offload AND GGUF/quantized via `quantized_transformer.rs`), `on` (always bypass), `off` (legacy merge / `gguf_lora_var_builder`) |
@@ -689,6 +690,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_OFFLOAD_PREFETCH`     | `on`                    | FLUX offload async H2D prefetch stream (`off` reverts to synchronous)      |
 | `MOLD_PINNED_VRAM_MAX_GB`   | RAM × 0.5 (Linux)       | Cap on cumulative pinned host memory used by the FLUX offload path         |
 | `MOLD_EMBED_METADATA`       | `1`                     | Set `0` to disable PNG metadata                                            |
+| `MOLD_MEDIA_ROOTS`          | unset                   | Platform path-list of allow roots for trusted server-local LTX-2 `audio_file_path` / `source_video_path` API requests. Canonical target files must stay under one configured root. |
 | `MOLD_PREVIEW`              | unset                   | Set `1` to display generated images inline in the terminal                 |
 | `MOLD_T5_VARIANT`           | `auto`                  | T5 encoder: auto/fp16/q8/q6/q5/q4/q3                                       |
 | `MOLD_QWEN3_VARIANT`        | `auto`                  | Qwen3 encoder: auto/bf16/q8/q6/iq4/q3                                      |
@@ -737,7 +739,7 @@ Models auto-pull if not downloaded: `mold run flux2-klein "a cat"` will download
 - For img2img, source images auto-resize to fit the model's native resolution (preserving aspect ratio). A 1024x1024 source with SD1.5 (512x512 native) generates at 512x512; a 1920x1080 source generates at 512x288. Use `--width`/`--height` to override
 - Set `MOLD_HOME` to relocate all mold data (config, cache, models)
 - LoRA adapters require FLUX BF16 models; use `--lora-scale 0.5-0.8` for subtle effects
-- On 24GB cards, LoRA + BF16 auto-offloads (slower but avoids OOM)
+- On 24GB cards, use `--offload` with BF16 FLUX / Flux.2 / Z-Image / SD3 when quantization is not acceptable; LoRA + offload is family-specific and SD3 currently rejects that combination.
 
 ## Discord Bot
 

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use mold_core::{
-    build_model_catalog, GenerateRequest, ModelDefaults, ModelInfo, ModelInfoExtended, ModelPaths,
+    build_model_catalog, Config, GenerateRequest, ModelDefaults, ModelInfo, ModelInfoExtended,
+    ModelPaths,
 };
 use mold_inference::device::{activation_bytes, activation_family_for, ActivationFamily};
 
@@ -9,6 +10,22 @@ use crate::model_cache::ModelResidency;
 use crate::{routes::ApiError, state::AppState};
 
 pub(crate) type EngineProgressCallback = Arc<dyn Fn(mold_inference::ProgressEvent) + Send + Sync>;
+
+fn transformer_path_lower(paths: &ModelPaths) -> String {
+    paths.transformer.to_string_lossy().to_ascii_lowercase()
+}
+
+fn transformer_path_looks_flux2(path: &str) -> bool {
+    path.contains("/flux2/") || path.contains("flux2")
+}
+
+fn transformer_path_looks_ltx2(path: &str) -> bool {
+    path.contains("/ltx2/") || path.contains("ltx2")
+}
+
+fn transformer_path_looks_zimage(path: &str) -> bool {
+    path.contains("/z-image/") || path.contains("zimage")
+}
 
 /// Per-request shape hint passed into [`preflight_memory_guard`] so the
 /// activation budget can scale with resolution / dtype / arch. `None`
@@ -167,7 +184,10 @@ pub(crate) fn preflight_memory_guard_with_available(
     // generous fixed cap that covers `streaming_prefetch_count` blocks
     // plus the always-resident top-level weights (proj_in / proj_out /
     // time_embed / caption_projection / scale_shift_table / norms).
-    let streaming = hint.is_some_and(|h| h.family.streaming_transformer());
+    let transformer_path = transformer_path_lower(paths);
+    let streaming = hint
+        .map(|h| h.family.streaming_transformer())
+        .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
     let forced_flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
         && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
     let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
@@ -481,15 +501,27 @@ pub(crate) fn select_server_load_strategy_for_budget(
     available_bytes: Option<u64>,
     hint: Option<ActivationHint>,
 ) -> mold_inference::LoadStrategy {
-    if hint.is_some_and(|h| h.family == ActivationFamily::ZImageDit) {
+    let transformer_is_gguf = paths
+        .transformer
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+
+    if hint.is_some_and(|h| h.family == ActivationFamily::ZImageDit) && !transformer_is_gguf {
         return mold_inference::LoadStrategy::Sequential;
     }
-    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
-        && paths
-            .transformer
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+    if transformer_is_gguf
+        && hint.is_some_and(|h| {
+            matches!(
+                h.family,
+                ActivationFamily::Sd3Mmdit | ActivationFamily::ZImageDit
+            )
+        })
+    {
+        return mold_inference::LoadStrategy::Eager;
+    }
+    let qwen_quantized =
+        hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit) && transformer_is_gguf;
 
     let Some(available_bytes) = available_bytes.filter(|v| *v > 0) else {
         return mold_inference::LoadStrategy::Eager;
@@ -537,6 +569,108 @@ pub(crate) fn select_server_load_strategy_for_device(
 
     select_server_load_strategy_for_budget(paths, capped_available, hint)
 }
+
+pub(crate) fn server_offload_enabled_for_paths(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+) -> bool {
+    if !std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1") {
+        return false;
+    }
+
+    let transformer_path = transformer_path_lower(paths);
+    let transformer_looks_flux2 = transformer_path_looks_flux2(&transformer_path);
+    let transformer_looks_zimage = transformer_path_looks_zimage(&transformer_path);
+    let transformer_looks_nvfp4 = transformer_path.contains("nvfp4");
+
+    if request_has_lora
+        && (transformer_looks_flux2
+            || transformer_looks_zimage
+            || hint.is_some_and(|h| {
+                matches!(
+                    h.family,
+                    ActivationFamily::Flux2Dit | ActivationFamily::ZImageDit
+                )
+            }))
+    {
+        return false;
+    }
+
+    let transformer_is_gguf = paths
+        .transformer
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+
+    if transformer_looks_nvfp4
+        && (transformer_looks_flux2 || hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit))
+    {
+        return false;
+    }
+
+    !(transformer_is_gguf
+        && hint.is_some_and(|h| {
+            matches!(
+                h.family,
+                ActivationFamily::Sd3Mmdit
+                    | ActivationFamily::ZImageDit
+                    | ActivationFamily::Flux2Dit
+            )
+        }))
+}
+
+pub(crate) fn request_requires_fresh_engine_for_offload_policy(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+) -> bool {
+    request_has_lora
+        && server_offload_enabled_for_paths(paths, hint, false)
+        && !server_offload_enabled_for_paths(paths, hint, true)
+}
+
+pub(crate) fn request_has_effective_lora(req: &GenerateRequest) -> bool {
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+    if let Some(loras) = &req.loras {
+        if !loras.is_empty() {
+            return loras.iter().any(|lora| lora.scale.abs() > ZERO_SCALE_EPS);
+        }
+    }
+    req.lora
+        .as_ref()
+        .is_some_and(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
+}
+
+pub(crate) fn resolve_installed_catalog_paths_for_worker(
+    model_name: &str,
+    config: &Config,
+) -> Result<Option<(ModelPaths, Config)>, ApiError> {
+    if !looks_like_catalog_id(model_name) {
+        return Ok(None);
+    }
+
+    let Some(intent) =
+        installed_catalog_intent_from_sidecar(&config.resolved_models_dir(), model_name)
+    else {
+        return Ok(None);
+    };
+    let model_cfg = resolve_intent_to_paths(model_name, &intent, config)
+        .map_err(|e| resolve_error_to_api_error(&e))?;
+    let mut resolved_config = config.clone();
+    resolved_config
+        .models
+        .insert(model_name.to_string(), model_cfg);
+    let paths = ModelPaths::resolve(model_name, &resolved_config).ok_or_else(|| {
+        ApiError::not_found(format!(
+            "catalog model '{model_name}' resolved to a config that ModelPaths \
+             could not turn into runtime paths — internal mismatch, please file an issue."
+        ))
+    })?;
+
+    Ok(Some((paths, resolved_config)))
+}
+
 pub(crate) type DownloadProgressCallback =
     Arc<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>;
 
@@ -875,6 +1009,7 @@ pub(crate) fn resolve_intent_to_paths(
         family: Some(intent.family.clone()),
         ..Default::default()
     };
+    apply_catalog_runtime_defaults(&mut cfg, intent);
     cfg.transformer = Some(primary_str.clone());
 
     // FLUX is the only family with mixed bundling — peek the safetensors
@@ -958,6 +1093,25 @@ pub(crate) fn resolve_intent_to_paths(
     }
 
     Ok(cfg)
+}
+
+fn apply_catalog_runtime_defaults(
+    cfg: &mut mold_core::ModelConfig,
+    intent: &mold_catalog::synthesis::CatalogModelIntent,
+) {
+    if intent.family == "flux" {
+        match intent.sub_family.as_deref() {
+            Some("flux1-s") => {
+                cfg.is_schnell.get_or_insert(true);
+                cfg.default_steps.get_or_insert(4);
+                cfg.default_guidance.get_or_insert(0.0);
+            }
+            Some("flux1-d" | "flux1-krea" | "flux1-kontext") => {
+                cfg.is_schnell.get_or_insert(false);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn catalog_primary_is_complete(
@@ -1176,6 +1330,7 @@ fn sidecar_primary_looks_like_auxiliary(sidecar: &mold_catalog::sidecar::Catalog
     let rel = sidecar.primary_filename_rel.to_ascii_lowercase();
     rel.contains("/text_encoder/")
         || rel.contains("text_encoder")
+        || rel.contains("te_")
         || rel.contains("_txt.")
         || rel.contains("-txt.")
 }
@@ -1261,6 +1416,9 @@ fn installed_catalog_models(
     let mut out = Vec::new();
     for (sidecar_dir, sidecar) in walked {
         if sidecar.kind != "checkpoint" {
+            continue;
+        }
+        if sidecar_primary_looks_like_auxiliary(&sidecar) {
             continue;
         }
         // Skip sidecars whose primary file isn't actually present —
@@ -1446,6 +1604,7 @@ pub(crate) async fn ensure_model_ready(
     model_name: &str,
     progress: Option<EngineProgressCallback>,
     hint: Option<ActivationHint>,
+    request_has_lora: bool,
 ) -> Result<(), ApiError> {
     let _guard = state.model_load_lock.lock().await;
 
@@ -1456,15 +1615,25 @@ pub(crate) async fn ensure_model_ready(
         let active_vram = cache.active_vram_bytes();
         if let Some(entry) = cache.get_mut(model_name) {
             if entry.residency == ModelResidency::Gpu {
-                // Already loaded — just set up progress callback.
-                if let Some(callback) = progress.clone() {
-                    entry.engine.set_on_progress(Box::new(move |event| {
-                        callback(event);
-                    }));
+                let must_recreate = entry.engine.model_paths().is_some_and(|paths| {
+                    request_requires_fresh_engine_for_offload_policy(paths, hint, request_has_lora)
+                });
+                if must_recreate {
+                    tracing::info!(
+                        model = %model_name,
+                        "recreating loaded engine for request-specific offload policy"
+                    );
                 } else {
-                    entry.engine.clear_on_progress();
+                    // Already loaded — just set up progress callback.
+                    if let Some(callback) = progress.clone() {
+                        entry.engine.set_on_progress(Box::new(move |event| {
+                            callback(event);
+                        }));
+                    } else {
+                        entry.engine.clear_on_progress();
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
 
             // Cached but not on GPU (Parked) — need to reload.
@@ -1531,11 +1700,15 @@ pub(crate) async fn ensure_model_ready(
                     )));
                 };
                 let config = state.config.read().await;
-                let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+                let offload = server_offload_enabled_for_paths(&paths, hint, request_has_lora);
+                let resolved_catalog_config =
+                    resolve_installed_catalog_paths_for_worker(model_name, &config)?
+                        .map(|(_, config)| config);
+                let engine_config = resolved_catalog_config.as_ref().unwrap_or(&config);
                 match mold_inference::create_engine_with_pool(
                     model_name.to_string(),
                     paths,
-                    &config,
+                    engine_config,
                     load_strategy,
                     0,
                     offload,
@@ -1791,7 +1964,7 @@ async fn create_and_load_engine(
     }
 
     let config = state.config.read().await;
-    let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let offload = server_offload_enabled_for_paths(&paths, hint, false);
     let mut new_engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,
@@ -2016,6 +2189,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn installed_catalog_intent_from_sidecar_rejects_te_suffix_primary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let install_dir = dir.path().join("cv-2597527");
+        let primary_rel = "flux2/civitai/2597527/qwen38BFluxKlein9BTE_38b.safetensors";
+        let primary = install_dir.join(primary_rel);
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::write(&primary, b"fake").unwrap();
+        let sidecar = mold_catalog::sidecar::CatalogSidecar {
+            schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+            id: "cv:2597527".to_string(),
+            source: "civitai".to_string(),
+            source_id: "2597527".to_string(),
+            name: "Qwen 3 8B Flux Klein 9B TE".to_string(),
+            author: None,
+            family: "flux2".to_string(),
+            family_role: "finetune".to_string(),
+            sub_family: Some("klein-9b".to_string()),
+            kind: "checkpoint".to_string(),
+            modality: "image".to_string(),
+            thumbnail_url: None,
+            size_bytes: Some(4),
+            engine_phase: 5,
+            trained_words: Vec::new(),
+            primary_filename_rel: primary_rel.to_string(),
+            written_at: 0,
+        };
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &sidecar,
+        )
+        .unwrap();
+
+        assert!(
+            installed_catalog_intent_from_sidecar(dir.path(), "cv:2597527").is_none(),
+            "checkpoint sidecars whose primary is a TE asset must be ignored"
+        );
+    }
+
     /// Build a `ModelPaths` whose `transformer` and `vae` files exist on disk
     /// with a combined size of `total_bytes`. `estimate_peak_memory()` reads
     /// file sizes via `std::fs::metadata`, so the on-disk footprint is what
@@ -2183,6 +2395,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             let f = std::fs::File::create(&p).unwrap();
             f.set_len(sz * GB).unwrap();
             p
@@ -2270,6 +2483,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             let f = std::fs::File::create(&p).unwrap();
             f.set_len(sz * GB).unwrap();
             p
@@ -2317,6 +2531,386 @@ mod tests {
             result.is_ok(),
             "SD3 GGUF should not count the monolithic VAE checkpoint as \
              co-resident with the transformer, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn server_load_strategy_keeps_sd3_gguf_eager() {
+        let (_dir, paths) = sd3_gguf_paths_with_monolithic_vae(9, 16, 10, 1, 1);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 2,
+            dtype_bytes: 2,
+            family: ActivationFamily::Sd3Mmdit,
+        };
+
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(32 * GB), Some(hint));
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Eager,
+            "SD3 GGUF has its own quantized runtime path; selecting Sequential \
+             asks the runtime for unsupported block offload"
+        );
+    }
+
+    fn zimage_gguf_paths(
+        transformer_gb: u64,
+        vae_gb: u64,
+        text_encoder_gb: u64,
+    ) -> (tempfile::TempDir, ModelPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk("z-image-turbo-Q8_0.gguf", transformer_gb);
+        let vae = mk("vae.safetensors", vae_gb);
+        let text_encoder = mk("qwen3.safetensors", text_encoder_gb);
+        let paths = ModelPaths {
+            transformer,
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![text_encoder],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        (dir, paths)
+    }
+
+    #[test]
+    fn server_load_strategy_keeps_zimage_gguf_eager() {
+        let (_dir, paths) = zimage_gguf_paths(12, 1, 8);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::ZImageDit,
+        };
+
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(24 * GB), Some(hint));
+
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Eager,
+            "Z-Image GGUF has a quantized/dense runtime path; selecting Sequential \
+             asks the runtime for unsupported block offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_sd3_gguf() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = sd3_gguf_paths_with_monolithic_vae(9, 16, 10, 1, 1);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 2,
+            dtype_bytes: 2,
+            family: ActivationFamily::Sd3Mmdit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            "global MOLD_OFFLOAD must not force unsupported SD3 GGUF block offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_zimage_gguf() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = zimage_gguf_paths(12, 1, 8);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::ZImageDit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            "global MOLD_OFFLOAD must not force unsupported Z-Image GGUF block offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_preserved_for_zimage_bf16() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = flux_shaped_paths_with_sizes(6, 1, 8, 0);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::ZImageDit,
+        };
+
+        assert!(
+            server_offload_enabled_for_paths(&paths, Some(hint), false),
+            "BF16/FP Z-Image paths should still receive explicit offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_zimage_lora_with_ambiguous_family_hint() {
+        let _guard = offload_env_guard("1");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let paths = ModelPaths {
+            transformer: mk("z-image/civitai/2442439/zImageTurbo_turbo.safetensors", 12),
+            transformer_shards: Vec::new(),
+            vae: mk("z-image/civitai/2442439/ae_zimgturbo.safetensors", 1),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![mk(
+                "z-image/civitai/2442439/zImageTurbo_turbo_txt.safetensors",
+                8,
+            )],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            "Z-Image LoRA requests must not receive global MOLD_OFFLOAD even \
+             when duplicate catalog rows provide an ambiguous Flux hint"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_flux2_lora_request() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = flux2_klein9b_bf16_paths();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            "global MOLD_OFFLOAD must not force Flux.2 block offload for LoRA \
+             requests because Flux.2 offload+LoRA is not supported"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_flux2_lora_with_ambiguous_family_hint() {
+        let _guard = offload_env_guard("1");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk(
+            "flux2/civitai/2669986/darkBeast_dbkBlitzV15.safetensors",
+            18,
+        );
+        let paths = ModelPaths {
+            transformer: transformer.clone(),
+            transformer_shards: vec![transformer],
+            vae: mk("flux2/civitai/2669986/flux2-vae.safetensors", 1),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![mk("flux2/civitai/2669986/qwen3.safetensors", 16)],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            "Flux.2 LoRA requests must not receive global MOLD_OFFLOAD even \
+             when the catalog family hint is missing or ambiguous"
+        );
+    }
+
+    #[test]
+    fn flux2_lora_request_requires_fresh_engine_when_plain_offload_was_enabled() {
+        let _guard = offload_env_guard("1");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let paths = ModelPaths {
+            transformer: mk(
+                "flux2/civitai/2669986/darkBeast_dbkBlitzV15.safetensors",
+                18,
+            ),
+            transformer_shards: Vec::new(),
+            vae: mk("flux2/civitai/2669986/flux2-vae.safetensors", 1),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![mk("flux2/civitai/2669986/qwen3.safetensors", 16)],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        assert!(
+            request_requires_fresh_engine_for_offload_policy(&paths, Some(hint), true),
+            "a cached Flux.2 engine loaded for plain offload must be recreated \
+             before serving a LoRA request, otherwise the runtime still sees \
+             offload+LoRA"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_preserved_for_plain_flux2_request() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = flux2_klein9b_bf16_paths();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        assert!(
+            server_offload_enabled_for_paths(&paths, Some(hint), false),
+            "plain Flux.2 requests should still receive explicit offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_flux2_gguf() {
+        let _guard = offload_env_guard("1");
+        let (dir, mut paths) = flux2_klein9b_bf16_paths();
+        let gguf = dir.path().join("flux2-klein-9b-q8.gguf");
+        std::fs::File::create(&gguf)
+            .unwrap()
+            .set_len(12 * GB)
+            .unwrap();
+        paths.transformer = gguf;
+        paths.transformer_shards.clear();
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            "global MOLD_OFFLOAD must not force Flux.2 GGUF block offload \
+             because GGUF variants use quantized transformer paths"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_flux2_nvfp4() {
+        let _guard = offload_env_guard("1");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let paths = ModelPaths {
+            transformer: mk(
+                "flux2/civitai/2759597/miracleinNSFWGeneration_10Nvfp4.safetensors",
+                18,
+            ),
+            transformer_shards: Vec::new(),
+            vae: mk("flux2/civitai/2759597/flux2-vae.safetensors", 1),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![mk("flux2/civitai/2759597/qwen3.safetensors", 8)],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            "global MOLD_OFFLOAD must not force Flux.2 NVFP4 block offload \
+             because the runtime does not support NVFP4 streaming layers"
         );
     }
 
@@ -2452,6 +3046,7 @@ mod tests {
     /// at 2048² (where the budget grows past 1 GB) on the same card.
     #[test]
     fn preflight_memory_guard_accepts_resolution_for_activation_budget() {
+        let _guard = offload_env_guard("0");
         // Shape: 23 GB transformer, 1 GB VAE, 9 GB T5, 1 GB CLIP. Sequential
         // peak = max(10, 24) + 2 GB headroom = 26 GB. On a 30 GB card the
         // 90 % hard limit is 27 GB:
@@ -2800,7 +3395,44 @@ mod tests {
             result.is_ok(),
             "22B LTX-2 must fit on a 24 GB card under streaming-aware peak \
              (only ~2 blocks co-resident; runtime handles its own memory), \
-             got {result:?}",
+            got {result:?}",
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_ltx2_22b_by_catalog_path_when_hint_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let transformer = mk("ltx2/civitai/2752735/ltx23_full.safetensors", 46);
+        let paths = ModelPaths {
+            transformer: transformer.clone(),
+            transformer_shards: Vec::new(),
+            vae: transformer,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let result = preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, None);
+
+        assert!(
+            result.is_ok(),
+            "LTX-2 catalog paths should use the streaming-transformer peak even \
+             when the multi-GPU worker cannot resolve a family hint, got {result:?}"
         );
     }
 
@@ -2943,7 +3575,9 @@ mod tests {
             gif_preview: false,
             enable_audio: None,
             audio_file: None,
+            audio_file_path: None,
             source_video: None,
+            source_video_path: None,
             keyframes: None,
             pipeline: None,
             loras: None,
@@ -3436,6 +4070,51 @@ mod tests {
         let vae_path = models_dir.join("flux-vae/ae.safetensors");
         assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
         assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
+
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_intent_preserves_flux_schnell_subfamily() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        let primary_path = models_dir
+            .join("cv-1153358/flux/civitai/1153358/agfluxSchnell_realistic23.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &primary_path,
+            &[
+                "model.diffusion_model.double_blocks.0.img_attn.proj.weight",
+                "model.diffusion_model.img_in.weight",
+            ],
+        );
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        stub_flux_companion_paths_in_dir(&mut config, models_dir, true);
+
+        let mut entry =
+            flux_unet_only_catalog_entry("1153358", "agfluxSchnell_realistic23.safetensors");
+        entry.sub_family = Some("flux1-s".into());
+
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let cfg = resolve_intent_to_paths("cv:1153358", &intent, &config).unwrap();
+
+        assert_eq!(
+            cfg.is_schnell,
+            Some(true),
+            "flux1-s catalog entries must select FLUX schnell config, not dev guidance config"
+        );
 
         unsafe {
             match _saved {
