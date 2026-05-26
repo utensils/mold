@@ -1309,6 +1309,7 @@ fn sidecar_primary_looks_like_auxiliary(sidecar: &mold_catalog::sidecar::Catalog
     let rel = sidecar.primary_filename_rel.to_ascii_lowercase();
     rel.contains("/text_encoder/")
         || rel.contains("text_encoder")
+        || rel.contains("te_")
         || rel.contains("_txt.")
         || rel.contains("-txt.")
 }
@@ -2161,6 +2162,45 @@ mod tests {
         assert!(
             installed_catalog_intent_from_sidecar(dir.path(), "cv:2442439").is_none(),
             "stale sidecars that point checkpoint primary at a text encoder must be ignored"
+        );
+    }
+
+    #[test]
+    fn installed_catalog_intent_from_sidecar_rejects_te_suffix_primary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let install_dir = dir.path().join("cv-2597527");
+        let primary_rel = "flux2/civitai/2597527/qwen38BFluxKlein9BTE_38b.safetensors";
+        let primary = install_dir.join(primary_rel);
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::write(&primary, b"fake").unwrap();
+        let sidecar = mold_catalog::sidecar::CatalogSidecar {
+            schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+            id: "cv:2597527".to_string(),
+            source: "civitai".to_string(),
+            source_id: "2597527".to_string(),
+            name: "Qwen 3 8B Flux Klein 9B TE".to_string(),
+            author: None,
+            family: "flux2".to_string(),
+            family_role: "finetune".to_string(),
+            sub_family: Some("klein-9b".to_string()),
+            kind: "checkpoint".to_string(),
+            modality: "image".to_string(),
+            thumbnail_url: None,
+            size_bytes: Some(4),
+            engine_phase: 5,
+            trained_words: Vec::new(),
+            primary_filename_rel: primary_rel.to_string(),
+            written_at: 0,
+        };
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &sidecar,
+        )
+        .unwrap();
+
+        assert!(
+            installed_catalog_intent_from_sidecar(dir.path(), "cv:2597527").is_none(),
+            "checkpoint sidecars whose primary is a TE asset must be ignored"
         );
     }
 
