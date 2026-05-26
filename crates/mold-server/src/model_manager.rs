@@ -581,6 +581,7 @@ pub(crate) fn server_offload_enabled_for_paths(
     let transformer_path = transformer_path_lower(paths);
     let transformer_looks_flux2 = transformer_path_looks_flux2(&transformer_path);
     let transformer_looks_zimage = transformer_path_looks_zimage(&transformer_path);
+    let transformer_looks_nvfp4 = transformer_path.contains("nvfp4");
 
     if request_has_lora
         && (transformer_looks_flux2
@@ -600,6 +601,12 @@ pub(crate) fn server_offload_enabled_for_paths(
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+
+    if transformer_looks_nvfp4
+        && (transformer_looks_flux2 || hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit))
+    {
+        return false;
+    }
 
     !(transformer_is_gguf
         && hint.is_some_and(|h| {
@@ -2794,6 +2801,52 @@ mod tests {
             !server_offload_enabled_for_paths(&paths, Some(hint), false),
             "global MOLD_OFFLOAD must not force Flux.2 GGUF block offload \
              because GGUF variants use quantized transformer paths"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_flux2_nvfp4() {
+        let _guard = offload_env_guard("1");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let paths = ModelPaths {
+            transformer: mk(
+                "flux2/civitai/2759597/miracleinNSFWGeneration_10Nvfp4.safetensors",
+                18,
+            ),
+            transformer_shards: Vec::new(),
+            vae: mk("flux2/civitai/2759597/flux2-vae.safetensors", 1),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![mk("flux2/civitai/2759597/qwen3.safetensors", 8)],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            "global MOLD_OFFLOAD must not force Flux.2 NVFP4 block offload \
+             because the runtime does not support NVFP4 streaming layers"
         );
     }
 
