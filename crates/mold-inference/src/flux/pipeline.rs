@@ -40,6 +40,21 @@ fn flux_transformer_var_builder<'a>(vb: VarBuilder<'a>) -> VarBuilder<'a> {
     }
 }
 
+/// Some FLUX single-file checkpoints bundle the VAE under a wrapper prefix
+/// while the candle FLUX autoencoder expects root `encoder.*` / `decoder.*`
+/// keys.
+fn flux_vae_var_builder<'a>(vb: VarBuilder<'a>) -> VarBuilder<'a> {
+    if vb.contains_tensor("encoder.conv_in.weight") {
+        vb
+    } else if vb.contains_tensor("first_stage_model.encoder.conv_in.weight") {
+        vb.pp("first_stage_model")
+    } else if vb.contains_tensor("vae.encoder.conv_in.weight") {
+        vb.pp("vae")
+    } else {
+        vb
+    }
+}
+
 /// Check if a FLUX safetensors checkpoint stores weights in FP8 (F8_E4M3).
 /// Uses candle's DType after loading a single small tensor on CPU (img_in.weight
 /// is typically only a few KB).
@@ -1043,20 +1058,18 @@ impl FluxEngine {
                 .lock()
                 .unwrap()
                 .load_cpu_tensors(std::slice::from_ref(&self.base.paths.vae))?;
-            return Ok(crate::encoders::park::varbuilder_from_parked(
-                cached.as_ref(),
-                dtype,
-                device,
-            ));
+            let vb = crate::encoders::park::varbuilder_from_parked(cached.as_ref(), dtype, device);
+            return Ok(flux_vae_var_builder(vb));
         }
 
-        crate::weight_loader::load_safetensors_with_progress(
+        let vb = crate::weight_loader::load_safetensors_with_progress(
             std::slice::from_ref(&self.base.paths.vae),
             dtype,
             device,
             component,
             &self.base.progress,
-        )
+        )?;
+        Ok(flux_vae_var_builder(vb))
     }
 
     fn get_cached_safetensors(&self, path: &Path) -> Result<Option<Arc<HashMap<String, Tensor>>>> {
@@ -3210,6 +3223,44 @@ mod tests {
         );
 
         assert!(engine.detect_is_schnell());
+    }
+
+    #[test]
+    fn flux_vae_var_builder_accepts_vae_prefix() {
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+        use std::collections::HashMap;
+
+        let dir = std::env::temp_dir().join(format!(
+            "mold-flux-vae-prefix-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vae-prefix.safetensors");
+
+        let data = vec![0u8; 128 * 3 * 3 * 3 * std::mem::size_of::<f32>()];
+        let shape = vec![128, 3, 3, 3];
+        let view = TensorView::new(SafeDtype::F32, shape, &data).unwrap();
+        let mut tensors = HashMap::new();
+        tensors.insert("vae.encoder.conv_in.weight".to_string(), view);
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let vb = crate::weight_loader::load_safetensors_with_progress(
+            &[path.clone()],
+            DType::F32,
+            &Device::Cpu,
+            "test VAE",
+            &crate::progress::ProgressReporter::default(),
+        )
+        .unwrap();
+        let vb = super::flux_vae_var_builder(vb);
+
+        assert!(vb.contains_tensor("encoder.conv_in.weight"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── Embedding patching tests ────────────────────────────────────────
