@@ -689,7 +689,7 @@ pub fn ensure_model_ready_sync(
                     .ok_or_else(|| anyhow::anyhow!("cache race: model '{model_name}' vanished"))?
             };
 
-            let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+            let offload = crate::model_manager::server_offload_enabled_for_paths(&paths, hint);
             let mut engine = match mold_inference::create_engine_with_pool(
                 model_name.to_string(),
                 paths,
@@ -804,7 +804,7 @@ pub fn ensure_model_ready_sync(
     }
     device::reclaim_gpu_memory(worker.gpu.ordinal);
 
-    let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let offload = crate::model_manager::server_offload_enabled_for_paths(&paths, hint);
     let mut engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,

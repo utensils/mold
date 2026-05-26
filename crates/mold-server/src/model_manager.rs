@@ -549,6 +549,30 @@ pub(crate) fn select_server_load_strategy_for_device(
 
     select_server_load_strategy_for_budget(paths, capped_available, hint)
 }
+
+pub(crate) fn server_offload_enabled_for_paths(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+) -> bool {
+    if !std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1") {
+        return false;
+    }
+
+    let transformer_is_gguf = paths
+        .transformer
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+
+    !(transformer_is_gguf
+        && hint.is_some_and(|h| {
+            matches!(
+                h.family,
+                ActivationFamily::Sd3Mmdit | ActivationFamily::ZImageDit
+            )
+        }))
+}
+
 pub(crate) type DownloadProgressCallback =
     Arc<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>;
 
@@ -1543,7 +1567,7 @@ pub(crate) async fn ensure_model_ready(
                     )));
                 };
                 let config = state.config.read().await;
-                let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+                let offload = server_offload_enabled_for_paths(&paths, hint);
                 match mold_inference::create_engine_with_pool(
                     model_name.to_string(),
                     paths,
@@ -1803,7 +1827,7 @@ async fn create_and_load_engine(
     }
 
     let config = state.config.read().await;
-    let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let offload = server_offload_enabled_for_paths(&paths, hint);
     let mut new_engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,
@@ -2406,6 +2430,60 @@ mod tests {
             mold_inference::LoadStrategy::Eager,
             "Z-Image GGUF has a quantized/dense runtime path; selecting Sequential \
              asks the runtime for unsupported block offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_sd3_gguf() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = sd3_gguf_paths_with_monolithic_vae(9, 16, 10, 1, 1);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 2,
+            dtype_bytes: 2,
+            family: ActivationFamily::Sd3Mmdit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint)),
+            "global MOLD_OFFLOAD must not force unsupported SD3 GGUF block offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_zimage_gguf() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = zimage_gguf_paths(12, 1, 8);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::ZImageDit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint)),
+            "global MOLD_OFFLOAD must not force unsupported Z-Image GGUF block offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_preserved_for_zimage_bf16() {
+        let _guard = offload_env_guard("1");
+        let (_dir, paths) = flux_shaped_paths_with_sizes(6, 1, 8, 0);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::ZImageDit,
+        };
+
+        assert!(
+            server_offload_enabled_for_paths(&paths, Some(hint)),
+            "BF16/FP Z-Image paths should still receive explicit offload"
         );
     }
 
