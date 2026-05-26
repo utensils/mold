@@ -1669,10 +1669,14 @@ pub(crate) async fn ensure_model_ready(
                 };
                 let config = state.config.read().await;
                 let offload = server_offload_enabled_for_paths(&paths, hint, request_has_lora);
+                let resolved_catalog_config =
+                    resolve_installed_catalog_paths_for_worker(model_name, &config)?
+                        .map(|(_, config)| config);
+                let engine_config = resolved_catalog_config.as_ref().unwrap_or(&config);
                 match mold_inference::create_engine_with_pool(
                     model_name.to_string(),
                     paths,
-                    &config,
+                    engine_config,
                     load_strategy,
                     0,
                     offload,

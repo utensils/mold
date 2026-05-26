@@ -710,10 +710,17 @@ pub fn ensure_model_ready_sync(
                 hint,
                 request_has_lora,
             );
+            let resolved_catalog_config =
+                crate::model_manager::resolve_installed_catalog_paths_for_worker(
+                    model_name, config,
+                )
+                .map_err(|e| anyhow::anyhow!(e.error))?
+                .map(|(_, config)| config);
+            let engine_config = resolved_catalog_config.as_ref().unwrap_or(config);
             let mut engine = match mold_inference::create_engine_with_pool(
                 model_name.to_string(),
                 paths,
-                config,
+                engine_config,
                 load_strategy,
                 worker.gpu.ordinal,
                 offload,
