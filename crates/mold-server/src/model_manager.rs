@@ -1397,6 +1397,9 @@ fn installed_catalog_models(
         if sidecar.kind != "checkpoint" {
             continue;
         }
+        if sidecar_primary_looks_like_auxiliary(&sidecar) {
+            continue;
+        }
         // Skip sidecars whose primary file isn't actually present —
         // partial pulls / aborted downloads.
         if mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar).is_none() {
