@@ -1502,6 +1502,7 @@ impl ZImageEngine {
         // higher transient memory and must not run while eager-mode VAE/text
         // encoders are still GPU-resident.
         if self.uses_sequential_generate_path() {
+            self.base.unload();
             return self.generate_sequential(req);
         }
 
@@ -2524,6 +2525,22 @@ mod tests {
         );
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn zimage_sequential_path_drops_eager_components_before_generation() {
+        let source = include_str!("pipeline.rs");
+        let sequential_branch = source
+            .split("// Eager mode: use pre-loaded components")
+            .next()
+            .expect("generate_inner should contain eager-mode marker");
+
+        assert!(
+            sequential_branch.contains("self.base.unload();")
+                && sequential_branch.contains("return self.generate_sequential(req);"),
+            "Z-Image LoRA/offload sequential generation must drop eager-loaded \
+             components before loading staged components"
+        );
     }
 
     #[test]
