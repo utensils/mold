@@ -559,7 +559,19 @@ pub(crate) fn server_offload_enabled_for_paths(
         return false;
     }
 
-    if request_has_lora && hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit) {
+    let transformer_path = paths.transformer.to_string_lossy().to_ascii_lowercase();
+    let transformer_looks_zimage =
+        transformer_path.contains("/z-image/") || transformer_path.contains("zimage");
+
+    if request_has_lora
+        && (transformer_looks_zimage
+            || hint.is_some_and(|h| {
+                matches!(
+                    h.family,
+                    ActivationFamily::Flux2Dit | ActivationFamily::ZImageDit
+                )
+            }))
+    {
         return false;
     }
 
@@ -2239,6 +2251,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             let f = std::fs::File::create(&p).unwrap();
             f.set_len(sz * GB).unwrap();
             p
@@ -2326,6 +2339,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             let f = std::fs::File::create(&p).unwrap();
             f.set_len(sz * GB).unwrap();
             p
@@ -2504,6 +2518,52 @@ mod tests {
         assert!(
             server_offload_enabled_for_paths(&paths, Some(hint), false),
             "BF16/FP Z-Image paths should still receive explicit offload"
+        );
+    }
+
+    #[test]
+    fn offload_env_is_ignored_for_zimage_lora_with_ambiguous_family_hint() {
+        let _guard = offload_env_guard("1");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let paths = ModelPaths {
+            transformer: mk("z-image/civitai/2442439/zImageTurbo_turbo.safetensors", 12),
+            transformer_shards: Vec::new(),
+            vae: mk("z-image/civitai/2442439/ae_zimgturbo.safetensors", 1),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![mk(
+                "z-image/civitai/2442439/zImageTurbo_turbo_txt.safetensors",
+                8,
+            )],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+
+        assert!(
+            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            "Z-Image LoRA requests must not receive global MOLD_OFFLOAD even \
+             when duplicate catalog rows provide an ambiguous Flux hint"
         );
     }
 
