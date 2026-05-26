@@ -637,7 +637,16 @@ pub fn ensure_model_ready_sync(
     // Already loaded?
     if let Some(entry) = cache.get(model_name) {
         if entry.residency == ModelResidency::Gpu {
-            return Ok(());
+            let must_recreate = entry.engine.model_paths().is_some_and(|paths| {
+                crate::model_manager::request_requires_fresh_engine_for_offload_policy(
+                    paths,
+                    hint,
+                    request_has_lora,
+                )
+            });
+            if !must_recreate {
+                return Ok(());
+            }
         }
     }
 
@@ -776,24 +785,37 @@ pub fn ensure_model_ready_sync(
 
     // Not in cache — need to create from scratch.
     // Resolve model paths.
-    let paths = ModelPaths::resolve(model_name, config).ok_or_else(|| {
-        // Catalog IDs (cv:/hf:) reach this path through the bridge in
-        // `model_manager::install_catalog_model`, which can synthesize a
-        // ModelConfig that's missing a required field (notably `vae`)
-        // when a canonical companion was never pulled. The legacy
-        // "Run: mold pull <id>" message is misleading there because the
-        // primary checkpoint IS on disk — the companion is what's
-        // missing. Surface the catalog-specific guidance instead.
-        if model_name.starts_with("cv:") || model_name.starts_with("hf:") {
-            anyhow::anyhow!(
-                "catalog model '{model_name}' has missing required components. \
+    let mut resolved_catalog_config = None;
+    let paths = if let Some(paths) = ModelPaths::resolve(model_name, config) {
+        paths
+    } else if let Some((paths, config)) =
+        crate::model_manager::resolve_installed_catalog_paths_for_worker(model_name, config)
+            .map_err(|e| anyhow::anyhow!(e.error))?
+    {
+        resolved_catalog_config = Some(config);
+        paths
+    } else {
+        return Err(
+            if model_name.starts_with("cv:") || model_name.starts_with("hf:") {
+                // Catalog IDs (cv:/hf:) reach this path through the bridge in
+                // `model_manager::install_catalog_model`, which can synthesize a
+                // ModelConfig that's missing a required field (notably `vae`)
+                // when a canonical companion was never pulled. The legacy
+                // "Run: mold pull <id>" message is misleading there because the
+                // primary checkpoint IS on disk — the companion is what's
+                // missing. Surface the catalog-specific guidance instead.
+                anyhow::anyhow!(
+                    "catalog model '{model_name}' has missing required components. \
                  Re-pull the entry from the catalog so its companions \
                  (CLIP-L / T5 / VAE) are fetched alongside the primary checkpoint."
-            )
-        } else {
-            anyhow::anyhow!("model '{model_name}' is not downloaded. Run: mold pull {model_name}")
-        }
-    })?;
+                )
+            } else {
+                anyhow::anyhow!(
+                    "model '{model_name}' is not downloaded. Run: mold pull {model_name}"
+                )
+            },
+        );
+    };
 
     // Preflight before unloading the active model. Evict-to-fit drops parked
     // entries on budget failure and retries before giving up.
@@ -817,10 +839,11 @@ pub fn ensure_model_ready_sync(
 
     let offload =
         crate::model_manager::server_offload_enabled_for_paths(&paths, hint, request_has_lora);
+    let engine_config = resolved_catalog_config.as_ref().unwrap_or(config);
     let mut engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,
-        config,
+        engine_config,
         load_strategy,
         worker.gpu.ordinal,
         offload,

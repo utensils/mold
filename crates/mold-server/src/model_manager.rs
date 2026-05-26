@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use mold_core::{
-    build_model_catalog, GenerateRequest, ModelDefaults, ModelInfo, ModelInfoExtended, ModelPaths,
+    build_model_catalog, Config, GenerateRequest, ModelDefaults, ModelInfo, ModelInfoExtended,
+    ModelPaths,
 };
 use mold_inference::device::{activation_bytes, activation_family_for, ActivationFamily};
 
@@ -611,6 +612,16 @@ pub(crate) fn server_offload_enabled_for_paths(
         }))
 }
 
+pub(crate) fn request_requires_fresh_engine_for_offload_policy(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+) -> bool {
+    request_has_lora
+        && server_offload_enabled_for_paths(paths, hint, false)
+        && !server_offload_enabled_for_paths(paths, hint, true)
+}
+
 pub(crate) fn request_has_effective_lora(req: &GenerateRequest) -> bool {
     const ZERO_SCALE_EPS: f64 = 1e-8;
     if let Some(loras) = &req.loras {
@@ -621,6 +632,35 @@ pub(crate) fn request_has_effective_lora(req: &GenerateRequest) -> bool {
     req.lora
         .as_ref()
         .is_some_and(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
+}
+
+pub(crate) fn resolve_installed_catalog_paths_for_worker(
+    model_name: &str,
+    config: &Config,
+) -> Result<Option<(ModelPaths, Config)>, ApiError> {
+    if !looks_like_catalog_id(model_name) {
+        return Ok(None);
+    }
+
+    let Some(intent) =
+        installed_catalog_intent_from_sidecar(&config.resolved_models_dir(), model_name)
+    else {
+        return Ok(None);
+    };
+    let model_cfg = resolve_intent_to_paths(model_name, &intent, config)
+        .map_err(|e| resolve_error_to_api_error(&e))?;
+    let mut resolved_config = config.clone();
+    resolved_config
+        .models
+        .insert(model_name.to_string(), model_cfg);
+    let paths = ModelPaths::resolve(model_name, &resolved_config).ok_or_else(|| {
+        ApiError::not_found(format!(
+            "catalog model '{model_name}' resolved to a config that ModelPaths \
+             could not turn into runtime paths — internal mismatch, please file an issue."
+        ))
+    })?;
+
+    Ok(Some((paths, resolved_config)))
 }
 
 pub(crate) type DownloadProgressCallback =
@@ -1543,15 +1583,25 @@ pub(crate) async fn ensure_model_ready(
         let active_vram = cache.active_vram_bytes();
         if let Some(entry) = cache.get_mut(model_name) {
             if entry.residency == ModelResidency::Gpu {
-                // Already loaded — just set up progress callback.
-                if let Some(callback) = progress.clone() {
-                    entry.engine.set_on_progress(Box::new(move |event| {
-                        callback(event);
-                    }));
+                let must_recreate = entry.engine.model_paths().is_some_and(|paths| {
+                    request_requires_fresh_engine_for_offload_policy(paths, hint, request_has_lora)
+                });
+                if must_recreate {
+                    tracing::info!(
+                        model = %model_name,
+                        "recreating loaded engine for request-specific offload policy"
+                    );
                 } else {
-                    entry.engine.clear_on_progress();
+                    // Already loaded — just set up progress callback.
+                    if let Some(callback) = progress.clone() {
+                        entry.engine.set_on_progress(Box::new(move |event| {
+                            callback(event);
+                        }));
+                    } else {
+                        entry.engine.clear_on_progress();
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
 
             // Cached but not on GPU (Parked) — need to reload.
@@ -2649,6 +2699,53 @@ mod tests {
             !server_offload_enabled_for_paths(&paths, Some(hint), true),
             "Flux.2 LoRA requests must not receive global MOLD_OFFLOAD even \
              when the catalog family hint is missing or ambiguous"
+        );
+    }
+
+    #[test]
+    fn flux2_lora_request_requires_fresh_engine_when_plain_offload_was_enabled() {
+        let _guard = offload_env_guard("1");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let paths = ModelPaths {
+            transformer: mk(
+                "flux2/civitai/2669986/darkBeast_dbkBlitzV15.safetensors",
+                18,
+            ),
+            transformer_shards: Vec::new(),
+            vae: mk("flux2/civitai/2669986/flux2-vae.safetensors", 1),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![mk("flux2/civitai/2669986/qwen3.safetensors", 16)],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::Flux2Dit,
+        };
+
+        assert!(
+            request_requires_fresh_engine_for_offload_policy(&paths, Some(hint), true),
+            "a cached Flux.2 engine loaded for plain offload must be recreated \
+             before serving a LoRA request, otherwise the runtime still sees \
+             offload+LoRA"
         );
     }
 
