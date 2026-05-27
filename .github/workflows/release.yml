@@ -77,6 +77,8 @@ jobs:
           cuda: "12.8.1"
           method: local
           log-file-suffix: sm89
+          use-github-cache: false
+          use-local-cache: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -136,6 +138,8 @@ jobs:
           cuda: "12.8.1"
           method: local
           log-file-suffix: sm120
+          use-github-cache: false
+          use-local-cache: false
 
       - uses: dtolnay/rust-toolchain@stable
 
