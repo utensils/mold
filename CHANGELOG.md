@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-27
+
 ### Changed
 
 - **Z-Image VAE loads now reuse the shared CPU tensor cache without bypassing its custom loader.** The cached path feeds the existing Z-Image VAE backend so Civitai/LDM key aliases and 1x1 convolution reshapes stay intact while avoiding repeat safetensors reads across engine loads.
@@ -733,7 +735,9 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/utensils/mold/compare/v0.10.0...v0.12.0
+[0.10.0]: https://github.com/utensils/mold/compare/v0.8.1...v0.10.0
 [0.8.1]: https://github.com/utensils/mold/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/utensils/mold/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/utensils/mold/compare/v0.7.0...v0.7.1

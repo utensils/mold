@@ -1200,8 +1200,7 @@ pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrateg
         0
     };
 
-    let mut base_component_paths: Vec<std::path::PathBuf> =
-        paths.transformer_shards.iter().cloned().collect();
+    let mut base_component_paths: Vec<std::path::PathBuf> = paths.transformer_shards.to_vec();
     if base_component_paths.is_empty() {
         base_component_paths.push(paths.transformer.clone());
     }

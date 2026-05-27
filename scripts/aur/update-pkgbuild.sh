@@ -73,6 +73,7 @@ rewrite() {
   local tmp
   tmp="$(mktemp)"
   sed -E "${pattern}" "${file}" > "${tmp}"
+  chmod --reference="${file}" "${tmp}" 2>/dev/null || chmod 0644 "${tmp}"
   mv "${tmp}" "${file}"
 }
 
