@@ -151,15 +151,17 @@ function openPicker(i: number) {
 function closePicker() {
   pickerStageIndex.value = null;
 }
-function onPickImage(v: SourceImageState) {
+function onPickImage(v: SourceImageState[]) {
   const i = pickerStageIndex.value;
   if (i === null) return;
   const current = script.value.stage[i];
   if (!current) return;
+  const first = v[0];
+  if (!first) return;
   script.value.stage[i] = {
     ...current,
-    source_image: v.filename,
-    source_image_b64: v.base64,
+    source_image: first.filename,
+    source_image_b64: first.base64,
   };
   pickerStageIndex.value = null;
 }

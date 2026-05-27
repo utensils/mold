@@ -15,7 +15,10 @@ import {
 } from "../types";
 import LoraPicker from "./LoraPicker.vue";
 import ModelPicker from "./ModelPicker.vue";
-import { outputFormatsForFamily } from "../composables/useGenerateForm";
+import {
+  isQwenImageEditFamily,
+  outputFormatsForFamily,
+} from "../composables/useGenerateForm";
 
 const props = defineProps<{
   modelValue: GenerateFormState;
@@ -35,19 +38,26 @@ function patch<K extends keyof GenerateFormState>(
 const currentModel = computed(
   () => props.models.find((m) => m.name === props.modelValue.model) ?? null,
 );
-const family = computed(() => currentModel.value?.family ?? "");
+const family = computed(
+  () => currentModel.value?.family ?? props.modelValue.modelFamily,
+);
 
 const showNegative = computed(() => !NO_CFG_FAMILIES.includes(family.value));
 const showScheduler = computed(() =>
   UNET_SCHEDULER_FAMILIES.includes(family.value),
 );
 const showVideo = computed(() => VIDEO_FAMILIES.includes(family.value));
-const showStrength = computed(() => !!props.modelValue.sourceImage);
+const showStrength = computed(
+  () =>
+    props.modelValue.imageAttachments.length > 0 &&
+    !isQwenImageEditFamily(family.value),
+);
 
 function selectModel(m: ModelInfoExtended) {
   const next: GenerateFormState = {
     ...props.modelValue,
     model: m.name,
+    modelFamily: m.family,
     width: m.default_width,
     height: m.default_height,
     steps: m.default_steps,
@@ -77,6 +87,11 @@ function selectModel(m: ModelInfoExtended) {
   // reject a stale `enable_audio: true` carried over from a prior AV
   // session. Mirrors `applyModelDefaults` in useGenerateForm.
   next.enableAudio = familySupportsAudio(m.family) ? true : null;
+  if (isQwenImageEditFamily(m.family)) {
+    next.batchSize = 1;
+  } else if (next.imageAttachments.length > 1) {
+    next.imageAttachments = next.imageAttachments.slice(0, 1);
+  }
   emit("update:modelValue", next);
 }
 
@@ -364,11 +379,15 @@ const summary = computed(() => {
               :key="n"
               type="button"
               class="rounded-full px-3 py-1 text-sm"
-              :class="
+              :disabled="isQwenImageEditFamily(family)"
+              :class="[
                 modelValue.batchSize === n
                   ? 'bg-brand-500 text-white'
-                  : 'bg-slate-900/60 text-slate-200'
-              "
+                  : 'bg-slate-900/60 text-slate-200',
+                isQwenImageEditFamily(family)
+                  ? 'cursor-not-allowed opacity-50'
+                  : '',
+              ]"
               @click="patch('batchSize', n)"
             >
               {{ n }}

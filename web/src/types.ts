@@ -123,6 +123,10 @@ export interface GenerateRequestWire {
   output_format?: OutputFormat;
   scheduler?: Scheduler | null;
   source_image?: string | null; // base64 (no data-URI prefix)
+  /** Qwen-Image-Edit attachments in order: first image is the target,
+   * subsequent images are references. Mutually exclusive with
+   * `source_image`. */
+  edit_images?: string[] | null;
   strength?: number;
   expand?: boolean;
   original_prompt?: string | null;
@@ -381,10 +385,13 @@ export function supportsLora(family: string): boolean {
 }
 
 export interface GenerateFormState {
-  version: 1;
+  version: 2;
   prompt: string;
   negativePrompt: string;
   model: string;
+  /** Family for the selected model. Stored so request serialization can
+   * choose family-specific wire fields without needing the model catalog. */
+  modelFamily: string;
   width: number;
   height: number;
   steps: number;
@@ -397,7 +404,7 @@ export interface GenerateFormState {
   scheduler: Scheduler | null;
   outputFormat: OutputFormat;
   expand: ExpandFormState;
-  sourceImage: SourceImageState | null;
+  imageAttachments: SourceImageState[];
   placement: DevicePlacement | null;
   /** LoRA stack. Stored as an array so the UI can hold multiple
    * selections; serialized as `loras` on the wire. Defaults to an empty

@@ -1163,6 +1163,16 @@ pub(crate) fn fits_in_memory(
 /// double-counts that file. We detect and elide it.
 pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrategy) -> u64 {
     let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let same_file = |a: &std::path::Path, b: &std::path::Path| -> bool {
+        a == b
+            || std::fs::canonicalize(a)
+                .ok()
+                .zip(std::fs::canonicalize(b).ok())
+                .is_some_and(|(a, b)| a == b)
+    };
+    let path_matches_any = |path: &std::path::Path, paths: &[std::path::PathBuf]| -> bool {
+        paths.iter().any(|candidate| same_file(path, candidate))
+    };
 
     let transformer_size = if !paths.transformer_shards.is_empty() {
         paths.transformer_shards.iter().map(|p| file_size(p)).sum()
@@ -1171,28 +1181,65 @@ pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrateg
     };
     // Single-file: transformer & vae point at the same on-disk file. Keys are
     // extracted from one mmap, so the file's bytes are paged in once. Don't
-    // double-count.
-    let vae_is_separate_file = paths.transformer_shards.is_empty()
-        && paths.transformer != paths.vae
-        || !paths.transformer_shards.is_empty();
+    // double-count. Use same-file identity rather than path-string equality
+    // because catalog resolution can surface equivalent paths through distinct
+    // spellings, and shard-backed configs can name the primary file in
+    // transformer_shards.
+    let vae_is_transformer_file = if paths.transformer_shards.is_empty() {
+        same_file(&paths.transformer, &paths.vae)
+    } else {
+        paths
+            .transformer_shards
+            .iter()
+            .any(|shard| same_file(shard, &paths.vae))
+    };
+    let vae_is_separate_file = !vae_is_transformer_file;
     let vae_size = if vae_is_separate_file {
         file_size(&paths.vae)
     } else {
         0
     };
 
-    let t5_size = paths.t5_encoder.as_ref().map(|p| file_size(p)).unwrap_or(0);
+    let mut base_component_paths: Vec<std::path::PathBuf> =
+        paths.transformer_shards.iter().cloned().collect();
+    if base_component_paths.is_empty() {
+        base_component_paths.push(paths.transformer.clone());
+    }
+    if vae_is_separate_file {
+        base_component_paths.push(paths.vae.clone());
+    }
+
+    let mut counted_encoder_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut encoder_size = |path: &std::path::Path| -> u64 {
+        if path_matches_any(path, &base_component_paths)
+            || path_matches_any(path, &counted_encoder_paths)
+        {
+            return 0;
+        }
+        counted_encoder_paths.push(path.to_path_buf());
+        file_size(path)
+    };
+
+    let t5_size = paths
+        .t5_encoder
+        .as_ref()
+        .map(|p| encoder_size(p))
+        .unwrap_or(0);
     let clip_size = paths
         .clip_encoder
         .as_ref()
-        .map(|p| file_size(p))
+        .map(|p| encoder_size(p))
         .unwrap_or(0);
     let clip2_size = paths
         .clip_encoder_2
         .as_ref()
-        .map(|p| file_size(p))
+        .map(|p| encoder_size(p))
         .unwrap_or(0);
-    let text_encoder_size: u64 = paths.text_encoder_files.iter().map(|p| file_size(p)).sum();
+    let text_encoder_size: u64 = paths
+        .text_encoder_files
+        .iter()
+        .map(|p| encoder_size(p))
+        .sum();
 
     let encoder_total = t5_size + clip_size + clip2_size + text_encoder_size;
 
@@ -2381,6 +2428,74 @@ mod tests {
         assert!(
             (10.5..11.5).contains(&peak_gb),
             "sharded peak should be ~11 GB, got {peak_gb:.1} GB"
+        );
+    }
+
+    #[test]
+    fn estimate_peak_memory_sharded_single_file_vae_does_not_double_count() {
+        // Catalog single-file checkpoints can reach the estimator with the
+        // primary checkpoint listed as a transformer shard and as the bundled
+        // VAE. That is still one mmap-backed safetensors file, not two GPU
+        // resident weight sets.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let single = write_dummy_file(dir.path(), "single.safetensors", 14_000_000_000);
+        let paths = mold_core::ModelPaths {
+            transformer: single.clone(),
+            transformer_shards: vec![single.clone()],
+            vae: single,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let peak = estimate_peak_memory(&paths, LoadStrategy::Sequential);
+        // max(0, 14 GB + deduped VAE) + 2 GB headroom = 16 GB.
+        let peak_gb = peak as f64 / 1e9;
+        assert!(
+            (15.5..16.5).contains(&peak_gb),
+            "sharded single-file peak should be ~16 GB, got {peak_gb:.1} GB"
+        );
+    }
+
+    #[test]
+    fn estimate_peak_memory_single_file_sdxl_does_not_count_clip_views_as_full_checkpoints() {
+        // Cached Civitai SDXL single-file engines expose a diffusers-shaped
+        // ModelPaths view where transformer, VAE, CLIP-L, and CLIP-G all point
+        // at the same safetensors file. These are component views into one
+        // checkpoint, not four full checkpoint-sized GPU phases.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let single = write_dummy_file(dir.path(), "single.safetensors", 14_000_000_000);
+        let paths = mold_core::ModelPaths {
+            transformer: single.clone(),
+            transformer_shards: vec![],
+            vae: single.clone(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: Some(single.clone()),
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: Some(single),
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let peak = estimate_peak_memory(&paths, LoadStrategy::Sequential);
+        // max(deduped encoders=0, transformer + deduped VAE=14 GB) + 2 GB.
+        let peak_gb = peak as f64 / 1e9;
+        assert!(
+            (15.5..16.5).contains(&peak_gb),
+            "single-file SDXL peak should be ~16 GB, got {peak_gb:.1} GB"
         );
     }
 

@@ -972,6 +972,14 @@ pub async fn run_queue_dispatcher(
             };
 
             let Some(worker) = worker else {
+                if preferred_gpu.is_none() && state.gpu_pool.worker_count() > 0 {
+                    tracing::warn!(
+                        model = %model_name,
+                        "all GPU workers are temporarily unavailable; keeping job queued"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
                 let rejected = gpu_job
                     .take()
                     .expect("gpu_job retained after failed dispatch");
@@ -1546,6 +1554,57 @@ mod tests {
         let dispatched = worker_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("queued job should dispatch once capacity is available");
+        assert_eq!(dispatched.model, "flux-dev:q4");
+
+        drop(job_tx);
+        dispatcher.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_dispatcher_waits_for_degraded_worker_recovery_instead_of_rejecting() {
+        let (worker, worker_rx) = test_worker(0, 1);
+        worker.consecutive_failures.store(3, Ordering::SeqCst);
+        *worker.degraded_until.write().unwrap() =
+            Some(Instant::now() + std::time::Duration::from_secs(60));
+
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(job_tx.clone());
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker.clone()],
+            }),
+            8,
+        );
+        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
+
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+        let job = crate::state::GenerationJob {
+            id: String::new(),
+            request: fake_request("flux-dev:q4"),
+            progress_tx: None,
+            result_tx,
+            output_dir: None,
+        };
+        queue.submit(job, 8).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(
+            result_rx.try_recv().is_err(),
+            "dispatcher should keep the job pending while all workers are degraded"
+        );
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "degraded worker must not receive work before recovery"
+        );
+
+        worker.consecutive_failures.store(0, Ordering::SeqCst);
+        *worker.degraded_until.write().unwrap() = None;
+
+        let dispatched = worker_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("queued job should dispatch once a worker recovers");
         assert_eq!(dispatched.model, "flux-dev:q4");
 
         drop(job_tx);

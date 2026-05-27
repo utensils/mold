@@ -6,7 +6,7 @@ import type { GalleryImage, SourceImageState } from "../types";
 
 defineProps<{ open: boolean }>();
 const emit = defineEmits<{
-  (e: "pick", v: SourceImageState): void;
+  (e: "pick", v: SourceImageState[]): void;
   (e: "close"): void;
 }>();
 
@@ -28,19 +28,31 @@ onMounted(async () => {
 
 async function onFiles(event: Event) {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) return;
-  const b64 = await blobToBase64(file);
-  emit("pick", { kind: "upload", filename: file.name, base64: b64 });
+  const files = Array.from(input.files ?? []);
+  if (!files.length) return;
+  const picked = await Promise.all(
+    files.map(async (file) => ({
+      kind: "upload" as const,
+      filename: file.name,
+      base64: await blobToBase64(file),
+    })),
+  );
+  emit("pick", picked);
   emit("close");
 }
 
 async function onDrop(event: DragEvent) {
   event.preventDefault();
-  const file = event.dataTransfer?.files?.[0];
-  if (!file) return;
-  const b64 = await blobToBase64(file);
-  emit("pick", { kind: "upload", filename: file.name, base64: b64 });
+  const files = Array.from(event.dataTransfer?.files ?? []);
+  if (!files.length) return;
+  const picked = await Promise.all(
+    files.map(async (file) => ({
+      kind: "upload" as const,
+      filename: file.name,
+      base64: await blobToBase64(file),
+    })),
+  );
+  emit("pick", picked);
   emit("close");
 }
 
@@ -52,7 +64,7 @@ async function pickFromGallery(item: GalleryImage) {
   }
   const blob = await res.blob();
   const b64 = await blobToBase64(blob);
-  emit("pick", { kind: "gallery", filename: item.filename, base64: b64 });
+  emit("pick", [{ kind: "gallery", filename: item.filename, base64: b64 }]);
   emit("close");
 }
 </script>
@@ -116,6 +128,7 @@ async function pickFromGallery(item: GalleryImage) {
               <input
                 type="file"
                 accept="image/*"
+                multiple
                 class="hidden"
                 @change="onFiles"
               />

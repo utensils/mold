@@ -43,10 +43,10 @@ describe("useGenerateForm", () => {
     expect(form.state.value.steps).toBe(20);
     expect(form.state.value.batchSize).toBe(1);
     expect(form.state.value.outputFormat).toBe("png");
-    expect(form.state.value.sourceImage).toBeNull();
+    expect(form.state.value.imageAttachments).toEqual([]);
   });
 
-  it("merges a persisted snapshot over defaults but drops the sourceImage field", () => {
+  it("migrates a version 1 persisted snapshot but drops source image bytes", () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
@@ -58,6 +58,9 @@ describe("useGenerateForm", () => {
         // sourceImage should never be read back from storage even if someone
         // injects it — base64 lives in memory only.
         sourceImage: { kind: "upload", filename: "x.png", base64: "AAAA" },
+        imageAttachments: [
+          { kind: "upload", filename: "y.png", base64: "BBBB" },
+        ],
       }),
     );
 
@@ -66,7 +69,7 @@ describe("useGenerateForm", () => {
     expect(form.state.value.model).toBe("flux-dev:q4");
     expect(form.state.value.width).toBe(512);
     expect(form.state.value.height).toBe(768);
-    expect(form.state.value.sourceImage).toBeNull();
+    expect(form.state.value.imageAttachments).toEqual([]);
     // Untouched fields fall back to defaults.
     expect(form.state.value.steps).toBe(20);
   });
@@ -86,14 +89,12 @@ describe("useGenerateForm", () => {
     expect(form.state.value.prompt).toBe("");
   });
 
-  it("debounces persistence and strips sourceImage from the written snapshot", async () => {
+  it("debounces persistence and strips attachment bytes from the written snapshot", async () => {
     const form = useGenerateForm();
     form.state.value.prompt = "a fox";
-    form.state.value.sourceImage = {
-      kind: "upload",
-      filename: "x.png",
-      base64: "SECRETBYTES",
-    };
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "x.png", base64: "SECRETBYTES" },
+    ];
     await nextTick();
 
     // Watch fires but persist is debounced by 300ms.
@@ -106,6 +107,7 @@ describe("useGenerateForm", () => {
     const parsed = JSON.parse(raw!);
     expect(parsed.prompt).toBe("a fox");
     expect(parsed.sourceImage).toBeUndefined();
+    expect(parsed.imageAttachments).toBeUndefined();
     expect(raw).not.toContain("SECRETBYTES");
   });
 
@@ -174,11 +176,9 @@ describe("useGenerateForm", () => {
       frames: null,
       fps: null,
       expand: { enabled: true, variations: 3, familyOverride: null },
-      sourceImage: {
-        kind: "upload",
-        filename: "src.png",
-        base64: "AAAA",
-      },
+      imageAttachments: [
+        { kind: "upload", filename: "src.png", base64: "AAAA" },
+      ],
     });
 
     const wire = form.toRequest();
@@ -198,6 +198,65 @@ describe("useGenerateForm", () => {
       source_image: "AAAA",
       expand: true,
     });
+    expect(wire.edit_images).toBeUndefined();
+  });
+
+  it("serializes ordered Qwen edit attachments as edit_images and omits source_image", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "qwen-image-edit:q4",
+      modelFamily: "qwen-image-edit",
+      batchSize: 4,
+      imageAttachments: [
+        { kind: "upload", filename: "target.png", base64: "TARGET" },
+        { kind: "upload", filename: "ref-a.png", base64: "REF_A" },
+        { kind: "gallery", filename: "ref-b.png", base64: "REF_B" },
+      ],
+    });
+
+    const wire = form.toRequest();
+    expect(wire.edit_images).toEqual(["TARGET", "REF_A", "REF_B"]);
+    expect(wire.source_image).toBeUndefined();
+    expect(wire.batch_size).toBe(1);
+    expect(wire.strength).toBeUndefined();
+  });
+
+  it("serializes only the first attachment as source_image for non-edit families", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "sdxl:fp16",
+      modelFamily: "sdxl",
+      imageAttachments: [
+        { kind: "upload", filename: "target.png", base64: "TARGET" },
+        { kind: "upload", filename: "ignored.png", base64: "IGNORED" },
+      ],
+    });
+
+    const wire = form.toRequest();
+    expect(wire.source_image).toBe("TARGET");
+    expect(wire.edit_images).toBeUndefined();
+  });
+
+  it("model switching forces Qwen edit batch to 1 and trims multi-image attachments for non-edit families", () => {
+    const form = useGenerateForm();
+    form.state.value.batchSize = 3;
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "target.png", base64: "TARGET" },
+      { kind: "upload", filename: "ref.png", base64: "REF" },
+    ];
+
+    form.applyModelDefaults(
+      makeModel({ name: "qwen-image-edit:q4", family: "qwen-image-edit" }),
+    );
+    expect(form.state.value.modelFamily).toBe("qwen-image-edit");
+    expect(form.state.value.batchSize).toBe(1);
+    expect(form.state.value.imageAttachments).toHaveLength(2);
+
+    form.applyModelDefaults(makeModel({ name: "sdxl:fp16", family: "sdxl" }));
+    expect(form.state.value.modelFamily).toBe("sdxl");
+    expect(form.state.value.batchSize).toBe(1);
+    expect(form.state.value.imageAttachments).toHaveLength(1);
+    expect(form.state.value.imageAttachments[0]?.base64).toBe("TARGET");
   });
 
   it("toRequest omits expand entirely when disabled (server treats missing/false the same, but this keeps payload minimal)", () => {

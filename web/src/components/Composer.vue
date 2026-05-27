@@ -4,11 +4,15 @@ import type {
   DevicePlacement,
   GenerateFormState,
   OutputFormat,
+  SourceImageState,
 } from "../types";
 import { familySupportsAudio } from "../types";
 import PlacementPanel from "./PlacementPanel.vue";
 import ScriptComposer from "./ScriptComposer.vue";
-import { outputFormatsForFamily } from "../composables/useGenerateForm";
+import {
+  isQwenImageEditFamily,
+  outputFormatsForFamily,
+} from "../composables/useGenerateForm";
 
 import type { ChainRoutingDecision } from "../lib/chainRouting";
 import type { ChainScriptToml } from "../lib/chainToml";
@@ -30,6 +34,7 @@ const props = defineProps<{
    * the Composer shows a "will render as N clips" cue so users understand
    * why the request will take much longer than a single-clip submit. */
   chainDecision: ChainRoutingDecision;
+  submitError?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -90,6 +95,12 @@ function updatePlacement(p: DevicePlacement | null) {
 }
 
 const outputFormats = computed(() => outputFormatsForFamily(props.family));
+const isQwenEdit = computed(() => isQwenImageEditFamily(props.family));
+const visibleAttachments = computed(() =>
+  isQwenEdit.value
+    ? props.modelValue.imageAttachments
+    : props.modelValue.imageAttachments.slice(0, 1),
+);
 
 function updateOutputFormat(v: string) {
   emit("update:modelValue", {
@@ -132,7 +143,7 @@ const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
 // The composer exposes a single "🖼️" image button above the mode toggle so
 // users can attach a source image from either mode without hunting for a
 // different control. In Single mode this opens the global picker (wires
-// into form.sourceImage). In Script mode, the per-stage pickers are still
+// into form.imageAttachments). In Script mode, the per-stage pickers are still
 // the primary affordance, but users expect a persistent toolbar entry —
 // we route the click to the first stage's picker so it has a sensible
 // target and the user doesn't have to scroll to find stage 1's attach
@@ -143,6 +154,34 @@ function onImageButton() {
     return;
   }
   emit("open-image-picker");
+}
+
+function updateAttachments(imageAttachments: SourceImageState[]) {
+  emit("update:modelValue", { ...props.modelValue, imageAttachments });
+}
+
+function removeAttachment(index: number) {
+  const next = props.modelValue.imageAttachments.slice();
+  next.splice(index, 1);
+  updateAttachments(next);
+}
+
+function moveAttachment(index: number, delta: -1 | 1) {
+  const nextIndex = index + delta;
+  const next = props.modelValue.imageAttachments.slice();
+  if (nextIndex < 0 || nextIndex >= next.length) return;
+  [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+  updateAttachments(next);
+}
+
+function roleLabel(index: number): string {
+  if (!isQwenEdit.value) return "Source";
+  return index === 0 ? "Target" : "Reference";
+}
+
+function titleLabel(index: number): string {
+  if (!isQwenEdit.value) return "Image";
+  return `Picture ${index + 1}`;
 }
 
 defineExpose({ scriptComposerRef });
@@ -218,24 +257,67 @@ defineExpose({ scriptComposerRef });
 
     <template v-else>
       <div class="flex items-start gap-3">
-        <!-- source image chip -->
         <div
-          v-if="modelValue.sourceImage"
-          class="relative flex-shrink-0 overflow-hidden rounded-xl"
+          v-if="visibleAttachments.length"
+          class="flex max-w-[42vw] flex-shrink-0 gap-2 overflow-x-auto pb-1"
+          data-test="attachment-strip"
         >
-          <img
-            :src="`data:image/png;base64,${modelValue.sourceImage.base64}`"
-            class="h-12 w-12 object-cover"
-            alt="Source"
-          />
-          <button
-            type="button"
-            class="absolute -right-1 -top-1 h-5 w-5 rounded-full bg-slate-900/90 text-xs text-slate-100"
-            aria-label="Remove source image"
-            @click="emit('clear-source')"
+          <div
+            v-for="(image, index) in visibleAttachments"
+            :key="`${image.filename}-${index}`"
+            class="relative grid w-20 flex-shrink-0 grid-rows-[3rem_auto] overflow-hidden rounded-xl bg-slate-900/60"
           >
-            ✕
-          </button>
+            <img
+              :src="`data:image/png;base64,${image.base64}`"
+              class="h-12 w-20 object-cover"
+              :alt="`${roleLabel(index)} ${titleLabel(index)}`"
+            />
+            <div class="px-1.5 py-1 leading-tight">
+              <div
+                class="text-[0.65rem] uppercase text-slate-400"
+                :data-test="`attachment-role-${index}`"
+              >
+                {{ roleLabel(index) }}
+              </div>
+              <div
+                class="truncate text-[0.7rem] text-slate-100"
+                :data-test="`attachment-title-${index}`"
+              >
+                {{ titleLabel(index) }}
+              </div>
+            </div>
+            <button
+              v-if="isQwenEdit && index > 0"
+              type="button"
+              class="absolute left-1 top-1 h-5 w-5 rounded-full bg-slate-950/80 text-xs text-slate-100"
+              :aria-label="`Move ${titleLabel(index)} left`"
+              :data-test="`move-attachment-up-${index}`"
+              @click="moveAttachment(index, -1)"
+            >
+              ‹
+            </button>
+            <button
+              v-if="
+                isQwenEdit && index < modelValue.imageAttachments.length - 1
+              "
+              type="button"
+              class="absolute left-7 top-1 h-5 w-5 rounded-full bg-slate-950/80 text-xs text-slate-100"
+              :aria-label="`Move ${titleLabel(index)} right`"
+              :data-test="`move-attachment-down-${index}`"
+              @click="moveAttachment(index, 1)"
+            >
+              ›
+            </button>
+            <button
+              type="button"
+              class="absolute -right-1 -top-1 h-5 w-5 rounded-full bg-slate-900/90 text-xs text-slate-100"
+              :aria-label="`Remove ${titleLabel(index)}`"
+              :data-test="`remove-attachment-${index}`"
+              @click="removeAttachment(index)"
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         <textarea
@@ -313,6 +395,13 @@ defineExpose({ scriptComposerRef });
         class="rounded-lg bg-red-900/40 px-3 py-1.5 text-xs text-red-200"
       >
         {{ chainDecision.reason }}
+      </div>
+      <div
+        v-if="submitError"
+        class="rounded-lg bg-red-900/40 px-3 py-1.5 text-xs text-red-200"
+        data-test="composer-submit-error"
+      >
+        {{ submitError }}
       </div>
 
       <!-- Agent C (model-ui-overhaul §3): device placement -->

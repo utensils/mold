@@ -3,9 +3,9 @@
 use anyhow::{anyhow, bail, Result};
 use mold_core::config::Config;
 use mold_core::lambda::{
-    build_launch_request, filesystem_name, image_tag_for_gpu, render_cloud_init, AvailabilityRow,
-    CloudInitOptions, CreateFilesystemRequest, CreateSshKeyRequest, Filesystem, Instance,
-    LambdaClient, LambdaSettings, LaunchRequestInput,
+    build_launch_request, filesystem_name, gpu_uses_unsupported_linux_arm64, image_tag_for_gpu,
+    render_cloud_init, AvailabilityRow, CloudInitOptions, CreateFilesystemRequest,
+    CreateSshKeyRequest, Filesystem, Instance, LambdaClient, LambdaSettings, LaunchRequestInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -330,6 +330,11 @@ pub async fn run_deploy(opts: DeployOptions) -> Result<()> {
         .region
         .clone()
         .ok_or_else(|| anyhow!("--region is required in non-interactive deploy"))?;
+    if gpu_uses_unsupported_linux_arm64(&instance_type) {
+        bail!(
+            "{instance_type} is not supported by the published mold Docker images yet; GH200 Lambda hosts are linux/arm64, while the current images are linux/amd64. Choose an x86 GPU instance such as gpu_1x_a100_sxm4 or gpu_1x_a10."
+        );
+    }
 
     let ssh = if opts.dry_run {
         plan_ssh_key(&config.lambda)?

@@ -30,13 +30,28 @@ export function defaultOutputFormat(family: string): OutputFormat {
 }
 
 const STORAGE_KEY = "mold.generate.form";
+const FORM_VERSION = 2;
+const QWEN_IMAGE_EDIT_FAMILY = "qwen-image-edit";
+
+function isQwenImageEditFamily(family: string): boolean {
+  return family === QWEN_IMAGE_EDIT_FAMILY;
+}
+
+function selectedFamily(s: GenerateFormState): string {
+  if (s.modelFamily) return s.modelFamily;
+  if (s.model.startsWith(`${QWEN_IMAGE_EDIT_FAMILY}:`)) {
+    return QWEN_IMAGE_EDIT_FAMILY;
+  }
+  return "";
+}
 
 function defaultForm(): GenerateFormState {
   return {
-    version: 1,
+    version: FORM_VERSION,
     prompt: "",
     negativePrompt: "",
     model: "",
+    modelFamily: "",
     width: 1024,
     height: 1024,
     steps: 20,
@@ -49,7 +64,7 @@ function defaultForm(): GenerateFormState {
     scheduler: null,
     outputFormat: "png",
     expand: { enabled: false, variations: 1, familyOverride: null },
-    sourceImage: null,
+    imageAttachments: [],
     placement: null,
     loras: [],
     enableAudio: null,
@@ -59,15 +74,29 @@ function defaultForm(): GenerateFormState {
 /// Drops users with pre-multi-LoRA persisted forms onto the new shape
 /// without re-prompting them for everything else. The old `lora` field
 /// (singular, nullable) becomes a 1- or 0-element `loras` array.
-type LegacyFormState = Partial<GenerateFormState> & {
+type LegacyFormState = Omit<Partial<GenerateFormState>, "version"> & {
   lora?: LoraSelection | null;
+  version?: number;
+  sourceImage?: GenerateFormState["imageAttachments"][number] | null;
 };
 
 function migrateLegacy(parsed: LegacyFormState): Partial<GenerateFormState> {
-  const { lora, ...rest } = parsed;
-  if (Array.isArray(rest.loras)) return rest;
-  if (lora) return { ...rest, loras: [lora] };
-  return { ...rest, loras: [] };
+  const {
+    lora,
+    sourceImage: _sourceImage,
+    imageAttachments: _imageAttachments,
+    version: _version,
+    ...rest
+  } = parsed;
+  const next: Partial<GenerateFormState> = {
+    ...rest,
+    version: FORM_VERSION,
+    imageAttachments: [],
+  };
+  if (!Array.isArray(rest.loras)) {
+    next.loras = lora ? [lora] : [];
+  }
+  return next;
 }
 
 function load(): GenerateFormState {
@@ -75,8 +104,10 @@ function load(): GenerateFormState {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultForm();
     const parsed = JSON.parse(raw) as LegacyFormState;
-    if (parsed.version !== 1) return defaultForm();
-    return { ...defaultForm(), ...migrateLegacy(parsed), sourceImage: null };
+    if (parsed.version !== 1 && parsed.version !== FORM_VERSION) {
+      return defaultForm();
+    }
+    return { ...defaultForm(), ...migrateLegacy(parsed) };
   } catch {
     return defaultForm();
   }
@@ -86,8 +117,11 @@ function persist(state: GenerateFormState) {
   try {
     // Drop base64 bytes from localStorage — they blow past the quota quickly
     // and the attachment is re-picked trivially on reload.
-    const { sourceImage: _omit, ...rest } = state;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(rest));
+    const { imageAttachments: _attachments, ...rest } = state;
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ ...rest, version: FORM_VERSION }),
+    );
   } catch {
     /* ignore */
   }
@@ -170,6 +204,7 @@ export function useGenerateForm(): UseGenerateForm {
     },
     applyModelDefaults: (m) => {
       state.value.model = m.name;
+      state.value.modelFamily = m.family;
       state.value.width = m.default_width;
       state.value.height = m.default_height;
       state.value.steps = m.default_steps;
@@ -199,6 +234,11 @@ export function useGenerateForm(): UseGenerateForm {
       // clean and the server's MP4 default-on behaviour isn't fought.
       // Mirrors `chain_limits::family_supports_audio` on the server.
       state.value.enableAudio = familySupportsAudio(m.family) ? true : null;
+      if (isQwenImageEditFamily(m.family)) {
+        state.value.batchSize = 1;
+      } else if (state.value.imageAttachments.length > 1) {
+        state.value.imageAttachments = state.value.imageAttachments.slice(0, 1);
+      }
     },
     toRequest: () => {
       const s = state.value;
@@ -209,6 +249,8 @@ export function useGenerateForm(): UseGenerateForm {
       const loras = s.loras.length
         ? s.loras.map((l) => ({ path: l.path, scale: l.scale }))
         : undefined;
+      const qwenEdit = isQwenImageEditFamily(selectedFamily(s));
+      const attachments = s.imageAttachments ?? [];
       return {
         prompt: s.prompt,
         negative_prompt: s.negativePrompt || null,
@@ -218,11 +260,17 @@ export function useGenerateForm(): UseGenerateForm {
         steps: s.steps,
         guidance: s.guidance,
         seed: s.seed,
-        batch_size: s.batchSize,
+        batch_size: qwenEdit ? 1 : s.batchSize,
         output_format: s.outputFormat,
         scheduler: s.scheduler,
-        source_image: s.sourceImage?.base64 ?? null,
-        strength: s.strength,
+        ...(qwenEdit
+          ? {
+              edit_images: attachments.map((image) => image.base64),
+            }
+          : {
+              source_image: attachments[0]?.base64 ?? null,
+              strength: s.strength,
+            }),
         expand: s.expand.enabled || undefined,
         frames: s.frames,
         fps: s.fps,
@@ -243,3 +291,4 @@ export function useGenerateForm(): UseGenerateForm {
 // Scheduler type is re-exported so callers can type-narrow without importing
 // both modules.
 export type { Scheduler };
+export { isQwenImageEditFamily };

@@ -70,8 +70,9 @@ function makeForm(
   overrides: Partial<GenerateFormState> = {},
 ): GenerateFormState {
   return {
-    version: 1,
+    version: 2,
     model: "flux-dev:q4",
+    modelFamily: "flux",
     prompt: "",
     negativePrompt: "",
     width: 1024,
@@ -81,7 +82,7 @@ function makeForm(
     seed: null,
     batchSize: 1,
     strength: 0.75,
-    sourceImage: null,
+    imageAttachments: [],
     scheduler: null,
     frames: null,
     fps: null,
@@ -171,9 +172,49 @@ describe("GenerateParamsPanel", () => {
     const last = events![events!.length - 1][0] as GenerateFormState;
     expect(last.model).toBe("sdxl:fp16");
     expect(last.loras).toEqual([]);
+    expect(last.modelFamily).toBe("sdxl");
     // Defaults from altModel are applied.
     expect(last.steps).toBe(30);
     expect(last.guidance).toBe(7.5);
+  });
+
+  it("hides strength for Qwen image edit even with a target attachment", async () => {
+    const qwenEdit = {
+      ...baseModel,
+      name: "qwen-image-edit:q4",
+      family: "qwen-image-edit",
+    };
+    const w = mountPanel(
+      makeForm({
+        model: "qwen-image-edit:q4",
+        modelFamily: "qwen-image-edit",
+        imageAttachments: [
+          { kind: "upload", filename: "target.png", base64: "TARGET" },
+        ],
+      }),
+      [qwenEdit],
+    );
+
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    expect(w.text()).not.toContain("Strength");
+  });
+
+  it("shows strength for non-edit img2img attachments", async () => {
+    const w = mountPanel(
+      makeForm({
+        model: "sdxl:fp16",
+        modelFamily: "sdxl",
+        imageAttachments: [
+          { kind: "upload", filename: "source.png", base64: "SOURCE" },
+        ],
+      }),
+      [altModel],
+    );
+
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    expect(w.text()).toContain("Strength");
   });
 
   it("renders the LoRA picker for Z-Image models", async () => {

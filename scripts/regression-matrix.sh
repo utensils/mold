@@ -7,6 +7,12 @@ OUT_ROOT="${MOLD_REGRESSION_OUT:-$HOME/.mold/regression}"
 RUN_ID="${MOLD_REGRESSION_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$OUT_ROOT/$RUN_ID"
 LOG="$RUN_DIR/results.jsonl"
+ERRORS_LOG="$RUN_DIR/errors.jsonl"
+ATTEMPT_ERRORS_LOG="$RUN_DIR/attempt-errors.jsonl"
+FAILED_CASES="$RUN_DIR/FAILED_CASES.tsv"
+FAILURE_LOCK="$RUN_DIR/failures.lock"
+LOG_LOCK="$RUN_DIR/results.lock"
+ATTEMPT_LOCK="$RUN_DIR/attempt-errors.lock"
 SOURCE_IMAGE="$RUN_DIR/source.png"
 
 PROMPT_IMAGE="${MOLD_REGRESSION_PROMPT_IMAGE:-a small ceramic teapot on a wooden table, soft window light, realistic}"
@@ -17,6 +23,8 @@ FRAMES_VIDEO="${MOLD_REGRESSION_FRAMES_VIDEO:-17}"
 FPS_VIDEO="${MOLD_REGRESSION_FPS_VIDEO:-12}"
 TIMEOUT_IMAGE="${MOLD_REGRESSION_TIMEOUT_IMAGE:-1800}"
 TIMEOUT_VIDEO="${MOLD_REGRESSION_TIMEOUT_VIDEO:-3600}"
+QUEUE_TIMEOUT_BONUS="${MOLD_REGRESSION_QUEUE_TIMEOUT_BONUS:-86400}"
+TRANSIENT_RETRIES="${MOLD_REGRESSION_TRANSIENT_RETRIES:-1}"
 MODE="${MOLD_REGRESSION_MODE:-matrix}"
 ONLY_MODEL="${MOLD_REGRESSION_ONLY_MODEL:-}"
 ONLY_CASE="${MOLD_REGRESSION_ONLY_CASE:-}"
@@ -34,6 +42,9 @@ else
 fi
 
 mkdir -p "$RUN_DIR"
+: > "$ERRORS_LOG"
+: > "$ATTEMPT_ERRORS_LOG"
+: > "$FAILED_CASES"
 
 if [[ ! -x "$MOLD_BIN" ]]; then
   echo "mold binary not executable: $MOLD_BIN" >&2
@@ -41,8 +52,15 @@ if [[ ! -x "$MOLD_BIN" ]]; then
 fi
 
 magick -size 1024x1024 gradient:'#c8d8df-#f7ead8' \
-  -fill '#5b4034' -draw 'circle 512,512 512,300' \
-  -fill '#f3f0e8' -draw 'rectangle 260,585 764,745' \
+  -fill '#8b6b55' -draw 'rectangle 0,675 1024,1024' \
+  -fill '#f3f0e8' -stroke '#5b4034' -strokewidth 14 \
+  -draw 'ellipse 512,560 235,150 0,360' \
+  -draw 'ellipse 512,425 120,46 0,360' \
+  -draw 'ellipse 512,360 34,24 0,360' \
+  -fill none -stroke '#5b4034' -strokewidth 28 \
+  -draw 'arc 300,430 455,665 70,290' \
+  -fill '#f3f0e8' -stroke '#5b4034' -strokewidth 12 \
+  -draw "path 'M 690,520 C 790,455 900,485 925,565 C 840,565 790,610 700,620 Z'" \
   "$SOURCE_IMAGE"
 
 models_json="$RUN_DIR/models.json"
@@ -51,13 +69,34 @@ curl -fsS "$HOST/api/models" > "$models_json"
 curl -fsS "$HOST/api/catalog/installed?kind=lora" > "$loras_json"
 
 jq -r '
-  .[]
-  | select(.downloaded == true)
-  | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2"))
-  | select((.family != "ltx2") or (((.description // "") | ascii_downcase | contains("fp4") | not) and ((.description // "") | ascii_downcase | contains("nvfp4") | not)))
+  [
+    .[]
+    | select(.downloaded == true)
+    | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2"))
+    | select((.family != "ltx2") or (((.description // "") | ascii_downcase | contains("fp4") | not) and ((.description // "") | ascii_downcase | contains("nvfp4") | not)))
+  ]
+  | sort_by(.name)
+  | group_by(.name)
+  | .[]
+  | select(length == 1)
+  | .[0]
   | [.name, .family, (.default_steps|tostring), (.default_width|tostring), (.default_height|tostring)]
   | @tsv
 ' "$models_json" > "$RUN_DIR/models.tsv"
+
+jq -r '
+  [
+    .[]
+    | select(.downloaded == true)
+    | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2"))
+    | select((.family != "ltx2") or (((.description // "") | ascii_downcase | contains("fp4") | not) and ((.description // "") | ascii_downcase | contains("nvfp4") | not)))
+  ]
+  | sort_by(.name)
+  | group_by(.name)
+  | .[]
+  | select(length > 1)
+  | .[] | [.name, .family] | @tsv
+' "$models_json" > "$RUN_DIR/ambiguous-models.tsv"
 
 if [[ "$INCLUDE_OVER_BUDGET" != 1 ]]; then
   awk -F '\t' '$1 != "ltx-video-0.9.8-13b-dev:bf16"' "$RUN_DIR/models.tsv" > "$RUN_DIR/models.tsv.tmp"
@@ -86,6 +125,57 @@ json_log() {
     '{ts:$ts,status:$status,model:$model,family:$family,case:$case,output:$output,cmd:$cmd}'
 }
 
+json_error_log() {
+  jq -nc \
+    --arg ts "$(date --iso-8601=seconds)" \
+    --arg status "$1" \
+    --arg model "$2" \
+    --arg family "$3" \
+    --arg case "$4" \
+    --arg output "$5" \
+    --arg cmd "$6" \
+    --arg stdout_path "$7" \
+    --arg stderr_path "$8" \
+    --arg stderr_tail "$9" \
+    '{ts:$ts,status:$status,model:$model,family:$family,case:$case,output:$output,cmd:$cmd,stdout_path:$stdout_path,stderr_path:$stderr_path,stderr_tail:$stderr_tail}'
+}
+
+append_log() {
+  (
+    flock 9
+    json_log "$@" >> "$LOG"
+  ) 9>"$LOG_LOCK"
+}
+
+append_attempt_error_log() {
+  (
+    flock 9
+    json_error_log "$@" >> "$ATTEMPT_ERRORS_LOG"
+  ) 9>"$ATTEMPT_LOCK"
+}
+
+record_failure() {
+  local status="$1" model="$2" family="$3" case_name="$4" output="$5" cmd_text="$6" stdout_path="$7" stderr_path="$8" artifact="$9"
+  local command_path="$RUN_DIR/$artifact.command"
+  local stderr_tail
+  stderr_tail="$(tail -n 80 "$stderr_path" 2> /dev/null || true)"
+  printf '%s\n' "$cmd_text" > "$command_path"
+  (
+    flock 9
+    json_error_log "$status" "$model" "$family" "$case_name" "$output" "$cmd_text" "$stdout_path" "$stderr_path" "$stderr_tail" >> "$ERRORS_LOG"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$model" "$family" "$case_name" "$status" "$output" "$command_path" "$stderr_path" >> "$FAILED_CASES"
+    if [[ ! -e "$RUN_DIR/FAILED_COMMAND.txt" ]]; then
+      cp "$command_path" "$RUN_DIR/FAILED_COMMAND.txt"
+      cp "$stderr_path" "$RUN_DIR/FAILED_STDERR.txt"
+    fi
+  ) 9>"$FAILURE_LOCK"
+}
+
+is_transient_attempt_failure() {
+  local stderr_path="$1"
+  grep -Fq 'CUDA_ERROR_INVALID_VALUE' "$stderr_path"
+}
+
 case_selected() {
   local model="$1" case_name="$2"
   if [[ -n "$ONLY_MODEL" && "$model" != "$ONLY_MODEL" ]]; then
@@ -107,26 +197,44 @@ execute_case() {
   local model="$1" family="$2" case_name="$3" output="$4" timeout_s="$5"
   shift 5
   local -a cmd=("$@")
-  local cmd_text artifact
+  local cmd_text artifact stdout_path stderr_path effective_timeout_s code
   printf -v cmd_text '%q ' "${cmd[@]}"
-  artifact="$(tr ':/ ' '---' <<< "$model.$case_name")"
+  artifact="$(case_stem "$family" "$model").$case_name"
+  stdout_path="$RUN_DIR/$artifact.stdout"
+  stderr_path="$RUN_DIR/$artifact.stderr"
+  effective_timeout_s=$((timeout_s + QUEUE_TIMEOUT_BONUS))
   echo "RUN $case_name $model -> $output"
-  json_log start "$model" "$family" "$case_name" "$output" "$cmd_text" >> "$LOG"
-  if timeout "$timeout_s" "${cmd[@]}" > "$RUN_DIR/$artifact.stdout" 2> "$RUN_DIR/$artifact.stderr"; then
-    if [[ ! -s "$output" ]]; then
-      echo "empty output for $case_name $model: $output" >&2
-      json_log empty-output "$model" "$family" "$case_name" "$output" "$cmd_text" >> "$LOG"
-      exit 1
+  append_log start "$model" "$family" "$case_name" "$output" "$cmd_text"
+  local attempt=0
+  while true; do
+    if timeout "$effective_timeout_s" "${cmd[@]}" > "$stdout_path" 2> "$stderr_path"; then
+      if [[ ! -s "$output" ]]; then
+        echo "empty output for $case_name $model: $output" >&2
+        append_log empty-output "$model" "$family" "$case_name" "$output" "$cmd_text"
+        record_failure empty-output "$model" "$family" "$case_name" "$output" "$cmd_text" "$stdout_path" "$stderr_path" "$artifact"
+        return 1
+      fi
+      append_log ok "$model" "$family" "$case_name" "$output" "$cmd_text"
+      return 0
+    else
+      code=$?
+      local stderr_tail
+      stderr_tail="$(tail -n 80 "$stderr_path" 2> /dev/null || true)"
+      append_attempt_error_log "attempt-failed:$code" "$model" "$family" "$case_name" "$output" "$cmd_text" "$stdout_path" "$stderr_path" "$stderr_tail"
+      if (( attempt < TRANSIENT_RETRIES )) && is_transient_attempt_failure "$stderr_path"; then
+        attempt=$((attempt + 1))
+        echo "RETRY $case_name $model after transient CUDA failure (attempt $attempt/$TRANSIENT_RETRIES)" >&2
+        append_log "retry:$code" "$model" "$family" "$case_name" "$output" "$cmd_text"
+        sleep 2
+        continue
+      fi
+
+      echo "FAILED $case_name $model (exit $code)" >&2
+      append_log "failed:$code" "$model" "$family" "$case_name" "$output" "$cmd_text"
+      record_failure "failed:$code" "$model" "$family" "$case_name" "$output" "$cmd_text" "$stdout_path" "$stderr_path" "$artifact"
+      return "$code"
     fi
-    json_log ok "$model" "$family" "$case_name" "$output" "$cmd_text" >> "$LOG"
-  else
-    local code=$?
-    echo "FAILED $case_name $model (exit $code)" >&2
-    echo "$cmd_text" > "$RUN_DIR/FAILED_COMMAND.txt"
-    cp "$RUN_DIR/$artifact.stderr" "$RUN_DIR/FAILED_STDERR.txt"
-    json_log "failed:$code" "$model" "$family" "$case_name" "$output" "$cmd_text" >> "$LOG"
-    exit "$code"
-  fi
+  done
 }
 
 queue_case() {
@@ -136,14 +244,11 @@ queue_case() {
   fi
   execute_case "$@" &
   MATRIX_ACTIVE=$((MATRIX_ACTIVE + 1))
-  if (( MATRIX_ACTIVE >= MATRIX_BATCH )); then
-    wait_for_matrix_batch
-  fi
 }
 
 MATRIX_ACTIVE=0
 
-wait_for_matrix_batch() {
+wait_for_matrix() {
   local failures=0
   while (( MATRIX_ACTIVE > 0 )); do
     if ! wait -n; then
@@ -152,7 +257,31 @@ wait_for_matrix_batch() {
     MATRIX_ACTIVE=$((MATRIX_ACTIVE - 1))
   done
   if (( failures > 0 )); then
-    echo "matrix batch failed with $failures failed case(s): $RUN_DIR" >&2
+    echo "matrix failed with $failures failed case(s): $RUN_DIR" >&2
+    echo "failed cases: $FAILED_CASES" >&2
+    echo "error details: $ERRORS_LOG" >&2
+    exit 1
+  fi
+}
+
+validate_run_log_complete() {
+  local starts terminals duplicate_outputs missing_outputs
+  starts="$(jq -s 'map(select(.status == "start")) | length' "$LOG")"
+  terminals="$(jq -s 'map(select(.status == "ok" or .status == "empty-output" or (.status | startswith("failed:")))) | length' "$LOG")"
+  if [[ "$starts" != "$terminals" ]]; then
+    echo "matrix log incomplete: starts=$starts terminal=$terminals ($LOG)" >&2
+    exit 1
+  fi
+  duplicate_outputs="$(jq -r 'select(.status == "ok") | .output' "$LOG" | sort | uniq -d)"
+  if [[ -n "$duplicate_outputs" ]]; then
+    echo "matrix produced duplicate output paths:" >&2
+    printf '%s\n' "$duplicate_outputs" >&2
+    exit 1
+  fi
+  missing_outputs="$(jq -r 'select(.status == "ok") | .output' "$LOG" | while IFS= read -r output; do test -s "$output" || printf '%s\n' "$output"; done)"
+  if [[ -n "$missing_outputs" ]]; then
+    echo "matrix has ok rows with missing outputs:" >&2
+    printf '%s\n' "$missing_outputs" >&2
     exit 1
   fi
 }
@@ -161,23 +290,24 @@ run_mixed_job() {
   local idx="$1" model="$2" family="$3" case_name="$4" output="$5" timeout_s="$6"
   shift 6
   local -a cmd=("$@")
-  local cmd_text
+  local cmd_text effective_timeout_s
   printf -v cmd_text '%q ' "${cmd[@]}"
+  effective_timeout_s=$((timeout_s + QUEUE_TIMEOUT_BONUS))
   echo "MIXED RUN $idx $case_name $model -> $output"
-  json_log start "$model" "$family" "mixed-$idx-$case_name" "$output" "$cmd_text" >> "$LOG"
-  if timeout "$timeout_s" "${cmd[@]}" > "$RUN_DIR/mixed-${idx}.stdout" 2> "$RUN_DIR/mixed-${idx}.stderr"; then
+  append_log start "$model" "$family" "mixed-$idx-$case_name" "$output" "$cmd_text"
+  if timeout "$effective_timeout_s" "${cmd[@]}" > "$RUN_DIR/mixed-${idx}.stdout" 2> "$RUN_DIR/mixed-${idx}.stderr"; then
     if [[ ! -s "$output" ]]; then
       echo "empty output for mixed job $idx $case_name $model: $output" >&2
-      json_log empty-output "$model" "$family" "mixed-$idx-$case_name" "$output" "$cmd_text" >> "$LOG"
+      append_log empty-output "$model" "$family" "mixed-$idx-$case_name" "$output" "$cmd_text"
       return 1
     fi
-    json_log ok "$model" "$family" "mixed-$idx-$case_name" "$output" "$cmd_text" >> "$LOG"
+    append_log ok "$model" "$family" "mixed-$idx-$case_name" "$output" "$cmd_text"
   else
     local code=$?
     echo "FAILED mixed job $idx $case_name $model (exit $code)" >&2
     echo "$cmd_text" > "$RUN_DIR/FAILED_COMMAND.txt"
     cp "$RUN_DIR/mixed-${idx}.stderr" "$RUN_DIR/FAILED_STDERR.txt"
-    json_log "failed:$code" "$model" "$family" "mixed-$idx-$case_name" "$output" "$cmd_text" >> "$LOG"
+    append_log "failed:$code" "$model" "$family" "mixed-$idx-$case_name" "$output" "$cmd_text"
     return "$code"
   fi
 }
@@ -220,6 +350,9 @@ write_chain_script() {
 
 lora_paths_for_model() {
   local model="$1" family="$2"
+  if [[ "$family" == z-image ]]; then
+    return 0
+  fi
   awk -F '\t' -v family="$family" -v model="$model" '
     $1 != family { next }
     family == "flux2" && $2 == "klein-9b" && model !~ /9b|cv:2669986|cv:2650565|cv:2805234|cv:2765147|cv:2663677|cv:2759597/ { next }
@@ -229,6 +362,11 @@ lora_paths_for_model() {
 
 sanitize() {
   tr ':/ ' '---' <<< "$1"
+}
+
+case_stem() {
+  local family="$1" model="$2"
+  sanitize "$family.$model"
 }
 
 model_row() {
@@ -286,7 +424,7 @@ run_mixed_queue() {
     fi
     [[ -n "$STEPS_IMAGE" && "$family" != ltx-video && "$family" != ltx2 ]] && steps="$STEPS_IMAGE"
     [[ -n "$STEPS_VIDEO" && ( "$family" == ltx-video || "$family" == ltx2 ) ]] && steps="$STEPS_VIDEO"
-    safe_model="$(sanitize "$model")"
+    safe_model="$(case_stem "$family" "$model")"
     prompt="$PROMPT_IMAGE"
     timeout_s="$TIMEOUT_IMAGE"
     if [[ "$family" == ltx-video || "$family" == ltx2 ]]; then
@@ -332,7 +470,7 @@ if [[ "$MODE" == "mixed-queue" ]]; then
 fi
 
 while IFS=$'\t' read -r model family default_steps default_width default_height; do
-  safe_model="$(sanitize "$model")"
+  safe_model="$(case_stem "$family" "$model")"
   prompt="$PROMPT_IMAGE"
   [[ "$family" == ltx-video || "$family" == ltx2 ]] && prompt="$PROMPT_VIDEO"
 
@@ -342,6 +480,10 @@ while IFS=$'\t' read -r model family default_steps default_width default_height;
   if [[ "$family" == qwen-image ]]; then
     width="${MOLD_REGRESSION_QWEN_WIDTH:-1024}"
     height="${MOLD_REGRESSION_QWEN_HEIGHT:-1024}"
+  fi
+  if [[ "$family" == z-image ]]; then
+    width="${MOLD_REGRESSION_ZIMAGE_WIDTH:-768}"
+    height="${MOLD_REGRESSION_ZIMAGE_HEIGHT:-768}"
   fi
   if [[ "$family" == ltx-video ]]; then
     width="${MOLD_REGRESSION_LTX_VIDEO_WIDTH:-768}"
@@ -412,7 +554,7 @@ while IFS=$'\t' read -r model family default_steps default_width default_height;
         --output "$lora1_out" --format png --width "$width" --height "$height" --steps "$steps" \
         --lora "${loras[0]}"
     fi
-    if (( ${#loras[@]} >= 2 )); then
+    if (( ${#loras[@]} >= 2 )) && [[ "$family" != z-image ]]; then
       lora2_out="$RUN_DIR/${safe_model}.lora2.png"
       queue_case "$model" "$family" lora2 "$lora2_out" "$TIMEOUT_IMAGE" \
         "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
@@ -420,14 +562,22 @@ while IFS=$'\t' read -r model family default_steps default_width default_height;
         --lora "${loras[0]}" --lora "${loras[1]}"
     fi
 
+    src_width="$width"
+    src_height="$height"
+    if [[ "$family" == sdxl ]]; then
+      src_width="${MOLD_REGRESSION_SDXL_SOURCE_WIDTH:-768}"
+      src_height="${MOLD_REGRESSION_SDXL_SOURCE_HEIGHT:-768}"
+    fi
+
     src_out="$RUN_DIR/${safe_model}.source.png"
     queue_case "$model" "$family" source "$src_out" "$TIMEOUT_IMAGE" \
       "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
-      --output "$src_out" --format png --width "$width" --height "$height" --steps "$steps" \
+      --output "$src_out" --format png --width "$src_width" --height "$src_height" --steps "$steps" \
       --image "$SOURCE_IMAGE"
   fi
 done < "$RUN_DIR/models.tsv"
 
-wait_for_matrix_batch
+wait_for_matrix
+validate_run_log_complete
 
 echo "all regression cases passed: $RUN_DIR"

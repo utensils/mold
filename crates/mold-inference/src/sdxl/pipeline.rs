@@ -88,6 +88,18 @@ const VAE_SCALE_STANDARD: f64 = 0.18215;
 /// VAE scaling factor for SDXL Turbo models.
 const VAE_SCALE_TURBO: f64 = 0.13025;
 
+fn resolve_sdxl_vae_dtype(default_dtype: DType, single_file: bool) -> DType {
+    let default = if single_file {
+        // Several SDXL Civitai single-file finetunes decode to all-black
+        // images when their baked VAE runs in fp16. Use fp32 by default for
+        // this path while still honoring an explicit MOLD_VAE_DTYPE override.
+        DType::F32
+    } else {
+        default_dtype
+    };
+    crate::device::resolve_vae_dtype(default)
+}
+
 impl SDXLEngine {
     pub fn new(
         model_name: String,
@@ -591,7 +603,7 @@ impl SDXLEngine {
         let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
         // Resolve VAE precision once at load — see LoadedSDXL::vae_dtype.
-        let vae_dtype = crate::device::resolve_vae_dtype(dtype);
+        let vae_dtype = resolve_sdxl_vae_dtype(dtype, self.single_file_path.is_some());
         let (unet, vae, clip_l, clip_g) = if let Some(single_file) = self.single_file_path.clone() {
             self.load_components_single_file(
                 &single_file,
@@ -1373,7 +1385,7 @@ impl SDXLEngine {
 
             self.base.progress.stage_start("Loading VAE (GPU)");
             let vae_start_t = Instant::now();
-            let vae_dtype = crate::device::resolve_vae_dtype(dtype);
+            let vae_dtype = resolve_sdxl_vae_dtype(dtype, self.single_file_path.is_some());
             let vae = self.build_vae_for_strategy(&sd_config, &device, vae_dtype)?;
             self.base
                 .progress
@@ -1458,7 +1470,7 @@ impl SDXLEngine {
         };
         self.base.progress.stage_start(vae_load_label);
         let vae_start = Instant::now();
-        let vae_dtype = crate::device::resolve_vae_dtype(dtype);
+        let vae_dtype = resolve_sdxl_vae_dtype(dtype, self.single_file_path.is_some());
         let vae = self.build_vae_for_strategy(&sd_config, &device, vae_dtype)?;
         self.base
             .progress
@@ -2233,6 +2245,13 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(single_file);
+    }
+
+    #[test]
+    fn single_file_sdxl_vae_defaults_to_f32_to_avoid_black_finetune_decodes() {
+        unsafe { std::env::remove_var("MOLD_VAE_DTYPE") };
+        assert_eq!(resolve_sdxl_vae_dtype(DType::F16, true), DType::F32);
+        assert_eq!(resolve_sdxl_vae_dtype(DType::F16, false), DType::F16);
     }
 
     // SDXL cfg_active predicate tests — pin the cfg=1.0 short-circuit so

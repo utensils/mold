@@ -12,6 +12,7 @@ import DetailDrawer from "../components/DetailDrawer.vue";
 import TopBar from "../components/TopBar.vue";
 import { deleteGalleryImage, fetchModels, listGallery } from "../api";
 import { useGenerateForm } from "../composables/useGenerateForm";
+import { isQwenImageEditFamily } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { useHideMode } from "../composables/useHideMode";
 import { decideChainRouting } from "../lib/chainRouting";
@@ -71,6 +72,7 @@ const muted = ref(loadMuted());
 const showPreferences = ref(false);
 const showExpand = ref(false);
 const showPicker = ref(false);
+const composerError = ref<string | null>(null);
 
 function loadComposerMode(): ComposerMode {
   try {
@@ -224,11 +226,22 @@ const chainDecision = computed(() =>
 );
 
 function onSubmit() {
+  composerError.value = null;
   if (!form.state.value.model) {
     // First-run / nothing-downloaded case. The user has to pick a model
     // before submit can do anything; force-expand the params panel so
     // the ModelPicker is reachable without hunting for the toggle.
     paramsPanelRef.value?.setExpanded(true);
+    return;
+  }
+  if (
+    (isQwenImageEditFamily(
+      currentModel.value?.family ?? form.state.value.modelFamily,
+    ) ||
+      form.state.value.model.startsWith("qwen-image-edit:")) &&
+    form.state.value.imageAttachments.length === 0
+  ) {
+    composerError.value = "Qwen image edit needs a target image.";
     return;
   }
   const decision = chainDecision.value;
@@ -286,11 +299,18 @@ function onExpandStage(stageIndex: number, prompt: string) {
 }
 
 function onClearSource() {
-  form.state.value.sourceImage = null;
+  form.state.value.imageAttachments = [];
 }
 
-function onPickSource(v: SourceImageState) {
-  form.state.value.sourceImage = v;
+function onPickSource(v: SourceImageState[]) {
+  const qwenEdit =
+    isQwenImageEditFamily(
+      currentModel.value?.family ?? form.state.value.modelFamily,
+    ) || form.state.value.model.startsWith("qwen-image-edit:");
+  form.state.value.imageAttachments = qwenEdit
+    ? [...form.state.value.imageAttachments, ...v]
+    : v.slice(0, 1);
+  composerError.value = null;
 }
 
 function openItem(item: GalleryImage) {
@@ -401,6 +421,7 @@ onBeforeUnmount(() => {
         :family="currentModel?.family ?? ''"
         :placement-gpus="gpuListForPlacement"
         :chain-decision="chainDecision"
+        :submit-error="composerError"
         @submit="onSubmit"
         @submit-script="onSubmitScript"
         @update:mode="setComposerMode"

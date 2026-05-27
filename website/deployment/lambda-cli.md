@@ -44,8 +44,12 @@ Image selection follows the GPU family:
 | --------------------------- | --------------- |
 | Ampere / A100               | `:latest-sm80`  |
 | Ada / L40 / RTX 4090        | `:latest`       |
-| Hopper / H100 / H200 / GH   | `:latest-sm90`  |
+| Hopper / H100 / H200        | `:latest-sm90`  |
 | Blackwell / B200 / RTX 5090 | `:latest-sm120` |
+
+GH200 Lambda instances are not currently supported by the published mold
+container images: Lambda's GH200 hosts are `linux/arm64`, while the mold CUDA
+images are published for `linux/amd64`.
 
 ## Persistent Storage
 
