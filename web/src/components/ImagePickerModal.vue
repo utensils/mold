@@ -4,7 +4,13 @@ import { listGallery, thumbnailUrl, imageUrl } from "../api";
 import { blobToBase64 } from "../lib/base64";
 import type { GalleryImage, SourceImageState } from "../types";
 
-defineProps<{ open: boolean }>();
+const props = withDefaults(
+  defineProps<{ open: boolean; title?: string; multiple?: boolean }>(),
+  {
+    title: "Source image",
+    multiple: true,
+  },
+);
 const emit = defineEmits<{
   (e: "pick", v: SourceImageState[]): void;
   (e: "close"): void;
@@ -29,9 +35,10 @@ onMounted(async () => {
 async function onFiles(event: Event) {
   const input = event.target as HTMLInputElement;
   const files = Array.from(input.files ?? []);
+  const selected = props.multiple ? files : files.slice(0, 1);
   if (!files.length) return;
   const picked = await Promise.all(
-    files.map(async (file) => ({
+    selected.map(async (file) => ({
       kind: "upload" as const,
       filename: file.name,
       base64: await blobToBase64(file),
@@ -44,9 +51,10 @@ async function onFiles(event: Event) {
 async function onDrop(event: DragEvent) {
   event.preventDefault();
   const files = Array.from(event.dataTransfer?.files ?? []);
+  const selected = props.multiple ? files : files.slice(0, 1);
   if (!files.length) return;
   const picked = await Promise.all(
-    files.map(async (file) => ({
+    selected.map(async (file) => ({
       kind: "upload" as const,
       filename: file.name,
       base64: await blobToBase64(file),
@@ -80,7 +88,7 @@ async function pickFromGallery(item: GalleryImage) {
         class="glass flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl p-6"
       >
         <div class="flex items-center justify-between">
-          <h2 class="text-lg font-semibold text-slate-100">🖼️ Source image</h2>
+          <h2 class="text-lg font-semibold text-slate-100">🖼️ {{ title }}</h2>
           <button
             type="button"
             class="text-slate-400 hover:text-slate-100"
@@ -128,7 +136,7 @@ async function pickFromGallery(item: GalleryImage) {
               <input
                 type="file"
                 accept="image/*"
-                multiple
+                :multiple="multiple"
                 class="hidden"
                 @change="onFiles"
               />

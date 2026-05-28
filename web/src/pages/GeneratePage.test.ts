@@ -1,8 +1,12 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { defineComponent } from "vue";
+import { defineComponent, nextTick } from "vue";
 import GeneratePage from "./GeneratePage.vue";
-import type { GalleryImage } from "../types";
+import type {
+  GalleryImage,
+  GenerateFormState,
+  ModelInfoExtended,
+} from "../types";
 
 const entry: GalleryImage = {
   filename: "generate-visible.png",
@@ -20,16 +24,20 @@ const entry: GalleryImage = {
   },
 };
 
+const submitMock = vi.hoisted(() => vi.fn());
+const fetchModelsMock = vi.hoisted(() => vi.fn(async () => []));
+
 vi.mock("../api", () => ({
-  fetchModels: vi.fn(async () => []),
+  fetchModels: fetchModelsMock,
   listGallery: vi.fn(async () => [entry]),
   deleteGalleryImage: vi.fn(async () => undefined),
+  updateQueueJobTargetGpu: vi.fn(async () => undefined),
 }));
 
 vi.mock("../composables/useGenerateStream", () => ({
   useGenerateStream: () => ({
     jobs: { value: [] },
-    submit: vi.fn(),
+    submit: submitMock,
     cancel: vi.fn(),
     remove: vi.fn(),
     clearDone: vi.fn(),
@@ -53,9 +61,33 @@ const GalleryFeedStub = defineComponent({
   template: '<div data-test="gallery-feed">{{ entries.length }}</div>',
 });
 
+const fluxModel: ModelInfoExtended = {
+  name: "flux-dev:q4",
+  family: "flux",
+  size_gb: 12,
+  is_loaded: false,
+  last_used: null,
+  hf_repo: "black-forest-labs/FLUX.1-dev",
+  downloaded: true,
+  default_steps: 28,
+  default_guidance: 3.5,
+  default_width: 1024,
+  default_height: 1024,
+  description: "",
+};
+
+const qwenEditModel: ModelInfoExtended = {
+  ...fluxModel,
+  name: "qwen-image-edit:q4",
+  family: "qwen-image-edit",
+  hf_repo: "Qwen/Qwen-Image-Edit",
+};
+
 describe("GeneratePage layout and visibility", () => {
   beforeEach(() => {
     localStorage.clear();
+    submitMock.mockClear();
+    fetchModelsMock.mockResolvedValue([]);
   });
 
   it("uses a wider large-screen shell and controls rail", () => {
@@ -84,13 +116,69 @@ describe("GeneratePage layout and visibility", () => {
     expect(feed.props("hideMode")).toBeUndefined();
     expect(feed.props("revealed")).toBeUndefined();
   });
+
+  it("blocks non-Qwen mask submissions until a source image is selected", async () => {
+    fetchModelsMock.mockResolvedValue([fluxModel]);
+    const wrapper = mount(GeneratePage, {
+      global: { stubs: pageStubs() },
+    });
+    await flushPromises();
+
+    const params = wrapper.getComponent({ name: "GenerateParamsPanel" });
+    const current = params.props("modelValue") as GenerateFormState;
+    params.vm.$emit("update:modelValue", {
+      ...current,
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
+    });
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("Mask image needs a source image.");
+  });
+
+  it("submits Qwen edit images without sending stale mask state", async () => {
+    fetchModelsMock.mockResolvedValue([qwenEditModel]);
+    const wrapper = mount(GeneratePage, {
+      global: { stubs: pageStubs() },
+    });
+    await flushPromises();
+
+    const params = wrapper.getComponent({ name: "GenerateParamsPanel" });
+    const current = params.props("modelValue") as GenerateFormState;
+    params.vm.$emit("update:modelValue", {
+      ...current,
+      imageAttachments: [
+        { kind: "upload", filename: "target.png", base64: "TARGET" },
+      ],
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
+    });
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    const req = submitMock.mock.calls[0][0];
+    expect(req.edit_images).toEqual(["TARGET"]);
+    expect(req.mask_image).toBeUndefined();
+    expect(req.source_image).toBeUndefined();
+  });
 });
 
 function pageStubs() {
   return {
     TopBar: { template: "<header />" },
-    Composer: { template: "<section />" },
+    Composer: {
+      props: ["submitError"],
+      emits: ["submit"],
+      template:
+        '<section><p v-if="submitError">{{ submitError }}</p><button data-test="composer-submit" @click="$emit(\'submit\')">submit</button></section>',
+    },
     GenerateParamsPanel: {
+      name: "GenerateParamsPanel",
+      props: ["modelValue"],
+      emits: ["update:modelValue"],
       template: "<aside />",
       methods: { setExpanded: vi.fn() },
     },

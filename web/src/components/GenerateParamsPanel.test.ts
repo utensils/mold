@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import GenerateParamsPanel from "./GenerateParamsPanel.vue";
 import type { GenerateFormState, ModelInfoExtended } from "../types";
@@ -118,6 +118,22 @@ function mountPanel(
 ) {
   return mount(GenerateParamsPanel, {
     props: { modelValue: form, models },
+    global: {
+      stubs: {
+        MaskEditorModal: {
+          props: ["open", "sourceImage"],
+          emits: ["apply", "close"],
+          template:
+            "<div v-if=\"open\" data-test=\"mask-editor-stub\"><button data-test=\"apply-mask-edit\" @click=\"$emit('apply', { kind: 'upload', filename: 'edited-mask.png', base64: 'EDITED_MASK' })\">apply</button></div>",
+        },
+        ImagePickerModal: {
+          props: ["open", "title", "multiple"],
+          emits: ["pick", "close"],
+          template:
+            '<div v-if="open" data-test="mask-base-picker-stub" :data-title="title" :data-multiple="String(multiple)"><button data-test="stub-pick-mask-base" @click="$emit(\'pick\', [{ kind: \'gallery\', filename: \'gallery-base.png\', base64: \'GALLERY_BASE\' }])">pick</button></div>',
+        },
+      },
+    },
   });
 }
 
@@ -232,6 +248,86 @@ describe("GenerateParamsPanel", () => {
     await w.find("[data-test='params-summary-toggle']").trigger("click");
 
     expect(w.text()).toContain("Strength");
+  });
+
+  it("keeps direct mask upload available and stores the uploaded mask", async () => {
+    const w = mountPanel();
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    const input = w.get("[data-test='mask-upload']")
+      .element as HTMLInputElement;
+    Object.defineProperty(input, "files", {
+      value: [new File(["mask"], "mask.png", { type: "image/png" })],
+    });
+    await w.get("[data-test='mask-upload']").trigger("change");
+    await flushPromises();
+
+    const events = w.emitted("update:modelValue");
+    expect(events).toBeTruthy();
+    const last = events![events!.length - 1][0] as GenerateFormState;
+    expect(last.maskImage?.filename).toBe("mask.png");
+    expect(last.maskImage?.base64).toMatch(/^[A-Za-z0-9+/]+=*$/);
+  });
+
+  it("opens the mask editor from the current source image and applies the edited mask", async () => {
+    const w = mountPanel(
+      makeForm({
+        imageAttachments: [
+          { kind: "upload", filename: "source.png", base64: "SOURCE" },
+        ],
+      }),
+    );
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    await w.get("[data-test='edit-source-mask']").trigger("click");
+    expect(w.find("[data-test='mask-editor-stub']").exists()).toBe(true);
+
+    await w.get("[data-test='apply-mask-edit']").trigger("click");
+
+    const events = w.emitted("update:modelValue");
+    expect(events).toBeTruthy();
+    const last = events![events!.length - 1][0] as GenerateFormState;
+    expect(last.maskImage).toEqual({
+      kind: "upload",
+      filename: "edited-mask.png",
+      base64: "EDITED_MASK",
+    });
+  });
+
+  it("disables source-based mask editing until a source image is selected", async () => {
+    const w = mountPanel();
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    const button = w.get("[data-test='edit-source-mask']");
+    expect((button.element as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("opens a single-image picker for mask editor base images", async () => {
+    const w = mountPanel();
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    await w.get("[data-test='pick-mask-base']").trigger("click");
+    const picker = w.get("[data-test='mask-base-picker-stub']");
+    expect(picker.attributes("data-title")).toBe("Mask base image");
+    expect(picker.attributes("data-multiple")).toBe("false");
+  });
+
+  it("hides mask controls for Qwen image edit", async () => {
+    const qwenEdit = {
+      ...baseModel,
+      name: "qwen-image-edit:q4",
+      family: "qwen-image-edit",
+    };
+    const w = mountPanel(
+      makeForm({ model: "qwen-image-edit:q4", modelFamily: "qwen-image-edit" }),
+      [qwenEdit],
+    );
+
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    expect(w.find("[data-test='mask-upload']").exists()).toBe(false);
+    expect(w.find("[data-test='edit-source-mask']").exists()).toBe(false);
+    expect(w.find("[data-test='pick-mask-base']").exists()).toBe(false);
   });
 
   it("renders the LoRA picker for Z-Image models", async () => {

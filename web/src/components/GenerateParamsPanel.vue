@@ -20,6 +20,8 @@ import {
 } from "../types";
 import LoraPicker from "./LoraPicker.vue";
 import ModelPicker from "./ModelPicker.vue";
+import ImagePickerModal from "./ImagePickerModal.vue";
+import MaskEditorModal from "./MaskEditorModal.vue";
 import {
   isQwenImageEditFamily,
   outputFormatsForFamily,
@@ -77,6 +79,9 @@ const showStrength = computed(
     props.modelValue.imageAttachments.length > 0 &&
     !isQwenImageEditFamily(family.value),
 );
+const currentSourceImage = computed(
+  () => props.modelValue.imageAttachments[0] ?? null,
+);
 
 function selectModel(m: ModelInfoExtended) {
   const next: GenerateFormState = {
@@ -114,6 +119,9 @@ function selectModel(m: ModelInfoExtended) {
   next.enableAudio = familySupportsAudio(m.family) ? true : null;
   if (isQwenImageEditFamily(m.family)) {
     next.batchSize = 1;
+    next.maskImage = null;
+    next.controlImage = null;
+    next.controlModel = "";
   } else if (next.imageAttachments.length > 1) {
     next.imageAttachments = next.imageAttachments.slice(0, 1);
   }
@@ -177,6 +185,9 @@ function onChangeFps(raw: string) {
 }
 
 const advancedOpen = ref(false);
+const showMaskEditor = ref(false);
+const showMaskBasePicker = ref(false);
+const maskEditorSource = ref<SourceImageState | null>(null);
 
 const sizePresets = [512, 768, 1024] as const;
 const batchChips = [1, 2, 3, 4] as const;
@@ -313,6 +324,29 @@ async function readMediaState(event: Event): Promise<SourceMediaState | null> {
 
 async function setMaskImage(event: Event) {
   patch("maskImage", await readImageState(event));
+}
+
+function openMaskFromSource() {
+  if (!currentSourceImage.value) return;
+  maskEditorSource.value = currentSourceImage.value;
+  showMaskEditor.value = true;
+}
+
+function openMaskBasePicker() {
+  showMaskBasePicker.value = true;
+}
+
+function onPickMaskBase(images: SourceImageState[]) {
+  const image = images[0] ?? null;
+  showMaskBasePicker.value = false;
+  if (!image) return;
+  maskEditorSource.value = image;
+  showMaskEditor.value = true;
+}
+
+function onApplyMask(mask: SourceImageState) {
+  patch("maskImage", mask);
+  showMaskEditor.value = false;
 }
 
 async function setControlImage(event: Event) {
@@ -624,6 +658,7 @@ function removeKeyframe(index: number) {
               type="file"
               accept="image/png,image/jpeg"
               class="mt-1 block w-full text-[11px]"
+              data-test="mask-upload"
               @change="setMaskImage"
             />
             <span v-if="modelValue.maskImage" class="mt-1 block truncate">
@@ -636,6 +671,25 @@ function removeKeyframe(index: number) {
                 clear
               </button>
             </span>
+            <div class="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                class="rounded-md bg-slate-800 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="!currentSourceImage"
+                data-test="edit-source-mask"
+                @click.prevent="openMaskFromSource"
+              >
+                Edit source
+              </button>
+              <button
+                type="button"
+                class="rounded-md bg-slate-800 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-700"
+                data-test="pick-mask-base"
+                @click.prevent="openMaskBasePicker"
+              >
+                Pick base
+              </button>
+            </div>
           </label>
           <label class="rounded-lg bg-slate-900/40 p-2 text-xs text-slate-300">
             Control image
@@ -694,6 +748,20 @@ function removeKeyframe(index: number) {
           @input="
             patch('upscaleModel', ($event.target as HTMLInputElement).value)
           "
+        />
+        <ImagePickerModal
+          :open="showMaskBasePicker"
+          title="Mask base image"
+          :multiple="false"
+          @pick="onPickMaskBase"
+          @close="showMaskBasePicker = false"
+        />
+        <MaskEditorModal
+          :open="showMaskEditor"
+          :source-image="maskEditorSource"
+          :initial-mask="modelValue.maskImage"
+          @apply="onApplyMask"
+          @close="showMaskEditor = false"
         />
       </section>
 
