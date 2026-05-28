@@ -1368,6 +1368,7 @@ function removeKeyframe(index: number) {
                   </option>
                 </select>
                 <PlacementPanel
+                  v-if="!isTransformerComponent(component)"
                   :model-value="modelValue.placement"
                   :family="family"
                   :model="modelValue.model"

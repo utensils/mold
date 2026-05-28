@@ -5,11 +5,12 @@ import type { GenerateRequestWire, QueueEntry } from "../types";
 import RunningJobCard from "./RunningJobCard.vue";
 
 type GpuLane = { ordinal: number; state?: string };
-type LaneKey = number | null;
+type LaneKey = number | "queue";
+type RequestedLane = number | null;
 type DisplayItem = {
   job: Job;
   queueEntry: QueueEntry | null;
-  requestedLane: LaneKey;
+  requestedLane: RequestedLane;
   sortState: "running" | "queued" | "settled";
   position: number;
 };
@@ -39,7 +40,7 @@ const hasFinished = computed(() =>
 const laneThreshold = ref(2);
 const draggedQueueId = ref<string | null>(null);
 
-function queueLane(entry: QueueEntry | null, job: Job): LaneKey {
+function queueLane(entry: QueueEntry | null, job: Job): RequestedLane {
   if (entry?.state === "running") return entry.gpu ?? job.progress.gpu ?? null;
   if (entry?.state === "queued") {
     return entry.target_gpu ?? entry.preferred_gpu ?? null;
@@ -159,17 +160,22 @@ const gpuOrdinals = computed(() => {
   for (const item of displayItems.value) {
     if (item.requestedLane !== null) ordinals.add(item.requestedLane);
   }
-  if (ordinals.size === 0 && displayItems.value.length > 0) ordinals.add(0);
   return Array.from(ordinals).sort((a, b) => a - b);
 });
 
 function assignedLaneItems() {
+  if (gpuOrdinals.value.length === 0) {
+    return displayItems.value.map((item) => ({
+      ...item,
+      lane: "queue" as const,
+    }));
+  }
   const threshold = Number.isFinite(laneThreshold.value)
     ? Math.max(1, laneThreshold.value)
     : 2;
   const counts = new Map<number, number>();
   const lanes = gpuOrdinals.value;
-  const fallbackLane = lanes[0] ?? 0;
+  const fallbackLane = lanes[0];
 
   return displayItems.value.map((item) => {
     let lane = item.requestedLane;
@@ -187,6 +193,15 @@ function assignedLaneItems() {
 const lanes = computed(() => {
   const items = assignedLaneItems();
   const keys = [...gpuOrdinals.value];
+  if (keys.length === 0) {
+    return [
+      {
+        key: "queue" as const,
+        label: "Queue",
+        items,
+      },
+    ];
+  }
   return keys
     .map((key) => ({
       key,
@@ -208,7 +223,7 @@ const lanes = computed(() => {
 });
 
 function canDrag(item: DisplayItem): boolean {
-  return item.queueEntry?.state === "queued";
+  return item.queueEntry?.state === "queued" && gpuOrdinals.value.length > 0;
 }
 
 function onDragStart(item: DisplayItem, event: DragEvent) {
@@ -221,7 +236,8 @@ function onDragStart(item: DisplayItem, event: DragEvent) {
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
 }
 
-function onDrop(targetGpu: number) {
+function onDrop(targetGpu: LaneKey) {
+  if (targetGpu === "queue") return;
   if (!draggedQueueId.value) return;
   emit("lane-change", draggedQueueId.value, targetGpu);
   draggedQueueId.value = null;
@@ -251,7 +267,9 @@ function onDragEnd() {
       v-for="lane in lanes"
       :key="lane.key"
       class="flex flex-col gap-2"
-      :data-test="`queue-lane-gpu-${lane.key}`"
+      :data-test="
+        lane.key === 'queue' ? 'queue-lane-queue' : `queue-lane-gpu-${lane.key}`
+      "
       @dragover.prevent
       @drop="onDrop(lane.key)"
     >

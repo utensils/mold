@@ -155,4 +155,19 @@ describe("PlacementPanel", () => {
       },
     });
   });
+
+  it("maps live component names to the family-specific text encoder field", async () => {
+    const wrapper = await mountPanel({
+      family: "qwen-image",
+      component: "text encoder",
+    });
+    await wrapper
+      .get("[data-test='component-placement-select']")
+      .setValue("gpu:1");
+
+    const emitted = wrapper.emitted("update:modelValue");
+    const last = emitted!.at(-1)![0] as import("../types").DevicePlacement;
+    expect(last.advanced?.qwen).toEqual({ kind: "gpu", ordinal: 1 });
+    expect(last.advanced?.t5).toBeNull();
+  });
 });

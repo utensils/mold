@@ -49,6 +49,36 @@ const ONE_FLUX_LORA: &str = r#"{
     "metadata": { "totalPages": 1 }
 }"#;
 
+const ONE_CONTROLNET: &str = r#"{
+    "items": [{
+        "id": 9101,
+        "name": "Test SDXL ControlNet",
+        "type": "Controlnet",
+        "nsfw": false,
+        "creator": { "username": "alice" },
+        "stats": { "downloadCount": 99, "rating": 4.5, "favoriteCount": 7 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 8101,
+            "name": "v1",
+            "baseModel": "SDXL 1.0",
+            "baseModelType": "Standard",
+            "trainedWords": [],
+            "files": [{
+                "id": 1,
+                "name": "controlnet.safetensors",
+                "sizeKB": 100000,
+                "downloadCount": 1,
+                "metadata": { "format": "SafeTensor" },
+                "downloadUrl": "https://civitai.example/controlnet.safetensors",
+                "hashes": { "SHA256": "feedface" }
+            }],
+            "images": []
+        }]
+    }],
+    "metadata": { "totalPages": 1 }
+}"#;
+
 fn flux_lora_opts(q: &str) -> LiveSearchOpts {
     LiveSearchOpts {
         q: Some(q.into()),
@@ -91,6 +121,32 @@ async fn civitai_search_returns_normalized_entries() {
     assert_eq!(row.kind, Kind::Lora);
     assert_eq!(row.family, Family::Flux);
     assert_eq!(row.trained_words, vec!["mold trigger".to_string()]);
+}
+
+#[tokio::test]
+async fn civitai_controlnet_search_uses_controlnet_type_filter() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("query", "control"))
+        .and(query_param("types", "Controlnet"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ONE_CONTROLNET))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let mut opts = flux_lora_opts("control");
+    opts.family = Some(Family::Sdxl);
+    opts.kind = Some(Kind::ControlNet);
+
+    let entries = search(&server.uri(), "https://hf.unused", &cache, &opts)
+        .await
+        .expect("controlnet live search");
+
+    assert_eq!(entries.len(), 1, "one normalized ControlNet expected");
+    assert_eq!(entries[0].kind, Kind::ControlNet);
+    assert_eq!(entries[0].family, Family::Sdxl);
 }
 
 #[tokio::test]

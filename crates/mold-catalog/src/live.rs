@@ -472,9 +472,12 @@ async fn civitai_search(
             Some(Kind::Checkpoint) => {
                 q.append_pair("types", "Checkpoint");
             }
-            // Vae / TextEncoder / ControlNet aren't searchable on Civitai
-            // (or are not yet first-class in mold), so we fall through to
-            // the default — both Checkpoints and LoRAs.
+            Some(Kind::ControlNet) => {
+                q.append_pair("types", "Controlnet");
+            }
+            // Vae / TextEncoder aren't searchable on Civitai (or are not
+            // yet first-class in mold), so we fall through to the default —
+            // both Checkpoints and LoRAs.
             _ => {
                 q.append_pair("types", "Checkpoint");
                 q.append_pair("types", "LORA");

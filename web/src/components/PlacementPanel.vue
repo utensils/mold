@@ -104,10 +104,24 @@ function componentToAdvancedField(
   const key = (component ?? "").toLowerCase().replace(/[-.\s]/g, "_");
   if (key.includes("transformer")) return "transformer";
   if (key.includes("vae")) return "vae";
+  if (key.includes("clip_g") || key.includes("clip_2")) return "clip_g";
   if (key === "clip_l" || key.includes("clip_l")) return "clip_l";
-  if (key === "clip_g" || key.includes("clip_g")) return "clip_g";
+  if (key.includes("clip")) return "clip_l";
   if (key === "t5" || key.includes("t5")) return "t5";
   if (key === "qwen" || key.includes("qwen")) return "qwen";
+  if (key === "text_encoder" || key.includes("text_encoder")) {
+    switch (props.family) {
+      case "flux2":
+      case "flux.2":
+      case "flux2-klein":
+      case "z-image":
+      case "qwen-image":
+      case "qwen_image":
+        return "qwen";
+      default:
+        return "t5";
+    }
+  }
   return null;
 }
 

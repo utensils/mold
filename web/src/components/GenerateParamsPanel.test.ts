@@ -52,8 +52,8 @@ vi.mock("../api", async (importOriginal) => {
           ],
         },
         {
-          kind: "text_encoder",
-          name: "clip_l",
+          kind: "clip",
+          name: "clip encoder",
           present: true,
           path: "/models/flux/clip_l.safetensors",
           repair_model: "flux-dev:q4",
@@ -66,8 +66,8 @@ vi.mock("../api", async (importOriginal) => {
           ],
         },
         {
-          kind: "text_encoder",
-          name: "clip_g",
+          kind: "clip",
+          name: "clip-g encoder",
           present: true,
           path: "/models/flux/clip_g.safetensors",
           repair_model: "flux-dev:q4",
@@ -572,8 +572,8 @@ describe("GenerateParamsPanel", () => {
       expect.arrayContaining([
         expect.stringContaining("transformer"),
         expect.stringContaining("vae"),
-        expect.stringContaining("clip_l"),
-        expect.stringContaining("clip_g"),
+        expect.stringContaining("clip encoder"),
+        expect.stringContaining("clip-g encoder"),
       ]),
     );
     const transformerRow = rows.find((row) =>
@@ -586,6 +586,9 @@ describe("GenerateParamsPanel", () => {
     expect(
       w.findAll("[data-test='component-option-select']")[0].text(),
     ).toContain("alternate-vae.safetensors");
+    expect(w.findAll("[data-test='component-placement-select']")).toHaveLength(
+      3,
+    );
     w.unmount();
   });
 
@@ -633,6 +636,29 @@ describe("GenerateParamsPanel", () => {
         qwen: null,
       },
     });
+    w.unmount();
+  });
+
+  it("maps live-style CLIP component names to distinct placement fields", async () => {
+    const w = mountPanel(makeForm(), [baseModel]);
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+    await vi.dynamicImportSettled();
+
+    const rows = w.findAll("[data-test='component-row']");
+    const clipGRow = rows.find((row) => row.text().includes("clip-g encoder"));
+    expect(clipGRow).toBeTruthy();
+
+    await clipGRow!
+      .get("[data-test='component-placement-select']")
+      .setValue("gpu:0");
+
+    const events = w.emitted("update:modelValue");
+    const last = events![events!.length - 1][0] as GenerateFormState;
+    expect(last.placement?.advanced?.clip_g).toEqual({
+      kind: "gpu",
+      ordinal: 0,
+    });
+    expect(last.placement?.advanced?.clip_l).toBeNull();
     w.unmount();
   });
 });

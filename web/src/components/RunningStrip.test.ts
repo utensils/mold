@@ -222,5 +222,12 @@ describe("RunningStrip queue lanes", () => {
 
     expect(wrapper.text()).toContain("qwen-image:q8");
     expect(wrapper.text()).toContain("Queued (position 7)");
+    expect(wrapper.find('[data-test="queue-lane-gpu-0"]').exists()).toBe(false);
+    expect(wrapper.get('[data-test="queue-lane-queue"]').text()).toContain(
+      "Queue",
+    );
+    expect(
+      wrapper.get('[data-queue-id="srv-server-only"]').attributes("draggable"),
+    ).toBe("false");
   });
 });
