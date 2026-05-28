@@ -578,11 +578,10 @@ pub async fn list_installed_catalog(
             }
         }
         if let Some(f) = family_filter.as_deref() {
-            let family_matches = compatible_lora_families.as_ref().is_some_and(|families| {
-                families
-                    .iter()
-                    .any(|candidate| *candidate == sidecar.family)
-            }) || sidecar.family == f;
+            let family_matches = compatible_lora_families
+                .as_ref()
+                .is_some_and(|families| families.contains(&sidecar.family))
+                || sidecar.family == f;
             if !family_matches {
                 continue;
             }
@@ -647,7 +646,7 @@ pub async fn list_loras(
                 return None;
             }
             if let Some(families) = family_filter.as_ref() {
-                if !families.iter().any(|family| *family == sidecar.family) {
+                if !families.contains(&sidecar.family) {
                     return None;
                 }
             }
