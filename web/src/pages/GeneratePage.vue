@@ -17,6 +17,7 @@ import { useGenerateForm } from "../composables/useGenerateForm";
 import { isQwenImageEditFamily } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { decideChainRouting } from "../lib/chainRouting";
+import { isStandaloneGenerationModel } from "../lib/modelFilters";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
   ChainRequestWire,
@@ -449,7 +450,9 @@ onMounted(async () => {
     console.error(e);
   }
   if (!form.state.value.model) {
-    const first = models.value.find((m) => m.downloaded);
+    const first = models.value.find(
+      (m) => m.downloaded && isStandaloneGenerationModel(m),
+    );
     if (first) form.applyModelDefaults(first);
   }
   startAutoRefresh();
