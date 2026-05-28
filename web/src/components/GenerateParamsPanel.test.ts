@@ -557,4 +557,21 @@ describe("GenerateParamsPanel", () => {
     ).toContain("alternate-vae.safetensors");
     w.unmount();
   });
+
+  it("renders estimated peak memory as a used over available progress bar", async () => {
+    const w = mountPanel(makeForm(), [baseModel]);
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+    await vi.dynamicImportSettled();
+
+    const bar = w.get("[data-test='memory-estimate-bar']");
+    expect(bar.attributes("aria-valuenow")).toBe("52");
+    expect(bar.attributes("aria-valuemax")).toBe("100");
+    expect(bar.text()).toContain("52%");
+    expect(bar.text()).toContain("12.5 GB used");
+    expect(bar.text()).toContain("24.0 GB available");
+    expect(
+      w.get("[data-test='memory-estimate-bar-fill']").attributes("style"),
+    ).toContain("width: 52.1%");
+    w.unmount();
+  });
 });
