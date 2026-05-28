@@ -6,7 +6,6 @@ import { mediaKind } from "../types";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
 import TopBar from "../components/TopBar.vue";
-import { useHideMode } from "../composables/useHideMode";
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
@@ -66,15 +65,6 @@ function setMuted(next: boolean) {
 }
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
-
-// Hide mode is a single global privacy knob shared with Generate; see
-// `useHideMode` for button semantics (toggle hides everything when any
-// tile is visible, reveals all only when the shroud is fully applied).
-const hide = useHideMode();
-
-function revealOne(item: GalleryImage) {
-  hide.revealOne(item.filename);
-}
 
 /*
  * Multi-select.
@@ -336,14 +326,12 @@ onMounted(async () => {
       :muted="muted"
       :counts="counts"
       :loading="loading"
-      :hide-mode="!hide.anyVisible.value"
       :select-mode="selectMode"
       :selection-count="selection.size"
       @update:filter="(f) => (filter = f)"
       @update:search="(s) => (search = s)"
       @update:view="setView"
       @update:muted="setMuted"
-      @update:hide-mode="hide.toggle"
       @update:select-mode="setSelectMode"
       @refresh="refresh"
     />
@@ -368,11 +356,8 @@ onMounted(async () => {
         :muted="muted"
         :select-mode="selectMode"
         :selection="selection"
-        :hide-mode="hide.hideMode.value"
-        :revealed="hide.revealed.value"
         @open="openItem"
         @toggle-select="toggleSelect"
-        @reveal="revealOne"
         @drag-select="onDragSelect"
       />
     </main>

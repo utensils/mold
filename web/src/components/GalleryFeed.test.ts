@@ -1,0 +1,57 @@
+import { mount } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import GalleryFeed from "./GalleryFeed.vue";
+import type { GalleryImage } from "../types";
+
+class FakeIntersectionObserver {
+  observe() {}
+  disconnect() {}
+}
+
+const entries: GalleryImage[] = [
+  {
+    filename: "recent.png",
+    timestamp: 1_700_000_000,
+    format: "png",
+    metadata: {
+      prompt: "recent image",
+      model: "flux-dev:fp16",
+      seed: 7,
+      steps: 20,
+      guidance: 3.5,
+      width: 1024,
+      height: 1024,
+      version: "test",
+    },
+  },
+];
+
+describe("GalleryFeed visibility", () => {
+  beforeEach(() => {
+    (
+      globalThis as typeof globalThis & {
+        IntersectionObserver: typeof FakeIntersectionObserver;
+      }
+    ).IntersectionObserver = FakeIntersectionObserver;
+  });
+
+  afterEach(() => {
+    delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
+  });
+
+  it("keeps entries visible even if legacy hide props are passed", () => {
+    const wrapper = mount(GalleryFeed, {
+      props: {
+        entries,
+        loading: false,
+        view: "grid",
+        muted: true,
+        hideMode: true,
+        revealed: new Set<string>(),
+      },
+    });
+
+    expect(wrapper.text()).toContain("recent image");
+    expect(wrapper.text()).not.toContain("Reveal");
+  });
+});

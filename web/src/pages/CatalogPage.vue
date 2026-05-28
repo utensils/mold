@@ -10,7 +10,7 @@ import TopBar from "../components/TopBar.vue";
 const cat = useCatalog();
 
 // TopBar requires gallery-shaped props even when those filters are hidden
-// for the catalog route (see TopBar's `v-if="$route.name === 'gallery'"`).
+// for the catalog route.
 // We feed it placeholders identical to GeneratePage's strategy.
 const topBarCounts = computed(() => ({
   total: cat.entries.value.length,
@@ -37,7 +37,6 @@ onMounted(() => {
       @update:search="() => {}"
       @update:view="() => {}"
       @update:muted="() => {}"
-      @update:hide-mode="() => {}"
       @refresh="() => cat.refresh()"
     />
 
