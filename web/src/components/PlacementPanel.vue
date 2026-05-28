@@ -14,6 +14,7 @@ const props = defineProps<{
   model: string;
   gpus: GpuEntry[];
   embedded?: boolean;
+  component?: string;
 }>();
 
 const emit = defineEmits<{
@@ -23,6 +24,7 @@ const emit = defineEmits<{
 const { supportsAdvanced } = usePlacement();
 
 const tier2 = computed(() => supportsAdvanced(props.family));
+const componentMode = computed(() => Boolean(props.component));
 const advancedOpen = ref(false);
 
 // The whole placement section collapses by default — most users never touch
@@ -96,6 +98,29 @@ function emitAdvanced<K extends keyof AdvancedPlacement>(
   });
 }
 
+function componentToAdvancedField(
+  component: string | undefined,
+): keyof AdvancedPlacement | null {
+  const key = (component ?? "").toLowerCase().replace(/[-.\s]/g, "_");
+  if (key.includes("transformer")) return "transformer";
+  if (key.includes("vae")) return "vae";
+  if (key === "clip_l" || key.includes("clip_l")) return "clip_l";
+  if (key === "clip_g" || key.includes("clip_g")) return "clip_g";
+  if (key === "t5" || key.includes("t5")) return "t5";
+  if (key === "qwen" || key.includes("qwen")) return "qwen";
+  return null;
+}
+
+const componentField = computed(() =>
+  componentToAdvancedField(props.component),
+);
+
+function emitComponent(opt: string) {
+  const field = componentField.value;
+  if (!field) return;
+  emitAdvanced(field, opt);
+}
+
 async function saveAsDefault() {
   if (!props.modelValue) return;
   const encoded = encodeURIComponent(props.model);
@@ -141,6 +166,28 @@ const isDirty = computed(() => props.modelValue !== null);
 
 <template>
   <section
+    v-if="componentMode"
+    class="shrink-0"
+    data-test="component-placement"
+  >
+    <select
+      v-if="componentField && tier2"
+      :value="advancedValue(componentField)"
+      class="rounded bg-slate-950/70 px-2 py-1 text-[11px] text-slate-200"
+      data-test="component-placement-select"
+      aria-label="Component device placement"
+      @change="emitComponent(($event.target as HTMLSelectElement).value)"
+    >
+      <option value="auto">Auto</option>
+      <option value="cpu">CPU</option>
+      <option v-for="g in gpus" :key="g.ordinal" :value="`gpu:${g.ordinal}`">
+        GPU {{ g.ordinal }}
+      </option>
+    </select>
+  </section>
+
+  <section
+    v-else
     class="flex flex-col gap-2 text-sm"
     :class="embedded ? '' : 'glass rounded-2xl p-3'"
   >

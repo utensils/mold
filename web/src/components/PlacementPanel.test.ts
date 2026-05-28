@@ -6,12 +6,14 @@ async function mountPanel(props: {
   family: string;
   placement?: import("../types").DevicePlacement | null;
   model?: string;
+  component?: string;
 }) {
   const wrapper = mount(PlacementPanel, {
     props: {
       modelValue: props.placement ?? null,
       family: props.family,
       model: props.model ?? "flux-dev:q4",
+      component: props.component,
       gpus: [
         { ordinal: 0, name: "RTX 3090" },
         { ordinal: 1, name: "RTX 3090" },
@@ -117,5 +119,40 @@ describe("PlacementPanel", () => {
     expect(
       wrapper.find("button[data-test='placement-section-toggle']").exists(),
     ).toBe(true);
+  });
+
+  it("renders a compact component pin without the standalone section chrome", async () => {
+    const wrapper = await mountPanel({ family: "flux", component: "vae" });
+    expect(
+      wrapper.find("button[data-test='placement-section-toggle']").exists(),
+    ).toBe(false);
+    const select = wrapper.get("[data-test='component-placement-select']");
+    expect(select.findAll("option").map((option) => option.text())).toEqual([
+      "Auto",
+      "CPU",
+      "GPU 0",
+      "GPU 1",
+    ]);
+  });
+
+  it("maps component pins to advanced placement fields", async () => {
+    const wrapper = await mountPanel({ family: "flux", component: "clip_g" });
+    await wrapper
+      .get("[data-test='component-placement-select']")
+      .setValue("cpu");
+
+    const emitted = wrapper.emitted("update:modelValue");
+    const last = emitted!.at(-1)![0] as import("../types").DevicePlacement;
+    expect(last).toEqual({
+      text_encoders: { kind: "auto" },
+      advanced: {
+        transformer: { kind: "auto" },
+        vae: { kind: "auto" },
+        clip_l: null,
+        clip_g: { kind: "cpu" },
+        t5: null,
+        qwen: null,
+      },
+    });
   });
 });

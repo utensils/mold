@@ -51,6 +51,34 @@ vi.mock("../api", async (importOriginal) => {
             },
           ],
         },
+        {
+          kind: "text_encoder",
+          name: "clip_l",
+          present: true,
+          path: "/models/flux/clip_l.safetensors",
+          repair_model: "flux-dev:q4",
+          options: [
+            {
+              label: "clip_l.safetensors",
+              path: "/models/flux/clip_l.safetensors",
+              present: true,
+            },
+          ],
+        },
+        {
+          kind: "text_encoder",
+          name: "clip_g",
+          present: true,
+          path: "/models/flux/clip_g.safetensors",
+          repair_model: "flux-dev:q4",
+          options: [
+            {
+              label: "clip_g.safetensors",
+              path: "/models/flux/clip_g.safetensors",
+              present: true,
+            },
+          ],
+        },
       ],
     })),
     downloadsStreamUrl: vi.fn(() => "/api/downloads/stream"),
@@ -509,33 +537,21 @@ describe("GenerateParamsPanel", () => {
     w.unmount();
   });
 
-  it("mirrors placement controls into the Controls panel", async () => {
-    const w = mount(GenerateParamsPanel, {
-      props: {
-        modelValue: makeForm(),
-        models: [baseModel],
-        placementGpus: [{ ordinal: 0, name: "GPU 0" }],
-        forceExpanded: true,
-        title: "Controls",
-      },
-      global: {
-        stubs: {
-          PlacementPanel: {
-            props: ["modelValue", "family", "model", "gpus"],
-            template:
-              '<section data-test="placement-panel-stub">{{ family }} {{ gpus.length }}</section>',
-          },
-        },
-      },
-    });
+  it("does not render a separate Device placement section in Controls", async () => {
+    const w = mountPanel(makeForm(), [baseModel]);
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+    await vi.dynamicImportSettled();
 
-    expect(w.find("[data-test='placement-panel-stub']").text()).toContain(
-      "flux 1",
+    expect(w.find("[data-test='placement-section-toggle']").exists()).toBe(
+      false,
+    );
+    expect(w.find("[data-test='component-status']").text()).not.toContain(
+      "Device placement",
     );
     w.unmount();
   });
 
-  it("shows server-derived memory estimate and component status in Controls", async () => {
+  it("shows component status, omits transformer asset dropdown, and keeps CLIP rows distinct", async () => {
     const w = mountPanel(makeForm(), [baseModel]);
     await w.find("[data-test='params-summary-toggle']").trigger("click");
     await vi.dynamicImportSettled();
@@ -551,9 +567,24 @@ describe("GenerateParamsPanel", () => {
     expect(
       w.find("[data-test='component-repair-link']").attributes("href"),
     ).toBe("/catalog?q=flux-dev%3Aq4");
-    expect(w.findAll("[data-test='component-option-select']")).toHaveLength(2);
+    const rows = w.findAll("[data-test='component-row']");
+    expect(rows.map((row) => row.text())).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("transformer"),
+        expect.stringContaining("vae"),
+        expect.stringContaining("clip_l"),
+        expect.stringContaining("clip_g"),
+      ]),
+    );
+    const transformerRow = rows.find((row) =>
+      row.text().includes("transformer"),
+    );
     expect(
-      w.findAll("[data-test='component-option-select']")[1].text(),
+      transformerRow?.find("[data-test='component-option-select']").exists(),
+    ).toBe(false);
+    expect(w.findAll("[data-test='component-option-select']")).toHaveLength(3);
+    expect(
+      w.findAll("[data-test='component-option-select']")[0].text(),
     ).toContain("alternate-vae.safetensors");
     w.unmount();
   });
@@ -572,6 +603,36 @@ describe("GenerateParamsPanel", () => {
     expect(
       w.get("[data-test='memory-estimate-bar-fill']").attributes("style"),
     ).toContain("width: 52.1%");
+    w.unmount();
+  });
+
+  it("updates placement from component-row pin controls", async () => {
+    const w = mountPanel(makeForm(), [baseModel]);
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+    await vi.dynamicImportSettled();
+
+    const rows = w.findAll("[data-test='component-row']");
+    const vaeRow = rows.find((row) => row.text().includes("vae"));
+    expect(vaeRow).toBeTruthy();
+
+    await vaeRow!
+      .get("[data-test='component-placement-select']")
+      .setValue("cpu");
+
+    const events = w.emitted("update:modelValue");
+    expect(events).toBeTruthy();
+    const last = events![events!.length - 1][0] as GenerateFormState;
+    expect(last.placement).toEqual({
+      text_encoders: { kind: "auto" },
+      advanced: {
+        transformer: { kind: "auto" },
+        vae: { kind: "cpu" },
+        clip_l: null,
+        clip_g: null,
+        t5: null,
+        qwen: null,
+      },
+    });
     w.unmount();
   });
 });

@@ -422,6 +422,23 @@ const catalogHref = computed(
   () => `/catalog?q=${encodeURIComponent(props.modelValue.model)}`,
 );
 
+function componentPlacementKey(component: {
+  kind: string;
+  name: string;
+}): string {
+  return component.name || component.kind;
+}
+
+function isTransformerComponent(component: {
+  kind: string;
+  name: string;
+}): boolean {
+  const key = componentPlacementKey(component).toLowerCase();
+  return (
+    component.kind.toLowerCase() === "transformer" || key === "transformer"
+  );
+}
+
 /// Force-expand from a parent (e.g. when `onSubmit` is called with no
 /// model selected — the user can't pick one until the panel is open).
 defineExpose({ setExpanded });
@@ -1295,17 +1312,6 @@ function removeKeyframe(index: number) {
           </div>
         </div>
 
-        <PlacementPanel
-          :model-value="modelValue.placement"
-          :family="family"
-          :model="modelValue.model"
-          :gpus="placementGpus"
-          :embedded="true"
-          @update:model-value="
-            (v) => patch('placement', v as GenerateFormState['placement'])
-          "
-        />
-
         <div
           class="rounded-lg bg-slate-900/40 p-3 text-xs text-slate-300"
           data-test="component-status"
@@ -1325,6 +1331,7 @@ function removeKeyframe(index: number) {
               v-for="component in componentStatus.components"
               :key="`${component.kind}:${component.name}`"
               class="rounded-md border px-2 py-1"
+              data-test="component-row"
               :class="
                 component.present
                   ? 'border-transparent bg-slate-950/20'
@@ -1345,6 +1352,7 @@ function removeKeyframe(index: number) {
               </div>
               <div class="flex items-center gap-2">
                 <select
+                  v-if="!isTransformerComponent(component)"
                   class="min-w-0 flex-1 rounded bg-slate-950/70 px-2 py-1 text-[11px] text-slate-200"
                   :value="component.path ?? ''"
                   :disabled="(component.options?.length ?? 0) <= 1"
@@ -1359,6 +1367,18 @@ function removeKeyframe(index: number) {
                     {{ option.label }}{{ option.present ? "" : " (missing)" }}
                   </option>
                 </select>
+                <PlacementPanel
+                  :model-value="modelValue.placement"
+                  :family="family"
+                  :model="modelValue.model"
+                  :gpus="placementGpus"
+                  :component="componentPlacementKey(component)"
+                  :embedded="true"
+                  @update:model-value="
+                    (v) =>
+                      patch('placement', v as GenerateFormState['placement'])
+                  "
+                />
                 <a
                   v-if="!component.present && component.repair_model"
                   :href="`/catalog?q=${encodeURIComponent(component.repair_model)}`"
