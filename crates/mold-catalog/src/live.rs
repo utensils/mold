@@ -712,7 +712,7 @@ fn hf_summary_to_entry(hit: HfSearchHit, family: Family, family_role: FamilyRole
             files: Vec::new(),
             needs_token: None,
         },
-        engine_phase: crate::civitai_map::engine_phase_for(family, Bundling::Separated),
+        engine_phase: crate::civitai_map::engine_phase_for(family, Bundling::Separated, kind),
         created_at: parse_iso(hit.created_at.as_deref()),
         updated_at: parse_iso(hit.last_modified.as_deref()),
         added_at: now,

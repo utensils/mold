@@ -208,7 +208,7 @@ pub fn from_hf(
         Bundling::SingleFile => companions_for(family, None, bundling, kind),
         Bundling::Separated => Vec::new(),
     };
-    let phase = engine_phase_for(family, bundling);
+    let phase = engine_phase_for(family, bundling, kind);
 
     let now = chrono_now_unix();
 
@@ -372,7 +372,7 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
         Bundling::Separated
     };
     let companions = companions_for(family, sub_family.as_deref(), bundling, kind);
-    let phase = engine_phase_for(family, bundling);
+    let phase = engine_phase_for(family, bundling, kind);
     let modality = match family {
         Family::LtxVideo | Family::Ltx2 => Modality::Video,
         _ => Modality::Image,

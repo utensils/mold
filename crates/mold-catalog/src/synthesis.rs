@@ -228,7 +228,7 @@ pub fn family_bundles_vae_unconditionally(family: Family) -> bool {
         Family::Ltx2 => true,
         // Always-separate VAE.
         Family::Flux2 | Family::ZImage | Family::LtxVideo => false,
-        // Single-file unsupported — engine_phase: 99 entries. Doesn't
+        // Single-file unsupported for checkpoints — no companions.
         // matter what we return; resolution will reject before VAE.
         Family::QwenImage | Family::Wuerstchen => true,
     }

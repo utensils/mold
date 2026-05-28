@@ -45,9 +45,9 @@ function formatCount(n: number): string {
         <span
           v-if="props.entry.engine_phase >= 6"
           class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 bg-amber-700/30 text-amber-200 rounded"
-          :title="`Coming in phase ${props.entry.engine_phase}`"
+          title="Unsupported by this build"
         >
-          phase {{ props.entry.engine_phase }}
+          unsupported
         </span>
       </div>
     </div>

@@ -66,12 +66,12 @@ async function handleDownload() {
 
     <!-- Meta -->
     <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
-      <!-- Phase badge -->
+      <!-- Unsupported badge -->
       <div v-if="cat.detail.value.engine_phase >= 6" class="inline-flex">
         <span
           class="text-[11px] px-2 py-0.5 rounded bg-amber-700/30 text-amber-200"
         >
-          Coming in phase {{ cat.detail.value.engine_phase }}
+          Unsupported by this build
         </span>
       </div>
 
@@ -178,7 +178,7 @@ async function handleDownload() {
         :disabled="!cat.canDownload(cat.detail.value)"
         :title="
           !cat.canDownload(cat.detail.value)
-            ? `Coming in phase ${cat.detail.value.engine_phase}`
+            ? 'Unsupported by this build'
             : 'Download this model'
         "
         class="w-full rounded-lg px-4 py-2 text-sm font-medium transition"

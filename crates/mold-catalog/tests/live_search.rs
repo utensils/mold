@@ -434,7 +434,7 @@ const HF_SEARCH_HITS: &str = r#"[
 async fn hf_search_drops_non_mold_repos() {
     // The HF search endpoint returns a flat list. Repos that don't
     // map to a supported mold family must be dropped, not surfaced
-    // with engine_phase=99.
+    // as fake unsupported catalog rows.
     let civ = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/models"))

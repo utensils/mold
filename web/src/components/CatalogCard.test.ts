@@ -45,10 +45,11 @@ describe("CatalogCard", () => {
     expect(w.text()).toContain("1,234");
   });
 
-  it("shows phase badge for engine_phase >= 6", () => {
+  it("shows unsupported badge for engine_phase >= 6", () => {
     const entry: CatalogEntryWire = { ...baseEntry, engine_phase: 6 };
     const w = mount(CatalogCard, { props: { entry } });
-    expect(w.text()).toMatch(/phase 6|coming/i);
+    expect(w.text()).toMatch(/unsupported/i);
+    expect(w.text()).not.toMatch(/phase 6|coming/i);
   });
 
   it("does not show phase badge for engine_phase 5 (LTX single-file, now downloadable)", () => {

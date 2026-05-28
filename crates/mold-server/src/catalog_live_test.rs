@@ -313,6 +313,27 @@ async fn installed_endpoint_returns_only_kind_filtered_sidecars() {
 }
 
 #[tokio::test]
+async fn installed_endpoint_treats_qwen_edit_loras_as_qwen_image_compatible() {
+    let (state, _server, tmp) = build_state().await;
+    write_lora_sidecar(tmp.path(), 42, "qwen-image", 42);
+    write_lora_sidecar(tmp.path(), 43, "flux", 43);
+
+    let router = create_router(state);
+    let (status, body) = get(
+        router,
+        "/api/catalog/installed?kind=lora&family=qwen-image-edit",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entries = parsed["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], "cv:42");
+    assert_eq!(entries[0]["family"], "qwen-image");
+}
+
+#[tokio::test]
 async fn loras_endpoint_filters_by_model_family_and_returns_all_matches() {
     let (state, _server, tmp) = build_state().await;
 
@@ -344,6 +365,23 @@ async fn loras_endpoint_filters_by_model_family_and_returns_all_matches() {
     let entries = parsed.as_array().unwrap();
     assert_eq!(entries.len(), 12);
     assert!(entries.iter().any(|entry| entry["id"] == "cv:99"));
+}
+
+#[tokio::test]
+async fn loras_endpoint_returns_qwen_image_loras_for_qwen_edit_models() {
+    let (state, _server, tmp) = build_state().await;
+    write_lora_sidecar(tmp.path(), 42, "qwen-image", 42);
+    write_lora_sidecar(tmp.path(), 43, "flux", 43);
+
+    let router = create_router(state);
+    let (status, body) = get(router, "/api/loras?model=qwen-image-edit-2511:q4").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entries = parsed.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], "cv:42");
+    assert_eq!(entries[0]["family"], "qwen-image");
 }
 
 #[tokio::test]

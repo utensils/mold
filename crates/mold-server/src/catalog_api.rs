@@ -560,6 +560,10 @@ pub async fn list_installed_catalog(
 ) -> impl IntoResponse {
     let kind_filter = q.kind.as_deref().map(|s| s.to_string());
     let family_filter = q.family.as_deref().map(|s| s.to_string());
+    let compatible_lora_families = match kind_filter.as_deref() {
+        Some("lora") => family_filter.as_deref().map(compatible_lora_families),
+        _ => None,
+    };
 
     let cfg = state.config.read().await;
     let models_dir = cfg.resolved_models_dir();
@@ -574,7 +578,12 @@ pub async fn list_installed_catalog(
             }
         }
         if let Some(f) = family_filter.as_deref() {
-            if sidecar.family != f {
+            let family_matches = compatible_lora_families.as_ref().is_some_and(|families| {
+                families
+                    .iter()
+                    .any(|candidate| *candidate == sidecar.family)
+            }) || sidecar.family == f;
+            if !family_matches {
                 continue;
             }
         }
@@ -622,7 +631,7 @@ pub async fn list_loras(
             if !mold_core::family_supports_lora(&family) {
                 return Ok(Json(Vec::new()));
             }
-            Some(family)
+            Some(compatible_lora_families(&family))
         }
         None => None,
     };
@@ -637,8 +646,8 @@ pub async fn list_loras(
             if sidecar.kind != "lora" {
                 return None;
             }
-            if let Some(family) = family_filter.as_deref() {
-                if sidecar.family != family {
+            if let Some(families) = family_filter.as_ref() {
+                if !families.iter().any(|family| *family == sidecar.family) {
                     return None;
                 }
             }
@@ -653,6 +662,15 @@ pub async fn list_loras(
             .then_with(|| a.id.cmp(&b.id))
     });
     Ok(Json(loras))
+}
+
+fn compatible_lora_families(family: &str) -> Vec<String> {
+    match family {
+        "qwen-image-edit" | "qwen_image_edit" => {
+            vec!["qwen-image".to_string(), "qwen-image-edit".to_string()]
+        }
+        other => vec![other.to_string()],
+    }
 }
 
 async fn lora_family_for_model(state: &crate::state::AppState, model: &str) -> Option<String> {

@@ -6,7 +6,7 @@
 //! entry would either have to ship its own T5 reference or trust an
 //! arbitrary repo. By committing this registry, mold ships *one* T5,
 //! *one* CLIP-L, etc., and any single-file checkpoint that demands
-//! something exotic gets `engine_phase: 99` (visible-but-unsupported).
+//! something exotic is marked unsupported by this build.
 
 use crate::entry::{Bundling, CompanionRef, Kind, Source};
 use crate::families::Family;
@@ -275,7 +275,7 @@ pub fn companions_for(
             // ~9.5 GB of unused weights and still fail the runtime check.
             push(&mut out, "ltx2-te");
         }
-        // Single-file for these is `engine_phase: 99` — no companions.
+        // Single-file checkpoints for these are unsupported — no companions.
         Family::QwenImage | Family::Wuerstchen => {}
     }
     out
