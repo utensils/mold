@@ -1376,7 +1376,6 @@ function removeKeyframe(index: number) {
                   :model="modelValue.model"
                   :gpus="placementGpus"
                   :component="componentPlacementKey(component)"
-                  :embedded="true"
                   @update:model-value="
                     (v) =>
                       patch('placement', v as GenerateFormState['placement'])
