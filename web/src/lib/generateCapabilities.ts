@@ -11,6 +11,7 @@ export interface GenerationCapabilities {
   supportsVideo: boolean;
   supportsAudio: boolean;
   supportsLora: boolean;
+  supportsControlNet: boolean;
   sourceImageMode: SourceImageMode;
   supportsMask: boolean;
   forcesBatchSizeOne: boolean;
@@ -44,6 +45,7 @@ const SCHEDULER_FAMILIES = new Set([
 const CFG_PLUS_FAMILIES = new Set(["sd3", "sd3.5"]);
 const VIDEO_FAMILIES = new Set(["ltx-video", "ltx2", "ltx-2"]);
 const AUDIO_FAMILIES = new Set(["ltx2", "ltx-2"]);
+const CONTROLNET_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5"]);
 
 export function generationCapabilitiesForFamily(
   family: string,
@@ -63,6 +65,7 @@ export function generationCapabilitiesForFamily(
     supportsLora: (LORA_CAPABLE_FAMILIES as readonly string[]).includes(
       normalized,
     ),
+    supportsControlNet: CONTROLNET_FAMILIES.has(normalized),
     sourceImageMode: qwenEdit ? "qwen-edit" : "single",
     supportsMask: !qwenEdit,
     forcesBatchSizeOne: qwenEdit,

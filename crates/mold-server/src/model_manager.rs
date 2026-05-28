@@ -911,6 +911,24 @@ fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, pat
                 .collect::<Vec<_>>()
                 .into();
         }
+        "qwen-image-runtime" => {
+            cfg.vae = to_str(&paths.vae);
+            cfg.text_encoder_files = paths
+                .text_encoder_files
+                .iter()
+                .filter_map(to_str)
+                .collect::<Vec<_>>()
+                .into();
+            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_str);
+        }
+        "wuerstchen-runtime" => {
+            cfg.vae = to_str(&paths.vae);
+            cfg.decoder = paths.decoder.as_ref().and_then(to_str);
+            cfg.clip_encoder = paths.clip_encoder.as_ref().and_then(to_str);
+            cfg.clip_tokenizer = paths.clip_tokenizer.as_ref().and_then(to_str);
+            cfg.clip_encoder_2 = paths.clip_encoder_2.as_ref().and_then(to_str);
+            cfg.clip_tokenizer_2 = paths.clip_tokenizer_2.as_ref().and_then(to_str);
+        }
         _ => {}
     }
 }
@@ -991,6 +1009,8 @@ fn known_companion_static(name: &str) -> Option<&'static str> {
         "z-image-te" => "z-image-te",
         "ltx-video-vae" => "ltx-video-vae",
         "ltx2-te" => "ltx2-te",
+        "qwen-image-runtime" => "qwen-image-runtime",
+        "wuerstchen-runtime" => "wuerstchen-runtime",
         "t5-v1_1-xxl" => "t5-v1_1-xxl",
         _ => return None,
     })
@@ -4489,6 +4509,123 @@ mod tests {
                 None => std::env::remove_var("MOLD_HOME"),
             }
         }
+    }
+
+    #[test]
+    fn resolve_intent_populates_qwen_runtime_companion_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let primary_path =
+            models_dir.join("cv-2110043/qwen-image/civitai/2110043/qwenImage_fp8.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&primary_path).unwrap();
+
+        let runtime_dir = models_dir.join("qwen-image-runtime");
+        let vae_path = runtime_dir.join("vae/diffusion_pytorch_model.safetensors");
+        let te_path = runtime_dir.join("text_encoder/model-00001-of-00004.safetensors");
+        let tok_path = runtime_dir.join("tokenizer/tokenizer.json");
+        for path in [&vae_path, &te_path, &tok_path] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(path).unwrap();
+        }
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.models.insert(
+            "qwen-image-runtime".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(vae_path.to_string_lossy().into_owned()),
+                vae: Some(vae_path.to_string_lossy().into_owned()),
+                text_encoder_files: Some(vec![te_path.to_string_lossy().into_owned()]),
+                text_tokenizer: Some(tok_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+
+        let mut entry = flux_unet_only_catalog_entry("2110043", "qwenImage_fp8.safetensors");
+        entry.family = mold_catalog::families::Family::QwenImage;
+        entry.companions = vec!["qwen-image-runtime".into()];
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let cfg = resolve_intent_to_paths("cv:2110043", &intent, &config).unwrap();
+
+        assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
+        assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
+        assert_eq!(
+            cfg.text_encoder_files.as_deref(),
+            Some(vec![te_path.to_string_lossy().into_owned()].as_slice())
+        );
+        assert_eq!(cfg.text_tokenizer.as_deref(), tok_path.to_str());
+    }
+
+    #[test]
+    fn resolve_intent_populates_wuerstchen_runtime_companion_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let primary_path = models_dir.join(
+            "hf-example/wuerstchen-prior/wuerstchen/example/wuerstchen-prior/prior.safetensors",
+        );
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&primary_path).unwrap();
+
+        let runtime_dir = models_dir.join("wuerstchen-runtime");
+        let decoder_path = runtime_dir.join("decoder/diffusion_pytorch_model.safetensors");
+        let vae_path = runtime_dir.join("vqgan/diffusion_pytorch_model.safetensors");
+        let clip_path = runtime_dir.join("text_encoder/model.safetensors");
+        let clip_tok_path = runtime_dir.join("tokenizer/tokenizer.json");
+        let clip_g_path = runtime_dir.join("prior/text_encoder/model.safetensors");
+        let clip_g_tok_path = runtime_dir.join("prior/tokenizer/tokenizer.json");
+        for path in [
+            &decoder_path,
+            &vae_path,
+            &clip_path,
+            &clip_tok_path,
+            &clip_g_path,
+            &clip_g_tok_path,
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(path).unwrap();
+        }
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.models.insert(
+            "wuerstchen-runtime".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(decoder_path.to_string_lossy().into_owned()),
+                decoder: Some(decoder_path.to_string_lossy().into_owned()),
+                vae: Some(vae_path.to_string_lossy().into_owned()),
+                clip_encoder: Some(clip_path.to_string_lossy().into_owned()),
+                clip_tokenizer: Some(clip_tok_path.to_string_lossy().into_owned()),
+                clip_encoder_2: Some(clip_g_path.to_string_lossy().into_owned()),
+                clip_tokenizer_2: Some(clip_g_tok_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+
+        let mut entry = flux_unet_only_catalog_entry("unused", "prior.safetensors");
+        entry.id = mold_catalog::entry::CatalogId::from("hf:example/wuerstchen-prior");
+        entry.source = mold_catalog::entry::Source::Hf;
+        entry.source_id = "example/wuerstchen-prior".into();
+        entry.family = mold_catalog::families::Family::Wuerstchen;
+        entry.companions = vec!["wuerstchen-runtime".into()];
+        entry.download_recipe.files[0].dest = "{family}/{author}/{name}/prior.safetensors".into();
+
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let cfg = resolve_intent_to_paths("hf:example/wuerstchen-prior", &intent, &config).unwrap();
+
+        assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
+        assert_eq!(cfg.decoder.as_deref(), decoder_path.to_str());
+        assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
+        assert_eq!(cfg.clip_encoder.as_deref(), clip_path.to_str());
+        assert_eq!(cfg.clip_tokenizer.as_deref(), clip_tok_path.to_str());
+        assert_eq!(cfg.clip_encoder_2.as_deref(), clip_g_path.to_str());
+        assert_eq!(cfg.clip_tokenizer_2.as_deref(), clip_g_tok_path.to_str());
     }
 
     #[test]

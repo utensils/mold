@@ -11,6 +11,7 @@ import type {
   Scheduler,
   SourceImageState,
   SourceMediaState,
+  CatalogEntryWire,
 } from "../types";
 import LoraPicker from "./LoraPicker.vue";
 import ModelPicker from "./ModelPicker.vue";
@@ -20,7 +21,11 @@ import { outputFormatsForFamily } from "../composables/useGenerateForm";
 import { blobToBase64 } from "../lib/base64";
 import GenerationTemplatesPanel from "./GenerationTemplatesPanel.vue";
 import PlacementPanel from "./PlacementPanel.vue";
-import { fetchGenerationEstimate, fetchModelComponents } from "../api";
+import {
+  fetchCatalogInstalled,
+  fetchGenerationEstimate,
+  fetchModelComponents,
+} from "../api";
 import {
   generationCapabilitiesForFamily,
   isQwenImageEditFamily,
@@ -136,6 +141,10 @@ function selectModel(m: ModelInfoExtended) {
   } else if (next.imageAttachments.length > 1) {
     next.imageAttachments = next.imageAttachments.slice(0, 1);
   }
+  if (!nextCapabilities.supportsControlNet) {
+    next.controlImage = null;
+    next.controlModel = "";
+  }
   emit("update:modelValue", next);
 }
 
@@ -156,6 +165,48 @@ function onAppendPromptPhrase(phrase: string) {
 }
 
 const familySupportsLora = computed(() => capabilities.value.supportsLora);
+const familySupportsControlNet = computed(
+  () => capabilities.value.supportsControlNet,
+);
+const controlNetModels = ref<CatalogEntryWire[]>([]);
+const builtInControlNetModels = computed(() =>
+  props.models
+    .filter((model) => model.family === "controlnet")
+    .sort(
+      (a, b) =>
+        Number(b.downloaded) - Number(a.downloaded) ||
+        a.name.localeCompare(b.name),
+    ),
+);
+const catalogControlNetOptions = computed(() =>
+  controlNetModels.value.map((entry) => ({
+    id: entry.id,
+    label: entry.name,
+    value: entry.primary_path ?? "",
+  })),
+);
+
+watch(
+  () => family.value,
+  async (nextFamily) => {
+    controlNetModels.value = [];
+    if (!generationCapabilitiesForFamily(nextFamily).supportsControlNet) {
+      return;
+    }
+    try {
+      const res = await fetchCatalogInstalled({
+        family: nextFamily,
+        kind: "control-net",
+      });
+      controlNetModels.value = res.entries.filter(
+        (entry) => entry.installed && entry.primary_path,
+      );
+    } catch {
+      controlNetModels.value = [];
+    }
+  },
+  { immediate: true },
+);
 
 // frames must be 8n+1 (9, 17, 25, 33, ...)
 function clampFrames(n: number): number {
@@ -329,8 +380,12 @@ function estimateRequest(): GenerateRequestWire | null {
     mask_image: !isQwenImageEditFamily(family.value)
       ? (s.maskImage?.base64 ?? null)
       : null,
-    control_image: s.controlImage?.base64 ?? null,
-    control_model: s.controlModel || null,
+    control_image: familySupportsControlNet.value
+      ? (s.controlImage?.base64 ?? null)
+      : null,
+    control_model: familySupportsControlNet.value
+      ? s.controlModel || null
+      : null,
     control_scale: s.controlScale,
     upscale_model: s.upscaleModel || null,
     frames: s.frames,
@@ -862,12 +917,16 @@ function removeKeyframe(index: number) {
               </button>
             </div>
           </label>
-          <label class="rounded-lg bg-slate-900/40 p-2 text-xs text-slate-300">
+          <label
+            v-if="familySupportsControlNet"
+            class="rounded-lg bg-slate-900/40 p-2 text-xs text-slate-300"
+          >
             Control image
             <input
               type="file"
               accept="image/png,image/jpeg"
               class="mt-1 block w-full text-[11px]"
+              data-test="control-upload"
               @change="setControlImage"
             />
             <span v-if="modelValue.controlImage" class="mt-1 block truncate">
@@ -883,17 +942,48 @@ function removeKeyframe(index: number) {
           </label>
         </div>
         <div
-          v-if="modelValue.controlImage"
+          v-if="familySupportsControlNet && modelValue.controlImage"
           class="grid grid-cols-1 gap-3 sm:grid-cols-2"
         >
-          <input
+          <select
             :value="modelValue.controlModel"
             class="rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
-            placeholder="controlnet-canny-sd15"
-            @input="
-              patch('controlModel', ($event.target as HTMLInputElement).value)
+            data-test="controlnet-select"
+            @change="
+              patch('controlModel', ($event.target as HTMLSelectElement).value)
             "
-          />
+          >
+            <option value="">None</option>
+            <option
+              v-for="model in builtInControlNetModels"
+              :key="model.name"
+              :value="model.name"
+              :disabled="!model.downloaded"
+            >
+              {{ model.name }}{{ model.downloaded ? "" : " (missing)" }}
+            </option>
+            <option
+              v-for="entry in catalogControlNetOptions"
+              :key="entry.id"
+              :value="entry.value"
+            >
+              {{ entry.label }}
+            </option>
+            <option
+              v-if="
+                modelValue.controlModel &&
+                !builtInControlNetModels.some(
+                  (model) => model.name === modelValue.controlModel,
+                ) &&
+                !catalogControlNetOptions.some(
+                  (entry) => entry.value === modelValue.controlModel,
+                )
+              "
+              :value="modelValue.controlModel"
+            >
+              {{ modelValue.controlModel }}
+            </option>
+          </select>
           <label class="text-xs text-slate-400">
             Control scale — {{ modelValue.controlScale.toFixed(2) }}
             <input

@@ -79,6 +79,37 @@ const ONE_CONTROLNET: &str = r#"{
     "metadata": { "totalPages": 1 }
 }"#;
 
+const ONE_QWEN_CHECKPOINT: &str = r#"{
+    "items": [{
+        "id": 9201,
+        "name": "Test Qwen Checkpoint",
+        "type": "Checkpoint",
+        "nsfw": false,
+        "creator": { "username": "alice" },
+        "stats": { "downloadCount": 101, "rating": 4.8, "favoriteCount": 11 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 8201,
+            "name": "fp8",
+            "baseModel": "Qwen",
+            "baseModelType": "Standard",
+            "trainedWords": [],
+            "files": [{
+                "id": 1,
+                "name": "qwenImage_fp8.safetensors",
+                "type": "Model",
+                "sizeKB": 19951792,
+                "downloadCount": 1,
+                "metadata": { "format": "SafeTensor" },
+                "downloadUrl": "https://civitai.example/qwen.safetensors",
+                "hashes": { "SHA256": "abc123" }
+            }],
+            "images": []
+        }]
+    }],
+    "metadata": { "totalPages": 1 }
+}"#;
+
 fn flux_lora_opts(q: &str) -> LiveSearchOpts {
     LiveSearchOpts {
         q: Some(q.into()),
@@ -147,6 +178,35 @@ async fn civitai_controlnet_search_uses_controlnet_type_filter() {
     assert_eq!(entries.len(), 1, "one normalized ControlNet expected");
     assert_eq!(entries[0].kind, Kind::ControlNet);
     assert_eq!(entries[0].family, Family::Sdxl);
+    assert_eq!(entries[0].engine_phase, 1);
+}
+
+#[tokio::test]
+async fn civitai_qwen_checkpoint_is_installable_with_runtime_companion() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("query", "qwen"))
+        .and(query_param("types", "Checkpoint"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ONE_QWEN_CHECKPOINT))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let mut opts = flux_lora_opts("qwen");
+    opts.family = Some(Family::QwenImage);
+    opts.kind = Some(Kind::Checkpoint);
+
+    let entries = search(&server.uri(), "https://hf.unused", &cache, &opts)
+        .await
+        .expect("qwen checkpoint live search");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, Kind::Checkpoint);
+    assert_eq!(entries[0].family, Family::QwenImage);
+    assert_eq!(entries[0].engine_phase, 1);
+    assert_eq!(entries[0].companions, vec!["qwen-image-runtime"]);
 }
 
 #[tokio::test]

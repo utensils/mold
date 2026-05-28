@@ -2,6 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import GenerateParamsPanel from "./GenerateParamsPanel.vue";
 import type { GenerateFormState, ModelInfoExtended } from "../types";
+import { fetchCatalogInstalled } from "../api";
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
@@ -153,6 +154,21 @@ const upscalerModel: ModelInfoExtended = {
   default_steps: 1,
   default_guidance: 1,
   description: "Real-ESRGAN 4x upscaler",
+};
+
+const controlNetModel: ModelInfoExtended = {
+  name: "controlnet-canny-sd15:fp16",
+  family: "controlnet",
+  size_gb: 0.7,
+  is_loaded: false,
+  last_used: null,
+  hf_repo: "lllyasviel/control_v11p_sd15_canny",
+  downloaded: true,
+  default_width: 512,
+  default_height: 512,
+  default_steps: 25,
+  default_guidance: 7.5,
+  description: "ControlNet Canny edge detection for SD1.5",
 };
 
 function makeForm(
@@ -453,6 +469,83 @@ describe("GenerateParamsPanel", () => {
 
     expect(w.find("[data-test='lora-picker-stub']").exists()).toBe(true);
     w.unmount();
+  });
+
+  it("renders installed ControlNet choices only for SD1.5-capable models", async () => {
+    vi.mocked(fetchCatalogInstalled).mockResolvedValueOnce({
+      entries: [
+        {
+          id: "cv:8101",
+          source: "civitai",
+          source_id: "8101",
+          name: "Catalog Canny",
+          author: "alice",
+          family: "sd15",
+          family_role: "finetune",
+          sub_family: null,
+          modality: "image",
+          kind: "control-net",
+          file_format: "safetensors",
+          bundling: "single-file",
+          size_bytes: 100,
+          download_count: 0,
+          rating: null,
+          likes: 0,
+          nsfw: false,
+          thumbnail_url: null,
+          description: null,
+          license: null,
+          license_flags: null,
+          tags: [],
+          companions: [],
+          download_recipe: { files: [], needs_token: null },
+          engine_phase: 1,
+          installed: true,
+          primary_path: "/models/controlnet/catalog-canny.safetensors",
+          created_at: null,
+          updated_at: null,
+          added_at: 0,
+          trained_words: [],
+        },
+      ],
+      page: 1,
+      page_size: 1,
+      total: 1,
+    });
+
+    const w = mountPanel(
+      makeForm({
+        model: "sd15:fp16",
+        modelFamily: "sd15",
+        controlImage: {
+          kind: "upload",
+          filename: "control.png",
+          base64: "CONTROL",
+        },
+      }),
+      [{ ...baseModel, name: "sd15:fp16", family: "sd15" }, controlNetModel],
+    );
+    await flushPromises();
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    expect(fetchCatalogInstalled).toHaveBeenCalledWith({
+      family: "sd15",
+      kind: "control-net",
+    });
+    const select = w.get("[data-test='controlnet-select']");
+    expect(select.text()).toContain("controlnet-canny-sd15:fp16");
+    expect(select.text()).toContain("Catalog Canny");
+
+    const flux = mountPanel(makeForm({ modelFamily: "flux" }), [
+      baseModel,
+      controlNetModel,
+    ]);
+    await flushPromises();
+    await flux.find("[data-test='params-summary-toggle']").trigger("click");
+    expect(flux.find("[data-test='control-upload']").exists()).toBe(false);
+
+    w.unmount();
+    flux.unmount();
   });
 
   it("persists expanded state to localStorage and restores it on remount", async () => {

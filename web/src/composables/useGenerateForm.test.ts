@@ -341,9 +341,9 @@ describe("useGenerateForm", () => {
     expect(wire.seed).toBe(123);
     expect(wire.cfg_plus).toBeUndefined();
     expect(wire.mask_image).toBe("MASK");
-    expect(wire.control_image).toBe("CONTROL");
-    expect(wire.control_model).toBe("controlnet-canny-sd15");
-    expect(wire.control_scale).toBe(0.8);
+    expect(wire.control_image).toBeUndefined();
+    expect(wire.control_model).toBeUndefined();
+    expect(wire.control_scale).toBeUndefined();
     expect(wire.upscale_model).toBe("real-esrgan-x4plus:fp16");
     expect(wire.gif_preview).toBe(true);
     expect(wire.audio_file).toBe("VOICE");
@@ -372,6 +372,27 @@ describe("useGenerateForm", () => {
     });
 
     expect(form.toRequest().cfg_plus).toBe(true);
+  });
+
+  it("serializes ControlNet inputs for SD1.5 models", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "sd15:fp16",
+      modelFamily: "sd15",
+      controlImage: {
+        kind: "upload",
+        filename: "control.png",
+        base64: "CONTROL",
+      },
+      controlModel: "controlnet-canny-sd15:fp16",
+      controlScale: 0.8,
+    });
+
+    const wire = form.toRequest();
+
+    expect(wire.control_image).toBe("CONTROL");
+    expect(wire.control_model).toBe("controlnet-canny-sd15:fp16");
+    expect(wire.control_scale).toBe(0.8);
   });
 
   it("omits seed when seed mode is random even if a numeric seed is present", () => {

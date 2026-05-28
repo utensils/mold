@@ -377,8 +377,8 @@ mod tests {
             (Family::ZImage, 4),
             (Family::LtxVideo, 5),
             (Family::Ltx2, 5),
-            (Family::QwenImage, 6),
-            (Family::Wuerstchen, 6),
+            (Family::QwenImage, 1),
+            (Family::Wuerstchen, 1),
         ];
 
         for (family, expected_phase) in cases {

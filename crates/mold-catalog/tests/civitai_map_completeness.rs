@@ -71,11 +71,19 @@ fn engine_phase_classifies_single_file_correctly() {
     );
     assert_eq!(
         engine_phase_for(Family::QwenImage, Bundling::SingleFile, Kind::Checkpoint),
-        6
+        1
     );
     assert_eq!(
         engine_phase_for(Family::Wuerstchen, Bundling::SingleFile, Kind::Checkpoint),
-        6
+        1
+    );
+    assert_eq!(
+        engine_phase_for(Family::Sd15, Bundling::SingleFile, Kind::ControlNet),
+        1
+    );
+    assert_eq!(
+        engine_phase_for(Family::Sdxl, Bundling::SingleFile, Kind::ControlNet),
+        1
     );
 }
 

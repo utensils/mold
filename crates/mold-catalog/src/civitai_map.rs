@@ -169,7 +169,10 @@ pub fn engine_phase_for(family: Family, bundling: Bundling, kind: Kind) -> u8 {
             LtxVideo | Wuerstchen => 6,
         },
         Vae | TextEncoder | Tokenizer | Clip => 1,
-        ControlNet => 6,
+        ControlNet => match family {
+            Sd15 | Sdxl => 1,
+            Flux | Flux2 | ZImage | LtxVideo | Ltx2 | QwenImage | Wuerstchen => 6,
+        },
         Checkpoint => engine_phase_for_checkpoint(family, bundling),
     }
 }
@@ -188,6 +191,6 @@ fn engine_phase_for_checkpoint(family: Family, bundling: Bundling) -> u8 {
         (Flux, SingleFile) => 3,
         (ZImage, SingleFile) => 4,
         (LtxVideo | Ltx2, SingleFile) => 5,
-        (QwenImage | Wuerstchen, SingleFile) => 6,
+        (QwenImage | Wuerstchen, SingleFile) => 1,
     }
 }

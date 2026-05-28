@@ -71,7 +71,7 @@ async function handleDownload() {
         <span
           class="text-[11px] px-2 py-0.5 rounded bg-amber-700/30 text-amber-200"
         >
-          Unsupported by this build
+          Unsupported catalog package
         </span>
       </div>
 
@@ -178,7 +178,7 @@ async function handleDownload() {
         :disabled="!cat.canDownload(cat.detail.value)"
         :title="
           !cat.canDownload(cat.detail.value)
-            ? 'Unsupported by this build'
+            ? 'Unsupported catalog package'
             : 'Download this model'
         "
         class="w-full rounded-lg px-4 py-2 text-sm font-medium transition"

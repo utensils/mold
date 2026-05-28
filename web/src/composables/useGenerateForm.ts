@@ -183,6 +183,10 @@ function modelDefaultsPatch(
   } else if (next.imageAttachments.length > 1) {
     next.imageAttachments = next.imageAttachments.slice(0, 1);
   }
+  if (!capabilities.supportsControlNet) {
+    next.controlImage = null;
+    next.controlModel = "";
+  }
   return next;
 }
 
@@ -412,7 +416,9 @@ export function useGenerateForm(): UseGenerateForm {
       const capabilities = generationCapabilitiesForFamily(selectedFamily(s));
       const qwenEdit = capabilities.sourceImageMode === "qwen-edit";
       const attachments = s.imageAttachments ?? [];
-      const controlModel = s.controlModel.trim();
+      const controlModel = capabilities.supportsControlNet
+        ? s.controlModel.trim()
+        : "";
       const upscaleModel = s.upscaleModel.trim();
       const audioPath = s.audioFilePath.trim();
       const sourceVideoPath = s.sourceVideoPath.trim();
@@ -441,7 +447,9 @@ export function useGenerateForm(): UseGenerateForm {
               source_image: attachments[0]?.base64 ?? null,
               strength: s.strength,
               mask_image: s.maskImage?.base64 ?? undefined,
-              control_image: s.controlImage?.base64 ?? undefined,
+              control_image: capabilities.supportsControlNet
+                ? (s.controlImage?.base64 ?? undefined)
+                : undefined,
               control_model:
                 s.controlImage && controlModel ? controlModel : undefined,
               control_scale:
