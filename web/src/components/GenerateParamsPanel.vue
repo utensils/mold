@@ -25,6 +25,7 @@ import {
   outputFormatsForFamily,
 } from "../composables/useGenerateForm";
 import { blobToBase64 } from "../lib/base64";
+import GenerationTemplatesPanel from "./GenerationTemplatesPanel.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -408,6 +409,13 @@ function removeKeyframe(index: number) {
           @select="selectModel"
         />
       </section>
+
+      <GenerationTemplatesPanel
+        :model-value="modelValue"
+        @update:model-value="
+          (v: GenerateFormState) => emit('update:modelValue', v)
+        "
+      />
 
       <section class="mt-4">
         <label class="text-xs uppercase text-slate-400">Size</label>

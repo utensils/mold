@@ -13,7 +13,10 @@ import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
 import TopBar from "../components/TopBar.vue";
 import { deleteGalleryImage, fetchModels, listGallery } from "../api";
-import { useGenerateForm } from "../composables/useGenerateForm";
+import {
+  applyMetadataToForm,
+  useGenerateForm,
+} from "../composables/useGenerateForm";
 import { isQwenImageEditFamily } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { decideChainRouting } from "../lib/chainRouting";
@@ -28,7 +31,7 @@ import type {
   ModelInfoExtended,
   SourceImageState,
 } from "../types";
-import { MAX_LORA_STACK, supportsLora } from "../types";
+import { supportsLora } from "../types";
 import type { ChainScriptToml } from "../lib/chainToml";
 import type { ComposerMode } from "../components/Composer.vue";
 
@@ -348,47 +351,10 @@ function openItem(item: GalleryImage) {
 }
 
 function recreateFromGallery(item: GalleryImage) {
-  const meta = item.metadata;
-  const model = models.value.find((m) => m.name === meta.model);
-  if (model) {
-    form.applyModelDefaults(model);
-  } else {
-    form.state.value.model = meta.model;
-    form.state.value.modelFamily = "";
-  }
-  form.state.value.prompt = meta.prompt ?? "";
-  form.state.value.negativePrompt = meta.negative_prompt ?? "";
-  form.state.value.width = meta.width || form.state.value.width;
-  form.state.value.height = meta.height || form.state.value.height;
-  form.state.value.steps = meta.steps || form.state.value.steps;
-  form.state.value.guidance = meta.guidance ?? form.state.value.guidance;
-  form.state.value.seedMode = "static";
-  form.state.value.seed = meta.seed ?? null;
-  form.state.value.scheduler = meta.scheduler ?? null;
-  form.state.value.cfgPlus = meta.cfg_plus ?? false;
-  if (meta.strength !== undefined && meta.strength !== null) {
-    form.state.value.strength = meta.strength;
-  }
-  form.state.value.loras = (meta.loras ?? [])
-    .slice(0, MAX_LORA_STACK)
-    .map<LoraSelection>((l) => ({ path: l.path, scale: l.scale }));
-  form.state.value.controlModel = meta.control_model ?? "";
-  form.state.value.controlScale =
-    meta.control_scale ?? form.state.value.controlScale;
-  form.state.value.upscaleModel = meta.upscale_model ?? "";
-  form.state.value.gifPreview = meta.gif_preview ?? false;
-  form.state.value.enableAudio =
-    meta.enable_audio ?? form.state.value.enableAudio;
-  form.state.value.audioFilePath = meta.audio_file_path ?? "";
-  form.state.value.sourceVideoPath = meta.source_video_path ?? "";
-  form.state.value.pipeline = meta.pipeline ?? null;
-  form.state.value.retakeRange = meta.retake_range ?? null;
-  form.state.value.spatialUpscale = meta.spatial_upscale ?? null;
-  form.state.value.temporalUpscale = meta.temporal_upscale ?? null;
-  form.state.value.frames = meta.frames ?? null;
-  form.state.value.fps = meta.fps ?? null;
-  const outputFormat = meta.output_format ?? item.format;
-  if (outputFormat) form.state.value.outputFormat = outputFormat;
+  form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
+    format: item.format,
+    models: models.value,
+  });
 }
 
 // Map a finished Job back to its saved GalleryImage. The SSE complete

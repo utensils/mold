@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
-import { useGenerateForm } from "./useGenerateForm";
-import type { ModelInfoExtended } from "../types";
+import {
+  applyMetadataToForm,
+  cloneTemplateForm,
+  sanitizePersistedForm,
+  useGenerateForm,
+} from "./useGenerateForm";
+import type {
+  GenerateFormState,
+  ModelInfoExtended,
+  OutputMetadata,
+} from "../types";
 
 const STORAGE_KEY = "mold.generate.form";
 
@@ -107,7 +116,7 @@ describe("useGenerateForm", () => {
     const parsed = JSON.parse(raw!);
     expect(parsed.prompt).toBe("a fox");
     expect(parsed.sourceImage).toBeUndefined();
-    expect(parsed.imageAttachments).toBeUndefined();
+    expect(parsed.imageAttachments).toEqual([]);
     expect(raw).not.toContain("SECRETBYTES");
   });
 
@@ -220,6 +229,21 @@ describe("useGenerateForm", () => {
     expect(wire.source_image).toBeUndefined();
     expect(wire.batch_size).toBe(1);
     expect(wire.strength).toBeUndefined();
+  });
+
+  it("serializes LoRAs in the visible stack order", () => {
+    const form = useGenerateForm();
+    form.state.value.loras = [
+      { path: "/loras/second.safetensors", scale: 0.9 },
+      { path: "/loras/first.safetensors", scale: 1.2 },
+      { path: "/loras/third.safetensors", scale: 0.5 },
+    ];
+
+    expect(form.toRequest().loras).toEqual([
+      { path: "/loras/second.safetensors", scale: 0.9 },
+      { path: "/loras/first.safetensors", scale: 1.2 },
+      { path: "/loras/third.safetensors", scale: 0.5 },
+    ]);
   });
 
   it("serializes only the first attachment as source_image for non-edit families", () => {
@@ -483,5 +507,171 @@ describe("useGenerateForm — enableAudio (LTX-2 / LTX-2.3)", () => {
     expect(form.toRequest().enable_audio).toBe(false);
     form.state.value.enableAudio = true;
     expect(form.toRequest().enable_audio).toBe(true);
+  });
+});
+
+describe("generate form serialization helpers", () => {
+  function makeForm(
+    overrides: Partial<GenerateFormState> = {},
+  ): GenerateFormState {
+    return {
+      version: 2,
+      prompt: "a cat",
+      negativePrompt: "",
+      model: "flux-dev:q4",
+      modelFamily: "flux",
+      width: 1024,
+      height: 1024,
+      steps: 28,
+      guidance: 3.5,
+      seedMode: "random",
+      seed: null,
+      batchSize: 1,
+      strength: 0.75,
+      frames: null,
+      fps: null,
+      scheduler: null,
+      cfgPlus: false,
+      outputFormat: "png",
+      expand: { enabled: false, variations: 1, familyOverride: null },
+      imageAttachments: [],
+      maskImage: null,
+      controlImage: null,
+      controlModel: "",
+      controlScale: 1,
+      upscaleModel: "",
+      gifPreview: false,
+      audioFile: null,
+      audioFilePath: "",
+      sourceVideo: null,
+      sourceVideoPath: "",
+      keyframes: [],
+      pipeline: null,
+      retakeRange: null,
+      spatialUpscale: null,
+      temporalUpscale: null,
+      placement: null,
+      loras: [],
+      enableAudio: null,
+      ...overrides,
+    };
+  }
+
+  it("sanitizePersistedForm strips binary media while preserving safe path references", () => {
+    const form = makeForm({
+      imageAttachments: [
+        { kind: "gallery", filename: "source.png", base64: "SOURCE_BYTES" },
+      ],
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK_BYTES" },
+      controlImage: {
+        kind: "upload",
+        filename: "control.png",
+        base64: "CONTROL_BYTES",
+      },
+      audioFile: {
+        kind: "upload",
+        filename: "voice.wav",
+        base64: "VOICE_BYTES",
+      },
+      audioFilePath: "/srv/voice.wav",
+      sourceVideo: {
+        kind: "upload",
+        filename: "clip.mp4",
+        base64: "VIDEO_BYTES",
+      },
+      sourceVideoPath: "/srv/clip.mp4",
+      keyframes: [
+        {
+          frame: 24,
+          image: { kind: "upload", filename: "kf.png", base64: "KF_BYTES" },
+        },
+      ],
+    });
+
+    const sanitized = sanitizePersistedForm(form);
+
+    expect(sanitized.imageAttachments).toEqual([]);
+    expect(sanitized.maskImage).toBeNull();
+    expect(sanitized.controlImage).toBeNull();
+    expect(sanitized.audioFile).toBeNull();
+    expect(sanitized.sourceVideo).toBeNull();
+    expect(sanitized.keyframes).toEqual([]);
+    expect(sanitized.audioFilePath).toBe("/srv/voice.wav");
+    expect(sanitized.sourceVideoPath).toBe("/srv/clip.mp4");
+    expect(JSON.stringify(sanitized)).not.toContain("_BYTES");
+  });
+
+  it("cloneTemplateForm preserves generation config including static seed and ordered LoRAs", () => {
+    const form = makeForm({
+      seedMode: "static",
+      seed: 777,
+      scheduler: "ddim",
+      loras: [
+        { path: "/loras/a.safetensors", scale: 0.5, trainedWords: ["a"] },
+        { path: "/loras/b.safetensors", scale: 1.2, trainedWords: ["b"] },
+      ],
+      placement: { text_encoders: { kind: "cpu" } },
+    });
+
+    const cloned = cloneTemplateForm(form);
+    cloned.loras[0].scale = 2;
+
+    expect(cloned.seedMode).toBe("static");
+    expect(cloned.seed).toBe(777);
+    expect(cloned.scheduler).toBe("ddim");
+    expect(cloned.loras).toEqual([
+      { path: "/loras/a.safetensors", scale: 2, trainedWords: ["a"] },
+      { path: "/loras/b.safetensors", scale: 1.2, trainedWords: ["b"] },
+    ]);
+    expect(form.loras[0].scale).toBe(0.5);
+  });
+
+  it("applyMetadataToForm restores recreate-safe metadata without carrying stale binary inputs", () => {
+    const current = makeForm({
+      prompt: "old prompt",
+      imageAttachments: [
+        { kind: "upload", filename: "old.png", base64: "OLD_BYTES" },
+      ],
+    });
+    const metadata: OutputMetadata = {
+      prompt: "new prompt",
+      negative_prompt: "blurry",
+      model: "sdxl:fp16",
+      seed: 42,
+      steps: 30,
+      guidance: 7.5,
+      width: 768,
+      height: 512,
+      strength: 0.6,
+      scheduler: "ddim",
+      output_format: "jpeg",
+      loras: [
+        { path: "/loras/one.safetensors", scale: 0.8 },
+        { path: "/loras/two.safetensors", scale: 1.1 },
+      ],
+      control_model: "controlnet-canny-sd15",
+      control_scale: 0.7,
+      upscale_model: "real-esrgan-x4plus:fp16",
+      gif_preview: true,
+      version: "0.12.0",
+    };
+
+    const next = applyMetadataToForm(current, metadata, {
+      format: "png",
+      models: [makeModel({ name: "sdxl:fp16", family: "sdxl" })],
+    });
+
+    expect(next.prompt).toBe("new prompt");
+    expect(next.negativePrompt).toBe("blurry");
+    expect(next.model).toBe("sdxl:fp16");
+    expect(next.modelFamily).toBe("sdxl");
+    expect(next.seedMode).toBe("static");
+    expect(next.seed).toBe(42);
+    expect(next.outputFormat).toBe("jpeg");
+    expect(next.imageAttachments).toEqual([]);
+    expect(next.loras).toEqual([
+      { path: "/loras/one.safetensors", scale: 0.8 },
+      { path: "/loras/two.safetensors", scale: 1.1 },
+    ]);
   });
 });
