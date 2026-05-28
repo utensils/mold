@@ -7,6 +7,33 @@ vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
     ...actual,
+    fetchGenerationEstimate: vi.fn(async () => ({
+      model: "flux-dev:q4",
+      peak_memory_bytes: 12_500_000_000,
+      activation_memory_bytes: 500_000_000,
+      available_memory_bytes: 24_000_000_000,
+      load_strategy: "sequential",
+      fits_available_memory: true,
+    })),
+    fetchModelComponents: vi.fn(async () => ({
+      model: "flux-dev:q4",
+      components: [
+        {
+          kind: "transformer",
+          name: "transformer",
+          present: true,
+          path: "/models/flux/transformer.safetensors",
+          repair_model: "flux-dev:q4",
+        },
+        {
+          kind: "vae",
+          name: "vae",
+          present: false,
+          path: "/models/flux/vae.safetensors",
+          repair_model: "flux-dev:q4",
+        },
+      ],
+    })),
     downloadsStreamUrl: vi.fn(() => "/api/downloads/stream"),
     fetchDownloads: vi.fn(async () => ({
       active: null,
@@ -66,6 +93,21 @@ const altModel: ModelInfoExtended = {
   description: "",
 };
 
+const upscalerModel: ModelInfoExtended = {
+  name: "real-esrgan-x4plus:fp16",
+  family: "upscaler",
+  size_gb: 0.08,
+  is_loaded: false,
+  last_used: null,
+  hf_repo: "ai-forever/Real-ESRGAN",
+  downloaded: true,
+  default_width: 1024,
+  default_height: 1024,
+  default_steps: 1,
+  default_guidance: 1,
+  description: "Real-ESRGAN 4x upscaler",
+};
+
 function makeForm(
   overrides: Partial<GenerateFormState> = {},
 ): GenerateFormState {
@@ -117,7 +159,11 @@ function mountPanel(
   models: ModelInfoExtended[] = [baseModel, altModel],
 ) {
   return mount(GenerateParamsPanel, {
-    props: { modelValue: form, models },
+    props: {
+      modelValue: form,
+      models,
+      placementGpus: [{ ordinal: 0, name: "GPU 0" }],
+    },
   });
 }
 
@@ -289,6 +335,104 @@ describe("GenerateParamsPanel", () => {
     expect(localStorage.getItem("mold.generation.templates.v1")).toContain(
       "template source",
     );
+    w.unmount();
+  });
+
+  it("shows scheduler controls only for scheduler-capable families", async () => {
+    const flux = mountPanel(
+      makeForm({ model: "flux-dev:q4", modelFamily: "flux" }),
+    );
+    await flux.find("[data-test='params-summary-toggle']").trigger("click");
+    expect(flux.find("[data-test='scheduler-select']").exists()).toBe(false);
+    flux.unmount();
+    localStorage.clear();
+
+    const sdxl = mountPanel(
+      makeForm({ model: "sdxl:fp16", modelFamily: "sdxl" }),
+      [altModel],
+    );
+    await sdxl.find("[data-test='params-summary-toggle']").trigger("click");
+    await sdxl.find("[data-test='advanced-toggle']").trigger("click");
+    const labels = sdxl
+      .findAll("[data-test='scheduler-select'] option")
+      .map((option) => option.text());
+    expect(labels).toEqual(["default", "ddim", "euler-ancestral", "unipc"]);
+    sdxl.unmount();
+  });
+
+  it("renders seed mode as a stable segmented control with non-truncating labels", async () => {
+    const w = mountPanel();
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    const control = w.get("[data-test='seed-mode-control']");
+    expect(control.classes().join(" ")).toContain(
+      "grid-cols-[repeat(3,minmax(0,1fr))]",
+    );
+    const labels = w
+      .findAll("[data-test='seed-mode-option']")
+      .map((button) => button.text());
+    expect(labels).toEqual(["random", "static", "increment"]);
+    for (const button of w.findAll("[data-test='seed-mode-option']")) {
+      expect(button.classes()).toContain("min-w-0");
+      expect(button.classes()).toContain("whitespace-nowrap");
+    }
+    w.unmount();
+  });
+
+  it("uses installed upscaler models for the upscaler dropdown", async () => {
+    const w = mountPanel(makeForm(), [baseModel, upscalerModel]);
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    const select = w.get("[data-test='upscaler-select']");
+    const labels = select.findAll("option").map((option) => option.text());
+    expect(labels).toEqual(["None", "real-esrgan-x4plus:fp16"]);
+
+    await select.setValue("real-esrgan-x4plus:fp16");
+    const events = w.emitted("update:modelValue");
+    const last = events![events!.length - 1][0] as GenerateFormState;
+    expect(last.upscaleModel).toBe("real-esrgan-x4plus:fp16");
+    w.unmount();
+  });
+
+  it("mirrors placement controls into the Controls panel", async () => {
+    const w = mount(GenerateParamsPanel, {
+      props: {
+        modelValue: makeForm(),
+        models: [baseModel],
+        placementGpus: [{ ordinal: 0, name: "GPU 0" }],
+        forceExpanded: true,
+        title: "Controls",
+      },
+      global: {
+        stubs: {
+          PlacementPanel: {
+            props: ["modelValue", "family", "model", "gpus"],
+            template:
+              '<section data-test="placement-panel-stub">{{ family }} {{ gpus.length }}</section>',
+          },
+        },
+      },
+    });
+
+    expect(w.find("[data-test='placement-panel-stub']").text()).toContain(
+      "flux 1",
+    );
+    w.unmount();
+  });
+
+  it("shows server-derived memory estimate and component status in Controls", async () => {
+    const w = mountPanel(makeForm(), [baseModel]);
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+    await vi.dynamicImportSettled();
+
+    expect(w.find("[data-test='memory-estimate']").text()).toContain("12.5 GB");
+    expect(w.find("[data-test='component-status']").text()).toContain(
+      "transformer",
+    );
+    expect(w.find("[data-test='component-status']").text()).toContain(
+      "Missing",
+    );
+    expect(w.find("[data-test='component-catalog-link']").exists()).toBe(true);
     w.unmount();
   });
 });

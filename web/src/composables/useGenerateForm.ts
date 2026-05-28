@@ -8,20 +8,21 @@ import type {
   OutputFormat,
   Scheduler,
 } from "../types";
+import { MAX_LORA_STACK } from "../types";
 import {
-  MAX_LORA_STACK,
-  NO_CFG_FAMILIES,
-  UNET_SCHEDULER_FAMILIES,
-  VIDEO_FAMILIES,
-  familySupportsAudio,
+  generationCapabilitiesForFamily,
+  isQwenImageEditFamily,
+  isVideoFamily,
   supportsLora,
-} from "../types";
+  supportsNegativePrompt,
+  supportsScheduler,
+} from "../lib/generateCapabilities";
 
 /** Output-format options for a given model family, ordered by preference.
  * The first entry is the default the UI auto-selects when a model is
  * chosen. */
 export function outputFormatsForFamily(family: string): OutputFormat[] {
-  return VIDEO_FAMILIES.includes(family)
+  return isVideoFamily(family)
     ? ["mp4", "gif", "apng", "webp"]
     : ["png", "jpeg", "webp"];
 }
@@ -34,15 +35,23 @@ const STORAGE_KEY = "mold.generate.form";
 const FORM_VERSION = 2;
 const QWEN_IMAGE_EDIT_FAMILY = "qwen-image-edit";
 
-function isQwenImageEditFamily(family: string): boolean {
-  return family === QWEN_IMAGE_EDIT_FAMILY;
-}
-
 function selectedFamily(s: GenerateFormState): string {
   if (s.modelFamily) return s.modelFamily;
   if (s.model.startsWith(`${QWEN_IMAGE_EDIT_FAMILY}:`)) {
     return QWEN_IMAGE_EDIT_FAMILY;
   }
+  if (s.model.startsWith("sdxl")) return "sdxl";
+  if (s.model.startsWith("sd15") || s.model.startsWith("sd1.5")) return "sd15";
+  if (s.model.startsWith("sd3.5")) return "sd3.5";
+  if (s.model.startsWith("sd3")) return "sd3";
+  if (s.model.startsWith("flux2") || s.model.startsWith("flux.2"))
+    return "flux2";
+  if (s.model.startsWith("flux")) return "flux";
+  if (s.model.startsWith("z-image")) return "z-image";
+  if (s.model.startsWith("qwen-image-edit")) return "qwen-image-edit";
+  if (s.model.startsWith("qwen-image")) return "qwen-image";
+  if (s.model.startsWith("ltx-video")) return "ltx-video";
+  if (s.model.startsWith("ltx2") || s.model.startsWith("ltx-2")) return "ltx2";
   return "";
 }
 
@@ -135,7 +144,8 @@ function modelDefaultsPatch(
     guidance: model.default_guidance,
     loras: [],
   };
-  if (VIDEO_FAMILIES.includes(model.family)) {
+  const capabilities = generationCapabilitiesForFamily(model.family);
+  if (capabilities.supportsVideo) {
     next.frames ??= 25;
     next.fps ??= 24;
   } else {
@@ -147,7 +157,13 @@ function modelDefaultsPatch(
   if (!formats.includes(next.outputFormat)) {
     next.outputFormat = formats[0];
   }
-  next.enableAudio = familySupportsAudio(model.family) ? true : null;
+  next.enableAudio = capabilities.supportsAudio ? true : null;
+  if (!capabilities.supportsScheduler) {
+    next.scheduler = null;
+  }
+  if (!capabilities.supportsCfgPlus) {
+    next.cfgPlus = false;
+  }
   if (model.family !== "ltx2" && model.family !== "ltx-2") {
     next.audioFile = null;
     next.audioFilePath = "";
@@ -159,7 +175,7 @@ function modelDefaultsPatch(
     next.spatialUpscale = null;
     next.temporalUpscale = null;
   }
-  if (isQwenImageEditFamily(model.family)) {
+  if (capabilities.sourceImageMode === "qwen-edit") {
     next.batchSize = 1;
     next.maskImage = null;
     next.controlImage = null;
@@ -393,7 +409,8 @@ export function useGenerateForm(): UseGenerateForm {
       const loras = s.loras.length
         ? s.loras.map((l) => ({ path: l.path, scale: l.scale }))
         : undefined;
-      const qwenEdit = isQwenImageEditFamily(selectedFamily(s));
+      const capabilities = generationCapabilitiesForFamily(selectedFamily(s));
+      const qwenEdit = capabilities.sourceImageMode === "qwen-edit";
       const attachments = s.imageAttachments ?? [];
       const controlModel = s.controlModel.trim();
       const upscaleModel = s.upscaleModel.trim();
@@ -401,20 +418,21 @@ export function useGenerateForm(): UseGenerateForm {
       const sourceVideoPath = s.sourceVideoPath.trim();
       const family = selectedFamily(s);
       const ltx2 = family === "ltx2" || family === "ltx-2";
-      const sd3 = family === "sd3" || family === "sd3.5";
       return {
         prompt: s.prompt,
-        negative_prompt: s.negativePrompt || null,
+        negative_prompt: capabilities.supportsNegativePrompt
+          ? s.negativePrompt || null
+          : null,
         model: s.model,
         width: s.width,
         height: s.height,
         steps: s.steps,
         guidance: s.guidance,
         seed: s.seedMode === "random" ? null : s.seed,
-        batch_size: qwenEdit ? 1 : s.batchSize,
+        batch_size: capabilities.forcesBatchSizeOne ? 1 : s.batchSize,
         output_format: s.outputFormat,
-        cfg_plus: sd3 && s.cfgPlus ? true : undefined,
-        scheduler: s.scheduler,
+        cfg_plus: capabilities.supportsCfgPlus && s.cfgPlus ? true : undefined,
+        scheduler: capabilities.supportsScheduler ? s.scheduler : undefined,
         ...(qwenEdit
           ? {
               edit_images: attachments.map((image) => image.base64),
@@ -459,11 +477,9 @@ export function useGenerateForm(): UseGenerateForm {
           : {}),
       };
     },
-    isVideoFamily: (family: string) => VIDEO_FAMILIES.includes(family),
-    supportsNegativePrompt: (family: string) =>
-      !NO_CFG_FAMILIES.includes(family),
-    supportsScheduler: (family: string) =>
-      UNET_SCHEDULER_FAMILIES.includes(family),
+    isVideoFamily,
+    supportsNegativePrompt,
+    supportsScheduler,
     supportsLora,
   };
 }

@@ -745,3 +745,25 @@ export interface CatalogListParams {
   page?: number;
   page_size?: number;
 }
+
+export interface GenerationMemoryEstimate {
+  model: string;
+  peak_memory_bytes: number;
+  activation_memory_bytes: number;
+  available_memory_bytes?: number | null;
+  load_strategy: string;
+  fits_available_memory?: boolean | null;
+}
+
+export interface ModelComponentStatus {
+  kind: string;
+  name: string;
+  present: boolean;
+  path?: string | null;
+  repair_model?: string | null;
+}
+
+export interface ModelComponentsResponse {
+  model: string;
+  components: ModelComponentStatus[];
+}

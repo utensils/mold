@@ -381,6 +381,20 @@ describe("useGenerateForm", () => {
     expect(form.toRequest().negative_prompt).toBeNull();
   });
 
+  it("toRequest omits stale scheduler and negative prompt for families that ignore them", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "flux-dev:q4",
+      modelFamily: "flux",
+      negativePrompt: "blurry",
+      scheduler: "ddim",
+    });
+
+    const wire = form.toRequest();
+    expect(wire.negative_prompt).toBeNull();
+    expect(wire.scheduler).toBeUndefined();
+  });
+
   it("family-capability helpers match the documented allow-lists", () => {
     const form = useGenerateForm();
     // Video families.
