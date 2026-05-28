@@ -231,6 +231,42 @@ describe("useGenerateForm", () => {
     expect(wire.strength).toBeUndefined();
   });
 
+  it("omits stale mask state for Qwen edit requests", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "qwen-image-edit:q4",
+      modelFamily: "qwen-image-edit",
+      imageAttachments: [
+        { kind: "upload", filename: "target.png", base64: "TARGET" },
+      ],
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
+    });
+
+    const wire = form.toRequest();
+
+    expect(wire.edit_images).toEqual(["TARGET"]);
+    expect(wire.mask_image).toBeUndefined();
+    expect(wire.source_image).toBeUndefined();
+  });
+
+  it("serializes an uploaded mask image for non-edit img2img requests", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "sdxl:fp16",
+      modelFamily: "sdxl",
+      imageAttachments: [
+        { kind: "upload", filename: "source.png", base64: "SOURCE" },
+      ],
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
+    });
+
+    const wire = form.toRequest();
+
+    expect(wire.source_image).toBe("SOURCE");
+    expect(wire.mask_image).toBe("MASK");
+    expect(wire.edit_images).toBeUndefined();
+  });
+
   it("serializes LoRAs in the visible stack order", () => {
     const form = useGenerateForm();
     form.state.value.loras = [

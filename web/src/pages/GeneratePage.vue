@@ -264,14 +264,20 @@ function onSubmit() {
     paramsPanelRef.value?.setExpanded(true);
     return;
   }
-  if (
-    (isQwenImageEditFamily(
+  const qwenImageEdit =
+    isQwenImageEditFamily(
       currentModel.value?.family ?? form.state.value.modelFamily,
-    ) ||
-      form.state.value.model.startsWith("qwen-image-edit:")) &&
+    ) || form.state.value.model.startsWith("qwen-image-edit:");
+  if (qwenImageEdit && form.state.value.imageAttachments.length === 0) {
+    composerError.value = "Qwen image edit needs a target image.";
+    return;
+  }
+  if (
+    !qwenImageEdit &&
+    form.state.value.maskImage &&
     form.state.value.imageAttachments.length === 0
   ) {
-    composerError.value = "Qwen image edit needs a target image.";
+    composerError.value = "Mask image needs a source image.";
     return;
   }
   const decision = chainDecision.value;
