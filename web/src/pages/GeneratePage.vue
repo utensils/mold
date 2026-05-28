@@ -16,7 +16,6 @@ import { deleteGalleryImage, fetchModels, listGallery } from "../api";
 import { useGenerateForm } from "../composables/useGenerateForm";
 import { isQwenImageEditFamily } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
-import { useHideMode } from "../composables/useHideMode";
 import { decideChainRouting } from "../lib/chainRouting";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
@@ -66,8 +65,6 @@ function persistMuted(v: boolean) {
 
 const form = useGenerateForm();
 const { status } = useStatusPoll();
-// Shared privacy toggle with Gallery — see useHideMode for button semantics.
-const hide = useHideMode();
 const models = ref<ModelInfoExtended[]>([]);
 const galleryEntries = ref<GalleryImage[]>([]);
 const view = ref<ViewMode>(loadViewMode());
@@ -464,7 +461,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="mx-auto max-w-[1800px] px-4 pb-40 pt-4 sm:px-6 sm:pt-6 lg:px-10">
+  <div
+    data-test="generate-shell"
+    class="mx-auto max-w-[2400px] px-3 pb-40 pt-4 sm:px-5 sm:pt-6 lg:px-6 2xl:px-8"
+  >
     <TopBar
       :filter="'all'"
       :search="''"
@@ -472,17 +472,16 @@ onBeforeUnmount(() => {
       :muted="muted"
       :counts="topBarCounts"
       :loading="false"
-      :hide-mode="!hide.anyVisible.value"
       @update:filter="() => {}"
       @update:search="() => {}"
       @update:view="setView"
       @update:muted="setMuted"
-      @update:hide-mode="hide.toggle"
       @refresh="refreshGallery"
     />
 
     <div
-      class="mt-4 grid gap-4 sm:mt-6 xl:grid-cols-[21rem_minmax(0,1fr)_24rem]"
+      data-test="generate-workspace"
+      class="mt-4 grid gap-4 sm:mt-6 xl:grid-cols-[21rem_minmax(0,1fr)_28rem] 2xl:grid-cols-[22rem_minmax(0,1fr)_30rem]"
     >
       <aside class="space-y-4 xl:sticky xl:top-4 xl:self-start">
         <section class="glass rounded-2xl p-4">
@@ -533,13 +532,10 @@ onBeforeUnmount(() => {
 
         <RunningStrip
           :jobs="stream.jobs.value"
-          :hide-mode="hide.hideMode.value"
-          :revealed="hide.revealed.value"
           @cancel="stream.cancel"
           @open="openJob"
           @dismiss="stream.remove"
           @clear-finished="stream.clearDone"
-          @reveal="(id: string) => hide.revealOne(id)"
         />
 
         <section class="mt-4">
@@ -555,12 +551,9 @@ onBeforeUnmount(() => {
               :loading="false"
               :view="'grid'"
               :muted="muted"
-              :hide-mode="hide.hideMode.value"
-              :revealed="hide.revealed.value"
               :show-recreate="true"
               @open="openItem"
               @recreate="recreateFromGallery"
-              @reveal="(item: GalleryImage) => hide.revealOne(item.filename)"
             />
           </div>
         </section>
