@@ -27,6 +27,7 @@ const emit = defineEmits<{
 const loras = ref<CatalogEntryWire[]>([]);
 const loading = ref(false);
 const search = ref("");
+const draggingIndex = ref<number | null>(null);
 
 async function loadLoras(family: string) {
   loras.value = [];
@@ -116,6 +117,36 @@ function removeAt(index: number) {
   emit("update:modelValue", next);
 }
 
+function moveAt(from: number, to: number) {
+  if (from === to) return;
+  if (from < 0 || from >= props.modelValue.length) return;
+  if (to < 0 || to >= props.modelValue.length) return;
+  const next = props.modelValue.slice();
+  const [row] = next.splice(from, 1);
+  next.splice(to, 0, row);
+  emit("update:modelValue", next);
+}
+
+function onDragStart(index: number, event: DragEvent) {
+  draggingIndex.value = index;
+  event.dataTransfer?.setData("text/plain", String(index));
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+
+function onDragOver(event: DragEvent) {
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
+function onDrop(index: number, event: DragEvent) {
+  event.preventDefault();
+  const raw = event.dataTransfer?.getData("text/plain");
+  const from = raw ? Number(raw) : draggingIndex.value;
+  draggingIndex.value = null;
+  if (from === null || !Number.isFinite(from)) return;
+  moveAt(from, index);
+}
+
 function addAnother() {
   if (!canAddMore.value) return;
   // Default to the first LoRA not yet in the stack to keep the picker
@@ -167,8 +198,22 @@ function addAnother() {
       v-for="(row, index) in modelValue"
       :key="`${row.path}-${index}`"
       class="rounded-lg border border-slate-800 bg-slate-900/40 p-2"
+      draggable="true"
+      data-test="lora-row"
+      @dragstart="onDragStart(index, $event)"
+      @dragover="onDragOver"
+      @drop="onDrop(index, $event)"
+      @dragend="draggingIndex = null"
     >
       <div class="flex items-center gap-2">
+        <button
+          type="button"
+          class="cursor-grab rounded-md bg-slate-800 px-2 py-1 text-xs text-slate-300"
+          aria-label="Drag LoRA to reorder"
+          title="Drag to reorder"
+        >
+          ↕
+        </button>
         <select
           :value="row.path"
           class="flex-1 rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
@@ -183,6 +228,24 @@ function addAnother() {
             {{ e.name }}
           </option>
         </select>
+        <button
+          type="button"
+          class="rounded-md bg-slate-800 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+          aria-label="Move LoRA up"
+          :disabled="index === 0"
+          @click="moveAt(index, index - 1)"
+        >
+          ↑
+        </button>
+        <button
+          type="button"
+          class="rounded-md bg-slate-800 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+          aria-label="Move LoRA down"
+          :disabled="index === modelValue.length - 1"
+          @click="moveAt(index, index + 1)"
+        >
+          ↓
+        </button>
         <button
           type="button"
           class="rounded-md bg-slate-800 px-2 py-1 text-xs text-slate-300 hover:bg-rose-700/50"

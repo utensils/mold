@@ -4,6 +4,7 @@ import type {
   GenerateRequestWire,
   LoraSelection,
   ModelInfoExtended,
+  OutputMetadata,
   OutputFormat,
   Scheduler,
 } from "../types";
@@ -88,6 +89,159 @@ function defaultForm(): GenerateFormState {
   };
 }
 
+function cloneFormState(state: GenerateFormState): GenerateFormState {
+  return JSON.parse(JSON.stringify(state)) as GenerateFormState;
+}
+
+/** Remove browser-only binary media from a form snapshot before writing it to
+ * localStorage or a local generation template. Server-local path fields
+ * (`audioFilePath`, `sourceVideoPath`) are preserved because they are stable
+ * references; upload/gallery base64 payloads are intentionally not stored. */
+export function sanitizePersistedForm(
+  state: GenerateFormState,
+): GenerateFormState {
+  return {
+    ...cloneFormState(state),
+    version: FORM_VERSION,
+    imageAttachments: [],
+    maskImage: null,
+    controlImage: null,
+    audioFile: null,
+    sourceVideo: null,
+    keyframes: [],
+  };
+}
+
+/** Clone the generation configuration that can be safely represented in a
+ * web-local template. Binary source/mask/control/media bytes are stripped by
+ * `sanitizePersistedForm`; callers can store separate filename references for
+ * display, but loading the template will not silently pretend those bytes are
+ * still available. */
+export function cloneTemplateForm(state: GenerateFormState): GenerateFormState {
+  return sanitizePersistedForm(state);
+}
+
+function modelDefaultsPatch(
+  current: GenerateFormState,
+  model: ModelInfoExtended,
+): GenerateFormState {
+  const next: GenerateFormState = {
+    ...cloneFormState(current),
+    model: model.name,
+    modelFamily: model.family,
+    width: model.default_width,
+    height: model.default_height,
+    steps: model.default_steps,
+    guidance: model.default_guidance,
+    loras: [],
+  };
+  if (VIDEO_FAMILIES.includes(model.family)) {
+    next.frames ??= 25;
+    next.fps ??= 24;
+  } else {
+    next.frames = null;
+    next.fps = null;
+    next.gifPreview = false;
+  }
+  const formats = outputFormatsForFamily(model.family);
+  if (!formats.includes(next.outputFormat)) {
+    next.outputFormat = formats[0];
+  }
+  next.enableAudio = familySupportsAudio(model.family) ? true : null;
+  if (model.family !== "ltx2" && model.family !== "ltx-2") {
+    next.audioFile = null;
+    next.audioFilePath = "";
+    next.sourceVideo = null;
+    next.sourceVideoPath = "";
+    next.keyframes = [];
+    next.pipeline = null;
+    next.retakeRange = null;
+    next.spatialUpscale = null;
+    next.temporalUpscale = null;
+  }
+  if (isQwenImageEditFamily(model.family)) {
+    next.batchSize = 1;
+    next.maskImage = null;
+    next.controlImage = null;
+    next.controlModel = "";
+  } else if (next.imageAttachments.length > 1) {
+    next.imageAttachments = next.imageAttachments.slice(0, 1);
+  }
+  return next;
+}
+
+export interface ApplyMetadataOptions {
+  models?: ModelInfoExtended[];
+  format?: OutputFormat | null;
+}
+
+/** Recreate-safe metadata application shared by Gallery Recreate and future
+ * template/import paths. It restores serialized generation knobs, uses static
+ * seed semantics for exact-ish recreation, and clears stale binary media
+ * because output metadata does not contain source/mask/control bytes. */
+export function applyMetadataToForm(
+  current: GenerateFormState,
+  metadata: OutputMetadata,
+  options: ApplyMetadataOptions = {},
+): GenerateFormState {
+  const model = options.models?.find((m) => m.name === metadata.model);
+  const next = model
+    ? modelDefaultsPatch(current, model)
+    : { ...cloneFormState(current), model: metadata.model, modelFamily: "" };
+  const loras =
+    metadata.loras?.map<LoraSelection>((l) => ({
+      path: l.path,
+      scale: l.scale,
+    })) ??
+    (metadata.lora
+      ? [
+          {
+            path: metadata.lora,
+            scale: metadata.lora_scale ?? 1.0,
+          },
+        ]
+      : []);
+  const outputFormat = metadata.output_format ?? options.format ?? null;
+  return {
+    ...next,
+    prompt: metadata.prompt ?? "",
+    negativePrompt: metadata.negative_prompt ?? "",
+    width: metadata.width || next.width,
+    height: metadata.height || next.height,
+    steps: metadata.steps || next.steps,
+    guidance: metadata.guidance ?? next.guidance,
+    seedMode: metadata.seed == null ? "random" : "static",
+    seed: metadata.seed ?? null,
+    scheduler: metadata.scheduler ?? null,
+    cfgPlus: metadata.cfg_plus ?? false,
+    strength:
+      metadata.strength !== undefined && metadata.strength !== null
+        ? metadata.strength
+        : next.strength,
+    loras: loras.slice(0, MAX_LORA_STACK),
+    controlModel: metadata.control_model ?? "",
+    controlScale: metadata.control_scale ?? next.controlScale,
+    upscaleModel: metadata.upscale_model ?? "",
+    gifPreview: metadata.gif_preview ?? false,
+    enableAudio: metadata.enable_audio ?? next.enableAudio,
+    audioFilePath: metadata.audio_file_path ?? "",
+    sourceVideoPath: metadata.source_video_path ?? "",
+    pipeline: metadata.pipeline ?? null,
+    retakeRange: metadata.retake_range ?? null,
+    spatialUpscale: metadata.spatial_upscale ?? null,
+    temporalUpscale: metadata.temporal_upscale ?? null,
+    frames: metadata.frames ?? null,
+    fps: metadata.fps ?? null,
+    outputFormat: outputFormat ?? next.outputFormat,
+    imageAttachments: [],
+    maskImage: null,
+    controlImage: null,
+    audioFile: null,
+    sourceVideo: null,
+    keyframes: [],
+  };
+}
+
 /// Drops users with pre-multi-LoRA persisted forms onto the new shape
 /// without re-prompting them for everything else. The old `lora` field
 /// (singular, nullable) becomes a 1- or 0-element `loras` array.
@@ -124,7 +278,13 @@ function load(): GenerateFormState {
     if (parsed.version !== 1 && parsed.version !== FORM_VERSION) {
       return defaultForm();
     }
-    return { ...defaultForm(), ...migrateLegacy(parsed) };
+    return {
+      ...defaultForm(),
+      ...sanitizePersistedForm({
+        ...defaultForm(),
+        ...migrateLegacy(parsed),
+      }),
+    };
   } catch {
     return defaultForm();
   }
@@ -134,18 +294,9 @@ function persist(state: GenerateFormState) {
   try {
     // Drop base64 bytes from localStorage — they blow past the quota quickly
     // and the attachment is re-picked trivially on reload.
-    const {
-      imageAttachments: _attachments,
-      maskImage: _mask,
-      controlImage: _control,
-      audioFile: _audio,
-      sourceVideo: _video,
-      keyframes: _keyframes,
-      ...rest
-    } = state;
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ ...rest, version: FORM_VERSION }),
+      JSON.stringify(sanitizePersistedForm(state)),
     );
   } catch {
     /* ignore */
@@ -228,57 +379,10 @@ export function useGenerateForm(): UseGenerateForm {
         : trimmed;
     },
     applyModelDefaults: (m) => {
-      state.value.model = m.name;
-      state.value.modelFamily = m.family;
-      state.value.width = m.default_width;
-      state.value.height = m.default_height;
-      state.value.steps = m.default_steps;
-      state.value.guidance = m.default_guidance;
       // LoRA support is family-specific. Clear the stack on every model
       // change — even FLUX→FLUX swaps because the LoRA might not target
       // the new variant's tensor layout.
-      state.value.loras = [];
-      // Video families need sensible frame/fps defaults.
-      if (VIDEO_FAMILIES.includes(m.family)) {
-        state.value.frames ??= 25; // 8n+1
-        state.value.fps ??= 24;
-      } else {
-        state.value.frames = null;
-        state.value.fps = null;
-        state.value.gifPreview = false;
-      }
-      // Auto-pick a valid output format whenever the model family changes so
-      // users never have to manually toggle this — switching from an image
-      // to a video family and back would otherwise leave an invalid format
-      // (e.g. `png` on LTX-2) stuck in the form.
-      const formats = outputFormatsForFamily(m.family);
-      if (!formats.includes(state.value.outputFormat)) {
-        state.value.outputFormat = formats[0];
-      }
-      // Audio toggle defaults: ON for the only family with an audio path
-      // today (LTX-2 / LTX-2.3), null for everyone else so the wire stays
-      // clean and the server's MP4 default-on behaviour isn't fought.
-      // Mirrors `chain_limits::family_supports_audio` on the server.
-      state.value.enableAudio = familySupportsAudio(m.family) ? true : null;
-      if (m.family !== "ltx2" && m.family !== "ltx-2") {
-        state.value.audioFile = null;
-        state.value.audioFilePath = "";
-        state.value.sourceVideo = null;
-        state.value.sourceVideoPath = "";
-        state.value.keyframes = [];
-        state.value.pipeline = null;
-        state.value.retakeRange = null;
-        state.value.spatialUpscale = null;
-        state.value.temporalUpscale = null;
-      }
-      if (isQwenImageEditFamily(m.family)) {
-        state.value.batchSize = 1;
-        state.value.maskImage = null;
-        state.value.controlImage = null;
-        state.value.controlModel = "";
-      } else if (state.value.imageAttachments.length > 1) {
-        state.value.imageAttachments = state.value.imageAttachments.slice(0, 1);
-      }
+      state.value = modelDefaultsPatch(state.value, m);
     },
     toRequest: () => {
       const s = state.value;

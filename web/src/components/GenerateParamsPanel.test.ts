@@ -277,4 +277,18 @@ describe("GenerateParamsPanel", () => {
     expect(w2.find("[data-test='params-body']").exists()).toBe(true);
     w2.unmount();
   });
+
+  it("renders compact generation template controls in the expanded panel", async () => {
+    const w = mountPanel(makeForm({ prompt: "template source" }));
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    expect(w.find("[data-test='generation-templates']").exists()).toBe(true);
+    await w.find("[data-test='template-name']").setValue("Base");
+    await w.find("[data-test='template-save']").trigger("click");
+
+    expect(localStorage.getItem("mold.generation.templates.v1")).toContain(
+      "template source",
+    );
+    w.unmount();
+  });
 });

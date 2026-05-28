@@ -160,6 +160,59 @@ describe("LoraPicker — multi-LoRA stack", () => {
     expect(last[0].path).toBe("/loras/pixel.safetensors");
   });
 
+  it("dragging a row reorders the visible LoRA stack without dropping row metadata", async () => {
+    const rows: LoraSelection[] = [
+      {
+        path: "/loras/cinematic.safetensors",
+        scale: 0.8,
+        trainedWords: ["cinematic style"],
+      },
+      {
+        path: "/loras/pixel.safetensors",
+        scale: 1.15,
+        trainedWords: ["pixel art"],
+      },
+      {
+        path: "/loras/third.safetensors",
+        scale: 0.45,
+        trainedWords: ["third style"],
+      },
+    ];
+    const w = mountPicker(rows);
+    await flushPromises();
+
+    const data = new Map<string, string>();
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      setData: vi.fn((key: string, value: string) => data.set(key, value)),
+      getData: vi.fn((key: string) => data.get(key) ?? ""),
+    };
+    const renderedRows = w.findAll("[data-test='lora-row']");
+
+    await renderedRows[0].trigger("dragstart", { dataTransfer });
+    await renderedRows[2].trigger("drop", { dataTransfer });
+
+    const last = w.emitted("update:modelValue")?.at(-1)?.[0] as LoraSelection[];
+    expect(last).toEqual([rows[1], rows[2], rows[0]]);
+  });
+
+  it("exposes button fallback controls for moving LoRA rows", async () => {
+    const rows: LoraSelection[] = [
+      { path: "/loras/cinematic.safetensors", scale: 0.8 },
+      { path: "/loras/pixel.safetensors", scale: 1.15 },
+    ];
+    const w = mountPicker(rows);
+    await flushPromises();
+
+    const moveDown = w.find("[aria-label='Move LoRA down']");
+    expect(moveDown.exists()).toBe(true);
+    await moveDown.trigger("click");
+
+    const last = w.emitted("update:modelValue")?.at(-1)?.[0] as LoraSelection[];
+    expect(last).toEqual([rows[1], rows[0]]);
+  });
+
   it("trigger-words backfill from the catalog when the form-state row lacks them", async () => {
     // Mimics localStorage-restored state: row was saved before trigger
     // words were captured. The picker must still surface the chips by
