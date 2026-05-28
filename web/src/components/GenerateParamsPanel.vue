@@ -408,6 +408,16 @@ function formatBytes(bytes: number | null | undefined): string {
   return `${bytes} B`;
 }
 
+const memoryUsagePercent = computed(() => {
+  const estimate = memoryEstimate.value;
+  const available = estimate?.available_memory_bytes;
+  if (!estimate || available == null || available <= 0) return null;
+  return Math.min(
+    100,
+    Math.max(0, (estimate.peak_memory_bytes / available) * 100),
+  );
+});
+
 const catalogHref = computed(
   () => `/catalog?q=${encodeURIComponent(props.modelValue.model)}`,
 );
@@ -1245,6 +1255,37 @@ function removeKeyframe(index: number) {
             <span v-if="memoryEstimate.available_memory_bytes != null">
               available {{ formatBytes(memoryEstimate.available_memory_bytes) }}
             </span>
+          </div>
+          <div
+            v-if="memoryEstimate && memoryUsagePercent != null"
+            class="mt-2"
+            data-test="memory-estimate-bar"
+            role="progressbar"
+            aria-label="Estimated peak memory usage"
+            :aria-valuenow="Math.round(memoryUsagePercent)"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            <div
+              class="h-2 overflow-hidden rounded-full bg-slate-800"
+              aria-hidden="true"
+            >
+              <div
+                class="h-full rounded-full bg-emerald-400"
+                data-test="memory-estimate-bar-fill"
+                :style="{ width: `${memoryUsagePercent.toFixed(1)}%` }"
+              />
+            </div>
+            <div
+              class="mt-1 flex flex-wrap justify-between gap-x-3 gap-y-1 text-[11px] text-slate-500"
+            >
+              <span>{{ Math.round(memoryUsagePercent) }}%</span>
+              <span>
+                {{ formatBytes(memoryEstimate.peak_memory_bytes) }} used /
+                {{ formatBytes(memoryEstimate.available_memory_bytes) }}
+                available
+              </span>
+            </div>
           </div>
           <div
             v-else-if="memoryEstimateError"

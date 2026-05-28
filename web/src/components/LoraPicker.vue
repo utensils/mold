@@ -198,9 +198,7 @@ function addAnother() {
       v-for="(row, index) in modelValue"
       :key="`${row.path}-${index}`"
       class="rounded-lg border border-slate-800 bg-slate-900/40 p-2"
-      draggable="true"
       data-test="lora-row"
-      @dragstart="onDragStart(index, $event)"
       @dragover="onDragOver"
       @drop="onDrop(index, $event)"
       @dragend="draggingIndex = null"
@@ -211,6 +209,10 @@ function addAnother() {
           class="cursor-grab rounded-md bg-slate-800 px-2 py-1 text-xs text-slate-300"
           aria-label="Drag LoRA to reorder"
           title="Drag to reorder"
+          draggable="true"
+          data-test="lora-drag-handle"
+          @dragstart="onDragStart(index, $event)"
+          @dragend="draggingIndex = null"
         >
           ↕
         </button>
