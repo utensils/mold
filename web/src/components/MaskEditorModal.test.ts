@@ -70,6 +70,7 @@ describe("MaskEditorModal", () => {
       props: { open: true, sourceImage },
       attachTo: document.body,
     });
+    expect(wrapper.exists()).toBe(true);
     await nextTick();
 
     const canvas = bodyGet<HTMLCanvasElement>("[data-test='mask-canvas']");
@@ -93,6 +94,7 @@ describe("MaskEditorModal", () => {
       props: { open: true, sourceImage },
       attachTo: document.body,
     });
+    expect(wrapper.exists()).toBe(true);
     await nextTick();
 
     await bodyGet<HTMLButtonElement>("[data-test='mask-clear']").trigger(
@@ -117,6 +119,7 @@ describe("MaskEditorModal", () => {
       props: { open: true, sourceImage },
       attachTo: document.body,
     });
+    expect(wrapper.exists()).toBe(true);
     await nextTick();
 
     await bodyGet<HTMLButtonElement>("[data-test='mask-mode-erase']").trigger(

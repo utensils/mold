@@ -4,9 +4,15 @@ This is the consolidated, de-duplicated backlog from UAT feedback on the
 Generate Studio Console in PR #326. Treat each top-level section as a likely
 follow-up PR slice unless an item explicitly depends on another section.
 
+Implementation status: all checklist items in this file are covered by the
+`feature/generate-studio-followups` branch. Named templates are web-local and
+intentionally omit binary media payloads while preserving safe path references;
+the Catalog remains the install/repair surface for missing models and
+components.
+
 ## 1. Model Selection
 
-- [ ] Filter the Generate model picker to standalone generation models only.
+- [x] Filter the Generate model picker to standalone generation models only.
   - Exclude upscalers, prompt-expansion utilities, companion/support models,
     ControlNet auxiliaries, and other non-primary generation assets from the
     main model list.
@@ -15,7 +21,7 @@ follow-up PR slice unless an item explicitly depends on another section.
   - Likely files: `web/src/types.ts`, `web/src/components/ModelPicker.vue`,
     `web/src/pages/GeneratePage.vue`.
 
-- [ ] Default the Generate model picker to downloaded generation models only.
+- [x] Default the Generate model picker to downloaded generation models only.
   - Remove `Show all` and `Download` actions from the picker.
   - If no downloaded generation models exist, show an empty state with a link
     to the model catalog.
@@ -23,13 +29,13 @@ follow-up PR slice unless an item explicitly depends on another section.
   - Likely files: `web/src/components/ModelPicker.vue`,
     `web/src/pages/GeneratePage.vue`, `web/src/router.ts`.
 
-- [ ] Group models by family with collapsible sections.
+- [x] Group models by family with collapsible sections.
   - Preserve stable ordering within each family.
   - Persist family collapsed/expanded state in localStorage.
   - Add readable family labels instead of raw family IDs.
   - Likely files: `web/src/components/ModelPicker.vue`, `web/src/types.ts`.
 
-- [ ] Add multi-sort support for models.
+- [x] Add multi-sort support for models.
   - Support sorting by name, family, size, quantization, downloaded state, and
     variant quality/rank.
   - Preserve stable ordering when multiple sort keys are active.
@@ -38,7 +44,7 @@ follow-up PR slice unless an item explicitly depends on another section.
   - Likely files: `web/src/components/ModelPicker.vue`,
     `crates/mold-core/src/catalog.rs`, `web/src/types.ts`.
 
-- [ ] Add advanced model filters.
+- [x] Add advanced model filters.
   - Filter by name, family, size range, quantization, downloaded state, and
     other model metadata.
   - Support boolean modes for selected filters: `ANY`, `ALL`, and `NOT`.
@@ -46,14 +52,14 @@ follow-up PR slice unless an item explicitly depends on another section.
   - Likely files: `web/src/components/ModelPicker.vue`; possibly new helper
     module such as `web/src/lib/modelFilters.ts`.
 
-- [ ] Add focused model picker tests.
+- [x] Add focused model picker tests.
   - Cover generation-only filtering, downloaded-only default, empty catalog
     link, family collapse/expand, sorting, and boolean filters.
   - Likely files: new `web/src/components/ModelPicker.test.ts`.
 
 ## 2. Layout And Controls
 
-- [ ] Widen and de-cramp the Controls rail.
+- [x] Widen and de-cramp the Controls rail.
   - Current rail is fixed around `24rem`; increase desktop width and/or switch
     to a two-column controls layout on wide monitors.
   - Reduce empty left/right margins on large and 4K displays while preserving
@@ -61,14 +67,14 @@ follow-up PR slice unless an item explicitly depends on another section.
   - Likely files: `web/src/pages/GeneratePage.vue`,
     `web/src/components/GenerateParamsPanel.vue`.
 
-- [ ] Replace cramped pills with consistent segmented controls.
+- [x] Replace cramped pills with consistent segmented controls.
   - Fix `random` / `increment` seed controls so labels fit cleanly.
   - Normalize seed mode, size, batch, dirty/custom indicators, and other pills
     into reusable controls.
   - Likely files: `web/src/components/GenerateParamsPanel.vue`,
     `web/src/components/GenerateParamsPanel.test.ts`.
 
-- [ ] Centralize model-family generation capabilities.
+- [x] Centralize model-family generation capabilities.
   - Drive scheduler options, CFG++ visibility, negative prompt support, video
     controls, source/edit image behavior, and LoRA support from one frontend
     capability map.
@@ -77,7 +83,7 @@ follow-up PR slice unless an item explicitly depends on another section.
     `web/src/lib/generationCapabilities.ts`,
     `web/src/components/GenerateParamsPanel.vue`.
 
-- [ ] Show scheduler and other model-specific options only when valid.
+- [x] Show scheduler and other model-specific options only when valid.
   - Replace the current hard-coded scheduler list with options appropriate for
     the selected model/family.
   - Ensure flow models do not show controls that the backend ignores.
@@ -85,7 +91,7 @@ follow-up PR slice unless an item explicitly depends on another section.
   - Likely files: `web/src/components/GenerateParamsPanel.vue`,
     `web/src/lib/generationCapabilities.ts`.
 
-- [ ] Move or mirror placement controls into the Controls rail.
+- [x] Move or mirror placement controls into the Controls rail.
   - `PlacementPanel` currently lives in the composer, while users expect CLIP,
     text encoder, transformer, VAE, and placement controls in Controls.
   - Decide whether to move the existing panel or create a Components section
@@ -94,7 +100,7 @@ follow-up PR slice unless an item explicitly depends on another section.
     `web/src/components/GenerateParamsPanel.vue`,
     `web/src/pages/GeneratePage.vue`.
 
-- [ ] Add component asset/status controls.
+- [x] Add component asset/status controls.
   - Show which CLIP/text encoder/VAE/transformer/etc. components are used.
   - For components that can be changed, show available options in dropdowns.
   - If required components are missing, highlight the field with an error and
@@ -105,14 +111,14 @@ follow-up PR slice unless an item explicitly depends on another section.
     `crates/mold-server/src/routes.rs`, `web/src/types.ts`,
     `web/src/components/GenerateParamsPanel.vue`.
 
-- [ ] Replace free-text upscaler model input with a dropdown.
+- [x] Replace free-text upscaler model input with a dropdown.
   - Derive options from installed/available upscaler models.
   - Include a `None` option and downloaded/missing status.
   - Keep upscalers excluded from the primary generation model picker.
   - Likely files: `web/src/components/GenerateParamsPanel.vue`,
     `web/src/pages/GeneratePage.vue`, `web/src/types.ts`.
 
-- [ ] Show estimated peak memory usage.
+- [x] Show estimated peak memory usage.
   - Use server-side preflight/memory estimation logic, not a static file-size
     guess.
   - Estimate should be request-sensitive: model, resolution, batch, frames,
@@ -124,7 +130,7 @@ follow-up PR slice unless an item explicitly depends on another section.
 
 ## 3. Generation Templates And Recreate
 
-- [ ] Add named generation templates.
+- [x] Add named generation templates.
   - Templates should save and load all generation configuration, including
     model, prompt, negative prompt, size, steps, guidance, seed mode/value,
     scheduler, LoRAs, source/mask/control settings, video settings, placement,
@@ -137,20 +143,20 @@ follow-up PR slice unless an item explicitly depends on another section.
     `web/src/components/GenerateParamsPanel.vue`; DB/API files if persisted
     server-side.
 
-- [ ] Add template browsing and management UI.
+- [x] Add template browsing and management UI.
   - Save, load, rename, delete, search, sort, and scroll/browse templates.
   - Keep the UI compact enough for many templates.
   - Likely files: new template picker component, `GenerateParamsPanel.vue`,
     `GeneratePage.vue`.
 
-- [ ] Decide media handling for templates.
+- [x] Decide media handling for templates.
   - Current form persistence strips binary base64 image/video/audio payloads.
   - Options: omit binary media, store gallery references, store server-local
     media paths, or add DB-backed blobs/references.
   - This decision affects exact recreation for img2img, masks, audio, source
     video, and keyframes.
 
-- [ ] Unify form serialization helpers.
+- [x] Unify form serialization helpers.
   - Gallery Recreate, template save/load, localStorage persistence, and
     request serialization should share helper functions instead of manual field
     copying in multiple places.
@@ -162,21 +168,21 @@ follow-up PR slice unless an item explicitly depends on another section.
 
 ## 4. LoRA Stack Ergonomics
 
-- [ ] Add drag-and-drop LoRA stack reordering.
+- [x] Add drag-and-drop LoRA stack reordering.
   - Current reorder path is too cumbersome.
   - Preserve each row's path, scale, and trained words while reordering.
   - Include accessible keyboard/button fallback controls.
   - Likely files: `web/src/components/LoraPicker.vue`,
     `web/src/components/LoraPicker.test.ts`.
 
-- [ ] Lock LoRA request serialization order in tests.
+- [x] Lock LoRA request serialization order in tests.
   - `toRequest()` already serializes `loras` in array order; add tests so drag
     reorder cannot regress wire order.
   - Likely files: `web/src/composables/useGenerateForm.test.ts`.
 
 ## 5. Mask Editing And Media Workflows
 
-- [ ] Add a mask editor for img2img/inpaint workflows.
+- [x] Add a mask editor for img2img/inpaint workflows.
   - New UI should support drawing and editing masks on uploaded, source, or
     gallery images.
   - Needed controls: brush, erase, brush size, clear, invert, undo/redo, and
@@ -184,21 +190,21 @@ follow-up PR slice unless an item explicitly depends on another section.
   - Output should populate `form.state.maskImage`.
   - Likely new file: `web/src/components/MaskEditorModal.vue`.
 
-- [ ] Preserve direct uploaded-mask support.
+- [x] Preserve direct uploaded-mask support.
   - Existing upload-mask behavior should remain available, either as a direct
     path or as an "Upload mask" action inside the mask editor.
   - Do not regress `mask_image` request serialization.
   - Likely files: `web/src/components/GenerateParamsPanel.vue`,
     `web/src/composables/useGenerateForm.ts`.
 
-- [ ] Add source/gallery entry points for mask editing.
+- [x] Add source/gallery entry points for mask editing.
   - Generalize `ImagePickerModal` or add a mask-specific launcher so users can
     edit masks from upload, current source image, or gallery image.
   - Fetch full gallery image before opening the editor.
   - Likely files: `web/src/components/ImagePickerModal.vue`,
     `web/src/components/GenerateParamsPanel.vue`, `web/src/api.ts`.
 
-- [ ] Validate mask/source combinations before submit.
+- [x] Validate mask/source combinations before submit.
   - For non-Qwen img2img/inpaint, a mask requires a source image.
   - Show a local form error matching backend behavior.
   - Keep Qwen Image Edit separate because the backend currently rejects
@@ -207,14 +213,14 @@ follow-up PR slice unless an item explicitly depends on another section.
     `web/src/composables/useGenerateForm.ts`,
     `web/src/components/GenerateParamsPanel.vue`.
 
-- [ ] Consider drag reorder for Qwen edit attachments.
+- [x] Consider drag reorder for Qwen edit attachments.
   - Current target/reference images have button-based reordering.
   - Drag reorder could improve the workflow, but index `0` must remain clearly
     labeled as the target image.
   - Likely files: `web/src/components/Composer.vue`,
     `web/src/components/Composer.test.ts`.
 
-- [ ] Add mask editor tests.
+- [x] Add mask editor tests.
   - Draw/apply emits a base64 mask.
   - Mask editor visible for non-edit image workflows and hidden/disabled for
     Qwen Image Edit.
@@ -224,26 +230,26 @@ follow-up PR slice unless an item explicitly depends on another section.
 
 ## 6. Running Jobs, Queue, GPU Lanes
 
-- [ ] Keep running/queued items always visible and sorted left.
+- [x] Keep running/queued items always visible and sorted left.
   - Replace or extend the current flat `RunningStrip`.
   - Active/running jobs should appear before queued/future jobs.
   - Likely files: `web/src/components/RunningStrip.vue`,
     `web/src/components/RunningJobCard.vue`, `web/src/pages/GeneratePage.vue`.
 
-- [ ] Use `/api/queue` as a reusable UI data source.
+- [x] Use `/api/queue` as a reusable UI data source.
   - Current queue polling is primarily for zombie-card reconciliation.
   - Expose queue state in a composable that UI components can render directly.
   - Likely files: `web/src/api.ts`, `web/src/types.ts`,
     `web/src/composables/useQueueReconciler.ts`, new queue composable.
 
-- [ ] Add one queue lane per GPU.
+- [x] Add one queue lane per GPU.
   - Running jobs can use the existing `gpu` field from `/api/queue`.
   - Queued jobs currently have no GPU assignment; show them in an `Auto` lane
     until the server exposes target/preferred GPU.
   - Likely files: `web/src/components/RunningStrip.vue`,
     `web/src/pages/GeneratePage.vue`, `web/src/types.ts`.
 
-- [ ] Add queued-job lane assignment to the server contract.
+- [x] Add queued-job lane assignment to the server contract.
   - The current queue API intentionally omits `gpu` for queued rows.
   - Add `target_gpu` / `preferred_gpu` metadata for queued jobs, populated
     from request placement or dispatcher assignment.
@@ -251,7 +257,7 @@ follow-up PR slice unless an item explicitly depends on another section.
     `crates/mold-server/src/queue.rs`, `crates/mold-server/src/routes.rs`,
     `crates/mold-core/src/types.rs`, `web/src/types.ts`.
 
-- [ ] Support lane changes for queued jobs.
+- [x] Support lane changes for queued jobs.
   - Add an endpoint such as `PATCH /api/queue/:id` with
     `{ target_gpu: number | null }`.
   - Reject changes for already-running jobs.
@@ -259,21 +265,21 @@ follow-up PR slice unless an item explicitly depends on another section.
     currently flow through channels/lookahead buffers.
   - Depends on queued-job lane assignment.
 
-- [ ] Join local stream jobs to queue entries.
+- [x] Join local stream jobs to queue entries.
   - Capture server id from the first `queued` SSE event.
   - Join local `Job` rows to `/api/queue.entries` by id for lane display,
     position, and actual running GPU.
   - Likely files: `web/src/composables/useGenerateStream.ts`,
     `web/src/components/RunningStrip.vue`.
 
-- [ ] Add queue/lane tests.
+- [x] Add queue/lane tests.
   - Vue tests for lane grouping, running-left ordering, queued `Auto` lane,
     actual GPU lanes, and disabled lane changes for running jobs.
   - Rust route/registry tests for queued lane metadata and PATCH validation.
 
 ## 7. Gallery And NSFW Visibility
 
-- [ ] Remove hide/blur controls and default to showing all content.
+- [x] Remove hide/blur controls and default to showing all content.
   - Remove `useHideMode` wiring from Generate and Gallery.
   - Remove hide buttons from `TopBar`.
   - Remove reveal overlays and hide props from gallery and running job cards.
@@ -284,13 +290,13 @@ follow-up PR slice unless an item explicitly depends on another section.
     `web/src/components/RunningStrip.vue`, `web/src/pages/GeneratePage.vue`,
     `web/src/pages/GalleryPage.vue`.
 
-- [ ] Keep the compact Generate gallery always visible.
+- [x] Keep the compact Generate gallery always visible.
   - After hide removal, recent thumbnails should always render normally.
   - Verify refresh-on-complete still works.
   - Likely files: `web/src/pages/GeneratePage.vue`,
     `web/src/components/GalleryFeed.vue`, `web/src/components/GalleryCard.vue`.
 
-- [ ] Add visibility tests.
+- [x] Add visibility tests.
   - No hide buttons/overlays remain.
   - Gallery and running previews are visible by default.
   - Likely files: existing gallery/running component tests.

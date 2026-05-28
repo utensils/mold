@@ -318,8 +318,24 @@ function estimateRequest(): GenerateRequestWire | null {
     scheduler: capabilities.value.supportsScheduler ? s.scheduler : undefined,
     cfg_plus:
       capabilities.value.supportsCfgPlus && s.cfgPlus ? true : undefined,
+    source_image:
+      !isQwenImageEditFamily(family.value) && s.imageAttachments[0]?.base64
+        ? s.imageAttachments[0].base64
+        : null,
+    edit_images: isQwenImageEditFamily(family.value)
+      ? s.imageAttachments.map((image) => image.base64)
+      : null,
+    strength: s.strength,
+    mask_image: !isQwenImageEditFamily(family.value)
+      ? (s.maskImage?.base64 ?? null)
+      : null,
+    control_image: s.controlImage?.base64 ?? null,
+    control_model: s.controlModel || null,
+    control_scale: s.controlScale,
+    upscale_model: s.upscaleModel || null,
     frames: s.frames,
     fps: s.fps,
+    gif_preview: s.gifPreview,
     placement: s.placement ?? undefined,
     loras: s.loras.length
       ? s.loras.map((lora) => ({ path: lora.path, scale: lora.scale }))
@@ -343,6 +359,13 @@ watch(
     props.modelValue.outputFormat,
     props.modelValue.scheduler,
     props.modelValue.cfgPlus,
+    props.modelValue.strength,
+    props.modelValue.maskImage?.base64 ?? "",
+    props.modelValue.controlImage?.base64 ?? "",
+    props.modelValue.controlModel,
+    props.modelValue.controlScale,
+    props.modelValue.upscaleModel,
+    props.modelValue.gifPreview,
     JSON.stringify(props.modelValue.placement),
     props.modelValue.loras
       .map((lora) => `${lora.path}:${lora.scale}`)
@@ -1260,18 +1283,50 @@ function removeKeyframe(index: number) {
             <div
               v-for="component in componentStatus.components"
               :key="`${component.kind}:${component.name}`"
-              class="grid grid-cols-[minmax(0,1fr)_auto] gap-2"
+              class="rounded-md border px-2 py-1"
+              :class="
+                component.present
+                  ? 'border-transparent bg-slate-950/20'
+                  : 'border-amber-400/40 bg-amber-500/10'
+              "
             >
-              <span class="truncate">{{
-                component.name || component.kind
-              }}</span>
-              <span
-                :class="
-                  component.present ? 'text-emerald-300' : 'text-amber-300'
-                "
-              >
-                {{ component.present ? "Ready" : "Missing" }}
-              </span>
+              <div class="mb-1 flex items-center justify-between gap-2">
+                <span class="truncate">{{
+                  component.name || component.kind
+                }}</span>
+                <span
+                  :class="
+                    component.present ? 'text-emerald-300' : 'text-amber-300'
+                  "
+                >
+                  {{ component.present ? "Ready" : "Missing" }}
+                </span>
+              </div>
+              <div class="flex items-center gap-2">
+                <select
+                  class="min-w-0 flex-1 rounded bg-slate-950/70 px-2 py-1 text-[11px] text-slate-200"
+                  :value="component.path ?? ''"
+                  :disabled="(component.options?.length ?? 0) <= 1"
+                  data-test="component-option-select"
+                >
+                  <option
+                    v-for="option in component.options ?? []"
+                    :key="option.path"
+                    :value="option.path"
+                    :disabled="!option.present"
+                  >
+                    {{ option.label }}{{ option.present ? "" : " (missing)" }}
+                  </option>
+                </select>
+                <a
+                  v-if="!component.present && component.repair_model"
+                  :href="`/catalog?q=${encodeURIComponent(component.repair_model)}`"
+                  class="shrink-0 text-amber-200 hover:underline"
+                  data-test="component-repair-link"
+                >
+                  Repair
+                </a>
+              </div>
             </div>
           </div>
           <div v-else-if="componentStatusError" class="text-slate-500">

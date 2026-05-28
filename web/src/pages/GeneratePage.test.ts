@@ -25,7 +25,9 @@ const entry: GalleryImage = {
 };
 
 const submitMock = vi.hoisted(() => vi.fn());
-const fetchModelsMock = vi.hoisted(() => vi.fn(async () => []));
+const fetchModelsMock = vi.hoisted(() =>
+  vi.fn(async (): Promise<ModelInfoExtended[]> => []),
+);
 
 vi.mock("../api", () => ({
   fetchModels: fetchModelsMock,

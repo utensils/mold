@@ -479,11 +479,10 @@ mod tests {
     #[tokio::test]
     async fn patch_queue_target_gpu_updates_queued_job_and_allows_auto() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
-        state
-            .gpu_pool
-            .workers
-            .iter()
-            .for_each(|_| panic!("test assumes explicit empty worker pool"));
+        assert!(
+            state.gpu_pool.workers.is_empty(),
+            "test assumes explicit empty worker pool"
+        );
         state.job_registry.register("aaaa", "flux-dev:fp16");
 
         let app = app_with_state(state);
@@ -772,6 +771,7 @@ mod tests {
             "output_format": "png"
         });
         let resp = app
+            .clone()
             .oneshot(
                 Request::post("/api/generate/estimate")
                     .header("content-type", "application/json")
@@ -787,6 +787,41 @@ mod tests {
         assert!(json["peak_memory_bytes"].as_u64().unwrap() > 0);
         assert!(json["activation_memory_bytes"].as_u64().unwrap() > 0);
         assert!(json["load_strategy"].as_str().is_some());
+        let base_peak = json["peak_memory_bytes"].as_u64().unwrap();
+
+        let larger_body = serde_json::json!({
+            "prompt": "a cat",
+            "model": "sdxl-base:fp16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 7.5,
+            "negative_prompt": "blurry",
+            "batch_size": 2,
+            "source_image": "aW1hZ2U=",
+            "mask_image": "bWFzaw==",
+            "control_image": "Y29udHJvbA==",
+            "control_model": "controlnet-canny-sd15",
+            "upscale_model": "real-esrgan-x4plus:fp16",
+            "loras": [{"path": "/tmp/style.safetensors", "scale": 0.8}],
+            "output_format": "png"
+        });
+        let larger_resp = app
+            .oneshot(
+                Request::post("/api/generate/estimate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(larger_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(larger_resp.status(), StatusCode::OK);
+        let larger_json = json_body(larger_resp).await;
+        assert!(
+            larger_json["peak_memory_bytes"].as_u64().unwrap() > base_peak,
+            "request-sensitive knobs should raise the estimate: base={base_peak} larger={}",
+            larger_json["peak_memory_bytes"]
+        );
 
         std::env::remove_var("MOLD_MODELS_DIR");
     }
@@ -824,6 +859,12 @@ mod tests {
         assert!(components
             .iter()
             .all(|c| c["repair_model"] == "sdxl-base:fp16"));
+        assert!(components.iter().all(|c| c["options"].is_array()));
+        assert!(components.iter().any(|c| c["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|opt| opt["present"] == true)));
 
         std::env::remove_var("MOLD_MODELS_DIR");
     }

@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use mold_core::{
-    build_model_catalog, Config, GenerateRequest, GenerationMemoryEstimate, ModelComponentStatus,
-    ModelComponentsResponse, ModelDefaults, ModelInfo, ModelInfoExtended, ModelPaths,
+    build_model_catalog, Config, GenerateRequest, GenerationMemoryEstimate, ModelComponentOption,
+    ModelComponentStatus, ModelComponentsResponse, ModelDefaults, ModelInfo, ModelInfoExtended,
+    ModelPaths,
 };
 use mold_inference::device::{activation_bytes, activation_family_for, ActivationFamily};
 
@@ -1633,7 +1636,7 @@ pub(crate) async fn estimate_generation_memory(
             .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
     let base_peak =
         base_peak_memory_for_paths(&paths, hint, streaming, forced_flux_offload, qwen_quantized);
-    let activation = activation_memory_for_estimate(hint, qwen_quantized);
+    let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
     let peak = base_peak.saturating_add(activation);
     let available = effective_load_available_bytes(0, 0);
     let load_strategy = select_server_load_strategy_for_budget(&paths, available, hint);
@@ -1649,6 +1652,62 @@ pub(crate) async fn estimate_generation_memory(
     })
 }
 
+fn request_sensitive_activation_memory(
+    req: &GenerateRequest,
+    hint: Option<ActivationHint>,
+    qwen_quantized: bool,
+) -> u64 {
+    let base = activation_memory_for_estimate(hint, qwen_quantized);
+    let batch = u64::from(req.batch_size.max(1));
+    let video_frames = u64::from(req.frames.unwrap_or(1).max(1));
+    let video_factor = if hint.is_some_and(|h| h.family.streaming_transformer()) {
+        // Video runtimes denoise multiple latent frames but do not keep every
+        // frame's full activation workspace resident at once. Scale
+        // sublinearly so longer clips still move the estimate without
+        // turning it into a file-size guess.
+        video_frames.div_ceil(25).max(1)
+    } else {
+        1
+    };
+    let cfg_factor = if req.guidance > 1.0 && req.negative_prompt.is_some() {
+        2
+    } else {
+        1
+    };
+
+    let mut activation = base
+        .saturating_mul(batch)
+        .saturating_mul(video_factor)
+        .saturating_mul(cfg_factor);
+
+    let pixel_bytes = u64::from(req.width)
+        .saturating_mul(u64::from(req.height))
+        .saturating_mul(4);
+    if req.source_image.is_some()
+        || req
+            .edit_images
+            .as_ref()
+            .is_some_and(|images| !images.is_empty())
+    {
+        activation = activation.saturating_add(pixel_bytes.saturating_mul(batch));
+    }
+    if req.mask_image.is_some() {
+        activation = activation.saturating_add(pixel_bytes / 2);
+    }
+    if req.control_image.is_some() || req.control_model.as_deref().is_some_and(|m| !m.is_empty()) {
+        activation = activation.saturating_add(pixel_bytes.saturating_mul(2));
+    }
+    if req.upscale_model.as_deref().is_some_and(|m| !m.is_empty()) {
+        activation = activation.saturating_add(pixel_bytes.saturating_mul(4));
+    }
+    let lora_count = req
+        .loras
+        .as_ref()
+        .map(|loras| loras.len())
+        .unwrap_or_else(|| usize::from(req.lora.is_some())) as u64;
+    activation.saturating_add(lora_count.saturating_mul(128 * 1024 * 1024))
+}
+
 pub(crate) async fn model_component_status(
     state: &AppState,
     model_name: &str,
@@ -1661,13 +1720,15 @@ pub(crate) async fn model_component_status(
             .files
             .iter()
             .map(|file| {
+                let kind = manifest_component_kind(file.component);
                 let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
                 ModelComponentStatus {
-                    kind: manifest_component_kind(file.component).to_string(),
+                    kind: kind.to_string(),
                     name: manifest_component_name(file.component, &file.hf_filename).to_string(),
                     present: path.is_file(),
                     path: Some(path.to_string_lossy().to_string()),
                     repair_model: Some(resolved.clone()),
+                    options: component_options_for_kind(&config, kind, Some(&path)),
                 }
             })
             .collect();
@@ -1685,7 +1746,7 @@ pub(crate) async fn model_component_status(
     };
     Ok(ModelComponentsResponse {
         model: model_name.to_string(),
-        components: component_status_from_paths(model_name, &paths),
+        components: component_status_from_paths(&config, model_name, &paths),
     })
 }
 
@@ -1730,7 +1791,11 @@ fn manifest_component_name(component: mold_core::manifest::ModelComponent, filen
     }
 }
 
-fn component_status_from_paths(model_name: &str, paths: &ModelPaths) -> Vec<ModelComponentStatus> {
+fn component_status_from_paths(
+    config: &Config,
+    model_name: &str,
+    paths: &ModelPaths,
+) -> Vec<ModelComponentStatus> {
     let mut components = Vec::new();
     let mut push_path = |kind: &str, name: &str, path: &std::path::Path| {
         components.push(ModelComponentStatus {
@@ -1739,6 +1804,7 @@ fn component_status_from_paths(model_name: &str, paths: &ModelPaths) -> Vec<Mode
             present: path.is_file(),
             path: Some(path.to_string_lossy().to_string()),
             repair_model: Some(model_name.to_string()),
+            options: component_options_for_kind(config, kind, Some(path)),
         });
     };
     push_path("transformer", "transformer", &paths.transformer);
@@ -1771,6 +1837,124 @@ fn component_status_from_paths(model_name: &str, paths: &ModelPaths) -> Vec<Mode
         push_path("decoder", "decoder", path);
     }
     components
+}
+
+fn component_options_for_kind(
+    config: &Config,
+    kind: &str,
+    current_path: Option<&Path>,
+) -> Vec<ModelComponentOption> {
+    let mut options = BTreeMap::<String, ModelComponentOption>::new();
+    if let Some(path) = current_path {
+        add_component_option(&mut options, path);
+    }
+    for model_cfg in config.models.values() {
+        for path in config_component_paths_for_kind(model_cfg, kind) {
+            add_component_option(&mut options, Path::new(path));
+        }
+    }
+    let models_dir = config.resolved_models_dir();
+    for manifest in mold_core::manifest::known_manifests() {
+        for file in &manifest.files {
+            if manifest_component_kind(file.component) != kind {
+                continue;
+            }
+            let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+            if path.is_file() {
+                add_component_option(&mut options, &path);
+            }
+        }
+    }
+    options.into_values().collect()
+}
+
+fn config_component_paths_for_kind<'a>(
+    model_cfg: &'a mold_core::config::ModelConfig,
+    kind: &str,
+) -> Vec<&'a str> {
+    let mut paths = Vec::new();
+    match kind {
+        "transformer" => {
+            if let Some(path) = model_cfg.transformer.as_deref() {
+                paths.push(path);
+            }
+            if let Some(shards) = &model_cfg.transformer_shards {
+                paths.extend(shards.iter().map(String::as_str));
+            }
+        }
+        "vae" => {
+            if let Some(path) = model_cfg.vae.as_deref() {
+                paths.push(path);
+            }
+        }
+        "text_encoder" => {
+            if let Some(path) = model_cfg.t5_encoder.as_deref() {
+                paths.push(path);
+            }
+            if let Some(files) = &model_cfg.text_encoder_files {
+                paths.extend(files.iter().map(String::as_str));
+            }
+        }
+        "clip" => {
+            if let Some(path) = model_cfg.clip_encoder.as_deref() {
+                paths.push(path);
+            }
+            if let Some(path) = model_cfg.clip_encoder_2.as_deref() {
+                paths.push(path);
+            }
+        }
+        "tokenizer" => {
+            for path in [
+                model_cfg.t5_tokenizer.as_deref(),
+                model_cfg.clip_tokenizer.as_deref(),
+                model_cfg.clip_tokenizer_2.as_deref(),
+                model_cfg.text_tokenizer.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                paths.push(path);
+            }
+        }
+        "spatial_upscaler" => {
+            if let Some(path) = model_cfg.spatial_upscaler.as_deref() {
+                paths.push(path);
+            }
+        }
+        "temporal_upscaler" => {
+            if let Some(path) = model_cfg.temporal_upscaler.as_deref() {
+                paths.push(path);
+            }
+        }
+        "distilled_lora" => {
+            if let Some(path) = model_cfg.distilled_lora.as_deref() {
+                paths.push(path);
+            }
+        }
+        "decoder" => {
+            if let Some(path) = model_cfg.decoder.as_deref() {
+                paths.push(path);
+            }
+        }
+        _ => {}
+    }
+    paths
+}
+
+fn add_component_option(options: &mut BTreeMap<String, ModelComponentOption>, path: &Path) {
+    let path_str = path.to_string_lossy().to_string();
+    options.entry(path_str.clone()).or_insert_with(|| {
+        let label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path_str.as_str())
+            .to_string();
+        ModelComponentOption {
+            label,
+            path: path_str,
+            present: path.is_file(),
+        }
+    });
 }
 
 /// Ensure the requested model is loaded on GPU and ready for inference.

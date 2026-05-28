@@ -207,10 +207,9 @@ const currentModel = computed(
 const gpus = computed(
   () =>
     status.value?.gpus?.map((g) => ({ ordinal: g.ordinal, state: g.state })) ??
-    null,
+    [],
 );
 
-// TODO-REMOVE-AFTER-MERGE: use useResources().gpuList once Agent B merges.
 const gpuListForPlacement = computed(
   () =>
     status.value?.gpus?.map((g) => ({

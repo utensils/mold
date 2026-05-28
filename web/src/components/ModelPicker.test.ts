@@ -85,6 +85,7 @@ describe("ModelPicker", () => {
     expect(
       w.findAll("button").some((button) => button.text() === "Download"),
     ).toBe(false);
+    expect(w.find("[data-test='filter-downloaded']").exists()).toBe(false);
   });
 
   it("shows a compact catalog empty state when no generation model is downloaded", () => {
@@ -138,7 +139,6 @@ describe("ModelPicker", () => {
     expect(w.text()).not.toContain("flux-schnell:q4");
     expect(w.text()).not.toContain("sdxl:fp16");
 
-    await w.find("[data-test='filter-downloaded']").setValue("any");
     await w.find("[data-test='filter-mode']").setValue("any");
     expect(w.text()).toContain("flux-schnell:q4");
     expect(w.text()).toContain("flux-dev:q8");
@@ -149,5 +149,33 @@ describe("ModelPicker", () => {
       .findAll("[data-test='model-option']")
       .map((row) => row.text());
     expect(rows[0]).toContain("flux-schnell:q4");
+  });
+
+  it("supports multi-select filter values with ANY and NOT logic", async () => {
+    const w = mountPicker([
+      model("flux-schnell:q4", { family: "flux", size_gb: 4 }),
+      model("flux-dev:q8", { family: "flux", size_gb: 8 }),
+      model("sdxl:fp16", { family: "sdxl", size_gb: 7 }),
+      model("qwen-image:q4", { family: "qwen-image", size_gb: 18 }),
+    ]);
+
+    await w.find("[data-test='filter-family']").setValue(["flux", "sdxl"]);
+    await w.find("[data-test='filter-quantization']").setValue(["q8", "fp16"]);
+    expect(w.text()).toContain("flux-dev:q8");
+    expect(w.text()).toContain("sdxl:fp16");
+    expect(w.text()).not.toContain("flux-schnell:q4");
+    expect(w.text()).not.toContain("qwen-image:q4");
+
+    await w.find("[data-test='filter-mode']").setValue("any");
+    expect(w.text()).toContain("flux-schnell:q4");
+    expect(w.text()).toContain("flux-dev:q8");
+    expect(w.text()).toContain("sdxl:fp16");
+    expect(w.text()).not.toContain("qwen-image:q4");
+
+    await w.find("[data-test='filter-mode']").setValue("not");
+    expect(w.text()).not.toContain("flux-schnell:q4");
+    expect(w.text()).not.toContain("flux-dev:q8");
+    expect(w.text()).not.toContain("sdxl:fp16");
+    expect(w.text()).toContain("qwen-image:q4");
   });
 });

@@ -851,12 +851,21 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 ///
 /// Exits when the sender half of the channel is dropped (server shutdown).
 pub async fn run_queue_dispatcher(
-    mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
+    job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
 ) {
     tracing::debug!("multi-GPU queue dispatcher started");
     let buffer_size = resolve_lookahead_buffer();
     let max_deferrals = resolve_max_deferrals();
+    run_queue_dispatcher_with_tuning(job_rx, state, buffer_size, max_deferrals).await;
+}
+
+async fn run_queue_dispatcher_with_tuning(
+    mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
+    state: AppState,
+    buffer_size: usize,
+    max_deferrals: usize,
+) {
     let mut buffer: VecDeque<BufferedJob> = VecDeque::with_capacity(buffer_size);
 
     loop {
@@ -1535,7 +1544,12 @@ mod tests {
         };
         worker.job_tx.send(filler_job).unwrap();
 
-        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
+        let dispatcher = tokio::spawn(run_queue_dispatcher_with_tuning(
+            job_rx,
+            state.clone(),
+            8,
+            DEFAULT_MAX_DEFERRALS,
+        ));
 
         let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {

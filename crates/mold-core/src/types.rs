@@ -2717,6 +2717,15 @@ pub struct ModelComponentStatus {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ModelComponentOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ModelComponentOption {
+    pub label: String,
+    pub path: String,
+    pub present: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

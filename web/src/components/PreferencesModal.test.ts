@@ -62,18 +62,12 @@ describe("PreferencesModal", () => {
     w.unmount();
   });
 
-  it("POSTs catalog.show_nsfw when NSFW checkbox toggles", async () => {
+  it("does not render an NSFW visibility control", () => {
     const w = mountModal();
-    const cb = document.body.querySelector(
-      "input[name=catalog_show_nsfw]",
-    ) as HTMLInputElement;
-    cb.checked = true;
-    cb.dispatchEvent(new Event("input", { bubbles: true }));
-    cb.dispatchEvent(new Event("change", { bubbles: true }));
-    await w.vm.$nextTick();
-    const fm = globalThis.fetch as ReturnType<typeof vi.fn>;
-    const body = JSON.parse(fm.mock.calls[0][1].body as string);
-    expect(body).toEqual({ key: "catalog.show_nsfw", value: "true" });
+    expect(
+      document.body.querySelector("input[name=catalog_show_nsfw]"),
+    ).toBeNull();
+    expect(document.body.textContent).not.toContain("Show NSFW models");
     w.unmount();
   });
 

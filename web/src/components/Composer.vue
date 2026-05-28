@@ -139,6 +139,7 @@ watch(
 );
 
 const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
+const draggingAttachmentIndex = ref<number | null>(null);
 
 // The composer exposes a single "🖼️" image button above the mode toggle so
 // users can attach a source image from either mode without hunting for a
@@ -172,6 +173,36 @@ function moveAttachment(index: number, delta: -1 | 1) {
   if (nextIndex < 0 || nextIndex >= next.length) return;
   [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
   updateAttachments(next);
+}
+
+function reorderAttachment(fromIndex: number, toIndex: number) {
+  if (!isQwenEdit.value) return;
+  if (fromIndex === toIndex) return;
+  const next = props.modelValue.imageAttachments.slice();
+  if (fromIndex < 0 || fromIndex >= next.length) return;
+  if (toIndex < 0 || toIndex >= next.length) return;
+  const [item] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, item);
+  updateAttachments(next);
+}
+
+function onAttachmentDragStart(index: number, event: DragEvent) {
+  if (!isQwenEdit.value) return;
+  draggingAttachmentIndex.value = index;
+  event.dataTransfer?.setData("text/plain", String(index));
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+
+function onAttachmentDrop(index: number, event: DragEvent) {
+  if (!isQwenEdit.value) return;
+  const raw = event.dataTransfer?.getData("text/plain");
+  const fromIndex =
+    raw && !Number.isNaN(Number(raw))
+      ? Number(raw)
+      : draggingAttachmentIndex.value;
+  draggingAttachmentIndex.value = null;
+  if (fromIndex == null) return;
+  reorderAttachment(fromIndex, index);
 }
 
 function roleLabel(index: number): string {
@@ -266,6 +297,12 @@ defineExpose({ scriptComposerRef });
             v-for="(image, index) in visibleAttachments"
             :key="`${image.filename}-${index}`"
             class="relative grid w-20 flex-shrink-0 grid-rows-[3rem_auto] overflow-hidden rounded-xl bg-slate-900/60"
+            :draggable="isQwenEdit"
+            :data-test="`attachment-card-${index}`"
+            @dragstart="onAttachmentDragStart(index, $event)"
+            @dragend="draggingAttachmentIndex = null"
+            @dragover.prevent
+            @drop.prevent="onAttachmentDrop(index, $event)"
           >
             <img
               :src="`data:image/png;base64,${image.base64}`"

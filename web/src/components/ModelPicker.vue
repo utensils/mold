@@ -8,7 +8,6 @@ import {
   isStandaloneGenerationModel,
   modelQuantization,
   sortModels,
-  type DownloadedFilter,
   type ModelFilterMode,
   type ModelSortKey,
   type SizeBucket,
@@ -29,10 +28,9 @@ const COLLAPSED_FAMILIES_KEY = "mold.generate.modelPicker.collapsedFamilies";
 
 const query = ref("");
 const filterMode = ref<ModelFilterMode>("all");
-const downloadedFilter = ref<DownloadedFilter>("downloaded");
-const selectedFamily = ref("");
-const selectedQuantization = ref("");
-const selectedSize = ref<SizeBucket | "">("");
+const selectedFamilies = ref<string[]>([]);
+const selectedQuantizations = ref<string[]>([]);
+const selectedSizes = ref<SizeBucket[]>([]);
 const sortKeys = ref<ModelSortKey[]>(["family", "variantRank", "name"]);
 const collapsedFamilies = ref<Set<string>>(loadCollapsedFamilies());
 
@@ -73,34 +71,39 @@ function toggleFamily(family: string) {
 const generationModels = computed(() =>
   props.models.filter(isStandaloneGenerationModel),
 );
+const downloadedGenerationModels = computed(() =>
+  generationModels.value.filter((m) => m.downloaded),
+);
 const downloadedGenerationCount = computed(
-  () => generationModels.value.filter((m) => m.downloaded).length,
+  () => downloadedGenerationModels.value.length,
 );
 const showEmptyState = computed(() => downloadedGenerationCount.value === 0);
 
 const familyOptions = computed(() =>
-  groupModelsByFamily(generationModels.value).map((group) => ({
+  groupModelsByFamily(downloadedGenerationModels.value).map((group) => ({
     family: group.family,
     label: group.label,
   })),
 );
 
 const quantizationOptions = computed(() =>
-  Array.from(new Set(generationModels.value.map(modelQuantization))).sort(),
+  Array.from(
+    new Set(downloadedGenerationModels.value.map(modelQuantization)),
+  ).sort(),
 );
 
 const filterState = computed(() => ({
   mode: filterMode.value,
   query: query.value,
-  families: selectedFamily.value ? [selectedFamily.value] : [],
-  quantizations: selectedQuantization.value ? [selectedQuantization.value] : [],
-  sizeBuckets: selectedSize.value ? [selectedSize.value] : [],
-  downloaded: downloadedFilter.value,
+  families: selectedFamilies.value,
+  quantizations: selectedQuantizations.value,
+  sizeBuckets: selectedSizes.value,
+  downloaded: "any" as const,
 }));
 
 const filteredModels = computed(() =>
   sortModels(
-    applyModelFilters(generationModels.value, filterState.value),
+    applyModelFilters(downloadedGenerationModels.value, filterState.value),
     sortKeys.value,
   ),
 );
@@ -114,8 +117,19 @@ function toggleSort(key: ModelSortKey) {
   sortKeys.value = activeSortKeys.value.has(key) ? current : [key, ...current];
 }
 
+function selectedValues(event: Event): string[] {
+  return Array.from((event.target as HTMLSelectElement).selectedOptions).map(
+    (option) => option.value,
+  );
+}
+
+function selectedSizeValues(event: Event): SizeBucket[] {
+  return selectedValues(event).filter((value): value is SizeBucket =>
+    ["small", "medium", "large", "xlarge"].includes(value),
+  );
+}
+
 function onPick(model: ModelInfoExtended) {
-  if (!model.downloaded) return;
   emit("update:modelValue", model.name);
   emit("select", model);
 }
@@ -149,7 +163,7 @@ function sizeLabel(bucket: SizeBucket): string {
     <div class="grid grid-cols-2 gap-1.5">
       <select
         v-model="filterMode"
-        class="rounded-md bg-slate-900/60 px-2 py-1.5 text-xs text-slate-100"
+        class="col-span-2 rounded-md bg-slate-900/60 px-2 py-1.5 text-xs text-slate-100 sm:col-span-1"
         aria-label="Filter logic"
         data-test="filter-mode"
       >
@@ -158,22 +172,14 @@ function sizeLabel(bucket: SizeBucket): string {
         <option value="not">Not filters</option>
       </select>
       <select
-        v-model="downloadedFilter"
+        :value="selectedFamilies"
+        multiple
+        size="3"
         class="rounded-md bg-slate-900/60 px-2 py-1.5 text-xs text-slate-100"
-        aria-label="Downloaded state"
-        data-test="filter-downloaded"
-      >
-        <option value="downloaded">Downloaded</option>
-        <option value="missing">Missing</option>
-        <option value="any">Any state</option>
-      </select>
-      <select
-        v-model="selectedFamily"
-        class="rounded-md bg-slate-900/60 px-2 py-1.5 text-xs text-slate-100"
-        aria-label="Family filter"
+        aria-label="Family filters"
         data-test="filter-family"
+        @change="selectedFamilies = selectedValues($event)"
       >
-        <option value="">Any family</option>
         <option
           v-for="family in familyOptions"
           :key="family.family"
@@ -183,22 +189,27 @@ function sizeLabel(bucket: SizeBucket): string {
         </option>
       </select>
       <select
-        v-model="selectedQuantization"
+        :value="selectedQuantizations"
+        multiple
+        size="3"
         class="rounded-md bg-slate-900/60 px-2 py-1.5 text-xs text-slate-100"
-        aria-label="Quantization filter"
+        aria-label="Quantization filters"
         data-test="filter-quantization"
+        @change="selectedQuantizations = selectedValues($event)"
       >
-        <option value="">Any quant</option>
         <option v-for="q in quantizationOptions" :key="q" :value="q">
           {{ q }}
         </option>
       </select>
       <select
-        v-model="selectedSize"
+        :value="selectedSizes"
+        multiple
+        size="3"
         class="col-span-2 rounded-md bg-slate-900/60 px-2 py-1.5 text-xs text-slate-100"
-        aria-label="Size filter"
+        aria-label="Size filters"
+        data-test="filter-size"
+        @change="selectedSizes = selectedSizeValues($event)"
       >
-        <option value="">Any size</option>
         <option
           v-for="bucket in ['small', 'medium', 'large', 'xlarge']"
           :key="bucket"
@@ -216,7 +227,6 @@ function sizeLabel(bucket: SizeBucket): string {
           ['family', 'Family'],
           ['size', 'Size'],
           ['quantization', 'Quant'],
-          ['downloaded', 'State'],
           ['variantRank', 'Variant'],
         ]"
         :key="sort[0]"
@@ -292,8 +302,6 @@ function sizeLabel(bucket: SizeBucket): string {
               <button
                 type="button"
                 class="flex w-full items-start justify-between gap-2 text-left"
-                :disabled="!m.downloaded"
-                :class="!m.downloaded ? 'cursor-default opacity-60' : ''"
                 :title="m.description"
                 :data-test="`model-option-${m.name}`"
                 @click="onPick(m)"
@@ -304,12 +312,6 @@ function sizeLabel(bucket: SizeBucket): string {
                     {{ familyLabel(m.family) }} · {{ fmtSize(m) }} ·
                     {{ modelQuantization(m) }}
                   </span>
-                </span>
-                <span
-                  v-if="!m.downloaded"
-                  class="shrink-0 rounded bg-white/10 px-1.5 py-0.5 text-xs text-slate-300"
-                >
-                  Missing
                 </span>
               </button>
               <div

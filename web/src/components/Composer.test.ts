@@ -101,6 +101,40 @@ describe("Composer image attachments", () => {
     expect(last?.imageAttachments.map((a) => a.base64)).toEqual(["REF"]);
   });
 
+  it("drag reorders Qwen edit attachments", async () => {
+    const w = mountComposer(
+      makeForm({
+        imageAttachments: [
+          { kind: "upload", filename: "target.png", base64: "TARGET" },
+          { kind: "upload", filename: "ref-a.png", base64: "REF_A" },
+          { kind: "upload", filename: "ref-b.png", base64: "REF_B" },
+        ],
+      }),
+    );
+    const data = new Map<string, string>();
+    const dataTransfer = {
+      effectAllowed: "",
+      setData: (key: string, value: string) => data.set(key, value),
+      getData: (key: string) => data.get(key) ?? "",
+    };
+
+    await w
+      .find("[data-test='attachment-card-2']")
+      .trigger("dragstart", { dataTransfer });
+    await w
+      .find("[data-test='attachment-card-0']")
+      .trigger("drop", { dataTransfer });
+
+    const last = w.emitted("update:modelValue")?.at(-1)?.[0] as
+      | GenerateFormState
+      | undefined;
+    expect(last?.imageAttachments.map((a) => a.base64)).toEqual([
+      "REF_B",
+      "TARGET",
+      "REF_A",
+    ]);
+  });
+
   it("shows a source chip label for non-edit image families", () => {
     const w = mountComposer(makeForm({ modelFamily: "sdxl" }), "sdxl");
 

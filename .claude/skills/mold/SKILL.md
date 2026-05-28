@@ -135,9 +135,19 @@ paths. MCP generation accepts ids, paths, or objects like `{ "id": "cv:827325" }
 and `{ "path": "...", "scale": 0.8 }`; omitted scale defaults to `1.0`.
 
 **Web UI multi-LoRA + trigger words:** the LoRA picker stacks up to 4 adapters
-per generation (each with its own scale slider). Civitai LoRAs ship trigger
+per generation (each with its own scale slider) and supports drag reordering
+with the request preserving visual stack order. Civitai LoRAs ship trigger
 phrases (`trainedWords`); they render as click-to-insert chips beside the
 selected LoRA — clicking a chip appends the phrase to the active prompt.
+
+**Generate web UI:** the Generate tab only lists downloaded standalone
+generation models; the Catalog tab is the install/repair surface for missing
+models and companions. The controls rail mirrors placement controls, exposes
+family-specific schedulers, uses installed upscaler dropdowns, shows
+server-derived peak-memory estimates, reports component readiness via
+`GET /api/models/:model/components`, and can save/load named web-local
+generation templates. The running strip consumes `GET /api/queue` and
+`PATCH /api/queue/:id` to render queued/running work in GPU lanes.
 
 **Requirements:**
 

@@ -476,7 +476,7 @@ pub async fn live_search_catalog(
         source,
         page: q.page.unwrap_or(1).max(1),
         page_size: q.page_size.unwrap_or(20).clamp(1, 100),
-        include_nsfw: q.include_nsfw.unwrap_or(false),
+        include_nsfw: q.include_nsfw.unwrap_or(true),
         civitai_token: std::env::var("CIVITAI_TOKEN").ok(),
         hf_token: std::env::var("HF_TOKEN").ok(),
     };

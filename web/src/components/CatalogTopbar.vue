@@ -54,10 +54,6 @@ function setKind(k: KindFilter | undefined) {
   cat.setFilter({ kind: k });
 }
 
-function toggleNsfw() {
-  cat.setFilter({ include_nsfw: !cat.filter.value.include_nsfw });
-}
-
 function clearSearch() {
   searchLocal.value = "";
   cat.setFilter({ q: undefined });
@@ -247,19 +243,5 @@ function clearSearch() {
         {{ opt.label }}
       </option>
     </select>
-
-    <!-- NSFW toggle -->
-    <button
-      class="inline-flex h-10 items-center rounded-full border border-white/5 px-3.5 text-[13px] font-medium transition"
-      :class="
-        cat.filter.value.include_nsfw
-          ? 'bg-amber-500/20 border-amber-400/40 text-amber-100'
-          : 'bg-white/5 text-ink-200 hover:text-white'
-      "
-      :aria-pressed="cat.filter.value.include_nsfw"
-      @click="toggleNsfw"
-    >
-      NSFW
-    </button>
   </div>
 </template>

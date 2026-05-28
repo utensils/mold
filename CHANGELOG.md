@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Generate web Studio Console.** The Generate tab now keeps model search, LoRA search/stacking, prompt entry, live jobs, compact recent gallery, and advanced controls visible in a three-rail workspace. Gallery cards on Generate include a Recreate action that restores the form from the saved generation metadata.
+- **Generate Studio follow-ups.** The Generate tab now filters its model picker to downloaded standalone generation models, groups them by collapsible family, supports compact boolean filtering and multi-sort controls, removes content hiding controls, adds drag-reorderable LoRA stacks, saves/loads named web-local generation templates, shows per-request memory estimates and component status, exposes model-specific scheduler/control options, uses installed upscaler dropdowns, adds GPU queue lanes with editable queued-job targets, and includes a mask editor for source/gallery/uploaded images.
+- **Generate support endpoints.** The server now exposes `POST /api/generate/estimate` for request-sensitive peak-memory estimates, `GET /api/models/:model/components` for model component readiness, and `PATCH /api/queue/:id` for queued-job GPU lane targets. Catalog search now includes NSFW rows by default and the web UI no longer exposes NSFW visibility toggles.
 - **Full gallery metadata JSON for Recreate.** The metadata DB now stores the complete `OutputMetadata` JSON alongside existing indexed columns, preserving scheduler, output format, CFG++, LoRA stacks, ControlNet/upscale settings, LTX-2 audio/video pipeline options, and video timing fields for future gallery round-trips.
 
 ## [0.12.0] - 2026-05-27

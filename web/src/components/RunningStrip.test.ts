@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import RunningStrip from "./RunningStrip.vue";
 import type { Job } from "../composables/useGenerateStream";
 import type { GenerateRequestWire, QueueEntry } from "../types";

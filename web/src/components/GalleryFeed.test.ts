@@ -28,11 +28,7 @@ const entries: GalleryImage[] = [
 
 describe("GalleryFeed visibility", () => {
   beforeEach(() => {
-    (
-      globalThis as typeof globalThis & {
-        IntersectionObserver: typeof FakeIntersectionObserver;
-      }
-    ).IntersectionObserver = FakeIntersectionObserver;
+    (globalThis as any).IntersectionObserver = FakeIntersectionObserver;
   });
 
   afterEach(() => {

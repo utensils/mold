@@ -68,7 +68,7 @@ impl Default for LiveSearchOpts {
             source: None,
             page: 1,
             page_size: 20,
-            include_nsfw: false,
+            include_nsfw: true,
             civitai_token: None,
             hf_token: None,
         }

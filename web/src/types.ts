@@ -761,6 +761,13 @@ export interface ModelComponentStatus {
   present: boolean;
   path?: string | null;
   repair_model?: string | null;
+  options?: ModelComponentOption[];
+}
+
+export interface ModelComponentOption {
+  label: string;
+  path: string;
+  present: boolean;
 }
 
 export interface ModelComponentsResponse {

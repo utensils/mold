@@ -24,6 +24,13 @@ vi.mock("../api", async (importOriginal) => {
           present: true,
           path: "/models/flux/transformer.safetensors",
           repair_model: "flux-dev:q4",
+          options: [
+            {
+              label: "transformer.safetensors",
+              path: "/models/flux/transformer.safetensors",
+              present: true,
+            },
+          ],
         },
         {
           kind: "vae",
@@ -31,6 +38,18 @@ vi.mock("../api", async (importOriginal) => {
           present: false,
           path: "/models/flux/vae.safetensors",
           repair_model: "flux-dev:q4",
+          options: [
+            {
+              label: "vae.safetensors",
+              path: "/models/flux/vae.safetensors",
+              present: false,
+            },
+            {
+              label: "alternate-vae.safetensors",
+              path: "/models/flux/alternate-vae.safetensors",
+              present: true,
+            },
+          ],
         },
       ],
     })),
@@ -529,6 +548,13 @@ describe("GenerateParamsPanel", () => {
       "Missing",
     );
     expect(w.find("[data-test='component-catalog-link']").exists()).toBe(true);
+    expect(
+      w.find("[data-test='component-repair-link']").attributes("href"),
+    ).toBe("/catalog?q=flux-dev%3Aq4");
+    expect(w.findAll("[data-test='component-option-select']")).toHaveLength(2);
+    expect(
+      w.findAll("[data-test='component-option-select']")[1].text(),
+    ).toContain("alternate-vae.safetensors");
     w.unmount();
   });
 });
