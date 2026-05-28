@@ -659,7 +659,7 @@ export interface CatalogEntryWire {
   family_role: "foundation" | "finetune";
   sub_family: string | null;
   modality: "image" | "video";
-  kind: "checkpoint" | "lora" | "vae" | "text-encoder" | "control-net";
+  kind: CatalogKind;
   file_format: "safetensors" | "gguf" | "diffusers";
   bundling: "separated" | "single-file";
   size_bytes: number | null;
@@ -734,7 +734,7 @@ export interface CatalogFamiliesResponse {
 export interface CatalogListParams {
   family?: string;
   family_role?: "foundation" | "finetune";
-  kind?: "checkpoint" | "lora" | "vae" | "text-encoder" | "control-net";
+  kind?: CatalogKind;
   modality?: "image" | "video";
   source?: "hf" | "civitai";
   sub_family?: string;
@@ -745,6 +745,15 @@ export interface CatalogListParams {
   page?: number;
   page_size?: number;
 }
+
+export type CatalogKind =
+  | "checkpoint"
+  | "lora"
+  | "vae"
+  | "text-encoder"
+  | "tokenizer"
+  | "clip"
+  | "control-net";
 
 export interface GenerationMemoryEstimate {
   model: string;

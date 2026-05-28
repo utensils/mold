@@ -32,6 +32,18 @@ describe("catalog api", () => {
     expect(call).toContain("page=2");
   });
 
+  it("fetchCatalogSearch passes component kind filters as query params", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ entries: [], page: 1, page_size: 48 }),
+    });
+    await fetchCatalogSearch({ kind: "tokenizer", q: "qwen tokenizer" });
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as string;
+    expect(call).toContain("kind=tokenizer");
+    expect(call).toContain("q=qwen+tokenizer");
+  });
+
   it("fetchCatalogEntry url-encodes the id", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,

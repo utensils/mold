@@ -13,7 +13,9 @@ pub async fn get_catalog_entry(
     let models_dir = cfg_guard.resolved_models_dir();
     drop(cfg_guard);
 
-    let entry = if let Some(version_id) = id.strip_prefix("cv:") {
+    let entry = if let Some(entry) = mold_catalog::live::companion_entry_for_id(&id) {
+        entry
+    } else if let Some(version_id) = id.strip_prefix("cv:") {
         match mold_catalog::live::fetch_civitai_version(
             state.catalog_live_civitai_base.as_str(),
             version_id,
@@ -270,6 +272,30 @@ pub async fn post_catalog_download(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     // Live single-id lookup — replaces the bulk-scrape DB read.
+    if let Some(companion_name) = mold_catalog::live::companion_name_for_catalog_id(&id) {
+        let models_dir = state.config.read().await.resolved_models_dir();
+        let companion_jobs = enqueue_missing_companions(
+            &[companion_name.to_string()],
+            &models_dir,
+            &state.downloads,
+            Some(&id),
+        )
+        .await;
+        let primary_job_id = if companion_jobs.is_empty() {
+            None
+        } else {
+            Some(companion_jobs[0].job_id.clone())
+        };
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "primary_job_id": primary_job_id,
+                "companion_jobs": [],
+            })),
+        )
+            .into_response();
+    }
+
     let entry = if let Some(version_id) = id.strip_prefix("cv:") {
         match mold_catalog::live::fetch_civitai_version(
             state.catalog_live_civitai_base.as_str(),
@@ -693,6 +719,8 @@ fn parse_kind(s: &str) -> Option<mold_catalog::entry::Kind> {
         "lora" => Lora,
         "vae" => Vae,
         "text-encoder" => TextEncoder,
+        "tokenizer" => Tokenizer,
+        "clip" => Clip,
         "control-net" => ControlNet,
         _ => return None,
     })
@@ -709,8 +737,14 @@ fn live_entry_to_wire(
     // legacy fallback for rows the catalog DB returned, and live rows
     // by definition pre-date their sidecar (which gets written at
     // download time).
-    let (installed, primary_path) = if matches!(entry.source, mold_catalog::entry::Source::Civitai)
+    let (installed, primary_path) = if let Some(companion_name) =
+        mold_catalog::live::companion_name_for_catalog_id(entry.id.as_str())
     {
+        let installed = mold_core::manifest::find_manifest(companion_name)
+            .map(|manifest| mold_core::download::companion_present_on_disk(models_dir, manifest))
+            .unwrap_or(false);
+        (installed, None)
+    } else if matches!(entry.source, mold_catalog::entry::Source::Civitai) {
         let sc_path = mold_catalog::sidecar::civitai_sidecar_path(models_dir, entry.id.as_str());
         match mold_catalog::sidecar::read_sidecar(&sc_path) {
             Ok(sidecar) => match sc_path.parent() {
