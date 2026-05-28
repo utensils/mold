@@ -55,6 +55,8 @@ pub enum Kind {
     Lora,
     Vae,
     TextEncoder,
+    Tokenizer,
+    Clip,
     ControlNet,
 }
 

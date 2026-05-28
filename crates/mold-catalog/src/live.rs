@@ -23,7 +23,11 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::civitai_map::{map_base_model, CIVITAI_BASE_MODELS};
-use crate::entry::{CatalogEntry, FamilyRole, Kind, Source};
+use crate::companions::{Companion, COMPANIONS};
+use crate::entry::{
+    Bundling, CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind, LicenseFlags,
+    Modality, RecipeFile, Source,
+};
 use crate::families::Family;
 use crate::normalizer::{
     from_civitai, from_hf, CivitaiItem, CivitaiVersion, HfDetail, HfTreeEntry,
@@ -40,13 +44,13 @@ pub struct LiveSearchOpts {
     /// Constrain to one mold family — translated to a multi-valued
     /// Civitai `baseModels=` parameter via [`CIVITAI_BASE_MODELS`].
     pub family: Option<Family>,
-    /// `Lora` / `Checkpoint` etc. — translated to Civitai `types=`. The
-    /// `Vae` / `TextEncoder` / `ControlNet` variants don't yet have a
-    /// natural Civitai representation; they fall through to all types.
+    /// `Lora` / `Checkpoint` etc. — translated to upstream filters where
+    /// possible. `Clip` / `Tokenizer` are local companion-component rows;
+    /// VAE and text-encoder components come from the same local registry
+    /// and can also coexist with upstream rows where an upstream has them.
     pub kind: Option<Kind>,
-    /// `None` (or `Some(Civitai)`) → query Civitai. Reserved for HF
-    /// support in a follow-up; the variant is preserved for forward
-    /// compatibility but the HF branch is currently a no-op.
+    /// `None` queries Civitai + HF + local component rows, while an
+    /// explicit source restricts to that source family.
     pub source: Option<Source>,
     pub page: u32,
     pub page_size: u32,
@@ -191,6 +195,11 @@ pub async fn search(
     }
 
     let mut entries = Vec::new();
+    let local_components = companion_component_entries(opts);
+    if matches!(opts.kind, Some(Kind::Clip | Kind::Tokenizer)) {
+        cache.put(opts.clone(), local_components.clone());
+        return Ok(local_components);
+    }
     if !matches!(opts.source, Some(Source::Hf)) {
         entries.extend(civitai_search(civitai_base, opts).await?);
     }
@@ -203,9 +212,226 @@ pub async fn search(
             }
         }
     }
+    entries.extend(local_components);
 
     cache.put(opts.clone(), entries.clone());
     Ok(entries)
+}
+
+pub fn companion_entry_for_id(id: &str) -> Option<CatalogEntry> {
+    let rest = id.strip_prefix("hf:companion/")?;
+    let (name, tokenizer) = match rest.strip_suffix("/tokenizer") {
+        Some(name) => (name, true),
+        None => (rest, false),
+    };
+    let companion = COMPANIONS.iter().find(|c| c.canonical_name == name)?;
+    if tokenizer && !companion_has_tokenizer(companion) {
+        return None;
+    }
+    let family = companion.family_scope.first().copied()?;
+    Some(companion_to_entry(companion, family, tokenizer))
+}
+
+pub fn companion_name_for_catalog_id(id: &str) -> Option<&'static str> {
+    let rest = id.strip_prefix("hf:companion/")?;
+    let name = rest.strip_suffix("/tokenizer").unwrap_or(rest);
+    COMPANIONS
+        .iter()
+        .find(|c| c.canonical_name == name)
+        .map(|c| c.canonical_name)
+}
+
+fn companion_component_entries(opts: &LiveSearchOpts) -> Vec<CatalogEntry> {
+    if matches!(opts.source, Some(Source::Civitai)) {
+        return Vec::new();
+    }
+    if opts.kind.is_none() && !query_mentions_component(opts.q.as_deref()) {
+        return Vec::new();
+    }
+
+    let mut entries = Vec::new();
+    for companion in COMPANIONS {
+        let Some(family) = companion_family_for_filter(companion, opts.family) else {
+            continue;
+        };
+
+        let include_bundle = match opts.kind {
+            Some(Kind::Clip) => companion_kind(companion) == Kind::Clip,
+            Some(Kind::TextEncoder) => companion_kind(companion) == Kind::TextEncoder,
+            Some(Kind::Vae) => companion_kind(companion) == Kind::Vae,
+            Some(Kind::Tokenizer) => false,
+            Some(Kind::Checkpoint | Kind::Lora | Kind::ControlNet) => false,
+            None => true,
+        };
+        if include_bundle {
+            let entry = companion_to_entry(companion, family, false);
+            if companion_matches_query(&entry, opts.q.as_deref()) {
+                entries.push(entry);
+            }
+        }
+
+        if companion_has_tokenizer(companion) && matches!(opts.kind, None | Some(Kind::Tokenizer)) {
+            let entry = companion_to_entry(companion, family, true);
+            if companion_matches_query(&entry, opts.q.as_deref()) {
+                entries.push(entry);
+            }
+        }
+    }
+    entries
+}
+
+fn query_mentions_component(q: Option<&str>) -> bool {
+    let Some(q) = q.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let q = q.to_ascii_lowercase();
+    [
+        "clip",
+        "tokenizer",
+        "vae",
+        "text encoder",
+        "text-encoder",
+        "t5",
+        "qwen",
+        "gemma",
+    ]
+    .iter()
+    .any(|needle| q.contains(needle))
+}
+
+fn companion_family_for_filter(companion: &Companion, filter: Option<Family>) -> Option<Family> {
+    match filter {
+        Some(family) if companion.family_scope.contains(&family) => Some(family),
+        Some(_) => None,
+        None => companion.family_scope.first().copied(),
+    }
+}
+
+fn companion_kind(companion: &Companion) -> Kind {
+    if companion.canonical_name.starts_with("clip-") {
+        Kind::Clip
+    } else {
+        companion.kind
+    }
+}
+
+fn companion_has_tokenizer(companion: &Companion) -> bool {
+    companion
+        .files
+        .iter()
+        .any(|path| path.to_ascii_lowercase().contains("tokenizer"))
+}
+
+fn companion_matches_query(entry: &CatalogEntry, q: Option<&str>) -> bool {
+    let Some(q) = q.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    let q = q.to_ascii_lowercase();
+    entry.name.to_ascii_lowercase().contains(&q)
+        || entry.source_id.to_ascii_lowercase().contains(&q)
+        || entry
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains(&q)
+        || entry
+            .tags
+            .iter()
+            .any(|tag| tag.to_ascii_lowercase().contains(&q))
+}
+
+fn companion_to_entry(companion: &Companion, family: Family, tokenizer: bool) -> CatalogEntry {
+    let kind = if tokenizer {
+        Kind::Tokenizer
+    } else {
+        companion_kind(companion)
+    };
+    let name = if tokenizer {
+        format!("{} tokenizer", companion.canonical_name)
+    } else {
+        companion.canonical_name.to_string()
+    };
+    let id = if tokenizer {
+        format!("hf:companion/{}/tokenizer", companion.canonical_name)
+    } else {
+        format!("hf:companion/{}", companion.canonical_name)
+    };
+    let files = companion
+        .files
+        .iter()
+        .map(|file| RecipeFile {
+            url: format!(
+                "https://huggingface.co/{}/resolve/main/{file}",
+                companion.repo
+            ),
+            dest: format!("{{family}}/{}/{file}", companion.canonical_name),
+            sha256: None,
+            size_bytes: None,
+            role: None,
+        })
+        .collect::<Vec<_>>();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    CatalogEntry {
+        id: CatalogId::from(id),
+        source: Source::Hf,
+        source_id: companion.repo.to_string(),
+        name,
+        author: companion.repo.split('/').next().map(str::to_string),
+        family,
+        family_role: FamilyRole::Foundation,
+        sub_family: None,
+        modality: match family {
+            Family::LtxVideo | Family::Ltx2 => Modality::Video,
+            _ => Modality::Image,
+        },
+        kind,
+        file_format: FileFormat::Safetensors,
+        bundling: Bundling::Separated,
+        size_bytes: Some(companion.size_bytes),
+        download_count: 0,
+        rating: None,
+        likes: 0,
+        nsfw: false,
+        thumbnail_url: None,
+        description: Some(format!(
+            "{} component bundle from {}",
+            companion.canonical_name, companion.repo
+        )),
+        license: None,
+        license_flags: LicenseFlags::default(),
+        tags: companion
+            .family_scope
+            .iter()
+            .map(|family| family.as_str().to_string())
+            .chain(std::iter::once(kind_tag(kind).to_string()))
+            .collect(),
+        companions: Vec::new(),
+        download_recipe: DownloadRecipe {
+            files,
+            needs_token: None,
+        },
+        engine_phase: 1,
+        created_at: None,
+        updated_at: None,
+        added_at: now,
+        trained_words: Vec::new(),
+    }
+}
+
+fn kind_tag(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Checkpoint => "checkpoint",
+        Kind::Lora => "lora",
+        Kind::Vae => "vae",
+        Kind::TextEncoder => "text-encoder",
+        Kind::Tokenizer => "tokenizer",
+        Kind::Clip => "clip",
+        Kind::ControlNet => "control-net",
+    }
 }
 
 async fn civitai_search(

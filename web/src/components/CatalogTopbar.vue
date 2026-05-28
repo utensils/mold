@@ -1,13 +1,23 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import { useCatalog } from "../composables/useCatalog";
-import type { CatalogListParams } from "../types";
+import type { CatalogKind, CatalogListParams } from "../types";
 
 const cat = useCatalog();
 
 type Modality = "image" | "video";
 type SortOption = CatalogListParams["sort"];
-type KindFilter = "checkpoint" | "lora";
+type KindFilter = CatalogKind;
+
+const KIND_OPTIONS: { value: KindFilter; label: string }[] = [
+  { value: "checkpoint", label: "Models" },
+  { value: "lora", label: "LoRAs" },
+  { value: "clip", label: "CLIP" },
+  { value: "text-encoder", label: "Text encoders" },
+  { value: "vae", label: "VAEs" },
+  { value: "tokenizer", label: "Tokenizers" },
+  { value: "control-net", label: "ControlNet" },
+];
 
 const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: "downloads", label: "Downloads" },
@@ -45,11 +55,6 @@ function setSource(s: "hf" | "civitai" | undefined) {
   cat.setFilter({ source: s });
 }
 
-/// Three-state kind filter: "all" (undefined) → checkpoints + LoRAs;
-/// "checkpoint" → base models only; "lora" → adapters only. We don't
-/// surface VAE / TextEncoder / ControlNet here because the catalog
-/// scanner doesn't currently produce those rows; a four-button group
-/// for two real values would be visual noise.
 function setKind(k: KindFilter | undefined) {
   cat.setFilter({ kind: k });
 }
@@ -104,7 +109,7 @@ function clearSearch() {
       </button>
     </nav>
 
-    <!-- Kind chips: All / Models (checkpoints) / LoRAs -->
+    <!-- Kind chips -->
     <nav
       class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-200"
       aria-label="Kind filter"
@@ -121,26 +126,17 @@ function clearSearch() {
         All
       </button>
       <button
+        v-for="opt in KIND_OPTIONS"
+        :key="opt.value"
         class="rounded-full px-3 py-1.5 transition"
         :class="
-          cat.filter.value.kind === 'checkpoint'
+          cat.filter.value.kind === opt.value
             ? 'bg-brand-500 text-white shadow-sm'
             : 'hover:text-white'
         "
-        @click="setKind('checkpoint')"
+        @click="setKind(opt.value)"
       >
-        Models
-      </button>
-      <button
-        class="rounded-full px-3 py-1.5 transition"
-        :class="
-          cat.filter.value.kind === 'lora'
-            ? 'bg-brand-500 text-white shadow-sm'
-            : 'hover:text-white'
-        "
-        @click="setKind('lora')"
-      >
-        LoRAs
+        {{ opt.label }}
       </button>
     </nav>
 
