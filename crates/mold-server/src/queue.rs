@@ -439,10 +439,8 @@ pub(crate) fn pick_next_job(
     );
 
     // Force-dispatch the head if it's hit the starvation budget.
-    if let Some(head) = buffer.front() {
-        if head.deferred >= max_deferrals {
-            return buffer.pop_front().expect("checked non-empty").job;
-        }
+    if let Some(head) = buffer.pop_front_if(|head| head.deferred >= max_deferrals) {
+        return head.job;
     }
 
     // Find the front-most buffered job whose model is already loaded.
