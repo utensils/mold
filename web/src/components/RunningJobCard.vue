@@ -7,18 +7,15 @@ const props = withDefaults(
   defineProps<{
     job: Job;
     queueEntry?: QueueEntry | null;
-    gpus?: Array<{ ordinal: number; state?: string }>;
   }>(),
   {
     queueEntry: null,
-    gpus: () => [],
   },
 );
 const emit = defineEmits<{
   (e: "cancel", id: string): void;
   (e: "open", job: Job): void;
   (e: "dismiss", id: string): void;
-  (e: "lane-change", id: string, targetGpu: number | null): void;
 }>();
 
 // Done jobs are clickable — they open the gallery detail drawer for the
@@ -73,26 +70,6 @@ const thumbSrc = computed(() => {
   const mime = r.format === "jpeg" ? "image/jpeg" : `image/${r.format}`;
   return `data:${mime};base64,${r.image}`;
 });
-
-const laneValue = computed(() => {
-  const target =
-    props.queueEntry?.target_gpu ?? props.queueEntry?.preferred_gpu;
-  return target === null || target === undefined ? "" : String(target);
-});
-
-const laneSelectDisabled = computed(
-  () => !props.queueEntry || props.queueEntry.state === "running",
-);
-
-function onLaneChange(evt: Event) {
-  if (!props.queueEntry || laneSelectDisabled.value) return;
-  const value = (evt.target as HTMLSelectElement).value;
-  emit(
-    "lane-change",
-    props.queueEntry.id,
-    value === "" ? null : Number.parseInt(value, 10),
-  );
-}
 </script>
 
 <template>
@@ -115,28 +92,6 @@ function onLaneChange(evt: Event) {
       <span>{{ job.request.model }}</span>
       <span v-if="job.progress.gpu !== null">GPU {{ job.progress.gpu }}</span>
     </div>
-    <label
-      v-if="queueEntry"
-      class="flex items-center justify-between gap-2 text-[11px] text-slate-400"
-    >
-      <span>Lane</span>
-      <select
-        data-test="job-lane-select"
-        class="rounded border border-white/10 bg-slate-950 px-2 py-1 text-xs text-slate-200 disabled:opacity-50"
-        :value="laneValue"
-        :disabled="laneSelectDisabled"
-        @change="onLaneChange"
-      >
-        <option value="">Auto</option>
-        <option
-          v-for="gpu in gpus"
-          :key="gpu.ordinal"
-          :value="String(gpu.ordinal)"
-        >
-          GPU {{ gpu.ordinal }}
-        </option>
-      </select>
-    </label>
     <div
       class="relative aspect-square overflow-hidden rounded-xl bg-slate-900/60"
     >
