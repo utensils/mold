@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type {
   GenerateFormState,
+  GenerateRequestWire,
   Ltx2PipelineMode,
   Ltx2SpatialUpscale,
   Ltx2TemporalUpscale,
@@ -11,21 +12,23 @@ import type {
   SourceImageState,
   SourceMediaState,
 } from "../types";
-import {
-  NO_CFG_FAMILIES,
-  UNET_SCHEDULER_FAMILIES,
-  VIDEO_FAMILIES,
-  familySupportsAudio,
-  supportsLora,
-} from "../types";
 import LoraPicker from "./LoraPicker.vue";
 import ModelPicker from "./ModelPicker.vue";
-import {
-  isQwenImageEditFamily,
-  outputFormatsForFamily,
-} from "../composables/useGenerateForm";
+import { outputFormatsForFamily } from "../composables/useGenerateForm";
 import { blobToBase64 } from "../lib/base64";
 import GenerationTemplatesPanel from "./GenerationTemplatesPanel.vue";
+import PlacementPanel from "./PlacementPanel.vue";
+import { fetchGenerationEstimate, fetchModelComponents } from "../api";
+import {
+  generationCapabilitiesForFamily,
+  isQwenImageEditFamily,
+  schedulerOptionsForFamily,
+} from "../lib/generateCapabilities";
+
+interface GpuEntry {
+  ordinal: number;
+  name: string;
+}
 
 const props = withDefaults(
   defineProps<{
@@ -35,12 +38,14 @@ const props = withDefaults(
     showModelPicker?: boolean;
     showLoras?: boolean;
     title?: string;
+    placementGpus?: GpuEntry[];
   }>(),
   {
     forceExpanded: false,
     showModelPicker: true,
     showLoras: true,
     title: "Parameters",
+    placementGpus: () => [],
   },
 );
 const emit = defineEmits<{
@@ -61,17 +66,16 @@ const family = computed(
   () => currentModel.value?.family ?? props.modelValue.modelFamily,
 );
 
-const showNegative = computed(() => !NO_CFG_FAMILIES.includes(family.value));
-const showScheduler = computed(() =>
-  UNET_SCHEDULER_FAMILIES.includes(family.value),
+const capabilities = computed(() =>
+  generationCapabilitiesForFamily(family.value),
 );
-const showVideo = computed(() => VIDEO_FAMILIES.includes(family.value));
+const showNegative = computed(() => capabilities.value.supportsNegativePrompt);
+const showScheduler = computed(() => capabilities.value.supportsScheduler);
+const showVideo = computed(() => capabilities.value.supportsVideo);
 const showLtx2 = computed(
   () => family.value === "ltx2" || family.value === "ltx-2",
 );
-const showCfgPlus = computed(
-  () => family.value === "sd3" || family.value === "sd3.5",
-);
+const showCfgPlus = computed(() => capabilities.value.supportsCfgPlus);
 const showStrength = computed(
   () =>
     props.modelValue.imageAttachments.length > 0 &&
@@ -93,7 +97,8 @@ function selectModel(m: ModelInfoExtended) {
     // to start from empty and let the user re-pick deliberately.
     loras: [],
   };
-  if (VIDEO_FAMILIES.includes(m.family)) {
+  const nextCapabilities = generationCapabilitiesForFamily(m.family);
+  if (nextCapabilities.supportsVideo) {
     next.frames ??= 25;
     next.fps ??= 24;
   } else {
@@ -111,8 +116,14 @@ function selectModel(m: ModelInfoExtended) {
   // default; anything else → null so the server's chain endpoint doesn't
   // reject a stale `enable_audio: true` carried over from a prior AV
   // session. Mirrors `applyModelDefaults` in useGenerateForm.
-  next.enableAudio = familySupportsAudio(m.family) ? true : null;
-  if (isQwenImageEditFamily(m.family)) {
+  next.enableAudio = nextCapabilities.supportsAudio ? true : null;
+  if (!nextCapabilities.supportsScheduler) {
+    next.scheduler = null;
+  }
+  if (!nextCapabilities.supportsCfgPlus) {
+    next.cfgPlus = false;
+  }
+  if (nextCapabilities.sourceImageMode === "qwen-edit") {
     next.batchSize = 1;
   } else if (next.imageAttachments.length > 1) {
     next.imageAttachments = next.imageAttachments.slice(0, 1);
@@ -136,7 +147,7 @@ function onAppendPromptPhrase(phrase: string) {
   patch("prompt", next);
 }
 
-const familySupportsLora = computed(() => supportsLora(family.value));
+const familySupportsLora = computed(() => capabilities.value.supportsLora);
 
 // frames must be 8n+1 (9, 17, 25, 33, ...)
 function clampFrames(n: number): number {
@@ -181,12 +192,9 @@ const advancedOpen = ref(false);
 const sizePresets = [512, 768, 1024] as const;
 const batchChips = [1, 2, 3, 4] as const;
 
-const schedulerOptions: Scheduler[] = [
-  "default",
-  "ddim",
-  "euler-ancestral",
-  "unipc",
-];
+const schedulerOptions = computed(() =>
+  schedulerOptionsForFamily(family.value),
+);
 
 const pipelineOptions: Ltx2PipelineMode[] = [
   "one-stage",
@@ -260,6 +268,115 @@ const paramsDirty = computed(() => {
     s.temporalUpscale !== null
   );
 });
+
+const upscalerModels = computed(() =>
+  props.models
+    .filter((model) => model.family === "upscaler")
+    .sort(
+      (a, b) =>
+        Number(b.downloaded) - Number(a.downloaded) ||
+        a.name.localeCompare(b.name),
+    ),
+);
+
+const memoryEstimate = ref<import("../types").GenerationMemoryEstimate | null>(
+  null,
+);
+const memoryEstimateError = ref<string | null>(null);
+const componentStatus = ref<import("../types").ModelComponentsResponse | null>(
+  null,
+);
+const componentStatusError = ref<string | null>(null);
+
+function estimateRequest(): GenerateRequestWire | null {
+  const s = props.modelValue;
+  if (!s.model) return null;
+  return {
+    prompt: s.prompt,
+    negative_prompt: capabilities.value.supportsNegativePrompt
+      ? s.negativePrompt || null
+      : null,
+    model: s.model,
+    width: s.width,
+    height: s.height,
+    steps: s.steps,
+    guidance: s.guidance,
+    seed: s.seedMode === "random" ? null : s.seed,
+    batch_size: capabilities.value.forcesBatchSizeOne ? 1 : s.batchSize,
+    output_format: s.outputFormat,
+    scheduler: capabilities.value.supportsScheduler ? s.scheduler : undefined,
+    cfg_plus:
+      capabilities.value.supportsCfgPlus && s.cfgPlus ? true : undefined,
+    frames: s.frames,
+    fps: s.fps,
+    placement: s.placement ?? undefined,
+    loras: s.loras.length
+      ? s.loras.map((lora) => ({ path: lora.path, scale: lora.scale }))
+      : undefined,
+    enable_audio: s.enableAudio ?? undefined,
+  };
+}
+
+let estimateSeq = 0;
+watch(
+  () => [
+    props.modelValue.model,
+    family.value,
+    props.modelValue.width,
+    props.modelValue.height,
+    props.modelValue.steps,
+    props.modelValue.guidance,
+    props.modelValue.batchSize,
+    props.modelValue.frames,
+    props.modelValue.fps,
+    props.modelValue.outputFormat,
+    props.modelValue.scheduler,
+    props.modelValue.cfgPlus,
+    JSON.stringify(props.modelValue.placement),
+    props.modelValue.loras
+      .map((lora) => `${lora.path}:${lora.scale}`)
+      .join("|"),
+  ],
+  async () => {
+    const seq = ++estimateSeq;
+    const req = estimateRequest();
+    if (!req) {
+      memoryEstimate.value = null;
+      componentStatus.value = null;
+      return;
+    }
+    try {
+      const [estimate, components] = await Promise.all([
+        fetchGenerationEstimate(req),
+        fetchModelComponents(req.model),
+      ]);
+      if (seq !== estimateSeq) return;
+      memoryEstimate.value = estimate;
+      memoryEstimateError.value = null;
+      componentStatus.value = components;
+      componentStatusError.value = null;
+    } catch (err) {
+      if (seq !== estimateSeq) return;
+      memoryEstimate.value = null;
+      componentStatus.value = null;
+      const message = err instanceof Error ? err.message : String(err);
+      memoryEstimateError.value = message;
+      componentStatusError.value = message;
+    }
+  },
+  { immediate: true },
+);
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) return "unknown";
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(0)} MB`;
+  return `${bytes} B`;
+}
+
+const catalogHref = computed(
+  () => `/catalog?q=${encodeURIComponent(props.modelValue.model)}`,
+);
 
 /// Force-expand from a parent (e.g. when `onSubmit` is called with no
 /// model selected — the user can't pick one until the panel is open).
@@ -510,12 +627,16 @@ function removeKeyframe(index: number) {
       <section class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
           <label class="text-xs uppercase text-slate-400">Seed</label>
-          <div class="mt-1 grid grid-cols-3 gap-1">
+          <div
+            class="mt-1 grid grid-cols-[repeat(3,minmax(0,1fr))] gap-1"
+            data-test="seed-mode-control"
+          >
             <button
               v-for="mode in ['random', 'static', 'increment']"
               :key="mode"
               type="button"
-              class="rounded-lg px-2 py-1 text-xs capitalize"
+              class="min-w-0 whitespace-nowrap rounded-lg px-2 py-1 text-xs capitalize"
+              data-test="seed-mode-option"
               :class="
                 modelValue.seedMode === mode
                   ? 'bg-brand-500 text-white'
@@ -687,14 +808,27 @@ function removeKeyframe(index: number) {
             />
           </label>
         </div>
-        <input
-          :value="modelValue.upscaleModel"
-          class="w-full rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
-          placeholder="Optional upscaler model, e.g. real-esrgan-x4plus:fp16"
-          @input="
-            patch('upscaleModel', ($event.target as HTMLInputElement).value)
-          "
-        />
+        <label class="block text-xs text-slate-300">
+          Upscaler
+          <select
+            :value="modelValue.upscaleModel"
+            class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
+            data-test="upscaler-select"
+            @change="
+              patch('upscaleModel', ($event.target as HTMLSelectElement).value)
+            "
+          >
+            <option value="">None</option>
+            <option
+              v-for="model in upscalerModels"
+              :key="model.name"
+              :value="model.name"
+              :disabled="!model.downloaded"
+            >
+              {{ model.name }}{{ model.downloaded ? "" : " (missing)" }}
+            </option>
+          </select>
+        </label>
       </section>
 
       <LoraPicker
@@ -951,6 +1085,7 @@ function removeKeyframe(index: number) {
         <button
           type="button"
           class="text-xs uppercase tracking-wide text-slate-400 hover:text-slate-200"
+          data-test="advanced-toggle"
           @click="advancedOpen = !advancedOpen"
         >
           {{ advancedOpen ? "▾" : "▸" }} Advanced
@@ -963,8 +1098,10 @@ function removeKeyframe(index: number) {
           <div>
             <label class="text-xs uppercase text-slate-400">Scheduler</label>
             <select
+              v-if="showScheduler"
               :value="modelValue.scheduler ?? 'default'"
               class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
+              data-test="scheduler-select"
               @change="
                 patch(
                   'scheduler',
@@ -990,6 +1127,89 @@ function removeKeyframe(index: number) {
             />
             CFG++
           </label>
+        </div>
+      </section>
+
+      <section class="mt-4 space-y-3 border-t border-slate-800 pt-4">
+        <div class="text-xs uppercase text-slate-400">Runtime</div>
+        <div
+          class="rounded-lg bg-slate-900/40 p-3 text-xs text-slate-300"
+          data-test="memory-estimate"
+        >
+          <div class="flex items-center justify-between gap-3">
+            <span>Estimated peak memory</span>
+            <span class="font-medium text-slate-100">
+              {{ formatBytes(memoryEstimate?.peak_memory_bytes) }}
+            </span>
+          </div>
+          <div
+            v-if="memoryEstimate"
+            class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500"
+          >
+            <span
+              >activations
+              {{ formatBytes(memoryEstimate.activation_memory_bytes) }}</span
+            >
+            <span>{{ memoryEstimate.load_strategy }}</span>
+            <span v-if="memoryEstimate.available_memory_bytes != null">
+              available {{ formatBytes(memoryEstimate.available_memory_bytes) }}
+            </span>
+          </div>
+          <div
+            v-else-if="memoryEstimateError"
+            class="mt-1 text-[11px] text-amber-300"
+          >
+            Estimate unavailable
+          </div>
+        </div>
+
+        <PlacementPanel
+          :model-value="modelValue.placement"
+          :family="family"
+          :model="modelValue.model"
+          :gpus="placementGpus"
+          :embedded="true"
+          @update:model-value="
+            (v) => patch('placement', v as GenerateFormState['placement'])
+          "
+        />
+
+        <div
+          class="rounded-lg bg-slate-900/40 p-3 text-xs text-slate-300"
+          data-test="component-status"
+        >
+          <div class="mb-2 flex items-center justify-between gap-3">
+            <span class="uppercase text-slate-400">Components</span>
+            <a
+              :href="catalogHref"
+              class="text-brand-300 hover:underline"
+              data-test="component-catalog-link"
+            >
+              Catalog
+            </a>
+          </div>
+          <div v-if="componentStatus?.components.length" class="space-y-1">
+            <div
+              v-for="component in componentStatus.components"
+              :key="`${component.kind}:${component.name}`"
+              class="grid grid-cols-[minmax(0,1fr)_auto] gap-2"
+            >
+              <span class="truncate">{{
+                component.name || component.kind
+              }}</span>
+              <span
+                :class="
+                  component.present ? 'text-emerald-300' : 'text-amber-300'
+                "
+              >
+                {{ component.present ? "Ready" : "Missing" }}
+              </span>
+            </div>
+          </div>
+          <div v-else-if="componentStatusError" class="text-slate-500">
+            Component status unavailable
+          </div>
+          <div v-else class="text-slate-500">No component details</div>
         </div>
       </section>
     </div>

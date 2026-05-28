@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use mold_core::{
-    build_model_catalog, Config, GenerateRequest, ModelDefaults, ModelInfo, ModelInfoExtended,
-    ModelPaths,
+    build_model_catalog, Config, GenerateRequest, GenerationMemoryEstimate, ModelComponentStatus,
+    ModelComponentsResponse, ModelDefaults, ModelInfo, ModelInfoExtended, ModelPaths,
 };
 use mold_inference::device::{activation_bytes, activation_family_for, ActivationFamily};
 
@@ -196,36 +196,13 @@ pub(crate) fn preflight_memory_guard_with_available(
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-    let peak = if streaming {
-        // LTX-2 also pays for a Gemma 3 12B prompt encoder. Auto placement
-        // may try GPU first, but the runtime catches prompt-encoder CUDA OOMs
-        // and retries on CPU before loading the streamed transformer. Preflight
-        // must not reject that recoverable path. Only an explicit same-GPU pin
-        // (`MOLD_LTX2_GEMMA_DEVICE=gpu`) is counted against this GPU because
-        // the runtime will surface that OOM instead of rewriting the request.
-        let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
-        streaming_transformer_peak(paths, gemma_competes)
-    } else if forced_flux_offload {
-        streaming_transformer_peak(paths, false)
-    } else if hint.is_some_and(|h| h.family == ActivationFamily::Sd3Mmdit) {
-        sd3_sequential_peak(paths)
-    } else if qwen_quantized {
-        qwen_image_quantized_sequential_peak(paths, hint)
-    } else {
-        mold_inference::device::estimate_peak_memory(
-            paths,
-            mold_inference::LoadStrategy::Sequential,
-        )
-    };
+    let peak =
+        base_peak_memory_for_paths(paths, hint, streaming, forced_flux_offload, qwen_quantized);
     // Add the per-request activation budget on top of the file-size peak.
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
     // is a generic "kernels + small state" constant that doesn't scale; the
     // hint is the resolution/dtype/arch-aware delta on top.
-    let activation = if qwen_quantized {
-        0
-    } else {
-        hint.map(|h| h.budget_bytes()).unwrap_or(0)
-    };
+    let activation = activation_memory_for_estimate(hint, qwen_quantized);
     let peak_with_activation = peak.saturating_add(activation);
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
     if qwen_quantized && peak_with_activation <= effective_available {
@@ -239,6 +216,41 @@ pub(crate) fn preflight_memory_guard_with_available(
         effective_available,
         suggestion,
     )
+}
+
+fn base_peak_memory_for_paths(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    streaming: bool,
+    forced_flux_offload: bool,
+    qwen_quantized: bool,
+) -> u64 {
+    if streaming {
+        // LTX-2 also pays for a Gemma 3 12B prompt encoder. Auto placement
+        // may try GPU first, but the runtime catches prompt-encoder CUDA OOMs
+        // and retries on CPU before loading the streamed transformer. Preflight
+        // must not reject that recoverable path. Only an explicit same-GPU pin
+        // (`MOLD_LTX2_GEMMA_DEVICE=gpu`) is counted against this GPU because
+        // the runtime will surface that OOM instead of rewriting the request.
+        let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
+        return streaming_transformer_peak(paths, gemma_competes);
+    } else if forced_flux_offload {
+        return streaming_transformer_peak(paths, false);
+    } else if hint.is_some_and(|h| h.family == ActivationFamily::Sd3Mmdit) {
+        return sd3_sequential_peak(paths);
+    } else if qwen_quantized {
+        return qwen_image_quantized_sequential_peak(paths, hint);
+    }
+
+    mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Sequential)
+}
+
+fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: bool) -> u64 {
+    if qwen_quantized {
+        0
+    } else {
+        hint.map(|h| h.budget_bytes()).unwrap_or(0)
+    }
 }
 
 /// Peak GPU residency for streaming-transformer families. Mirrors the
@@ -1588,6 +1600,177 @@ pub(crate) async fn check_model_available(
     Err(ApiError::unknown_model(format!(
         "unknown model '{model_name}'. Run 'mold list' to see available models."
     )))
+}
+
+pub(crate) async fn estimate_generation_memory(
+    state: &AppState,
+    req: &GenerateRequest,
+) -> Result<GenerationMemoryEstimate, ApiError> {
+    let paths = match check_model_available(state, &req.model).await? {
+        Some(paths) => paths,
+        None => {
+            let config = state.config.read().await;
+            ModelPaths::resolve(&req.model, &config).ok_or_else(|| {
+                ApiError::not_found(format!(
+                    "model '{}' is loaded but runtime paths are not available for estimation",
+                    req.model
+                ))
+            })?
+        }
+    };
+    let hint = activation_hint_for_request(state, req).await;
+    let transformer_path = transformer_path_lower(&paths);
+    let streaming = hint
+        .map(|h| h.family.streaming_transformer())
+        .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
+    let forced_flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
+        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
+        && paths
+            .transformer
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+    let base_peak =
+        base_peak_memory_for_paths(&paths, hint, streaming, forced_flux_offload, qwen_quantized);
+    let activation = activation_memory_for_estimate(hint, qwen_quantized);
+    let peak = base_peak.saturating_add(activation);
+    let available = effective_load_available_bytes(0, 0);
+    let load_strategy = select_server_load_strategy_for_budget(&paths, available, hint);
+    let fits = available.map(|available| peak <= available.saturating_mul(9) / 10);
+
+    Ok(GenerationMemoryEstimate {
+        model: req.model.clone(),
+        peak_memory_bytes: peak,
+        activation_memory_bytes: activation,
+        available_memory_bytes: available,
+        load_strategy: format!("{load_strategy:?}").to_ascii_lowercase(),
+        fits_available_memory: fits,
+    })
+}
+
+pub(crate) async fn model_component_status(
+    state: &AppState,
+    model_name: &str,
+) -> Result<ModelComponentsResponse, ApiError> {
+    let resolved = mold_core::manifest::resolve_model_name(model_name);
+    if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
+        let config = state.config.read().await;
+        let models_dir = config.resolved_models_dir();
+        let components = manifest
+            .files
+            .iter()
+            .map(|file| {
+                let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+                ModelComponentStatus {
+                    kind: manifest_component_kind(file.component).to_string(),
+                    name: manifest_component_name(file.component, &file.hf_filename).to_string(),
+                    present: path.is_file(),
+                    path: Some(path.to_string_lossy().to_string()),
+                    repair_model: Some(resolved.clone()),
+                }
+            })
+            .collect();
+        return Ok(ModelComponentsResponse {
+            model: resolved,
+            components,
+        });
+    }
+
+    let config = state.config.read().await;
+    let Some(paths) = ModelPaths::resolve(model_name, &config) else {
+        return Err(ApiError::unknown_model(format!(
+            "unknown model '{model_name}'. Run 'mold list' to see available models."
+        )));
+    };
+    Ok(ModelComponentsResponse {
+        model: model_name.to_string(),
+        components: component_status_from_paths(model_name, &paths),
+    })
+}
+
+fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'static str {
+    use mold_core::manifest::ModelComponent;
+    match component {
+        ModelComponent::Transformer | ModelComponent::TransformerShard => "transformer",
+        ModelComponent::Vae => "vae",
+        ModelComponent::SpatialUpscaler => "spatial_upscaler",
+        ModelComponent::TemporalUpscaler => "temporal_upscaler",
+        ModelComponent::DistilledLora => "distilled_lora",
+        ModelComponent::T5Encoder | ModelComponent::TextEncoder => "text_encoder",
+        ModelComponent::ClipEncoder | ModelComponent::ClipEncoder2 => "clip",
+        ModelComponent::T5Tokenizer
+        | ModelComponent::ClipTokenizer
+        | ModelComponent::ClipTokenizer2
+        | ModelComponent::TextTokenizer => "tokenizer",
+        ModelComponent::Decoder => "decoder",
+        ModelComponent::Upscaler => "upscaler",
+    }
+}
+
+fn manifest_component_name(component: mold_core::manifest::ModelComponent, filename: &str) -> &str {
+    use mold_core::manifest::ModelComponent;
+    match component {
+        ModelComponent::Transformer => "transformer",
+        ModelComponent::TransformerShard => "transformer shard",
+        ModelComponent::Vae => "vae",
+        ModelComponent::SpatialUpscaler => "spatial upscaler",
+        ModelComponent::TemporalUpscaler => "temporal upscaler",
+        ModelComponent::DistilledLora => "distilled lora",
+        ModelComponent::T5Encoder => "t5 encoder",
+        ModelComponent::ClipEncoder => "clip encoder",
+        ModelComponent::T5Tokenizer => "t5 tokenizer",
+        ModelComponent::ClipTokenizer => "clip tokenizer",
+        ModelComponent::ClipEncoder2 => "clip-g encoder",
+        ModelComponent::ClipTokenizer2 => "clip-g tokenizer",
+        ModelComponent::TextEncoder => "text encoder",
+        ModelComponent::TextTokenizer => "text tokenizer",
+        ModelComponent::Decoder => "decoder",
+        ModelComponent::Upscaler => filename,
+    }
+}
+
+fn component_status_from_paths(model_name: &str, paths: &ModelPaths) -> Vec<ModelComponentStatus> {
+    let mut components = Vec::new();
+    let mut push_path = |kind: &str, name: &str, path: &std::path::Path| {
+        components.push(ModelComponentStatus {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            present: path.is_file(),
+            path: Some(path.to_string_lossy().to_string()),
+            repair_model: Some(model_name.to_string()),
+        });
+    };
+    push_path("transformer", "transformer", &paths.transformer);
+    for shard in &paths.transformer_shards {
+        push_path("transformer", "transformer shard", shard);
+    }
+    push_path("vae", "vae", &paths.vae);
+    if let Some(path) = &paths.spatial_upscaler {
+        push_path("spatial_upscaler", "spatial upscaler", path);
+    }
+    if let Some(path) = &paths.temporal_upscaler {
+        push_path("temporal_upscaler", "temporal upscaler", path);
+    }
+    if let Some(path) = &paths.distilled_lora {
+        push_path("distilled_lora", "distilled lora", path);
+    }
+    if let Some(path) = &paths.t5_encoder {
+        push_path("text_encoder", "t5 encoder", path);
+    }
+    if let Some(path) = &paths.clip_encoder {
+        push_path("clip", "clip encoder", path);
+    }
+    if let Some(path) = &paths.clip_encoder_2 {
+        push_path("clip", "clip-g encoder", path);
+    }
+    for path in &paths.text_encoder_files {
+        push_path("text_encoder", "text encoder", path);
+    }
+    if let Some(path) = &paths.decoder {
+        push_path("decoder", "decoder", path);
+    }
+    components
 }
 
 /// Ensure the requested model is loaded on GPU and ready for inference.

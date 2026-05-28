@@ -752,6 +752,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(models_dir);
     }
 
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn generate_estimate_returns_server_memory_estimate() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("estimate");
+        populate_manifest_files(&models_dir, "sdxl-base:fp16");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let app = app_empty();
+        let body = serde_json::json!({
+            "prompt": "a cat",
+            "model": "sdxl-base:fp16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 7.5,
+            "batch_size": 1,
+            "output_format": "png"
+        });
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/estimate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = json_body(resp).await;
+        assert_eq!(json["model"], "sdxl-base:fp16");
+        assert!(json["peak_memory_bytes"].as_u64().unwrap() > 0);
+        assert!(json["activation_memory_bytes"].as_u64().unwrap() > 0);
+        assert!(json["load_strategy"].as_str().is_some());
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn model_components_reports_present_and_missing_manifest_assets() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("components");
+        let manifest = mold_core::manifest::find_manifest("sdxl-base:fp16").unwrap();
+        for file in manifest.files.iter().take(1) {
+            let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"test").unwrap();
+            mold_core::download::write_sha256_marker(&path, "deadbeef").unwrap();
+        }
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::get("/api/models/sdxl-base%3Afp16/components")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = json_body(resp).await;
+        assert_eq!(json["model"], "sdxl-base:fp16");
+        let components = json["components"].as_array().unwrap();
+        assert!(components.iter().any(|c| c["present"] == true));
+        assert!(components.iter().any(|c| c["present"] == false));
+        assert!(components
+            .iter()
+            .all(|c| c["repair_model"] == "sdxl-base:fp16"));
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_models_does_not_block_during_generation() {
         let blocker = Arc::new(GenerateBlocker::default());

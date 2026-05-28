@@ -10,8 +10,8 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    types::GpuSelection, ActiveGenerationStatus, GpuInfo, GpuWorkerState, ModelInfoExtended,
-    ResourceSnapshot, ServerStatus, SseErrorEvent, SseProgressEvent,
+    types::GpuSelection, ActiveGenerationStatus, GenerateRequest, GpuInfo, GpuWorkerState,
+    ModelInfoExtended, ResourceSnapshot, ServerStatus, SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -214,6 +214,7 @@ pub fn create_router(state: AppState) -> Router {
     // Router<AppState> → Router<()>. Stateless routes (OpenAPI, docs) are merged after.
     Router::new()
         .route("/api/generate", post(generate))
+        .route("/api/generate/estimate", post(generate_estimate))
         .route("/api/generate/stream", post(generate_stream))
         .route(
             "/api/generate/chain",
@@ -225,6 +226,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/expand", post(expand_prompt))
         .route("/api/models", get(list_models))
+        .route("/api/models/:model/components", get(model_components))
         .route("/api/loras", get(crate::catalog_api::list_loras))
         .route("/api/models/load", post(load_model))
         .route("/api/models/pull", post(pull_model_endpoint))
@@ -1298,6 +1300,24 @@ async fn generate_stream(
 )]
 async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtended>> {
     Json(model_manager::list_models(&state).await)
+}
+
+async fn generate_estimate(
+    State(state): State<AppState>,
+    Json(req): Json<GenerateRequest>,
+) -> Result<Json<mold_core::GenerationMemoryEstimate>, ApiError> {
+    Ok(Json(
+        model_manager::estimate_generation_memory(&state, &req).await?,
+    ))
+}
+
+async fn model_components(
+    State(state): State<AppState>,
+    Path(model): Path<String>,
+) -> Result<Json<mold_core::ModelComponentsResponse>, ApiError> {
+    Ok(Json(
+        model_manager::model_component_status(&state, &model).await?,
+    ))
 }
 
 // ── /api/models/load ──────────────────────────────────────────────────────────

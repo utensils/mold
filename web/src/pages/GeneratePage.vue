@@ -553,6 +553,7 @@ onBeforeUnmount(() => {
           ref="paramsPanelRef"
           v-model="form.state.value"
           :models="models"
+          :placement-gpus="gpuListForPlacement"
           :force-expanded="true"
           :show-model-picker="false"
           :show-loras="false"

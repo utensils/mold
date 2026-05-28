@@ -13,6 +13,7 @@ const props = defineProps<{
   family: string;
   model: string;
   gpus: GpuEntry[];
+  embedded?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -139,7 +140,10 @@ const isDirty = computed(() => props.modelValue !== null);
 </script>
 
 <template>
-  <section class="glass flex flex-col gap-2 rounded-2xl p-3 text-sm">
+  <section
+    class="flex flex-col gap-2 text-sm"
+    :class="embedded ? '' : 'glass rounded-2xl p-3'"
+  >
     <header class="flex items-center justify-between">
       <button
         type="button"

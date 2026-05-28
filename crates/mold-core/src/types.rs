@@ -2696,6 +2696,35 @@ pub struct ServerCapabilities {
     pub catalog: CatalogCapabilities,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationMemoryEstimate {
+    pub model: String,
+    pub peak_memory_bytes: u64,
+    pub activation_memory_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_memory_bytes: Option<u64>,
+    pub load_strategy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fits_available_memory: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ModelComponentStatus {
+    pub kind: String,
+    pub name: String,
+    pub present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ModelComponentsResponse {
+    pub model: String,
+    pub components: Vec<ModelComponentStatus>,
+}
+
 /// Build a default output filename, sanitizing colons from model names.
 pub fn default_output_filename(
     model: &str,

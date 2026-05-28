@@ -4,8 +4,10 @@ import type {
   ExpandRequestWire,
   ExpandResponseWire,
   GalleryImage,
+  GenerationMemoryEstimate,
   GenerateRequestWire,
   ModelInfoExtended,
+  ModelComponentsResponse,
   ServerCapabilities,
   ServerStatus,
   SseChainCompleteEvent,
@@ -86,6 +88,36 @@ export async function fetchModels(
   const res = await fetch(`${base}/api/models`, { signal });
   if (!res.ok) throw new Error(`GET /api/models failed: ${res.status}`);
   return (await res.json()) as ModelInfoExtended[];
+}
+
+export async function fetchGenerationEstimate(
+  req: GenerateRequestWire,
+  signal?: AbortSignal,
+): Promise<GenerationMemoryEstimate> {
+  const res = await fetch(`${base}/api/generate/estimate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+    signal,
+  });
+  if (!res.ok)
+    throw new Error(`POST /api/generate/estimate failed: ${res.status}`);
+  return (await res.json()) as GenerationMemoryEstimate;
+}
+
+export async function fetchModelComponents(
+  model: string,
+  signal?: AbortSignal,
+): Promise<ModelComponentsResponse> {
+  const res = await fetch(
+    `${base}/api/models/${encodeURIComponent(model)}/components`,
+    { signal },
+  );
+  if (!res.ok)
+    throw new Error(
+      `GET /api/models/${model}/components failed: ${res.status}`,
+    );
+  return (await res.json()) as ModelComponentsResponse;
 }
 
 export async function fetchStatus(signal?: AbortSignal): Promise<ServerStatus> {
