@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
 import { STALE_THRESHOLD_MS, type Job } from "../composables/useGenerateStream";
+import type { QueueEntry } from "../types";
 
 // Hide-mode renders the thumbnail behind a blurred shroud until the user
 // reveals it. `revealed` is a per-card boolean; the parent tracks the
@@ -10,10 +11,14 @@ const props = withDefaults(
     job: Job;
     hideMode?: boolean;
     revealed?: boolean;
+    queueEntry?: QueueEntry | null;
+    gpus?: Array<{ ordinal: number; state?: string }>;
   }>(),
   {
     hideMode: false,
     revealed: false,
+    queueEntry: null,
+    gpus: () => [],
   },
 );
 const emit = defineEmits<{
@@ -21,6 +26,7 @@ const emit = defineEmits<{
   (e: "open", job: Job): void;
   (e: "dismiss", id: string): void;
   (e: "reveal", id: string): void;
+  (e: "lane-change", id: string, targetGpu: number | null): void;
 }>();
 
 const isHidden = computed(() => props.hideMode && !props.revealed);
@@ -85,10 +91,31 @@ const thumbSrc = computed(() => {
   const mime = r.format === "jpeg" ? "image/jpeg" : `image/${r.format}`;
   return `data:${mime};base64,${r.image}`;
 });
+
+const laneValue = computed(() => {
+  const target =
+    props.queueEntry?.target_gpu ?? props.queueEntry?.preferred_gpu;
+  return target === null || target === undefined ? "" : String(target);
+});
+
+const laneSelectDisabled = computed(
+  () => !props.queueEntry || props.queueEntry.state === "running",
+);
+
+function onLaneChange(evt: Event) {
+  if (!props.queueEntry || laneSelectDisabled.value) return;
+  const value = (evt.target as HTMLSelectElement).value;
+  emit(
+    "lane-change",
+    props.queueEntry.id,
+    value === "" ? null : Number.parseInt(value, 10),
+  );
+}
 </script>
 
 <template>
   <div
+    data-test="running-card"
     class="glass flex w-[280px] flex-shrink-0 flex-col gap-2 rounded-2xl p-3"
     :class="
       clickable
@@ -106,6 +133,28 @@ const thumbSrc = computed(() => {
       <span>{{ job.request.model }}</span>
       <span v-if="job.progress.gpu !== null">GPU {{ job.progress.gpu }}</span>
     </div>
+    <label
+      v-if="queueEntry"
+      class="flex items-center justify-between gap-2 text-[11px] text-slate-400"
+    >
+      <span>Lane</span>
+      <select
+        data-test="job-lane-select"
+        class="rounded border border-white/10 bg-slate-950 px-2 py-1 text-xs text-slate-200 disabled:opacity-50"
+        :value="laneValue"
+        :disabled="laneSelectDisabled"
+        @change="onLaneChange"
+      >
+        <option value="">Auto</option>
+        <option
+          v-for="gpu in gpus"
+          :key="gpu.ordinal"
+          :value="String(gpu.ordinal)"
+        >
+          GPU {{ gpu.ordinal }}
+        </option>
+      </select>
+    </label>
     <div
       class="relative aspect-square overflow-hidden rounded-xl bg-slate-900/60"
     >

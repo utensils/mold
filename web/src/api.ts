@@ -11,6 +11,8 @@ import type {
   SseChainCompleteEvent,
   SseCompleteEvent,
   SseProgressEvent,
+  QueueEntry,
+  QueueListing,
 } from "./types";
 import { streamSse } from "./lib/sse";
 
@@ -97,12 +99,25 @@ export async function fetchStatus(signal?: AbortSignal): Promise<ServerStatus> {
  * `serverId` no longer appears in the registry (zombie from a dropped SSE
  * stream). Throws on transport failure so the caller can back off; the
  * empty-listing case (`{entries: []}`) is a successful response. */
-export async function fetchQueue(
-  signal?: AbortSignal,
-): Promise<import("./types").QueueListing> {
+export async function fetchQueue(signal?: AbortSignal): Promise<QueueListing> {
   const res = await fetch(`${base}/api/queue`, { signal });
   if (!res.ok) throw new Error(`GET /api/queue failed: ${res.status}`);
-  return (await res.json()) as import("./types").QueueListing;
+  return (await res.json()) as QueueListing;
+}
+
+export async function updateQueueJobTargetGpu(
+  id: string,
+  targetGpu: number | null,
+  signal?: AbortSignal,
+): Promise<QueueEntry> {
+  const res = await fetch(`${base}/api/queue/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ target_gpu: targetGpu }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`PATCH /api/queue/${id} failed: ${res.status}`);
+  return (await res.json()) as QueueEntry;
 }
 
 const chainLimitsCache = new Map<string, { value: ChainLimits; at: number }>();

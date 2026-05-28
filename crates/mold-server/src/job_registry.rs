@@ -48,6 +48,9 @@ pub struct JobEntry {
     /// GPU ordinal currently running this job (`null` for queued rows).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu: Option<usize>,
+    /// Preferred GPU ordinal for queued jobs (`None` means Auto).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_gpu: Option<usize>,
 }
 
 /// Whole-queue listing returned by `GET /api/queue`. Wrapped in a struct so
@@ -65,6 +68,13 @@ struct EntryInternal {
     state: JobLifecycle,
     started_at_unix_ms: u64,
     gpu: Option<usize>,
+    target_gpu: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetGpuUpdateError {
+    NotFound,
+    AlreadyRunning,
 }
 
 /// The registry itself. Construct via `JobRegistry::new` and share through
@@ -87,6 +97,16 @@ impl JobRegistry {
 
     /// Insert a freshly-submitted job at the tail in `Queued` state.
     pub fn register(&self, id: impl Into<String>, model: impl Into<String>) {
+        self.register_with_target_gpu(id, model, None);
+    }
+
+    /// Insert a freshly-submitted job with an optional queued lane target.
+    pub fn register_with_target_gpu(
+        &self,
+        id: impl Into<String>,
+        model: impl Into<String>,
+        target_gpu: Option<usize>,
+    ) {
         let started_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -98,6 +118,7 @@ impl JobRegistry {
             state: JobLifecycle::Queued,
             started_at_unix_ms,
             gpu: None,
+            target_gpu,
         });
     }
 
@@ -108,7 +129,44 @@ impl JobRegistry {
         if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
             e.state = JobLifecycle::Running;
             e.gpu = gpu;
+            e.target_gpu = None;
         }
+    }
+
+    pub fn set_target_gpu(
+        &self,
+        id: &str,
+        target_gpu: Option<usize>,
+    ) -> Result<(), TargetGpuUpdateError> {
+        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let Some(e) = entries.iter_mut().find(|e| e.id == id) else {
+            return Err(TargetGpuUpdateError::NotFound);
+        };
+        if e.state == JobLifecycle::Running {
+            return Err(TargetGpuUpdateError::AlreadyRunning);
+        }
+        e.target_gpu = target_gpu;
+        Ok(())
+    }
+
+    pub fn target_gpu(&self, id: &str) -> Option<Option<usize>> {
+        let entries = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        entries.iter().find(|e| e.id == id).map(|e| e.target_gpu)
+    }
+
+    pub fn entry(&self, id: &str) -> Option<JobEntry> {
+        let entries = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        entries.iter().enumerate().find_map(|(i, e)| {
+            (e.id == id).then(|| JobEntry {
+                id: e.id.clone(),
+                model: e.model.clone(),
+                state: e.state,
+                started_at_unix_ms: e.started_at_unix_ms,
+                position: i,
+                gpu: e.gpu,
+                target_gpu: e.target_gpu,
+            })
+        })
     }
 
     /// Drop the entry — call once on every terminal path (success, error,
@@ -135,6 +193,7 @@ impl JobRegistry {
                 started_at_unix_ms: e.started_at_unix_ms,
                 position: i,
                 gpu: e.gpu,
+                target_gpu: e.target_gpu,
             })
             .collect();
         QueueListing { entries: out }
@@ -179,6 +238,29 @@ mod tests {
         let snap = reg.snapshot();
         assert_eq!(snap.entries[0].state, JobLifecycle::Running);
         assert_eq!(snap.entries[0].gpu, Some(1));
+    }
+
+    #[test]
+    fn queued_entries_can_carry_target_gpu_metadata() {
+        let reg = JobRegistry::new();
+        reg.register_with_target_gpu("a", "flux-dev:fp16", Some(1));
+        let snap = reg.snapshot();
+        assert_eq!(snap.entries[0].state, JobLifecycle::Queued);
+        assert_eq!(snap.entries[0].target_gpu, Some(1));
+        assert_eq!(snap.entries[0].gpu, None);
+    }
+
+    #[test]
+    fn target_gpu_updates_only_apply_to_queued_entries() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.set_target_gpu("a", Some(1)).unwrap();
+        assert_eq!(reg.target_gpu("a"), Some(Some(1)));
+
+        reg.mark_running("a", Some(1));
+        let err = reg.set_target_gpu("a", None).unwrap_err();
+        assert_eq!(err, TargetGpuUpdateError::AlreadyRunning);
+        assert_eq!(reg.target_gpu("a"), Some(None));
     }
 
     #[test]

@@ -893,7 +893,7 @@ pub async fn run_queue_dispatcher(
             continue;
         }
 
-        let preferred_gpu = match state
+        let placement_gpu = match state
             .gpu_pool
             .resolve_explicit_placement_gpu(job.request.placement.as_ref())
         {
@@ -913,6 +913,11 @@ pub async fn run_queue_dispatcher(
                 continue;
             }
         };
+        let preferred_gpu = state
+            .job_registry
+            .target_gpu(&job_id)
+            .flatten()
+            .or(placement_gpu);
 
         if job.result_tx.is_closed() {
             tracing::debug!(model = %model_name, "skipping queued multi-GPU job — client disconnected");

@@ -1,11 +1,11 @@
 use axum::{
-    extract::{Request, State},
+    extract::{Path, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use base64::Engine as _;
@@ -91,6 +91,22 @@ impl ApiError {
         }
     }
 
+    pub fn queue_job_not_found(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "QUEUE_JOB_NOT_FOUND".to_string(),
+            status: StatusCode::NOT_FOUND,
+        }
+    }
+
+    pub fn queue_job_running(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "QUEUE_JOB_RUNNING".to_string(),
+            status: StatusCode::CONFLICT,
+        }
+    }
+
     pub fn insufficient_memory(msg: impl Into<String>) -> Self {
         Self {
             error: msg.into(),
@@ -145,6 +161,8 @@ use crate::queue::clean_error_message;
         pull_model_endpoint,
         unload_model,
         server_status,
+        list_queue,
+        patch_queue_job,
         health,
         capabilities_chain_limits,
         crate::routes_chain::generate_chain,
@@ -173,6 +191,9 @@ use crate::queue::clean_error_message;
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,
+        QueuePatchRequest,
+        crate::job_registry::JobEntry,
+        crate::job_registry::QueueListing,
         crate::chain_limits::ChainLimits,
     )),
     tags(
@@ -246,6 +267,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/status", get(server_status))
         .route("/api/queue", get(list_queue))
+        .route("/api/queue/:id", patch(patch_queue_job))
         .route("/api/capabilities", get(server_capabilities))
         .route(
             "/api/capabilities/chain-limits",
@@ -323,7 +345,7 @@ fn save_image_to_dir(
 async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
-) -> Result<(Option<std::path::PathBuf>, Option<String>), ApiError> {
+) -> Result<(Option<std::path::PathBuf>, Option<String>, Option<usize>), ApiError> {
     // NOTE: the capacity check is enforced inside `state.queue.submit(...)` so
     // that a burst of concurrent callers can't all slip past an open check
     // (classic TOCTOU).  The submit call in `generate`/`generate_stream` will
@@ -380,7 +402,7 @@ async fn prepare_generation(
         (output_dir, dim_warning)
     };
 
-    Ok((output_dir, dim_warning))
+    Ok((output_dir, dim_warning, preferred_gpu))
 }
 
 pub(crate) async fn resolve_server_local_media_paths(
@@ -482,7 +504,7 @@ async fn generate(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (output_dir, dim_warning) = prepare_generation(&state, &mut req).await?;
+    let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
 
     tracing::info!(
         model = %req.model,
@@ -506,7 +528,9 @@ async fn generate(
     // SSE clients. Cleanup happens unconditionally on every terminal
     // path (drop guard in `gpu_worker::process_job`).
     let job_id = uuid::Uuid::new_v4().to_string();
-    state.job_registry.register(&job_id, &req.model);
+    state
+        .job_registry
+        .register_with_target_gpu(&job_id, &req.model, preferred_gpu);
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -1196,7 +1220,7 @@ async fn generate_stream(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    let (output_dir, dim_warning) = prepare_generation(&state, &mut req).await?;
+    let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
 
     tracing::info!(
         model = %req.model,
@@ -1218,7 +1242,9 @@ async fn generate_stream(
     // Assign a server-side ID and register before submit so the entry is
     // visible to /api/queue from the moment we accept the request.
     let job_id = uuid::Uuid::new_v4().to_string();
-    state.job_registry.register(&job_id, &req.model);
+    state
+        .job_registry
+        .register_with_target_gpu(&job_id, &req.model, preferred_gpu);
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -1781,6 +1807,62 @@ async fn health() -> impl IntoResponse {
 )]
 async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::QueueListing> {
     Json(state.job_registry.snapshot())
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct QueuePatchRequest {
+    target_gpu: Option<usize>,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/queue/{id}",
+    tag = "queue",
+    request_body = QueuePatchRequest,
+    responses(
+        (status = 200, description = "Updated queue entry", body = crate::job_registry::JobEntry),
+        (status = 404, description = "Queue job not found"),
+        (status = 409, description = "Queue job is already running"),
+        (status = 422, description = "Invalid GPU target"),
+    )
+)]
+async fn patch_queue_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<QueuePatchRequest>,
+) -> Result<Json<crate::job_registry::JobEntry>, ApiError> {
+    if let Some(target) = req.target_gpu {
+        let available = state
+            .gpu_pool
+            .workers
+            .iter()
+            .any(|w| w.gpu.ordinal == target);
+        if !available {
+            return Err(ApiError::validation(format!(
+                "gpu:{target} is not available in this server's worker pool"
+            )));
+        }
+    }
+
+    state
+        .job_registry
+        .set_target_gpu(&id, req.target_gpu)
+        .map_err(|e| match e {
+            crate::job_registry::TargetGpuUpdateError::NotFound => {
+                ApiError::queue_job_not_found(format!("queue job {id} not found"))
+            }
+            crate::job_registry::TargetGpuUpdateError::AlreadyRunning => {
+                ApiError::queue_job_running(format!(
+                    "queue job {id} is already running; lane changes only apply to queued jobs"
+                ))
+            }
+        })?;
+
+    let entry = state
+        .job_registry
+        .entry(&id)
+        .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} not found")))?;
+    Ok(Json(entry))
 }
 
 // ── /api/capabilities ────────────────────────────────────────────────────────
