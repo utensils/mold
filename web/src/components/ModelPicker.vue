@@ -111,10 +111,38 @@ const filteredModels = computed(() =>
 const groupedModels = computed(() => groupModelsByFamily(filteredModels.value));
 
 const activeSortKeys = computed(() => new Set(sortKeys.value));
+const hasActiveFilters = computed(
+  () =>
+    query.value.trim().length > 0 ||
+    filterMode.value !== "all" ||
+    selectedFamilies.value.length > 0 ||
+    selectedQuantizations.value.length > 0 ||
+    selectedSizes.value.length > 0,
+);
 
 function toggleSort(key: ModelSortKey) {
   const current = sortKeys.value.filter((existing) => existing !== key);
   sortKeys.value = activeSortKeys.value.has(key) ? current : [key, ...current];
+}
+
+function clearAllFilters() {
+  query.value = "";
+  filterMode.value = "all";
+  selectedFamilies.value = [];
+  selectedQuantizations.value = [];
+  selectedSizes.value = [];
+}
+
+function clearFamilyFilters() {
+  selectedFamilies.value = [];
+}
+
+function clearQuantizationFilters() {
+  selectedQuantizations.value = [];
+}
+
+function clearSizeFilters() {
+  selectedSizes.value = [];
 }
 
 function selectedValues(event: Event): string[] {
@@ -220,6 +248,48 @@ function sizeLabel(bucket: SizeBucket): string {
       </select>
     </div>
 
+    <div
+      v-if="hasActiveFilters"
+      class="flex flex-wrap items-center gap-1"
+      aria-label="Active model filters"
+    >
+      <button
+        type="button"
+        class="rounded-md bg-slate-800 px-2 py-1 text-xs text-slate-200 hover:bg-slate-700"
+        data-test="filter-clear-all"
+        @click="clearAllFilters"
+      >
+        Clear filters
+      </button>
+      <button
+        v-if="selectedFamilies.length > 0"
+        type="button"
+        class="rounded-md bg-slate-900/70 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+        data-test="filter-clear-family"
+        @click="clearFamilyFilters"
+      >
+        Clear family
+      </button>
+      <button
+        v-if="selectedQuantizations.length > 0"
+        type="button"
+        class="rounded-md bg-slate-900/70 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+        data-test="filter-clear-quantization"
+        @click="clearQuantizationFilters"
+      >
+        Clear quant
+      </button>
+      <button
+        v-if="selectedSizes.length > 0"
+        type="button"
+        class="rounded-md bg-slate-900/70 px-2 py-1 text-xs text-slate-300 hover:bg-white/10"
+        data-test="filter-clear-size"
+        @click="clearSizeFilters"
+      >
+        Clear size
+      </button>
+    </div>
+
     <div class="flex flex-wrap gap-1" aria-label="Sort models">
       <button
         v-for="sort in [
@@ -259,7 +329,11 @@ function sizeLabel(bucket: SizeBucket): string {
       </RouterLink>
     </div>
 
-    <div v-else class="flex max-h-96 flex-col gap-2 overflow-y-auto pr-1">
+    <div
+      v-else
+      class="flex max-h-96 min-h-0 flex-col gap-2 overflow-y-auto pr-1"
+      data-test="model-list"
+    >
       <div
         v-if="groupedModels.length === 0"
         class="rounded-md bg-slate-900/50 px-3 py-2 text-xs text-slate-400"
@@ -271,11 +345,12 @@ function sizeLabel(bucket: SizeBucket): string {
         v-for="group in groupedModels"
         v-else
         :key="group.family"
-        class="overflow-hidden rounded-md bg-slate-950/30"
+        class="shrink-0 overflow-hidden rounded-md bg-slate-950/30"
+        data-test="family-group"
       >
         <button
           type="button"
-          class="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-xs font-medium text-slate-300 hover:bg-white/5"
+          class="flex min-h-9 w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-xs font-medium text-slate-300 hover:bg-white/5"
           :aria-expanded="!collapsedFamilies.has(group.family)"
           :data-test="`family-toggle-${group.family}`"
           @click="toggleFamily(group.family)"

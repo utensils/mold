@@ -178,4 +178,66 @@ describe("ModelPicker", () => {
     expect(w.text()).not.toContain("sdxl:fp16");
     expect(w.text()).toContain("qwen-image:q4");
   });
+
+  it("clears active multi-select filters without remounting", async () => {
+    const w = mountPicker([
+      model("flux-schnell:q4", { family: "flux", size_gb: 4 }),
+      model("flux-dev:q8", { family: "flux", size_gb: 8 }),
+      model("sdxl:fp16", { family: "sdxl", size_gb: 7 }),
+    ]);
+
+    await w.find("[data-test='filter-family']").setValue(["flux"]);
+    await w.find("[data-test='filter-quantization']").setValue(["q8"]);
+    await w.find("[data-test='filter-size']").setValue(["medium"]);
+    expect(w.text()).toContain("flux-dev:q8");
+    expect(w.text()).not.toContain("flux-schnell:q4");
+    expect(w.text()).not.toContain("sdxl:fp16");
+
+    const clear = w.find("[data-test='filter-clear-all']");
+    expect(clear.exists()).toBe(true);
+    await clear.trigger("click");
+
+    expect(w.text()).toContain("flux-schnell:q4");
+    expect(w.text()).toContain("flux-dev:q8");
+    expect(w.text()).toContain("sdxl:fp16");
+    expect(
+      (w.find("[data-test='filter-family']").element as HTMLSelectElement)
+        .selectedOptions,
+    ).toHaveLength(0);
+    expect(
+      (w.find("[data-test='filter-quantization']").element as HTMLSelectElement)
+        .selectedOptions,
+    ).toHaveLength(0);
+    expect(
+      (w.find("[data-test='filter-size']").element as HTMLSelectElement)
+        .selectedOptions,
+    ).toHaveLength(0);
+  });
+
+  it("keeps collapsed family headers readable when another group expands", async () => {
+    localStorage.setItem(
+      "mold.generate.modelPicker.collapsedFamilies",
+      JSON.stringify(["sdxl", "qwen-image"]),
+    );
+    const w = mountPicker([
+      ...Array.from({ length: 8 }, (_, i) =>
+        model(`flux-dev-${i}:q8`, { family: "flux", size_gb: 8 }),
+      ),
+      model("sdxl:fp16", { family: "sdxl", size_gb: 7 }),
+      model("qwen-image:q4", { family: "qwen-image", size_gb: 18 }),
+    ]);
+
+    expect(
+      w.find("[data-test='family-toggle-flux']").attributes("aria-expanded"),
+    ).toBe("true");
+    expect(
+      w.find("[data-test='family-toggle-sdxl']").attributes("aria-expanded"),
+    ).toBe("false");
+
+    const groups = w.findAll("[data-test='family-group']");
+    expect(groups).toHaveLength(3);
+    for (const group of groups) {
+      expect(group.classes()).toContain("shrink-0");
+    }
+  });
 });
