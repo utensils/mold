@@ -181,13 +181,13 @@ const isDirty = computed(() => props.modelValue !== null);
 <template>
   <section
     v-if="componentMode"
-    class="shrink-0"
+    class="min-w-[7rem]"
     data-test="component-placement"
   >
     <select
       v-if="componentField && tier2"
       :value="advancedValue(componentField)"
-      class="rounded bg-slate-950/70 px-2 py-1 text-[11px] text-slate-200"
+      class="w-full rounded bg-slate-950/70 px-2 py-1 text-[11px] text-slate-200"
       data-test="component-placement-select"
       aria-label="Component device placement"
       @change="emitComponent(($event.target as HTMLSelectElement).value)"

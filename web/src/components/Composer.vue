@@ -1,13 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import type {
-  DevicePlacement,
   GenerateFormState,
   OutputFormat,
   SourceImageState,
 } from "../types";
 import { familySupportsAudio } from "../types";
-import PlacementPanel from "./PlacementPanel.vue";
 import ScriptComposer from "./ScriptComposer.vue";
 import {
   isQwenImageEditFamily,
@@ -26,10 +24,7 @@ const props = defineProps<{
   queueCapacity: number | null;
   gpus: { ordinal: number; state: string }[] | null;
   expandActive: boolean;
-  // Agent C (model-ui-overhaul §3) ────────────────────────────────────
-  family: string; // family of the currently-selected model
-  placementGpus: { ordinal: number; name: string }[];
-  // ──────────────────────────────────────────────────────────────────
+  family: string;
   /** Chain routing decision for the current form settings. When `chain`,
    * the Composer shows a "will render as N clips" cue so users understand
    * why the request will take much longer than a single-clip submit. */
@@ -89,10 +84,6 @@ const statusLine = computed(() => {
   }
   return parts.join(" · ");
 });
-
-function updatePlacement(p: DevicePlacement | null) {
-  emit("update:modelValue", { ...props.modelValue, placement: p });
-}
 
 const outputFormats = computed(() => outputFormatsForFamily(props.family));
 const isQwenEdit = computed(() => isQwenImageEditFamily(props.family));
@@ -440,15 +431,6 @@ defineExpose({ scriptComposerRef });
       >
         {{ submitError }}
       </div>
-
-      <!-- Agent C (model-ui-overhaul §3): device placement -->
-      <PlacementPanel
-        :model-value="modelValue.placement"
-        :family="family"
-        :model="modelValue.model"
-        :gpus="placementGpus"
-        @update:model-value="updatePlacement"
-      />
     </template>
   </div>
 </template>

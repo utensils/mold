@@ -1350,10 +1350,12 @@ function removeKeyframe(index: number) {
                   {{ component.present ? "Ready" : "Missing" }}
                 </span>
               </div>
-              <div class="flex items-center gap-2">
+              <div
+                class="grid grid-cols-1 gap-2 min-[36rem]:grid-cols-[minmax(0,1fr)_auto_auto]"
+              >
                 <select
                   v-if="!isTransformerComponent(component)"
-                  class="min-w-0 flex-1 rounded bg-slate-950/70 px-2 py-1 text-[11px] text-slate-200"
+                  class="min-w-0 rounded bg-slate-950/70 px-2 py-1 text-[11px] text-slate-200"
                   :value="component.path ?? ''"
                   :disabled="(component.options?.length ?? 0) <= 1"
                   data-test="component-option-select"
@@ -1383,7 +1385,7 @@ function removeKeyframe(index: number) {
                 <a
                   v-if="!component.present && component.repair_model"
                   :href="`/catalog?q=${encodeURIComponent(component.repair_model)}`"
-                  class="shrink-0 text-amber-200 hover:underline"
+                  class="self-center text-amber-200 hover:underline"
                   data-test="component-repair-link"
                 >
                   Repair

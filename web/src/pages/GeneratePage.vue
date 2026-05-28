@@ -472,7 +472,7 @@ onBeforeUnmount(() => {
 
     <div
       data-test="generate-workspace"
-      class="mt-4 grid gap-4 sm:mt-6 xl:grid-cols-[21rem_minmax(0,1fr)_28rem] 2xl:grid-cols-[22rem_minmax(0,1fr)_30rem]"
+      class="mt-4 grid gap-4 sm:mt-6 xl:grid-cols-[24rem_minmax(0,1fr)_34rem] 2xl:grid-cols-[26rem_minmax(0,1fr)_38rem]"
     >
       <aside class="space-y-4 xl:sticky xl:top-4 xl:self-start">
         <section class="glass rounded-2xl p-4">
@@ -508,7 +508,6 @@ onBeforeUnmount(() => {
           :gpus="gpus"
           :expand-active="form.state.value.expand.enabled"
           :family="currentFamily"
-          :placement-gpus="gpuListForPlacement"
           :chain-decision="chainDecision"
           :submit-error="composerError"
           @submit="onSubmit"

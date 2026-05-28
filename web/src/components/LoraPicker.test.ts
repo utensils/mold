@@ -160,45 +160,7 @@ describe("LoraPicker — multi-LoRA stack", () => {
     expect(last[0].path).toBe("/loras/pixel.safetensors");
   });
 
-  it("dragging the handle reorders the visible LoRA stack without dropping row metadata", async () => {
-    const rows: LoraSelection[] = [
-      {
-        path: "/loras/cinematic.safetensors",
-        scale: 0.8,
-        trainedWords: ["cinematic style"],
-      },
-      {
-        path: "/loras/pixel.safetensors",
-        scale: 1.15,
-        trainedWords: ["pixel art"],
-      },
-      {
-        path: "/loras/third.safetensors",
-        scale: 0.45,
-        trainedWords: ["third style"],
-      },
-    ];
-    const w = mountPicker(rows);
-    await flushPromises();
-
-    const data = new Map<string, string>();
-    const dataTransfer = {
-      effectAllowed: "",
-      dropEffect: "",
-      setData: vi.fn((key: string, value: string) => data.set(key, value)),
-      getData: vi.fn((key: string) => data.get(key) ?? ""),
-    };
-    const renderedRows = w.findAll("[data-test='lora-row']");
-    const handles = w.findAll("[data-test='lora-drag-handle']");
-
-    await handles[0].trigger("dragstart", { dataTransfer });
-    await renderedRows[2].trigger("drop", { dataTransfer });
-
-    const last = w.emitted("update:modelValue")?.at(-1)?.[0] as LoraSelection[];
-    expect(last).toEqual([rows[1], rows[2], rows[0]]);
-  });
-
-  it("keeps rows non-draggable so range input scale changes cannot start reorder", async () => {
+  it("uses only explicit up/down buttons for row movement", async () => {
     const rows: LoraSelection[] = [
       { path: "/loras/cinematic.safetensors", scale: 0.8 },
       { path: "/loras/pixel.safetensors", scale: 1.15 },
@@ -207,9 +169,8 @@ describe("LoraPicker — multi-LoRA stack", () => {
     await flushPromises();
 
     const renderedRows = w.findAll("[data-test='lora-row']");
-    const handles = w.findAll("[data-test='lora-drag-handle']");
     expect(renderedRows[0].attributes("draggable")).not.toBe("true");
-    expect(handles[0].attributes("draggable")).toBe("true");
+    expect(w.find("[data-test='lora-drag-handle']").exists()).toBe(false);
 
     const scale = renderedRows[0].get("input[type='range']");
     await scale.setValue("1.35");
@@ -220,6 +181,13 @@ describe("LoraPicker — multi-LoRA stack", () => {
       { path: "/loras/cinematic.safetensors", scale: 1.35 },
       rows[1],
     ]);
+
+    await w.setProps({ modelValue: emitted[0][0] as LoraSelection[] });
+    await w.find("[aria-label='Move LoRA down']").trigger("click");
+    const moved = w
+      .emitted("update:modelValue")
+      ?.at(-1)?.[0] as LoraSelection[];
+    expect(moved).toEqual([rows[1], { ...rows[0], scale: 1.35 }]);
   });
 
   it("exposes button fallback controls for moving LoRA rows", async () => {

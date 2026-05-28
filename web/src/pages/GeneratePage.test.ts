@@ -101,7 +101,7 @@ describe("GeneratePage layout and visibility", () => {
       "max-w-[2400px]",
     );
     expect(wrapper.get("[data-test='generate-workspace']").classes()).toContain(
-      "2xl:grid-cols-[22rem_minmax(0,1fr)_30rem]",
+      "2xl:grid-cols-[26rem_minmax(0,1fr)_38rem]",
     );
   });
 

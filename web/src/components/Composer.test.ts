@@ -65,7 +65,6 @@ function mountComposer(
       gpus: null,
       expandActive: false,
       family,
-      placementGpus: [],
       chainDecision: { kind: "single" },
     },
   });
