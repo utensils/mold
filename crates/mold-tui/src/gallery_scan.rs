@@ -186,7 +186,7 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
             Some("gif") => read_gif_metadata(&path, timestamp),
             Some("jpg" | "jpeg") => read_jpeg_metadata(&path, timestamp),
             // WebP/MP4: minimal entry (no embedded metadata to parse)
-            Some("webp" | "mp4") => {
+            Some(ext @ ("webp" | "mp4")) => {
                 let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 Some(GalleryEntry {
                     path: path.clone(),
@@ -202,8 +202,26 @@ pub fn scan_images_local() -> Vec<GalleryEntry> {
                         height: 0,
                         strength: None,
                         scheduler: None,
+                        output_format: Some(if ext == "mp4" {
+                            mold_core::OutputFormat::Mp4
+                        } else {
+                            mold_core::OutputFormat::Webp
+                        }),
+                        cfg_plus: None,
                         lora: None,
                         lora_scale: None,
+                        loras: None,
+                        control_model: None,
+                        control_scale: None,
+                        upscale_model: None,
+                        gif_preview: None,
+                        enable_audio: None,
+                        audio_file_path: None,
+                        source_video_path: None,
+                        pipeline: None,
+                        retake_range: None,
+                        spatial_upscale: None,
+                        temporal_upscale: None,
                         frames: None,
                         fps: None,
                         version: String::new(),
@@ -319,8 +337,22 @@ fn read_gif_metadata(path: &Path, timestamp: u64) -> Option<GalleryEntry> {
             height: 0,
             strength: None,
             scheduler: None,
+            output_format: None,
+            cfg_plus: None,
             lora: None,
             lora_scale: None,
+            loras: None,
+            control_model: None,
+            control_scale: None,
+            upscale_model: None,
+            gif_preview: None,
+            enable_audio: None,
+            audio_file_path: None,
+            source_video_path: None,
+            pipeline: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
             frames: None,
             fps: None,
             version: String::new(),

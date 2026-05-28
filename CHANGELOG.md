@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Generate web Studio Console.** The Generate tab now keeps model search, LoRA search/stacking, prompt entry, live jobs, compact recent gallery, and advanced controls visible in a three-rail workspace. Gallery cards on Generate include a Recreate action that restores the form from the saved generation metadata.
+- **Full gallery metadata JSON for Recreate.** The metadata DB now stores the complete `OutputMetadata` JSON alongside existing indexed columns, preserving scheduler, output format, CFG++, LoRA stacks, ControlNet/upscale settings, LTX-2 audio/video pipeline options, and video timing fields for future gallery round-trips.
+
 ## [0.12.0] - 2026-05-27
 
 ### Changed

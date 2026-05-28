@@ -450,6 +450,8 @@ fn collect_gpu_ordinal(device: DeviceRef, out: &mut BTreeSet<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static MODEL_CUDA_OOM_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
     use crate::model_cache::ModelCache;
     use mold_core::types::AdvancedPlacement;
     use mold_inference::shared_pool::SharedPool;
@@ -705,6 +707,7 @@ mod tests {
 
     #[test]
     fn model_oom_on_sibling_gpu_marks_model_unschedulable() {
+        let _guard = MODEL_CUDA_OOM_TEST_LOCK.lock().unwrap();
         clear_model_cuda_ooms_for_tests();
         let model = "flux2-klein-9b:bf16";
 
@@ -732,6 +735,7 @@ mod tests {
 
     #[test]
     fn failed_model_ordinals_can_be_skipped_before_cooldown() {
+        let _guard = MODEL_CUDA_OOM_TEST_LOCK.lock().unwrap();
         clear_model_cuda_ooms_for_tests();
         let (failed, _failed_rx) = test_worker(0, 24_000_000_000);
         let (untested, _untested_rx) = test_worker(1, 24_000_000_000);

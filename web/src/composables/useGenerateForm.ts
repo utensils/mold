@@ -56,15 +56,32 @@ function defaultForm(): GenerateFormState {
     height: 1024,
     steps: 20,
     guidance: 3.5,
+    seedMode: "random",
     seed: null,
     batchSize: 1,
     strength: 0.75,
     frames: null,
     fps: null,
     scheduler: null,
+    cfgPlus: false,
     outputFormat: "png",
     expand: { enabled: false, variations: 1, familyOverride: null },
     imageAttachments: [],
+    maskImage: null,
+    controlImage: null,
+    controlModel: "",
+    controlScale: 1.0,
+    upscaleModel: "",
+    gifPreview: false,
+    audioFile: null,
+    audioFilePath: "",
+    sourceVideo: null,
+    sourceVideoPath: "",
+    keyframes: [],
+    pipeline: null,
+    retakeRange: null,
+    spatialUpscale: null,
+    temporalUpscale: null,
     placement: null,
     loras: [],
     enableAudio: null,
@@ -117,7 +134,15 @@ function persist(state: GenerateFormState) {
   try {
     // Drop base64 bytes from localStorage — they blow past the quota quickly
     // and the attachment is re-picked trivially on reload.
-    const { imageAttachments: _attachments, ...rest } = state;
+    const {
+      imageAttachments: _attachments,
+      maskImage: _mask,
+      controlImage: _control,
+      audioFile: _audio,
+      sourceVideo: _video,
+      keyframes: _keyframes,
+      ...rest
+    } = state;
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({ ...rest, version: FORM_VERSION }),
@@ -220,6 +245,7 @@ export function useGenerateForm(): UseGenerateForm {
       } else {
         state.value.frames = null;
         state.value.fps = null;
+        state.value.gifPreview = false;
       }
       // Auto-pick a valid output format whenever the model family changes so
       // users never have to manually toggle this — switching from an image
@@ -234,8 +260,22 @@ export function useGenerateForm(): UseGenerateForm {
       // clean and the server's MP4 default-on behaviour isn't fought.
       // Mirrors `chain_limits::family_supports_audio` on the server.
       state.value.enableAudio = familySupportsAudio(m.family) ? true : null;
+      if (m.family !== "ltx2" && m.family !== "ltx-2") {
+        state.value.audioFile = null;
+        state.value.audioFilePath = "";
+        state.value.sourceVideo = null;
+        state.value.sourceVideoPath = "";
+        state.value.keyframes = [];
+        state.value.pipeline = null;
+        state.value.retakeRange = null;
+        state.value.spatialUpscale = null;
+        state.value.temporalUpscale = null;
+      }
       if (isQwenImageEditFamily(m.family)) {
         state.value.batchSize = 1;
+        state.value.maskImage = null;
+        state.value.controlImage = null;
+        state.value.controlModel = "";
       } else if (state.value.imageAttachments.length > 1) {
         state.value.imageAttachments = state.value.imageAttachments.slice(0, 1);
       }
@@ -251,6 +291,13 @@ export function useGenerateForm(): UseGenerateForm {
         : undefined;
       const qwenEdit = isQwenImageEditFamily(selectedFamily(s));
       const attachments = s.imageAttachments ?? [];
+      const controlModel = s.controlModel.trim();
+      const upscaleModel = s.upscaleModel.trim();
+      const audioPath = s.audioFilePath.trim();
+      const sourceVideoPath = s.sourceVideoPath.trim();
+      const family = selectedFamily(s);
+      const ltx2 = family === "ltx2" || family === "ltx-2";
+      const sd3 = family === "sd3" || family === "sd3.5";
       return {
         prompt: s.prompt,
         negative_prompt: s.negativePrompt || null,
@@ -259,9 +306,10 @@ export function useGenerateForm(): UseGenerateForm {
         height: s.height,
         steps: s.steps,
         guidance: s.guidance,
-        seed: s.seed,
+        seed: s.seedMode === "random" ? null : s.seed,
         batch_size: qwenEdit ? 1 : s.batchSize,
         output_format: s.outputFormat,
+        cfg_plus: sd3 && s.cfgPlus ? true : undefined,
         scheduler: s.scheduler,
         ...(qwenEdit
           ? {
@@ -270,13 +318,41 @@ export function useGenerateForm(): UseGenerateForm {
           : {
               source_image: attachments[0]?.base64 ?? null,
               strength: s.strength,
+              mask_image: s.maskImage?.base64 ?? undefined,
+              control_image: s.controlImage?.base64 ?? undefined,
+              control_model:
+                s.controlImage && controlModel ? controlModel : undefined,
+              control_scale:
+                s.controlImage && controlModel ? s.controlScale : undefined,
             }),
         expand: s.expand.enabled || undefined,
         frames: s.frames,
         fps: s.fps,
+        upscale_model: upscaleModel || undefined,
+        gif_preview: s.gifPreview || undefined,
         placement: s.placement ?? undefined,
         loras,
         enable_audio: s.enableAudio ?? undefined,
+        ...(ltx2
+          ? {
+              audio_file: s.audioFile?.base64 ?? undefined,
+              audio_file_path: s.audioFile ? undefined : audioPath || undefined,
+              source_video: s.sourceVideo?.base64 ?? undefined,
+              source_video_path: s.sourceVideo
+                ? undefined
+                : sourceVideoPath || undefined,
+              keyframes: s.keyframes.length
+                ? s.keyframes.map((k) => ({
+                    frame: k.frame,
+                    image: k.image.base64,
+                  }))
+                : undefined,
+              pipeline: s.pipeline ?? undefined,
+              retake_range: s.retakeRange ?? undefined,
+              spatial_upscale: s.spatialUpscale ?? undefined,
+              temporal_upscale: s.temporalUpscale ?? undefined,
+            }
+          : {}),
       };
     },
     isVideoFamily: (family: string) => VIDEO_FAMILIES.includes(family),

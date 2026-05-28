@@ -1,6 +1,26 @@
 // Matches `mold_core::OutputFormat` on the wire (lowercase strings).
 export type OutputFormat = "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4";
 
+export type SeedMode = "random" | "static" | "increment";
+
+export type Ltx2PipelineMode =
+  | "one-stage"
+  | "two-stage"
+  | "two-stage-hq"
+  | "distilled"
+  | "ic-lora"
+  | "keyframe"
+  | "a2vid"
+  | "retake";
+
+export type Ltx2SpatialUpscale = "x1-5" | "x2";
+export type Ltx2TemporalUpscale = "x2";
+
+export interface TimeRange {
+  start_seconds: number;
+  end_seconds: number;
+}
+
 export type Scheduler =
   | "default"
   | "ddim"
@@ -22,8 +42,22 @@ export interface OutputMetadata {
   height: number;
   strength?: number | null;
   scheduler?: Scheduler | null;
+  output_format?: OutputFormat | null;
+  cfg_plus?: boolean | null;
   lora?: string | null;
   lora_scale?: number | null;
+  loras?: LoraWeight[] | null;
+  control_model?: string | null;
+  control_scale?: number | null;
+  upscale_model?: string | null;
+  gif_preview?: boolean | null;
+  enable_audio?: boolean | null;
+  audio_file_path?: string | null;
+  source_video_path?: string | null;
+  pipeline?: Ltx2PipelineMode | null;
+  retake_range?: TimeRange | null;
+  spatial_upscale?: Ltx2SpatialUpscale | null;
+  temporal_upscale?: Ltx2TemporalUpscale | null;
   frames?: number | null;
   fps?: number | null;
   version: string;
@@ -121,6 +155,7 @@ export interface GenerateRequestWire {
   seed?: number | null;
   batch_size?: number;
   output_format?: OutputFormat;
+  cfg_plus?: boolean | null;
   scheduler?: Scheduler | null;
   source_image?: string | null; // base64 (no data-URI prefix)
   /** Qwen-Image-Edit attachments in order: first image is the target,
@@ -128,10 +163,16 @@ export interface GenerateRequestWire {
    * `source_image`. */
   edit_images?: string[] | null;
   strength?: number;
+  mask_image?: string | null;
+  control_image?: string | null;
+  control_model?: string | null;
+  control_scale?: number;
   expand?: boolean;
   original_prompt?: string | null;
   frames?: number | null;
   fps?: number | null;
+  upscale_model?: string | null;
+  gif_preview?: boolean;
   placement?: DevicePlacement | null;
   lora?: { path: string; scale: number } | null;
   /** Multi-LoRA stack. Wins over the singular `lora` field when both are
@@ -147,6 +188,11 @@ export interface GenerateRequestWire {
   audio_file_path?: string | null;
   source_video?: string | null;
   source_video_path?: string | null;
+  keyframes?: KeyframeConditionWire[] | null;
+  pipeline?: Ltx2PipelineMode | null;
+  retake_range?: TimeRange | null;
+  spatial_upscale?: Ltx2SpatialUpscale | null;
+  temporal_upscale?: Ltx2TemporalUpscale | null;
 }
 
 export interface ModelDefaults {
@@ -342,6 +388,22 @@ export interface SourceImageState {
   base64: string; // stripped before localStorage persist
 }
 
+export interface SourceMediaState {
+  kind: "upload";
+  filename: string;
+  base64: string; // stripped before localStorage persist
+}
+
+export interface KeyframeConditionState {
+  frame: number;
+  image: SourceImageState;
+}
+
+export interface KeyframeConditionWire {
+  frame: number;
+  image: string;
+}
+
 export interface ExpandFormState {
   enabled: boolean;
   variations: 1 | 3 | 5;
@@ -396,15 +458,32 @@ export interface GenerateFormState {
   height: number;
   steps: number;
   guidance: number;
+  seedMode: SeedMode;
   seed: number | null; // null = random
   batchSize: number;
   strength: number;
   frames: number | null;
   fps: number | null;
   scheduler: Scheduler | null;
+  cfgPlus: boolean;
   outputFormat: OutputFormat;
   expand: ExpandFormState;
   imageAttachments: SourceImageState[];
+  maskImage: SourceImageState | null;
+  controlImage: SourceImageState | null;
+  controlModel: string;
+  controlScale: number;
+  upscaleModel: string;
+  gifPreview: boolean;
+  audioFile: SourceMediaState | null;
+  audioFilePath: string;
+  sourceVideo: SourceMediaState | null;
+  sourceVideoPath: string;
+  keyframes: KeyframeConditionState[];
+  pipeline: Ltx2PipelineMode | null;
+  retakeRange: TimeRange | null;
+  spatialUpscale: Ltx2SpatialUpscale | null;
+  temporalUpscale: Ltx2TemporalUpscale | null;
   placement: DevicePlacement | null;
   /** LoRA stack. Stored as an array so the UI can hold multiple
    * selections; serialized as `loras` on the wire. Defaults to an empty

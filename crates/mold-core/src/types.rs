@@ -430,7 +430,7 @@ pub struct KeyframeCondition {
     pub image: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct TimeRange {
     #[schema(example = 0.0)]
     pub start_seconds: f32,
@@ -465,7 +465,7 @@ pub enum Ltx2TemporalUpscale {
 }
 
 /// A LoRA adapter specification: path to safetensors file and effect scale.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct LoraWeight {
     /// Path to the LoRA safetensors file.
     #[schema(example = "/path/to/lora.safetensors")]
@@ -607,10 +607,38 @@ pub struct OutputMetadata {
     pub strength: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<Scheduler>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg_plus: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lora: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lora_scale: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loras: Option<Vec<LoraWeight>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_scale: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upscale_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gif_preview: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_audio: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_video_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<Ltx2PipelineMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retake_range: Option<TimeRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_upscale: Option<Ltx2SpatialUpscale>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal_upscale: Option<Ltx2TemporalUpscale>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -625,7 +653,11 @@ impl OutputMetadata {
         scheduler: Option<Scheduler>,
         version: impl Into<String>,
     ) -> Self {
-        let (lora, lora_scale) = match &req.lora {
+        let loras = req
+            .loras
+            .clone()
+            .or_else(|| req.lora.clone().map(|lora| vec![lora]));
+        let (lora, lora_scale) = match loras.as_ref().and_then(|items| items.first()) {
             Some(lw) => {
                 let name = std::path::Path::new(&lw.path)
                     .file_name()
@@ -647,8 +679,23 @@ impl OutputMetadata {
             height: req.height,
             strength: req.source_image.as_ref().map(|_| req.strength),
             scheduler,
+            output_format: req.output_format,
+            cfg_plus: req.cfg_plus,
             lora,
             lora_scale,
+            loras,
+            control_model: req.control_model.clone(),
+            control_scale: (req.control_image.is_some() || req.control_model.is_some())
+                .then_some(req.control_scale),
+            upscale_model: req.upscale_model.clone(),
+            gif_preview: req.gif_preview.then_some(true),
+            enable_audio: req.enable_audio,
+            audio_file_path: req.audio_file_path.clone(),
+            source_video_path: req.source_video_path.clone(),
+            pipeline: req.pipeline,
+            retake_range: req.retake_range.clone(),
+            spatial_upscale: req.spatial_upscale,
+            temporal_upscale: req.temporal_upscale,
             frames: req.frames,
             fps: req.fps,
             version: version.into(),
@@ -1649,6 +1696,95 @@ mod tests {
             OutputMetadata::from_generate_request(&req, 9, Some(Scheduler::UniPc), "0.1.0");
         assert_eq!(metadata.strength, Some(0.5));
         assert_eq!(metadata.scheduler, Some(Scheduler::UniPc));
+    }
+
+    #[test]
+    fn output_metadata_preserves_recreate_knobs() {
+        let req = GenerateRequest {
+            prompt: "video".to_string(),
+            negative_prompt: Some("blur".to_string()),
+            model: "ltx-2.3-22b-distilled:fp8".to_string(),
+            width: 960,
+            height: 576,
+            steps: 8,
+            guidance: 3.0,
+            seed: Some(9),
+            batch_size: 1,
+            output_format: Some(OutputFormat::Mp4),
+            embed_metadata: Some(true),
+            scheduler: None,
+            cfg_plus: Some(true),
+            source_image: None,
+            edit_images: None,
+            strength: 0.75,
+            mask_image: None,
+            control_image: None,
+            control_model: Some("controlnet-canny-sd15".to_string()),
+            control_scale: 0.8,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: Some(97),
+            fps: Some(24),
+            upscale_model: Some("real-esrgan-x4plus:fp16".to_string()),
+            gif_preview: true,
+            enable_audio: Some(false),
+            audio_file: None,
+            audio_file_path: Some("/srv/mold/voice.wav".to_string()),
+            source_video: None,
+            source_video_path: Some("/srv/mold/source.mp4".to_string()),
+            keyframes: None,
+            pipeline: Some(Ltx2PipelineMode::Retake),
+            loras: Some(vec![LoraWeight {
+                path: "/loras/camera.safetensors".to_string(),
+                scale: 0.7,
+            }]),
+            retake_range: Some(TimeRange {
+                start_seconds: 1.0,
+                end_seconds: 2.5,
+            }),
+            spatial_upscale: Some(Ltx2SpatialUpscale::X1_5),
+            temporal_upscale: Some(Ltx2TemporalUpscale::X2),
+            placement: None,
+        };
+
+        let metadata = OutputMetadata::from_generate_request(&req, 9, None, "0.1.0");
+
+        assert_eq!(metadata.output_format, Some(OutputFormat::Mp4));
+        assert_eq!(metadata.cfg_plus, Some(true));
+        assert_eq!(
+            metadata.control_model.as_deref(),
+            Some("controlnet-canny-sd15")
+        );
+        assert_eq!(metadata.control_scale, Some(0.8));
+        assert_eq!(
+            metadata.upscale_model.as_deref(),
+            Some("real-esrgan-x4plus:fp16")
+        );
+        assert_eq!(metadata.gif_preview, Some(true));
+        assert_eq!(metadata.enable_audio, Some(false));
+        assert_eq!(
+            metadata.audio_file_path.as_deref(),
+            Some("/srv/mold/voice.wav")
+        );
+        assert_eq!(
+            metadata.source_video_path.as_deref(),
+            Some("/srv/mold/source.mp4")
+        );
+        assert_eq!(metadata.pipeline, Some(Ltx2PipelineMode::Retake));
+        assert_eq!(
+            metadata.loras.as_ref().unwrap()[0].path,
+            "/loras/camera.safetensors"
+        );
+        assert_eq!(
+            metadata.retake_range,
+            Some(TimeRange {
+                start_seconds: 1.0,
+                end_seconds: 2.5,
+            }),
+        );
+        assert_eq!(metadata.spatial_upscale, Some(Ltx2SpatialUpscale::X1_5));
+        assert_eq!(metadata.temporal_upscale, Some(Ltx2TemporalUpscale::X2));
     }
 
     // ── SSE type tests ──────────────────────────────────────────────────────

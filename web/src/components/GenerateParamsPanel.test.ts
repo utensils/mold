@@ -79,11 +79,28 @@ function makeForm(
     height: 1024,
     steps: 28,
     guidance: 3.5,
+    seedMode: "random",
     seed: null,
     batchSize: 1,
     strength: 0.75,
     imageAttachments: [],
+    maskImage: null,
+    controlImage: null,
+    controlModel: "",
+    controlScale: 1,
+    upscaleModel: "",
+    gifPreview: false,
+    audioFile: null,
+    audioFilePath: "",
+    sourceVideo: null,
+    sourceVideoPath: "",
+    keyframes: [],
+    pipeline: null,
+    retakeRange: null,
+    spatialUpscale: null,
+    temporalUpscale: null,
     scheduler: null,
+    cfgPlus: false,
     frames: null,
     fps: null,
     outputFormat: "png",
@@ -126,9 +143,9 @@ describe("GenerateParamsPanel", () => {
   });
 
   it("formats a numeric seed in the summary", () => {
-    const w = mountPanel(makeForm({ seed: 42 }));
+    const w = mountPanel(makeForm({ seedMode: "static", seed: 42 }));
     expect(w.find("[data-test='params-summary']").text()).toBe(
-      "flux-dev:q4 · 1024×1024 · 28 · g 3.5 · seed 42",
+      "flux-dev:q4 · 1024×1024 · 28 · g 3.5 · seed static 42",
     );
     w.unmount();
   });

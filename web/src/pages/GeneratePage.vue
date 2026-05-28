@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Composer from "../components/Composer.vue";
 import GenerateParamsPanel from "../components/GenerateParamsPanel.vue";
 type GenerateParamsPanelInstance = InstanceType<typeof GenerateParamsPanel>;
+import LoraPicker from "../components/LoraPicker.vue";
+import ModelPicker from "../components/ModelPicker.vue";
 import PreferencesModal from "../components/PreferencesModal.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
@@ -22,9 +24,11 @@ import type {
   ChainStageWire,
   ExpandFormState,
   GalleryImage,
+  LoraSelection,
   ModelInfoExtended,
   SourceImageState,
 } from "../types";
+import { MAX_LORA_STACK, supportsLora } from "../types";
 import type { ChainScriptToml } from "../lib/chainToml";
 import type { ComposerMode } from "../components/Composer.vue";
 
@@ -225,6 +229,24 @@ const chainDecision = computed(() =>
   ),
 );
 
+const currentFamily = computed(
+  () => currentModel.value?.family ?? form.state.value.modelFamily,
+);
+
+const familySupportsLora = computed(() => supportsLora(currentFamily.value));
+
+function selectModel(model: ModelInfoExtended) {
+  form.applyModelDefaults(model);
+}
+
+function onLorasChange(loras: LoraSelection[]) {
+  form.state.value.loras = loras;
+}
+
+function onAppendPromptPhrase(phrase: string) {
+  form.appendPromptPhrase(phrase);
+}
+
 function onSubmit() {
   composerError.value = null;
   if (!form.state.value.model) {
@@ -255,6 +277,12 @@ function onSubmit() {
   }
   const req = form.toRequest();
   stream.submit(req, decision);
+  if (
+    form.state.value.seedMode === "increment" &&
+    form.state.value.seed !== null
+  ) {
+    form.state.value.seed += Math.max(1, form.state.value.batchSize);
+  }
 }
 
 function onSubmitScript(script: ChainScriptToml) {
@@ -319,6 +347,50 @@ function openItem(item: GalleryImage) {
   );
   selectedIndex.value = idx;
   selected.value = item;
+}
+
+function recreateFromGallery(item: GalleryImage) {
+  const meta = item.metadata;
+  const model = models.value.find((m) => m.name === meta.model);
+  if (model) {
+    form.applyModelDefaults(model);
+  } else {
+    form.state.value.model = meta.model;
+    form.state.value.modelFamily = "";
+  }
+  form.state.value.prompt = meta.prompt ?? "";
+  form.state.value.negativePrompt = meta.negative_prompt ?? "";
+  form.state.value.width = meta.width || form.state.value.width;
+  form.state.value.height = meta.height || form.state.value.height;
+  form.state.value.steps = meta.steps || form.state.value.steps;
+  form.state.value.guidance = meta.guidance ?? form.state.value.guidance;
+  form.state.value.seedMode = "static";
+  form.state.value.seed = meta.seed ?? null;
+  form.state.value.scheduler = meta.scheduler ?? null;
+  form.state.value.cfgPlus = meta.cfg_plus ?? false;
+  if (meta.strength !== undefined && meta.strength !== null) {
+    form.state.value.strength = meta.strength;
+  }
+  form.state.value.loras = (meta.loras ?? [])
+    .slice(0, MAX_LORA_STACK)
+    .map<LoraSelection>((l) => ({ path: l.path, scale: l.scale }));
+  form.state.value.controlModel = meta.control_model ?? "";
+  form.state.value.controlScale =
+    meta.control_scale ?? form.state.value.controlScale;
+  form.state.value.upscaleModel = meta.upscale_model ?? "";
+  form.state.value.gifPreview = meta.gif_preview ?? false;
+  form.state.value.enableAudio =
+    meta.enable_audio ?? form.state.value.enableAudio;
+  form.state.value.audioFilePath = meta.audio_file_path ?? "";
+  form.state.value.sourceVideoPath = meta.source_video_path ?? "";
+  form.state.value.pipeline = meta.pipeline ?? null;
+  form.state.value.retakeRange = meta.retake_range ?? null;
+  form.state.value.spatialUpscale = meta.spatial_upscale ?? null;
+  form.state.value.temporalUpscale = meta.temporal_upscale ?? null;
+  form.state.value.frames = meta.frames ?? null;
+  form.state.value.fps = meta.fps ?? null;
+  const outputFormat = meta.output_format ?? item.format;
+  if (outputFormat) form.state.value.outputFormat = outputFormat;
 }
 
 // Map a finished Job back to its saved GalleryImage. The SSE complete
@@ -409,58 +481,102 @@ onBeforeUnmount(() => {
       @refresh="refreshGallery"
     />
 
-    <div class="mt-4 sm:mt-6">
-      <Composer
-        ref="composerRef"
-        v-model="form.state.value"
-        :mode="composerMode"
-        :queue-depth="status?.queue_depth ?? null"
-        :queue-capacity="status?.queue_capacity ?? null"
-        :gpus="gpus"
-        :expand-active="form.state.value.expand.enabled"
-        :family="currentModel?.family ?? ''"
-        :placement-gpus="gpuListForPlacement"
-        :chain-decision="chainDecision"
-        :submit-error="composerError"
-        @submit="onSubmit"
-        @submit-script="onSubmitScript"
-        @update:mode="setComposerMode"
-        @open-preferences="showPreferences = true"
-        @open-expand="showExpand = true"
-        @open-expand-stage="(idx: number, p: string) => onExpandStage(idx, p)"
-        @open-image-picker="showPicker = true"
-        @clear-source="onClearSource"
-      />
+    <div
+      class="mt-4 grid gap-4 sm:mt-6 xl:grid-cols-[21rem_minmax(0,1fr)_24rem]"
+    >
+      <aside class="space-y-4 xl:sticky xl:top-4 xl:self-start">
+        <section class="glass rounded-2xl p-4">
+          <h2 class="text-sm font-semibold text-slate-100">Models</h2>
+          <div class="mt-3">
+            <ModelPicker
+              :models="models"
+              :model-value="form.state.value.model"
+              @update:model-value="() => {}"
+              @select="selectModel"
+            />
+          </div>
+        </section>
 
-      <GenerateParamsPanel
-        ref="paramsPanelRef"
-        v-model="form.state.value"
-        :models="models"
-      />
+        <section v-if="familySupportsLora" class="glass rounded-2xl p-4">
+          <h2 class="text-sm font-semibold text-slate-100">LoRA Stack</h2>
+          <LoraPicker
+            :family="currentFamily"
+            :model-value="form.state.value.loras"
+            @update:model-value="onLorasChange"
+            @append-prompt="onAppendPromptPhrase"
+          />
+        </section>
+      </aside>
 
-      <RunningStrip
-        :jobs="stream.jobs.value"
-        :hide-mode="hide.hideMode.value"
-        :revealed="hide.revealed.value"
-        @cancel="stream.cancel"
-        @open="openJob"
-        @dismiss="stream.remove"
-        @clear-finished="stream.clearDone"
-        @reveal="(id: string) => hide.revealOne(id)"
-      />
+      <main class="min-w-0">
+        <Composer
+          ref="composerRef"
+          v-model="form.state.value"
+          :mode="composerMode"
+          :queue-depth="status?.queue_depth ?? null"
+          :queue-capacity="status?.queue_capacity ?? null"
+          :gpus="gpus"
+          :expand-active="form.state.value.expand.enabled"
+          :family="currentFamily"
+          :placement-gpus="gpuListForPlacement"
+          :chain-decision="chainDecision"
+          :submit-error="composerError"
+          @submit="onSubmit"
+          @submit-script="onSubmitScript"
+          @update:mode="setComposerMode"
+          @open-preferences="showPreferences = true"
+          @open-expand="showExpand = true"
+          @open-expand-stage="(idx: number, p: string) => onExpandStage(idx, p)"
+          @open-image-picker="showPicker = true"
+          @clear-source="onClearSource"
+        />
 
-      <div class="mt-6">
-        <GalleryFeed
-          :entries="galleryEntries"
-          :loading="false"
-          :view="view"
-          :muted="muted"
+        <RunningStrip
+          :jobs="stream.jobs.value"
           :hide-mode="hide.hideMode.value"
           :revealed="hide.revealed.value"
-          @open="openItem"
-          @reveal="(item: GalleryImage) => hide.revealOne(item.filename)"
+          @cancel="stream.cancel"
+          @open="openJob"
+          @dismiss="stream.remove"
+          @clear-finished="stream.clearDone"
+          @reveal="(id: string) => hide.revealOne(id)"
         />
-      </div>
+
+        <section class="mt-4">
+          <div class="mb-2 flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-slate-100">Recent</h2>
+            <span class="text-xs text-slate-500"
+              >{{ galleryEntries.length }} items</span
+            >
+          </div>
+          <div class="max-h-[52rem] overflow-y-auto pr-1">
+            <GalleryFeed
+              :entries="galleryEntries"
+              :loading="false"
+              :view="'grid'"
+              :muted="muted"
+              :hide-mode="hide.hideMode.value"
+              :revealed="hide.revealed.value"
+              :show-recreate="true"
+              @open="openItem"
+              @recreate="recreateFromGallery"
+              @reveal="(item: GalleryImage) => hide.revealOne(item.filename)"
+            />
+          </div>
+        </section>
+      </main>
+
+      <aside class="xl:sticky xl:top-4 xl:self-start">
+        <GenerateParamsPanel
+          ref="paramsPanelRef"
+          v-model="form.state.value"
+          :models="models"
+          :force-expanded="true"
+          :show-model-picker="false"
+          :show-loras="false"
+          title="Controls"
+        />
+      </aside>
     </div>
 
     <PreferencesModal

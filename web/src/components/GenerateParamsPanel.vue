@@ -2,9 +2,14 @@
 import { computed, ref } from "vue";
 import type {
   GenerateFormState,
+  Ltx2PipelineMode,
+  Ltx2SpatialUpscale,
+  Ltx2TemporalUpscale,
   LoraSelection,
   ModelInfoExtended,
   Scheduler,
+  SourceImageState,
+  SourceMediaState,
 } from "../types";
 import {
   NO_CFG_FAMILIES,
@@ -19,11 +24,24 @@ import {
   isQwenImageEditFamily,
   outputFormatsForFamily,
 } from "../composables/useGenerateForm";
+import { blobToBase64 } from "../lib/base64";
 
-const props = defineProps<{
-  modelValue: GenerateFormState;
-  models: ModelInfoExtended[];
-}>();
+const props = withDefaults(
+  defineProps<{
+    modelValue: GenerateFormState;
+    models: ModelInfoExtended[];
+    forceExpanded?: boolean;
+    showModelPicker?: boolean;
+    showLoras?: boolean;
+    title?: string;
+  }>(),
+  {
+    forceExpanded: false,
+    showModelPicker: true,
+    showLoras: true,
+    title: "Parameters",
+  },
+);
 const emit = defineEmits<{
   (e: "update:modelValue", v: GenerateFormState): void;
 }>();
@@ -47,6 +65,12 @@ const showScheduler = computed(() =>
   UNET_SCHEDULER_FAMILIES.includes(family.value),
 );
 const showVideo = computed(() => VIDEO_FAMILIES.includes(family.value));
+const showLtx2 = computed(
+  () => family.value === "ltx2" || family.value === "ltx-2",
+);
+const showCfgPlus = computed(
+  () => family.value === "sd3" || family.value === "sd3.5",
+);
 const showStrength = computed(
   () =>
     props.modelValue.imageAttachments.length > 0 &&
@@ -163,6 +187,19 @@ const schedulerOptions: Scheduler[] = [
   "unipc",
 ];
 
+const pipelineOptions: Ltx2PipelineMode[] = [
+  "one-stage",
+  "two-stage",
+  "two-stage-hq",
+  "distilled",
+  "ic-lora",
+  "keyframe",
+  "a2vid",
+  "retake",
+];
+const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
+const temporalOptions: Ltx2TemporalUpscale[] = ["x2"];
+
 // ── Expand / collapse persistence ────────────────────────────────────────
 const EXPANDED_KEY = "mold.generate.params.expanded";
 
@@ -175,6 +212,7 @@ function loadExpanded(): boolean {
 }
 
 const expanded = ref(loadExpanded());
+const bodyOpen = computed(() => props.forceExpanded || expanded.value);
 
 function setExpanded(v: boolean) {
   expanded.value = v;
@@ -200,9 +238,25 @@ const paramsDirty = computed(() => {
     s.steps !== m.default_steps ||
     Math.abs(s.guidance - m.default_guidance) > 0.001 ||
     s.batchSize !== 1 ||
+    s.seedMode !== "random" ||
     s.seed !== null ||
     s.negativePrompt.length > 0 ||
-    s.loras.length > 0
+    s.loras.length > 0 ||
+    s.cfgPlus ||
+    s.maskImage !== null ||
+    s.controlImage !== null ||
+    s.controlModel.length > 0 ||
+    s.upscaleModel.length > 0 ||
+    s.gifPreview ||
+    s.audioFile !== null ||
+    s.audioFilePath.length > 0 ||
+    s.sourceVideo !== null ||
+    s.sourceVideoPath.length > 0 ||
+    s.keyframes.length > 0 ||
+    s.pipeline !== null ||
+    s.retakeRange !== null ||
+    s.spatialUpscale !== null ||
+    s.temporalUpscale !== null
   );
 });
 
@@ -213,18 +267,108 @@ defineExpose({ setExpanded });
 // ── Summary line shown when collapsed ────────────────────────────────────
 const summary = computed(() => {
   const s = props.modelValue;
-  const seedTxt = s.seed === null ? "random" : String(s.seed);
+  const seedTxt =
+    s.seedMode === "random" ? "random" : `${s.seedMode} ${s.seed ?? "—"}`;
   const modelName = s.model || "—";
   return `${modelName} · ${s.width}×${s.height} · ${s.steps} · g ${s.guidance.toFixed(1)} · seed ${seedTxt}`;
 });
+
+function patchSeedMode(mode: GenerateFormState["seedMode"]) {
+  const nextSeed =
+    mode === "random" ? props.modelValue.seed : (props.modelValue.seed ?? 1);
+  emit("update:modelValue", {
+    ...props.modelValue,
+    seedMode: mode,
+    seed: nextSeed,
+  });
+}
+
+async function readFile(event: Event): Promise<File | null> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0] ?? null;
+  input.value = "";
+  return file;
+}
+
+async function readImageState(event: Event): Promise<SourceImageState | null> {
+  const file = await readFile(event);
+  if (!file) return null;
+  return {
+    kind: "upload",
+    filename: file.name,
+    base64: await blobToBase64(file),
+  };
+}
+
+async function readMediaState(event: Event): Promise<SourceMediaState | null> {
+  const file = await readFile(event);
+  if (!file) return null;
+  return {
+    kind: "upload",
+    filename: file.name,
+    base64: await blobToBase64(file),
+  };
+}
+
+async function setMaskImage(event: Event) {
+  patch("maskImage", await readImageState(event));
+}
+
+async function setControlImage(event: Event) {
+  patch("controlImage", await readImageState(event));
+}
+
+async function setAudioFile(event: Event) {
+  const audioFile = await readMediaState(event);
+  if (!audioFile) return;
+  emit("update:modelValue", {
+    ...props.modelValue,
+    audioFile,
+    audioFilePath: "",
+  });
+}
+
+async function setSourceVideo(event: Event) {
+  const sourceVideo = await readMediaState(event);
+  if (!sourceVideo) return;
+  emit("update:modelValue", {
+    ...props.modelValue,
+    sourceVideo,
+    sourceVideoPath: "",
+  });
+}
+
+async function addKeyframe(event: Event) {
+  const image = await readImageState(event);
+  if (!image) return;
+  const last = props.modelValue.keyframes.at(-1);
+  const frame = last ? last.frame + 24 : 0;
+  patch("keyframes", [...props.modelValue.keyframes, { frame, image }]);
+}
+
+function updateKeyframeFrame(index: number, raw: string) {
+  const frame = Math.max(0, Math.round(Number(raw) || 0));
+  const keyframes = props.modelValue.keyframes.slice();
+  const item = keyframes[index];
+  if (!item) return;
+  keyframes[index] = { ...item, frame };
+  patch("keyframes", keyframes);
+}
+
+function removeKeyframe(index: number) {
+  const keyframes = props.modelValue.keyframes.slice();
+  keyframes.splice(index, 1);
+  patch("keyframes", keyframes);
+}
 </script>
 
 <template>
-  <div class="glass mt-3 rounded-3xl p-4">
+  <div class="glass rounded-2xl p-4">
     <button
+      v-if="!forceExpanded"
       type="button"
       class="flex w-full items-center gap-3 text-left"
-      :aria-expanded="expanded"
+      :aria-expanded="bodyOpen"
       data-test="params-summary-toggle"
       @click="toggleExpanded"
     >
@@ -241,11 +385,22 @@ const summary = computed(() => {
         aria-label="Parameters differ from model defaults"
         title="Parameters differ from model defaults"
       ></span>
-      <span class="text-slate-400">{{ expanded ? "▾" : "▸" }}</span>
+      <span class="text-slate-400">{{ bodyOpen ? "▾" : "▸" }}</span>
     </button>
+    <div v-else class="flex items-center justify-between">
+      <h2 class="text-sm font-semibold text-slate-100">
+        {{ title ?? "Parameters" }}
+      </h2>
+      <span
+        v-if="paramsDirty"
+        class="rounded-full bg-brand-500/20 px-2 py-0.5 text-[11px] text-brand-100"
+      >
+        custom
+      </span>
+    </div>
 
-    <div v-if="expanded" data-test="params-body" class="mt-3">
-      <section>
+    <div v-if="bodyOpen" data-test="params-body" class="mt-3">
+      <section v-if="showModelPicker !== false">
         <ModelPicker
           :models="models"
           :model-value="modelValue.model"
@@ -347,12 +502,29 @@ const summary = computed(() => {
       <section class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
           <label class="text-xs uppercase text-slate-400">Seed</label>
-          <div class="mt-1 flex items-center gap-2">
+          <div class="mt-1 grid grid-cols-3 gap-1">
+            <button
+              v-for="mode in ['random', 'static', 'increment']"
+              :key="mode"
+              type="button"
+              class="rounded-lg px-2 py-1 text-xs capitalize"
+              :class="
+                modelValue.seedMode === mode
+                  ? 'bg-brand-500 text-white'
+                  : 'bg-slate-900/60 text-slate-200'
+              "
+              @click="patchSeedMode(mode as GenerateFormState['seedMode'])"
+            >
+              {{ mode }}
+            </button>
+          </div>
+          <div class="mt-2 flex items-center gap-2">
             <input
               type="number"
               :value="modelValue.seed ?? ''"
               placeholder="random"
               class="flex-1 rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
+              :disabled="modelValue.seedMode === 'random'"
               @input="
                 patch(
                   'seed',
@@ -365,7 +537,13 @@ const summary = computed(() => {
             <button
               type="button"
               class="rounded-lg bg-slate-900/60 px-3 py-1 text-sm"
-              @click="patch('seed', null)"
+              @click="
+                emit('update:modelValue', {
+                  ...modelValue,
+                  seedMode: 'random',
+                  seed: null,
+                })
+              "
             >
               🎲
             </button>
@@ -429,8 +607,90 @@ const summary = computed(() => {
         />
       </section>
 
+      <section v-if="!isQwenImageEditFamily(family)" class="mt-4 space-y-3">
+        <label class="text-xs uppercase text-slate-400">Image inputs</label>
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <label class="rounded-lg bg-slate-900/40 p-2 text-xs text-slate-300">
+            Mask image
+            <input
+              type="file"
+              accept="image/png,image/jpeg"
+              class="mt-1 block w-full text-[11px]"
+              @change="setMaskImage"
+            />
+            <span v-if="modelValue.maskImage" class="mt-1 block truncate">
+              {{ modelValue.maskImage.filename }}
+              <button
+                type="button"
+                class="ml-1 text-slate-400 hover:text-rose-300"
+                @click.prevent="patch('maskImage', null)"
+              >
+                clear
+              </button>
+            </span>
+          </label>
+          <label class="rounded-lg bg-slate-900/40 p-2 text-xs text-slate-300">
+            Control image
+            <input
+              type="file"
+              accept="image/png,image/jpeg"
+              class="mt-1 block w-full text-[11px]"
+              @change="setControlImage"
+            />
+            <span v-if="modelValue.controlImage" class="mt-1 block truncate">
+              {{ modelValue.controlImage.filename }}
+              <button
+                type="button"
+                class="ml-1 text-slate-400 hover:text-rose-300"
+                @click.prevent="patch('controlImage', null)"
+              >
+                clear
+              </button>
+            </span>
+          </label>
+        </div>
+        <div
+          v-if="modelValue.controlImage"
+          class="grid grid-cols-1 gap-3 sm:grid-cols-2"
+        >
+          <input
+            :value="modelValue.controlModel"
+            class="rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
+            placeholder="controlnet-canny-sd15"
+            @input="
+              patch('controlModel', ($event.target as HTMLInputElement).value)
+            "
+          />
+          <label class="text-xs text-slate-400">
+            Control scale — {{ modelValue.controlScale.toFixed(2) }}
+            <input
+              type="range"
+              min="0"
+              max="2"
+              step="0.05"
+              :value="modelValue.controlScale"
+              class="w-full"
+              @input="
+                patch(
+                  'controlScale',
+                  Number(($event.target as HTMLInputElement).value),
+                )
+              "
+            />
+          </label>
+        </div>
+        <input
+          :value="modelValue.upscaleModel"
+          class="w-full rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
+          placeholder="Optional upscaler model, e.g. real-esrgan-x4plus:fp16"
+          @input="
+            patch('upscaleModel', ($event.target as HTMLInputElement).value)
+          "
+        />
+      </section>
+
       <LoraPicker
-        v-if="familySupportsLora"
+        v-if="showLoras !== false && familySupportsLora"
         :family="family"
         :model-value="modelValue.loras"
         @update:model-value="onLorasChange"
@@ -473,7 +733,213 @@ const summary = computed(() => {
         </div>
       </section>
 
-      <section v-if="showScheduler" class="mt-4">
+      <section v-if="showVideo" class="mt-4 space-y-3">
+        <label class="flex items-center gap-2 text-xs text-slate-300">
+          <input
+            type="checkbox"
+            :checked="modelValue.gifPreview"
+            @change="
+              patch('gifPreview', ($event.target as HTMLInputElement).checked)
+            "
+          />
+          Generate GIF preview
+        </label>
+
+        <div v-if="showLtx2" class="space-y-3">
+          <label class="text-xs uppercase text-slate-400">LTX-2 pipeline</label>
+          <select
+            :value="modelValue.pipeline ?? ''"
+            class="w-full rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
+            @change="
+              patch(
+                'pipeline',
+                (($event.target as HTMLSelectElement).value ||
+                  null) as Ltx2PipelineMode | null,
+              )
+            "
+          >
+            <option value="">auto</option>
+            <option v-for="p in pipelineOptions" :key="p" :value="p">
+              {{ p }}
+            </option>
+          </select>
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label
+              class="rounded-lg bg-slate-900/40 p-2 text-xs text-slate-300"
+            >
+              Audio file
+              <input
+                type="file"
+                class="mt-1 block w-full text-[11px]"
+                @change="setAudioFile"
+              />
+              <span v-if="modelValue.audioFile" class="mt-1 block truncate">
+                {{ modelValue.audioFile.filename }}
+                <button
+                  type="button"
+                  class="ml-1 text-slate-400 hover:text-rose-300"
+                  @click.prevent="patch('audioFile', null)"
+                >
+                  clear
+                </button>
+              </span>
+            </label>
+            <input
+              :value="modelValue.audioFilePath"
+              :disabled="modelValue.audioFile !== null"
+              class="rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100 disabled:opacity-50"
+              placeholder="Server audio path"
+              @input="
+                patch(
+                  'audioFilePath',
+                  ($event.target as HTMLInputElement).value,
+                )
+              "
+            />
+            <label
+              class="rounded-lg bg-slate-900/40 p-2 text-xs text-slate-300"
+            >
+              Source video
+              <input
+                type="file"
+                accept="video/*"
+                class="mt-1 block w-full text-[11px]"
+                @change="setSourceVideo"
+              />
+              <span v-if="modelValue.sourceVideo" class="mt-1 block truncate">
+                {{ modelValue.sourceVideo.filename }}
+                <button
+                  type="button"
+                  class="ml-1 text-slate-400 hover:text-rose-300"
+                  @click.prevent="patch('sourceVideo', null)"
+                >
+                  clear
+                </button>
+              </span>
+            </label>
+            <input
+              :value="modelValue.sourceVideoPath"
+              :disabled="modelValue.sourceVideo !== null"
+              class="rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100 disabled:opacity-50"
+              placeholder="Server source video path"
+              @input="
+                patch(
+                  'sourceVideoPath',
+                  ($event.target as HTMLInputElement).value,
+                )
+              "
+            />
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <input
+              type="number"
+              step="0.1"
+              :value="modelValue.retakeRange?.start_seconds ?? ''"
+              class="rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
+              placeholder="Retake start"
+              @input="
+                patch('retakeRange', {
+                  start_seconds:
+                    Number(($event.target as HTMLInputElement).value) || 0,
+                  end_seconds: modelValue.retakeRange?.end_seconds ?? 1,
+                })
+              "
+            />
+            <input
+              type="number"
+              step="0.1"
+              :value="modelValue.retakeRange?.end_seconds ?? ''"
+              class="rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
+              placeholder="Retake end"
+              @input="
+                patch('retakeRange', {
+                  start_seconds: modelValue.retakeRange?.start_seconds ?? 0,
+                  end_seconds:
+                    Number(($event.target as HTMLInputElement).value) || 1,
+                })
+              "
+            />
+          </div>
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <select
+              :value="modelValue.spatialUpscale ?? ''"
+              class="rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
+              @change="
+                patch(
+                  'spatialUpscale',
+                  (($event.target as HTMLSelectElement).value ||
+                    null) as Ltx2SpatialUpscale | null,
+                )
+              "
+            >
+              <option value="">spatial native</option>
+              <option v-for="v in spatialOptions" :key="v" :value="v">
+                spatial {{ v }}
+              </option>
+            </select>
+            <select
+              :value="modelValue.temporalUpscale ?? ''"
+              class="rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
+              @change="
+                patch(
+                  'temporalUpscale',
+                  (($event.target as HTMLSelectElement).value ||
+                    null) as Ltx2TemporalUpscale | null,
+                )
+              "
+            >
+              <option value="">temporal native</option>
+              <option v-for="v in temporalOptions" :key="v" :value="v">
+                temporal {{ v }}
+              </option>
+            </select>
+          </div>
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <label class="text-xs uppercase text-slate-400">Keyframes</label>
+              <label
+                class="rounded-md bg-slate-800 px-2 py-0.5 text-xs text-slate-200 hover:bg-slate-700"
+              >
+                Add
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  class="hidden"
+                  @change="addKeyframe"
+                />
+              </label>
+            </div>
+            <div
+              v-for="(keyframe, index) in modelValue.keyframes"
+              :key="`${keyframe.image.filename}-${index}`"
+              class="grid grid-cols-[4.5rem_1fr_auto] items-center gap-2 rounded-lg bg-slate-900/40 p-2 text-xs text-slate-300"
+            >
+              <input
+                type="number"
+                min="0"
+                :value="keyframe.frame"
+                class="rounded bg-slate-950/70 px-2 py-1 text-slate-100"
+                @input="
+                  updateKeyframeFrame(
+                    index,
+                    ($event.target as HTMLInputElement).value,
+                  )
+                "
+              />
+              <span class="truncate">{{ keyframe.image.filename }}</span>
+              <button
+                type="button"
+                class="text-slate-400 hover:text-rose-300"
+                @click="removeKeyframe(index)"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="showScheduler || showCfgPlus" class="mt-4">
         <button
           type="button"
           class="text-xs uppercase tracking-wide text-slate-400 hover:text-slate-200"
@@ -503,6 +969,19 @@ const summary = computed(() => {
               </option>
             </select>
           </div>
+          <label
+            v-if="showCfgPlus"
+            class="flex items-center gap-2 text-sm text-slate-300"
+          >
+            <input
+              type="checkbox"
+              :checked="modelValue.cfgPlus"
+              @change="
+                patch('cfgPlus', ($event.target as HTMLInputElement).checked)
+              "
+            />
+            CFG++
+          </label>
         </div>
       </section>
     </div>

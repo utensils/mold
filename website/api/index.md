@@ -241,7 +241,7 @@ Important fields:
 | `enable_audio`, `audio_file`, `audio_file_path`     | LTX-2 synchronized audio toggle and audio-to-video input. Path input is server-local and requires configured `media_roots` / `MOLD_MEDIA_ROOTS`. |
 | `source_video`, `source_video_path`, `retake_range` | LTX-2 retake/video-conditioning source and seconds range. Path input is server-local and cannot be combined with inline base64 bytes.            |
 | `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake`) |
-| `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1.5` and `x2`                                                                                             |
+| `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1-5` and `x2`                                                                                             |
 | `placement`                                         | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                |
 | `cfg_plus`                                          | CFG++ guidance for supported SD-family scheduler paths                                                                                           |
 | `embed_metadata`                                    | override config/env metadata embedding for this request                                                                                          |

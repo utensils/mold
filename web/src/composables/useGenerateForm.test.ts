@@ -168,6 +168,7 @@ describe("useGenerateForm", () => {
       height: 1024,
       steps: 30,
       guidance: 7.5,
+      seedMode: "static",
       seed: 42,
       batchSize: 2,
       outputFormat: "png",
@@ -235,6 +236,90 @@ describe("useGenerateForm", () => {
     const wire = form.toRequest();
     expect(wire.source_image).toBe("TARGET");
     expect(wire.edit_images).toBeUndefined();
+  });
+
+  it("serializes backend-supported advanced generation knobs", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "ltx-2.3-22b-distilled:fp8",
+      modelFamily: "ltx2",
+      seedMode: "static",
+      seed: 123,
+      cfgPlus: true,
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
+      controlImage: {
+        kind: "upload",
+        filename: "control.png",
+        base64: "CONTROL",
+      },
+      controlModel: "controlnet-canny-sd15",
+      controlScale: 0.8,
+      upscaleModel: "real-esrgan-x4plus:fp16",
+      gifPreview: true,
+      audioFile: { kind: "upload", filename: "voice.wav", base64: "VOICE" },
+      audioFilePath: "",
+      sourceVideo: { kind: "upload", filename: "clip.mp4", base64: "VIDEO" },
+      sourceVideoPath: "",
+      keyframes: [
+        {
+          frame: 0,
+          image: { kind: "upload", filename: "first.png", base64: "FIRST" },
+        },
+        {
+          frame: 24,
+          image: { kind: "upload", filename: "last.png", base64: "LAST" },
+        },
+      ],
+      pipeline: "keyframe",
+      retakeRange: { start_seconds: 1.25, end_seconds: 3.5 },
+      spatialUpscale: "x1-5",
+      temporalUpscale: "x2",
+    });
+
+    const wire = form.toRequest();
+
+    expect(wire.seed).toBe(123);
+    expect(wire.cfg_plus).toBeUndefined();
+    expect(wire.mask_image).toBe("MASK");
+    expect(wire.control_image).toBe("CONTROL");
+    expect(wire.control_model).toBe("controlnet-canny-sd15");
+    expect(wire.control_scale).toBe(0.8);
+    expect(wire.upscale_model).toBe("real-esrgan-x4plus:fp16");
+    expect(wire.gif_preview).toBe(true);
+    expect(wire.audio_file).toBe("VOICE");
+    expect(wire.audio_file_path).toBeUndefined();
+    expect(wire.source_video).toBe("VIDEO");
+    expect(wire.source_video_path).toBeUndefined();
+    expect(wire.keyframes).toEqual([
+      { frame: 0, image: "FIRST" },
+      { frame: 24, image: "LAST" },
+    ]);
+    expect(wire.pipeline).toBe("keyframe");
+    expect(wire.retake_range).toEqual({
+      start_seconds: 1.25,
+      end_seconds: 3.5,
+    });
+    expect(wire.spatial_upscale).toBe("x1-5");
+    expect(wire.temporal_upscale).toBe("x2");
+  });
+
+  it("serializes CFG++ only for SD3-family models", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "sd3.5-large:fp16",
+      modelFamily: "sd3.5",
+      cfgPlus: true,
+    });
+
+    expect(form.toRequest().cfg_plus).toBe(true);
+  });
+
+  it("omits seed when seed mode is random even if a numeric seed is present", () => {
+    const form = useGenerateForm();
+    form.state.value.seedMode = "random";
+    form.state.value.seed = 123;
+
+    expect(form.toRequest().seed).toBeNull();
   });
 
   it("model switching forces Qwen edit batch to 1 and trims multi-image attachments for non-edit families", () => {

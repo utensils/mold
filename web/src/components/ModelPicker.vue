@@ -4,6 +4,8 @@ import type { ModelInfoExtended } from "../types";
 import { VIDEO_FAMILIES } from "../types";
 import { useDownloads } from "../composables/useDownloads";
 
+defineOptions({ name: "ModelPicker" });
+
 const props = defineProps<{
   models: ModelInfoExtended[];
   modelValue: string;
@@ -15,6 +17,7 @@ const emit = defineEmits<{
 
 const SHOW_ALL_KEY = "mold.generate.showAllModels";
 const showAll = ref(localStorage.getItem(SHOW_ALL_KEY) === "true");
+const search = ref("");
 
 function setShowAll(v: boolean) {
   showAll.value = v;
@@ -26,7 +29,16 @@ function setShowAll(v: boolean) {
 }
 
 const visibleModels = computed(() =>
-  props.models.filter((m) => (showAll.value ? true : m.downloaded)),
+  props.models
+    .filter((m) => (showAll.value ? true : m.downloaded))
+    .filter((m) => {
+      const q = search.value.trim().toLowerCase();
+      if (!q) return true;
+      return [m.name, m.family, m.description, m.hf_repo]
+        .join(" ")
+        .toLowerCase()
+        .includes(q);
+    }),
 );
 
 const imageModels = computed(() =>
@@ -106,6 +118,14 @@ async function cancelQueued(id: string) {
         <label for="mold-show-all-models">Show all</label>
       </span>
     </label>
+
+    <input
+      v-model="search"
+      type="search"
+      class="rounded-lg bg-slate-900/60 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500"
+      placeholder="Search models"
+      aria-label="Search models"
+    />
 
     <div class="flex max-h-80 flex-col gap-3 overflow-y-auto pr-1">
       <div>

@@ -18,12 +18,14 @@ const props = withDefaults(
     selection?: Set<string>;
     hideMode?: boolean;
     revealed?: Set<string>;
+    showRecreate?: boolean;
   }>(),
   {
     selectMode: false,
     selection: () => new Set<string>(),
     hideMode: false,
     revealed: () => new Set<string>(),
+    showRecreate: false,
   },
 );
 
@@ -34,6 +36,7 @@ const emit = defineEmits<{
     payload: { item: GalleryImage; shift: boolean; meta: boolean },
   ): void;
   (e: "reveal", item: GalleryImage): void;
+  (e: "recreate", item: GalleryImage): void;
   // Drag-select: emitted with the full finalized selection the parent
   // should adopt. We snapshot the starting selection at pointerdown so
   // additive drags (shift/meta) merge cleanly with the existing set;
@@ -295,7 +298,9 @@ onBeforeUnmount(() => {
         :selected="selection.has(entry.filename)"
         :hide-mode="hideMode"
         :revealed="revealed.has(entry.filename)"
+        :show-recreate="showRecreate"
         @open="emit('open', entry)"
+        @recreate="emit('recreate', $event)"
         @toggle-select="emit('toggle-select', $event)"
         @reveal="emit('reveal', $event)"
       />
@@ -316,7 +321,9 @@ onBeforeUnmount(() => {
         :selected="selection.has(entry.filename)"
         :hide-mode="hideMode"
         :revealed="revealed.has(entry.filename)"
+        :show-recreate="showRecreate"
         @open="emit('open', entry)"
+        @recreate="emit('recreate', $event)"
         @toggle-select="emit('toggle-select', $event)"
         @reveal="emit('reveal', $event)"
       />

@@ -281,6 +281,13 @@ DROP TABLE IF EXISTS catalog_fts;
 DROP TABLE IF EXISTS catalog;
 "#;
 
+/// v10 → persist the full `mold:parameters` JSON next to the indexed
+/// compatibility columns. Newer generate controls should round-trip through
+/// gallery Recreate without adding one SQLite column per option.
+const V10_GENERATION_METADATA_JSON: &str = r#"
+ALTER TABLE generations ADD COLUMN metadata_json TEXT;
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -320,11 +327,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 9,
         kind: MigrationKind::Sql(V9_DROP_CATALOG),
     },
+    Migration {
+        version: 10,
+        kind: MigrationKind::Sql(V10_GENERATION_METADATA_JSON),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -652,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_reaches_schema_version_9() {
+    fn fresh_db_reaches_latest_schema_version() {
         let mut conn = Connection::open_in_memory().unwrap();
         apply_pending(&mut conn).unwrap();
         assert_eq!(
@@ -660,7 +671,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 9);
+        assert_eq!(SCHEMA_VERSION, 10);
     }
 
     /// v6: `settings` keeps every existing row under `profile = 'default'`
@@ -912,8 +923,8 @@ mod v9_tests {
     use rusqlite::Connection;
 
     #[test]
-    fn schema_version_is_nine() {
-        assert_eq!(SCHEMA_VERSION, 9);
+    fn schema_version_is_ten() {
+        assert_eq!(SCHEMA_VERSION, 10);
     }
 
     #[test]

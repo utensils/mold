@@ -225,6 +225,11 @@ prompt, model, seed, steps, guidance, dimensions, LoRA, scheduler, the
 file's mtime/size, the generation duration, and a `source` column
 (`server` / `cli` / `backfill`).
 
+The DB also stores the full generation metadata JSON for rows written by
+current versions, so gallery clients can recreate outputs with advanced
+options such as LoRA stacks, ControlNet settings, CFG++, output format,
+and LTX-2 audio/video pipeline controls.
+
 The DB powers `/api/gallery` so listings stay fast on large directories
 (no per-request file walk) and surface metadata for formats that don't
 embed it (mp4, gif, webp). PNG / JPEG outputs still get the existing

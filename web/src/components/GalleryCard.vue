@@ -28,6 +28,7 @@ const props = withDefaults(
     // clicks the reveal button (per-item) or flips the global toggle.
     hideMode?: boolean;
     revealed?: boolean;
+    showRecreate?: boolean;
   }>(),
   {
     variant: "grid",
@@ -36,6 +37,7 @@ const props = withDefaults(
     selected: false,
     hideMode: false,
     revealed: false,
+    showRecreate: false,
   },
 );
 
@@ -46,6 +48,7 @@ const emit = defineEmits<{
     payload: { item: GalleryImage; shift: boolean; meta: boolean },
   ): void;
   (e: "reveal", item: GalleryImage): void;
+  (e: "recreate", item: GalleryImage): void;
 }>();
 
 const isHidden = computed(() => props.hideMode && !props.revealed);
@@ -178,6 +181,11 @@ function onCardKey(evt: KeyboardEvent) {
 function onReveal(evt: Event) {
   evt.stopPropagation();
   emit("reveal", props.item);
+}
+
+function onRecreate(evt: Event) {
+  evt.stopPropagation();
+  emit("recreate", props.item);
 }
 </script>
 
@@ -314,6 +322,18 @@ function onReveal(evt: Event) {
       >
         {{ item.format }}
       </div>
+
+      <button
+        v-if="showRecreate && !selectMode"
+        type="button"
+        class="absolute left-3 top-3 z-[6] rounded-full bg-black/65 px-2.5 py-1 text-[11px] font-semibold text-white/90 opacity-0 backdrop-blur transition hover:bg-brand-500/80 group-hover:opacity-100 focus:opacity-100"
+        title="Recreate with these settings"
+        aria-label="Recreate with these settings"
+        @click="onRecreate"
+        @keydown.stop
+      >
+        Recreate
+      </button>
 
       <!-- Selection checkbox (top-left). Always visible in select mode so
            users can see what's pickable before touching anything. -->

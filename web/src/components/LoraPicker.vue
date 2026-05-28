@@ -4,6 +4,8 @@ import { fetchCatalogInstalled } from "../api";
 import type { CatalogEntryWire, LoraSelection } from "../types";
 import { MAX_LORA_STACK } from "../types";
 
+defineOptions({ name: "LoraPicker" });
+
 /// Multi-LoRA picker. The component owns its own catalog fetch (filtered
 /// to `kind=lora` for the current model family) and exposes the user-
 /// chosen stack via `modelValue` as an array. The parent feeds back a
@@ -24,6 +26,7 @@ const emit = defineEmits<{
 
 const loras = ref<CatalogEntryWire[]>([]);
 const loading = ref(false);
+const search = ref("");
 
 async function loadLoras(family: string) {
   loras.value = [];
@@ -47,6 +50,23 @@ watch(() => props.family, loadLoras, { immediate: true });
 const canAddMore = computed(
   () => props.modelValue.length < MAX_LORA_STACK && loras.value.length > 0,
 );
+
+const filteredLoras = computed(() => {
+  const q = search.value.trim().toLowerCase();
+  if (!q) return loras.value;
+  return loras.value.filter((entry) =>
+    [
+      entry.name,
+      entry.author ?? "",
+      entry.id,
+      entry.primary_path ?? "",
+      ...(entry.trained_words ?? []),
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(q),
+  );
+});
 
 /// Resolve the catalog entry for a given LoRA path so we can surface its
 /// trigger words on every selected row, even after a fresh page load (the
@@ -134,6 +154,15 @@ function addAnother() {
       </button>
     </div>
 
+    <input
+      v-if="loras.length > 6"
+      v-model="search"
+      type="search"
+      class="w-full rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100 placeholder:text-slate-500"
+      placeholder="Search LoRAs"
+      aria-label="Search LoRAs"
+    />
+
     <div
       v-for="(row, index) in modelValue"
       :key="`${row.path}-${index}`"
@@ -146,7 +175,11 @@ function addAnother() {
           @change="selectAt(index, $event)"
         >
           <option value="">— remove —</option>
-          <option v-for="e in loras" :key="e.id" :value="e.primary_path!">
+          <option
+            v-for="e in filteredLoras"
+            :key="e.id"
+            :value="e.primary_path!"
+          >
             {{ e.name }}
           </option>
         </select>
