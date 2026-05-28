@@ -259,6 +259,10 @@ export interface QueueEntry {
   position: number;
   /** Present only when `state === "running"`. */
   gpu?: number;
+  /** Preferred lane for queued jobs. Omitted/null means Auto. */
+  target_gpu?: number | null;
+  /** Back-compat alias if a server chooses preferred_gpu wording. */
+  preferred_gpu?: number | null;
 }
 
 export interface QueueListing {

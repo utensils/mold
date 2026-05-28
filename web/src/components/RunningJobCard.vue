@@ -1,34 +1,25 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
 import { STALE_THRESHOLD_MS, type Job } from "../composables/useGenerateStream";
+import type { QueueEntry } from "../types";
 
-// Hide-mode renders the thumbnail behind a blurred shroud until the user
-// reveals it. `revealed` is a per-card boolean; the parent tracks the
-// global peek set and looks up by job.id.
 const props = withDefaults(
   defineProps<{
     job: Job;
-    hideMode?: boolean;
-    revealed?: boolean;
+    queueEntry?: QueueEntry | null;
+    gpus?: Array<{ ordinal: number; state?: string }>;
   }>(),
   {
-    hideMode: false,
-    revealed: false,
+    queueEntry: null,
+    gpus: () => [],
   },
 );
 const emit = defineEmits<{
   (e: "cancel", id: string): void;
   (e: "open", job: Job): void;
   (e: "dismiss", id: string): void;
-  (e: "reveal", id: string): void;
+  (e: "lane-change", id: string, targetGpu: number | null): void;
 }>();
-
-const isHidden = computed(() => props.hideMode && !props.revealed);
-
-function onReveal(evt: Event) {
-  evt.stopPropagation();
-  emit("reveal", props.job.id);
-}
 
 // Done jobs are clickable — they open the gallery detail drawer for the
 // saved file. The parent does the Job→GalleryImage lookup since the SSE
@@ -38,9 +29,6 @@ const clickable = computed(
 );
 
 function onClick() {
-  // Shrouded cards should not leak the finished image through the detail
-  // drawer — the user must reveal first.
-  if (isHidden.value) return;
   if (clickable.value) emit("open", props.job);
 }
 
@@ -85,10 +73,31 @@ const thumbSrc = computed(() => {
   const mime = r.format === "jpeg" ? "image/jpeg" : `image/${r.format}`;
   return `data:${mime};base64,${r.image}`;
 });
+
+const laneValue = computed(() => {
+  const target =
+    props.queueEntry?.target_gpu ?? props.queueEntry?.preferred_gpu;
+  return target === null || target === undefined ? "" : String(target);
+});
+
+const laneSelectDisabled = computed(
+  () => !props.queueEntry || props.queueEntry.state === "running",
+);
+
+function onLaneChange(evt: Event) {
+  if (!props.queueEntry || laneSelectDisabled.value) return;
+  const value = (evt.target as HTMLSelectElement).value;
+  emit(
+    "lane-change",
+    props.queueEntry.id,
+    value === "" ? null : Number.parseInt(value, 10),
+  );
+}
 </script>
 
 <template>
   <div
+    data-test="running-card"
     class="glass flex w-[280px] flex-shrink-0 flex-col gap-2 rounded-2xl p-3"
     :class="
       clickable
@@ -106,6 +115,28 @@ const thumbSrc = computed(() => {
       <span>{{ job.request.model }}</span>
       <span v-if="job.progress.gpu !== null">GPU {{ job.progress.gpu }}</span>
     </div>
+    <label
+      v-if="queueEntry"
+      class="flex items-center justify-between gap-2 text-[11px] text-slate-400"
+    >
+      <span>Lane</span>
+      <select
+        data-test="job-lane-select"
+        class="rounded border border-white/10 bg-slate-950 px-2 py-1 text-xs text-slate-200 disabled:opacity-50"
+        :value="laneValue"
+        :disabled="laneSelectDisabled"
+        @change="onLaneChange"
+      >
+        <option value="">Auto</option>
+        <option
+          v-for="gpu in gpus"
+          :key="gpu.ordinal"
+          :value="String(gpu.ordinal)"
+        >
+          GPU {{ gpu.ordinal }}
+        </option>
+      </select>
+    </label>
     <div
       class="relative aspect-square overflow-hidden rounded-xl bg-slate-900/60"
     >
@@ -121,39 +152,6 @@ const thumbSrc = computed(() => {
         class="absolute inset-0 flex items-center justify-center bg-rose-500/70 p-2 text-center text-xs text-white"
       >
         {{ job.error }}
-      </div>
-      <!-- Hide shroud. Matches the gallery card: heavy blur + dim, with
-           a Reveal button that peeks this job without flipping the global
-           toggle. Stop-propagates so the parent's open handler doesn't fire. -->
-      <div
-        v-if="isHidden"
-        class="absolute inset-0 z-[5] flex flex-col items-center justify-center gap-2 bg-slate-950/70 text-slate-100 backdrop-blur-2xl"
-      >
-        <svg
-          class="h-5 w-5 text-slate-300"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.8"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path
-            d="M10.6 5.1A10 10 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.3 4.2"
-          />
-          <path d="M6.7 6.7A17 17 0 0 0 2 12s4 7 10 7a9.7 9.7 0 0 0 5.3-1.7" />
-          <path d="m3 3 18 18" />
-          <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
-        </svg>
-        <button
-          type="button"
-          class="rounded-full bg-white/10 px-3 py-1 text-[12px] font-medium text-slate-100 transition hover:bg-white/20"
-          @click="onReveal"
-          @keydown.stop
-        >
-          Reveal
-        </button>
       </div>
     </div>
     <div class="text-xs text-slate-300">{{ job.progress.stage }}</div>

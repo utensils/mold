@@ -453,6 +453,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_lists_target_gpu_for_queued_jobs() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state
+            .job_registry
+            .register_with_target_gpu("aaaa", "flux-dev:fp16", Some(1));
+
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let entries = body["entries"].as_array().expect("entries array");
+        assert_eq!(entries[0]["state"], "queued");
+        assert_eq!(entries[0]["target_gpu"], 1);
+        assert!(
+            entries[0].get("gpu").is_none(),
+            "queued rows still must not emit running gpu: {}",
+            entries[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_queue_target_gpu_updates_queued_job_and_allows_auto() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state
+            .gpu_pool
+            .workers
+            .iter()
+            .for_each(|_| panic!("test assumes explicit empty worker pool"));
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["id"], "aaaa");
+        assert!(body.get("target_gpu").is_none());
+    }
+
+    #[tokio::test]
+    async fn patch_queue_target_gpu_rejects_already_running_jobs() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        state.job_registry.mark_running("aaaa", Some(0));
+
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "QUEUE_JOB_RUNNING");
+    }
+
+    #[tokio::test]
     async fn status_when_no_model() {
         let app = app_empty();
         let resp = app

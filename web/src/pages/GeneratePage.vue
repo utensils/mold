@@ -12,13 +12,19 @@ import RunningStrip from "../components/RunningStrip.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
 import TopBar from "../components/TopBar.vue";
-import { deleteGalleryImage, fetchModels, listGallery } from "../api";
+import {
+  deleteGalleryImage,
+  fetchModels,
+  listGallery,
+  updateQueueJobTargetGpu,
+} from "../api";
 import {
   applyMetadataToForm,
   useGenerateForm,
 } from "../composables/useGenerateForm";
 import { isQwenImageEditFamily } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
+import { useQueue } from "../composables/useQueue";
 import { decideChainRouting } from "../lib/chainRouting";
 import { isStandaloneGenerationModel } from "../lib/modelFilters";
 import { useStatusPoll } from "../composables/useStatusPoll";
@@ -69,6 +75,7 @@ function persistMuted(v: boolean) {
 
 const form = useGenerateForm();
 const { status } = useStatusPoll();
+const queue = useQueue();
 const models = ref<ModelInfoExtended[]>([]);
 const galleryEntries = ref<GalleryImage[]>([]);
 const view = ref<ViewMode>(loadViewMode());
@@ -395,6 +402,15 @@ async function handleDelete(item: GalleryImage) {
   }
 }
 
+async function onQueueLaneChange(id: string, targetGpu: number | null) {
+  try {
+    await updateQueueJobTargetGpu(id, targetGpu);
+    await queue.refresh();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
 function setView(v: ViewMode) {
   view.value = v;
   persistViewMode(v);
@@ -426,6 +442,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopAutoRefresh();
+  queue.stop();
 });
 </script>
 
@@ -501,10 +518,13 @@ onBeforeUnmount(() => {
 
         <RunningStrip
           :jobs="stream.jobs.value"
+          :queue-entries="queue.entries.value"
+          :gpus="gpus"
           @cancel="stream.cancel"
           @open="openJob"
           @dismiss="stream.remove"
           @clear-finished="stream.clearDone"
+          @lane-change="onQueueLaneChange"
         />
 
         <section class="mt-4">
