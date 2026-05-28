@@ -88,7 +88,7 @@ describe("RunningStrip queue lanes", () => {
     expect(labels[1]).toContain("Queued (position 4)");
   });
 
-  it("places unassigned queued jobs in the Auto lane and GPU-assigned work in actual lanes", () => {
+  it("places unassigned queued jobs into visible GPU lanes without rendering Auto", () => {
     const wrapper = mount(RunningStrip, {
       props: {
         jobs: [makeJob({ id: "running", serverId: "srv-running" })],
@@ -115,18 +115,73 @@ describe("RunningStrip queue lanes", () => {
       },
     });
 
-    expect(wrapper.get('[data-test="queue-lane-auto"]').text()).toContain(
-      "sdxl:q8",
-    );
+    expect(wrapper.find('[data-test="queue-lane-auto"]').exists()).toBe(false);
     expect(wrapper.get('[data-test="queue-lane-gpu-0"]').text()).toContain(
       "GPU 0",
+    );
+    expect(wrapper.get('[data-test="queue-lane-gpu-0"]').text()).toContain(
+      "sdxl:q8",
     );
     expect(wrapper.get('[data-test="queue-lane-gpu-1"]').text()).toContain(
       "flux-dev:q4",
     );
   });
 
-  it("emits lane changes for queued jobs but disables lane changes for running jobs", async () => {
+  it("opens another GPU lane for unassigned jobs only after the lane threshold is reached", async () => {
+    const wrapper = mount(RunningStrip, {
+      props: {
+        jobs: [],
+        queueEntries: [
+          entry({
+            id: "srv-a",
+            model: "model-a",
+            state: "queued",
+            position: 0,
+          }),
+          entry({
+            id: "srv-b",
+            model: "model-b",
+            state: "queued",
+            position: 1,
+          }),
+          entry({
+            id: "srv-c",
+            model: "model-c",
+            state: "queued",
+            position: 2,
+          }),
+        ],
+        gpus: [
+          { ordinal: 0, state: "idle" },
+          { ordinal: 1, state: "idle" },
+        ],
+      },
+    });
+
+    expect(wrapper.get('[data-test="queue-lane-gpu-0"]').text()).toContain(
+      "model-a",
+    );
+    expect(wrapper.get('[data-test="queue-lane-gpu-0"]').text()).toContain(
+      "model-b",
+    );
+    expect(wrapper.get('[data-test="queue-lane-gpu-1"]').text()).toContain(
+      "model-c",
+    );
+
+    await wrapper.get('[data-test="queue-lane-threshold"]').setValue("1");
+
+    expect(wrapper.get('[data-test="queue-lane-gpu-0"]').text()).toContain(
+      "model-a",
+    );
+    expect(wrapper.get('[data-test="queue-lane-gpu-1"]').text()).toContain(
+      "model-b",
+    );
+    expect(wrapper.get('[data-test="queue-lane-gpu-1"]').text()).toContain(
+      "model-c",
+    );
+  });
+
+  it("emits lane changes when queued cards are dragged between GPU lanes", async () => {
     const wrapper = mount(RunningStrip, {
       props: {
         jobs: [],
@@ -141,25 +196,17 @@ describe("RunningStrip queue lanes", () => {
       },
     });
 
-    const selects = wrapper.findAll('[data-test="job-lane-select"]');
-    expect(selects).toHaveLength(2);
-    const queuedSelect = selects.find(
-      (s) => !(s.element as HTMLSelectElement).disabled,
-    )!;
-    const runningSelect = selects.find(
-      (s) => (s.element as HTMLSelectElement).disabled,
-    )!;
-    expect(queuedSelect.exists()).toBe(true);
-    expect(runningSelect.exists()).toBe(true);
+    const queuedCard = wrapper.find('[data-queue-id="srv-queued"]');
+    const runningCard = wrapper.find('[data-queue-id="srv-running"]');
 
-    await queuedSelect.setValue("1");
+    expect(queuedCard.attributes("draggable")).toBe("true");
+    expect(runningCard.attributes("draggable")).toBe("false");
+    expect(wrapper.find('[data-test="job-lane-select"]').exists()).toBe(false);
+
+    await queuedCard.trigger("dragstart");
+    await wrapper.get('[data-test="queue-lane-gpu-1"]').trigger("drop");
+
     expect(wrapper.emitted("lane-change")).toEqual([["srv-queued", 1]]);
-
-    await queuedSelect.setValue("");
-    expect(wrapper.emitted("lane-change")?.at(-1)).toEqual([
-      "srv-queued",
-      null,
-    ]);
   });
 
   it("renders queued server rows even when the local stream job is missing", () => {

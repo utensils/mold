@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { Job } from "../composables/useGenerateStream";
 import type { GenerateRequestWire, QueueEntry } from "../types";
 import RunningJobCard from "./RunningJobCard.vue";
 
 type GpuLane = { ordinal: number; state?: string };
-type LaneKey = "auto" | number;
+type LaneKey = number | null;
 type DisplayItem = {
   job: Job;
   queueEntry: QueueEntry | null;
-  lane: LaneKey;
+  requestedLane: LaneKey;
   sortState: "running" | "queued" | "settled";
   position: number;
 };
@@ -36,14 +36,15 @@ const emit = defineEmits<{
 const hasFinished = computed(() =>
   props.jobs.some((j) => j.state !== "running"),
 );
+const laneThreshold = ref(2);
+const draggedQueueId = ref<string | null>(null);
 
 function queueLane(entry: QueueEntry | null, job: Job): LaneKey {
-  if (entry?.state === "running")
-    return entry.gpu ?? job.progress.gpu ?? "auto";
+  if (entry?.state === "running") return entry.gpu ?? job.progress.gpu ?? null;
   if (entry?.state === "queued") {
-    return entry.target_gpu ?? entry.preferred_gpu ?? "auto";
+    return entry.target_gpu ?? entry.preferred_gpu ?? null;
   }
-  return job.progress.gpu ?? "auto";
+  return job.progress.gpu ?? null;
 }
 
 function queueSortState(
@@ -126,7 +127,7 @@ const displayItems = computed<DisplayItem[]>(() => {
     items.push({
       job: merged,
       queueEntry: entry,
-      lane: queueLane(entry, merged),
+      requestedLane: queueLane(entry, merged),
       sortState: queueSortState(entry, merged),
       position: entry?.position ?? Number.MAX_SAFE_INTEGER,
     });
@@ -138,7 +139,7 @@ const displayItems = computed<DisplayItem[]>(() => {
     items.push({
       job,
       queueEntry: entry,
-      lane: queueLane(entry, job),
+      requestedLane: queueLane(entry, job),
       sortState: entry.state,
       position: entry.position,
     });
@@ -152,20 +153,46 @@ const displayItems = computed<DisplayItem[]>(() => {
 
 const stateRank = { running: 0, queued: 1, settled: 2 };
 
-const lanes = computed(() => {
-  const keys: LaneKey[] = [];
-  if (displayItems.value.some((i) => i.lane === "auto")) keys.push("auto");
-  for (const gpu of props.gpus) keys.push(gpu.ordinal);
+const gpuOrdinals = computed(() => {
+  const ordinals = new Set<number>();
+  for (const gpu of props.gpus) ordinals.add(gpu.ordinal);
   for (const item of displayItems.value) {
-    if (item.lane !== "auto" && !keys.includes(item.lane)) keys.push(item.lane);
+    if (item.requestedLane !== null) ordinals.add(item.requestedLane);
   }
+  if (ordinals.size === 0 && displayItems.value.length > 0) ordinals.add(0);
+  return Array.from(ordinals).sort((a, b) => a - b);
+});
+
+function assignedLaneItems() {
+  const threshold = Number.isFinite(laneThreshold.value)
+    ? Math.max(1, laneThreshold.value)
+    : 2;
+  const counts = new Map<number, number>();
+  const lanes = gpuOrdinals.value;
+  const fallbackLane = lanes[0] ?? 0;
+
+  return displayItems.value.map((item) => {
+    let lane = item.requestedLane;
+    if (lane === null) {
+      lane =
+        lanes.find((ordinal) => (counts.get(ordinal) ?? 0) < threshold) ??
+        lanes.at(-1) ??
+        fallbackLane;
+    }
+    counts.set(lane, (counts.get(lane) ?? 0) + 1);
+    return { ...item, lane };
+  });
+}
+
+const lanes = computed(() => {
+  const items = assignedLaneItems();
+  const keys = [...gpuOrdinals.value];
   return keys
     .map((key) => ({
       key,
-      label: key === "auto" ? "Auto" : `GPU ${key}`,
-      items: displayItems.value.filter((i) => i.lane === key),
+      label: `GPU ${key}`,
+      items: items.filter((i) => i.lane === key),
     }))
-    .filter((lane) => lane.items.length > 0 || lane.key !== "auto")
     .sort((a, b) => {
       const aRank = Math.min(
         ...a.items.map((i) => stateRank[i.sortState]),
@@ -176,22 +203,57 @@ const lanes = computed(() => {
         Number.MAX_SAFE_INTEGER,
       );
       if (aRank !== bRank) return aRank - bRank;
-      if (a.key === "auto") return -1;
-      if (b.key === "auto") return 1;
-      return Number(a.key) - Number(b.key);
+      return a.key - b.key;
     });
 });
+
+function canDrag(item: DisplayItem): boolean {
+  return item.queueEntry?.state === "queued";
+}
+
+function onDragStart(item: DisplayItem, event: DragEvent) {
+  if (!canDrag(item) || !item.queueEntry) {
+    draggedQueueId.value = null;
+    return;
+  }
+  draggedQueueId.value = item.queueEntry.id;
+  event.dataTransfer?.setData("text/plain", item.queueEntry.id);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+
+function onDrop(targetGpu: number) {
+  if (!draggedQueueId.value) return;
+  emit("lane-change", draggedQueueId.value, targetGpu);
+  draggedQueueId.value = null;
+}
+
+function onDragEnd() {
+  draggedQueueId.value = null;
+}
 </script>
 
 <template>
   <div v-if="displayItems.length" class="mt-4 flex flex-col gap-2">
+    <div class="flex items-center justify-end gap-2 text-xs text-slate-400">
+      <label class="flex items-center gap-2">
+        <span>Lane threshold</span>
+        <input
+          v-model.number="laneThreshold"
+          data-test="queue-lane-threshold"
+          class="w-14 rounded border border-white/10 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+          type="number"
+          min="1"
+          max="9"
+        />
+      </label>
+    </div>
     <div
       v-for="lane in lanes"
       :key="lane.key"
       class="flex flex-col gap-2"
-      :data-test="
-        lane.key === 'auto' ? 'queue-lane-auto' : `queue-lane-gpu-${lane.key}`
-      "
+      :data-test="`queue-lane-gpu-${lane.key}`"
+      @dragover.prevent
+      @drop="onDrop(lane.key)"
     >
       <div class="text-xs font-medium uppercase tracking-wide text-slate-500">
         {{ lane.label }}
@@ -202,14 +264,13 @@ const lanes = computed(() => {
           :key="item.job.id"
           :job="item.job"
           :queue-entry="item.queueEntry"
-          :gpus="gpus"
+          :data-queue-id="item.queueEntry?.id"
+          :draggable="canDrag(item)"
           @cancel="(id: string) => emit('cancel', id)"
           @open="(j: Job) => emit('open', j)"
           @dismiss="(id: string) => emit('dismiss', id)"
-          @lane-change="
-            (id: string, targetGpu: number | null) =>
-              emit('lane-change', id, targetGpu)
-          "
+          @dragstart="(event: DragEvent) => onDragStart(item, event)"
+          @dragend="onDragEnd"
         />
       </div>
     </div>
