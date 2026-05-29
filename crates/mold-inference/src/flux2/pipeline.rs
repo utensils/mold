@@ -1161,6 +1161,10 @@ impl Flux2Engine {
         };
 
         let state = Flux2State::new(&txt_emb, &img)?;
+        let inpaint_ctx = inpaint_ctx
+            .as_ref()
+            .map(crate::img2img::pack_flux_inpaint_context)
+            .transpose()?;
 
         // --- Phase 2: Load transformer, denoise ---
         let xformer_size = std::fs::metadata(&self.base.paths.transformer)
@@ -1489,6 +1493,10 @@ impl Flux2Engine {
 
         // 4. Build sampling state
         let state = Flux2State::new(&txt_emb, &img)?;
+        let inpaint_ctx = inpaint_ctx
+            .as_ref()
+            .map(crate::img2img::pack_flux_inpaint_context)
+            .transpose()?;
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         progress.stage_start(&denoise_label);

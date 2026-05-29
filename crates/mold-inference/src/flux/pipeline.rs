@@ -2080,6 +2080,10 @@ impl FluxEngine {
         };
 
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
+        let inpaint_ctx = inpaint_ctx
+            .as_ref()
+            .map(crate::img2img::pack_flux_inpaint_context)
+            .transpose()?;
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         self.base.progress.stage_start(&denoise_label);
@@ -2684,6 +2688,10 @@ impl FluxEngine {
 
         // Build sampling state
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
+        let inpaint_ctx = inpaint_ctx
+            .as_ref()
+            .map(crate::img2img::pack_flux_inpaint_context)
+            .transpose()?;
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         progress.stage_start(&denoise_label);
