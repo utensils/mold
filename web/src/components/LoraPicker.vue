@@ -4,6 +4,8 @@ import { fetchCatalogInstalled } from "../api";
 import type { CatalogEntryWire, LoraSelection } from "../types";
 import { MAX_LORA_STACK } from "../types";
 
+defineOptions({ name: "LoraPicker" });
+
 /// Multi-LoRA picker. The component owns its own catalog fetch (filtered
 /// to `kind=lora` for the current model family) and exposes the user-
 /// chosen stack via `modelValue` as an array. The parent feeds back a
@@ -24,6 +26,7 @@ const emit = defineEmits<{
 
 const loras = ref<CatalogEntryWire[]>([]);
 const loading = ref(false);
+const search = ref("");
 
 async function loadLoras(family: string) {
   loras.value = [];
@@ -47,6 +50,23 @@ watch(() => props.family, loadLoras, { immediate: true });
 const canAddMore = computed(
   () => props.modelValue.length < MAX_LORA_STACK && loras.value.length > 0,
 );
+
+const filteredLoras = computed(() => {
+  const q = search.value.trim().toLowerCase();
+  if (!q) return loras.value;
+  return loras.value.filter((entry) =>
+    [
+      entry.name,
+      entry.author ?? "",
+      entry.id,
+      entry.primary_path ?? "",
+      ...(entry.trained_words ?? []),
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(q),
+  );
+});
 
 /// Resolve the catalog entry for a given LoRA path so we can surface its
 /// trigger words on every selected row, even after a fresh page load (the
@@ -96,6 +116,16 @@ function removeAt(index: number) {
   emit("update:modelValue", next);
 }
 
+function moveAt(from: number, to: number) {
+  if (from === to) return;
+  if (from < 0 || from >= props.modelValue.length) return;
+  if (to < 0 || to >= props.modelValue.length) return;
+  const next = props.modelValue.slice();
+  const [row] = next.splice(from, 1);
+  next.splice(to, 0, row);
+  emit("update:modelValue", next);
+}
+
 function addAnother() {
   if (!canAddMore.value) return;
   // Default to the first LoRA not yet in the stack to keep the picker
@@ -134,30 +164,64 @@ function addAnother() {
       </button>
     </div>
 
+    <input
+      v-if="loras.length > 6"
+      v-model="search"
+      type="search"
+      class="w-full rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100 placeholder:text-slate-500"
+      placeholder="Search LoRAs"
+      aria-label="Search LoRAs"
+    />
+
     <div
       v-for="(row, index) in modelValue"
       :key="`${row.path}-${index}`"
       class="rounded-lg border border-slate-800 bg-slate-900/40 p-2"
+      data-test="lora-row"
     >
-      <div class="flex items-center gap-2">
+      <div class="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
         <select
           :value="row.path"
-          class="flex-1 rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
+          class="min-w-0 rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
           @change="selectAt(index, $event)"
         >
           <option value="">— remove —</option>
-          <option v-for="e in loras" :key="e.id" :value="e.primary_path!">
+          <option
+            v-for="e in filteredLoras"
+            :key="e.id"
+            :value="e.primary_path!"
+          >
             {{ e.name }}
           </option>
         </select>
-        <button
-          type="button"
-          class="rounded-md bg-slate-800 px-2 py-1 text-xs text-slate-300 hover:bg-rose-700/50"
-          aria-label="Remove this LoRA"
-          @click="removeAt(index)"
-        >
-          ✕
-        </button>
+        <div class="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            class="h-8 w-8 rounded-md bg-slate-800 text-xs text-slate-300 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label="Move LoRA up"
+            :disabled="index === 0"
+            @click="moveAt(index, index - 1)"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            class="h-8 w-8 rounded-md bg-slate-800 text-xs text-slate-300 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label="Move LoRA down"
+            :disabled="index === modelValue.length - 1"
+            @click="moveAt(index, index + 1)"
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            class="h-8 w-8 rounded-md bg-slate-800 text-xs text-slate-300 hover:bg-rose-700/50"
+            aria-label="Remove this LoRA"
+            @click="removeAt(index)"
+          >
+            ✕
+          </button>
+        </div>
       </div>
 
       <div class="mt-2">

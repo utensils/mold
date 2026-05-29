@@ -299,6 +299,7 @@ describe("workStarted tracking", () => {
     });
     expect(job.workStarted).toBe(false);
     expect(job.progress.queuePosition).toBe(3);
+    expect(job.serverId).toBe("server-job");
 
     lastSingleHandlers!.onProgress({ type: "stage_start", name: "Loading" });
     expect(job.workStarted).toBe(true);

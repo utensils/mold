@@ -189,6 +189,16 @@ fn civitai_lora_classifies_as_kind_lora() {
 }
 
 #[test]
+fn civitai_qwen_lora_is_downloadable_without_phase_sentinel() {
+    let item: CivitaiItem =
+        serde_json::from_str(&civitai_lora_json("LORA", "Qwen")).expect("parse");
+    let entry = from_civitai(item).expect("Qwen LoRA must round-trip");
+    assert_eq!(entry.kind, Kind::Lora);
+    assert_eq!(entry.family, Family::QwenImage);
+    assert_eq!(entry.engine_phase, 1);
+}
+
+#[test]
 fn civitai_locon_grouped_with_lora() {
     // LoCon adapters share the LoRA inference path (low-rank merge into
     // base weights). Catalog them as Kind::Lora so the FLUX backend can

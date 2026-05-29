@@ -73,6 +73,20 @@ async fn get(router: axum::Router, uri: &str) -> (StatusCode, String) {
     (status, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
+async fn post(router: axum::Router, uri: &str) -> (StatusCode, String) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
 #[tokio::test]
 async fn live_search_returns_normalized_civitai_rows() {
     let (state, _server, _tmp) = build_state().await;
@@ -100,6 +114,89 @@ async fn live_search_returns_normalized_civitai_rows() {
         "no sidecar yet → not installed"
     );
     assert_eq!(entries[0]["trained_words"][0], "live trigger");
+}
+
+#[tokio::test]
+async fn live_search_returns_manual_clip_component_rows() {
+    let (state, _server, _tmp) = build_state().await;
+    let router = create_router(state);
+
+    let (status, body) = get(
+        router,
+        "/api/catalog/search?q=clip&kind=clip&source=hf&family=sdxl",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let entries = parsed["entries"].as_array().expect("entries array");
+    let ids = entries
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"hf:companion/clip-l"), "{ids:?}");
+    assert!(ids.contains(&"hf:companion/clip-g"), "{ids:?}");
+    assert!(entries.iter().all(|entry| entry["kind"] == "clip"));
+}
+
+#[tokio::test]
+async fn live_search_free_text_can_find_manual_clip_components() {
+    let (state, _server, _tmp) = build_state().await;
+    let router = create_router(state);
+
+    let (status, body) = get(router, "/api/catalog/search?q=clip&source=hf&family=sdxl").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let entries = parsed["entries"].as_array().expect("entries array");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["id"] == "hf:companion/clip-l" && entry["kind"] == "clip"),
+        "{entries:?}"
+    );
+}
+
+#[tokio::test]
+async fn live_search_returns_manual_tokenizer_component_rows() {
+    let (state, _server, _tmp) = build_state().await;
+    let router = create_router(state);
+
+    let (status, body) = get(
+        router,
+        "/api/catalog/search?q=tokenizer&kind=tokenizer&source=hf&family=flux2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let entries = parsed["entries"].as_array().expect("entries array");
+    let ids = entries
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"hf:companion/flux2-te/tokenizer"), "{ids:?}");
+    assert!(
+        ids.contains(&"hf:companion/flux2-te-9b/tokenizer"),
+        "{ids:?}"
+    );
+    assert!(entries.iter().all(|entry| entry["kind"] == "tokenizer"));
+}
+
+#[tokio::test]
+async fn catalog_download_enqueues_manual_component_companion() {
+    let (state, _server, _tmp) = build_state().await;
+    let router = create_router(state);
+
+    let (status, body) = post(router, "/api/catalog/hf%3Acompanion%2Fclip-l/download").await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(
+        parsed["primary_job_id"].as_str().is_some(),
+        "component downloads should enqueue the backing companion manifest: {body}"
+    );
+    assert_eq!(parsed["companion_jobs"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -216,6 +313,27 @@ async fn installed_endpoint_returns_only_kind_filtered_sidecars() {
 }
 
 #[tokio::test]
+async fn installed_endpoint_treats_qwen_edit_loras_as_qwen_image_compatible() {
+    let (state, _server, tmp) = build_state().await;
+    write_lora_sidecar(tmp.path(), 42, "qwen-image", 42);
+    write_lora_sidecar(tmp.path(), 43, "flux", 43);
+
+    let router = create_router(state);
+    let (status, body) = get(
+        router,
+        "/api/catalog/installed?kind=lora&family=qwen-image-edit",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entries = parsed["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], "cv:42");
+    assert_eq!(entries[0]["family"], "qwen-image");
+}
+
+#[tokio::test]
 async fn loras_endpoint_filters_by_model_family_and_returns_all_matches() {
     let (state, _server, tmp) = build_state().await;
 
@@ -247,6 +365,23 @@ async fn loras_endpoint_filters_by_model_family_and_returns_all_matches() {
     let entries = parsed.as_array().unwrap();
     assert_eq!(entries.len(), 12);
     assert!(entries.iter().any(|entry| entry["id"] == "cv:99"));
+}
+
+#[tokio::test]
+async fn loras_endpoint_returns_qwen_image_loras_for_qwen_edit_models() {
+    let (state, _server, tmp) = build_state().await;
+    write_lora_sidecar(tmp.path(), 42, "qwen-image", 42);
+    write_lora_sidecar(tmp.path(), 43, "flux", 43);
+
+    let router = create_router(state);
+    let (status, body) = get(router, "/api/loras?model=qwen-image-edit-2511:q4").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entries = parsed.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], "cv:42");
+    assert_eq!(entries[0]["family"], "qwen-image");
 }
 
 #[tokio::test]

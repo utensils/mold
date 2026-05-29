@@ -218,6 +218,19 @@ fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     }
 }
 
+fn require_controlnet_capable_family(family: Option<&str>) -> Result<(), String> {
+    match family {
+        Some("sd15" | "sd1.5" | "stable-diffusion-1.5") => Ok(()),
+        Some(other) => Err(format!(
+            "ControlNet generation is currently supported for SD1.5 models; got family {other:?}"
+        )),
+        None => Err(
+            "ControlNet generation requires a known model family — pick an SD1.5 model first"
+                .to_string(),
+        ),
+    }
+}
+
 fn validate_inline_media_size(
     bytes: &[u8],
     field_name: &str,
@@ -349,6 +362,7 @@ pub fn validate_generate_request_with_family(
     }
     // ControlNet validation
     if let Some(ref ctrl) = req.control_image {
+        require_controlnet_capable_family(family)?;
         if req.control_model.is_none() {
             return Err("control_image requires control_model to also be provided".to_string());
         }
@@ -363,6 +377,7 @@ pub fn validate_generate_request_with_family(
         }
     }
     if req.control_model.is_some() && req.control_image.is_none() {
+        require_controlnet_capable_family(family)?;
         return Err("control_model requires control_image to also be provided".to_string());
     }
     // Inpainting validation
@@ -1508,6 +1523,7 @@ mod tests {
     #[test]
     fn controlnet_valid_request() {
         let mut req = valid_req();
+        req.model = "dreamshaper-v8:fp16".to_string();
         req.control_image = Some(png_bytes());
         req.control_model = Some("controlnet-canny-sd15".to_string());
         req.control_scale = 0.8;
@@ -1517,6 +1533,7 @@ mod tests {
     #[test]
     fn controlnet_image_without_model_rejected() {
         let mut req = valid_req();
+        req.model = "dreamshaper-v8:fp16".to_string();
         req.control_image = Some(png_bytes());
         req.control_model = None;
         assert!(validate_generate_request(&req)
@@ -1527,6 +1544,7 @@ mod tests {
     #[test]
     fn controlnet_model_without_image_rejected() {
         let mut req = valid_req();
+        req.model = "dreamshaper-v8:fp16".to_string();
         req.control_image = None;
         req.control_model = Some("controlnet-canny-sd15".to_string());
         assert!(validate_generate_request(&req)
@@ -1537,6 +1555,7 @@ mod tests {
     #[test]
     fn controlnet_invalid_image_rejected() {
         let mut req = valid_req();
+        req.model = "dreamshaper-v8:fp16".to_string();
         req.control_image = Some(vec![0x00, 0x01, 0x02, 0x03]);
         req.control_model = Some("controlnet-canny-sd15".to_string());
         assert!(validate_generate_request(&req)
@@ -1547,6 +1566,7 @@ mod tests {
     #[test]
     fn controlnet_negative_scale_rejected() {
         let mut req = valid_req();
+        req.model = "dreamshaper-v8:fp16".to_string();
         req.control_image = Some(png_bytes());
         req.control_model = Some("controlnet-canny-sd15".to_string());
         req.control_scale = -0.1;
@@ -1558,6 +1578,7 @@ mod tests {
     #[test]
     fn controlnet_zero_scale_accepted() {
         let mut req = valid_req();
+        req.model = "dreamshaper-v8:fp16".to_string();
         req.control_image = Some(png_bytes());
         req.control_model = Some("controlnet-canny-sd15".to_string());
         req.control_scale = 0.0;
@@ -1567,6 +1588,7 @@ mod tests {
     #[test]
     fn controlnet_high_scale_accepted() {
         let mut req = valid_req();
+        req.model = "dreamshaper-v8:fp16".to_string();
         req.control_image = Some(png_bytes());
         req.control_model = Some("controlnet-canny-sd15".to_string());
         req.control_scale = 2.0;
@@ -1576,9 +1598,21 @@ mod tests {
     #[test]
     fn controlnet_jpeg_accepted() {
         let mut req = valid_req();
+        req.model = "dreamshaper-v8:fp16".to_string();
         req.control_image = Some(jpeg_bytes());
         req.control_model = Some("controlnet-canny-sd15".to_string());
         assert!(validate_generate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn controlnet_rejected_for_non_sd15_family() {
+        let mut req = valid_req();
+        req.model = "sdxl:fp16".to_string();
+        req.control_image = Some(png_bytes());
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("SD1.5"), "got: {err}");
     }
     // ── Inpainting validation tests ───────────────────────────────────────
 

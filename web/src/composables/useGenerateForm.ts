@@ -4,23 +4,25 @@ import type {
   GenerateRequestWire,
   LoraSelection,
   ModelInfoExtended,
+  OutputMetadata,
   OutputFormat,
   Scheduler,
 } from "../types";
+import { MAX_LORA_STACK } from "../types";
 import {
-  MAX_LORA_STACK,
-  NO_CFG_FAMILIES,
-  UNET_SCHEDULER_FAMILIES,
-  VIDEO_FAMILIES,
-  familySupportsAudio,
+  generationCapabilitiesForFamily,
+  isQwenImageEditFamily,
+  isVideoFamily,
   supportsLora,
-} from "../types";
+  supportsNegativePrompt,
+  supportsScheduler,
+} from "../lib/generateCapabilities";
 
 /** Output-format options for a given model family, ordered by preference.
  * The first entry is the default the UI auto-selects when a model is
  * chosen. */
 export function outputFormatsForFamily(family: string): OutputFormat[] {
-  return VIDEO_FAMILIES.includes(family)
+  return isVideoFamily(family)
     ? ["mp4", "gif", "apng", "webp"]
     : ["png", "jpeg", "webp"];
 }
@@ -33,15 +35,23 @@ const STORAGE_KEY = "mold.generate.form";
 const FORM_VERSION = 2;
 const QWEN_IMAGE_EDIT_FAMILY = "qwen-image-edit";
 
-function isQwenImageEditFamily(family: string): boolean {
-  return family === QWEN_IMAGE_EDIT_FAMILY;
-}
-
 function selectedFamily(s: GenerateFormState): string {
   if (s.modelFamily) return s.modelFamily;
   if (s.model.startsWith(`${QWEN_IMAGE_EDIT_FAMILY}:`)) {
     return QWEN_IMAGE_EDIT_FAMILY;
   }
+  if (s.model.startsWith("sdxl")) return "sdxl";
+  if (s.model.startsWith("sd15") || s.model.startsWith("sd1.5")) return "sd15";
+  if (s.model.startsWith("sd3.5")) return "sd3.5";
+  if (s.model.startsWith("sd3")) return "sd3";
+  if (s.model.startsWith("flux2") || s.model.startsWith("flux.2"))
+    return "flux2";
+  if (s.model.startsWith("flux")) return "flux";
+  if (s.model.startsWith("z-image")) return "z-image";
+  if (s.model.startsWith("qwen-image-edit")) return "qwen-image-edit";
+  if (s.model.startsWith("qwen-image")) return "qwen-image";
+  if (s.model.startsWith("ltx-video")) return "ltx-video";
+  if (s.model.startsWith("ltx2") || s.model.startsWith("ltx-2")) return "ltx2";
   return "";
 }
 
@@ -56,18 +66,199 @@ function defaultForm(): GenerateFormState {
     height: 1024,
     steps: 20,
     guidance: 3.5,
+    seedMode: "random",
     seed: null,
     batchSize: 1,
     strength: 0.75,
     frames: null,
     fps: null,
     scheduler: null,
+    cfgPlus: false,
     outputFormat: "png",
     expand: { enabled: false, variations: 1, familyOverride: null },
     imageAttachments: [],
+    maskImage: null,
+    controlImage: null,
+    controlModel: "",
+    controlScale: 1.0,
+    upscaleModel: "",
+    gifPreview: false,
+    audioFile: null,
+    audioFilePath: "",
+    sourceVideo: null,
+    sourceVideoPath: "",
+    keyframes: [],
+    pipeline: null,
+    retakeRange: null,
+    spatialUpscale: null,
+    temporalUpscale: null,
     placement: null,
     loras: [],
     enableAudio: null,
+  };
+}
+
+function cloneFormState(state: GenerateFormState): GenerateFormState {
+  return JSON.parse(JSON.stringify(state)) as GenerateFormState;
+}
+
+/** Remove browser-only binary media from a form snapshot before writing it to
+ * localStorage or a local generation template. Server-local path fields
+ * (`audioFilePath`, `sourceVideoPath`) are preserved because they are stable
+ * references; upload/gallery base64 payloads are intentionally not stored. */
+export function sanitizePersistedForm(
+  state: GenerateFormState,
+): GenerateFormState {
+  return {
+    ...cloneFormState(state),
+    version: FORM_VERSION,
+    imageAttachments: [],
+    maskImage: null,
+    controlImage: null,
+    audioFile: null,
+    sourceVideo: null,
+    keyframes: [],
+  };
+}
+
+/** Clone the generation configuration that can be safely represented in a
+ * web-local template. Binary source/mask/control/media bytes are stripped by
+ * `sanitizePersistedForm`; callers can store separate filename references for
+ * display, but loading the template will not silently pretend those bytes are
+ * still available. */
+export function cloneTemplateForm(state: GenerateFormState): GenerateFormState {
+  return sanitizePersistedForm(state);
+}
+
+function modelDefaultsPatch(
+  current: GenerateFormState,
+  model: ModelInfoExtended,
+): GenerateFormState {
+  const next: GenerateFormState = {
+    ...cloneFormState(current),
+    model: model.name,
+    modelFamily: model.family,
+    width: model.default_width,
+    height: model.default_height,
+    steps: model.default_steps,
+    guidance: model.default_guidance,
+    loras: [],
+  };
+  const capabilities = generationCapabilitiesForFamily(model.family);
+  if (capabilities.supportsVideo) {
+    next.frames ??= 25;
+    next.fps ??= 24;
+  } else {
+    next.frames = null;
+    next.fps = null;
+    next.gifPreview = false;
+  }
+  const formats = outputFormatsForFamily(model.family);
+  if (!formats.includes(next.outputFormat)) {
+    next.outputFormat = formats[0];
+  }
+  next.enableAudio = capabilities.supportsAudio ? true : null;
+  if (!capabilities.supportsScheduler) {
+    next.scheduler = null;
+  }
+  if (!capabilities.supportsCfgPlus) {
+    next.cfgPlus = false;
+  }
+  if (model.family !== "ltx2" && model.family !== "ltx-2") {
+    next.audioFile = null;
+    next.audioFilePath = "";
+    next.sourceVideo = null;
+    next.sourceVideoPath = "";
+    next.keyframes = [];
+    next.pipeline = null;
+    next.retakeRange = null;
+    next.spatialUpscale = null;
+    next.temporalUpscale = null;
+  }
+  if (capabilities.sourceImageMode === "qwen-edit") {
+    next.batchSize = 1;
+    next.maskImage = null;
+    next.controlImage = null;
+    next.controlModel = "";
+  } else if (next.imageAttachments.length > 1) {
+    next.imageAttachments = next.imageAttachments.slice(0, 1);
+  }
+  if (!capabilities.supportsControlNet) {
+    next.controlImage = null;
+    next.controlModel = "";
+  }
+  return next;
+}
+
+export interface ApplyMetadataOptions {
+  models?: ModelInfoExtended[];
+  format?: OutputFormat | null;
+}
+
+/** Recreate-safe metadata application shared by Gallery Recreate and future
+ * template/import paths. It restores serialized generation knobs, uses static
+ * seed semantics for exact-ish recreation, and clears stale binary media
+ * because output metadata does not contain source/mask/control bytes. */
+export function applyMetadataToForm(
+  current: GenerateFormState,
+  metadata: OutputMetadata,
+  options: ApplyMetadataOptions = {},
+): GenerateFormState {
+  const model = options.models?.find((m) => m.name === metadata.model);
+  const next = model
+    ? modelDefaultsPatch(current, model)
+    : { ...cloneFormState(current), model: metadata.model, modelFamily: "" };
+  const loras =
+    metadata.loras?.map<LoraSelection>((l) => ({
+      path: l.path,
+      scale: l.scale,
+    })) ??
+    (metadata.lora
+      ? [
+          {
+            path: metadata.lora,
+            scale: metadata.lora_scale ?? 1.0,
+          },
+        ]
+      : []);
+  const outputFormat = metadata.output_format ?? options.format ?? null;
+  return {
+    ...next,
+    prompt: metadata.prompt ?? "",
+    negativePrompt: metadata.negative_prompt ?? "",
+    width: metadata.width || next.width,
+    height: metadata.height || next.height,
+    steps: metadata.steps || next.steps,
+    guidance: metadata.guidance ?? next.guidance,
+    seedMode: metadata.seed == null ? "random" : "static",
+    seed: metadata.seed ?? null,
+    scheduler: metadata.scheduler ?? null,
+    cfgPlus: metadata.cfg_plus ?? false,
+    strength:
+      metadata.strength !== undefined && metadata.strength !== null
+        ? metadata.strength
+        : next.strength,
+    loras: loras.slice(0, MAX_LORA_STACK),
+    controlModel: metadata.control_model ?? "",
+    controlScale: metadata.control_scale ?? next.controlScale,
+    upscaleModel: metadata.upscale_model ?? "",
+    gifPreview: metadata.gif_preview ?? false,
+    enableAudio: metadata.enable_audio ?? next.enableAudio,
+    audioFilePath: metadata.audio_file_path ?? "",
+    sourceVideoPath: metadata.source_video_path ?? "",
+    pipeline: metadata.pipeline ?? null,
+    retakeRange: metadata.retake_range ?? null,
+    spatialUpscale: metadata.spatial_upscale ?? null,
+    temporalUpscale: metadata.temporal_upscale ?? null,
+    frames: metadata.frames ?? null,
+    fps: metadata.fps ?? null,
+    outputFormat: outputFormat ?? next.outputFormat,
+    imageAttachments: [],
+    maskImage: null,
+    controlImage: null,
+    audioFile: null,
+    sourceVideo: null,
+    keyframes: [],
   };
 }
 
@@ -107,7 +298,13 @@ function load(): GenerateFormState {
     if (parsed.version !== 1 && parsed.version !== FORM_VERSION) {
       return defaultForm();
     }
-    return { ...defaultForm(), ...migrateLegacy(parsed) };
+    return {
+      ...defaultForm(),
+      ...sanitizePersistedForm({
+        ...defaultForm(),
+        ...migrateLegacy(parsed),
+      }),
+    };
   } catch {
     return defaultForm();
   }
@@ -117,10 +314,9 @@ function persist(state: GenerateFormState) {
   try {
     // Drop base64 bytes from localStorage — they blow past the quota quickly
     // and the attachment is re-picked trivially on reload.
-    const { imageAttachments: _attachments, ...rest } = state;
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ ...rest, version: FORM_VERSION }),
+      JSON.stringify(sanitizePersistedForm(state)),
     );
   } catch {
     /* ignore */
@@ -203,42 +399,10 @@ export function useGenerateForm(): UseGenerateForm {
         : trimmed;
     },
     applyModelDefaults: (m) => {
-      state.value.model = m.name;
-      state.value.modelFamily = m.family;
-      state.value.width = m.default_width;
-      state.value.height = m.default_height;
-      state.value.steps = m.default_steps;
-      state.value.guidance = m.default_guidance;
       // LoRA support is family-specific. Clear the stack on every model
       // change — even FLUX→FLUX swaps because the LoRA might not target
       // the new variant's tensor layout.
-      state.value.loras = [];
-      // Video families need sensible frame/fps defaults.
-      if (VIDEO_FAMILIES.includes(m.family)) {
-        state.value.frames ??= 25; // 8n+1
-        state.value.fps ??= 24;
-      } else {
-        state.value.frames = null;
-        state.value.fps = null;
-      }
-      // Auto-pick a valid output format whenever the model family changes so
-      // users never have to manually toggle this — switching from an image
-      // to a video family and back would otherwise leave an invalid format
-      // (e.g. `png` on LTX-2) stuck in the form.
-      const formats = outputFormatsForFamily(m.family);
-      if (!formats.includes(state.value.outputFormat)) {
-        state.value.outputFormat = formats[0];
-      }
-      // Audio toggle defaults: ON for the only family with an audio path
-      // today (LTX-2 / LTX-2.3), null for everyone else so the wire stays
-      // clean and the server's MP4 default-on behaviour isn't fought.
-      // Mirrors `chain_limits::family_supports_audio` on the server.
-      state.value.enableAudio = familySupportsAudio(m.family) ? true : null;
-      if (isQwenImageEditFamily(m.family)) {
-        state.value.batchSize = 1;
-      } else if (state.value.imageAttachments.length > 1) {
-        state.value.imageAttachments = state.value.imageAttachments.slice(0, 1);
-      }
+      state.value = modelDefaultsPatch(state.value, m);
     },
     toRequest: () => {
       const s = state.value;
@@ -249,20 +413,32 @@ export function useGenerateForm(): UseGenerateForm {
       const loras = s.loras.length
         ? s.loras.map((l) => ({ path: l.path, scale: l.scale }))
         : undefined;
-      const qwenEdit = isQwenImageEditFamily(selectedFamily(s));
+      const capabilities = generationCapabilitiesForFamily(selectedFamily(s));
+      const qwenEdit = capabilities.sourceImageMode === "qwen-edit";
       const attachments = s.imageAttachments ?? [];
+      const controlModel = capabilities.supportsControlNet
+        ? s.controlModel.trim()
+        : "";
+      const upscaleModel = s.upscaleModel.trim();
+      const audioPath = s.audioFilePath.trim();
+      const sourceVideoPath = s.sourceVideoPath.trim();
+      const family = selectedFamily(s);
+      const ltx2 = family === "ltx2" || family === "ltx-2";
       return {
         prompt: s.prompt,
-        negative_prompt: s.negativePrompt || null,
+        negative_prompt: capabilities.supportsNegativePrompt
+          ? s.negativePrompt || null
+          : null,
         model: s.model,
         width: s.width,
         height: s.height,
         steps: s.steps,
         guidance: s.guidance,
-        seed: s.seed,
-        batch_size: qwenEdit ? 1 : s.batchSize,
+        seed: s.seedMode === "random" ? null : s.seed,
+        batch_size: capabilities.forcesBatchSizeOne ? 1 : s.batchSize,
         output_format: s.outputFormat,
-        scheduler: s.scheduler,
+        cfg_plus: capabilities.supportsCfgPlus && s.cfgPlus ? true : undefined,
+        scheduler: capabilities.supportsScheduler ? s.scheduler : undefined,
         ...(qwenEdit
           ? {
               edit_images: attachments.map((image) => image.base64),
@@ -270,20 +446,48 @@ export function useGenerateForm(): UseGenerateForm {
           : {
               source_image: attachments[0]?.base64 ?? null,
               strength: s.strength,
+              mask_image: s.maskImage?.base64 ?? undefined,
+              control_image: capabilities.supportsControlNet
+                ? (s.controlImage?.base64 ?? undefined)
+                : undefined,
+              control_model:
+                s.controlImage && controlModel ? controlModel : undefined,
+              control_scale:
+                s.controlImage && controlModel ? s.controlScale : undefined,
             }),
         expand: s.expand.enabled || undefined,
         frames: s.frames,
         fps: s.fps,
+        upscale_model: upscaleModel || undefined,
+        gif_preview: s.gifPreview || undefined,
         placement: s.placement ?? undefined,
         loras,
         enable_audio: s.enableAudio ?? undefined,
+        ...(ltx2
+          ? {
+              audio_file: s.audioFile?.base64 ?? undefined,
+              audio_file_path: s.audioFile ? undefined : audioPath || undefined,
+              source_video: s.sourceVideo?.base64 ?? undefined,
+              source_video_path: s.sourceVideo
+                ? undefined
+                : sourceVideoPath || undefined,
+              keyframes: s.keyframes.length
+                ? s.keyframes.map((k) => ({
+                    frame: k.frame,
+                    image: k.image.base64,
+                  }))
+                : undefined,
+              pipeline: s.pipeline ?? undefined,
+              retake_range: s.retakeRange ?? undefined,
+              spatial_upscale: s.spatialUpscale ?? undefined,
+              temporal_upscale: s.temporalUpscale ?? undefined,
+            }
+          : {}),
       };
     },
-    isVideoFamily: (family: string) => VIDEO_FAMILIES.includes(family),
-    supportsNegativePrompt: (family: string) =>
-      !NO_CFG_FAMILIES.includes(family),
-    supportsScheduler: (family: string) =>
-      UNET_SCHEDULER_FAMILIES.includes(family),
+    isVideoFamily,
+    supportsNegativePrompt,
+    supportsScheduler,
     supportsLora,
   };
 }

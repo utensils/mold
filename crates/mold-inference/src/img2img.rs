@@ -118,6 +118,41 @@ pub(crate) fn maybe_build_inpaint_context(
     }))
 }
 
+/// Pack a spatial FLUX inpaint context to match candle's packed transformer state.
+///
+/// FLUX denoising operates on latents packed from `[B, C, H, W]` to
+/// `[B, H/2 * W/2, C * 4]`. The mask is packed to `[B, H/2 * W/2, 1]` so it
+/// broadcasts over the packed channel dimension.
+pub(crate) fn pack_flux_inpaint_context(
+    ctx: &crate::img_utils::InpaintContext,
+) -> Result<crate::img_utils::InpaintContext> {
+    fn pack_latents(xs: &Tensor) -> Result<Tensor> {
+        let (bs, c, h, w) = xs.dims4()?;
+        Ok(xs
+            .reshape((bs, c, h / 2, 2, w / 2, 2))?
+            .permute((0, 2, 4, 1, 3, 5))?
+            .reshape((bs, h / 2 * w / 2, c * 4))?)
+    }
+
+    fn pack_mask(mask: &Tensor) -> Result<Tensor> {
+        let (bs, c, h, w) = mask.dims4()?;
+        if c != 1 {
+            anyhow::bail!("inpaint mask must have one channel before FLUX packing");
+        }
+        Ok(mask
+            .reshape((bs, c, h / 2, 2, w / 2, 2))?
+            .permute((0, 2, 4, 1, 3, 5))?
+            .reshape((bs, h / 2 * w / 2, 4))?
+            .mean_keepdim(2)?)
+    }
+
+    Ok(crate::img_utils::InpaintContext {
+        original_latents: pack_latents(&ctx.original_latents)?,
+        mask: pack_mask(&ctx.mask)?,
+        noise: pack_latents(&ctx.noise)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +394,30 @@ mod tests {
             .to_vec1::<f32>()
             .unwrap();
         assert_eq!(blended, vec![4.0, 8.0]);
+    }
+
+    #[test]
+    fn pack_flux_inpaint_context_matches_packed_latent_shape() {
+        let device = Device::Cpu;
+        for (channels, packed_channels) in [(16, 64), (32, 128)] {
+            let ctx = crate::img_utils::InpaintContext {
+                original_latents: Tensor::zeros((1, channels, 4, 4), DType::F32, &device)
+                    .expect("original latents"),
+                mask: Tensor::ones((1, 1, 4, 4), DType::F32, &device).expect("mask"),
+                noise: Tensor::ones((1, channels, 4, 4), DType::F32, &device).expect("noise"),
+            };
+
+            let packed = pack_flux_inpaint_context(&ctx).expect("pack context");
+
+            assert_eq!(packed.original_latents.dims(), &[1, 4, packed_channels]);
+            assert_eq!(packed.noise.dims(), &[1, 4, packed_channels]);
+            assert_eq!(packed.mask.dims(), &[1, 4, 1]);
+            apply_flow_match_inpaint(
+                &Tensor::zeros((1, 4, packed_channels), DType::F32, &device).unwrap(),
+                &packed,
+                0.5,
+            )
+            .expect("packed context should broadcast over packed FLUX channels");
+        }
     }
 }

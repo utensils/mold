@@ -49,6 +49,67 @@ const ONE_FLUX_LORA: &str = r#"{
     "metadata": { "totalPages": 1 }
 }"#;
 
+const ONE_CONTROLNET: &str = r#"{
+    "items": [{
+        "id": 9101,
+        "name": "Test SDXL ControlNet",
+        "type": "Controlnet",
+        "nsfw": false,
+        "creator": { "username": "alice" },
+        "stats": { "downloadCount": 99, "rating": 4.5, "favoriteCount": 7 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 8101,
+            "name": "v1",
+            "baseModel": "SDXL 1.0",
+            "baseModelType": "Standard",
+            "trainedWords": [],
+            "files": [{
+                "id": 1,
+                "name": "controlnet.safetensors",
+                "sizeKB": 100000,
+                "downloadCount": 1,
+                "metadata": { "format": "SafeTensor" },
+                "downloadUrl": "https://civitai.example/controlnet.safetensors",
+                "hashes": { "SHA256": "feedface" }
+            }],
+            "images": []
+        }]
+    }],
+    "metadata": { "totalPages": 1 }
+}"#;
+
+const ONE_QWEN_CHECKPOINT: &str = r#"{
+    "items": [{
+        "id": 9201,
+        "name": "Test Qwen Checkpoint",
+        "type": "Checkpoint",
+        "nsfw": false,
+        "creator": { "username": "alice" },
+        "stats": { "downloadCount": 101, "rating": 4.8, "favoriteCount": 11 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 8201,
+            "name": "fp8",
+            "baseModel": "Qwen",
+            "baseModelType": "Standard",
+            "trainedWords": [],
+            "files": [{
+                "id": 1,
+                "name": "qwenImage_fp8.safetensors",
+                "type": "Model",
+                "sizeKB": 19951792,
+                "downloadCount": 1,
+                "metadata": { "format": "SafeTensor" },
+                "downloadUrl": "https://civitai.example/qwen.safetensors",
+                "hashes": { "SHA256": "abc123" }
+            }],
+            "images": []
+        }]
+    }],
+    "metadata": { "totalPages": 1 }
+}"#;
+
 fn flux_lora_opts(q: &str) -> LiveSearchOpts {
     LiveSearchOpts {
         q: Some(q.into()),
@@ -91,6 +152,61 @@ async fn civitai_search_returns_normalized_entries() {
     assert_eq!(row.kind, Kind::Lora);
     assert_eq!(row.family, Family::Flux);
     assert_eq!(row.trained_words, vec!["mold trigger".to_string()]);
+}
+
+#[tokio::test]
+async fn civitai_controlnet_search_uses_controlnet_type_filter() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("query", "control"))
+        .and(query_param("types", "Controlnet"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ONE_CONTROLNET))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let mut opts = flux_lora_opts("control");
+    opts.family = Some(Family::Sdxl);
+    opts.kind = Some(Kind::ControlNet);
+
+    let entries = search(&server.uri(), "https://hf.unused", &cache, &opts)
+        .await
+        .expect("controlnet live search");
+
+    assert_eq!(entries.len(), 1, "one normalized ControlNet expected");
+    assert_eq!(entries[0].kind, Kind::ControlNet);
+    assert_eq!(entries[0].family, Family::Sdxl);
+    assert_eq!(entries[0].engine_phase, 1);
+}
+
+#[tokio::test]
+async fn civitai_qwen_checkpoint_is_installable_with_runtime_companion() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("query", "qwen"))
+        .and(query_param("types", "Checkpoint"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ONE_QWEN_CHECKPOINT))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let mut opts = flux_lora_opts("qwen");
+    opts.family = Some(Family::QwenImage);
+    opts.kind = Some(Kind::Checkpoint);
+
+    let entries = search(&server.uri(), "https://hf.unused", &cache, &opts)
+        .await
+        .expect("qwen checkpoint live search");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, Kind::Checkpoint);
+    assert_eq!(entries[0].family, Family::QwenImage);
+    assert_eq!(entries[0].engine_phase, 1);
+    assert_eq!(entries[0].companions, vec!["qwen-image-runtime"]);
 }
 
 #[tokio::test]
@@ -378,7 +494,7 @@ const HF_SEARCH_HITS: &str = r#"[
 async fn hf_search_drops_non_mold_repos() {
     // The HF search endpoint returns a flat list. Repos that don't
     // map to a supported mold family must be dropped, not surfaced
-    // with engine_phase=99.
+    // as fake unsupported catalog rows.
     let civ = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/models"))

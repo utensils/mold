@@ -19,10 +19,9 @@ function openDownloadsDrawer() {
   window.dispatchEvent(new CustomEvent("mold:open-downloads"));
 }
 
-// Gallery-only props (`hideMode`, `selectMode`, `selectionCount`) are
-// optional. The Generate page mounts this same TopBar without a gallery
-// underneath it, so their defaults keep the toolbar in its "no bulk
-// actions" state.
+// Gallery-only props are optional. The Generate page mounts this same TopBar
+// without a gallery underneath it, so their defaults keep the toolbar in its
+// "no bulk actions" state.
 const props = withDefaults(
   defineProps<{
     filter: FilterKind;
@@ -31,12 +30,10 @@ const props = withDefaults(
     muted: boolean;
     counts: { total: number; images: number; video: number; filtered: number };
     loading: boolean;
-    hideMode?: boolean;
     selectMode?: boolean;
     selectionCount?: number;
   }>(),
   {
-    hideMode: false,
     selectMode: false,
     selectionCount: 0,
   },
@@ -47,7 +44,6 @@ const emit = defineEmits<{
   (e: "update:search", value: string): void;
   (e: "update:view", value: ViewMode): void;
   (e: "update:muted", value: boolean): void;
-  (e: "update:hide-mode", value: boolean): void;
   (e: "update:select-mode", value: boolean): void;
   (e: "refresh"): void;
 }>();
@@ -226,7 +222,7 @@ function clearSearch() {
     </label>
 
     <div
-      v-if="$route.name === 'gallery'"
+      v-if="route.name === 'gallery'"
       class="flex shrink-0 flex-wrap items-center gap-2"
     >
       <!-- View-mode toggle -->
@@ -378,51 +374,6 @@ function clearSearch() {
         </svg>
       </button>
 
-      <!-- Hide/blur toggle. Flipping it on blurs every gallery item; flipping
-           it back off reveals everything. Per-item "Reveal" still lets users
-           peek a single tile without disabling the global shroud. -->
-      <button
-        class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/5 text-ink-200 transition hover:text-white"
-        :class="hideMode ? 'bg-brand-500 text-white' : 'bg-white/5'"
-        :aria-pressed="hideMode"
-        :aria-label="hideMode ? 'Unhide gallery' : 'Hide gallery'"
-        :title="hideMode ? 'Unhide gallery' : 'Hide gallery'"
-        @click="emit('update:hide-mode', !hideMode)"
-      >
-        <svg
-          v-if="!hideMode"
-          class="h-4 w-4"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
-          <circle cx="12" cy="12" r="3" />
-        </svg>
-        <svg
-          v-else
-          class="h-4 w-4"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path
-            d="M10.6 5.1A10 10 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.3 4.2"
-          />
-          <path d="M6.7 6.7A17 17 0 0 0 2 12s4 7 10 7a9.7 9.7 0 0 0 5.3-1.7" />
-          <path d="m3 3 18 18" />
-          <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
-        </svg>
-      </button>
-
       <!-- Select mode toggle. Opens a bulk-edit mode where clicks select
            instead of opening the detail drawer, shift-clicks extend the
            range, and drag draws a marquee. Gateway to the bulk delete
@@ -489,56 +440,12 @@ function clearSearch() {
       </button>
     </div>
 
-    <!-- Generate-route extras: hide toggle mirrors the Gallery button so
-         preview images below the composer (and running-job tiles) can be
-         shrouded without a trip to the Gallery tab. The narrow-viewport
-         resource chip lives here too — desktop uses the full ResourceStrip
-         inside the page. -->
+    <!-- Generate-route extras: the narrow-viewport resource chip lives here;
+         desktop uses the full ResourceStrip inside the page. -->
     <div
       v-if="route.name === 'generate'"
       class="flex shrink-0 items-center gap-2"
     >
-      <button
-        class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/5 text-ink-200 transition hover:text-white"
-        :class="hideMode ? 'bg-brand-500 text-white' : 'bg-white/5'"
-        :aria-pressed="hideMode"
-        :aria-label="hideMode ? 'Reveal previews' : 'Hide previews'"
-        :title="hideMode ? 'Reveal previews' : 'Hide previews'"
-        @click="emit('update:hide-mode', !hideMode)"
-      >
-        <svg
-          v-if="!hideMode"
-          class="h-4 w-4"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
-          <circle cx="12" cy="12" r="3" />
-        </svg>
-        <svg
-          v-else
-          class="h-4 w-4"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path
-            d="M10.6 5.1A10 10 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.3 4.2"
-          />
-          <path d="M6.7 6.7A17 17 0 0 0 2 12s4 7 10 7a9.7 9.7 0 0 0 5.3-1.7" />
-          <path d="m3 3 18 18" />
-          <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
-        </svg>
-      </button>
       <div class="lg:hidden">
         <ResourceStrip variant="chip" />
       </div>

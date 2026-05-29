@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
-import { useGenerateForm } from "./useGenerateForm";
-import type { ModelInfoExtended } from "../types";
+import {
+  applyMetadataToForm,
+  cloneTemplateForm,
+  sanitizePersistedForm,
+  useGenerateForm,
+} from "./useGenerateForm";
+import type {
+  GenerateFormState,
+  ModelInfoExtended,
+  OutputMetadata,
+} from "../types";
 
 const STORAGE_KEY = "mold.generate.form";
 
@@ -107,7 +116,7 @@ describe("useGenerateForm", () => {
     const parsed = JSON.parse(raw!);
     expect(parsed.prompt).toBe("a fox");
     expect(parsed.sourceImage).toBeUndefined();
-    expect(parsed.imageAttachments).toBeUndefined();
+    expect(parsed.imageAttachments).toEqual([]);
     expect(raw).not.toContain("SECRETBYTES");
   });
 
@@ -168,6 +177,7 @@ describe("useGenerateForm", () => {
       height: 1024,
       steps: 30,
       guidance: 7.5,
+      seedMode: "static",
       seed: 42,
       batchSize: 2,
       outputFormat: "png",
@@ -221,6 +231,57 @@ describe("useGenerateForm", () => {
     expect(wire.strength).toBeUndefined();
   });
 
+  it("omits stale mask state for Qwen edit requests", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "qwen-image-edit:q4",
+      modelFamily: "qwen-image-edit",
+      imageAttachments: [
+        { kind: "upload", filename: "target.png", base64: "TARGET" },
+      ],
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
+    });
+
+    const wire = form.toRequest();
+
+    expect(wire.edit_images).toEqual(["TARGET"]);
+    expect(wire.mask_image).toBeUndefined();
+    expect(wire.source_image).toBeUndefined();
+  });
+
+  it("serializes an uploaded mask image for non-edit img2img requests", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "sdxl:fp16",
+      modelFamily: "sdxl",
+      imageAttachments: [
+        { kind: "upload", filename: "source.png", base64: "SOURCE" },
+      ],
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
+    });
+
+    const wire = form.toRequest();
+
+    expect(wire.source_image).toBe("SOURCE");
+    expect(wire.mask_image).toBe("MASK");
+    expect(wire.edit_images).toBeUndefined();
+  });
+
+  it("serializes LoRAs in the visible stack order", () => {
+    const form = useGenerateForm();
+    form.state.value.loras = [
+      { path: "/loras/second.safetensors", scale: 0.9 },
+      { path: "/loras/first.safetensors", scale: 1.2 },
+      { path: "/loras/third.safetensors", scale: 0.5 },
+    ];
+
+    expect(form.toRequest().loras).toEqual([
+      { path: "/loras/second.safetensors", scale: 0.9 },
+      { path: "/loras/first.safetensors", scale: 1.2 },
+      { path: "/loras/third.safetensors", scale: 0.5 },
+    ]);
+  });
+
   it("serializes only the first attachment as source_image for non-edit families", () => {
     const form = useGenerateForm();
     Object.assign(form.state.value, {
@@ -235,6 +296,111 @@ describe("useGenerateForm", () => {
     const wire = form.toRequest();
     expect(wire.source_image).toBe("TARGET");
     expect(wire.edit_images).toBeUndefined();
+  });
+
+  it("serializes backend-supported advanced generation knobs", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "ltx-2.3-22b-distilled:fp8",
+      modelFamily: "ltx2",
+      seedMode: "static",
+      seed: 123,
+      cfgPlus: true,
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
+      controlImage: {
+        kind: "upload",
+        filename: "control.png",
+        base64: "CONTROL",
+      },
+      controlModel: "controlnet-canny-sd15",
+      controlScale: 0.8,
+      upscaleModel: "real-esrgan-x4plus:fp16",
+      gifPreview: true,
+      audioFile: { kind: "upload", filename: "voice.wav", base64: "VOICE" },
+      audioFilePath: "",
+      sourceVideo: { kind: "upload", filename: "clip.mp4", base64: "VIDEO" },
+      sourceVideoPath: "",
+      keyframes: [
+        {
+          frame: 0,
+          image: { kind: "upload", filename: "first.png", base64: "FIRST" },
+        },
+        {
+          frame: 24,
+          image: { kind: "upload", filename: "last.png", base64: "LAST" },
+        },
+      ],
+      pipeline: "keyframe",
+      retakeRange: { start_seconds: 1.25, end_seconds: 3.5 },
+      spatialUpscale: "x1-5",
+      temporalUpscale: "x2",
+    });
+
+    const wire = form.toRequest();
+
+    expect(wire.seed).toBe(123);
+    expect(wire.cfg_plus).toBeUndefined();
+    expect(wire.mask_image).toBe("MASK");
+    expect(wire.control_image).toBeUndefined();
+    expect(wire.control_model).toBeUndefined();
+    expect(wire.control_scale).toBeUndefined();
+    expect(wire.upscale_model).toBe("real-esrgan-x4plus:fp16");
+    expect(wire.gif_preview).toBe(true);
+    expect(wire.audio_file).toBe("VOICE");
+    expect(wire.audio_file_path).toBeUndefined();
+    expect(wire.source_video).toBe("VIDEO");
+    expect(wire.source_video_path).toBeUndefined();
+    expect(wire.keyframes).toEqual([
+      { frame: 0, image: "FIRST" },
+      { frame: 24, image: "LAST" },
+    ]);
+    expect(wire.pipeline).toBe("keyframe");
+    expect(wire.retake_range).toEqual({
+      start_seconds: 1.25,
+      end_seconds: 3.5,
+    });
+    expect(wire.spatial_upscale).toBe("x1-5");
+    expect(wire.temporal_upscale).toBe("x2");
+  });
+
+  it("serializes CFG++ only for SD3-family models", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "sd3.5-large:fp16",
+      modelFamily: "sd3.5",
+      cfgPlus: true,
+    });
+
+    expect(form.toRequest().cfg_plus).toBe(true);
+  });
+
+  it("serializes ControlNet inputs for SD1.5 models", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "sd15:fp16",
+      modelFamily: "sd15",
+      controlImage: {
+        kind: "upload",
+        filename: "control.png",
+        base64: "CONTROL",
+      },
+      controlModel: "controlnet-canny-sd15:fp16",
+      controlScale: 0.8,
+    });
+
+    const wire = form.toRequest();
+
+    expect(wire.control_image).toBe("CONTROL");
+    expect(wire.control_model).toBe("controlnet-canny-sd15:fp16");
+    expect(wire.control_scale).toBe(0.8);
+  });
+
+  it("omits seed when seed mode is random even if a numeric seed is present", () => {
+    const form = useGenerateForm();
+    form.state.value.seedMode = "random";
+    form.state.value.seed = 123;
+
+    expect(form.toRequest().seed).toBeNull();
   });
 
   it("model switching forces Qwen edit batch to 1 and trims multi-image attachments for non-edit families", () => {
@@ -270,6 +436,20 @@ describe("useGenerateForm", () => {
     const form = useGenerateForm();
     form.state.value.negativePrompt = "";
     expect(form.toRequest().negative_prompt).toBeNull();
+  });
+
+  it("toRequest omits stale scheduler and negative prompt for families that ignore them", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "flux-dev:q4",
+      modelFamily: "flux",
+      negativePrompt: "blurry",
+      scheduler: "ddim",
+    });
+
+    const wire = form.toRequest();
+    expect(wire.negative_prompt).toBeNull();
+    expect(wire.scheduler).toBeUndefined();
   });
 
   it("family-capability helpers match the documented allow-lists", () => {
@@ -398,5 +578,171 @@ describe("useGenerateForm — enableAudio (LTX-2 / LTX-2.3)", () => {
     expect(form.toRequest().enable_audio).toBe(false);
     form.state.value.enableAudio = true;
     expect(form.toRequest().enable_audio).toBe(true);
+  });
+});
+
+describe("generate form serialization helpers", () => {
+  function makeForm(
+    overrides: Partial<GenerateFormState> = {},
+  ): GenerateFormState {
+    return {
+      version: 2,
+      prompt: "a cat",
+      negativePrompt: "",
+      model: "flux-dev:q4",
+      modelFamily: "flux",
+      width: 1024,
+      height: 1024,
+      steps: 28,
+      guidance: 3.5,
+      seedMode: "random",
+      seed: null,
+      batchSize: 1,
+      strength: 0.75,
+      frames: null,
+      fps: null,
+      scheduler: null,
+      cfgPlus: false,
+      outputFormat: "png",
+      expand: { enabled: false, variations: 1, familyOverride: null },
+      imageAttachments: [],
+      maskImage: null,
+      controlImage: null,
+      controlModel: "",
+      controlScale: 1,
+      upscaleModel: "",
+      gifPreview: false,
+      audioFile: null,
+      audioFilePath: "",
+      sourceVideo: null,
+      sourceVideoPath: "",
+      keyframes: [],
+      pipeline: null,
+      retakeRange: null,
+      spatialUpscale: null,
+      temporalUpscale: null,
+      placement: null,
+      loras: [],
+      enableAudio: null,
+      ...overrides,
+    };
+  }
+
+  it("sanitizePersistedForm strips binary media while preserving safe path references", () => {
+    const form = makeForm({
+      imageAttachments: [
+        { kind: "gallery", filename: "source.png", base64: "SOURCE_BYTES" },
+      ],
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK_BYTES" },
+      controlImage: {
+        kind: "upload",
+        filename: "control.png",
+        base64: "CONTROL_BYTES",
+      },
+      audioFile: {
+        kind: "upload",
+        filename: "voice.wav",
+        base64: "VOICE_BYTES",
+      },
+      audioFilePath: "/srv/voice.wav",
+      sourceVideo: {
+        kind: "upload",
+        filename: "clip.mp4",
+        base64: "VIDEO_BYTES",
+      },
+      sourceVideoPath: "/srv/clip.mp4",
+      keyframes: [
+        {
+          frame: 24,
+          image: { kind: "upload", filename: "kf.png", base64: "KF_BYTES" },
+        },
+      ],
+    });
+
+    const sanitized = sanitizePersistedForm(form);
+
+    expect(sanitized.imageAttachments).toEqual([]);
+    expect(sanitized.maskImage).toBeNull();
+    expect(sanitized.controlImage).toBeNull();
+    expect(sanitized.audioFile).toBeNull();
+    expect(sanitized.sourceVideo).toBeNull();
+    expect(sanitized.keyframes).toEqual([]);
+    expect(sanitized.audioFilePath).toBe("/srv/voice.wav");
+    expect(sanitized.sourceVideoPath).toBe("/srv/clip.mp4");
+    expect(JSON.stringify(sanitized)).not.toContain("_BYTES");
+  });
+
+  it("cloneTemplateForm preserves generation config including static seed and ordered LoRAs", () => {
+    const form = makeForm({
+      seedMode: "static",
+      seed: 777,
+      scheduler: "ddim",
+      loras: [
+        { path: "/loras/a.safetensors", scale: 0.5, trainedWords: ["a"] },
+        { path: "/loras/b.safetensors", scale: 1.2, trainedWords: ["b"] },
+      ],
+      placement: { text_encoders: { kind: "cpu" } },
+    });
+
+    const cloned = cloneTemplateForm(form);
+    cloned.loras[0].scale = 2;
+
+    expect(cloned.seedMode).toBe("static");
+    expect(cloned.seed).toBe(777);
+    expect(cloned.scheduler).toBe("ddim");
+    expect(cloned.loras).toEqual([
+      { path: "/loras/a.safetensors", scale: 2, trainedWords: ["a"] },
+      { path: "/loras/b.safetensors", scale: 1.2, trainedWords: ["b"] },
+    ]);
+    expect(form.loras[0].scale).toBe(0.5);
+  });
+
+  it("applyMetadataToForm restores recreate-safe metadata without carrying stale binary inputs", () => {
+    const current = makeForm({
+      prompt: "old prompt",
+      imageAttachments: [
+        { kind: "upload", filename: "old.png", base64: "OLD_BYTES" },
+      ],
+    });
+    const metadata: OutputMetadata = {
+      prompt: "new prompt",
+      negative_prompt: "blurry",
+      model: "sdxl:fp16",
+      seed: 42,
+      steps: 30,
+      guidance: 7.5,
+      width: 768,
+      height: 512,
+      strength: 0.6,
+      scheduler: "ddim",
+      output_format: "jpeg",
+      loras: [
+        { path: "/loras/one.safetensors", scale: 0.8 },
+        { path: "/loras/two.safetensors", scale: 1.1 },
+      ],
+      control_model: "controlnet-canny-sd15",
+      control_scale: 0.7,
+      upscale_model: "real-esrgan-x4plus:fp16",
+      gif_preview: true,
+      version: "0.12.0",
+    };
+
+    const next = applyMetadataToForm(current, metadata, {
+      format: "png",
+      models: [makeModel({ name: "sdxl:fp16", family: "sdxl" })],
+    });
+
+    expect(next.prompt).toBe("new prompt");
+    expect(next.negativePrompt).toBe("blurry");
+    expect(next.model).toBe("sdxl:fp16");
+    expect(next.modelFamily).toBe("sdxl");
+    expect(next.seedMode).toBe("static");
+    expect(next.seed).toBe(42);
+    expect(next.outputFormat).toBe("jpeg");
+    expect(next.imageAttachments).toEqual([]);
+    expect(next.loras).toEqual([
+      { path: "/loras/one.safetensors", scale: 0.8 },
+      { path: "/loras/two.safetensors", scale: 1.1 },
+    ]);
   });
 });

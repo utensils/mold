@@ -26,7 +26,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use mold_catalog::civitai_map::engine_phase_for;
-use mold_catalog::entry::Bundling;
+use mold_catalog::entry::{Bundling, Kind};
 use mold_catalog::families::Family;
 use serde_json::Value;
 use thiserror::Error;
@@ -72,9 +72,9 @@ pub enum LoadError {
     Header(String),
     /// Returned for any family whose single-file ingest path is not in
     /// scope yet. The `u8` is the canonical phase number from
-    /// `mold_catalog::civitai_map::engine_phase_for(family, Bundling::SingleFile)`
+    /// `mold_catalog::civitai_map::engine_phase_for(family, Bundling::SingleFile, Kind::Checkpoint)`
     /// so callers can render "arrives in mold phase N" without a second
-    /// lookup. `99` is the sentinel for "not in scope for any current phase".
+    /// lookup. Values at or above 6 mean unsupported by this build.
     #[error("family {0:?} is not a single-file family yet (phase {1})")]
     UnsupportedFamily(Family, u8),
 }
@@ -85,7 +85,7 @@ pub enum LoadError {
 /// Only the safetensors header is read — tensor data is left untouched.
 /// SD1.5 + SDXL produce `Ok(SingleFileBundle)`; every other family
 /// returns `Err(LoadError::UnsupportedFamily(family, engine_phase))`
-/// per `engine_phase_for(family, Bundling::SingleFile)`.
+/// per `engine_phase_for(family, Bundling::SingleFile, Kind::Checkpoint)`.
 pub fn load(path: &Path, family: Family) -> Result<SingleFileBundle, LoadError> {
     let clip_l_prefix = match family {
         Family::Sd15 => SD15_CLIP_L_PREFIX,
@@ -93,7 +93,7 @@ pub fn load(path: &Path, family: Family) -> Result<SingleFileBundle, LoadError> 
         other => {
             return Err(LoadError::UnsupportedFamily(
                 other,
-                engine_phase_for(other, Bundling::SingleFile),
+                engine_phase_for(other, Bundling::SingleFile, Kind::Checkpoint),
             ));
         }
     };
@@ -377,8 +377,8 @@ mod tests {
             (Family::ZImage, 4),
             (Family::LtxVideo, 5),
             (Family::Ltx2, 5),
-            (Family::QwenImage, 99),
-            (Family::Wuerstchen, 99),
+            (Family::QwenImage, 1),
+            (Family::Wuerstchen, 1),
         ];
 
         for (family, expected_phase) in cases {

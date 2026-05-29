@@ -1,17 +1,17 @@
 use axum::{
-    extract::{Request, State},
+    extract::{Path, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use base64::Engine as _;
 use mold_core::{
-    types::GpuSelection, ActiveGenerationStatus, GpuInfo, GpuWorkerState, ModelInfoExtended,
-    ResourceSnapshot, ServerStatus, SseErrorEvent, SseProgressEvent,
+    types::GpuSelection, ActiveGenerationStatus, GenerateRequest, GpuInfo, GpuWorkerState,
+    ModelInfoExtended, ResourceSnapshot, ServerStatus, SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -91,6 +91,22 @@ impl ApiError {
         }
     }
 
+    pub fn queue_job_not_found(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "QUEUE_JOB_NOT_FOUND".to_string(),
+            status: StatusCode::NOT_FOUND,
+        }
+    }
+
+    pub fn queue_job_running(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "QUEUE_JOB_RUNNING".to_string(),
+            status: StatusCode::CONFLICT,
+        }
+    }
+
     pub fn insufficient_memory(msg: impl Into<String>) -> Self {
         Self {
             error: msg.into(),
@@ -145,6 +161,8 @@ use crate::queue::clean_error_message;
         pull_model_endpoint,
         unload_model,
         server_status,
+        list_queue,
+        patch_queue_job,
         health,
         capabilities_chain_limits,
         crate::routes_chain::generate_chain,
@@ -173,6 +191,9 @@ use crate::queue::clean_error_message;
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,
+        QueuePatchRequest,
+        crate::job_registry::JobEntry,
+        crate::job_registry::QueueListing,
         crate::chain_limits::ChainLimits,
     )),
     tags(
@@ -193,6 +214,7 @@ pub fn create_router(state: AppState) -> Router {
     // Router<AppState> → Router<()>. Stateless routes (OpenAPI, docs) are merged after.
     Router::new()
         .route("/api/generate", post(generate))
+        .route("/api/generate/estimate", post(generate_estimate))
         .route("/api/generate/stream", post(generate_stream))
         .route(
             "/api/generate/chain",
@@ -204,6 +226,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/expand", post(expand_prompt))
         .route("/api/models", get(list_models))
+        .route("/api/models/:model/components", get(model_components))
         .route("/api/loras", get(crate::catalog_api::list_loras))
         .route("/api/models/load", post(load_model))
         .route("/api/models/pull", post(pull_model_endpoint))
@@ -246,6 +269,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/status", get(server_status))
         .route("/api/queue", get(list_queue))
+        .route("/api/queue/:id", patch(patch_queue_job))
         .route("/api/capabilities", get(server_capabilities))
         .route(
             "/api/capabilities/chain-limits",
@@ -323,7 +347,7 @@ fn save_image_to_dir(
 async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
-) -> Result<(Option<std::path::PathBuf>, Option<String>), ApiError> {
+) -> Result<(Option<std::path::PathBuf>, Option<String>, Option<usize>), ApiError> {
     // NOTE: the capacity check is enforced inside `state.queue.submit(...)` so
     // that a burst of concurrent callers can't all slip past an open check
     // (classic TOCTOU).  The submit call in `generate`/`generate_stream` will
@@ -380,7 +404,7 @@ async fn prepare_generation(
         (output_dir, dim_warning)
     };
 
-    Ok((output_dir, dim_warning))
+    Ok((output_dir, dim_warning, preferred_gpu))
 }
 
 pub(crate) async fn resolve_server_local_media_paths(
@@ -482,7 +506,7 @@ async fn generate(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (output_dir, dim_warning) = prepare_generation(&state, &mut req).await?;
+    let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
 
     tracing::info!(
         model = %req.model,
@@ -506,7 +530,9 @@ async fn generate(
     // SSE clients. Cleanup happens unconditionally on every terminal
     // path (drop guard in `gpu_worker::process_job`).
     let job_id = uuid::Uuid::new_v4().to_string();
-    state.job_registry.register(&job_id, &req.model);
+    state
+        .job_registry
+        .register_with_target_gpu(&job_id, &req.model, preferred_gpu);
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -1196,7 +1222,7 @@ async fn generate_stream(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    let (output_dir, dim_warning) = prepare_generation(&state, &mut req).await?;
+    let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
 
     tracing::info!(
         model = %req.model,
@@ -1218,7 +1244,9 @@ async fn generate_stream(
     // Assign a server-side ID and register before submit so the entry is
     // visible to /api/queue from the moment we accept the request.
     let job_id = uuid::Uuid::new_v4().to_string();
-    state.job_registry.register(&job_id, &req.model);
+    state
+        .job_registry
+        .register_with_target_gpu(&job_id, &req.model, preferred_gpu);
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -1272,6 +1300,24 @@ async fn generate_stream(
 )]
 async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtended>> {
     Json(model_manager::list_models(&state).await)
+}
+
+async fn generate_estimate(
+    State(state): State<AppState>,
+    Json(req): Json<GenerateRequest>,
+) -> Result<Json<mold_core::GenerationMemoryEstimate>, ApiError> {
+    Ok(Json(
+        model_manager::estimate_generation_memory(&state, &req).await?,
+    ))
+}
+
+async fn model_components(
+    State(state): State<AppState>,
+    Path(model): Path<String>,
+) -> Result<Json<mold_core::ModelComponentsResponse>, ApiError> {
+    Ok(Json(
+        model_manager::model_component_status(&state, &model).await?,
+    ))
 }
 
 // ── /api/models/load ──────────────────────────────────────────────────────────
@@ -1781,6 +1827,62 @@ async fn health() -> impl IntoResponse {
 )]
 async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::QueueListing> {
     Json(state.job_registry.snapshot())
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct QueuePatchRequest {
+    target_gpu: Option<usize>,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/queue/{id}",
+    tag = "queue",
+    request_body = QueuePatchRequest,
+    responses(
+        (status = 200, description = "Updated queue entry", body = crate::job_registry::JobEntry),
+        (status = 404, description = "Queue job not found"),
+        (status = 409, description = "Queue job is already running"),
+        (status = 422, description = "Invalid GPU target"),
+    )
+)]
+async fn patch_queue_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<QueuePatchRequest>,
+) -> Result<Json<crate::job_registry::JobEntry>, ApiError> {
+    if let Some(target) = req.target_gpu {
+        let available = state
+            .gpu_pool
+            .workers
+            .iter()
+            .any(|w| w.gpu.ordinal == target);
+        if !available {
+            return Err(ApiError::validation(format!(
+                "gpu:{target} is not available in this server's worker pool"
+            )));
+        }
+    }
+
+    state
+        .job_registry
+        .set_target_gpu(&id, req.target_gpu)
+        .map_err(|e| match e {
+            crate::job_registry::TargetGpuUpdateError::NotFound => {
+                ApiError::queue_job_not_found(format!("queue job {id} not found"))
+            }
+            crate::job_registry::TargetGpuUpdateError::AlreadyRunning => {
+                ApiError::queue_job_running(format!(
+                    "queue job {id} is already running; lane changes only apply to queued jobs"
+                ))
+            }
+        })?;
+
+    let entry = state
+        .job_registry
+        .entry(&id)
+        .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} not found")))?;
+    Ok(Json(entry))
 }
 
 // ── /api/capabilities ────────────────────────────────────────────────────────
@@ -2756,8 +2858,22 @@ fn synthesize_metadata_from_filename(filename: &str, timestamp: u64) -> mold_cor
         height: 0,
         strength: None,
         scheduler: None,
+        output_format: None,
+        cfg_plus: None,
         lora: None,
         lora_scale: None,
+        loras: None,
+        control_model: None,
+        control_scale: None,
+        upscale_model: None,
+        gif_preview: None,
+        enable_audio: None,
+        audio_file_path: None,
+        source_video_path: None,
+        pipeline: None,
+        retake_range: None,
+        spatial_upscale: None,
+        temporal_upscale: None,
         frames: None,
         fps: None,
         version: format!("synthesized@{timestamp}"),

@@ -1255,7 +1255,7 @@ impl ZImageEngine {
                 source_bytes,
                 req.width,
                 req.height,
-                img_utils::NormalizeRange::MinusOneToOne,
+                img_utils::NormalizeRange::ZeroToOne,
                 &encode_vae_device,
                 encode_vae_dtype,
             )?;
@@ -1673,7 +1673,7 @@ impl ZImageEngine {
                 source_bytes,
                 req.width,
                 req.height,
-                img_utils::NormalizeRange::MinusOneToOne,
+                img_utils::NormalizeRange::ZeroToOne,
                 vae_encode_device,
                 vae_encode_dtype,
             )?;
@@ -2410,6 +2410,34 @@ mod tests {
             "expected model timestep to match 1-sigma semantics, got {t} vs {}",
             1.0 - scheduler.sigmas[0]
         );
+    }
+
+    #[test]
+    fn zimage_img2img_source_decode_uses_vae_native_zero_to_one_range() {
+        let source = include_str!("pipeline.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("pipeline source should include production section");
+        let decode_sites = source
+            .split("let source_tensor = img_utils::decode_source_image(")
+            .skip(1)
+            .collect::<Vec<_>>();
+
+        assert_eq!(decode_sites.len(), 2);
+        for site in decode_sites {
+            let args = site
+                .split(")?;")
+                .next()
+                .expect("source decode call should terminate");
+            assert!(
+                args.contains("img_utils::NormalizeRange::ZeroToOne"),
+                "Z-Image source-image encoding must use the VAE-native [0, 1] range"
+            );
+            assert!(
+                !args.contains("img_utils::NormalizeRange::MinusOneToOne"),
+                "Z-Image source-image encoding must not use [-1, 1] normalization"
+            );
+        }
     }
 
     #[test]

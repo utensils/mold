@@ -453,6 +453,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_lists_target_gpu_for_queued_jobs() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state
+            .job_registry
+            .register_with_target_gpu("aaaa", "flux-dev:fp16", Some(1));
+
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let entries = body["entries"].as_array().expect("entries array");
+        assert_eq!(entries[0]["state"], "queued");
+        assert_eq!(entries[0]["target_gpu"], 1);
+        assert!(
+            entries[0].get("gpu").is_none(),
+            "queued rows still must not emit running gpu: {}",
+            entries[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_queue_target_gpu_updates_queued_job_and_allows_auto() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        assert!(
+            state.gpu_pool.workers.is_empty(),
+            "test assumes explicit empty worker pool"
+        );
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["id"], "aaaa");
+        assert!(body.get("target_gpu").is_none());
+    }
+
+    #[tokio::test]
+    async fn patch_queue_target_gpu_rejects_already_running_jobs() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        state.job_registry.mark_running("aaaa", Some(0));
+
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "QUEUE_JOB_RUNNING");
+    }
+
+    #[tokio::test]
     async fn status_when_no_model() {
         let app = app_empty();
         let resp = app
@@ -679,6 +749,124 @@ mod tests {
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn generate_estimate_returns_server_memory_estimate() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("estimate");
+        populate_manifest_files(&models_dir, "sdxl-base:fp16");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let app = app_empty();
+        let body = serde_json::json!({
+            "prompt": "a cat",
+            "model": "sdxl-base:fp16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 7.5,
+            "batch_size": 1,
+            "output_format": "png"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/estimate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = json_body(resp).await;
+        assert_eq!(json["model"], "sdxl-base:fp16");
+        assert!(json["peak_memory_bytes"].as_u64().unwrap() > 0);
+        assert!(json["activation_memory_bytes"].as_u64().unwrap() > 0);
+        assert!(json["load_strategy"].as_str().is_some());
+        let base_peak = json["peak_memory_bytes"].as_u64().unwrap();
+
+        let larger_body = serde_json::json!({
+            "prompt": "a cat",
+            "model": "sdxl-base:fp16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 7.5,
+            "negative_prompt": "blurry",
+            "batch_size": 2,
+            "source_image": "aW1hZ2U=",
+            "mask_image": "bWFzaw==",
+            "control_image": "Y29udHJvbA==",
+            "control_model": "controlnet-canny-sd15",
+            "upscale_model": "real-esrgan-x4plus:fp16",
+            "loras": [{"path": "/tmp/style.safetensors", "scale": 0.8}],
+            "output_format": "png"
+        });
+        let larger_resp = app
+            .oneshot(
+                Request::post("/api/generate/estimate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(larger_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(larger_resp.status(), StatusCode::OK);
+        let larger_json = json_body(larger_resp).await;
+        assert!(
+            larger_json["peak_memory_bytes"].as_u64().unwrap() > base_peak,
+            "request-sensitive knobs should raise the estimate: base={base_peak} larger={}",
+            larger_json["peak_memory_bytes"]
+        );
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn model_components_reports_present_and_missing_manifest_assets() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("components");
+        let manifest = mold_core::manifest::find_manifest("sdxl-base:fp16").unwrap();
+        for file in manifest.files.iter().take(1) {
+            let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"test").unwrap();
+            mold_core::download::write_sha256_marker(&path, "deadbeef").unwrap();
+        }
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::get("/api/models/sdxl-base%3Afp16/components")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = json_body(resp).await;
+        assert_eq!(json["model"], "sdxl-base:fp16");
+        let components = json["components"].as_array().unwrap();
+        assert!(components.iter().any(|c| c["present"] == true));
+        assert!(components.iter().any(|c| c["present"] == false));
+        assert!(components
+            .iter()
+            .all(|c| c["repair_model"] == "sdxl-base:fp16"));
+        assert!(components.iter().all(|c| c["options"].is_array()));
+        assert!(components.iter().any(|c| c["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|opt| opt["present"] == true)));
+
+        std::env::remove_var("MOLD_MODELS_DIR");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2091,8 +2279,22 @@ mod tests {
             height: 64,
             strength: None,
             scheduler: None,
+            output_format: Some(mold_core::OutputFormat::Png),
+            cfg_plus: None,
             lora: None,
             lora_scale: None,
+            loras: None,
+            control_model: None,
+            control_scale: None,
+            upscale_model: None,
+            gif_preview: None,
+            enable_audio: None,
+            audio_file_path: None,
+            source_video_path: None,
+            pipeline: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
             frames: None,
             fps: None,
             version: "test".into(),
@@ -2310,8 +2512,22 @@ mod tests {
             height: 1,
             strength: None,
             scheduler: None,
+            output_format: Some(mold_core::OutputFormat::Png),
+            cfg_plus: None,
             lora: None,
             lora_scale: None,
+            loras: None,
+            control_model: None,
+            control_scale: None,
+            upscale_model: None,
+            gif_preview: None,
+            enable_audio: None,
+            audio_file_path: None,
+            source_video_path: None,
+            pipeline: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
             frames: None,
             fps: None,
             version: "t".into(),

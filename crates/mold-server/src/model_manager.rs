@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use mold_core::{
-    build_model_catalog, Config, GenerateRequest, ModelDefaults, ModelInfo, ModelInfoExtended,
+    build_model_catalog, Config, GenerateRequest, GenerationMemoryEstimate, ModelComponentOption,
+    ModelComponentStatus, ModelComponentsResponse, ModelDefaults, ModelInfo, ModelInfoExtended,
     ModelPaths,
 };
 use mold_inference::device::{activation_bytes, activation_family_for, ActivationFamily};
@@ -196,36 +199,13 @@ pub(crate) fn preflight_memory_guard_with_available(
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-    let peak = if streaming {
-        // LTX-2 also pays for a Gemma 3 12B prompt encoder. Auto placement
-        // may try GPU first, but the runtime catches prompt-encoder CUDA OOMs
-        // and retries on CPU before loading the streamed transformer. Preflight
-        // must not reject that recoverable path. Only an explicit same-GPU pin
-        // (`MOLD_LTX2_GEMMA_DEVICE=gpu`) is counted against this GPU because
-        // the runtime will surface that OOM instead of rewriting the request.
-        let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
-        streaming_transformer_peak(paths, gemma_competes)
-    } else if forced_flux_offload {
-        streaming_transformer_peak(paths, false)
-    } else if hint.is_some_and(|h| h.family == ActivationFamily::Sd3Mmdit) {
-        sd3_sequential_peak(paths)
-    } else if qwen_quantized {
-        qwen_image_quantized_sequential_peak(paths, hint)
-    } else {
-        mold_inference::device::estimate_peak_memory(
-            paths,
-            mold_inference::LoadStrategy::Sequential,
-        )
-    };
+    let peak =
+        base_peak_memory_for_paths(paths, hint, streaming, forced_flux_offload, qwen_quantized);
     // Add the per-request activation budget on top of the file-size peak.
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
     // is a generic "kernels + small state" constant that doesn't scale; the
     // hint is the resolution/dtype/arch-aware delta on top.
-    let activation = if qwen_quantized {
-        0
-    } else {
-        hint.map(|h| h.budget_bytes()).unwrap_or(0)
-    };
+    let activation = activation_memory_for_estimate(hint, qwen_quantized);
     let peak_with_activation = peak.saturating_add(activation);
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
     if qwen_quantized && peak_with_activation <= effective_available {
@@ -239,6 +219,41 @@ pub(crate) fn preflight_memory_guard_with_available(
         effective_available,
         suggestion,
     )
+}
+
+fn base_peak_memory_for_paths(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    streaming: bool,
+    forced_flux_offload: bool,
+    qwen_quantized: bool,
+) -> u64 {
+    if streaming {
+        // LTX-2 also pays for a Gemma 3 12B prompt encoder. Auto placement
+        // may try GPU first, but the runtime catches prompt-encoder CUDA OOMs
+        // and retries on CPU before loading the streamed transformer. Preflight
+        // must not reject that recoverable path. Only an explicit same-GPU pin
+        // (`MOLD_LTX2_GEMMA_DEVICE=gpu`) is counted against this GPU because
+        // the runtime will surface that OOM instead of rewriting the request.
+        let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
+        return streaming_transformer_peak(paths, gemma_competes);
+    } else if forced_flux_offload {
+        return streaming_transformer_peak(paths, false);
+    } else if hint.is_some_and(|h| h.family == ActivationFamily::Sd3Mmdit) {
+        return sd3_sequential_peak(paths);
+    } else if qwen_quantized {
+        return qwen_image_quantized_sequential_peak(paths, hint);
+    }
+
+    mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Sequential)
+}
+
+fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: bool) -> u64 {
+    if qwen_quantized {
+        0
+    } else {
+        hint.map(|h| h.budget_bytes()).unwrap_or(0)
+    }
 }
 
 /// Peak GPU residency for streaming-transformer families. Mirrors the
@@ -896,6 +911,24 @@ fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, pat
                 .collect::<Vec<_>>()
                 .into();
         }
+        "qwen-image-runtime" => {
+            cfg.vae = to_str(&paths.vae);
+            cfg.text_encoder_files = paths
+                .text_encoder_files
+                .iter()
+                .filter_map(to_str)
+                .collect::<Vec<_>>()
+                .into();
+            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_str);
+        }
+        "wuerstchen-runtime" => {
+            cfg.vae = to_str(&paths.vae);
+            cfg.decoder = paths.decoder.as_ref().and_then(to_str);
+            cfg.clip_encoder = paths.clip_encoder.as_ref().and_then(to_str);
+            cfg.clip_tokenizer = paths.clip_tokenizer.as_ref().and_then(to_str);
+            cfg.clip_encoder_2 = paths.clip_encoder_2.as_ref().and_then(to_str);
+            cfg.clip_tokenizer_2 = paths.clip_tokenizer_2.as_ref().and_then(to_str);
+        }
         _ => {}
     }
 }
@@ -976,6 +1009,8 @@ fn known_companion_static(name: &str) -> Option<&'static str> {
         "z-image-te" => "z-image-te",
         "ltx-video-vae" => "ltx-video-vae",
         "ltx2-te" => "ltx2-te",
+        "qwen-image-runtime" => "qwen-image-runtime",
+        "wuerstchen-runtime" => "wuerstchen-runtime",
         "t5-v1_1-xxl" => "t5-v1_1-xxl",
         _ => return None,
     })
@@ -1588,6 +1623,358 @@ pub(crate) async fn check_model_available(
     Err(ApiError::unknown_model(format!(
         "unknown model '{model_name}'. Run 'mold list' to see available models."
     )))
+}
+
+pub(crate) async fn estimate_generation_memory(
+    state: &AppState,
+    req: &GenerateRequest,
+) -> Result<GenerationMemoryEstimate, ApiError> {
+    let paths = match check_model_available(state, &req.model).await? {
+        Some(paths) => paths,
+        None => {
+            let config = state.config.read().await;
+            ModelPaths::resolve(&req.model, &config).ok_or_else(|| {
+                ApiError::not_found(format!(
+                    "model '{}' is loaded but runtime paths are not available for estimation",
+                    req.model
+                ))
+            })?
+        }
+    };
+    let hint = activation_hint_for_request(state, req).await;
+    let transformer_path = transformer_path_lower(&paths);
+    let streaming = hint
+        .map(|h| h.family.streaming_transformer())
+        .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
+    let forced_flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
+        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
+        && paths
+            .transformer
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+    let base_peak =
+        base_peak_memory_for_paths(&paths, hint, streaming, forced_flux_offload, qwen_quantized);
+    let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
+    let peak = base_peak.saturating_add(activation);
+    let available = effective_load_available_bytes(0, 0);
+    let load_strategy = select_server_load_strategy_for_budget(&paths, available, hint);
+    let fits = available.map(|available| peak <= available.saturating_mul(9) / 10);
+
+    Ok(GenerationMemoryEstimate {
+        model: req.model.clone(),
+        peak_memory_bytes: peak,
+        activation_memory_bytes: activation,
+        available_memory_bytes: available,
+        load_strategy: format!("{load_strategy:?}").to_ascii_lowercase(),
+        fits_available_memory: fits,
+    })
+}
+
+fn request_sensitive_activation_memory(
+    req: &GenerateRequest,
+    hint: Option<ActivationHint>,
+    qwen_quantized: bool,
+) -> u64 {
+    let base = activation_memory_for_estimate(hint, qwen_quantized);
+    let batch = u64::from(req.batch_size.max(1));
+    let video_frames = u64::from(req.frames.unwrap_or(1).max(1));
+    let video_factor = if hint.is_some_and(|h| h.family.streaming_transformer()) {
+        // Video runtimes denoise multiple latent frames but do not keep every
+        // frame's full activation workspace resident at once. Scale
+        // sublinearly so longer clips still move the estimate without
+        // turning it into a file-size guess.
+        video_frames.div_ceil(25).max(1)
+    } else {
+        1
+    };
+    let cfg_factor = if req.guidance > 1.0 && req.negative_prompt.is_some() {
+        2
+    } else {
+        1
+    };
+
+    let mut activation = base
+        .saturating_mul(batch)
+        .saturating_mul(video_factor)
+        .saturating_mul(cfg_factor);
+
+    let pixel_bytes = u64::from(req.width)
+        .saturating_mul(u64::from(req.height))
+        .saturating_mul(4);
+    if req.source_image.is_some()
+        || req
+            .edit_images
+            .as_ref()
+            .is_some_and(|images| !images.is_empty())
+    {
+        activation = activation.saturating_add(pixel_bytes.saturating_mul(batch));
+    }
+    if req.mask_image.is_some() {
+        activation = activation.saturating_add(pixel_bytes / 2);
+    }
+    if req.control_image.is_some() || req.control_model.as_deref().is_some_and(|m| !m.is_empty()) {
+        activation = activation.saturating_add(pixel_bytes.saturating_mul(2));
+    }
+    if req.upscale_model.as_deref().is_some_and(|m| !m.is_empty()) {
+        activation = activation.saturating_add(pixel_bytes.saturating_mul(4));
+    }
+    let lora_count = req
+        .loras
+        .as_ref()
+        .map(|loras| loras.len())
+        .unwrap_or_else(|| usize::from(req.lora.is_some())) as u64;
+    activation.saturating_add(lora_count.saturating_mul(128 * 1024 * 1024))
+}
+
+pub(crate) async fn model_component_status(
+    state: &AppState,
+    model_name: &str,
+) -> Result<ModelComponentsResponse, ApiError> {
+    let resolved = mold_core::manifest::resolve_model_name(model_name);
+    if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
+        let config = state.config.read().await;
+        let models_dir = config.resolved_models_dir();
+        let components = manifest
+            .files
+            .iter()
+            .map(|file| {
+                let kind = manifest_component_kind(file.component);
+                let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+                ModelComponentStatus {
+                    kind: kind.to_string(),
+                    name: manifest_component_name(file.component, &file.hf_filename).to_string(),
+                    present: path.is_file(),
+                    path: Some(path.to_string_lossy().to_string()),
+                    repair_model: Some(resolved.clone()),
+                    options: component_options_for_kind(&config, kind, Some(&path)),
+                }
+            })
+            .collect();
+        return Ok(ModelComponentsResponse {
+            model: resolved,
+            components,
+        });
+    }
+
+    let config = state.config.read().await;
+    let Some(paths) = ModelPaths::resolve(model_name, &config) else {
+        return Err(ApiError::unknown_model(format!(
+            "unknown model '{model_name}'. Run 'mold list' to see available models."
+        )));
+    };
+    Ok(ModelComponentsResponse {
+        model: model_name.to_string(),
+        components: component_status_from_paths(&config, model_name, &paths),
+    })
+}
+
+fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'static str {
+    use mold_core::manifest::ModelComponent;
+    match component {
+        ModelComponent::Transformer | ModelComponent::TransformerShard => "transformer",
+        ModelComponent::Vae => "vae",
+        ModelComponent::SpatialUpscaler => "spatial_upscaler",
+        ModelComponent::TemporalUpscaler => "temporal_upscaler",
+        ModelComponent::DistilledLora => "distilled_lora",
+        ModelComponent::T5Encoder | ModelComponent::TextEncoder => "text_encoder",
+        ModelComponent::ClipEncoder | ModelComponent::ClipEncoder2 => "clip",
+        ModelComponent::T5Tokenizer
+        | ModelComponent::ClipTokenizer
+        | ModelComponent::ClipTokenizer2
+        | ModelComponent::TextTokenizer => "tokenizer",
+        ModelComponent::Decoder => "decoder",
+        ModelComponent::Upscaler => "upscaler",
+    }
+}
+
+fn manifest_component_name(component: mold_core::manifest::ModelComponent, filename: &str) -> &str {
+    use mold_core::manifest::ModelComponent;
+    match component {
+        ModelComponent::Transformer => "transformer",
+        ModelComponent::TransformerShard => "transformer shard",
+        ModelComponent::Vae => "vae",
+        ModelComponent::SpatialUpscaler => "spatial upscaler",
+        ModelComponent::TemporalUpscaler => "temporal upscaler",
+        ModelComponent::DistilledLora => "distilled lora",
+        ModelComponent::T5Encoder => "t5 encoder",
+        ModelComponent::ClipEncoder => "clip encoder",
+        ModelComponent::T5Tokenizer => "t5 tokenizer",
+        ModelComponent::ClipTokenizer => "clip tokenizer",
+        ModelComponent::ClipEncoder2 => "clip-g encoder",
+        ModelComponent::ClipTokenizer2 => "clip-g tokenizer",
+        ModelComponent::TextEncoder => "text encoder",
+        ModelComponent::TextTokenizer => "text tokenizer",
+        ModelComponent::Decoder => "decoder",
+        ModelComponent::Upscaler => filename,
+    }
+}
+
+fn component_status_from_paths(
+    config: &Config,
+    model_name: &str,
+    paths: &ModelPaths,
+) -> Vec<ModelComponentStatus> {
+    let mut components = Vec::new();
+    let mut push_path = |kind: &str, name: &str, path: &std::path::Path| {
+        components.push(ModelComponentStatus {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            present: path.is_file(),
+            path: Some(path.to_string_lossy().to_string()),
+            repair_model: Some(model_name.to_string()),
+            options: component_options_for_kind(config, kind, Some(path)),
+        });
+    };
+    push_path("transformer", "transformer", &paths.transformer);
+    for shard in &paths.transformer_shards {
+        push_path("transformer", "transformer shard", shard);
+    }
+    push_path("vae", "vae", &paths.vae);
+    if let Some(path) = &paths.spatial_upscaler {
+        push_path("spatial_upscaler", "spatial upscaler", path);
+    }
+    if let Some(path) = &paths.temporal_upscaler {
+        push_path("temporal_upscaler", "temporal upscaler", path);
+    }
+    if let Some(path) = &paths.distilled_lora {
+        push_path("distilled_lora", "distilled lora", path);
+    }
+    if let Some(path) = &paths.t5_encoder {
+        push_path("text_encoder", "t5 encoder", path);
+    }
+    if let Some(path) = &paths.clip_encoder {
+        push_path("clip", "clip encoder", path);
+    }
+    if let Some(path) = &paths.clip_encoder_2 {
+        push_path("clip", "clip-g encoder", path);
+    }
+    for path in &paths.text_encoder_files {
+        push_path("text_encoder", "text encoder", path);
+    }
+    if let Some(path) = &paths.decoder {
+        push_path("decoder", "decoder", path);
+    }
+    components
+}
+
+fn component_options_for_kind(
+    config: &Config,
+    kind: &str,
+    current_path: Option<&Path>,
+) -> Vec<ModelComponentOption> {
+    let mut options = BTreeMap::<String, ModelComponentOption>::new();
+    if let Some(path) = current_path {
+        add_component_option(&mut options, path);
+    }
+    for model_cfg in config.models.values() {
+        for path in config_component_paths_for_kind(model_cfg, kind) {
+            add_component_option(&mut options, Path::new(path));
+        }
+    }
+    let models_dir = config.resolved_models_dir();
+    for manifest in mold_core::manifest::known_manifests() {
+        for file in &manifest.files {
+            if manifest_component_kind(file.component) != kind {
+                continue;
+            }
+            let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+            if path.is_file() {
+                add_component_option(&mut options, &path);
+            }
+        }
+    }
+    options.into_values().collect()
+}
+
+fn config_component_paths_for_kind<'a>(
+    model_cfg: &'a mold_core::config::ModelConfig,
+    kind: &str,
+) -> Vec<&'a str> {
+    let mut paths = Vec::new();
+    match kind {
+        "transformer" => {
+            if let Some(path) = model_cfg.transformer.as_deref() {
+                paths.push(path);
+            }
+            if let Some(shards) = &model_cfg.transformer_shards {
+                paths.extend(shards.iter().map(String::as_str));
+            }
+        }
+        "vae" => {
+            if let Some(path) = model_cfg.vae.as_deref() {
+                paths.push(path);
+            }
+        }
+        "text_encoder" => {
+            if let Some(path) = model_cfg.t5_encoder.as_deref() {
+                paths.push(path);
+            }
+            if let Some(files) = &model_cfg.text_encoder_files {
+                paths.extend(files.iter().map(String::as_str));
+            }
+        }
+        "clip" => {
+            if let Some(path) = model_cfg.clip_encoder.as_deref() {
+                paths.push(path);
+            }
+            if let Some(path) = model_cfg.clip_encoder_2.as_deref() {
+                paths.push(path);
+            }
+        }
+        "tokenizer" => {
+            for path in [
+                model_cfg.t5_tokenizer.as_deref(),
+                model_cfg.clip_tokenizer.as_deref(),
+                model_cfg.clip_tokenizer_2.as_deref(),
+                model_cfg.text_tokenizer.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                paths.push(path);
+            }
+        }
+        "spatial_upscaler" => {
+            if let Some(path) = model_cfg.spatial_upscaler.as_deref() {
+                paths.push(path);
+            }
+        }
+        "temporal_upscaler" => {
+            if let Some(path) = model_cfg.temporal_upscaler.as_deref() {
+                paths.push(path);
+            }
+        }
+        "distilled_lora" => {
+            if let Some(path) = model_cfg.distilled_lora.as_deref() {
+                paths.push(path);
+            }
+        }
+        "decoder" => {
+            if let Some(path) = model_cfg.decoder.as_deref() {
+                paths.push(path);
+            }
+        }
+        _ => {}
+    }
+    paths
+}
+
+fn add_component_option(options: &mut BTreeMap<String, ModelComponentOption>, path: &Path) {
+    let path_str = path.to_string_lossy().to_string();
+    options.entry(path_str.clone()).or_insert_with(|| {
+        let label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path_str.as_str())
+            .to_string();
+        ModelComponentOption {
+            label,
+            path: path_str,
+            present: path.is_file(),
+        }
+    });
 }
 
 /// Ensure the requested model is loaded on GPU and ready for inference.
@@ -4122,6 +4509,123 @@ mod tests {
                 None => std::env::remove_var("MOLD_HOME"),
             }
         }
+    }
+
+    #[test]
+    fn resolve_intent_populates_qwen_runtime_companion_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let primary_path =
+            models_dir.join("cv-2110043/qwen-image/civitai/2110043/qwenImage_fp8.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&primary_path).unwrap();
+
+        let runtime_dir = models_dir.join("qwen-image-runtime");
+        let vae_path = runtime_dir.join("vae/diffusion_pytorch_model.safetensors");
+        let te_path = runtime_dir.join("text_encoder/model-00001-of-00004.safetensors");
+        let tok_path = runtime_dir.join("tokenizer/tokenizer.json");
+        for path in [&vae_path, &te_path, &tok_path] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(path).unwrap();
+        }
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.models.insert(
+            "qwen-image-runtime".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(vae_path.to_string_lossy().into_owned()),
+                vae: Some(vae_path.to_string_lossy().into_owned()),
+                text_encoder_files: Some(vec![te_path.to_string_lossy().into_owned()]),
+                text_tokenizer: Some(tok_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+
+        let mut entry = flux_unet_only_catalog_entry("2110043", "qwenImage_fp8.safetensors");
+        entry.family = mold_catalog::families::Family::QwenImage;
+        entry.companions = vec!["qwen-image-runtime".into()];
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let cfg = resolve_intent_to_paths("cv:2110043", &intent, &config).unwrap();
+
+        assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
+        assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
+        assert_eq!(
+            cfg.text_encoder_files.as_deref(),
+            Some(vec![te_path.to_string_lossy().into_owned()].as_slice())
+        );
+        assert_eq!(cfg.text_tokenizer.as_deref(), tok_path.to_str());
+    }
+
+    #[test]
+    fn resolve_intent_populates_wuerstchen_runtime_companion_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let primary_path = models_dir.join(
+            "hf-example/wuerstchen-prior/wuerstchen/example/wuerstchen-prior/prior.safetensors",
+        );
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        std::fs::File::create(&primary_path).unwrap();
+
+        let runtime_dir = models_dir.join("wuerstchen-runtime");
+        let decoder_path = runtime_dir.join("decoder/diffusion_pytorch_model.safetensors");
+        let vae_path = runtime_dir.join("vqgan/diffusion_pytorch_model.safetensors");
+        let clip_path = runtime_dir.join("text_encoder/model.safetensors");
+        let clip_tok_path = runtime_dir.join("tokenizer/tokenizer.json");
+        let clip_g_path = runtime_dir.join("prior/text_encoder/model.safetensors");
+        let clip_g_tok_path = runtime_dir.join("prior/tokenizer/tokenizer.json");
+        for path in [
+            &decoder_path,
+            &vae_path,
+            &clip_path,
+            &clip_tok_path,
+            &clip_g_path,
+            &clip_g_tok_path,
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(path).unwrap();
+        }
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.models.insert(
+            "wuerstchen-runtime".into(),
+            mold_core::ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(decoder_path.to_string_lossy().into_owned()),
+                decoder: Some(decoder_path.to_string_lossy().into_owned()),
+                vae: Some(vae_path.to_string_lossy().into_owned()),
+                clip_encoder: Some(clip_path.to_string_lossy().into_owned()),
+                clip_tokenizer: Some(clip_tok_path.to_string_lossy().into_owned()),
+                clip_encoder_2: Some(clip_g_path.to_string_lossy().into_owned()),
+                clip_tokenizer_2: Some(clip_g_tok_path.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+
+        let mut entry = flux_unet_only_catalog_entry("unused", "prior.safetensors");
+        entry.id = mold_catalog::entry::CatalogId::from("hf:example/wuerstchen-prior");
+        entry.source = mold_catalog::entry::Source::Hf;
+        entry.source_id = "example/wuerstchen-prior".into();
+        entry.family = mold_catalog::families::Family::Wuerstchen;
+        entry.companions = vec!["wuerstchen-runtime".into()];
+        entry.download_recipe.files[0].dest = "{family}/{author}/{name}/prior.safetensors".into();
+
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let cfg = resolve_intent_to_paths("hf:example/wuerstchen-prior", &intent, &config).unwrap();
+
+        assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
+        assert_eq!(cfg.decoder.as_deref(), decoder_path.to_str());
+        assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
+        assert_eq!(cfg.clip_encoder.as_deref(), clip_path.to_str());
+        assert_eq!(cfg.clip_tokenizer.as_deref(), clip_tok_path.to_str());
+        assert_eq!(cfg.clip_encoder_2.as_deref(), clip_g_path.to_str());
+        assert_eq!(cfg.clip_tokenizer_2.as_deref(), clip_g_tok_path.to_str());
     }
 
     #[test]

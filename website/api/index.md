@@ -8,10 +8,12 @@ When running `mold serve`, you get a REST API for remote image generation.
 | -------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `POST`   | `/api/generate`                     | Generate images from prompt                                                                                       |
 | `POST`   | `/api/generate/stream`              | Generate with SSE progress streaming                                                                              |
+| `POST`   | `/api/generate/estimate`            | Estimate request-sensitive peak memory for a generation request                                                   |
 | `POST`   | `/api/generate/chain`               | Chained video generation (LTX-2)                                                                                  |
 | `POST`   | `/api/generate/chain/stream`        | Chained video with SSE progress                                                                                   |
 | `POST`   | `/api/expand`                       | Expand a prompt using LLM                                                                                         |
 | `GET`    | `/api/models`                       | List available models                                                                                             |
+| `GET`    | `/api/models/:model/components`     | List required model component readiness and paths                                                                 |
 | `GET`    | `/api/loras`                        | List installed LoRAs, optionally filtered by `?model=` compatibility                                              |
 | `POST`   | `/api/models/load`                  | Load/swap the active model                                                                                        |
 | `POST`   | `/api/models/pull`                  | Pull/download a model                                                                                             |
@@ -35,6 +37,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `GET`    | `/api/resources`                    | Latest RAM/GPU resource snapshot                                                                                  |
 | `GET`    | `/api/resources/stream`             | Resource snapshots as SSE                                                                                         |
 | `GET`    | `/api/queue`                        | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
+| `PATCH`  | `/api/queue/:id`                    | Update the preferred GPU lane for a queued job                                                                    |
 | `GET`    | `/api/capabilities`                 | Feature capabilities (gallery delete, chain limits, …)                                                            |
 | `GET`    | `/api/capabilities/chain-limits`    | Chain-generation request limits                                                                                   |
 | `PUT`    | `/api/config/model/:name/placement` | Save model-specific device placement defaults                                                                     |
@@ -241,7 +244,7 @@ Important fields:
 | `enable_audio`, `audio_file`, `audio_file_path`     | LTX-2 synchronized audio toggle and audio-to-video input. Path input is server-local and requires configured `media_roots` / `MOLD_MEDIA_ROOTS`. |
 | `source_video`, `source_video_path`, `retake_range` | LTX-2 retake/video-conditioning source and seconds range. Path input is server-local and cannot be combined with inline base64 bytes.            |
 | `keyframes`, `pipeline`                             | LTX-2 keyframe and explicit pipeline selection (`one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2vid`, `retake`) |
-| `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1.5` and `x2`                                                                                             |
+| `spatial_upscale`, `temporal_upscale`               | LTX-2 latent upscaling modes such as `x1-5` and `x2`                                                                                             |
 | `placement`                                         | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                |
 | `cfg_plus`                                          | CFG++ guidance for supported SD-family scheduler paths                                                                                           |
 | `embed_metadata`                                    | override config/env metadata embedding for this request                                                                                          |
@@ -249,6 +252,50 @@ Important fields:
 
 The exhaustive schema for enums and nested objects is served by the running
 server at `/api/docs` and `/api/openapi.json`.
+
+## `/api/generate/estimate`
+
+`POST /api/generate/estimate` accepts the same JSON shape as
+`/api/generate` and returns the server's current peak-memory estimate for that
+request. The estimate accounts for model files, resolution, batch, frames,
+placement, and runtime load strategy.
+
+```bash
+curl -X POST http://localhost:7680/api/generate/estimate \
+  -H "Content-Type: application/json" \
+  -d '{"model":"flux-dev:q8","prompt":"a cat","width":1024,"height":1024}'
+```
+
+The response includes `peak_memory_bytes`, `activation_memory_bytes`,
+`load_strategy`, and optional available-memory fit fields.
+
+## `/api/models/:model/components`
+
+`GET /api/models/:model/components` reports the component assets the server
+expects for a model and whether each one is present. The Generate UI uses this
+to highlight missing text encoders, VAEs, transformers, and companion files
+with a path back to the model catalog.
+
+```bash
+curl "http://localhost:7680/api/models/flux-dev:q8/components"
+```
+
+## `/api/queue`
+
+`GET /api/queue` returns queued and running generation jobs. Running jobs carry
+their actual `gpu`; queued jobs carry an optional `target_gpu` so UI clients
+can render one lane per GPU plus an automatic lane.
+
+Use `PATCH /api/queue/:id` to update a queued job's preferred lane:
+
+```bash
+curl -X PATCH http://localhost:7680/api/queue/00000000-0000-0000-0000-000000000000 \
+  -H "Content-Type: application/json" \
+  -d '{"target_gpu":0}'
+```
+
+Set `target_gpu` to `null` to return the queued job to automatic placement.
+Already-running jobs reject lane changes.
 
 ## `/api/loras`
 

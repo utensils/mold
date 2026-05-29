@@ -886,15 +886,22 @@ fn lora_family_for_model_filter(model: &str) -> Option<String> {
     let canonical = crate::manifest::resolve_model_name(model);
     crate::manifest::find_manifest(&canonical)
         .or_else(|| crate::manifest::find_manifest(model))
-        .map(|manifest| manifest.family.clone())
+        .map(|manifest| catalog_lora_family_filter(&manifest.family))
         .or_else(|| {
             let config = crate::Config::load_or_default();
             config
                 .models
                 .get(model)
                 .or_else(|| config.models.get(&canonical))
-                .and_then(|model| model.family.clone())
+                .and_then(|model| model.family.as_deref().map(catalog_lora_family_filter))
         })
+}
+
+fn catalog_lora_family_filter(family: &str) -> String {
+    match family {
+        "qwen-image-edit" | "qwen_image_edit" => "qwen-image".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Parsed video metadata from `x-mold-video-*` response headers.
@@ -1216,6 +1223,14 @@ mod tests {
             "/models/cv-827325/fluxRealSkin-V2.safetensors"
         );
         assert_eq!(loras[0].trained_words, ["realskin"]);
+    }
+
+    #[test]
+    fn qwen_edit_lora_fallback_uses_qwen_image_catalog_family() {
+        assert_eq!(
+            lora_family_for_model_filter("qwen-image-edit-2511:q4"),
+            Some("qwen-image".to_string())
+        );
     }
 
     #[test]

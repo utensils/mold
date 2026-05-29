@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  fetchQueue,
   generateStream,
   generateChainStream,
+  updateQueueJobTargetGpu,
   type ChainStreamHandlers,
   type GenerateStreamHandlers,
 } from "./api";
@@ -85,6 +87,63 @@ function installDriver(
 
 afterEach(() => {
   vi.mocked(streamSse).mockReset();
+});
+
+describe("queue api", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("fetchQueue preserves queued target_gpu metadata", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          entries: [
+            {
+              id: "srv-1",
+              model: "flux-dev:q4",
+              state: "queued",
+              started_at_unix_ms: 0,
+              position: 0,
+              target_gpu: 1,
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const listing = await fetchQueue();
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/queue", { signal: undefined });
+    expect(listing.entries[0].target_gpu).toBe(1);
+  });
+
+  it("PATCHes queued job target_gpu including null for Auto", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "srv-1",
+          model: "flux-dev:q4",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateQueueJobTargetGpu("srv-1", null);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/queue/srv-1", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target_gpu: null }),
+      signal: undefined,
+    });
+  });
 });
 
 describe("generateStream", () => {

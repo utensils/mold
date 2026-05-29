@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Composer from "../components/Composer.vue";
 import GenerateParamsPanel from "../components/GenerateParamsPanel.vue";
 type GenerateParamsPanelInstance = InstanceType<typeof GenerateParamsPanel>;
+import LoraPicker from "../components/LoraPicker.vue";
+import ModelPicker from "../components/ModelPicker.vue";
 import PreferencesModal from "../components/PreferencesModal.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
@@ -10,21 +12,32 @@ import RunningStrip from "../components/RunningStrip.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
 import TopBar from "../components/TopBar.vue";
-import { deleteGalleryImage, fetchModels, listGallery } from "../api";
-import { useGenerateForm } from "../composables/useGenerateForm";
+import {
+  deleteGalleryImage,
+  fetchModels,
+  listGallery,
+  updateQueueJobTargetGpu,
+} from "../api";
+import {
+  applyMetadataToForm,
+  useGenerateForm,
+} from "../composables/useGenerateForm";
 import { isQwenImageEditFamily } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
-import { useHideMode } from "../composables/useHideMode";
+import { useQueue } from "../composables/useQueue";
 import { decideChainRouting } from "../lib/chainRouting";
+import { isStandaloneGenerationModel } from "../lib/modelFilters";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
   ChainRequestWire,
   ChainStageWire,
   ExpandFormState,
   GalleryImage,
+  LoraSelection,
   ModelInfoExtended,
   SourceImageState,
 } from "../types";
+import { supportsLora } from "../types";
 import type { ChainScriptToml } from "../lib/chainToml";
 import type { ComposerMode } from "../components/Composer.vue";
 
@@ -62,8 +75,7 @@ function persistMuted(v: boolean) {
 
 const form = useGenerateForm();
 const { status } = useStatusPoll();
-// Shared privacy toggle with Gallery — see useHideMode for button semantics.
-const hide = useHideMode();
+const queue = useQueue();
 const models = ref<ModelInfoExtended[]>([]);
 const galleryEntries = ref<GalleryImage[]>([]);
 const view = ref<ViewMode>(loadViewMode());
@@ -195,10 +207,9 @@ const currentModel = computed(
 const gpus = computed(
   () =>
     status.value?.gpus?.map((g) => ({ ordinal: g.ordinal, state: g.state })) ??
-    null,
+    [],
 );
 
-// TODO-REMOVE-AFTER-MERGE: use useResources().gpuList once Agent B merges.
 const gpuListForPlacement = computed(
   () =>
     status.value?.gpus?.map((g) => ({
@@ -225,6 +236,24 @@ const chainDecision = computed(() =>
   ),
 );
 
+const currentFamily = computed(
+  () => currentModel.value?.family ?? form.state.value.modelFamily,
+);
+
+const familySupportsLora = computed(() => supportsLora(currentFamily.value));
+
+function selectModel(model: ModelInfoExtended) {
+  form.applyModelDefaults(model);
+}
+
+function onLorasChange(loras: LoraSelection[]) {
+  form.state.value.loras = loras;
+}
+
+function onAppendPromptPhrase(phrase: string) {
+  form.appendPromptPhrase(phrase);
+}
+
 function onSubmit() {
   composerError.value = null;
   if (!form.state.value.model) {
@@ -234,14 +263,20 @@ function onSubmit() {
     paramsPanelRef.value?.setExpanded(true);
     return;
   }
-  if (
-    (isQwenImageEditFamily(
+  const qwenImageEdit =
+    isQwenImageEditFamily(
       currentModel.value?.family ?? form.state.value.modelFamily,
-    ) ||
-      form.state.value.model.startsWith("qwen-image-edit:")) &&
+    ) || form.state.value.model.startsWith("qwen-image-edit:");
+  if (qwenImageEdit && form.state.value.imageAttachments.length === 0) {
+    composerError.value = "Qwen image edit needs a target image.";
+    return;
+  }
+  if (
+    !qwenImageEdit &&
+    form.state.value.maskImage &&
     form.state.value.imageAttachments.length === 0
   ) {
-    composerError.value = "Qwen image edit needs a target image.";
+    composerError.value = "Mask image needs a source image.";
     return;
   }
   const decision = chainDecision.value;
@@ -255,6 +290,12 @@ function onSubmit() {
   }
   const req = form.toRequest();
   stream.submit(req, decision);
+  if (
+    form.state.value.seedMode === "increment" &&
+    form.state.value.seed !== null
+  ) {
+    form.state.value.seed += Math.max(1, form.state.value.batchSize);
+  }
 }
 
 function onSubmitScript(script: ChainScriptToml) {
@@ -321,6 +362,13 @@ function openItem(item: GalleryImage) {
   selected.value = item;
 }
 
+function recreateFromGallery(item: GalleryImage) {
+  form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
+    format: item.format,
+    models: models.value,
+  });
+}
+
 // Map a finished Job back to its saved GalleryImage. The SSE complete
 // event doesn't echo the on-disk filename, so we match on seed + model
 // against the freshly-refreshed gallery (sorted newest-first, so the
@@ -359,6 +407,15 @@ async function handleDelete(item: GalleryImage) {
   }
 }
 
+async function onQueueLaneChange(id: string, targetGpu: number | null) {
+  try {
+    await updateQueueJobTargetGpu(id, targetGpu);
+    await queue.refresh();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
 function setView(v: ViewMode) {
   view.value = v;
   persistViewMode(v);
@@ -380,7 +437,9 @@ onMounted(async () => {
     console.error(e);
   }
   if (!form.state.value.model) {
-    const first = models.value.find((m) => m.downloaded);
+    const first = models.value.find(
+      (m) => m.downloaded && isStandaloneGenerationModel(m),
+    );
     if (first) form.applyModelDefaults(first);
   }
   startAutoRefresh();
@@ -388,11 +447,15 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopAutoRefresh();
+  queue.stop();
 });
 </script>
 
 <template>
-  <div class="mx-auto max-w-[1800px] px-4 pb-40 pt-4 sm:px-6 sm:pt-6 lg:px-10">
+  <div
+    data-test="generate-shell"
+    class="mx-auto max-w-[2400px] px-3 pb-40 pt-4 sm:px-5 sm:pt-6 lg:px-6 2xl:px-8"
+  >
     <TopBar
       :filter="'all'"
       :search="''"
@@ -400,67 +463,107 @@ onBeforeUnmount(() => {
       :muted="muted"
       :counts="topBarCounts"
       :loading="false"
-      :hide-mode="!hide.anyVisible.value"
       @update:filter="() => {}"
       @update:search="() => {}"
       @update:view="setView"
       @update:muted="setMuted"
-      @update:hide-mode="hide.toggle"
       @refresh="refreshGallery"
     />
 
-    <div class="mt-4 sm:mt-6">
-      <Composer
-        ref="composerRef"
-        v-model="form.state.value"
-        :mode="composerMode"
-        :queue-depth="status?.queue_depth ?? null"
-        :queue-capacity="status?.queue_capacity ?? null"
-        :gpus="gpus"
-        :expand-active="form.state.value.expand.enabled"
-        :family="currentModel?.family ?? ''"
-        :placement-gpus="gpuListForPlacement"
-        :chain-decision="chainDecision"
-        :submit-error="composerError"
-        @submit="onSubmit"
-        @submit-script="onSubmitScript"
-        @update:mode="setComposerMode"
-        @open-preferences="showPreferences = true"
-        @open-expand="showExpand = true"
-        @open-expand-stage="(idx: number, p: string) => onExpandStage(idx, p)"
-        @open-image-picker="showPicker = true"
-        @clear-source="onClearSource"
-      />
+    <div
+      data-test="generate-workspace"
+      class="mt-4 grid gap-4 sm:mt-6 xl:grid-cols-[24rem_minmax(0,1fr)_34rem] 2xl:grid-cols-[26rem_minmax(0,1fr)_38rem]"
+    >
+      <aside class="space-y-4 xl:sticky xl:top-4 xl:self-start">
+        <section class="glass rounded-2xl p-4">
+          <h2 class="text-sm font-semibold text-slate-100">Models</h2>
+          <div class="mt-3">
+            <ModelPicker
+              :models="models"
+              :model-value="form.state.value.model"
+              @update:model-value="() => {}"
+              @select="selectModel"
+            />
+          </div>
+        </section>
 
-      <GenerateParamsPanel
-        ref="paramsPanelRef"
-        v-model="form.state.value"
-        :models="models"
-      />
+        <section v-if="familySupportsLora" class="glass rounded-2xl p-4">
+          <h2 class="text-sm font-semibold text-slate-100">LoRA Stack</h2>
+          <LoraPicker
+            :family="currentFamily"
+            :model-value="form.state.value.loras"
+            @update:model-value="onLorasChange"
+            @append-prompt="onAppendPromptPhrase"
+          />
+        </section>
+      </aside>
 
-      <RunningStrip
-        :jobs="stream.jobs.value"
-        :hide-mode="hide.hideMode.value"
-        :revealed="hide.revealed.value"
-        @cancel="stream.cancel"
-        @open="openJob"
-        @dismiss="stream.remove"
-        @clear-finished="stream.clearDone"
-        @reveal="(id: string) => hide.revealOne(id)"
-      />
-
-      <div class="mt-6">
-        <GalleryFeed
-          :entries="galleryEntries"
-          :loading="false"
-          :view="view"
-          :muted="muted"
-          :hide-mode="hide.hideMode.value"
-          :revealed="hide.revealed.value"
-          @open="openItem"
-          @reveal="(item: GalleryImage) => hide.revealOne(item.filename)"
+      <main class="min-w-0">
+        <Composer
+          ref="composerRef"
+          v-model="form.state.value"
+          :mode="composerMode"
+          :queue-depth="status?.queue_depth ?? null"
+          :queue-capacity="status?.queue_capacity ?? null"
+          :gpus="gpus"
+          :expand-active="form.state.value.expand.enabled"
+          :family="currentFamily"
+          :chain-decision="chainDecision"
+          :submit-error="composerError"
+          @submit="onSubmit"
+          @submit-script="onSubmitScript"
+          @update:mode="setComposerMode"
+          @open-preferences="showPreferences = true"
+          @open-expand="showExpand = true"
+          @open-expand-stage="(idx: number, p: string) => onExpandStage(idx, p)"
+          @open-image-picker="showPicker = true"
+          @clear-source="onClearSource"
         />
-      </div>
+
+        <RunningStrip
+          :jobs="stream.jobs.value"
+          :queue-entries="queue.entries.value"
+          :gpus="gpus"
+          @cancel="stream.cancel"
+          @open="openJob"
+          @dismiss="stream.remove"
+          @clear-finished="stream.clearDone"
+          @lane-change="onQueueLaneChange"
+        />
+
+        <section class="mt-4">
+          <div class="mb-2 flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-slate-100">Recent</h2>
+            <span class="text-xs text-slate-500"
+              >{{ galleryEntries.length }} items</span
+            >
+          </div>
+          <div class="max-h-[52rem] overflow-y-auto pr-1">
+            <GalleryFeed
+              :entries="galleryEntries"
+              :loading="false"
+              :view="'grid'"
+              :muted="muted"
+              :show-recreate="true"
+              @open="openItem"
+              @recreate="recreateFromGallery"
+            />
+          </div>
+        </section>
+      </main>
+
+      <aside class="xl:sticky xl:top-4 xl:self-start">
+        <GenerateParamsPanel
+          ref="paramsPanelRef"
+          v-model="form.state.value"
+          :models="models"
+          :placement-gpus="gpuListForPlacement"
+          :force-expanded="true"
+          :show-model-picker="false"
+          :show-loras="false"
+          title="Controls"
+        />
+      </aside>
     </div>
 
     <PreferencesModal

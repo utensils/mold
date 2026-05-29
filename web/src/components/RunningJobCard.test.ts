@@ -2,6 +2,7 @@ import { mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import RunningJobCard from "./RunningJobCard.vue";
 import { STALE_THRESHOLD_MS, type Job } from "../composables/useGenerateStream";
+import type { QueueEntry } from "../types";
 
 function makeJob(overrides: Partial<Job> = {}): Job {
   return {
@@ -75,5 +76,28 @@ describe("RunningJobCard stale stream warning", () => {
     const wrapper = mountAtStaleAge(makeJob());
 
     expect(wrapper.text()).toContain("stream may have dropped");
+  });
+});
+
+describe("RunningJobCard lane controls", () => {
+  it("does not render a per-card lane dropdown for queued queue entries", () => {
+    const queueEntry: QueueEntry = {
+      id: "server-job-1",
+      model: "flux-dev:fp16",
+      state: "queued",
+      started_at_unix_ms: 0,
+      position: 1,
+      target_gpu: null,
+    };
+
+    const wrapper = mount(RunningJobCard, {
+      props: {
+        job: makeJob({ workStarted: false }),
+        queueEntry,
+      },
+    });
+
+    expect(wrapper.find('[data-test="job-lane-select"]').exists()).toBe(false);
+    expect(wrapper.emitted("lane-change")).toBeUndefined();
   });
 });

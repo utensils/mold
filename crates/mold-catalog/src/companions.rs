@@ -6,7 +6,7 @@
 //! entry would either have to ship its own T5 reference or trust an
 //! arbitrary repo. By committing this registry, mold ships *one* T5,
 //! *one* CLIP-L, etc., and any single-file checkpoint that demands
-//! something exotic gets `engine_phase: 99` (visible-but-unsupported).
+//! something exotic is marked unsupported by this build.
 
 use crate::entry::{Bundling, CompanionRef, Kind, Source};
 use crate::families::Family;
@@ -199,6 +199,45 @@ pub static COMPANIONS: &[Companion] = &[
         // tokenizer files round to ~38 MB combined and don't move the needle.
         size_bytes: 24_374_793_024,
     },
+    // Shared Qwen-Image runtime assets. Civitai Qwen single-file
+    // checkpoints are transformer-only exports; the VAE, Qwen2.5-VL text
+    // encoder shards, and tokenizer come from the base HF release.
+    Companion {
+        canonical_name: "qwen-image-runtime",
+        kind: Kind::TextEncoder,
+        family_scope: &[Family::QwenImage],
+        source: Source::Hf,
+        repo: "Qwen/Qwen-Image",
+        files: &[
+            "vae/diffusion_pytorch_model.safetensors",
+            "text_encoder/model-00001-of-00004.safetensors",
+            "text_encoder/model-00002-of-00004.safetensors",
+            "text_encoder/model-00003-of-00004.safetensors",
+            "text_encoder/model-00004-of-00004.safetensors",
+            "tokenizer/tokenizer.json",
+        ],
+        size_bytes: 16_845_253_155,
+    },
+    // Shared Wuerstchen runtime assets excluding the Stage C prior. A
+    // single-file catalog primary is treated as the prior transformer, and
+    // this companion supplies Stage B decoder, VQGAN, both CLIP encoders,
+    // and tokenizers from the manifest Wuerstchen v2 layout.
+    Companion {
+        canonical_name: "wuerstchen-runtime",
+        kind: Kind::TextEncoder,
+        family_scope: &[Family::Wuerstchen],
+        source: Source::Hf,
+        repo: "warp-ai/wuerstchen",
+        files: &[
+            "decoder/diffusion_pytorch_model.safetensors",
+            "vqgan/diffusion_pytorch_model.safetensors",
+            "text_encoder/model.safetensors",
+            "tokenizer/tokenizer.json",
+            "prior/text_encoder/model.safetensors",
+            "prior/tokenizer/tokenizer.json",
+        ],
+        size_bytes: 8_483_788_558,
+    },
 ];
 
 pub fn companion_by_name(name: &str) -> Option<&'static Companion> {
@@ -275,8 +314,12 @@ pub fn companions_for(
             // ~9.5 GB of unused weights and still fail the runtime check.
             push(&mut out, "ltx2-te");
         }
-        // Single-file for these is `engine_phase: 99` — no companions.
-        Family::QwenImage | Family::Wuerstchen => {}
+        Family::QwenImage => {
+            push(&mut out, "qwen-image-runtime");
+        }
+        Family::Wuerstchen => {
+            push(&mut out, "wuerstchen-runtime");
+        }
     }
     out
 }

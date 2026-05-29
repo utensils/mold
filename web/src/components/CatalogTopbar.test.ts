@@ -58,10 +58,12 @@ describe("CatalogTopbar", () => {
     expect(input.exists()).toBe(true);
   });
 
-  it("renders kind chips (Models / LoRAs)", () => {
+  it("renders kind chips for models, LoRAs, and components", () => {
     const w = mount(CatalogTopbar);
     expect(w.text()).toMatch(/Models/);
     expect(w.text()).toMatch(/LoRAs/);
+    expect(w.text()).toMatch(/CLIP/);
+    expect(w.text()).toMatch(/Tokenizers/);
   });
 
   it("clicking LoRAs chip filters catalog by kind=lora", async () => {
@@ -81,6 +83,28 @@ describe("CatalogTopbar", () => {
     await modelsBtn!.trigger("click");
     expect(mockSetFilter).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "checkpoint" }),
+    );
+  });
+
+  it("clicking CLIP chip filters catalog by kind=clip", async () => {
+    const w = mount(CatalogTopbar);
+    const clipBtn = w.findAll("button").find((b) => b.text() === "CLIP");
+    expect(clipBtn).toBeDefined();
+    await clipBtn!.trigger("click");
+    expect(mockSetFilter).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "clip" }),
+    );
+  });
+
+  it("clicking Tokenizers chip filters catalog by kind=tokenizer", async () => {
+    const w = mount(CatalogTopbar);
+    const tokenizerBtn = w
+      .findAll("button")
+      .find((b) => b.text() === "Tokenizers");
+    expect(tokenizerBtn).toBeDefined();
+    await tokenizerBtn!.trigger("click");
+    expect(mockSetFilter).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "tokenizer" }),
     );
   });
 

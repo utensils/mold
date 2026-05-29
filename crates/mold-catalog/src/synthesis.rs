@@ -228,9 +228,7 @@ pub fn family_bundles_vae_unconditionally(family: Family) -> bool {
         Family::Ltx2 => true,
         // Always-separate VAE.
         Family::Flux2 | Family::ZImage | Family::LtxVideo => false,
-        // Single-file unsupported — engine_phase: 99 entries. Doesn't
-        // matter what we return; resolution will reject before VAE.
-        Family::QwenImage | Family::Wuerstchen => true,
+        Family::QwenImage | Family::Wuerstchen => false,
     }
 }
 
@@ -383,6 +381,35 @@ mod tests {
         let intent = synthesize_intent(&entry, Path::new("/tmp")).unwrap();
         let names: Vec<&str> = intent.companions.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["t5-v1_1-xxl", "clip-l", "flux-vae"]);
+    }
+
+    #[test]
+    fn synthesize_intent_emits_required_companion_for_qwen_single_file() {
+        let mut entry = flux_unet_only_entry();
+        entry.id = CatalogId::from("cv:2110043");
+        entry.source_id = "2110043".into();
+        entry.family = Family::QwenImage;
+        entry.download_recipe.files[0].dest =
+            "{family}/civitai/2110043/qwenImage_fp8.safetensors".into();
+
+        let intent = synthesize_intent(&entry, Path::new("/tmp")).unwrap();
+        let names: Vec<&str> = intent.companions.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["qwen-image-runtime"]);
+    }
+
+    #[test]
+    fn synthesize_intent_emits_required_companion_for_wuerstchen_single_file() {
+        let mut entry = flux_unet_only_entry();
+        entry.id = CatalogId::from("hf:example/wuerstchen-prior");
+        entry.source = Source::Hf;
+        entry.source_id = "example/wuerstchen-prior".into();
+        entry.family = Family::Wuerstchen;
+        entry.download_recipe.files[0].dest =
+            "{family}/{author}/{name}/prior/diffusion_pytorch_model.safetensors".into();
+
+        let intent = synthesize_intent(&entry, Path::new("/tmp")).unwrap();
+        let names: Vec<&str> = intent.companions.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["wuerstchen-runtime"]);
     }
 
     #[test]

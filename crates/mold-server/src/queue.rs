@@ -439,10 +439,8 @@ pub(crate) fn pick_next_job(
     );
 
     // Force-dispatch the head if it's hit the starvation budget.
-    if let Some(head) = buffer.front() {
-        if head.deferred >= max_deferrals {
-            return buffer.pop_front().expect("checked non-empty").job;
-        }
+    if let Some(head) = buffer.pop_front_if(|head| head.deferred >= max_deferrals) {
+        return head.job;
     }
 
     // Find the front-most buffered job whose model is already loaded.
@@ -851,12 +849,21 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 ///
 /// Exits when the sender half of the channel is dropped (server shutdown).
 pub async fn run_queue_dispatcher(
-    mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
+    job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
 ) {
     tracing::debug!("multi-GPU queue dispatcher started");
     let buffer_size = resolve_lookahead_buffer();
     let max_deferrals = resolve_max_deferrals();
+    run_queue_dispatcher_with_tuning(job_rx, state, buffer_size, max_deferrals).await;
+}
+
+async fn run_queue_dispatcher_with_tuning(
+    mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
+    state: AppState,
+    buffer_size: usize,
+    max_deferrals: usize,
+) {
     let mut buffer: VecDeque<BufferedJob> = VecDeque::with_capacity(buffer_size);
 
     loop {
@@ -893,7 +900,7 @@ pub async fn run_queue_dispatcher(
             continue;
         }
 
-        let preferred_gpu = match state
+        let placement_gpu = match state
             .gpu_pool
             .resolve_explicit_placement_gpu(job.request.placement.as_ref())
         {
@@ -913,6 +920,11 @@ pub async fn run_queue_dispatcher(
                 continue;
             }
         };
+        let preferred_gpu = state
+            .job_registry
+            .target_gpu(&job_id)
+            .flatten()
+            .or(placement_gpu);
 
         if job.result_tx.is_closed() {
             tracing::debug!(model = %model_name, "skipping queued multi-GPU job — client disconnected");
@@ -1005,12 +1017,20 @@ pub async fn run_queue_dispatcher(
             // Increment in-flight BEFORE sending to reserve the slot.
             worker.in_flight.fetch_add(1, Ordering::SeqCst);
             let pending = gpu_job.take().expect("gpu_job present in retry loop");
+            if preferred_gpu.is_none() {
+                let _ = state
+                    .job_registry
+                    .set_target_gpu(&job_id, Some(worker.gpu.ordinal));
+            }
             match worker.job_tx.try_send(pending) {
                 Ok(()) => {
                     dispatched = true;
                 }
                 Err(std::sync::mpsc::TrySendError::Full(j)) => {
                     worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    if preferred_gpu.is_none() {
+                        let _ = state.job_registry.set_target_gpu(&job_id, None);
+                    }
                     gpu_job = Some(j);
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
@@ -1024,6 +1044,9 @@ pub async fn run_queue_dispatcher(
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(j)) => {
                     worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    if preferred_gpu.is_none() {
+                        let _ = state.job_registry.set_target_gpu(&job_id, None);
+                    }
                     tracing::warn!(
                         gpu = worker.gpu.ordinal,
                         "GPU worker disconnected — retrying dispatch"
@@ -1530,7 +1553,12 @@ mod tests {
         };
         worker.job_tx.send(filler_job).unwrap();
 
-        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
+        let dispatcher = tokio::spawn(run_queue_dispatcher_with_tuning(
+            job_rx,
+            state.clone(),
+            8,
+            DEFAULT_MAX_DEFERRALS,
+        ));
 
         let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
@@ -2136,6 +2164,52 @@ mod tests {
             .expect("explicit placement should route to gpu 1");
         assert_eq!(dispatched.model, "flux-dev:q4");
         assert!(rx0.try_recv().is_err(), "gpu 0 should not receive the job");
+
+        drop(job_tx);
+        dispatcher.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_dispatcher_records_auto_selected_gpu_before_worker_starts() {
+        let (worker0, rx0) = test_worker(0, 1);
+        let (worker1, rx1) = test_worker(1, 1);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(job_tx.clone());
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker0, worker1],
+            }),
+            8,
+        );
+        state.job_registry.register("auto-job", "flux-dev:q4");
+
+        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
+
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let job = crate::state::GenerationJob {
+            id: "auto-job".to_string(),
+            request: fake_request("flux-dev:q4"),
+            progress_tx: None,
+            result_tx,
+            output_dir: None,
+        };
+        let _position = queue.submit(job, 8).await.unwrap();
+
+        let (dispatched, ordinal) = match rx0.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(job) => (job, 0),
+            Err(_) => (
+                rx1.recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("auto job should dispatch to one GPU"),
+                1,
+            ),
+        };
+        assert_eq!(dispatched.model, "flux-dev:q4");
+        assert_eq!(
+            state.job_registry.target_gpu("auto-job"),
+            Some(Some(ordinal))
+        );
 
         drop(job_tx);
         dispatcher.abort();

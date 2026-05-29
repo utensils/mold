@@ -160,6 +160,52 @@ describe("LoraPicker — multi-LoRA stack", () => {
     expect(last[0].path).toBe("/loras/pixel.safetensors");
   });
 
+  it("uses only explicit up/down buttons for row movement", async () => {
+    const rows: LoraSelection[] = [
+      { path: "/loras/cinematic.safetensors", scale: 0.8 },
+      { path: "/loras/pixel.safetensors", scale: 1.15 },
+    ];
+    const w = mountPicker(rows);
+    await flushPromises();
+
+    const renderedRows = w.findAll("[data-test='lora-row']");
+    expect(renderedRows[0].attributes("draggable")).not.toBe("true");
+    expect(w.find("[data-test='lora-drag-handle']").exists()).toBe(false);
+
+    const scale = renderedRows[0].get("input[type='range']");
+    await scale.setValue("1.35");
+
+    const emitted = w.emitted("update:modelValue") ?? [];
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0][0]).toEqual([
+      { path: "/loras/cinematic.safetensors", scale: 1.35 },
+      rows[1],
+    ]);
+
+    await w.setProps({ modelValue: emitted[0][0] as LoraSelection[] });
+    await w.find("[aria-label='Move LoRA down']").trigger("click");
+    const moved = w
+      .emitted("update:modelValue")
+      ?.at(-1)?.[0] as LoraSelection[];
+    expect(moved).toEqual([rows[1], { ...rows[0], scale: 1.35 }]);
+  });
+
+  it("exposes button fallback controls for moving LoRA rows", async () => {
+    const rows: LoraSelection[] = [
+      { path: "/loras/cinematic.safetensors", scale: 0.8 },
+      { path: "/loras/pixel.safetensors", scale: 1.15 },
+    ];
+    const w = mountPicker(rows);
+    await flushPromises();
+
+    const moveDown = w.find("[aria-label='Move LoRA down']");
+    expect(moveDown.exists()).toBe(true);
+    await moveDown.trigger("click");
+
+    const last = w.emitted("update:modelValue")?.at(-1)?.[0] as LoraSelection[];
+    expect(last).toEqual([rows[1], rows[0]]);
+  });
+
   it("trigger-words backfill from the catalog when the form-state row lacks them", async () => {
     // Mimics localStorage-restored state: row was saved before trigger
     // words were captured. The picker must still surface the chips by

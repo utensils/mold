@@ -4,13 +4,17 @@ import type {
   ExpandRequestWire,
   ExpandResponseWire,
   GalleryImage,
+  GenerationMemoryEstimate,
   GenerateRequestWire,
   ModelInfoExtended,
+  ModelComponentsResponse,
   ServerCapabilities,
   ServerStatus,
   SseChainCompleteEvent,
   SseCompleteEvent,
   SseProgressEvent,
+  QueueEntry,
+  QueueListing,
 } from "./types";
 import { streamSse } from "./lib/sse";
 
@@ -86,6 +90,36 @@ export async function fetchModels(
   return (await res.json()) as ModelInfoExtended[];
 }
 
+export async function fetchGenerationEstimate(
+  req: GenerateRequestWire,
+  signal?: AbortSignal,
+): Promise<GenerationMemoryEstimate> {
+  const res = await fetch(`${base}/api/generate/estimate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+    signal,
+  });
+  if (!res.ok)
+    throw new Error(`POST /api/generate/estimate failed: ${res.status}`);
+  return (await res.json()) as GenerationMemoryEstimate;
+}
+
+export async function fetchModelComponents(
+  model: string,
+  signal?: AbortSignal,
+): Promise<ModelComponentsResponse> {
+  const res = await fetch(
+    `${base}/api/models/${encodeURIComponent(model)}/components`,
+    { signal },
+  );
+  if (!res.ok)
+    throw new Error(
+      `GET /api/models/${model}/components failed: ${res.status}`,
+    );
+  return (await res.json()) as ModelComponentsResponse;
+}
+
 export async function fetchStatus(signal?: AbortSignal): Promise<ServerStatus> {
   const res = await fetch(`${base}/api/status`, { signal });
   if (!res.ok) throw new Error(`GET /api/status failed: ${res.status}`);
@@ -97,12 +131,25 @@ export async function fetchStatus(signal?: AbortSignal): Promise<ServerStatus> {
  * `serverId` no longer appears in the registry (zombie from a dropped SSE
  * stream). Throws on transport failure so the caller can back off; the
  * empty-listing case (`{entries: []}`) is a successful response. */
-export async function fetchQueue(
-  signal?: AbortSignal,
-): Promise<import("./types").QueueListing> {
+export async function fetchQueue(signal?: AbortSignal): Promise<QueueListing> {
   const res = await fetch(`${base}/api/queue`, { signal });
   if (!res.ok) throw new Error(`GET /api/queue failed: ${res.status}`);
-  return (await res.json()) as import("./types").QueueListing;
+  return (await res.json()) as QueueListing;
+}
+
+export async function updateQueueJobTargetGpu(
+  id: string,
+  targetGpu: number | null,
+  signal?: AbortSignal,
+): Promise<QueueEntry> {
+  const res = await fetch(`${base}/api/queue/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ target_gpu: targetGpu }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`PATCH /api/queue/${id} failed: ${res.status}`);
+  return (await res.json()) as QueueEntry;
 }
 
 const chainLimitsCache = new Map<string, { value: ChainLimits; at: number }>();

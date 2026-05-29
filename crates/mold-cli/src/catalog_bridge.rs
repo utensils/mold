@@ -289,6 +289,24 @@ fn copy_companion_into_cfg(cfg: &mut ModelConfig, companion_name: &str, paths: &
                 .collect::<Vec<_>>()
                 .into();
         }
+        "qwen-image-runtime" => {
+            cfg.vae = to_string(&paths.vae);
+            cfg.text_encoder_files = paths
+                .text_encoder_files
+                .iter()
+                .filter_map(to_string)
+                .collect::<Vec<_>>()
+                .into();
+            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_string);
+        }
+        "wuerstchen-runtime" => {
+            cfg.vae = to_string(&paths.vae);
+            cfg.decoder = paths.decoder.as_ref().and_then(to_string);
+            cfg.clip_encoder = paths.clip_encoder.as_ref().and_then(to_string);
+            cfg.clip_tokenizer = paths.clip_tokenizer.as_ref().and_then(to_string);
+            cfg.clip_encoder_2 = paths.clip_encoder_2.as_ref().and_then(to_string);
+            cfg.clip_tokenizer_2 = paths.clip_tokenizer_2.as_ref().and_then(to_string);
+        }
         _ => {}
     }
 }

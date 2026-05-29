@@ -194,7 +194,6 @@ describe("useCatalog", () => {
     expect(cat.canDownload({ engine_phase: 4 } as any)).toBe(true);
     expect(cat.canDownload({ engine_phase: 5 } as any)).toBe(true);
     expect(cat.canDownload({ engine_phase: 6 } as any)).toBe(false);
-    expect(cat.canDownload({ engine_phase: 99 } as any)).toBe(false);
   });
 });
 

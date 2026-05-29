@@ -26,7 +26,8 @@ include text encoders, tokenizers, VAEs, and LTX-2 companion assets.
 
 1. Start the server with `mold serve`.
 2. Open `http://localhost:7680/catalog`.
-3. Search or filter by family, kind, source, rating, downloads, and NSFW state.
+3. Search or filter by family, kind, source, rating, and downloads. Catalog
+   searches include NSFW rows by default.
 4. Click **Install** on the entry you want.
 
 The downloads drawer tracks queued and running jobs. Installed LoRAs then appear

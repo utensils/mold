@@ -16,6 +16,7 @@ function makeForm(
     height: 1024,
     steps: 20,
     guidance: 3.5,
+    seedMode: "random",
     seed: null,
     batchSize: 1,
     strength: 0.75,
@@ -26,8 +27,24 @@ function makeForm(
     scheduler: null,
     frames: null,
     fps: null,
+    cfgPlus: false,
     outputFormat: "png",
     expand: { enabled: false, variations: 1, familyOverride: null },
+    maskImage: null,
+    controlImage: null,
+    controlModel: "",
+    controlScale: 1,
+    upscaleModel: "",
+    gifPreview: false,
+    audioFile: null,
+    audioFilePath: "",
+    sourceVideo: null,
+    sourceVideoPath: "",
+    keyframes: [],
+    pipeline: null,
+    retakeRange: null,
+    spatialUpscale: null,
+    temporalUpscale: null,
     placement: null,
     loras: [],
     enableAudio: null,
@@ -48,7 +65,6 @@ function mountComposer(
       gpus: null,
       expandActive: false,
       family,
-      placementGpus: [],
       chainDecision: { kind: "single" },
     },
   });
@@ -82,6 +98,40 @@ describe("Composer image attachments", () => {
       | GenerateFormState
       | undefined;
     expect(last?.imageAttachments.map((a) => a.base64)).toEqual(["REF"]);
+  });
+
+  it("drag reorders Qwen edit attachments", async () => {
+    const w = mountComposer(
+      makeForm({
+        imageAttachments: [
+          { kind: "upload", filename: "target.png", base64: "TARGET" },
+          { kind: "upload", filename: "ref-a.png", base64: "REF_A" },
+          { kind: "upload", filename: "ref-b.png", base64: "REF_B" },
+        ],
+      }),
+    );
+    const data = new Map<string, string>();
+    const dataTransfer = {
+      effectAllowed: "",
+      setData: (key: string, value: string) => data.set(key, value),
+      getData: (key: string) => data.get(key) ?? "",
+    };
+
+    await w
+      .find("[data-test='attachment-card-2']")
+      .trigger("dragstart", { dataTransfer });
+    await w
+      .find("[data-test='attachment-card-0']")
+      .trigger("drop", { dataTransfer });
+
+    const last = w.emitted("update:modelValue")?.at(-1)?.[0] as
+      | GenerateFormState
+      | undefined;
+    expect(last?.imageAttachments.map((a) => a.base64)).toEqual([
+      "REF_B",
+      "TARGET",
+      "REF_A",
+    ]);
   });
 
   it("shows a source chip label for non-edit image families", () => {

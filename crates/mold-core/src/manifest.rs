@@ -3853,6 +3853,11 @@ pub fn paths_from_downloads(
                 downloads
                     .iter()
                     .find(|(c, _)| *c == ModelComponent::TextEncoder)
+                    .or_else(|| {
+                        downloads
+                            .iter()
+                            .find(|(c, _)| *c == ModelComponent::Decoder)
+                    })
                     .map(|(_, p)| p.clone())
             } else {
                 None
@@ -4799,6 +4804,74 @@ fn companion_manifests() -> Vec<ModelManifest> {
             description: "LTX-2 Gemma-3-12B text encoder + tokenizer companion (single-file LTX-2)"
                 .to_string(),
             files: shared_ltx2_files(),
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        ModelManifest {
+            name: "qwen-image-runtime".to_string(),
+            family: "companion".to_string(),
+            description: "Qwen-Image VAE, text encoder, and tokenizer companion (single-file Qwen-Image)"
+                .to_string(),
+            files: shared_qwen_image_base_files(),
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        ModelManifest {
+            name: "wuerstchen-runtime".to_string(),
+            family: "companion".to_string(),
+            description:
+                "Wuerstchen decoder, VQGAN, CLIP encoders, and tokenizers companion (single-file Wuerstchen)"
+                    .to_string(),
+            files: vec![
+                ModelFile {
+                    hf_repo: "warp-ai/wuerstchen".to_string(),
+                    hf_filename: "decoder/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Decoder,
+                    size_bytes: 4_221_568_336,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "warp-ai/wuerstchen".to_string(),
+                    hf_filename: "vqgan/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Vae,
+                    size_bytes: 73_639_568,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "warp-ai/wuerstchen-prior".to_string(),
+                    hf_filename: "text_encoder/model.safetensors".to_string(),
+                    component: ModelComponent::ClipEncoder2,
+                    size_bytes: 2_772_149_276,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "warp-ai/wuerstchen-prior".to_string(),
+                    hf_filename: "tokenizer/tokenizer.json".to_string(),
+                    component: ModelComponent::ClipTokenizer2,
+                    size_bytes: 2_224_091,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "warp-ai/wuerstchen".to_string(),
+                    hf_filename: "text_encoder/model.safetensors".to_string(),
+                    component: ModelComponent::ClipEncoder,
+                    size_bytes: 1_411_983_168,
+                    gated: false,
+                    sha256: None,
+                },
+                ModelFile {
+                    hf_repo: "warp-ai/wuerstchen".to_string(),
+                    hf_filename: "tokenizer/tokenizer.json".to_string(),
+                    component: ModelComponent::ClipTokenizer,
+                    size_bytes: 2_224_119,
+                    gated: false,
+                    sha256: None,
+                },
+            ],
             defaults,
             hidden: true,
         },
@@ -5460,13 +5533,13 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 12 Companion = 109
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 14 Companion = 111
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder).
-        assert_eq!(known_manifests().len(), 109);
+        assert_eq!(known_manifests().len(), 111);
     }
 
     #[test]
@@ -6724,12 +6797,13 @@ mod tests {
     #[test]
     fn all_utility_models_identified_by_is_utility() {
         let utility_count = known_manifests().iter().filter(|m| m.is_utility()).count();
-        // Currently 14: 2 qwen3-expand variants + 12 catalog companions
+        // Currently 16: 2 qwen3-expand variants + 14 catalog companions
         // (clip-l, clip-g, sdxl-vae, sd-vae-ft-mse, t5-v1_1-xxl, flux-vae,
-        // ltx-video-vae, flux2-te, flux2-te-9b, flux2-vae, z-image-te, ltx2-te).
+        // ltx-video-vae, flux2-te, flux2-te-9b, flux2-vae, z-image-te, ltx2-te,
+        // qwen-image-runtime, wuerstchen-runtime).
         assert_eq!(
-            utility_count, 14,
-            "expected exactly 14 utility models, got {utility_count}"
+            utility_count, 16,
+            "expected exactly 16 utility models, got {utility_count}"
         );
     }
 

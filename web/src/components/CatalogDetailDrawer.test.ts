@@ -90,14 +90,15 @@ describe("CatalogDetailDrawer", () => {
     expect((btn.element as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("Download button is disabled when engine_phase >= 6 and shows phase tooltip", () => {
+  it("Download button is disabled when engine_phase >= 6 and shows unsupported tooltip", () => {
     mockDetail.value = makeEntry(6);
     const w = mount(CatalogDetailDrawer);
     const btn = w.find("[data-test=download-btn]");
     expect(btn.exists()).toBe(true);
     expect((btn.element as HTMLButtonElement).disabled).toBe(true);
     const title = btn.attributes("title") ?? "";
-    expect(title).toMatch(/phase 6|coming/i);
+    expect(title).toMatch(/unsupported/i);
+    expect(title).not.toMatch(/phase 6|coming/i);
   });
 
   it("does not render the Coming-in-phase badge for engine_phase 5", () => {

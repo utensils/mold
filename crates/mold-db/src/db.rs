@@ -138,7 +138,7 @@ impl MetadataDb {
                     format, model, prompt, negative_prompt, original_prompt, seed, steps,
                     guidance, width, height, strength, scheduler, lora, lora_scale, frames,
                     fps, metadata_version, generation_time_ms, backend, hostname, source,
-                    metadata_synthetic
+                    metadata_synthetic, metadata_json
              FROM generations
              WHERE output_dir = ?1 AND filename = ?2",
         )?;
@@ -162,7 +162,7 @@ impl MetadataDb {
             file_size_bytes, format, model, prompt, negative_prompt, original_prompt, seed, \
             steps, guidance, width, height, strength, scheduler, lora, lora_scale, frames, \
             fps, metadata_version, generation_time_ms, backend, hostname, source, \
-            metadata_synthetic FROM generations";
+            metadata_synthetic, metadata_json FROM generations";
         let mut out = Vec::new();
         if let Some(dir) = output_dir {
             let dir_key = canonical_dir_string(dir);
@@ -258,15 +258,17 @@ pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Res
         .as_ref()
         .map(scheduler_to_str)
         .map(str::to_string);
+    let metadata_json = serde_json::to_string(&rec.metadata)?;
     conn.execute(
         "INSERT INTO generations (
             filename, output_dir, created_at_ms, file_mtime_ms, file_size_bytes, format,
             model, prompt, negative_prompt, original_prompt, seed, steps, guidance,
             width, height, strength, scheduler, lora, lora_scale, frames, fps,
-            metadata_version, generation_time_ms, backend, hostname, source, metadata_synthetic
+            metadata_version, generation_time_ms, backend, hostname, source, metadata_synthetic,
+            metadata_json
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
+            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
          )
          ON CONFLICT(output_dir, filename) DO UPDATE SET
             created_at_ms = excluded.created_at_ms,
@@ -293,7 +295,8 @@ pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Res
             backend = excluded.backend,
             hostname = excluded.hostname,
             source = excluded.source,
-            metadata_synthetic = excluded.metadata_synthetic",
+            metadata_synthetic = excluded.metadata_synthetic,
+            metadata_json = excluded.metadata_json",
         params![
             rec.filename,
             dir_key,
@@ -322,6 +325,7 @@ pub(crate) fn upsert_with_conn(conn: &Connection, rec: &GenerationRecord) -> Res
             rec.hostname,
             rec.source.as_str(),
             rec.metadata_synthetic as i64,
+            metadata_json,
         ],
     )?;
     let id = conn.query_row(
@@ -349,7 +353,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
     let format = format_from_str(&format_s).unwrap_or(OutputFormat::Png);
     let scheduler_s: Option<String> = row.get(17)?;
     let scheduler = scheduler_s.as_deref().and_then(scheduler_from_str);
-    let metadata = OutputMetadata {
+    let legacy_metadata = OutputMetadata {
         model: row.get(7)?,
         prompt: row.get(8)?,
         negative_prompt: row.get(9)?,
@@ -361,14 +365,33 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
         height: row.get::<_, i64>(15)? as u32,
         strength: row.get(16)?,
         scheduler,
+        output_format: Some(format),
+        cfg_plus: None,
         lora: row.get(18)?,
         lora_scale: row.get(19)?,
+        loras: None,
+        control_model: None,
+        control_scale: None,
+        upscale_model: None,
+        gif_preview: None,
+        enable_audio: None,
+        audio_file_path: None,
+        source_video_path: None,
+        pipeline: None,
+        retake_range: None,
+        spatial_upscale: None,
+        temporal_upscale: None,
         frames: row.get::<_, Option<i64>>(20)?.map(|n| n as u32),
         fps: row.get::<_, Option<i64>>(21)?.map(|n| n as u32),
         version: row.get(22)?,
     };
     let source_s: String = row.get(26)?;
     let synthetic_i: i64 = row.get(27)?;
+    let metadata_json: Option<String> = row.get(28)?;
+    let metadata = metadata_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<OutputMetadata>(json).ok())
+        .unwrap_or(legacy_metadata);
     Ok(GenerationRecord {
         id: Some(row.get(0)?),
         filename: row.get(1)?,
@@ -446,8 +469,22 @@ mod tests {
             height: 1024,
             strength: Some(0.8),
             scheduler: Some(Scheduler::Ddim),
+            output_format: Some(OutputFormat::Png),
+            cfg_plus: None,
             lora: Some("style.safetensors".into()),
             lora_scale: Some(1.0),
+            loras: None,
+            control_model: None,
+            control_scale: None,
+            upscale_model: None,
+            gif_preview: None,
+            enable_audio: None,
+            audio_file_path: None,
+            source_video_path: None,
+            pipeline: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
             frames: None,
             fps: None,
             version: "0.8.1".into(),
@@ -485,6 +522,38 @@ mod tests {
         assert_eq!(got.metadata.seed, 42);
         assert_eq!(got.format, OutputFormat::Png);
         assert_eq!(got.source, RecordSource::Server);
+    }
+
+    #[test]
+    fn upsert_round_trips_full_metadata_json_for_recreate() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut rec = rec();
+        rec.metadata.loras = Some(vec![mold_core::LoraWeight {
+            path: "/loras/style.safetensors".into(),
+            scale: 0.6,
+        }]);
+        rec.metadata.output_format = Some(OutputFormat::Png);
+        rec.metadata.cfg_plus = Some(true);
+        rec.metadata.control_model = Some("controlnet-canny-sd15".into());
+        rec.metadata.control_scale = Some(0.8);
+
+        db.upsert(&rec).unwrap();
+        let got = db
+            .get(Path::new("/tmp/out"), "mold-flux-dev-q4-1.png")
+            .unwrap()
+            .expect("row should exist");
+
+        assert_eq!(got.metadata.output_format, Some(OutputFormat::Png));
+        assert_eq!(got.metadata.cfg_plus, Some(true));
+        assert_eq!(
+            got.metadata.loras.as_ref().unwrap()[0].path,
+            "/loras/style.safetensors"
+        );
+        assert_eq!(
+            got.metadata.control_model.as_deref(),
+            Some("controlnet-canny-sd15")
+        );
+        assert_eq!(got.metadata.control_scale, Some(0.8));
     }
 
     #[test]

@@ -5,9 +5,8 @@ import GalleryCard from "./GalleryCard.vue";
 
 type ViewMode = "feed" | "grid";
 
-// Selection / hide-mode props are gallery-only. The Generate page reuses
-// this component for its small inline preview list and doesn't need any
-// of it — defaults keep those surfaces behaviorally identical to before.
+// Selection props are gallery-only. The Generate page reuses this component
+// for its small inline preview list and doesn't need any of it.
 const props = withDefaults(
   defineProps<{
     entries: GalleryImage[];
@@ -16,14 +15,12 @@ const props = withDefaults(
     muted: boolean;
     selectMode?: boolean;
     selection?: Set<string>;
-    hideMode?: boolean;
-    revealed?: Set<string>;
+    showRecreate?: boolean;
   }>(),
   {
     selectMode: false,
     selection: () => new Set<string>(),
-    hideMode: false,
-    revealed: () => new Set<string>(),
+    showRecreate: false,
   },
 );
 
@@ -33,7 +30,7 @@ const emit = defineEmits<{
     e: "toggle-select",
     payload: { item: GalleryImage; shift: boolean; meta: boolean },
   ): void;
-  (e: "reveal", item: GalleryImage): void;
+  (e: "recreate", item: GalleryImage): void;
   // Drag-select: emitted with the full finalized selection the parent
   // should adopt. We snapshot the starting selection at pointerdown so
   // additive drags (shift/meta) merge cleanly with the existing set;
@@ -293,11 +290,10 @@ onBeforeUnmount(() => {
         variant="feed"
         :select-mode="selectMode"
         :selected="selection.has(entry.filename)"
-        :hide-mode="hideMode"
-        :revealed="revealed.has(entry.filename)"
+        :show-recreate="showRecreate"
         @open="emit('open', entry)"
+        @recreate="emit('recreate', $event)"
         @toggle-select="emit('toggle-select', $event)"
-        @reveal="emit('reveal', $event)"
       />
     </div>
 
@@ -314,11 +310,10 @@ onBeforeUnmount(() => {
         variant="grid"
         :select-mode="selectMode"
         :selected="selection.has(entry.filename)"
-        :hide-mode="hideMode"
-        :revealed="revealed.has(entry.filename)"
+        :show-recreate="showRecreate"
         @open="emit('open', entry)"
+        @recreate="emit('recreate', $event)"
         @toggle-select="emit('toggle-select', $event)"
-        @reveal="emit('reveal', $event)"
       />
     </div>
 

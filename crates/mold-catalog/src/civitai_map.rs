@@ -5,7 +5,7 @@
 //! `map_base_model` or appears in `CIVITAI_DROPS`. The
 //! `civitai_map_completeness` integration test enforces this invariant.
 
-use crate::entry::Bundling;
+use crate::entry::{Bundling, Kind};
 use crate::families::Family;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -155,10 +155,29 @@ pub const CIVITAI_BASE_MODELS: &[&str] = &[
     "Upscaler",
 ];
 
-/// Returns the phase that unlocks runnability for a given (family, bundling).
-/// `99` is the sentinel for "not in scope for any current phase" — those entries
-/// are stored but rendered with a permanently disabled Download button.
-pub fn engine_phase_for(family: Family, bundling: Bundling) -> u8 {
+/// Returns the phase that unlocks installability/runnability for a catalog row.
+/// Phase 6 is the current "not supported by this build" boundary.
+pub fn engine_phase_for(family: Family, bundling: Bundling, kind: Kind) -> u8 {
+    use Family::*;
+    use Kind::*;
+    match kind {
+        // Supporting assets and adapters are installable when the family has
+        // a compatible runtime. They are not standalone generation models, so
+        // don't inherit checkpoint runnability phases.
+        Lora => match family {
+            Flux | Flux2 | Sd15 | Sdxl | ZImage | Ltx2 | QwenImage => 1,
+            LtxVideo | Wuerstchen => 6,
+        },
+        Vae | TextEncoder | Tokenizer | Clip => 1,
+        ControlNet => match family {
+            Sd15 | Sdxl => 1,
+            Flux | Flux2 | ZImage | LtxVideo | Ltx2 | QwenImage | Wuerstchen => 6,
+        },
+        Checkpoint => engine_phase_for_checkpoint(family, bundling),
+    }
+}
+
+fn engine_phase_for_checkpoint(family: Family, bundling: Bundling) -> u8 {
     use Bundling::*;
     use Family::*;
     match (family, bundling) {
@@ -172,6 +191,6 @@ pub fn engine_phase_for(family: Family, bundling: Bundling) -> u8 {
         (Flux, SingleFile) => 3,
         (ZImage, SingleFile) => 4,
         (LtxVideo | Ltx2, SingleFile) => 5,
-        (QwenImage | Wuerstchen, SingleFile) => 99,
+        (QwenImage | Wuerstchen, SingleFile) => 1,
     }
 }
