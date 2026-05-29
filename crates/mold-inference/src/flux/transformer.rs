@@ -97,11 +97,7 @@ impl FluxTransformer {
 
             // Inpainting: blend preserved regions back at current noise level
             if let Some(ctx) = inpaint_ctx {
-                let t = *t_prev;
-                // Re-noise original latents to current timestep (flow-matching schedule)
-                let noised_original = ((&ctx.original_latents * (1.0 - t))? + (&ctx.noise * t)?)?;
-                // mask=1 -> repaint (use denoised), mask=0 -> preserve (use noised original)
-                img = ((&ctx.mask * &img)? + (&(1.0 - &ctx.mask)? * &noised_original)?)?;
+                img = apply_flux_inpaint_step(&img, ctx, *t_prev)?;
             }
 
             progress.emit(ProgressEvent::DenoiseStep {
@@ -111,5 +107,30 @@ impl FluxTransformer {
             });
         }
         Ok(img)
+    }
+}
+
+fn apply_flux_inpaint_step(img: &Tensor, ctx: &InpaintContext, timestep: f64) -> Result<Tensor> {
+    crate::img2img::apply_flow_match_inpaint(img, ctx, timestep)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{DType, Device, Tensor};
+
+    #[test]
+    fn packed_inpaint_mask_broadcasts_across_flux_channels() {
+        let device = Device::Cpu;
+        let img = Tensor::ones((1, 4, 64), DType::F32, &device).unwrap();
+        let ctx = InpaintContext {
+            original_latents: Tensor::zeros((1, 4, 64), DType::F32, &device).unwrap(),
+            mask: Tensor::ones((1, 4, 1), DType::F32, &device).unwrap(),
+            noise: Tensor::zeros((1, 4, 64), DType::F32, &device).unwrap(),
+        };
+
+        let blended = apply_flux_inpaint_step(&img, &ctx, 0.0).unwrap();
+
+        assert_eq!(blended.dims(), &[1, 4, 64]);
     }
 }
