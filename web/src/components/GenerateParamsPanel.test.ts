@@ -421,6 +421,21 @@ describe("GenerateParamsPanel", () => {
     expect(picker.attributes("data-multiple")).toBe("false");
   });
 
+  it("mask base picker also seeds the generation source image", async () => {
+    const w = mountPanel();
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    await w.get("[data-test='pick-mask-base']").trigger("click");
+    await w.get("[data-test='stub-pick-mask-base']").trigger("click");
+
+    const events = w.emitted("update:modelValue");
+    expect(events).toBeTruthy();
+    const last = events![events!.length - 1][0] as GenerateFormState;
+    expect(last.imageAttachments).toEqual([
+      { kind: "gallery", filename: "gallery-base.png", base64: "GALLERY_BASE" },
+    ]);
+  });
+
   it("hides mask controls for Qwen image edit", async () => {
     const qwenEdit = {
       ...baseModel,

@@ -13,6 +13,8 @@ import type {
   SseChainCompleteEvent,
   SseCompleteEvent,
   SseProgressEvent,
+  SseUpscaleCompleteEvent,
+  UpscaleRequestWire,
   QueueEntry,
   QueueListing,
 } from "./types";
@@ -263,6 +265,72 @@ export async function generateStream(
   } catch (err) {
     if (signal?.aborted) return; // user canceled
     if (terminal) return;
+    handlers.onError({
+      kind: "network",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+export interface UpscaleStreamHandlers {
+  onProgress: (evt: SseProgressEvent) => void;
+  onComplete: (evt: SseUpscaleCompleteEvent) => void;
+  onError: (
+    err:
+      | { kind: "http"; status: number; retryAfter?: number; body: string }
+      | { kind: "network"; message: string },
+  ) => void;
+}
+
+export async function upscaleStream(
+  req: UpscaleRequestWire,
+  handlers: UpscaleStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  let terminal = false;
+  try {
+    await streamSse({
+      url: `${base}/api/upscale/stream`,
+      body: req,
+      signal,
+      onEvent: (evt) => {
+        if (!evt.data) return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(evt.data);
+        } catch {
+          return;
+        }
+        if (evt.event === "complete") {
+          terminal = true;
+          handlers.onComplete(parsed as SseUpscaleCompleteEvent);
+        } else if (evt.event === "error") {
+          terminal = true;
+          handlers.onError({ kind: "http", status: 0, body: evt.data });
+        } else {
+          handlers.onProgress(parsed as SseProgressEvent);
+        }
+      },
+      onHttpError: (res) => {
+        terminal = true;
+        res
+          .text()
+          .then((body) =>
+            handlers.onError({ kind: "http", status: res.status, body }),
+          )
+          .catch(() =>
+            handlers.onError({ kind: "http", status: res.status, body: "" }),
+          );
+      },
+    });
+    if (!terminal && !signal?.aborted) {
+      handlers.onError({
+        kind: "network",
+        message: "upscale stream closed before completion",
+      });
+    }
+  } catch (err) {
+    if (signal?.aborted || terminal) return;
     handlers.onError({
       kind: "network",
       message: err instanceof Error ? err.message : String(err),

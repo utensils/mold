@@ -302,6 +302,23 @@ export interface SseCompleteEvent {
   gpu?: number | null;
 }
 
+export interface UpscaleRequestWire {
+  model: string;
+  image: string;
+  output_format?: OutputFormat;
+  tile_size?: number | null;
+}
+
+export interface SseUpscaleCompleteEvent {
+  image: string;
+  format: OutputFormat;
+  model: string;
+  scale_factor: number;
+  original_width: number;
+  original_height: number;
+  upscale_time_ms: number;
+}
+
 // ── Chained video generation (POST /api/generate/chain/stream) ────────────
 // Mirrors `mold_core::chain::{ChainRequest, ChainStage,
 // ChainProgressEvent, SseChainCompleteEvent}`.
@@ -390,12 +407,18 @@ export interface SourceImageState {
   kind: "upload" | "gallery";
   filename: string;
   base64: string; // stripped before localStorage persist
+  draftId?: string;
+  width?: number | null;
+  height?: number | null;
+  mime?: string | null;
 }
 
 export interface SourceMediaState {
   kind: "upload";
   filename: string;
   base64: string; // stripped before localStorage persist
+  draftId?: string;
+  mime?: string | null;
 }
 
 export interface KeyframeConditionState {
@@ -413,6 +436,21 @@ export interface ExpandFormState {
   variations: 1 | 3 | 5;
   familyOverride: string | null;
 }
+
+export type SourceFitPolicy =
+  | { mode: "pad-repaint" }
+  | { mode: "pad-fit" }
+  | {
+      mode: "crop-fill";
+      alignX?: "left" | "center" | "right";
+      alignY?: "top" | "center" | "bottom";
+    }
+  | { mode: "lanczos-resize" }
+  | {
+      mode: "upscale-then-fit";
+      upscalerModel: string;
+      fit: Exclude<SourceFitPolicy, { mode: "upscale-then-fit" }>;
+    };
 
 export interface LoraSelection {
   path: string;
@@ -472,6 +510,7 @@ export interface GenerateFormState {
   cfgPlus: boolean;
   outputFormat: OutputFormat;
   expand: ExpandFormState;
+  sourceFitPolicy?: SourceFitPolicy;
   imageAttachments: SourceImageState[];
   maskImage: SourceImageState | null;
   controlImage: SourceImageState | null;

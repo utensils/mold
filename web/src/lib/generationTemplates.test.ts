@@ -85,8 +85,13 @@ describe("generation templates", () => {
 
     expect(saved.name).toBe("Portrait Base");
     expect(saved.form.prompt).toBe("cinematic cat");
-    expect(saved.form.imageAttachments).toEqual([]);
-    expect(saved.form.maskImage).toBeNull();
+    expect(saved.form.imageAttachments).toEqual([
+      { kind: "gallery", filename: "source.png" },
+    ]);
+    expect(saved.form.maskImage).toEqual({
+      kind: "upload",
+      filename: "mask.png",
+    });
     expect(saved.form.audioFilePath).toBe("/srv/audio.wav");
     expect(saved.form.loras).toEqual([
       { path: "/loras/a.safetensors", scale: 0.7, trainedWords: ["style a"] },

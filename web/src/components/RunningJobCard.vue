@@ -62,6 +62,12 @@ const pct = computed(() => {
   return null;
 });
 
+const upscalerModel = computed(() => {
+  const model = (props.job.request as { upscale_model?: string | null })
+    .upscale_model;
+  return model?.trim() || null;
+});
+
 const thumbSrc = computed(() => {
   const r = props.job.result;
   if (!r) return null;
@@ -110,6 +116,9 @@ const thumbSrc = computed(() => {
       </div>
     </div>
     <div class="text-xs text-slate-300">{{ job.progress.stage }}</div>
+    <div v-if="upscalerModel" class="truncate text-[11px] text-slate-400">
+      Upscaler: {{ upscalerModel }}
+    </div>
     <div
       v-if="isStale"
       role="status"

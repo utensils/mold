@@ -563,6 +563,9 @@ function onPickMaskBase(images: SourceImageState[]) {
   showMaskBasePicker.value = false;
   if (!image) return;
   maskEditorSource.value = image;
+  if (!currentSourceImage.value) {
+    patch("imageAttachments", [image]);
+  }
   showMaskEditor.value = true;
 }
 
@@ -573,6 +576,33 @@ function onApplyMask(mask: SourceImageState) {
 
 async function setControlImage(event: Event) {
   patch("controlImage", await readImageState(event));
+}
+
+function setSourceFitPolicy(raw: string) {
+  if (raw === "crop-fill") {
+    patch("sourceFitPolicy", {
+      mode: "crop-fill",
+      alignX: "center",
+      alignY: "center",
+    });
+    return;
+  }
+  if (raw === "lanczos-resize") {
+    patch("sourceFitPolicy", { mode: "lanczos-resize" });
+    return;
+  }
+  if (raw === "upscale-then-fit") {
+    patch("sourceFitPolicy", {
+      mode: "upscale-then-fit",
+      upscalerModel:
+        props.modelValue.upscaleModel || upscalerModels.value[0]?.name || "",
+      fit: { mode: "pad-repaint" },
+    });
+    return;
+  }
+  patch("sourceFitPolicy", {
+    mode: raw === "pad-fit" ? "pad-fit" : "pad-repaint",
+  });
 }
 
 async function setAudioFile(event: Event) {
@@ -877,6 +907,23 @@ function removeKeyframe(index: number) {
 
       <section v-if="!isQwenImageEditFamily(family)" class="mt-4 space-y-3">
         <label class="text-xs uppercase text-slate-400">Image inputs</label>
+        <label class="block text-xs text-slate-300">
+          Source fit
+          <select
+            :value="modelValue.sourceFitPolicy?.mode ?? 'pad-repaint'"
+            class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100"
+            data-test="source-fit-policy"
+            @change="
+              setSourceFitPolicy(($event.target as HTMLSelectElement).value)
+            "
+          >
+            <option value="pad-repaint">Pad repaint</option>
+            <option value="crop-fill">Crop fill</option>
+            <option value="pad-fit">Pad fit</option>
+            <option value="lanczos-resize">Lanczos resize</option>
+            <option value="upscale-then-fit">Upscale then fit</option>
+          </select>
+        </label>
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <label class="rounded-lg bg-slate-900/40 p-2 text-xs text-slate-300">
             Mask image
