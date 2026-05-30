@@ -197,6 +197,129 @@ pub(crate) fn save_video_to_dir(
     }
 }
 
+fn requested_post_upscale_model(req: &mold_core::GenerateRequest) -> Option<&str> {
+    req.upscale_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+}
+
+pub(crate) fn apply_output_dimensions_to_metadata(metadata: &mut OutputMetadata, img: &ImageData) {
+    metadata.width = img.width;
+    metadata.height = img.height;
+}
+
+pub(crate) fn apply_upscale_response_to_image_generation(
+    req: &mold_core::GenerateRequest,
+    response: &mut mold_core::GenerateResponse,
+    original: ImageData,
+    upscaled: mold_core::UpscaleResponse,
+) -> anyhow::Result<ImageData> {
+    if response.video.is_some() || requested_post_upscale_model(req).is_none() {
+        return Ok(original);
+    }
+    if upscaled.image.data.is_empty() {
+        anyhow::bail!("upscaler returned an empty image");
+    }
+    response.generation_time_ms = response
+        .generation_time_ms
+        .saturating_add(upscaled.upscale_time_ms);
+    Ok(ImageData {
+        index: original.index,
+        ..upscaled.image
+    })
+}
+
+async fn upscale_generated_image_on_single_worker(
+    state: &AppState,
+    req: &mold_core::GenerateRequest,
+    img: ImageData,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+) -> Result<ImageData, String> {
+    let Some(upscale_model) = requested_post_upscale_model(req).map(str::to_string) else {
+        return Ok(img);
+    };
+    let model_name = mold_core::manifest::resolve_model_name(&upscale_model);
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(SseMessage::Progress(SseProgressEvent::StageStart {
+            name: format!("Loading upscaler {model_name}"),
+        }));
+    }
+
+    let needs_pull = {
+        let config = state.config.read().await;
+        config
+            .models
+            .get(&model_name)
+            .and_then(|c| c.transformer.as_ref())
+            .is_none()
+    };
+    if needs_pull {
+        if mold_core::manifest::find_manifest(&model_name).is_none() {
+            return Err(format!("unknown upscaler model '{model_name}'"));
+        }
+        model_manager::pull_model(state, &model_name, None)
+            .await
+            .map_err(|e| format!("failed to pull upscaler model: {}", e.error))?;
+    }
+
+    let weights_path = {
+        let config = state.config.read().await;
+        config
+            .models
+            .get(&model_name)
+            .and_then(|c| c.transformer.as_ref())
+            .map(std::path::PathBuf::from)
+    }
+    .ok_or_else(|| format!("upscaler model '{model_name}' not configured after pull"))?;
+
+    let upscale_req = mold_core::UpscaleRequest {
+        model: model_name.clone(),
+        image: img.data.clone(),
+        output_format: img.format,
+        tile_size: None,
+    };
+    let upscaler_cache = state.upscaler_cache.clone();
+    let progress_tx_for_blocking = progress_tx.cloned();
+    let upscaled =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
+            let mut cache = upscaler_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let needs_new = cache.as_ref().is_none_or(|e| e.model_name() != model_name);
+            if needs_new {
+                let new_engine = mold_inference::create_upscale_engine(
+                    model_name.clone(),
+                    weights_path,
+                    mold_inference::LoadStrategy::Eager,
+                    0,
+                )?;
+                *cache = Some(new_engine);
+            }
+            let engine = cache.as_mut().unwrap();
+            if let Some(tx) = progress_tx_for_blocking {
+                engine.set_on_progress(Box::new(move |event| {
+                    let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
+                }));
+            }
+            let result = engine.upscale(&upscale_req);
+            engine.clear_on_progress();
+            result
+        })
+        .await
+        .map_err(|e| format!("upscale task failed: {e}"))?
+        .map_err(|e| format!("upscale failed: {e}"))?;
+
+    let mut response = mold_core::GenerateResponse {
+        images: vec![],
+        video: None,
+        generation_time_ms: 0,
+        model: req.model.clone(),
+        seed_used: req.seed.unwrap_or(0),
+        gpu: None,
+    };
+    apply_upscale_response_to_image_generation(req, &mut response, img, upscaled)
+        .map_err(|e| format!("upscale failed: {e}"))
+}
+
 /// Persist a video's `.preview.gif` sidecar to the server's preview cache
 /// (`$MOLD_HOME/cache/previews/<filename>.preview.gif`). Best-effort —
 /// warnings log and return so a failure here never fails the save path.
@@ -714,7 +837,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             }
             // For video-only responses, synthesize an ImageData from the thumbnail
             // so the existing queue/SSE pipeline can handle it.
-            let img = if !response.images.is_empty() {
+            let mut img = if !response.images.is_empty() {
                 response.images.remove(0)
             } else if let Some(ref video) = response.video {
                 ImageData {
@@ -727,6 +850,29 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             } else {
                 unreachable!("checked above");
             };
+            if response.video.is_none() && requested_post_upscale_model(&job.request).is_some() {
+                match upscale_generated_image_on_single_worker(
+                    state,
+                    &job.request,
+                    img,
+                    job.progress_tx.as_ref(),
+                )
+                .await
+                {
+                    Ok(upscaled) => {
+                        img = upscaled;
+                    }
+                    Err(err_msg) => {
+                        if let Some(ref tx) = job.progress_tx {
+                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                                message: err_msg.clone(),
+                            }));
+                        }
+                        let _ = job.result_tx.send(Err(err_msg));
+                        return;
+                    }
+                }
+            }
 
             // Save to output directory if configured.
             // Builds OutputMetadata from the request + the engine's actual
@@ -736,12 +882,15 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                 let model = job.request.model.clone();
                 let batch_size = job.request.batch_size;
                 let generation_time_ms = response.generation_time_ms as i64;
-                let metadata = OutputMetadata::from_generate_request(
+                let mut metadata = OutputMetadata::from_generate_request(
                     &job.request,
                     response.seed_used,
                     None,
                     mold_core::build_info::version_string(),
                 );
+                if response.video.is_none() {
+                    apply_output_dimensions_to_metadata(&mut metadata, &img);
+                }
                 let db = state.metadata_db.clone();
                 if let Some(ref video) = response.video {
                     let video_data = video.data.clone();
@@ -1109,7 +1258,7 @@ mod tests {
     use crate::gpu_pool::{GpuPool, GpuWorker};
     use crate::model_cache::ModelCache;
     use crate::state::QueueHandle;
-    use mold_core::{GenerateRequest, ImageData, OutputFormat};
+    use mold_core::{GenerateRequest, ImageData, ModelConfig, OutputFormat};
     use mold_db::MetadataDb;
     use mold_inference::device::DiscoveredGpu;
     use mold_inference::shared_pool::SharedPool;
@@ -1200,6 +1349,15 @@ mod tests {
             job_tx,
         });
         (worker, job_rx)
+    }
+
+    fn empty_test_state(config: mold_core::Config) -> crate::state::AppState {
+        crate::state::AppState::empty(
+            config,
+            QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            crate::state::AppState::empty_gpu_pool(),
+            200,
+        )
     }
 
     #[test]
@@ -1522,6 +1680,180 @@ mod tests {
         assert!(event.video_gif_preview.is_none());
         assert!(!event.video_has_audio);
         assert!(event.video_duration_ms.is_none());
+    }
+
+    #[test]
+    fn post_generation_upscale_replaces_image_response_dimensions() {
+        let mut req = fake_request("flux-dev:q4");
+        req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+        let mut response = mold_core::GenerateResponse {
+            images: vec![],
+            video: None,
+            generation_time_ms: 100,
+            model: "flux-dev:q4".to_string(),
+            seed_used: 5,
+            gpu: None,
+        };
+        let img = fake_image();
+        let upscaled = mold_core::UpscaleResponse {
+            image: ImageData {
+                data: vec![1, 2, 3],
+                format: OutputFormat::Png,
+                width: 2048,
+                height: 2048,
+                index: 0,
+            },
+            upscale_time_ms: 42,
+            model: "real-esrgan-x4plus:fp16".to_string(),
+            scale_factor: 4,
+            original_width: 512,
+            original_height: 512,
+        };
+
+        let next = apply_upscale_response_to_image_generation(&req, &mut response, img, upscaled)
+            .expect("image upscale should apply");
+        let event = build_sse_complete_event(&response, &next);
+        let mut metadata =
+            OutputMetadata::from_generate_request(&req, response.seed_used, None, "test-version");
+        apply_output_dimensions_to_metadata(&mut metadata, &next);
+
+        assert_eq!(next.width, 2048);
+        assert_eq!(next.height, 2048);
+        assert_eq!(event.width, 2048);
+        assert_eq!(event.height, 2048);
+        assert_eq!(metadata.width, 2048);
+        assert_eq!(metadata.height, 2048);
+        assert_eq!(
+            metadata.upscale_model.as_deref(),
+            Some("real-esrgan-x4plus:fp16")
+        );
+    }
+
+    #[test]
+    fn post_generation_upscale_skips_video_responses() {
+        let mut req = fake_request("ltx-video:fp16");
+        req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+        let video = mold_core::VideoData {
+            data: vec![0, 0, 0, 24],
+            format: OutputFormat::Mp4,
+            width: 512,
+            height: 512,
+            frames: 25,
+            fps: 24,
+            thumbnail: vec![9, 9],
+            gif_preview: vec![],
+            has_audio: false,
+            duration_ms: None,
+            audio_sample_rate: None,
+            audio_channels: None,
+        };
+        let mut response = mold_core::GenerateResponse {
+            images: vec![],
+            video: Some(video),
+            generation_time_ms: 100,
+            model: "ltx-video:fp16".to_string(),
+            seed_used: 5,
+            gpu: None,
+        };
+        let img = fake_image();
+        let upscaled = mold_core::UpscaleResponse {
+            image: ImageData {
+                data: vec![1, 2, 3],
+                format: OutputFormat::Png,
+                width: 2048,
+                height: 2048,
+                index: 0,
+            },
+            upscale_time_ms: 42,
+            model: "real-esrgan-x4plus:fp16".to_string(),
+            scale_factor: 4,
+            original_width: 512,
+            original_height: 512,
+        };
+
+        let next = apply_upscale_response_to_image_generation(&req, &mut response, img, upscaled)
+            .expect("video upscale should be skipped");
+
+        assert_eq!(next.width, 512);
+        assert_eq!(next.height, 512);
+        assert!(response.video.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_worker_post_upscale_noops_without_model() {
+        let state = empty_test_state(mold_core::Config::default());
+        let req = fake_request("flux-dev:q4");
+
+        let next = upscale_generated_image_on_single_worker(&state, &req, fake_image(), None)
+            .await
+            .expect("missing upscale model should leave the image unchanged");
+
+        assert_eq!(next.width, 512);
+        assert_eq!(next.height, 512);
+        assert_eq!(next.index, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_worker_post_upscale_rejects_unknown_upscaler_manifest() {
+        let state = empty_test_state(mold_core::Config::default());
+        let mut req = fake_request("flux-dev:q4");
+        req.upscale_model = Some("definitely-not-a-real-upscaler:fp16".to_string());
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let err = upscale_generated_image_on_single_worker(
+            &state,
+            &req,
+            fake_image(),
+            Some(&progress_tx),
+        )
+        .await
+        .expect_err("unknown upscalers should fail before generation completes");
+
+        assert!(err.contains("unknown upscaler model"), "got: {err}");
+        let first_progress = progress_rx
+            .try_recv()
+            .expect("loading stage should be emitted before validation fails");
+        assert!(matches!(
+            first_progress,
+            SseMessage::Progress(SseProgressEvent::StageStart { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_worker_post_upscale_surfaces_missing_weights_path() {
+        let tmp = TempDir::new().unwrap();
+        let missing_weights = tmp.path().join("missing-upscaler.safetensors");
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "real-esrgan-x4plus:fp16".to_string(),
+            ModelConfig {
+                transformer: Some(missing_weights.display().to_string()),
+                ..Default::default()
+            },
+        );
+        let state = empty_test_state(config);
+        let mut req = fake_request("flux-dev:q4");
+        req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let err = upscale_generated_image_on_single_worker(
+            &state,
+            &req,
+            fake_image(),
+            Some(&progress_tx),
+        )
+        .await
+        .expect_err("missing weight files should be surfaced");
+
+        assert!(err.contains("upscale failed"), "got: {err}");
+        assert!(err.contains("upscaler weights not found"), "got: {err}");
+        let first_progress = progress_rx
+            .try_recv()
+            .expect("loading stage should be emitted before loading fails");
+        assert!(matches!(
+            first_progress,
+            SseMessage::Progress(SseProgressEvent::StageStart { .. })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

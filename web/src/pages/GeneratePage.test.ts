@@ -2,6 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick } from "vue";
 import GeneratePage from "./GeneratePage.vue";
+import { __testing__ as generateFormTesting } from "../composables/useGenerateForm";
 import type {
   GalleryImage,
   GenerateFormState,
@@ -31,8 +32,10 @@ const fetchModelsMock = vi.hoisted(() =>
 
 vi.mock("../api", () => ({
   fetchModels: fetchModelsMock,
+  fetchQueue: vi.fn(async () => ({ entries: [] })),
   listGallery: vi.fn(async () => [entry]),
   deleteGalleryImage: vi.fn(async () => undefined),
+  upscaleStream: vi.fn(async () => undefined),
   updateQueueJobTargetGpu: vi.fn(async () => undefined),
 }));
 
@@ -88,8 +91,10 @@ const qwenEditModel: ModelInfoExtended = {
 describe("GeneratePage layout and visibility", () => {
   beforeEach(() => {
     localStorage.clear();
+    generateFormTesting.resetForTest();
     submitMock.mockClear();
     fetchModelsMock.mockResolvedValue([]);
+    vi.stubGlobal("prompt", vi.fn());
   });
 
   it("uses a wider large-screen shell and controls rail", () => {
@@ -166,14 +171,51 @@ describe("GeneratePage layout and visibility", () => {
     expect(req.mask_image).toBeUndefined();
     expect(req.source_image).toBeUndefined();
   });
+
+  it("prompts before replacing a source image while a mask exists", async () => {
+    fetchModelsMock.mockResolvedValue([fluxModel]);
+    const promptSpy = vi.mocked(window.prompt).mockReturnValue("reset");
+    const wrapper = mount(GeneratePage, {
+      global: { stubs: pageStubs() },
+    });
+    await flushPromises();
+
+    const params = wrapper.getComponent({ name: "GenerateParamsPanel" });
+    const current = params.props("modelValue") as GenerateFormState;
+    params.vm.$emit("update:modelValue", {
+      ...current,
+      imageAttachments: [
+        { kind: "upload", filename: "old.png", base64: "OLD" },
+      ],
+      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
+    });
+    await nextTick();
+
+    wrapper.getComponent({ name: "Composer" }).vm.$emit("open-image-picker");
+    await nextTick();
+    wrapper
+      .getComponent({ name: "ImagePickerModal" })
+      .vm.$emit("pick", [
+        { kind: "upload", filename: "new.png", base64: "NEW" },
+      ]);
+    await nextTick();
+
+    const updated = wrapper
+      .getComponent({ name: "GenerateParamsPanel" })
+      .props("modelValue") as GenerateFormState;
+    expect(promptSpy).toHaveBeenCalled();
+    expect(updated.imageAttachments[0]?.filename).toBe("new.png");
+    expect(updated.maskImage).toBeNull();
+  });
 });
 
 function pageStubs() {
   return {
     TopBar: { template: "<header />" },
     Composer: {
+      name: "Composer",
       props: ["submitError"],
-      emits: ["submit"],
+      emits: ["submit", "open-image-picker", "clear-source"],
       template:
         '<section><p v-if="submitError">{{ submitError }}</p><button data-test="composer-submit" @click="$emit(\'submit\')">submit</button></section>',
     },
@@ -188,7 +230,12 @@ function pageStubs() {
     ModelPicker: { template: "<div />" },
     PreferencesModal: { template: "<div />" },
     ExpandModal: { template: "<div />" },
-    ImagePickerModal: { template: "<div />" },
+    ImagePickerModal: {
+      name: "ImagePickerModal",
+      props: ["open"],
+      emits: ["pick", "close"],
+      template: "<div v-if='open' />",
+    },
     RunningStrip: { template: "<div />" },
     GalleryFeed: GalleryFeedStub,
     DetailDrawer: { template: "<div />" },

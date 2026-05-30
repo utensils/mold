@@ -1,4 +1,4 @@
-import { ref, watch, type Ref } from "vue";
+import { ref, watch, type Ref, type WatchStopHandle } from "vue";
 import type {
   GenerateFormState,
   GenerateRequestWire,
@@ -9,6 +9,12 @@ import type {
   Scheduler,
 } from "../types";
 import { MAX_LORA_STACK } from "../types";
+import {
+  clearMemoryDraftsForTest,
+  getDraftMedia,
+  newDraftId,
+  putDraftMedia,
+} from "../lib/draftMediaStore";
 import {
   generationCapabilitiesForFamily,
   isQwenImageEditFamily,
@@ -32,7 +38,7 @@ export function defaultOutputFormat(family: string): OutputFormat {
 }
 
 const STORAGE_KEY = "mold.generate.form";
-const FORM_VERSION = 2;
+const FORM_VERSION = 2 as const;
 const QWEN_IMAGE_EDIT_FAMILY = "qwen-image-edit";
 
 function selectedFamily(s: GenerateFormState): string {
@@ -76,6 +82,7 @@ function defaultForm(): GenerateFormState {
     cfgPlus: false,
     outputFormat: "png",
     expand: { enabled: false, variations: 1, familyOverride: null },
+    sourceFitPolicy: { mode: "pad-repaint" },
     imageAttachments: [],
     maskImage: null,
     controlImage: null,
@@ -98,8 +105,8 @@ function defaultForm(): GenerateFormState {
   };
 }
 
-function cloneFormState(state: GenerateFormState): GenerateFormState {
-  return JSON.parse(JSON.stringify(state)) as GenerateFormState;
+function cloneFormState<T>(state: T): T {
+  return JSON.parse(JSON.stringify(state)) as T;
 }
 
 /** Remove browser-only binary media from a form snapshot before writing it to
@@ -109,16 +116,22 @@ function cloneFormState(state: GenerateFormState): GenerateFormState {
 export function sanitizePersistedForm(
   state: GenerateFormState,
 ): GenerateFormState {
-  return {
+  const sanitized = {
     ...cloneFormState(state),
     version: FORM_VERSION,
-    imageAttachments: [],
-    maskImage: null,
-    controlImage: null,
-    audioFile: null,
-    sourceVideo: null,
-    keyframes: [],
+    imageAttachments: state.imageAttachments.map(stripMediaBytes),
+    maskImage: state.maskImage ? stripMediaBytes(state.maskImage) : null,
+    controlImage: state.controlImage
+      ? stripMediaBytes(state.controlImage)
+      : null,
+    audioFile: state.audioFile ? stripMediaBytes(state.audioFile) : null,
+    sourceVideo: state.sourceVideo ? stripMediaBytes(state.sourceVideo) : null,
+    keyframes: state.keyframes.map((k) => ({
+      ...k,
+      image: stripMediaBytes(k.image),
+    })),
   };
+  return sanitized;
 }
 
 /** Clone the generation configuration that can be safely represented in a
@@ -275,19 +288,123 @@ function migrateLegacy(parsed: LegacyFormState): Partial<GenerateFormState> {
   const {
     lora,
     sourceImage: _sourceImage,
-    imageAttachments: _imageAttachments,
+    imageAttachments,
     version: _version,
     ...rest
   } = parsed;
   const next: Partial<GenerateFormState> = {
     ...rest,
     version: FORM_VERSION,
-    imageAttachments: [],
+    imageAttachments: parsed.version === 1 ? [] : (imageAttachments ?? []),
   };
   if (!Array.isArray(rest.loras)) {
     next.loras = lora ? [lora] : [];
   }
   return next;
+}
+
+function stripMediaBytes<T extends { base64: string }>(media: T): T {
+  const { base64: _base64, ...rest } = cloneFormState(media) as T & {
+    base64?: string;
+  };
+  void _base64;
+  return rest as T;
+}
+
+function ensureDraftIds(state: GenerateFormState) {
+  const ensure = <T extends { base64: string; draftId?: string } | null>(
+    media: T,
+  ): T => {
+    if (media?.base64 && !media.draftId) media.draftId = newDraftId();
+    return media;
+  };
+  state.imageAttachments = state.imageAttachments.map((m) => ensure(m)!);
+  state.maskImage = ensure(state.maskImage);
+  state.controlImage = ensure(state.controlImage);
+  state.audioFile = ensure(state.audioFile);
+  state.sourceVideo = ensure(state.sourceVideo);
+  state.keyframes = state.keyframes.map((k) => ({
+    ...k,
+    image: ensure(k.image)!,
+  }));
+}
+
+function mediaFromState(state: GenerateFormState) {
+  return [
+    ...state.imageAttachments,
+    state.maskImage,
+    state.controlImage,
+    state.audioFile,
+    state.sourceVideo,
+    ...state.keyframes.map((k) => k.image),
+  ].filter((m): m is NonNullable<typeof m> => Boolean(m?.base64));
+}
+
+let pendingDraftWrites: Promise<unknown>[] = [];
+let pendingHydration: Promise<unknown> | null = null;
+
+function persistDraftMedia(state: GenerateFormState) {
+  ensureDraftIds(state);
+  pendingDraftWrites = mediaFromState(state).map((m) => putDraftMedia(m));
+  return Promise.allSettled(pendingDraftWrites);
+}
+
+async function hydrateDraftMedia(state: GenerateFormState) {
+  const hydrate = async <
+    T extends { draftId?: string; base64?: string } | null,
+  >(
+    media: T,
+  ): Promise<T> => {
+    if (!media?.draftId || media.base64) return media;
+    const stored = await getDraftMedia(media.draftId);
+    return stored ? ({ ...media, ...stored } as T) : media;
+  };
+  const attachmentIds = state.imageAttachments.map((m) => m.draftId ?? "");
+  const attachments = await Promise.all(
+    state.imageAttachments.map((m) => hydrate(m)),
+  );
+  if (
+    state.imageAttachments.length === attachmentIds.length &&
+    state.imageAttachments.every(
+      (m, i) => (m.draftId ?? "") === attachmentIds[i],
+    )
+  ) {
+    state.imageAttachments = attachments;
+  }
+
+  const maskId = state.maskImage?.draftId ?? "";
+  const mask = await hydrate(state.maskImage);
+  if ((state.maskImage?.draftId ?? "") === maskId) state.maskImage = mask;
+
+  const controlId = state.controlImage?.draftId ?? "";
+  const control = await hydrate(state.controlImage);
+  if ((state.controlImage?.draftId ?? "") === controlId)
+    state.controlImage = control;
+
+  const audioId = state.audioFile?.draftId ?? "";
+  const audio = await hydrate(state.audioFile);
+  if ((state.audioFile?.draftId ?? "") === audioId) state.audioFile = audio;
+
+  const sourceVideoId = state.sourceVideo?.draftId ?? "";
+  const sourceVideo = await hydrate(state.sourceVideo);
+  if ((state.sourceVideo?.draftId ?? "") === sourceVideoId) {
+    state.sourceVideo = sourceVideo;
+  }
+
+  const keyframeIds = state.keyframes.map(
+    (k) => `${k.frame}:${k.image.draftId ?? ""}`,
+  );
+  const keyframes = await Promise.all(
+    state.keyframes.map(async (k) => ({ ...k, image: await hydrate(k.image) })),
+  );
+  if (
+    state.keyframes.length === keyframeIds.length &&
+    state.keyframes.every(
+      (k, i) => `${k.frame}:${k.image.draftId ?? ""}` === keyframeIds[i],
+    )
+  ) {
+    state.keyframes = keyframes;
+  }
 }
 
 function load(): GenerateFormState {
@@ -312,6 +429,7 @@ function load(): GenerateFormState {
 
 function persist(state: GenerateFormState) {
   try {
+    void persistDraftMedia(state);
     // Drop base64 bytes from localStorage — they blow past the quota quickly
     // and the attachment is re-picked trivially on reload.
     localStorage.setItem(
@@ -348,20 +466,25 @@ export interface UseGenerateForm {
   supportsLora: (family: string) => boolean;
 }
 
-export function useGenerateForm(): UseGenerateForm {
-  const state = ref<GenerateFormState>(load());
+let singleton: UseGenerateForm | null = null;
+let stopPersistWatch: WatchStopHandle | null = null;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  watch(
+export function useGenerateForm(): UseGenerateForm {
+  if (singleton) return singleton;
+  const state = ref<GenerateFormState>(load());
+  pendingHydration = hydrateDraftMedia(state.value);
+
+  stopPersistWatch = watch(
     state,
     (v) => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => persist(v), 300);
+      if (persistTimer) clearTimeout(persistTimer);
+      persistTimer = setTimeout(() => persist(v), 300);
     },
     { deep: true },
   );
 
-  return {
+  singleton = {
     state,
     reset: () => {
       state.value = defaultForm();
@@ -490,9 +613,31 @@ export function useGenerateForm(): UseGenerateForm {
     supportsScheduler,
     supportsLora,
   };
+  return singleton;
 }
 
 // Scheduler type is re-exported so callers can type-narrow without importing
 // both modules.
 export type { Scheduler };
 export { isQwenImageEditFamily };
+
+export const __testing__ = {
+  resetForTest() {
+    stopPersistWatch?.();
+    stopPersistWatch = null;
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = null;
+    singleton = null;
+    pendingDraftWrites = [];
+    pendingHydration = null;
+  },
+  async flushDraftWrites() {
+    await Promise.allSettled(pendingDraftWrites);
+  },
+  async flushHydration() {
+    await pendingHydration;
+  },
+  clearDraftsForTest() {
+    clearMemoryDraftsForTest();
+  },
+};

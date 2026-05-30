@@ -5,6 +5,7 @@ import {
   cloneTemplateForm,
   sanitizePersistedForm,
   useGenerateForm,
+  __testing__,
 } from "./useGenerateForm";
 import type {
   GenerateFormState,
@@ -37,6 +38,7 @@ function makeModel(
 describe("useGenerateForm", () => {
   beforeEach(() => {
     localStorage.clear();
+    __testing__.resetForTest();
     vi.useFakeTimers();
   });
 
@@ -53,6 +55,43 @@ describe("useGenerateForm", () => {
     expect(form.state.value.batchSize).toBe(1);
     expect(form.state.value.outputFormat).toBe("png");
     expect(form.state.value.imageAttachments).toEqual([]);
+    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "pad-repaint" });
+  });
+
+  it("shares a singleton state across route remounts", () => {
+    const first = useGenerateForm();
+    first.state.value.prompt = "persistent cat";
+    first.state.value.width = 768;
+    first.state.value.upscaleModel = "real-esrgan-x4plus:fp16";
+    first.state.value.imageAttachments = [
+      {
+        kind: "upload",
+        filename: "source.png",
+        base64: "SOURCE_BYTES",
+        draftId: "draft-source",
+        width: 640,
+        height: 480,
+        mime: "image/png",
+      },
+    ];
+    first.state.value.maskImage = {
+      kind: "upload",
+      filename: "mask.png",
+      base64: "MASK_BYTES",
+      draftId: "draft-mask",
+      width: 640,
+      height: 480,
+      mime: "image/png",
+    };
+
+    const second = useGenerateForm();
+
+    expect(second.state).toBe(first.state);
+    expect(second.state.value.prompt).toBe("persistent cat");
+    expect(second.state.value.width).toBe(768);
+    expect(second.state.value.upscaleModel).toBe("real-esrgan-x4plus:fp16");
+    expect(second.state.value.imageAttachments[0]?.base64).toBe("SOURCE_BYTES");
+    expect(second.state.value.maskImage?.base64).toBe("MASK_BYTES");
   });
 
   it("migrates a version 1 persisted snapshot but drops source image bytes", () => {
@@ -115,9 +154,41 @@ describe("useGenerateForm", () => {
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw!);
     expect(parsed.prompt).toBe("a fox");
-    expect(parsed.sourceImage).toBeUndefined();
-    expect(parsed.imageAttachments).toEqual([]);
+    expect(parsed.imageAttachments[0]).toMatchObject({
+      filename: "x.png",
+      draftId: expect.any(String),
+    });
+    expect(parsed.imageAttachments[0].base64).toBeUndefined();
     expect(raw).not.toContain("SECRETBYTES");
+  });
+
+  it("hydrates media drafts from the draft store after refresh", async () => {
+    const first = useGenerateForm();
+    first.state.value.imageAttachments = [
+      { kind: "upload", filename: "source.png", base64: "SOURCE_BYTES" },
+    ];
+    first.state.value.maskImage = {
+      kind: "upload",
+      filename: "mask.png",
+      base64: "MASK_BYTES",
+    };
+    first.state.value.controlImage = {
+      kind: "upload",
+      filename: "control.png",
+      base64: "CONTROL_BYTES",
+    };
+    await nextTick();
+    vi.advanceTimersByTime(300);
+    await __testing__.flushDraftWrites();
+
+    __testing__.resetForTest();
+    const second = useGenerateForm();
+    await __testing__.flushHydration();
+
+    expect(second.state.value.imageAttachments[0]?.base64).toBe("SOURCE_BYTES");
+    expect(second.state.value.maskImage?.base64).toBe("MASK_BYTES");
+    expect(second.state.value.controlImage?.base64).toBe("CONTROL_BYTES");
+    expect(localStorage.getItem(STORAGE_KEY)).not.toContain("_BYTES");
   });
 
   it("applyModelDefaults copies model defaults and clears video fields for non-video families", () => {
@@ -624,6 +695,7 @@ describe("generate form serialization helpers", () => {
       placement: null,
       loras: [],
       enableAudio: null,
+      sourceFitPolicy: { mode: "pad-repaint" },
       ...overrides,
     };
   }
@@ -661,12 +733,28 @@ describe("generate form serialization helpers", () => {
 
     const sanitized = sanitizePersistedForm(form);
 
-    expect(sanitized.imageAttachments).toEqual([]);
-    expect(sanitized.maskImage).toBeNull();
-    expect(sanitized.controlImage).toBeNull();
-    expect(sanitized.audioFile).toBeNull();
-    expect(sanitized.sourceVideo).toBeNull();
-    expect(sanitized.keyframes).toEqual([]);
+    expect(sanitized.imageAttachments).toEqual([
+      { kind: "gallery", filename: "source.png" },
+    ]);
+    expect(sanitized.maskImage).toEqual({
+      kind: "upload",
+      filename: "mask.png",
+    });
+    expect(sanitized.controlImage).toEqual({
+      kind: "upload",
+      filename: "control.png",
+    });
+    expect(sanitized.audioFile).toEqual({
+      kind: "upload",
+      filename: "voice.wav",
+    });
+    expect(sanitized.sourceVideo).toEqual({
+      kind: "upload",
+      filename: "clip.mp4",
+    });
+    expect(sanitized.keyframes).toEqual([
+      { frame: 24, image: { kind: "upload", filename: "kf.png" } },
+    ]);
     expect(sanitized.audioFilePath).toBe("/srv/voice.wav");
     expect(sanitized.sourceVideoPath).toBe("/srv/clip.mp4");
     expect(JSON.stringify(sanitized)).not.toContain("_BYTES");

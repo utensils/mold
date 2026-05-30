@@ -1,0 +1,133 @@
+import type { SourceFitPolicy } from "../types";
+
+export interface Size {
+  width: number;
+  height: number;
+}
+
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SourceFitTransform {
+  outputWidth: number;
+  outputHeight: number;
+  drawWidth: number;
+  drawHeight: number;
+  offsetX: number;
+  offsetY: number;
+  maskPaddedPixels: boolean;
+}
+
+function alignOffset(
+  available: number,
+  align: "left" | "center" | "right" | "top" | "bottom" | undefined,
+): number {
+  if (align === "left" || align === "top") return 0;
+  if (align === "right" || align === "bottom") return available;
+  return Math.round(available / 2);
+}
+
+export function resolveSourceFitTransform(
+  source: Size,
+  target: Size,
+  policy: SourceFitPolicy,
+): SourceFitTransform {
+  const fit = policy.mode === "upscale-then-fit" ? policy.fit : policy;
+  const outputWidth = target.width;
+  const outputHeight = target.height;
+  if (fit.mode === "lanczos-resize") {
+    return {
+      outputWidth,
+      outputHeight,
+      drawWidth: outputWidth,
+      drawHeight: outputHeight,
+      offsetX: 0,
+      offsetY: 0,
+      maskPaddedPixels: false,
+    };
+  }
+
+  const sourceRatio = source.width / source.height;
+  const targetRatio = target.width / target.height;
+  const crop = fit.mode === "crop-fill";
+  const scale = crop
+    ? targetRatio > sourceRatio
+      ? target.width / source.width
+      : target.height / source.height
+    : targetRatio < sourceRatio
+      ? target.width / source.width
+      : target.height / source.height;
+  const drawWidth = Math.round(source.width * scale);
+  const drawHeight = Math.round(source.height * scale);
+  const availableX = outputWidth - drawWidth;
+  const availableY = outputHeight - drawHeight;
+  let offsetX = crop
+    ? -alignOffset(-availableX, fit.alignX)
+    : Math.round(availableX / 2);
+  let offsetY = crop
+    ? -alignOffset(-availableY, fit.alignY)
+    : Math.round(availableY / 2);
+  if (Object.is(offsetX, -0)) offsetX = 0;
+  if (Object.is(offsetY, -0)) offsetY = 0;
+
+  return {
+    outputWidth,
+    outputHeight,
+    drawWidth,
+    drawHeight,
+    offsetX,
+    offsetY,
+    maskPaddedPixels: fit.mode === "pad-repaint",
+  };
+}
+
+export function maskPaddingRectangles(t: SourceFitTransform): Rect[] {
+  if (!t.maskPaddedPixels) return [];
+  const rects: Rect[] = [];
+  const left = Math.max(0, t.offsetX);
+  const top = Math.max(0, t.offsetY);
+  const right = Math.max(0, t.outputWidth - (t.offsetX + t.drawWidth));
+  const bottom = Math.max(0, t.outputHeight - (t.offsetY + t.drawHeight));
+  if (top > 0) rects.push({ x: 0, y: 0, width: t.outputWidth, height: top });
+  if (bottom > 0)
+    rects.push({
+      x: 0,
+      y: t.outputHeight - bottom,
+      width: t.outputWidth,
+      height: bottom,
+    });
+  if (left > 0)
+    rects.push({
+      x: 0,
+      y: top,
+      width: left,
+      height: t.outputHeight - top - bottom,
+    });
+  if (right > 0)
+    rects.push({
+      x: t.outputWidth - right,
+      y: top,
+      width: right,
+      height: t.outputHeight - top - bottom,
+    });
+  return rects.filter((r) => r.width > 0 && r.height > 0);
+}
+
+export function describeSourceFit(policy: SourceFitPolicy): string {
+  switch (policy.mode) {
+    case "pad-repaint":
+      return "Pad to fit and repaint added pixels";
+    case "pad-fit":
+      return "Pad to fit";
+    case "crop-fill":
+      return "Crop fill";
+    case "lanczos-resize":
+      return "Lanczos resize";
+    case "upscale-then-fit":
+      return `Upscale with ${policy.upscalerModel}, then ${describeSourceFit(policy.fit)}`;
+  }
+}

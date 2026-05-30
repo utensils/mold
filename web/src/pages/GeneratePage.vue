@@ -16,6 +16,7 @@ import {
   deleteGalleryImage,
   fetchModels,
   listGallery,
+  upscaleStream,
   updateQueueJobTargetGpu,
 } from "../api";
 import {
@@ -27,6 +28,10 @@ import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { useQueue } from "../composables/useQueue";
 import { decideChainRouting } from "../lib/chainRouting";
 import { isStandaloneGenerationModel } from "../lib/modelFilters";
+import {
+  maskPaddingRectangles,
+  resolveSourceFitTransform,
+} from "../lib/sourceFit";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import type {
   ChainRequestWire,
@@ -35,6 +40,7 @@ import type {
   GalleryImage,
   LoraSelection,
   ModelInfoExtended,
+  SourceFitPolicy,
   SourceImageState,
 } from "../types";
 import { supportsLora } from "../types";
@@ -85,6 +91,49 @@ const showPreferences = ref(false);
 const showExpand = ref(false);
 const showPicker = ref(false);
 const composerError = ref<string | null>(null);
+const preprocessingStatus = ref<string | null>(null);
+const submitStatus = computed(
+  () => composerError.value ?? preprocessingStatus.value,
+);
+
+function mediaUrl(image: SourceImageState): string {
+  return `data:${image.mime || "image/png"};base64,${image.base64}`;
+}
+
+function loadHtmlImage(image: SourceImageState): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`failed to decode ${image.filename}`));
+    img.src = mediaUrl(image);
+  });
+}
+
+function canvasToSourceImage(
+  canvas: HTMLCanvasElement,
+  original: SourceImageState,
+  suffix: string,
+): SourceImageState {
+  const dataUrl = canvas.toDataURL("image/png");
+  const comma = dataUrl.indexOf(",");
+  return {
+    ...original,
+    filename: original.filename.replace(/(\.[^.]+)?$/, `${suffix}.png`),
+    base64: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl,
+    width: canvas.width,
+    height: canvas.height,
+    mime: "image/png",
+  };
+}
+
+function drawableFitPolicy(
+  policy: SourceFitPolicy | undefined,
+): SourceFitPolicy {
+  if (!policy || policy.mode === "upscale-then-fit") {
+    return { mode: "pad-repaint" };
+  }
+  return policy;
+}
 
 function loadComposerMode(): ComposerMode {
   try {
@@ -254,8 +303,130 @@ function onAppendPromptPhrase(phrase: string) {
   form.appendPromptPhrase(phrase);
 }
 
-function onSubmit() {
+async function preprocessSourceIfNeeded(): Promise<boolean> {
+  const policy = form.state.value.sourceFitPolicy;
+  const source = form.state.value.imageAttachments[0];
+  if (policy?.mode !== "upscale-then-fit" || !source) return true;
+  const model = policy.upscalerModel || form.state.value.upscaleModel;
+  if (!model) return true;
+  preprocessingStatus.value = `Preprocessing source with ${model}`;
+  let completed = false;
+  await upscaleStream(
+    {
+      model,
+      image: source.base64,
+      output_format: "png",
+    },
+    {
+      onProgress: (evt) => {
+        if (evt.type === "stage_start") preprocessingStatus.value = evt.name;
+        if (evt.type === "stage_done")
+          preprocessingStatus.value = `${evt.name} (done)`;
+        if (evt.type === "info") preprocessingStatus.value = evt.message;
+      },
+      onComplete: (evt) => {
+        form.state.value.imageAttachments = [
+          {
+            ...source,
+            filename: source.filename.replace(/(\.[^.]+)?$/, "-prefit.png"),
+            base64: evt.image,
+            width: undefined,
+            height: undefined,
+            mime: "image/png",
+          },
+        ];
+        completed = true;
+      },
+      onError: (err) => {
+        composerError.value =
+          err.kind === "http"
+            ? `Source preprocessing failed: ${err.body}`
+            : `Source preprocessing failed: ${err.message}`;
+      },
+    },
+  );
+  preprocessingStatus.value = null;
+  return completed;
+}
+
+async function fitStillSourceToRequest(): Promise<void> {
+  const family = currentModel.value?.family ?? form.state.value.modelFamily;
+  if (isQwenImageEditFamily(family) || form.state.value.frames) return;
+  const source = form.state.value.imageAttachments[0];
+  if (!source) return;
+  const target = {
+    width: form.state.value.width,
+    height: form.state.value.height,
+  };
+  const sourceImg = await loadHtmlImage(source);
+  if (
+    sourceImg.naturalWidth === target.width &&
+    sourceImg.naturalHeight === target.height
+  ) {
+    return;
+  }
+  const policy = drawableFitPolicy(form.state.value.sourceFitPolicy);
+  const transform = resolveSourceFitTransform(
+    { width: sourceImg.naturalWidth, height: sourceImg.naturalHeight },
+    target,
+    policy,
+  );
+  const canvas = document.createElement("canvas");
+  canvas.width = transform.outputWidth;
+  canvas.height = transform.outputHeight;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.fillStyle = "black";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(
+    sourceImg,
+    transform.offsetX,
+    transform.offsetY,
+    transform.drawWidth,
+    transform.drawHeight,
+  );
+  form.state.value.imageAttachments = [
+    canvasToSourceImage(canvas, source, "-fit"),
+  ];
+
+  if (policy.mode !== "pad-repaint" && !form.state.value.maskImage) return;
+  const maskCanvas = document.createElement("canvas");
+  maskCanvas.width = transform.outputWidth;
+  maskCanvas.height = transform.outputHeight;
+  const maskCtx = maskCanvas.getContext("2d");
+  if (!maskCtx) return;
+  maskCtx.fillStyle = "black";
+  maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+  if (form.state.value.maskImage) {
+    const maskImg = await loadHtmlImage(form.state.value.maskImage);
+    maskCtx.drawImage(
+      maskImg,
+      transform.offsetX,
+      transform.offsetY,
+      transform.drawWidth,
+      transform.drawHeight,
+    );
+  }
+  if (policy.mode === "pad-repaint") {
+    maskCtx.fillStyle = "white";
+    for (const rect of maskPaddingRectangles(transform)) {
+      maskCtx.fillRect(rect.x, rect.y, rect.width, rect.height);
+    }
+  }
+  form.state.value.maskImage = canvasToSourceImage(
+    maskCanvas,
+    form.state.value.maskImage ?? {
+      kind: source.kind,
+      filename: "pad-mask.png",
+      base64: "",
+    },
+    "-fit-mask",
+  );
+}
+
+async function onSubmit() {
   composerError.value = null;
+  preprocessingStatus.value = null;
   if (!form.state.value.model) {
     // First-run / nothing-downloaded case. The user has to pick a model
     // before submit can do anything; force-expand the params panel so
@@ -288,6 +459,8 @@ function onSubmit() {
     alert(decision.reason);
     return;
   }
+  if (!(await preprocessSourceIfNeeded())) return;
+  await fitStillSourceToRequest();
   const req = form.toRequest();
   stream.submit(req, decision);
   if (
@@ -340,6 +513,7 @@ function onExpandStage(stageIndex: number, prompt: string) {
 }
 
 function onClearSource() {
+  if (form.state.value.maskImage && !resolveMaskSourceConflict()) return;
   form.state.value.imageAttachments = [];
 }
 
@@ -348,10 +522,37 @@ function onPickSource(v: SourceImageState[]) {
     isQwenImageEditFamily(
       currentModel.value?.family ?? form.state.value.modelFamily,
     ) || form.state.value.model.startsWith("qwen-image-edit:");
+  if (
+    !qwenEdit &&
+    form.state.value.maskImage &&
+    form.state.value.imageAttachments.length > 0 &&
+    v.length > 0 &&
+    !resolveMaskSourceConflict()
+  ) {
+    return;
+  }
   form.state.value.imageAttachments = qwenEdit
     ? [...form.state.value.imageAttachments, ...v]
     : v.slice(0, 1);
   composerError.value = null;
+}
+
+function resolveMaskSourceConflict(): boolean {
+  const choice = window.prompt(
+    "This source image has a mask. Type reset to clear the mask, keep to keep/scale it, or cancel.",
+    "reset",
+  );
+  const normalized = choice?.trim().toLowerCase();
+  if (
+    normalized === "cancel" ||
+    normalized === null ||
+    normalized === undefined
+  ) {
+    return false;
+  }
+  if (normalized === "keep") return true;
+  form.state.value.maskImage = null;
+  return true;
 }
 
 function openItem(item: GalleryImage) {
@@ -509,7 +710,7 @@ onBeforeUnmount(() => {
           :expand-active="form.state.value.expand.enabled"
           :family="currentFamily"
           :chain-decision="chainDecision"
-          :submit-error="composerError"
+          :submit-error="submitStatus"
           @submit="onSubmit"
           @submit-script="onSubmitScript"
           @update:mode="setComposerMode"

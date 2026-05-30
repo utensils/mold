@@ -1,6 +1,7 @@
 use crate::gpu_pool::{ActiveGeneration, GpuJob, GpuWorker};
 use crate::model_cache::ModelResidency;
 use crate::queue::{
+    apply_output_dimensions_to_metadata, apply_upscale_response_to_image_generation,
     build_sse_complete_event, clean_error_message, save_image_to_dir, save_video_to_dir,
 };
 use crate::state::{GenerationJobResult, SseMessage};
@@ -130,6 +131,56 @@ pub(crate) fn oom_user_message_for_request(
 
 fn is_video_family(family_slug: &str) -> bool {
     matches!(family_slug, "ltx-video" | "ltx2" | "ltx-2" | "ltx-2.3")
+}
+
+fn upscale_generated_image_on_worker(
+    worker: &GpuWorker,
+    job: &GpuJob,
+    upscale_model: &str,
+    img: ImageData,
+    response: &mut mold_core::GenerateResponse,
+) -> Result<ImageData, String> {
+    let model_name = mold_core::manifest::resolve_model_name(upscale_model);
+    let weights_path = {
+        let config = job.config.blocking_read();
+        config
+            .models
+            .get(&model_name)
+            .and_then(|c| c.transformer.as_ref())
+            .map(std::path::PathBuf::from)
+    }
+    .ok_or_else(|| format!("upscaler model '{model_name}' is not downloaded"))?;
+
+    if let Some(ref tx) = job.progress_tx {
+        let _ = tx.send(SseMessage::Progress(SseProgressEvent::StageStart {
+            name: format!("Loading upscaler {model_name}"),
+        }));
+    }
+    let mut engine = mold_inference::create_upscale_engine(
+        model_name.clone(),
+        weights_path,
+        mold_inference::LoadStrategy::Eager,
+        worker.gpu.ordinal,
+    )
+    .map_err(|e| format!("failed to load upscaler: {e}"))?;
+    if let Some(ref tx) = job.progress_tx {
+        let tx = tx.clone();
+        engine.set_on_progress(Box::new(move |event| {
+            let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
+        }));
+    }
+    let req = mold_core::UpscaleRequest {
+        model: model_name,
+        image: img.data.clone(),
+        output_format: img.format,
+        tile_size: None,
+    };
+    let upscaled = engine
+        .upscale(&req)
+        .map_err(|e| format!("upscale failed: {e}"))?;
+    engine.clear_on_progress();
+    apply_upscale_response_to_image_generation(&job.request, response, img, upscaled)
+        .map_err(|e| format!("upscale failed: {e}"))
 }
 
 fn cuda_oom_user_message(
@@ -401,7 +452,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
             }
 
             // Extract the primary image (or video thumbnail).
-            let img = if !response.images.is_empty() {
+            let mut img = if !response.images.is_empty() {
                 response.images.remove(0)
             } else if let Some(ref video) = response.video {
                 ImageData {
@@ -415,6 +466,35 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                 unreachable!("checked above");
             };
 
+            if response.video.is_none() {
+                if let Some(upscale_model) = job
+                    .request
+                    .upscale_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                {
+                    match upscale_generated_image_on_worker(
+                        worker,
+                        &job,
+                        upscale_model,
+                        img.clone(),
+                        &mut response,
+                    ) {
+                        Ok(upscaled) => img = upscaled,
+                        Err(err_msg) => {
+                            if let Some(ref tx) = job.progress_tx {
+                                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                                    message: err_msg.clone(),
+                                }));
+                            }
+                            let _ = job.result_tx.send(Err(err_msg));
+                            return;
+                        }
+                    }
+                }
+            }
+
             // Save to output directory if configured. Routes through the
             // shared queue helpers so the metadata-DB upsert (and embedded
             // chunks, hostname/backend tagging) cannot drift between the
@@ -423,12 +503,15 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
             // invisible to /api/gallery until the next reconcile on
             // server restart.
             if let Some(ref dir) = job.output_dir {
-                let metadata = OutputMetadata::from_generate_request(
+                let mut metadata = OutputMetadata::from_generate_request(
                     &job.request,
                     response.seed_used,
                     None,
                     mold_core::build_info::version_string(),
                 );
+                if response.video.is_none() {
+                    apply_output_dimensions_to_metadata(&mut metadata, &img);
+                }
                 let generation_time_ms = response.generation_time_ms as i64;
                 let db = job.metadata_db.as_ref().as_ref();
                 if let Some(ref video) = response.video {
@@ -1030,8 +1113,12 @@ pub fn run_chain_blocking<T, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job_registry::JobRegistry;
     use crate::model_cache::ModelCache;
-    use mold_core::{Config, GenerateRequest, GenerateResponse};
+    use crate::state::QueueHandle;
+    use mold_core::{
+        Config, GenerateRequest, GenerateResponse, ImageData, ModelConfig, OutputFormat,
+    };
     use mold_inference::device::DiscoveredGpu;
     use mold_inference::shared_pool::SharedPool;
     use mold_inference::InferenceEngine;
@@ -1099,6 +1186,99 @@ mod tests {
             degraded_until: RwLock::new(None),
             job_tx,
         })
+    }
+
+    fn fake_upscale_job(config: Config, upscale_model: &str) -> GpuJob {
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let mut request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"portrait","model":"flux-dev:q4","width":512,"height":512,"steps":4,"guidance":3.5,"batch_size":1}"#,
+        )
+        .unwrap();
+        request.upscale_model = Some(upscale_model.to_string());
+        GpuJob {
+            id: "job-upscale-test".to_string(),
+            model: request.model.clone(),
+            request,
+            progress_tx: None,
+            result_tx,
+            output_dir: None,
+            config: Arc::new(tokio::sync::RwLock::new(config)),
+            metadata_db: Arc::new(None),
+            queue: QueueHandle::new(queue_tx),
+            registry: JobRegistry::new(),
+        }
+    }
+
+    fn fake_upscale_image() -> ImageData {
+        ImageData {
+            data: vec![0x89, 0x50, 0x4E, 0x47],
+            format: OutputFormat::Png,
+            width: 512,
+            height: 512,
+            index: 0,
+        }
+    }
+
+    #[test]
+    fn worker_post_upscale_reports_missing_downloaded_model() {
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+        let job = fake_upscale_job(Config::default(), "real-esrgan-x4plus:fp16");
+        let mut response = GenerateResponse {
+            images: vec![],
+            video: None,
+            generation_time_ms: 10,
+            model: job.request.model.clone(),
+            seed_used: 7,
+            gpu: None,
+        };
+
+        let err = upscale_generated_image_on_worker(
+            &worker,
+            &job,
+            "real-esrgan-x4plus:fp16",
+            fake_upscale_image(),
+            &mut response,
+        )
+        .expect_err("worker should reject a missing upscaler config");
+
+        assert!(err.contains("not downloaded"), "got: {err}");
+    }
+
+    #[test]
+    fn worker_post_upscale_surfaces_missing_weights_path() {
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing_weights = tmp.path().join("missing-upscaler.safetensors");
+        let mut config = Config::default();
+        config.models.insert(
+            "real-esrgan-x4plus:fp16".to_string(),
+            ModelConfig {
+                transformer: Some(missing_weights.display().to_string()),
+                ..Default::default()
+            },
+        );
+        let job = fake_upscale_job(config, "real-esrgan-x4plus:fp16");
+        let mut response = GenerateResponse {
+            images: vec![],
+            video: None,
+            generation_time_ms: 10,
+            model: job.request.model.clone(),
+            seed_used: 7,
+            gpu: None,
+        };
+
+        let err = upscale_generated_image_on_worker(
+            &worker,
+            &job,
+            "real-esrgan-x4plus:fp16",
+            fake_upscale_image(),
+            &mut response,
+        )
+        .expect_err("worker should surface missing weight files before generation completes");
+
+        assert!(err.contains("failed to load upscaler"), "got: {err}");
+        assert!(err.contains("upscaler weights not found"), "got: {err}");
     }
 
     /// Two concurrent callers into `run_chain_blocking` on the same worker
