@@ -1263,10 +1263,14 @@ fn build_generate_request(
         }
     };
 
-    let config = Config::load_or_default();
+    let mut config = Config::load_or_default();
     let model = args
         .model
         .unwrap_or_else(|| config.resolved_default_model());
+    if crate::catalog_bridge::looks_like_catalog_id(&model) {
+        crate::catalog_bridge::install_catalog_model_from_installed_sidecar(&mut config, &model)
+            .map_err(|e| format!("failed to resolve installed catalog model '{model}': {e}"))?;
+    }
     let model_cfg = config.resolved_model_config(&model);
     let width = args
         .width
@@ -1735,6 +1739,7 @@ fn handle_protocol_message_for_test(message: Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
     use serde_json::json;
 
     #[test]
@@ -1938,6 +1943,82 @@ mod tests {
         assert_eq!(loras.len(), 2);
         assert_eq!(loras[0].path, "/models/a.safetensors");
         assert_eq!(loras[1].scale, 0.4);
+    }
+
+    #[test]
+    fn build_generate_request_uses_installed_catalog_sidecar_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_home = std::env::var_os("MOLD_HOME");
+        let prior_models_dir = std::env::var_os("MOLD_MODELS_DIR");
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            std::env::set_var("MOLD_HOME", dir.path());
+            std::env::remove_var("MOLD_MODELS_DIR");
+        }
+
+        let install_dir = dir.path().join("models/cv-12345");
+        let primary_rel = "sdxl/civitai/12345/model.safetensors";
+        let primary = install_dir.join(primary_rel);
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::write(&primary, b"fake").unwrap();
+        let sidecar = mold_catalog::sidecar::CatalogSidecar {
+            schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+            id: "cv:12345".to_string(),
+            source: "civitai".to_string(),
+            source_id: "12345".to_string(),
+            name: "SDXL Fine Tune".to_string(),
+            author: Some("tester".to_string()),
+            family: "sdxl".to_string(),
+            family_role: "finetune".to_string(),
+            sub_family: None,
+            kind: "checkpoint".to_string(),
+            modality: "image".to_string(),
+            thumbnail_url: None,
+            size_bytes: Some(4),
+            engine_phase: 1,
+            trained_words: Vec::new(),
+            primary_filename_rel: primary_rel.to_string(),
+            written_at: 0,
+        };
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &sidecar,
+        )
+        .unwrap();
+
+        let req = build_generate_request(
+            GenerateImageArgs {
+                prompt: "a catalog default test".into(),
+                model: Some("cv:12345".into()),
+                width: None,
+                height: None,
+                steps: None,
+                guidance: None,
+                seed: None,
+                negative_prompt: None,
+                output_format: None,
+                expand: None,
+                loras: None,
+            },
+            None,
+        )
+        .expect("catalog sidecar should supply model defaults");
+
+        assert_eq!(req.width, 1024);
+        assert_eq!(req.height, 1024);
+        assert_eq!(req.steps, 25);
+        assert_eq!(req.guidance, 7.5);
+
+        unsafe {
+            match prior_home {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+            match prior_models_dir {
+                Some(v) => std::env::set_var("MOLD_MODELS_DIR", v),
+                None => std::env::remove_var("MOLD_MODELS_DIR"),
+            }
+        }
     }
 
     #[tokio::test]

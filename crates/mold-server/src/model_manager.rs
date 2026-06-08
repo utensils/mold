@@ -30,6 +30,51 @@ fn transformer_path_looks_zimage(path: &str) -> bool {
     path.contains("/z-image/") || path.contains("zimage")
 }
 
+fn transformer_path_is_gguf(paths: &ModelPaths) -> bool {
+    paths
+        .transformer
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
+}
+
+fn model_component_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn transformer_component_size(paths: &ModelPaths) -> u64 {
+    if paths.transformer_shards.is_empty() {
+        model_component_size(&paths.transformer)
+    } else {
+        paths
+            .transformer_shards
+            .iter()
+            .map(|path| model_component_size(path))
+            .sum()
+    }
+}
+
+fn large_flux_bf16_should_auto_offload(paths: &ModelPaths, hint: Option<ActivationHint>) -> bool {
+    const LARGE_FLUX_BF16_TRANSFORMER_BYTES: u64 = 20_000_000_000;
+
+    if !hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
+        || transformer_path_is_gguf(paths)
+    {
+        return false;
+    }
+
+    let transformer_path = transformer_path_lower(paths);
+    if transformer_path_looks_flux2(&transformer_path)
+        || transformer_path_looks_zimage(&transformer_path)
+        || transformer_path_looks_ltx2(&transformer_path)
+        || transformer_path.contains("nvfp4")
+    {
+        return false;
+    }
+
+    transformer_component_size(paths) >= LARGE_FLUX_BF16_TRANSFORMER_BYTES
+}
+
 /// Per-request shape hint passed into [`preflight_memory_guard`] so the
 /// activation budget can scale with resolution / dtype / arch. `None`
 /// degrades to the previous fixed-headroom approximation (the
@@ -191,16 +236,16 @@ pub(crate) fn preflight_memory_guard_with_available(
     let streaming = hint
         .map(|h| h.family.streaming_transformer())
         .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
-    let forced_flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
-        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let flux_offload = (hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
+        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1"))
+        || large_flux_bf16_should_auto_offload(paths, hint);
     let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
         && paths
             .transformer
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-    let peak =
-        base_peak_memory_for_paths(paths, hint, streaming, forced_flux_offload, qwen_quantized);
+    let peak = base_peak_memory_for_paths(paths, hint, streaming, flux_offload, qwen_quantized);
     // Add the per-request activation budget on top of the file-size peak.
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
     // is a generic "kernels + small state" constant that doesn't scale; the
@@ -225,7 +270,7 @@ fn base_peak_memory_for_paths(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
     streaming: bool,
-    forced_flux_offload: bool,
+    flux_offload: bool,
     qwen_quantized: bool,
 ) -> u64 {
     if streaming {
@@ -237,7 +282,7 @@ fn base_peak_memory_for_paths(
         // the runtime will surface that OOM instead of rewriting the request.
         let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
         return streaming_transformer_peak(paths, gemma_competes);
-    } else if forced_flux_offload {
+    } else if flux_offload {
         return streaming_transformer_peak(paths, false);
     } else if hint.is_some_and(|h| h.family == ActivationFamily::Sd3Mmdit) {
         return sd3_sequential_peak(paths);
@@ -516,11 +561,7 @@ pub(crate) fn select_server_load_strategy_for_budget(
     available_bytes: Option<u64>,
     hint: Option<ActivationHint>,
 ) -> mold_inference::LoadStrategy {
-    let transformer_is_gguf = paths
-        .transformer
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+    let transformer_is_gguf = transformer_path_is_gguf(paths);
 
     if hint.is_some_and(|h| h.family == ActivationFamily::ZImageDit) && !transformer_is_gguf {
         return mold_inference::LoadStrategy::Sequential;
@@ -590,10 +631,7 @@ pub(crate) fn server_offload_enabled_for_paths(
     hint: Option<ActivationHint>,
     request_has_lora: bool,
 ) -> bool {
-    if !std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1") {
-        return false;
-    }
-
+    let forced_offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
     let transformer_path = transformer_path_lower(paths);
     let transformer_looks_flux2 = transformer_path_looks_flux2(&transformer_path);
     let transformer_looks_zimage = transformer_path_looks_zimage(&transformer_path);
@@ -612,11 +650,7 @@ pub(crate) fn server_offload_enabled_for_paths(
         return false;
     }
 
-    let transformer_is_gguf = paths
-        .transformer
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+    let transformer_is_gguf = transformer_path_is_gguf(paths);
 
     if transformer_looks_nvfp4
         && (transformer_looks_flux2 || hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit))
@@ -624,7 +658,7 @@ pub(crate) fn server_offload_enabled_for_paths(
         return false;
     }
 
-    !(transformer_is_gguf
+    if transformer_is_gguf
         && hint.is_some_and(|h| {
             matches!(
                 h.family,
@@ -632,7 +666,12 @@ pub(crate) fn server_offload_enabled_for_paths(
                     | ActivationFamily::ZImageDit
                     | ActivationFamily::Flux2Dit
             )
-        }))
+        })
+    {
+        return false;
+    }
+
+    forced_offload || large_flux_bf16_should_auto_offload(paths, hint)
 }
 
 pub(crate) fn request_requires_fresh_engine_for_offload_policy(
@@ -1134,18 +1173,16 @@ fn apply_catalog_runtime_defaults(
     cfg: &mut mold_core::ModelConfig,
     intent: &mold_catalog::synthesis::CatalogModelIntent,
 ) {
-    if intent.family == "flux" {
-        match intent.sub_family.as_deref() {
-            Some("flux1-s") => {
-                cfg.is_schnell.get_or_insert(true);
-                cfg.default_steps.get_or_insert(4);
-                cfg.default_guidance.get_or_insert(0.0);
-            }
-            Some("flux1-d" | "flux1-krea" | "flux1-kontext") => {
-                cfg.is_schnell.get_or_insert(false);
-            }
-            _ => {}
-        }
+    let defaults = mold_catalog::defaults::runtime_defaults_for_family(
+        &intent.family,
+        intent.sub_family.as_deref(),
+    );
+    cfg.default_width.get_or_insert(defaults.width);
+    cfg.default_height.get_or_insert(defaults.height);
+    cfg.default_steps.get_or_insert(defaults.steps);
+    cfg.default_guidance.get_or_insert(defaults.guidance);
+    if let Some(is_schnell) = defaults.is_schnell {
+        cfg.is_schnell.get_or_insert(is_schnell);
     }
 }
 
@@ -1471,25 +1508,27 @@ fn installed_catalog_models(
             .map(|b| b as f32 / 1_000_000_000.0)
             .unwrap_or(0.0);
 
-        let (w, h, steps, guidance) = mold_core::manifest::visible_manifests()
-            .find(|m| m.family == sidecar.family)
-            .map(|m| {
-                let cfg = config.resolved_model_config(&m.name);
-                (
-                    cfg.effective_width(config),
-                    cfg.effective_height(config),
-                    cfg.effective_steps(config),
-                    cfg.effective_guidance(),
-                )
-            })
-            .unwrap_or_else(|| match sidecar.family.as_str() {
-                "ltx-video" | "ltx2" => (768, 512, 25, 3.5),
-                "sdxl" => (1024, 1024, 20, 7.5),
-                "sd15" => (512, 512, 20, 7.5),
-                "flux" => (1024, 1024, 20, 3.5),
-                "flux2" => (512, 512, 4, 0.0),
-                _ => (1024, 1024, 20, 3.5),
-            });
+        let defaults = mold_catalog::defaults::runtime_defaults_for_family(
+            &sidecar.family,
+            sidecar.sub_family.as_deref(),
+        );
+        let user_cfg = config.lookup_model_config(&sidecar.id);
+        let w = user_cfg
+            .as_ref()
+            .and_then(|cfg| cfg.default_width)
+            .unwrap_or(defaults.width);
+        let h = user_cfg
+            .as_ref()
+            .and_then(|cfg| cfg.default_height)
+            .unwrap_or(defaults.height);
+        let steps = user_cfg
+            .as_ref()
+            .and_then(|cfg| cfg.default_steps)
+            .unwrap_or(defaults.steps);
+        let guidance = user_cfg
+            .as_ref()
+            .and_then(|cfg| cfg.default_guidance)
+            .unwrap_or(defaults.guidance);
 
         let description = match &sidecar.author {
             Some(a) if !a.is_empty() => format!("{} by {a}", sidecar.name),
@@ -1646,16 +1685,13 @@ pub(crate) async fn estimate_generation_memory(
     let streaming = hint
         .map(|h| h.family.streaming_transformer())
         .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
-    let forced_flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
-        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let flux_offload = (hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
+        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1"))
+        || large_flux_bf16_should_auto_offload(&paths, hint);
     let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
-        && paths
-            .transformer
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+        && transformer_path_is_gguf(&paths);
     let base_peak =
-        base_peak_memory_for_paths(&paths, hint, streaming, forced_flux_offload, qwen_quantized);
+        base_peak_memory_for_paths(&paths, hint, streaming, flux_offload, qwen_quantized);
     let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
     let peak = base_peak.saturating_add(activation);
     let available = effective_load_available_bytes(0, 0);
@@ -2860,6 +2896,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preflight_accepts_large_flux_bf16_auto_offload_on_24gb() {
+        let _guard = offload_env_guard("0");
+        let (_dir, paths) = flux_shaped_paths_with_sizes(23, 1, 9, 1);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+
+        let result = preflight_memory_guard_with_available(
+            "cv:2319074",
+            &paths,
+            0,
+            24_500_000_000,
+            Some(hint),
+        );
+
+        assert!(
+            result.is_ok(),
+            "large FLUX BF16 checkpoints should be admitted on 24 GB cards via \
+             automatic block offload instead of being rejected by resident \
+             transformer peak math, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn server_auto_enables_offload_for_large_flux_bf16_without_env() {
+        let _guard = offload_env_guard("0");
+        let (_dir, paths) = flux_shaped_paths_with_sizes(23, 1, 9, 1);
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::FluxDit,
+        };
+
+        assert!(
+            server_offload_enabled_for_paths(&paths, Some(hint), false),
+            "large FLUX BF16 checkpoints should load with block offload even \
+             when MOLD_OFFLOAD is not globally forced"
+        );
+    }
+
     fn sd3_gguf_paths_with_monolithic_vae(
         transformer_gb: u64,
         vae_gb: u64,
@@ -3434,13 +3517,13 @@ mod tests {
     #[test]
     fn preflight_memory_guard_accepts_resolution_for_activation_budget() {
         let _guard = offload_env_guard("0");
-        // Shape: 23 GB transformer, 1 GB VAE, 9 GB T5, 1 GB CLIP. Sequential
-        // peak = max(10, 24) + 2 GB headroom = 26 GB. On a 30 GB card the
-        // 90 % hard limit is 27 GB:
-        //   * 768²:  26 + 0.256 (floor) = 26.256 ≤ 27  → accept
-        //   * 2048²: 26 + 1.09          = 27.09  > 27  → reject
-        // Without the activation hint both would land at 26 GB and accept.
-        let (_dir, paths) = flux_shaped_paths_with_sizes(23, 1, 9, 1);
+        // Shape: 19 GB transformer, 1 GB VAE, 9 GB T5, 1 GB CLIP. Sequential
+        // peak = max(10, 20) + 2 GB headroom = 22 GB. On a 25 GB card the
+        // 90 % hard limit is 22.5 GB:
+        //   * 768²:  22 + 0.256 (floor) = 22.256 ≤ 22.5 → accept
+        //   * 2048²: 22 + 1.09          = 23.09  > 22.5 → reject
+        // Without the activation hint both would land at 22 GB and accept.
+        let (_dir, paths) = flux_shaped_paths_with_sizes(19, 1, 9, 1);
 
         let hint_768 = ActivationHint {
             width: 768,
@@ -3457,7 +3540,7 @@ mod tests {
             family: ActivationFamily::FluxDit,
         };
 
-        let card_total = 30 * GB;
+        let card_total = 25 * GB;
         let result_768 = preflight_memory_guard_with_available(
             "flux-dev",
             &paths,
@@ -4502,6 +4585,52 @@ mod tests {
             Some(true),
             "flux1-s catalog entries must select FLUX schnell config, not dev guidance config"
         );
+
+        unsafe {
+            match _saved {
+                Some(v) => std::env::set_var("MOLD_HOME", v),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_intent_applies_flux_dev_subfamily_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let _saved = std::env::var("MOLD_HOME").ok();
+        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+
+        let primary_path =
+            models_dir.join("cv-2319074/flux/civitai/2319074/jibMixFlux_v12SRPO.safetensors");
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &primary_path,
+            &[
+                "double_blocks.0.img_attn.proj.weight",
+                "single_blocks.0.linear1.weight",
+                "img_in.weight",
+            ],
+        );
+
+        let mut config = mold_core::Config {
+            models_dir: models_dir.to_string_lossy().into_owned(),
+            default_steps: 4,
+            ..Default::default()
+        };
+        stub_flux_companion_paths_in_dir(&mut config, models_dir, true);
+
+        let mut entry = flux_unet_only_catalog_entry("2319074", "jibMixFlux_v12SRPO.safetensors");
+        entry.sub_family = Some("flux1-d".into());
+
+        let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
+        let cfg = resolve_intent_to_paths("cv:2319074", &intent, &config).unwrap();
+
+        assert_eq!(cfg.is_schnell, Some(false));
+        assert_eq!(cfg.default_steps, Some(25));
+        assert_eq!(cfg.default_guidance, Some(3.5));
+        assert_eq!(cfg.default_width, Some(1024));
+        assert_eq!(cfg.default_height, Some(1024));
 
         unsafe {
             match _saved {

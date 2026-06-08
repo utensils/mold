@@ -4,7 +4,7 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::flux;
 use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -633,13 +633,58 @@ fn flux_safetensors_var_builder<'a>(
     component: &str,
     progress: &ProgressReporter,
 ) -> Result<VarBuilder<'a>> {
-    crate::weight_loader::load_safetensors_with_progress(
-        std::slice::from_ref(&path),
-        dtype,
-        device,
-        component,
-        progress,
-    )
+    let aliases = flux_rms_norm_scale_aliases(path)?;
+    if aliases.is_empty() {
+        crate::weight_loader::load_safetensors_with_progress(
+            std::slice::from_ref(&path),
+            dtype,
+            device,
+            component,
+            progress,
+        )
+    } else {
+        tracing::info!(
+            alias_count = aliases.len(),
+            path = %path.display(),
+            "FLUX checkpoint uses RMSNorm .weight keys; aliasing .scale lookups"
+        );
+        crate::weight_loader::load_safetensors_with_aliases(
+            std::slice::from_ref(&path),
+            dtype,
+            device,
+            component,
+            progress,
+            aliases,
+        )
+    }
+}
+
+fn flux_rms_norm_scale_aliases(path: &std::path::Path) -> Result<BTreeMap<String, String>> {
+    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path])? };
+    let mut aliases = BTreeMap::new();
+    for prefix in ["", "model.diffusion_model.", "diffusion_model."] {
+        for i in 0..64 {
+            for stream in ["img_attn", "txt_attn"] {
+                for norm in ["query_norm", "key_norm"] {
+                    let target = format!("{prefix}double_blocks.{i}.{stream}.norm.{norm}.scale");
+                    let source = format!("{prefix}double_blocks.{i}.{stream}.norm.{norm}.weight");
+                    if tensors.get(&target).is_err() && tensors.get(&source).is_ok() {
+                        aliases.insert(target, source);
+                    }
+                }
+            }
+        }
+        for i in 0..128 {
+            for norm in ["query_norm", "key_norm"] {
+                let target = format!("{prefix}single_blocks.{i}.norm.{norm}.scale");
+                let source = format!("{prefix}single_blocks.{i}.norm.{norm}.weight");
+                if tensors.get(&target).is_err() && tensors.get(&source).is_ok() {
+                    aliases.insert(target, source);
+                }
+            }
+        }
+    }
+    Ok(aliases)
 }
 
 /// Build a LoRA-patching VarBuilder that wraps mmap'd base weights.
@@ -2854,8 +2899,8 @@ impl FluxEngine {
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_loras, flux_runtime_dtype, flux_transformer_var_builder, park_cond_to_cpu,
-        LoraBypassMode,
+        effective_loras, flux_rms_norm_scale_aliases, flux_runtime_dtype,
+        flux_transformer_var_builder, park_cond_to_cpu, LoraBypassMode,
     };
     use crate::LoadStrategy;
     use candle_core::{DType, Device, Result, Tensor};
@@ -2891,6 +2936,41 @@ mod tests {
         assert_eq!(with_env(Some("auto")), LoraBypassMode::Auto);
         assert_eq!(with_env(Some("garbage")), LoraBypassMode::Auto);
         assert_eq!(with_env(None), LoraBypassMode::Auto);
+    }
+
+    #[test]
+    fn flux_rms_norm_aliases_detect_weight_suffix_checkpoint() {
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+
+        let dir = std::env::temp_dir().join(format!(
+            "mold-flux-rms-alias-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("flux-rms-weight.safetensors");
+
+        let data = 1.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "model.diffusion_model.double_blocks.0.img_attn.norm.query_norm.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &data).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let aliases = flux_rms_norm_scale_aliases(&path).unwrap();
+        assert_eq!(
+            aliases.get("model.diffusion_model.double_blocks.0.img_attn.norm.query_norm.scale"),
+            Some(
+                &"model.diffusion_model.double_blocks.0.img_attn.norm.query_norm.weight"
+                    .to_string()
+            )
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn dummy_paths(transformer: &str) -> ModelPaths {

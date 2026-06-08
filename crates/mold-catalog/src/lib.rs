@@ -9,6 +9,7 @@
 
 pub mod civitai_map;
 pub mod companions;
+pub mod defaults;
 pub mod entry;
 pub mod families;
 pub mod hf_seeds;

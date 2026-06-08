@@ -114,6 +114,7 @@ fn intent_to_model_config(
         family: Some(intent.family.clone()),
         ..Default::default()
     };
+    apply_catalog_runtime_defaults(&mut cfg, intent);
 
     if !matches!(intent.bundling, Bundling::SingleFile) {
         anyhow::bail!(
@@ -186,6 +187,23 @@ fn intent_to_model_config(
     }
 
     Ok(cfg)
+}
+
+fn apply_catalog_runtime_defaults(
+    cfg: &mut ModelConfig,
+    intent: &mold_catalog::synthesis::CatalogModelIntent,
+) {
+    let defaults = mold_catalog::defaults::runtime_defaults_for_family(
+        &intent.family,
+        intent.sub_family.as_deref(),
+    );
+    cfg.default_width.get_or_insert(defaults.width);
+    cfg.default_height.get_or_insert(defaults.height);
+    cfg.default_steps.get_or_insert(defaults.steps);
+    cfg.default_guidance.get_or_insert(defaults.guidance);
+    if let Some(is_schnell) = defaults.is_schnell {
+        cfg.is_schnell.get_or_insert(is_schnell);
+    }
 }
 
 fn copy_companion_into_cfg(cfg: &mut ModelConfig, companion_name: &str, paths: &ModelPaths) {
@@ -322,13 +340,23 @@ pub async fn install_catalog_model_live(config: &mut Config, id: &str) -> Result
     if !looks_like_catalog_id(id) {
         return Ok(false);
     }
-    if let Some(synth) = synthesize_model_config_from_installed_sidecar(config, id)? {
-        config.models.insert(id.to_string(), synth);
+    if install_catalog_model_from_installed_sidecar(config, id)? {
         return Ok(true);
     }
     let entry = lookup_catalog_entry_live(id).await?;
     let models_dir = config.resolved_models_dir();
     let synth = synthesize_model_config(&entry, &models_dir, config)?;
+    config.models.insert(id.to_string(), synth);
+    Ok(true)
+}
+
+pub fn install_catalog_model_from_installed_sidecar(config: &mut Config, id: &str) -> Result<bool> {
+    if !looks_like_catalog_id(id) {
+        return Ok(false);
+    }
+    let Some(synth) = synthesize_model_config_from_installed_sidecar(config, id)? else {
+        return Ok(false);
+    };
     config.models.insert(id.to_string(), synth);
     Ok(true)
 }

@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Shape, Tensor};
+use candle_nn::var_builder::SimpleBackend;
 use candle_nn::VarBuilder;
 use safetensors::tensor::TensorInfo;
 use serde_json::Value;
@@ -23,6 +24,11 @@ use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 /// per-layer FP8→BF16 dequantization (with optional scale) during forward.
 pub(crate) struct NativeFp8Backend {
     inner: candle_core::safetensors::MmapedSafetensors,
+}
+
+pub(crate) struct AliasSafetensorsBackend {
+    inner: candle_core::safetensors::MmapedSafetensors,
+    aliases: BTreeMap<String, String>,
 }
 
 impl NativeFp8Backend {
@@ -101,6 +107,50 @@ impl candle_nn::var_builder::SimpleBackend for NativeFp8Backend {
 
     fn contains_tensor(&self, name: &str) -> bool {
         self.inner.get(name).is_ok()
+    }
+}
+
+impl SimpleBackend for AliasSafetensorsBackend {
+    fn get(
+        &self,
+        s: Shape,
+        path: &str,
+        _: candle_nn::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        let source = self.aliases.get(path).map(String::as_str).unwrap_or(path);
+        let tensor = self.inner.load(source, dev)?;
+        if tensor.shape() != &s {
+            Err(candle_core::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {path}"),
+                expected: s,
+                got: tensor.shape().clone(),
+            })?
+        }
+        if tensor.dtype() != dtype {
+            tensor.to_dtype(dtype)
+        } else {
+            Ok(tensor)
+        }
+    }
+
+    fn get_unchecked(&self, path: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+        let source = self.aliases.get(path).map(String::as_str).unwrap_or(path);
+        let tensor = self.inner.load(source, dev)?;
+        if tensor.dtype() != dtype {
+            tensor.to_dtype(dtype)
+        } else {
+            Ok(tensor)
+        }
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.inner.get(name).is_ok()
+            || self
+                .aliases
+                .get(name)
+                .is_some_and(|source| self.inner.get(source).is_ok())
     }
 }
 
@@ -216,6 +266,31 @@ pub fn load_safetensors_with_progress<'a>(
     load_safetensors_with_progress_total(paths, dtype, device, component, progress, bytes_total)
 }
 
+pub(crate) fn load_safetensors_with_aliases<'a>(
+    paths: &[impl AsRef<Path>],
+    dtype: DType,
+    device: &Device,
+    component: &str,
+    progress: &ProgressReporter,
+    aliases: BTreeMap<String, String>,
+) -> Result<VarBuilder<'a>> {
+    let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_ref()).collect();
+    let bytes_total = total_file_bytes(paths);
+
+    progress.weight_load(component, 0, bytes_total);
+
+    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&path_refs)? };
+    let backend = AliasSafetensorsBackend {
+        inner: tensors,
+        aliases,
+    };
+    let vb = VarBuilder::from_backend(Box::new(backend), dtype, device.clone());
+
+    progress.weight_load(component, bytes_total, bytes_total);
+
+    Ok(vb)
+}
+
 pub(crate) fn load_safetensors_with_progress_callback<'a>(
     paths: &[impl AsRef<Path>],
     dtype: DType,
@@ -278,6 +353,44 @@ mod tests {
         })
         .unwrap();
         assert_eq!(total, visual_data.len() as u64);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn alias_backend_maps_missing_rms_scale_to_weight_suffix() {
+        let path = temp_file("alias-rms");
+        let data = 1.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "model.diffusion_model.double_blocks.0.img_attn.norm.query_norm.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &data).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let mut aliases = BTreeMap::new();
+        aliases.insert(
+            "model.diffusion_model.double_blocks.0.img_attn.norm.query_norm.scale".to_string(),
+            "model.diffusion_model.double_blocks.0.img_attn.norm.query_norm.weight".to_string(),
+        );
+        let backend = AliasSafetensorsBackend {
+            inner: unsafe { candle_core::safetensors::MmapedSafetensors::new(&path).unwrap() },
+            aliases,
+        };
+        let dev = Device::Cpu;
+
+        assert!(SimpleBackend::contains_tensor(
+            &backend,
+            "model.diffusion_model.double_blocks.0.img_attn.norm.query_norm.scale"
+        ));
+        let tensor = SimpleBackend::get_unchecked(
+            &backend,
+            "model.diffusion_model.double_blocks.0.img_attn.norm.query_norm.scale",
+            DType::F32,
+            &dev,
+        )
+        .unwrap();
+        assert_eq!(tensor.to_vec1::<f32>().unwrap(), vec![1.0]);
 
         let _ = std::fs::remove_file(path);
     }
