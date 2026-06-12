@@ -69,6 +69,22 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          df -h
+
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y clang lld nasm
 
@@ -130,6 +146,22 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          df -h
 
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y clang lld nasm
@@ -207,6 +239,22 @@ jobs:
             tag_suffix: "-sm120"
     steps:
       - uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          docker system prune -af --volumes || true
+          df -h
 
       - uses: docker/setup-buildx-action@v4
 
