@@ -54,6 +54,7 @@ export function applyDownloadEvent(
       state.queued.push({
         id: event.id,
         model: event.model,
+        catalog_id: null,
         status: "queued",
         files_done: 0,
         files_total: 0,
@@ -79,6 +80,7 @@ export function applyDownloadEvent(
           : {
               id: event.id,
               model: "",
+              catalog_id: null,
               status: "queued" as const,
               files_done: 0,
               files_total: 0,

@@ -78,4 +78,57 @@ describe("DownloadsDrawer", () => {
     btn.trigger("click");
     expect(onRetry).toHaveBeenCalledOnce();
   });
+
+  it("groups catalog primary and required resources", () => {
+    const wrapper = mount(DownloadsDrawer, {
+      props: {
+        open: true,
+        active: makeJob({
+          id: "primary",
+          model: "cv:2910912",
+          catalog_id: "cv:2910912",
+          files_done: 0,
+          files_total: 1,
+          bytes_done: 500,
+          bytes_total: 1_000,
+          current_file: "moody.safetensors",
+        }) as never,
+        queued: [
+          makeJob({
+            id: "clip",
+            model: "flux2-te-9b",
+            catalog_id: "cv:2910912",
+            status: "queued",
+            files_done: 0,
+            files_total: 3,
+            bytes_done: 0,
+            bytes_total: 9_000,
+            current_file: null,
+          }) as never,
+        ],
+        history: [
+          makeJob({
+            id: "vae",
+            model: "flux2-vae",
+            catalog_id: "cv:2910912",
+            status: "completed",
+            files_done: 1,
+            files_total: 1,
+            bytes_done: 2_000,
+            bytes_total: 2_000,
+            current_file: null,
+          }) as never,
+        ],
+        etaSeconds: 12,
+      },
+    });
+
+    expect(wrapper.text()).toContain("Catalog model");
+    expect(wrapper.text()).toContain("cv:2910912");
+    expect(wrapper.text()).toContain("Primary model");
+    expect(wrapper.text()).toContain("flux2-te-9b");
+    expect(wrapper.text()).toContain("flux2-vae");
+    expect(wrapper.text()).toContain("moody.safetensors");
+    expect(wrapper.text()).toContain("12s");
+  });
 });

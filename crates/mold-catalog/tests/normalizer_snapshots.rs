@@ -2,7 +2,9 @@ use mold_catalog::entry::{
     Bundling, CatalogEntry, FamilyRole, FileFormat, Kind, Modality, RecipeFileRole, Source,
 };
 use mold_catalog::families::Family;
-use mold_catalog::normalizer::{from_civitai, from_hf, CivitaiItem, HfDetail, HfTreeEntry};
+use mold_catalog::normalizer::{
+    from_civitai, from_civitai_search_entries, from_hf, CivitaiItem, HfDetail, HfTreeEntry,
+};
 
 fn load(path: &str) -> String {
     std::fs::read_to_string(format!("tests/fixtures/{path}")).unwrap()
@@ -49,13 +51,87 @@ fn civitai_juggernaut_normalizes_as_sdxl_single_file() {
     assert!(!entry.download_recipe.files.is_empty());
     assert_eq!(
         entry.download_recipe.files[0].url,
-        "https://civitai.com/api/download/models/618692"
+        "https://civitai.com/api/download/models/618692?format=SafeTensor&size=full&fp=fp16"
     );
     assert_eq!(
         entry.download_recipe.files[0].sha256.as_deref(),
         Some("ABC123")
     );
     assert!(entry.thumbnail_url.as_deref().is_some());
+}
+
+#[test]
+fn civitai_search_expands_public_versions_and_skips_early_access() {
+    let json = r#"{
+        "id": 2453960,
+        "name": "Miraclein NSFW [Generation & Edit] [Flux2Klein]",
+        "type": "Checkpoint",
+        "nsfw": true,
+        "creator": { "username": "m" },
+        "stats": { "downloadCount": 10, "favoriteCount": 2 },
+        "tags": [],
+        "modelVersions": [
+            {
+                "id": 2986788,
+                "name": "3.0(bf16+fp8)",
+                "baseModel": "Flux.2 Klein 9B",
+                "baseModelType": "Standard",
+                "availability": "EarlyAccess",
+                "files": [{
+                    "id": 1, "name": "early.safetensors", "type": "Model",
+                    "sizeKB": 100, "downloadCount": 0,
+                    "metadata": { "format": "SafeTensor", "size": "full", "fp": "fp8" },
+                    "downloadUrl": "https://civitai.com/api/download/models/2986788",
+                    "hashes": {}
+                }],
+                "images": []
+            },
+            {
+                "id": 2940538,
+                "name": "2.0_FP8",
+                "baseModel": "Flux.2 Klein 9B",
+                "baseModelType": "Standard",
+                "availability": "Public",
+                "files": [{
+                    "id": 2, "name": "fp8.safetensors", "type": "Model",
+                    "sizeKB": 200, "downloadCount": 0,
+                    "metadata": { "format": "SafeTensor", "size": "full", "fp": "fp8" },
+                    "downloadUrl": "https://civitai.com/api/download/models/2940538",
+                    "hashes": { "SHA256": "FP8" }
+                }],
+                "images": []
+            },
+            {
+                "id": 2912809,
+                "name": "1.0_bf16",
+                "baseModel": "Flux.2 Klein 9B",
+                "baseModelType": "Standard",
+                "availability": "Public",
+                "files": [{
+                    "id": 3, "name": "bf16.safetensors", "type": "Diffusion Model",
+                    "sizeKB": 300, "downloadCount": 0,
+                    "metadata": { "format": "Other", "fp": "bf16" },
+                    "downloadUrl": "https://civitai.com/api/download/models/2912809",
+                    "hashes": { "SHA256": "BF16" }
+                }],
+                "images": []
+            }
+        ]
+    }"#;
+    let item: CivitaiItem = serde_json::from_str(json).unwrap();
+    let entries = from_civitai_search_entries(item);
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].id.as_str(), "cv:2940538");
+    assert_eq!(
+        entries[0].download_recipe.files[0].url,
+        "https://civitai.com/api/download/models/2940538?type=Model&format=SafeTensor&size=full&fp=fp8"
+    );
+    assert_eq!(entries[1].id.as_str(), "cv:2912809");
+    assert_eq!(
+        entries[1].download_recipe.files[0].sha256.as_deref(),
+        Some("BF16")
+    );
 }
 
 #[test]
@@ -100,7 +176,7 @@ fn civitai_zimage_multifile_version_picks_model_file_not_text_encoder() {
     assert_eq!(entry.download_recipe.files.len(), 2);
     assert_eq!(
         entry.download_recipe.files[0].url,
-        "https://civitai.example/model"
+        "https://civitai.example/model?type=Model&format=SafeTensor&size=full&fp=bf16"
     );
     assert_eq!(
         entry.download_recipe.files[0].dest,
@@ -112,7 +188,7 @@ fn civitai_zimage_multifile_version_picks_model_file_not_text_encoder() {
     );
     assert_eq!(
         entry.download_recipe.files[1].url,
-        "https://civitai.example/txt"
+        "https://civitai.example/txt?type=Text+Encoder&format=SafeTensor"
     );
     assert_eq!(
         entry.download_recipe.files[1].dest,

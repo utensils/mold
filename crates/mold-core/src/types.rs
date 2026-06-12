@@ -2773,6 +2773,8 @@ pub enum JobStatus {
 pub struct DownloadJob {
     pub id: String,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<String>,
     pub status: JobStatus,
     pub files_done: usize,
     pub files_total: usize,
@@ -2886,6 +2888,7 @@ mod downloads_types_tests {
         let job = DownloadJob {
             id: "11111111-1111-1111-1111-111111111111".to_string(),
             model: "flux-dev:q4".to_string(),
+            catalog_id: None,
             status: JobStatus::Active,
             files_done: 2,
             files_total: 5,

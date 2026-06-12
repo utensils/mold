@@ -30,7 +30,8 @@ use crate::entry::{
 };
 use crate::families::Family;
 use crate::normalizer::{
-    from_civitai, from_hf, CivitaiItem, CivitaiVersion, HfDetail, HfTreeEntry,
+    from_civitai, from_civitai_search_entries, from_hf, CivitaiItem, CivitaiVersion, HfDetail,
+    HfTreeEntry,
 };
 
 /// Request shape for [`search`]. Hash-equal opts hit the same cache key,
@@ -523,10 +524,10 @@ async fn civitai_search(
     }
     let parsed: CivitaiResponse = serde_json::from_str(&body)?;
 
-    let mut out = Vec::with_capacity(parsed.items.len());
+    let mut out = Vec::new();
     for item in parsed.items {
         let nsfw_item = item.nsfw;
-        if let Some(entry) = from_civitai(item) {
+        for entry in from_civitai_search_entries(item) {
             // Civitai's nsfw filter is best-effort — drop again locally so
             // a row whose top-level `nsfw=false` but version is gated
             // doesn't leak through. The from_civitai output preserves the

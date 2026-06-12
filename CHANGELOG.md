@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-06-12
+
 ### Added
 
 - **Generate web Studio Console.** The Generate tab now keeps model search, LoRA search/stacking, prompt entry, live jobs, compact recent gallery, and advanced controls visible in a three-rail workspace. Gallery cards on Generate include a Recreate action that restores the form from the saved generation metadata.
@@ -16,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Civitai version and download selection now preserves every public variant and downloads the exact selected file.** Live Civitai search now expands a model's public `modelVersions` into separate catalog rows instead of only showing the first version, while EarlyAccess/paywalled versions stay hidden from search. Recipe URLs now include Civitai's file selectors (`type`, `format`, `size`, `fp`) so ambiguous primary URLs cannot redirect to a different precision than the SHA-256 mold verifies. The catalog detail drawer also lists the primary file plus required companion resources with sizes, and the download drawer groups catalog primary + companion jobs into one model-level progress view.
 - **Qwen-Image / Qwen-Image-Edit LoRA catalog compatibility.** Qwen LoRA rows now normalize as installable adapter entries instead of inheriting the old unsupported single-file checkpoint phase, Qwen-Image-Edit model filters also show Qwen-Image LoRAs, and unsupported catalog rows now render as "Unsupported by this build" instead of a fake future phase badge.
 
 ## [0.12.0] - 2026-05-27
@@ -746,7 +749,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/utensils/mold/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/utensils/mold/compare/v0.10.0...v0.12.0
 [0.10.0]: https://github.com/utensils/mold/compare/v0.8.1...v0.10.0
 [0.8.1]: https://github.com/utensils/mold/compare/v0.8.0...v0.8.1

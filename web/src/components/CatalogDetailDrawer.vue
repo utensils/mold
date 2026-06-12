@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { useCatalog } from "../composables/useCatalog";
 
 const cat = useCatalog();
@@ -13,6 +14,32 @@ async function handleDownload() {
   await cat.startDownload(cat.detail.value.id);
   cat.closeDetail();
 }
+
+const downloadItems = computed(() => {
+  const detail = cat.detail.value;
+  if (!detail) return [];
+  const primary = detail.download_recipe.files.map((file) => ({
+    key: `primary:${file.dest}`,
+    label: file.dest.split("/").pop() || "Primary model",
+    kind: "primary",
+    size: file.size_bytes,
+  }));
+  const companions = (detail.companion_details ?? []).map((companion) => ({
+    key: `companion:${companion.name}`,
+    label: companion.name,
+    kind: companion.kind,
+    size: companion.size_bytes,
+  }));
+  return [...primary, ...companions];
+});
+
+const downloadTotalBytes = computed(() => {
+  const total = downloadItems.value.reduce((sum, item) => {
+    if (item.size === null || item.size === undefined) return sum;
+    return sum + item.size;
+  }, 0);
+  return total > 0 ? total : null;
+});
 </script>
 
 <template>
@@ -140,6 +167,32 @@ async function handleDownload() {
       >
         {{ cat.detail.value.description }}
       </p>
+
+      <!-- Download contents -->
+      <div
+        v-if="downloadItems.length"
+        class="border-t border-zinc-800 pt-3"
+        data-test="download-contents"
+      >
+        <div class="mb-2 flex items-center justify-between text-xs">
+          <span class="text-zinc-500">Download contents</span>
+          <span class="text-zinc-300">{{ formatGB(downloadTotalBytes) }}</span>
+        </div>
+        <ul class="flex flex-col gap-1">
+          <li
+            v-for="item in downloadItems"
+            :key="item.key"
+            class="grid grid-cols-[1fr_auto] gap-2 text-xs"
+          >
+            <span class="min-w-0 truncate text-zinc-300">
+              {{ item.label }}
+            </span>
+            <span class="text-zinc-500">
+              {{ item.kind }} · {{ formatGB(item.size) }}
+            </span>
+          </li>
+        </ul>
+      </div>
 
       <!-- Tags -->
       <div v-if="cat.detail.value.tags.length > 0" class="flex flex-wrap gap-1">

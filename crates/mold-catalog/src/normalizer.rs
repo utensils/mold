@@ -1,7 +1,7 @@
 //! Source-specific JSON → `CatalogEntry`.
 //!
 //! HF: combine `/api/models/{repo}` detail + `/api/models/{repo}/tree/main`.
-//! Civitai: combine the model + first version + a chosen safetensors file.
+//! Civitai: combine the model + a chosen version + a chosen safetensors file.
 
 use serde::Deserialize;
 
@@ -322,6 +322,8 @@ pub struct CivitaiVersion {
     pub files: Vec<CivitaiFile>,
     #[serde(default)]
     pub images: Vec<CivitaiImage>,
+    #[serde(default)]
+    pub availability: Option<String>,
     /// Trigger phrases the LoRA was trained on (Civitai's `trainedWords`).
     /// Empty for non-LoRA entries; the catalog wire format passes them
     /// through to the web UI which renders click-to-insert chips.
@@ -350,6 +352,8 @@ pub struct CivitaiFile {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct CivitaiFileMetadata {
     pub format: Option<String>,
+    pub size: Option<String>,
+    pub fp: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -361,6 +365,25 @@ pub struct CivitaiImage {
 
 pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
     let version = item.model_versions.first()?;
+    from_civitai_version(&item, version)
+}
+
+pub fn from_civitai_search_entries(item: CivitaiItem) -> Vec<CatalogEntry> {
+    item.model_versions
+        .iter()
+        .filter(|version| version_is_public(version))
+        .filter_map(|version| from_civitai_version(&item, version))
+        .collect()
+}
+
+fn version_is_public(version: &CivitaiVersion) -> bool {
+    matches!(
+        version.availability.as_deref(),
+        None | Some("Public") | Some("public")
+    )
+}
+
+fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<CatalogEntry> {
     let (family, family_role, sub_family) = map_base_model(&version.base_model)?;
     let file = pick_safetensors(&version.files)?;
     // Drop entries whose Civitai type isn't representable in the catalog
@@ -394,7 +417,7 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
         needs_token: Some(TokenKind::Civitai),
     };
 
-    let stats = item.stats.unwrap_or_default();
+    let stats = item.stats.clone().unwrap_or_default();
     let now = chrono_now_unix();
 
     let trained_words = version.trained_words.clone();
@@ -403,8 +426,8 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
         id: CatalogId::from(format!("cv:{}", version.id)),
         source: Source::Civitai,
         source_id: version.id.to_string(),
-        name: item.name.clone(),
-        author: item.creator.and_then(|c| c.username),
+        name: civitai_entry_name(&item.name, version.name.as_deref()),
+        author: item.creator.as_ref().and_then(|c| c.username.clone()),
         family,
         family_role,
         sub_family,
@@ -421,7 +444,7 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
         description: None,
         license: None,
         license_flags: LicenseFlags::default(),
-        tags: item.tags,
+        tags: item.tags.clone(),
         companions,
         download_recipe: recipe,
         engine_phase: phase,
@@ -432,12 +455,25 @@ pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
     })
 }
 
+fn civitai_entry_name(model_name: &str, version_name: Option<&str>) -> String {
+    let Some(version_name) = version_name.map(str::trim).filter(|s| !s.is_empty()) else {
+        return model_name.to_string();
+    };
+    if version_name.eq_ignore_ascii_case(model_name) {
+        model_name.to_string()
+    } else {
+        format!("{model_name} - {version_name}")
+    }
+}
+
 /// Civitai's legacy unsafe `.pt` ("PickleTensor") format is dropped at the
 /// scanner. Arbitrary-code-execution risk on deserialization is not worth
 /// catalog completeness — only safetensors are surfaced.
 fn pick_safetensors(files: &[CivitaiFile]) -> Option<&CivitaiFile> {
-    let is_safetensors =
-        |file: &&CivitaiFile| file.metadata.format.as_deref() == Some("SafeTensor");
+    let is_safetensors = |file: &&CivitaiFile| {
+        file.metadata.format.as_deref() == Some("SafeTensor")
+            || file.name.to_ascii_lowercase().ends_with(".safetensors")
+    };
     files
         .iter()
         .filter(is_safetensors)
@@ -452,7 +488,8 @@ fn pick_safetensors(files: &[CivitaiFile]) -> Option<&CivitaiFile> {
 fn pick_civitai_text_encoder(files: &[CivitaiFile]) -> Option<&CivitaiFile> {
     files.iter().find(|file| {
         file.download_url.is_some()
-            && file.metadata.format.as_deref() == Some("SafeTensor")
+            && (file.metadata.format.as_deref() == Some("SafeTensor")
+                || file.name.to_ascii_lowercase().ends_with(".safetensors"))
             && file
                 .file_type
                 .as_deref()
@@ -466,10 +503,7 @@ fn civitai_recipe_file(
     role: Option<RecipeFileRole>,
 ) -> RecipeFile {
     RecipeFile {
-        url: file
-            .download_url
-            .clone()
-            .unwrap_or_else(|| format!("https://civitai.com/api/download/models/{version_id}")),
+        url: exact_civitai_download_url(version_id, file),
         dest: format!("{{family}}/civitai/{}/{}", version_id, file.name),
         sha256: file
             .hashes
@@ -479,4 +513,35 @@ fn civitai_recipe_file(
         size_bytes: file.size_kb.map(|kb| (kb * 1000.0) as u64),
         role,
     }
+}
+
+fn exact_civitai_download_url(version_id: u64, file: &CivitaiFile) -> String {
+    let raw = file
+        .download_url
+        .clone()
+        .unwrap_or_else(|| format!("https://civitai.com/api/download/models/{version_id}"));
+    if raw.contains('?') {
+        return raw;
+    }
+
+    let mut url = match reqwest::Url::parse(&raw) {
+        Ok(url) => url,
+        Err(_) => return raw,
+    };
+    {
+        let mut q = url.query_pairs_mut();
+        if let Some(file_type) = file.file_type.as_deref().filter(|s| !s.is_empty()) {
+            q.append_pair("type", file_type);
+        }
+        if let Some(format) = file.metadata.format.as_deref().filter(|s| !s.is_empty()) {
+            q.append_pair("format", format);
+        }
+        if let Some(size) = file.metadata.size.as_deref().filter(|s| !s.is_empty()) {
+            q.append_pair("size", size);
+        }
+        if let Some(fp) = file.metadata.fp.as_deref().filter(|s| !s.is_empty()) {
+            q.append_pair("fp", fp);
+        }
+    }
+    url.to_string()
 }

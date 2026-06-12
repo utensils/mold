@@ -352,7 +352,7 @@ async fn nsfw_filtered_out_when_include_nsfw_false() {
         1,
         "nsfw row must be filtered when opt-in is off"
     );
-    assert_eq!(entries[0].name, "SFW");
+    assert_eq!(entries[0].name, "SFW - v1");
 }
 
 /// Regression for the 400 "Cannot use page param with query search.
@@ -449,7 +449,7 @@ async fn fetch_civitai_version_normalizes_single_id() {
     assert_eq!(entry.download_recipe.files.len(), 1);
     assert_eq!(
         entry.download_recipe.files[0].url,
-        "https://civitai.example/x.safetensors"
+        "https://civitai.example/x.safetensors?format=SafeTensor"
     );
 }
 

@@ -195,6 +195,7 @@ impl DownloadQueue {
         let job = DownloadJob {
             id: id.clone(),
             model: canonical.clone(),
+            catalog_id: None,
             status: JobStatus::Queued,
             files_done: 0,
             files_total: 0,
@@ -261,6 +262,7 @@ impl DownloadQueue {
         let job = DownloadJob {
             id: id.clone(),
             model: payload.catalog_id.clone(),
+            catalog_id: Some(payload.catalog_id.clone()),
             status: JobStatus::Queued,
             files_done: 0,
             files_total: payload.files.len(),
@@ -324,6 +326,7 @@ impl DownloadQueue {
     }
 
     fn register_in_group(&self, catalog_id: &str, job_id: &str) {
+        self.tag_job_with_catalog_id(catalog_id, job_id);
         let mut groups = match self.groups.lock() {
             Ok(g) => g,
             Err(_) => return, // poisoned — best effort, the broadcast still works
@@ -336,6 +339,26 @@ impl DownloadQueue {
                 outcomes: HashMap::new(),
             });
         entry.job_ids.insert(job_id.to_string());
+    }
+
+    fn tag_job_with_catalog_id(&self, catalog_id: &str, job_id: &str) {
+        if let Ok(mut queued) = self.queued.lock() {
+            if let Some(job) = queued.iter_mut().find(|job| job.id == job_id) {
+                job.catalog_id = Some(catalog_id.to_string());
+                return;
+            }
+        }
+        if let Ok(mut history) = self.history.lock() {
+            if let Some(job) = history.iter_mut().find(|job| job.id == job_id) {
+                job.catalog_id = Some(catalog_id.to_string());
+                return;
+            }
+        }
+        if let Ok(mut active) = self.active.try_lock() {
+            if let Some(handle) = active.as_mut().filter(|handle| handle.job.id == job_id) {
+                handle.job.catalog_id = Some(catalog_id.to_string());
+            }
+        }
     }
 
     /// Record a job's terminal status against any catalog group it belongs

@@ -2,8 +2,9 @@ import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { ref } from "vue";
 import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
+import type { CatalogEntryWire } from "../types";
 
-const makeEntry = (phase: number) => ({
+const makeEntry = (phase: number): CatalogEntryWire => ({
   id: "hf:a",
   name: "Alpha",
   family: "flux",
@@ -29,6 +30,7 @@ const makeEntry = (phase: number) => ({
   license_flags: null,
   tags: [],
   companions: [],
+  companion_details: [],
   download_recipe: { files: [], needs_token: null },
   primary_path: null,
   created_at: null,
@@ -41,7 +43,7 @@ const mockStartDownload = vi.fn();
 const mockCanDownload = vi.fn(
   (e: { engine_phase: number }) => e.engine_phase <= 5,
 );
-const mockDetail = ref<ReturnType<typeof makeEntry> | null>(null);
+const mockDetail = ref<CatalogEntryWire | null>(null);
 
 vi.mock("../composables/useCatalog", () => {
   return {
@@ -134,5 +136,44 @@ describe("CatalogDetailDrawer", () => {
     mockDetail.value = { ...makeEntry(1), installed: true };
     const w = mount(CatalogDetailDrawer);
     expect(w.text()).toMatch(/installed/i);
+  });
+
+  it("renders primary and required companion download contents", () => {
+    mockDetail.value = {
+      ...makeEntry(3),
+      download_recipe: {
+        needs_token: "civitai" as const,
+        files: [
+          {
+            url: "https://civitai.example/model",
+            dest: "flux2/civitai/2910912/moody.safetensors",
+            sha256: "abc",
+            size_bytes: 8_000_000_000,
+          },
+        ],
+      },
+      companions: ["flux2-te-9b", "flux2-vae"],
+      companion_details: [
+        {
+          name: "flux2-te-9b",
+          kind: "text-encoder" as const,
+          repo: "black-forest-labs/FLUX.2-klein-9B",
+          size_bytes: 16_000_000_000,
+        },
+        {
+          name: "flux2-vae",
+          kind: "vae" as const,
+          repo: "black-forest-labs/FLUX.2-klein-4B",
+          size_bytes: 168_000_000,
+        },
+      ],
+    };
+    const w = mount(CatalogDetailDrawer);
+
+    expect(w.find("[data-test=download-contents]").exists()).toBe(true);
+    expect(w.text()).toContain("moody.safetensors");
+    expect(w.text()).toContain("flux2-te-9b");
+    expect(w.text()).toContain("flux2-vae");
+    expect(w.text()).toContain("24.2 GB");
   });
 });

@@ -16,6 +16,17 @@ const emit = defineEmits<{
   (e: "retry", model: string): void;
 }>();
 
+type DownloadGroup = {
+  id: string;
+  jobs: DownloadJobWire[];
+  bytesDone: number;
+  bytesTotal: number;
+  filesDone: number;
+  filesTotal: number;
+  status: DownloadJobWire["status"];
+  currentFile: string | null;
+};
+
 function formatGb(bytes: number): string {
   if (!bytes) return "—";
   const gb = bytes / 1_073_741_824;
@@ -32,11 +43,84 @@ function formatEta(seconds: number | null): string {
   return `${m}m ${s}s`;
 }
 
+const looseActive = computed(() =>
+  props.active && !props.active.catalog_id ? props.active : null,
+);
+
+const looseQueued = computed(() =>
+  props.queued.filter((job) => !job.catalog_id),
+);
+
+const looseHistory = computed(() =>
+  props.history.filter((job) => !job.catalog_id || job.status !== "completed"),
+);
+
 const activePct = computed(() => {
-  const a = props.active;
+  const a = looseActive.value;
   if (!a || a.bytes_total === 0) return 0;
   return Math.min(100, Math.round((a.bytes_done / a.bytes_total) * 100));
 });
+
+const catalogGroups = computed<DownloadGroup[]>(() => {
+  const byId = new Map<string, DownloadJobWire[]>();
+  for (const job of [
+    ...(props.active ? [props.active] : []),
+    ...props.queued,
+    ...props.history,
+  ]) {
+    if (!job.catalog_id) continue;
+    const jobs = byId.get(job.catalog_id) ?? [];
+    jobs.push(job);
+    byId.set(job.catalog_id, jobs);
+  }
+
+  const rank: Record<DownloadJobWire["status"], number> = {
+    active: 0,
+    queued: 1,
+    failed: 2,
+    cancelled: 3,
+    completed: 4,
+  };
+
+  return [...byId.entries()]
+    .map(([id, jobs]) => {
+      const ordered = [...jobs].sort((a, b) => rank[a.status] - rank[b.status]);
+      const status: DownloadJobWire["status"] = ordered.some(
+        (job) => job.status === "active",
+      )
+        ? "active"
+        : ordered.some((job) => job.status === "queued")
+          ? "queued"
+          : ordered.some((job) => job.status === "failed")
+            ? "failed"
+            : ordered.some((job) => job.status === "cancelled")
+              ? "cancelled"
+              : "completed";
+      return {
+        id,
+        jobs: ordered,
+        bytesDone: jobs.reduce((sum, job) => sum + job.bytes_done, 0),
+        bytesTotal: jobs.reduce((sum, job) => sum + job.bytes_total, 0),
+        filesDone: jobs.reduce((sum, job) => sum + job.files_done, 0),
+        filesTotal: jobs.reduce((sum, job) => sum + job.files_total, 0),
+        status,
+        currentFile:
+          ordered.find((job) => job.status === "active")?.current_file ?? null,
+      };
+    })
+    .filter((group) => group.status !== "completed")
+    .sort((a, b) => rank[a.status] - rank[b.status]);
+});
+
+function groupPct(group: DownloadGroup): number {
+  if (group.bytesTotal === 0) return 0;
+  return Math.min(100, Math.round((group.bytesDone / group.bytesTotal) * 100));
+}
+
+function jobLabel(job: DownloadJobWire): string {
+  if (job.catalog_id && job.model === job.catalog_id) return "Primary model";
+  return job.model;
+}
 </script>
 
 <template>
@@ -57,26 +141,106 @@ const activePct = computed(() => {
       </button>
     </header>
 
+    <!-- Catalog Groups -->
+    <section
+      v-for="group in catalogGroups"
+      :key="group.id"
+      class="rounded-2xl border border-white/5 bg-white/5 p-3"
+    >
+      <div class="mb-2 flex items-center justify-between">
+        <div class="text-xs uppercase tracking-wider text-ink-300">
+          Catalog model
+        </div>
+        <span
+          class="rounded-full px-1.5 py-0.5 text-[10px] uppercase"
+          :class="{
+            'bg-brand-500/20 text-brand-100': group.status === 'active',
+            'bg-white/10 text-ink-300': group.status === 'queued',
+            'bg-red-500/20 text-red-200': group.status === 'failed',
+            'bg-slate-500/30 text-slate-200': group.status === 'cancelled',
+          }"
+        >
+          {{ group.status }}
+        </span>
+      </div>
+      <div class="flex items-center justify-between">
+        <div class="min-w-0 truncate text-sm font-medium text-ink-50">
+          {{ group.id }}
+        </div>
+        <button
+          v-if="group.status === 'active'"
+          class="rounded-full bg-red-500/20 px-2 py-0.5 text-xs text-red-200 hover:bg-red-500/40"
+          @click="
+            emit(
+              'cancel',
+              group.jobs.find((job) => job.status === 'active')?.id ??
+                group.jobs[0].id,
+            )
+          "
+        >
+          Cancel
+        </button>
+      </div>
+      <div class="mt-1 text-xs text-ink-300">
+        {{ formatGb(group.bytesDone) }} / {{ formatGb(group.bytesTotal) }} ·
+        {{ group.filesDone }}/{{ group.filesTotal }} files ·
+        {{ groupPct(group) }}%
+        <template v-if="active?.catalog_id === group.id">
+          · ETA {{ formatEta(etaSeconds) }}
+        </template>
+      </div>
+      <div
+        class="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/10"
+        role="progressbar"
+        :aria-valuenow="groupPct(group)"
+        aria-valuemin="0"
+        aria-valuemax="100"
+      >
+        <div
+          class="h-full bg-brand-400 transition-[width]"
+          :style="{ width: groupPct(group) + '%' }"
+        />
+      </div>
+      <div v-if="group.currentFile" class="mt-2 truncate text-xs text-ink-400">
+        {{ group.currentFile }}
+      </div>
+      <ul class="mt-3 flex flex-col gap-1 border-t border-white/5 pt-2">
+        <li
+          v-for="job in group.jobs"
+          :key="job.id"
+          class="grid grid-cols-[1fr_auto] gap-2 text-xs"
+        >
+          <span class="min-w-0 truncate text-ink-200">{{ jobLabel(job) }}</span>
+          <span class="text-ink-400">
+            {{ formatGb(job.bytes_total) }} · {{ job.status }}
+          </span>
+        </li>
+      </ul>
+    </section>
+
     <!-- Active -->
     <section
-      v-if="active"
+      v-if="looseActive"
       class="rounded-2xl border border-white/5 bg-white/5 p-3"
     >
       <div class="mb-2 text-xs uppercase tracking-wider text-ink-300">
         Active
       </div>
       <div class="flex items-center justify-between">
-        <div class="text-sm font-medium text-ink-50">{{ active.model }}</div>
+        <div class="text-sm font-medium text-ink-50">
+          {{ looseActive.model }}
+        </div>
         <button
           class="rounded-full bg-red-500/20 px-2 py-0.5 text-xs text-red-200 hover:bg-red-500/40"
-          @click="emit('cancel', active.id)"
+          @click="emit('cancel', looseActive.id)"
         >
           Cancel
         </button>
       </div>
       <div class="mt-1 text-xs text-ink-300">
-        {{ formatGb(active.bytes_done) }} / {{ formatGb(active.bytes_total) }} ·
-        {{ active.files_done }}/{{ active.files_total }} · ETA
+        {{ formatGb(looseActive.bytes_done) }} /
+        {{ formatGb(looseActive.bytes_total) }} ·
+        {{ looseActive.files_done }}/{{ looseActive.files_total }} · ETA
         {{ formatEta(etaSeconds) }}
       </div>
       <div
@@ -92,24 +256,24 @@ const activePct = computed(() => {
         />
       </div>
       <div
-        v-if="active.current_file"
+        v-if="looseActive.current_file"
         class="mt-2 truncate text-xs text-ink-400"
       >
-        {{ active.current_file }}
+        {{ looseActive.current_file }}
       </div>
     </section>
 
     <!-- Queued -->
     <section
-      v-if="queued.length"
+      v-if="looseQueued.length"
       class="rounded-2xl border border-white/5 bg-white/5 p-3"
     >
       <div class="mb-2 text-xs uppercase tracking-wider text-ink-300">
-        Queued ({{ queued.length }})
+        Queued ({{ looseQueued.length }})
       </div>
       <ul class="flex flex-col gap-1">
         <li
-          v-for="(job, idx) in queued"
+          v-for="(job, idx) in looseQueued"
           :key="job.id"
           class="flex items-center justify-between text-sm"
         >
@@ -128,7 +292,7 @@ const activePct = computed(() => {
 
     <!-- Recent -->
     <section
-      v-if="history.length"
+      v-if="looseHistory.length"
       class="rounded-2xl border border-white/5 bg-white/5 p-3"
     >
       <div class="mb-2 text-xs uppercase tracking-wider text-ink-300">
@@ -136,7 +300,7 @@ const activePct = computed(() => {
       </div>
       <ul class="flex flex-col gap-1">
         <li
-          v-for="job in [...history].reverse()"
+          v-for="job in [...looseHistory].reverse()"
           :key="job.id"
           class="flex items-center justify-between gap-2 text-sm"
         >
@@ -167,7 +331,12 @@ const activePct = computed(() => {
     </section>
 
     <p
-      v-if="!active && !queued.length && !history.length"
+      v-if="
+        !looseActive &&
+        !looseQueued.length &&
+        !looseHistory.length &&
+        !catalogGroups.length
+      "
       class="text-center text-sm text-ink-400"
     >
       No downloads yet.

@@ -590,6 +590,7 @@ export type JobStatusWire =
 export interface DownloadJobWire {
   id: string;
   model: string;
+  catalog_id?: string | null;
   status: JobStatusWire;
   files_done: number;
   files_total: number;
@@ -716,6 +717,12 @@ export interface CatalogEntryWire {
   } | null;
   tags: string[];
   companions: string[];
+  companion_details?: {
+    name: string;
+    kind: CatalogKind;
+    repo: string;
+    size_bytes: number | null;
+  }[];
   download_recipe: {
     files: {
       url: string;

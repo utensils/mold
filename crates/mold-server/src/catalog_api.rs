@@ -778,6 +778,24 @@ fn live_entry_to_wire(
     } else {
         (false, None)
     };
+    let companion_details = entry
+        .companions
+        .iter()
+        .filter_map(|name| {
+            mold_catalog::companions::COMPANIONS
+                .iter()
+                .find(|companion| companion.canonical_name == name)
+                .map(|companion| {
+                    serde_json::json!({
+                        "name": companion.canonical_name,
+                        "kind": companion.kind,
+                        "repo": companion.repo,
+                        "size_bytes": companion.size_bytes,
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+
     serde_json::json!({
         "id": entry.id.as_str(),
         "source": entry.source,
@@ -802,6 +820,7 @@ fn live_entry_to_wire(
         "license_flags": entry.license_flags,
         "tags": entry.tags,
         "companions": entry.companions,
+        "companion_details": companion_details,
         "download_recipe": entry.download_recipe,
         "engine_phase": entry.engine_phase,
         "installed": installed,
@@ -848,6 +867,7 @@ fn sidecar_to_wire(
         "license_flags": null,
         "tags": [],
         "companions": [],
+        "companion_details": [],
         "download_recipe": { "files": [], "needs_token": null },
         "engine_phase": sc.engine_phase,
         "installed": installed,
