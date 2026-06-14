@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use crate::adaptive_offload::AdaptiveResidencyPlan;
 use crate::ltx2::guidance::{BatchedPerturbationConfig, PerturbationType};
 use crate::ltx2::lora::{LinearLoraAdapter, Ltx2LoraRegistry};
 
@@ -2834,6 +2835,11 @@ impl LtxAvTransformerBlock {
 enum AvTransformerBlockSource {
     Eager(Vec<LtxAvTransformerBlock>),
     Streaming(VarBuilder<'static>),
+    Adaptive {
+        resident_blocks: Vec<Option<LtxAvTransformerBlock>>,
+        streamed_vb: VarBuilder<'static>,
+        plan: AdaptiveResidencyPlan,
+    },
 }
 
 pub struct Ltx2AvTransformer3DModel {
@@ -3024,6 +3030,53 @@ impl Ltx2AvTransformer3DModel {
         vb: VarBuilder<'static>,
         lora_registry: Option<Arc<Ltx2LoraRegistry>>,
     ) -> Result<Self> {
+        let transformer_blocks = AvTransformerBlockSource::Streaming(vb.pp("transformer_blocks"));
+        Self::new_with_block_source(config, vb, lora_registry, transformer_blocks)
+    }
+
+    pub(crate) fn new_adaptive(
+        config: &Ltx2VideoTransformer3DModelConfig,
+        vb: VarBuilder<'static>,
+        lora_registry: Option<Arc<Ltx2LoraRegistry>>,
+        plan: AdaptiveResidencyPlan,
+    ) -> Result<Self> {
+        if plan.resident.len() != config.num_layers {
+            candle_core::bail!(
+                "LTX-2 adaptive residency plan has {} layers, expected {}",
+                plan.resident.len(),
+                config.num_layers
+            );
+        }
+
+        let blocks_vb = vb.pp("transformer_blocks");
+        let mut resident_blocks = Vec::with_capacity(config.num_layers);
+        for (index, is_resident) in plan.resident.iter().copied().enumerate() {
+            if is_resident {
+                resident_blocks.push(Some(LtxAvTransformerBlock::new(
+                    config,
+                    blocks_vb.pp(index.to_string()),
+                    lora_registry.as_deref(),
+                    &format!("diffusion_model.transformer_blocks.{index}"),
+                )?));
+            } else {
+                resident_blocks.push(None);
+            }
+        }
+
+        let transformer_blocks = AvTransformerBlockSource::Adaptive {
+            resident_blocks,
+            streamed_vb: blocks_vb,
+            plan,
+        };
+        Self::new_with_block_source(config, vb, lora_registry, transformer_blocks)
+    }
+
+    fn new_with_block_source(
+        config: &Ltx2VideoTransformer3DModelConfig,
+        vb: VarBuilder<'static>,
+        lora_registry: Option<Arc<Ltx2LoraRegistry>>,
+        transformer_blocks: AvTransformerBlockSource,
+    ) -> Result<Self> {
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
         let adaln_embedding_coefficient = if config.cross_attention_adaln { 9 } else { 6 };
@@ -3152,10 +3205,29 @@ impl Ltx2AvTransformer3DModel {
                 config.rope_type,
                 config.double_precision_rope,
             ),
-            transformer_blocks: AvTransformerBlockSource::Streaming(vb.pp("transformer_blocks")),
+            transformer_blocks,
             lora_registry,
             config: config.clone(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn adaptive_residency_counts(&self) -> Option<(usize, usize)> {
+        match &self.transformer_blocks {
+            AvTransformerBlockSource::Adaptive {
+                resident_blocks, ..
+            } => {
+                let resident_count = resident_blocks
+                    .iter()
+                    .filter(|block| block.is_some())
+                    .count();
+                Some((
+                    resident_count,
+                    resident_blocks.len().saturating_sub(resident_count),
+                ))
+            }
+            _ => None,
+        }
     }
 
     fn streaming_block(
@@ -3520,6 +3592,61 @@ impl Ltx2AvTransformer3DModel {
                     let block = self.streaming_block(blocks_vb.clone(), index)?;
                     let (vx, ax) =
                         block.forward(index, Some(&video), audio.as_ref(), &perturbations)?;
+                    video.x = vx.ok_or_else(|| {
+                        candle_core::Error::msg("video branch unexpectedly returned no output")
+                    })?;
+                    if let (Some(audio), Some(ax)) = (audio.as_mut(), ax) {
+                        audio.x = ax;
+                    }
+                    if ltx2_block_debug_enabled() {
+                        let (v_mean, v_abs_mean, v_abs_max) = tensor_debug_stats(&video.x)?;
+                        if let Some(audio) = audio.as_ref() {
+                            let (a_mean, a_abs_mean, a_abs_max) = tensor_debug_stats(&audio.x)?;
+                            eprintln!(
+                                "[ltx2-block-debug] block={index} video(mean={v_mean:.6}, abs_mean={v_abs_mean:.6}, abs_max={v_abs_max:.6}) audio(mean={a_mean:.6}, abs_mean={a_abs_mean:.6}, abs_max={a_abs_max:.6})"
+                            );
+                        } else {
+                            eprintln!(
+                                "[ltx2-block-debug] block={index} video(mean={v_mean:.6}, abs_mean={v_abs_mean:.6}, abs_max={v_abs_max:.6})"
+                            );
+                        }
+                    }
+                    if video.x.device().is_cuda()
+                        && should_synchronize_streaming_layer(
+                            index,
+                            self.config.num_layers,
+                            self.config.streaming_prefetch_count,
+                        )
+                    {
+                        video.x.device().synchronize()?;
+                    }
+                }
+            }
+            AvTransformerBlockSource::Adaptive {
+                resident_blocks,
+                streamed_vb,
+                plan,
+            } => {
+                debug_assert_eq!(plan.resident.len(), resident_blocks.len());
+                for index in 0..self.config.num_layers {
+                    if ltx2_block_debug_enabled() {
+                        eprintln!("[ltx2-block-debug] enter block={index}");
+                    }
+                    let should_reside = plan.resident.get(index).copied().unwrap_or(false);
+                    let (vx, ax) = if should_reside {
+                        let block = resident_blocks
+                            .get(index)
+                            .and_then(Option::as_ref)
+                            .ok_or_else(|| {
+                                candle_core::Error::msg(format!(
+                                    "missing resident LTX-2 block {index} from adaptive plan"
+                                ))
+                            })?;
+                        block.forward(index, Some(&video), audio.as_ref(), &perturbations)?
+                    } else {
+                        let block = self.streaming_block(streamed_vb.clone(), index)?;
+                        block.forward(index, Some(&video), audio.as_ref(), &perturbations)?
+                    };
                     video.x = vx.ok_or_else(|| {
                         candle_core::Error::msg("video branch unexpectedly returned no output")
                     })?;
@@ -4971,6 +5098,21 @@ mod tests {
         let vb = av_transformer_var_builder();
         let eager = Ltx2AvTransformer3DModel::new(&config, vb.clone(), None).unwrap();
         let streaming = Ltx2AvTransformer3DModel::new_streaming(&config, vb, None).unwrap();
+        let adaptive_plan = crate::adaptive_offload::AdaptiveResidencyPlan {
+            resident: vec![true, false],
+            resident_bytes: 10,
+            streamed_bytes: 20,
+            largest_streamed_block: 20,
+            activation_budget: 0,
+            runtime_headroom: 0,
+        };
+        let adaptive = Ltx2AvTransformer3DModel::new_adaptive(
+            &config,
+            av_transformer_var_builder(),
+            None,
+            adaptive_plan,
+        )
+        .unwrap();
 
         let video_hidden_states = Tensor::from_vec(
             vec![0.1f32, -0.2, 0.3, 0.4, -0.5, 0.6],
@@ -5049,9 +5191,32 @@ mod tests {
                 None,
             )
             .unwrap();
+        let (adaptive_video, adaptive_audio) = adaptive
+            .forward(
+                &video_hidden_states,
+                Some(&audio_hidden_states),
+                &video_encoder_hidden_states,
+                Some(&audio_encoder_hidden_states),
+                &timestep,
+                &timestep,
+                Some(&timestep),
+                Some(&timestep),
+                Some(&video_attention_mask),
+                Some(&audio_attention_mask),
+                None,
+                None,
+                &video_positions,
+                Some(&audio_positions),
+                None,
+            )
+            .unwrap();
 
         assert_tensors_close(&eager_video, &streaming_video, 1e-4);
-        assert_tensors_close(&eager_audio.unwrap(), &streaming_audio.unwrap(), 1e-4);
+        let eager_audio = eager_audio.unwrap();
+        assert_tensors_close(&eager_audio, &streaming_audio.unwrap(), 1e-4);
+        assert_tensors_close(&eager_video, &adaptive_video, 1e-4);
+        assert_tensors_close(&eager_audio, &adaptive_audio.unwrap(), 1e-4);
+        assert_eq!(adaptive.adaptive_residency_counts(), Some((1, 1)));
     }
 
     #[test]

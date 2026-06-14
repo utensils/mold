@@ -10,6 +10,8 @@ use image::{imageops, GenericImage, Rgb, RgbImage};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::collections::HashMap;
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -38,7 +40,13 @@ use super::plan::{Ltx2GeneratePlan, PipelineKind};
 use super::sampler::sampler_step;
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
-use crate::device::{fmt_gb, free_vram_bytes};
+use crate::adaptive_offload::{
+    plan_adaptive_residency, AdaptiveResidencyPlan, ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
+};
+use crate::device::{
+    activation_bytes, dtype_bytes, fmt_gb, free_vram_bytes, thread_gpu_ordinal,
+    usable_free_vram_bytes, ActivationFamily,
+};
 use crate::engine::{gpu_dtype, seeded_randn};
 use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
@@ -4477,6 +4485,39 @@ fn load_ltx2_av_transformer_with_loras(
     let vb = vb.rename_f(remap_ltx2_transformer_key);
     if device.is_cuda() && ltx2_checkpoint_is_fp8(plan) && force_eager && !force_streaming {
         Ok(Ltx2AvTransformer3DModel::new(&config, vb, lora_registry)?)
+    } else if device.is_cuda() && !force_streaming {
+        let gpu_ordinal = thread_gpu_ordinal().unwrap_or(0);
+        let free_vram = usable_free_vram_bytes(gpu_ordinal).unwrap_or(0);
+        match ltx2_transformer_block_sizes_from_safetensors(
+            Path::new(&plan.checkpoint_path),
+            config.num_layers,
+        ) {
+            Ok(block_sizes) if free_vram > 0 && block_sizes.iter().any(|size| *size > 0) => {
+                let residency_plan = ltx2_adaptive_transformer_plan(plan, &block_sizes, free_vram);
+                emit_info(
+                    progress,
+                    format!(
+                        "LTX-2 adaptive offload: {} resident / {} streamed blocks (resident {}, streamed {} per denoise pass, reserve {})",
+                        residency_plan.resident_count(),
+                        residency_plan.streamed_count(),
+                        fmt_gb(residency_plan.resident_bytes),
+                        fmt_gb(residency_plan.streamed_bytes),
+                        fmt_gb(residency_plan.reserved_bytes()),
+                    ),
+                );
+                Ok(Ltx2AvTransformer3DModel::new_adaptive(
+                    &config,
+                    vb,
+                    lora_registry,
+                    residency_plan,
+                )?)
+            }
+            Ok(_) | Err(_) => Ok(Ltx2AvTransformer3DModel::new_streaming(
+                &config,
+                vb,
+                lora_registry,
+            )?),
+        }
     } else {
         Ok(Ltx2AvTransformer3DModel::new_streaming(
             &config,
@@ -4484,6 +4525,43 @@ fn load_ltx2_av_transformer_with_loras(
             lora_registry,
         )?)
     }
+}
+
+fn emit_info(progress: Option<&ProgressCallback>, message: String) {
+    if let Some(progress) = progress {
+        progress(ProgressEvent::Info { message });
+    } else {
+        tracing::info!("{message}");
+    }
+}
+
+fn ltx2_video_activation_budget(plan: &Ltx2GeneratePlan) -> u64 {
+    let dtype = DType::BF16;
+    let base = activation_bytes(
+        plan.width,
+        plan.height,
+        1,
+        dtype_bytes(dtype),
+        ActivationFamily::Ltx2Video,
+    );
+    let latent_frames = ((plan.num_frames.max(1) - 1) / 8 + 1) as u64;
+    let default_latent_frames = 13u64; // 97 pixel frames at 8x temporal compression.
+    base.saturating_mul(latent_frames.max(1))
+        .saturating_add(default_latent_frames - 1)
+        / default_latent_frames
+}
+
+fn ltx2_adaptive_transformer_plan(
+    plan: &Ltx2GeneratePlan,
+    block_sizes: &[usize],
+    free_vram: u64,
+) -> AdaptiveResidencyPlan {
+    plan_adaptive_residency(
+        block_sizes,
+        free_vram,
+        ltx2_video_activation_budget(plan),
+        ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
+    )
 }
 
 fn load_ltx2_video_vae(
@@ -4616,6 +4694,84 @@ fn remap_ltx2_transformer_key(name: &str) -> String {
         .collect::<Vec<_>>()
         .join(".");
     format!("model.diffusion_model.{mapped}")
+}
+
+fn ltx2_transformer_block_index(name: &str) -> Option<usize> {
+    let mut components = name.split('.');
+    while let Some(component) = components.next() {
+        if component == "transformer_blocks" || component == "blocks" {
+            return components.next()?.parse().ok();
+        }
+    }
+    None
+}
+
+#[derive(serde::Deserialize)]
+struct SafetensorsHeaderTensor {
+    dtype: safetensors::Dtype,
+    shape: Vec<usize>,
+    data_offsets: (usize, usize),
+}
+
+fn ltx2_transformer_block_sizes_from_safetensors(
+    path: &Path,
+    num_layers: usize,
+) -> Result<Vec<usize>> {
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open LTX-2 checkpoint {}", path.display()))?;
+    let mut header_len_bytes = [0u8; 8];
+    file.read_exact(&mut header_len_bytes).with_context(|| {
+        format!(
+            "failed to read safetensors header length from {}",
+            path.display()
+        )
+    })?;
+    let header_len = u64::from_le_bytes(header_len_bytes) as usize;
+    let mut header = vec![0u8; header_len];
+    file.read_exact(&mut header).with_context(|| {
+        format!(
+            "failed to read safetensors metadata header from {}",
+            path.display()
+        )
+    })?;
+    let tensors: HashMap<String, serde_json::Value> = serde_json::from_slice(&header)
+        .with_context(|| {
+            format!(
+                "failed to parse safetensors metadata header from {}",
+                path.display()
+            )
+        })?;
+    let mut sizes = vec![0usize; num_layers];
+    for (name, value) in tensors {
+        if name == "__metadata__" {
+            continue;
+        }
+        let tensor: SafetensorsHeaderTensor = serde_json::from_value(value)
+            .with_context(|| format!("failed to parse safetensors tensor metadata for {name}"))?;
+        let tensor_bytes = tensor
+            .data_offsets
+            .1
+            .checked_sub(tensor.data_offsets.0)
+            .with_context(|| format!("invalid safetensors data offsets for tensor {name}"))?;
+        let expected_bytes = tensor
+            .shape
+            .iter()
+            .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
+            .and_then(|elements| elements.checked_mul(tensor.dtype.size()))
+            .with_context(|| format!("safetensors tensor shape overflows for {name}"))?;
+        if expected_bytes != tensor_bytes {
+            anyhow::bail!(
+                "safetensors tensor {name} reports {tensor_bytes} bytes but shape/dtype imply {expected_bytes}"
+            );
+        }
+        let remapped = remap_ltx2_transformer_key(&name);
+        if let Some(index) = ltx2_transformer_block_index(&remapped) {
+            if let Some(size) = sizes.get_mut(index) {
+                *size = size.saturating_add(tensor_bytes);
+            }
+        }
+    }
+    Ok(sizes)
 }
 
 fn denoised_from_velocity(sample: &Tensor, velocity: &Tensor, sigma: f32) -> Result<Tensor> {
@@ -5083,6 +5239,7 @@ mod tests {
         build_embeddings_processor, ConnectorSpec, NativePromptEncoder,
     };
     use crate::progress::{ProgressCallback, ProgressEvent};
+    use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
@@ -6229,6 +6386,38 @@ mod tests {
             super::remap_ltx2_transformer_key("blocks.0.norm_q_extra.weight"),
             "model.diffusion_model.blocks.0.norm_q_extra.weight"
         );
+    }
+
+    #[test]
+    fn ltx2_block_size_discovery_groups_transformer_tensors_after_remap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ltx2-blocks.safetensors");
+        let block0 = vec![0u8; 4 * SafeDtype::F32.size()];
+        let block1_a = vec![0u8; 6 * SafeDtype::F16.size()];
+        let block1_b = vec![0u8; 2 * SafeDtype::F32.size()];
+        let non_block = vec![0u8; 3 * SafeDtype::F32.size()];
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "transformer_blocks.0.attn1.to_q.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2, 2], &block0).unwrap(),
+        );
+        tensors.insert(
+            "model.diffusion_model.transformer_blocks.1.ff.net.0.proj.weight".to_string(),
+            TensorView::new(SafeDtype::F16, vec![2, 3], &block1_a).unwrap(),
+        );
+        tensors.insert(
+            "blocks.1.norm_q.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![2], &block1_b).unwrap(),
+        );
+        tensors.insert(
+            "caption_projection.linear_1.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![3], &non_block).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let sizes = super::ltx2_transformer_block_sizes_from_safetensors(&path, 3).unwrap();
+
+        assert_eq!(sizes, vec![16, 20, 0]);
     }
 
     #[test]
