@@ -1,9 +1,14 @@
-//! BF16 Z-Image transformer block streaming.
+//! BF16 Z-Image transformer adaptive block offloading.
 //!
 //! Stem/final/RoPE layers stay on the runtime device. Refiner and main
-//! transformer blocks stay CPU-resident and are copied to the runtime device
+//! transformer blocks use adaptive residency: the planner keeps the largest
+//! safe subset GPU-resident and streams only the remaining CPU-resident blocks
 //! one at a time for each forward pass.
 
+use crate::adaptive_offload::{
+    plan_adaptive_residency, AdaptiveResidencyPlan, ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
+};
+use crate::progress::ProgressReporter;
 use candle_core::{Device, Module, Result, Tensor, D};
 use candle_nn::{linear, linear_no_bias, Linear, VarBuilder};
 use candle_transformers::models::z_image::transformer::{
@@ -37,6 +42,14 @@ fn linear_to_device(linear: &Linear, device: &Device) -> Result<Linear> {
         .map(|bias| bias.to_device(device))
         .transpose()?;
     Ok(Linear::new(weight, bias))
+}
+
+fn tensor_bytes(t: &Tensor) -> usize {
+    t.elem_count() * t.dtype().size_in_bytes()
+}
+
+fn linear_bytes(linear: &Linear) -> usize {
+    tensor_bytes(linear.weight()) + linear.bias().map(tensor_bytes).unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -79,6 +92,11 @@ fn rms_norm_to_device(norm: &RmsNorm, device: &Device) -> Result<RmsNorm> {
     norm.to_device(device)
 }
 
+fn rms_norm_bytes(norm: &RmsNorm) -> usize {
+    tensor_bytes(&norm.weight)
+}
+
+#[derive(Clone)]
 struct FeedForward {
     w1: Linear,
     w2: Linear,
@@ -111,6 +129,11 @@ impl Module for FeedForward {
     }
 }
 
+fn feed_forward_bytes(feed_forward: &FeedForward) -> usize {
+    linear_bytes(&feed_forward.w1) + linear_bytes(&feed_forward.w2) + linear_bytes(&feed_forward.w3)
+}
+
+#[derive(Clone)]
 struct QkNorm {
     norm_q: RmsNorm,
     norm_k: RmsNorm,
@@ -136,6 +159,11 @@ impl QkNorm {
     }
 }
 
+fn qk_norm_bytes(norm: &QkNorm) -> usize {
+    rms_norm_bytes(&norm.norm_q) + rms_norm_bytes(&norm.norm_k)
+}
+
+#[derive(Clone)]
 struct ZImageAttention {
     to_q: Linear,
     to_k: Linear,
@@ -226,6 +254,15 @@ impl ZImageAttention {
     }
 }
 
+fn zimage_attention_bytes(attention: &ZImageAttention) -> usize {
+    linear_bytes(&attention.to_q)
+        + linear_bytes(&attention.to_k)
+        + linear_bytes(&attention.to_v)
+        + linear_bytes(&attention.to_out)
+        + attention.qk_norm.as_ref().map(qk_norm_bytes).unwrap_or(0)
+}
+
+#[derive(Clone)]
 struct ZImageTransformerBlock {
     attention: ZImageAttention,
     feed_forward: FeedForward,
@@ -234,6 +271,20 @@ struct ZImageTransformerBlock {
     ffn_norm1: RmsNorm,
     ffn_norm2: RmsNorm,
     adaln_modulation: Option<Linear>,
+}
+
+fn zimage_transformer_block_bytes(block: &ZImageTransformerBlock) -> usize {
+    zimage_attention_bytes(&block.attention)
+        + feed_forward_bytes(&block.feed_forward)
+        + rms_norm_bytes(&block.attention_norm1)
+        + rms_norm_bytes(&block.attention_norm2)
+        + rms_norm_bytes(&block.ffn_norm1)
+        + rms_norm_bytes(&block.ffn_norm2)
+        + block
+            .adaln_modulation
+            .as_ref()
+            .map(linear_bytes)
+            .unwrap_or(0)
 }
 
 impl ZImageTransformerBlock {
@@ -319,6 +370,63 @@ impl ZImageTransformerBlock {
     }
 }
 
+enum ZImageBlockSlot {
+    Resident(ZImageTransformerBlock),
+    Streamed(ZImageTransformerBlock),
+}
+
+fn is_probable_cuda_oom(err: &candle_core::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("cuda_error_out_of_memory")
+        || msg.contains("out of memory")
+        || msg.contains("memory allocation")
+}
+
+fn materialize_zimage_block_slots(
+    context_refiner: &[ZImageTransformerBlock],
+    noise_refiner: &[ZImageTransformerBlock],
+    layers: &[ZImageTransformerBlock],
+    plan: &AdaptiveResidencyPlan,
+    device: &Device,
+) -> Result<(
+    Vec<ZImageBlockSlot>,
+    Vec<ZImageBlockSlot>,
+    Vec<ZImageBlockSlot>,
+)> {
+    let mut offset = 0usize;
+    let mut context_slots = Vec::with_capacity(context_refiner.len());
+    for block in context_refiner {
+        if plan.resident.get(offset).copied().unwrap_or(false) {
+            context_slots.push(ZImageBlockSlot::Resident(block.to_device(device)?));
+        } else {
+            context_slots.push(ZImageBlockSlot::Streamed(block.clone()));
+        }
+        offset += 1;
+    }
+
+    let mut noise_slots = Vec::with_capacity(noise_refiner.len());
+    for block in noise_refiner {
+        if plan.resident.get(offset).copied().unwrap_or(false) {
+            noise_slots.push(ZImageBlockSlot::Resident(block.to_device(device)?));
+        } else {
+            noise_slots.push(ZImageBlockSlot::Streamed(block.clone()));
+        }
+        offset += 1;
+    }
+
+    let mut layer_slots = Vec::with_capacity(layers.len());
+    for block in layers {
+        if plan.resident.get(offset).copied().unwrap_or(false) {
+            layer_slots.push(ZImageBlockSlot::Resident(block.to_device(device)?));
+        } else {
+            layer_slots.push(ZImageBlockSlot::Streamed(block.clone()));
+        }
+        offset += 1;
+    }
+
+    Ok((context_slots, noise_slots, layer_slots))
+}
+
 pub(crate) struct OffloadedZImageTransformer {
     t_embedder: TimestepEmbedder,
     cap_embedder_norm: RmsNorm,
@@ -327,16 +435,23 @@ pub(crate) struct OffloadedZImageTransformer {
     final_layer: FinalLayer,
     x_pad_token: Tensor,
     cap_pad_token: Tensor,
-    noise_refiner: Vec<ZImageTransformerBlock>,
-    context_refiner: Vec<ZImageTransformerBlock>,
-    layers: Vec<ZImageTransformerBlock>,
+    noise_refiner: Vec<ZImageBlockSlot>,
+    context_refiner: Vec<ZImageBlockSlot>,
+    layers: Vec<ZImageBlockSlot>,
     rope_embedder: RopeEmbedder,
     cfg: Config,
     gpu_device: Device,
 }
 
 impl OffloadedZImageTransformer {
-    pub(crate) fn new(cfg: &Config, gpu_vb: VarBuilder, cpu_vb: VarBuilder) -> Result<Self> {
+    pub(crate) fn new(
+        cfg: &Config,
+        gpu_vb: VarBuilder,
+        cpu_vb: VarBuilder,
+        gpu_ordinal: usize,
+        activation_budget: u64,
+        progress: &ProgressReporter,
+    ) -> Result<Self> {
         let gpu_device = gpu_vb.device().clone();
         let dtype = gpu_vb.dtype();
         let adaln_dim = cfg.dim.min(ADALN_EMBED_DIM);
@@ -393,6 +508,65 @@ impl OffloadedZImageTransformer {
                 }
             }
         }
+
+        let mut block_sizes =
+            Vec::with_capacity(context_refiner.len() + noise_refiner.len() + layers.len());
+        block_sizes.extend(context_refiner.iter().map(zimage_transformer_block_bytes));
+        block_sizes.extend(noise_refiner.iter().map(zimage_transformer_block_bytes));
+        block_sizes.extend(layers.iter().map(zimage_transformer_block_bytes));
+
+        let free_vram = crate::device::usable_free_vram_bytes(gpu_ordinal).unwrap_or(0);
+        let mut plan = plan_adaptive_residency(
+            &block_sizes,
+            free_vram,
+            activation_budget,
+            ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
+        );
+
+        let (context_refiner, noise_refiner, layers, plan) = loop {
+            match materialize_zimage_block_slots(
+                &context_refiner,
+                &noise_refiner,
+                &layers,
+                &plan,
+                &gpu_device,
+            ) {
+                Ok((context_slots, noise_slots, layer_slots)) => {
+                    break (context_slots, noise_slots, layer_slots, plan);
+                }
+                Err(err)
+                    if gpu_device.is_cuda()
+                        && plan.resident_count() > 0
+                        && is_probable_cuda_oom(&err) =>
+                {
+                    progress.info(&format!(
+                        "Z-Image adaptive offload: resident allocation OOM at {} resident blocks; \
+                         retrying with fewer resident blocks",
+                        plan.resident_count()
+                    ));
+                    if let Err(sync_err) = gpu_device.synchronize() {
+                        tracing::warn!(
+                            "Z-Image adaptive offload: synchronize after OOM failed: {sync_err}"
+                        );
+                    }
+                    if !plan.demote_largest_resident(&block_sizes) {
+                        return Err(err);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        };
+
+        progress.info(&format!(
+            "Z-Image adaptive offload: {} resident / {} streamed blocks \
+             (resident {:.2} GB, streamed {:.2} GB per denoise pass, reserve {:.2} GB)",
+            plan.resident_count(),
+            plan.streamed_count(),
+            plan.resident_bytes as f64 / 1_000_000_000.0,
+            plan.streamed_bytes as f64 / 1_000_000_000.0,
+            plan.reserved_bytes() as f64 / 1_000_000_000.0,
+        ));
+
         let rope_embedder = RopeEmbedder::new(
             cfg.rope_theta,
             cfg.axes_dims.clone(),
@@ -409,8 +583,8 @@ impl OffloadedZImageTransformer {
             final_layer,
             x_pad_token,
             cap_pad_token,
-            noise_refiner,
             context_refiner,
+            noise_refiner,
             layers,
             rope_embedder,
             cfg: cfg.clone(),
@@ -457,26 +631,61 @@ impl OffloadedZImageTransformer {
         let (image_cos, image_sin) = self.rope_embedder.forward(&image_pos_ids)?;
 
         for block in &self.context_refiner {
-            let block = block.to_device(device)?;
-            cap = block.forward(&cap, None, &cap_cos, &cap_sin, None)?;
+            match block {
+                ZImageBlockSlot::Resident(block) => {
+                    cap = block.forward(&cap, None, &cap_cos, &cap_sin, None)?;
+                }
+                ZImageBlockSlot::Streamed(block) => {
+                    let block = block.to_device(device)?;
+                    cap = block.forward(&cap, None, &cap_cos, &cap_sin, None)?;
+                    device.synchronize()?;
+                    drop(block);
+                }
+            }
         }
         for block in &self.noise_refiner {
-            let block = block.to_device(device)?;
-            image = block.forward(&image, None, &image_cos, &image_sin, Some(&adaln_input))?;
+            match block {
+                ZImageBlockSlot::Resident(block) => {
+                    image =
+                        block.forward(&image, None, &image_cos, &image_sin, Some(&adaln_input))?;
+                }
+                ZImageBlockSlot::Streamed(block) => {
+                    let block = block.to_device(device)?;
+                    image =
+                        block.forward(&image, None, &image_cos, &image_sin, Some(&adaln_input))?;
+                    device.synchronize()?;
+                    drop(block);
+                }
+            }
         }
 
         let (mut unified, unified_pos_ids) =
             build_basic_unified_sequence(&image, &cap, &image_pos_ids, &cap_pos_ids)?;
         let (unified_cos, unified_sin) = self.rope_embedder.forward(&unified_pos_ids)?;
         for block in &self.layers {
-            let block = block.to_device(device)?;
-            unified = block.forward(
-                &unified,
-                None,
-                &unified_cos,
-                &unified_sin,
-                Some(&adaln_input),
-            )?;
+            match block {
+                ZImageBlockSlot::Resident(block) => {
+                    unified = block.forward(
+                        &unified,
+                        None,
+                        &unified_cos,
+                        &unified_sin,
+                        Some(&adaln_input),
+                    )?;
+                }
+                ZImageBlockSlot::Streamed(block) => {
+                    let block = block.to_device(device)?;
+                    unified = block.forward(
+                        &unified,
+                        None,
+                        &unified_cos,
+                        &unified_sin,
+                        Some(&adaln_input),
+                    )?;
+                    device.synchronize()?;
+                    drop(block);
+                }
+            }
         }
 
         let image = unified.narrow(1, 0, padded_image_seq_len)?;

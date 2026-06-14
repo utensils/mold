@@ -1115,6 +1115,14 @@ pub(crate) fn should_use_gpu(
 /// streaming blocks one at a time between CPU and GPU.
 /// Minimum VRAM needed for one block + activations during offloaded inference.
 pub(crate) const MIN_OFFLOAD_VRAM: u64 = 4_000_000_000; // 4 GB
+/// Extra workspace needed when a full BF16/FP transformer stays GPU-resident.
+///
+/// `activation_bytes` covers resolution-scaled tensor peaks. It does not cover
+/// CUDA allocator slack, attention workspaces, and short-lived per-layer
+/// buffers that only appear once denoising starts. Without this reserve a
+/// 23.8 GB FLUX transformer can pass preflight on a 24 GB card, then OOM in
+/// the first denoise step before adaptive offload ever gets a chance to run.
+pub(crate) const FULL_RESIDENT_RUNTIME_HEADROOM: u64 = 2_000_000_000; // 2 GB
 
 /// Decide whether to enable block-level offloading.
 ///
@@ -1122,9 +1130,13 @@ pub(crate) const MIN_OFFLOAD_VRAM: u64 = 4_000_000_000; // 4 GB
 /// [`activation_bytes`] — scaled with resolution and dtype. Replaces the
 /// previous fixed 3 GB `INFERENCE_HEADROOM` so a 768² generation isn't
 /// false-offloaded on a 16 GB card while a 2048² generation isn't
-/// under-budgeted on a 24 GB card.
+/// under-budgeted on a 24 GB card. Full-resident inference also reserves
+/// [`FULL_RESIDENT_RUNTIME_HEADROOM`] because kernels and allocator workspaces
+/// are not represented in the safetensors byte count.
 pub(crate) fn should_offload(transformer_size: u64, free_vram: u64, activation_bytes: u64) -> bool {
-    let needed = transformer_size.saturating_add(activation_bytes);
+    let needed = transformer_size
+        .saturating_add(activation_bytes)
+        .saturating_add(FULL_RESIDENT_RUNTIME_HEADROOM);
     free_vram > 0 && needed > free_vram && free_vram >= MIN_OFFLOAD_VRAM
 }
 
@@ -1794,11 +1806,12 @@ mod tests {
 
     #[test]
     fn offload_when_transformer_fits_but_no_headroom() {
-        // 23.8GB transformer on 23.95GB free: file fits but 23.8 + ~256 MB
-        // activation > 23.95 GB free. With the new resolution-scaled budget
-        // at 1024² ≈ 256 MB (floor), the tight squeeze still trips offload.
+        // 23.8GB transformer on 24.5GB usable free: the file plus activations
+        // appears to fit, but runtime workspace does not. This is the 24GB
+        // CUDA-card FLUX BF16 regression: without resident-runtime headroom,
+        // full load succeeds and denoising OOMs before adaptive offload starts.
         let xformer = 23_800_000_000;
-        let free = 23_950_000_000;
+        let free = 24_500_000_000;
         assert!(should_offload(xformer, free, flux_1024_activation()));
     }
 
@@ -1902,15 +1915,13 @@ mod tests {
     /// same way at both resolutions.
     #[test]
     fn should_offload_uses_resolution_scaled_activation() {
-        // Pick a transformer + VRAM pair where the answer depends on the
-        // activation budget alone. 22 GB transformer on a 23 GB card: at
-        // 768² the activation floor is 256 MB → 22.256 GB fits in 23 GB;
-        // at 2048² the budget grows to ~1.09 GB → 23.09 GB > 23 GB →
-        // offload. The old fixed 3 GB headroom would have triggered
-        // offload at *both* resolutions even though only the larger one
-        // actually needs it.
+        // Pick a transformer + VRAM pair where the answer still depends on
+        // resolution after the fixed resident-runtime reserve is included.
+        // 22 GB transformer on 24.5 GB usable free: 768² fits; 2048² does not.
+        // The old fixed 3 GB inference headroom would have triggered offload
+        // at both resolutions even though only the larger one needs it.
         let xformer = 22_000_000_000;
-        let free = 23_000_000_000;
+        let free = 24_500_000_000;
         let act_768 = activation_bytes(768, 768, 1, 2, ActivationFamily::FluxDit);
         let act_2048 = activation_bytes(2048, 2048, 1, 2, ActivationFamily::FluxDit);
         assert!(act_2048 > act_768, "2048² must exceed 768²");

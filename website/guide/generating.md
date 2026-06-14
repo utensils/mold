@@ -218,8 +218,9 @@ mold run z-image:bf16 "anime"    --lora cv:2904324
 ::: tip LoRA requirements
 Requires `.safetensors` format. Z-Image / FLUX accept diffusers (PEFT canonical),
 Kohya/sd-scripts, OneTrainer, and PEFT default-adapter naming. BF16 FLUX on
-24 GB cards auto-uses block-level offloading. Wuerstchen and LTX-Video are not
-yet wired — attaching a LoRA there returns a 400 with the supported-family list.
+24 GB cards can adaptive-offload, keeping fitting blocks on GPU and streaming
+only overflow blocks. Wuerstchen and LTX-Video are not yet wired — attaching a
+LoRA there returns a 400 with the supported-family list.
 :::
 
 ## Inline Preview

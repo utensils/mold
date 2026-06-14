@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Adaptive block residency for offload paths.** FLUX BF16 offload now keeps the largest safe set of transformer blocks GPU-resident and streams only the overflow blocks, using actual loaded per-block tensor sizes plus activation budget, runtime headroom, and largest-streamed-block reserve. Flux.2, Z-Image, and Qwen-Image offload use the same shared residency planner; SD3 remains the older full-streaming implementation because its offload path rebuilds trait-object joint blocks from a CPU tensor map rather than storing block objects. FLUX LoRA bypass registries are built before adaptive planning so adapter VRAM is included in the free-memory measurement, and FLUX/Flux.2/Z-Image resident materialization backs off on CUDA OOM before falling back toward full streaming. Progress logs now report resident/streamed block counts, resident GB, streamed GB per denoise pass, and reserved headroom.
 ## [0.12.1] - 2026-06-12
 
 ### Added

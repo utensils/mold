@@ -1,3 +1,4 @@
+pub(crate) mod adaptive_offload;
 pub mod attention;
 mod cache;
 pub(crate) mod cfg_plus_ddim;

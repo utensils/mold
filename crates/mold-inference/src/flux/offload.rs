@@ -1,8 +1,8 @@
 //! Block-level GPU offloading for FLUX transformers.
 //!
-//! Streams transformer blocks one at a time between CPU and GPU during each
-//! denoising step. Reduces peak VRAM from ~24GB (full BF16 dev model) to ~2-4GB
-//! at the cost of 3-5x slower inference.
+//! Uses adaptive block residency: keep the largest safe subset of transformer
+//! blocks GPU-resident and stream only the CPU-resident overflow blocks during
+//! each denoising step.
 //!
 //! Self-contained: defines its own block types and forward logic so no patches
 //! to candle-transformers are needed.
@@ -11,6 +11,9 @@ use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::{LayerNorm, Linear, RmsNorm, VarBuilder};
 
+use crate::adaptive_offload::{
+    plan_adaptive_residency, AdaptiveResidencyPlan, ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
+};
 use crate::flux::lora_bypass::{LoraLinear, LoraRegistry};
 use crate::flux::pinned::{
     largest_block_size_bytes, pinned_cap_bytes, prefetch_enabled_from_env, try_pin_to_host,
@@ -774,10 +777,152 @@ impl FinalLayer {
     }
 }
 
+enum DoubleBlockSlot {
+    Resident(Box<GpuDoubleBlock>),
+    Streamed(Box<DoubleBlock>),
+}
+
+enum SingleBlockSlot {
+    Resident(Box<GpuSingleBlock>),
+    Streamed(Box<SingleBlock>),
+}
+
+fn is_probable_cuda_oom(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}").to_ascii_lowercase();
+    msg.contains("cuda_error_out_of_memory")
+        || msg.contains("out of memory")
+        || msg.contains("memory allocation")
+}
+
+fn materialize_block_slots(
+    double_blocks: &mut [Option<DoubleBlock>],
+    single_blocks: &mut [Option<SingleBlock>],
+    plan: &AdaptiveResidencyPlan,
+    gpu_device: &Device,
+    registry: Option<&LoraRegistry>,
+) -> Result<(Vec<DoubleBlockSlot>, Vec<SingleBlockSlot>)> {
+    let mut resident_double: Vec<Option<GpuDoubleBlock>> = std::iter::repeat_with(|| None)
+        .take(double_blocks.len())
+        .collect();
+    let mut resident_single: Vec<Option<GpuSingleBlock>> = std::iter::repeat_with(|| None)
+        .take(single_blocks.len())
+        .collect();
+
+    for (i, slot) in double_blocks.iter().enumerate() {
+        if plan.resident.get(i).copied().unwrap_or(false) {
+            let block = slot
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("double block {i} already consumed"))?;
+            resident_double[i] = Some(block.to_device(gpu_device, registry, i)?);
+        }
+    }
+
+    let single_offset = double_blocks.len();
+    for (i, slot) in single_blocks.iter().enumerate() {
+        if plan
+            .resident
+            .get(single_offset + i)
+            .copied()
+            .unwrap_or(false)
+        {
+            let block = slot
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("single block {i} already consumed"))?;
+            resident_single[i] = Some(block.to_device(gpu_device, registry, i)?);
+        }
+    }
+
+    let mut double_slots = Vec::with_capacity(double_blocks.len());
+    for (i, block) in double_blocks.iter_mut().enumerate() {
+        if let Some(gpu_block) = resident_double[i].take() {
+            *block = None;
+            double_slots.push(DoubleBlockSlot::Resident(Box::new(gpu_block)));
+        } else {
+            double_slots.push(DoubleBlockSlot::Streamed(Box::new(
+                block
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("double block {i} already consumed"))?,
+            )));
+        }
+    }
+
+    let mut single_slots = Vec::with_capacity(single_blocks.len());
+    for (i, block) in single_blocks.iter_mut().enumerate() {
+        if let Some(gpu_block) = resident_single[i].take() {
+            *block = None;
+            single_slots.push(SingleBlockSlot::Resident(Box::new(gpu_block)));
+        } else {
+            single_slots.push(SingleBlockSlot::Streamed(Box::new(
+                block
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("single block {i} already consumed"))?,
+            )));
+        }
+    }
+
+    Ok((double_slots, single_slots))
+}
+
+fn pin_streamed_block_weights(
+    double_blocks: &[DoubleBlockSlot],
+    single_blocks: &[SingleBlockSlot],
+) -> (Vec<PinnedRegion>, u64) {
+    let tracker = PinnedMemoryTracker::new(pinned_cap_bytes());
+    let mut pinned_regions: Vec<PinnedRegion> = Vec::new();
+    let mut pin_visit = |t: &Tensor| -> usize {
+        match try_pin_to_host(t, &tracker) {
+            Ok(Some(region)) => {
+                pinned_regions.push(region);
+                0
+            }
+            Ok(None) => 0,
+            Err(e) => {
+                tracing::debug!("try_pin_to_host failed: {e:?} (continuing)");
+                0
+            }
+        }
+    };
+    for block in double_blocks {
+        if let DoubleBlockSlot::Streamed(block) = block {
+            visit_double_block_weights(block, &mut pin_visit);
+        }
+    }
+    for block in single_blocks {
+        if let SingleBlockSlot::Streamed(block) = block {
+            visit_single_block_weights(block, &mut pin_visit);
+        }
+    }
+    let pinned_bytes = tracker.used_bytes();
+    (pinned_regions, pinned_bytes)
+}
+
+fn streamed_block_sizes(
+    double_blocks: &[DoubleBlockSlot],
+    single_blocks: &[SingleBlockSlot],
+) -> Vec<usize> {
+    let mut sizes = Vec::new();
+    for block in double_blocks {
+        if let DoubleBlockSlot::Streamed(block) = block {
+            sizes.push(visit_double_block_weights(block, tensor_bytes));
+        }
+    }
+    for block in single_blocks {
+        if let SingleBlockSlot::Streamed(block) = block {
+            sizes.push(visit_single_block_weights(block, tensor_bytes));
+        }
+    }
+    sizes
+}
+
 // ── Main offloaded transformer ───────────────────────────────────────────────
 
-/// BF16 FLUX transformer with blocks on CPU, streamed to GPU one at a time.
+/// BF16 FLUX transformer with adaptive block residency.
 pub(crate) struct OffloadedFluxTransformer {
+    /// `cuMemHostRegister`'d regions backing every streamed CPU block
+    /// weight. Declared before the block slots so CUDA unregisters host
+    /// pages before the CPU tensors that own those pages are dropped.
+    #[allow(dead_code)]
+    pinned_regions: Vec<PinnedRegion>,
     // Stem layers on GPU permanently (~50MB). Stem isn't a typical LoRA
     // target so we leave them as raw `Linear`. If a future FLUX LoRA
     // does target `img_in` / `txt_in`, promote these to `LoraLinear` and
@@ -789,20 +934,13 @@ pub(crate) struct OffloadedFluxTransformer {
     guidance_in: Option<StemMlpEmbedder>,
     pe_embedder: EmbedNd,
     final_layer: FinalLayer,
-    // Blocks on CPU
-    double_blocks: Vec<DoubleBlock>,
-    single_blocks: Vec<SingleBlock>,
+    double_blocks: Vec<DoubleBlockSlot>,
+    single_blocks: Vec<SingleBlockSlot>,
     gpu_device: Device,
     /// Bypass-mode LoRA stack. None when no LoRAs are active. Adapters
     /// already live on `gpu_device` so block-stream cycles never have
     /// to copy them — only the base `Linear` weights move.
     lora_registry: Option<LoraRegistry>,
-    /// `cuMemHostRegister`'d regions backing every CPU-resident block
-    /// weight. Held for the lifetime of the transformer so the underlying
-    /// page-locks survive across forward passes. Empty on Metal/CPU and
-    /// when pinning was disabled or capped.
-    #[allow(dead_code)]
-    pinned_regions: Vec<PinnedRegion>,
     /// Side stream for async H2D prefetching of block N+1 while block N
     /// computes on the device's primary stream. None on Metal/CPU and
     /// when `MOLD_OFFLOAD_PREFETCH=off`.
@@ -834,6 +972,9 @@ impl OffloadedFluxTransformer {
         vb: VarBuilder,
         cfg: &Config,
         gpu_device: &Device,
+        gpu_ordinal: usize,
+        activation_budget: u64,
+        lora_registry: Option<LoraRegistry>,
         progress: &ProgressReporter,
     ) -> Result<Self> {
         progress.info("Loading transformer blocks on CPU…");
@@ -869,61 +1010,98 @@ impl OffloadedFluxTransformer {
             FinalLayer::load(cfg.hidden_size, 1, cfg.in_channels, vb.pp("final_layer"))?
                 .to_device(gpu_device)?;
 
-        // Load blocks on CPU
+        // Load blocks on CPU.
         let mut double_blocks = Vec::with_capacity(cfg.depth);
         let vb_d = vb.pp("double_blocks");
         for idx in 0..cfg.depth {
-            double_blocks.push(DoubleBlock::load(cfg, vb_d.pp(idx))?);
+            double_blocks.push(Some(DoubleBlock::load(cfg, vb_d.pp(idx))?));
         }
         let mut single_blocks = Vec::with_capacity(cfg.depth_single_blocks);
         let vb_s = vb.pp("single_blocks");
         for idx in 0..cfg.depth_single_blocks {
-            single_blocks.push(SingleBlock::load(cfg, vb_s.pp(idx))?);
+            single_blocks.push(Some(SingleBlock::load(cfg, vb_s.pp(idx))?));
         }
 
         progress.info(&format!(
-            "Offloading: {} double + {} single blocks on CPU, stem on GPU",
+            "Offloading: planning adaptive residency for {} double + {} single blocks",
             double_blocks.len(),
             single_blocks.len(),
         ));
 
-        // Per-block byte sizes — feeds both the prefetch-buffer sizing and
-        // the pinning summary log.
         let mut block_sizes: Vec<usize> =
             Vec::with_capacity(double_blocks.len() + single_blocks.len());
         for b in &double_blocks {
-            block_sizes.push(visit_double_block_weights(b, tensor_bytes));
+            block_sizes.push(visit_double_block_weights(
+                b.as_ref().expect("double block just loaded"),
+                tensor_bytes,
+            ));
         }
         for b in &single_blocks {
-            block_sizes.push(visit_single_block_weights(b, tensor_bytes));
+            block_sizes.push(visit_single_block_weights(
+                b.as_ref().expect("single block just loaded"),
+                tensor_bytes,
+            ));
         }
 
-        // ── Phase 1: pin every CPU-resident block weight ────────────────
-        let tracker = PinnedMemoryTracker::new(pinned_cap_bytes());
-        let mut pinned_regions: Vec<PinnedRegion> = Vec::new();
-        let mut pin_visit = |t: &Tensor| -> usize {
-            match try_pin_to_host(t, &tracker) {
-                Ok(Some(region)) => {
-                    pinned_regions.push(region);
-                    0
+        let free_vram = crate::device::usable_free_vram_bytes(gpu_ordinal).unwrap_or(0);
+        let mut plan = plan_adaptive_residency(
+            &block_sizes,
+            free_vram,
+            activation_budget,
+            ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
+        );
+
+        let registry_ref = lora_registry.as_ref();
+        let (double_blocks, single_blocks, plan) = loop {
+            match materialize_block_slots(
+                &mut double_blocks,
+                &mut single_blocks,
+                &plan,
+                gpu_device,
+                registry_ref,
+            ) {
+                Ok((double_slots, single_slots)) => break (double_slots, single_slots, plan),
+                Err(err)
+                    if gpu_device.is_cuda()
+                        && plan.resident_count() > 0
+                        && is_probable_cuda_oom(&err) =>
+                {
+                    progress.info(&format!(
+                        "FLUX adaptive offload: resident allocation OOM at {} resident blocks; \
+                         retrying with fewer resident blocks",
+                        plan.resident_count()
+                    ));
+                    if let Err(sync_err) = gpu_device.synchronize() {
+                        tracing::warn!(
+                            "FLUX adaptive offload: synchronize after OOM failed: {sync_err}"
+                        );
+                    }
+                    if !plan.demote_largest_resident(&block_sizes) {
+                        return Err(err);
+                    }
                 }
-                Ok(None) => 0,
-                Err(e) => {
-                    tracing::debug!("try_pin_to_host failed: {e:?} (continuing)");
-                    0
-                }
+                Err(err) => return Err(err),
             }
         };
-        for b in &double_blocks {
-            visit_double_block_weights(b, &mut pin_visit);
-        }
-        for b in &single_blocks {
-            visit_single_block_weights(b, &mut pin_visit);
-        }
+
+        progress.info(&format!(
+            "FLUX adaptive offload: {} resident / {} streamed blocks \
+             (resident {:.2} GB, streamed {:.2} GB per denoise pass, reserve {:.2} GB)",
+            plan.resident_count(),
+            plan.streamed_count(),
+            plan.resident_bytes as f64 / 1_000_000_000.0,
+            plan.streamed_bytes as f64 / 1_000_000_000.0,
+            plan.reserved_bytes() as f64 / 1_000_000_000.0,
+        ));
+
+        // ── Phase 1: pin only streamed CPU-resident block weights ───────
+        let (pinned_regions, pinned_bytes) =
+            pin_streamed_block_weights(&double_blocks, &single_blocks);
 
         // ── Phase 2: optionally bring up a prefetch stream + buffer ────
         let prefetch_on = prefetch_enabled_from_env() && gpu_device.is_cuda();
-        let largest_block = largest_block_size_bytes(&block_sizes);
+        let streamed_sizes = streamed_block_sizes(&double_blocks, &single_blocks);
+        let largest_block = largest_block_size_bytes(&streamed_sizes);
 
         #[cfg(feature = "cuda")]
         let (prefetch_stream, prefetch_buffer) = if prefetch_on {
@@ -948,11 +1126,11 @@ impl OffloadedFluxTransformer {
         };
 
         // Single-line INFO so users can confirm both levers are running.
-        let pinned_gb = tracker.used_bytes() as f64 / 1_000_000_000.0;
+        let pinned_gb = pinned_bytes as f64 / 1_000_000_000.0;
         if pinned_regions.is_empty() {
             progress.info(&format!(
                 "FLUX offload: prefetch={} (largest block {:.1} MB) — pinning skipped \
-                 (no CUDA / unsupported tensors)",
+                 (no streamed CUDA tensors / unsupported tensors)",
                 prefetch_label,
                 largest_block as f64 / 1_000_000.0,
             ));
@@ -968,6 +1146,7 @@ impl OffloadedFluxTransformer {
         }
 
         Ok(Self {
+            pinned_regions,
             img_in,
             txt_in,
             time_in,
@@ -978,24 +1157,12 @@ impl OffloadedFluxTransformer {
             double_blocks,
             single_blocks,
             gpu_device: gpu_device.clone(),
-            lora_registry: None,
-            pinned_regions,
+            lora_registry,
             #[cfg(feature = "cuda")]
             prefetch_stream,
             #[cfg(feature = "cuda")]
             prefetch_buffer,
         })
-    }
-
-    /// Install a bypass-mode LoRA stack. Adapters fire each block-step
-    /// on top of the base matmul output — no base-weight rebuild, no
-    /// CPU-side dequant→merge→requant. Pass `None` to clear.
-    ///
-    /// Cheap: just stashes the registry handle. The actual binding to
-    /// each `LoraLinear` happens lazily on the next `forward()` when
-    /// blocks stream onto the GPU.
-    pub(crate) fn set_lora_registry(&mut self, registry: Option<LoraRegistry>) {
-        self.lora_registry = registry;
     }
 
     /// True when at least one bypass-mode adapter is installed.
@@ -1042,25 +1209,38 @@ impl OffloadedFluxTransformer {
         };
         let vec_ = (vec_ + y.apply(&self.vector_in))?;
 
-        // Double blocks: stream each from CPU → GPU. LoRA adapters are
-        // already GPU-resident (in `lora_registry`); streaming a block
-        // copies only the base Linear weights.
+        // Double blocks: resident blocks run directly; streamed blocks copy
+        // only their base Linear weights onto the GPU for this forward.
         for (i, block) in self.double_blocks.iter().enumerate() {
-            let gpu_block = block.to_device(&self.gpu_device, registry, i)?;
-            (img, txt) = gpu_block.forward(&img, &txt, &vec_, &pe)?;
-            self.gpu_device.synchronize()?;
-            drop(gpu_block);
+            match block {
+                DoubleBlockSlot::Resident(gpu_block) => {
+                    (img, txt) = gpu_block.forward(&img, &txt, &vec_, &pe)?;
+                }
+                DoubleBlockSlot::Streamed(block) => {
+                    let gpu_block = block.to_device(&self.gpu_device, registry, i)?;
+                    (img, txt) = gpu_block.forward(&img, &txt, &vec_, &pe)?;
+                    self.gpu_device.synchronize()?;
+                    drop(gpu_block);
+                }
+            }
             tracing::trace!("double block {i} done");
         }
 
-        // Single blocks: stream each from CPU → GPU
+        // Single blocks: resident or streamed using the same policy.
         let mut img = Tensor::cat(&[&txt, &img], 1)?;
         let txt_len = txt.dim(1)?;
         for (i, block) in self.single_blocks.iter().enumerate() {
-            let gpu_block = block.to_device(&self.gpu_device, registry, i)?;
-            img = gpu_block.forward(&img, &vec_, &pe)?;
-            self.gpu_device.synchronize()?;
-            drop(gpu_block);
+            match block {
+                SingleBlockSlot::Resident(gpu_block) => {
+                    img = gpu_block.forward(&img, &vec_, &pe)?;
+                }
+                SingleBlockSlot::Streamed(block) => {
+                    let gpu_block = block.to_device(&self.gpu_device, registry, i)?;
+                    img = gpu_block.forward(&img, &vec_, &pe)?;
+                    self.gpu_device.synchronize()?;
+                    drop(gpu_block);
+                }
+            }
             tracing::trace!("single block {i} done");
         }
 

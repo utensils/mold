@@ -54,11 +54,14 @@ explicitly unsupported for this family.
 
 ### Offloading
 
-`--offload` can drop FLUX, Flux.2, Z-Image, and SD3 BF16 VRAM usage from
-roughly 18-24 GB to roughly 2-4 GB, but it is usually 3-5x slower.
+`--offload` uses adaptive block residency for FLUX, Flux.2, Z-Image, and
+Qwen-Image BF16 paths: mold keeps the blocks that fit on GPU and streams only
+the remainder. SD3 still uses full MMDiT block streaming.
 
 Use it when a model otherwise would not fit. Do not use it when the model
-already fits comfortably in VRAM.
+already fits comfortably in VRAM. Progress output reports resident blocks,
+streamed blocks, resident GB, streamed GB per denoise pass, and reserved
+headroom.
 
 ### CPU text encoders
 
@@ -69,9 +72,9 @@ You can also force the choice with `--device-text-encoders cpu` on `mold run`
 (or the web UI's **Placement** panel, or `MOLD_PLACE_TEXT_ENCODERS=cpu`). This
 is often the single biggest VRAM win short of quantization: FLUX's T5 is ~10
 GB, SD3.5's triple-encoder stack is larger, and freeing that budget lets the
-transformer stay fully resident without triggering block-level offload (which
-is 3–5× slower per step). Encoding moves from ≈200 ms to ≈2 s on typical CPU
-— negligible at 20+ denoising steps, painful at 4.
+transformer stay fully resident without triggering block-level offload. Encoding
+moves from ≈200 ms to ≈2 s on typical CPU — negligible at 20+ denoising steps,
+painful at 4.
 
 For FLUX, Flux.2, Z-Image, and Qwen-Image specifically, you can also pin
 individual components: `--device-transformer gpu:1 --device-vae cpu` (two-GPU
@@ -131,7 +134,7 @@ mold run flux-schnell:q8 "studio product photo"
 # Move up in quality if the baseline is good enough operationally
 mold run flux-dev:q6 "studio product photo"
 
-# Only use offload when necessary
+# Only use adaptive offload when necessary
 mold run flux-dev:bf16 "studio product photo" --offload
 ```
 

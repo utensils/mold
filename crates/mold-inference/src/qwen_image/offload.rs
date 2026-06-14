@@ -1,9 +1,9 @@
 //! Block-level GPU offloading for the Qwen-Image BF16/FP8 transformer.
 //!
-//! Streams 60 transformer blocks one at a time between CPU and GPU during each
-//! denoising step. Reduces peak VRAM from ~38GB (full BF16) to ~4-6GB at the
-//! cost of 3-5x slower inference. This enables native 1328×1328 generation on
-//! 24GB cards.
+//! Keeps as many transformer blocks GPU-resident as the current VRAM budget
+//! allows and streams the remaining CPU-resident blocks one at a time during
+//! each denoising step. This avoids leaving usable VRAM idle while still
+//! fitting large BF16/FP8 checkpoints on smaller cards.
 //!
 //! Self-contained: defines its own block types with `to_device()` methods,
 //! following the same pattern as `flux/offload.rs`.
@@ -22,6 +22,7 @@ use super::quantized_transformer::{
     build_edit_modulation_index, select_modulation_params, QwenRopeEmbedder,
 };
 use super::transformer::{QwenImageConfig, MAX_PERIOD};
+use crate::adaptive_offload::{plan_adaptive_residency, ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM};
 use crate::progress::ProgressReporter;
 
 // ── Device-transfer helpers ──────────────────────────────────────────────────
@@ -496,6 +497,7 @@ impl OffloadedQwenImageTransformer {
         cfg: &QwenImageConfig,
         gpu_device: &Device,
         gpu_ordinal: usize,
+        activation_budget: u64,
         progress: &ProgressReporter,
     ) -> Result<Self> {
         progress.info("Loading transformer with dynamic GPU/CPU placement…");
@@ -526,26 +528,32 @@ impl OffloadedQwenImageTransformer {
         // time so leaving it in the budget over-promises VRAM.
         gpu_device.synchronize()?;
         let free_vram = crate::device::usable_free_vram_bytes(gpu_ordinal).unwrap_or(0);
-        const VRAM_HEADROOM: u64 = 4_500_000_000; // 4.5GB for attention + activations + CUDA overhead
-        let vram_budget = free_vram.saturating_sub(VRAM_HEADROOM);
 
         // Load first block on CPU to measure actual size
         let first_block = OffloadedQwenBlock::load(cfg, cpu_vb.pp("transformer_blocks").pp(0))?;
         let block_size = Self::block_size_bytes(&first_block);
-        let max_gpu_blocks = vram_budget.checked_div(block_size).unwrap_or(0) as usize;
-        let max_gpu_blocks = max_gpu_blocks.min(cfg.num_layers);
+        let block_sizes = vec![block_size as usize; cfg.num_layers];
+        let plan = plan_adaptive_residency(
+            &block_sizes,
+            free_vram,
+            activation_budget,
+            ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
+        );
 
         progress.info(&format!(
-            "Block size: {} MB, VRAM budget: {} MB → {} of {} blocks on GPU",
+            "Qwen-Image adaptive offload: block size {} MB, {} resident / {} streamed \
+             blocks (resident {:.2} GB, streamed {:.2} GB per denoise pass, reserve {:.2} GB)",
             block_size / (1024 * 1024),
-            vram_budget / (1024 * 1024),
-            max_gpu_blocks,
-            cfg.num_layers,
+            plan.resident_count(),
+            plan.streamed_count(),
+            plan.resident_bytes as f64 / 1_000_000_000.0,
+            plan.streamed_bytes as f64 / 1_000_000_000.0,
+            plan.reserved_bytes() as f64 / 1_000_000_000.0,
         ));
 
         // Place first block
         let mut blocks = Vec::with_capacity(cfg.num_layers);
-        if max_gpu_blocks > 0 {
+        if plan.resident.first().copied().unwrap_or(false) {
             // Re-load directly on GPU for GPU-resident blocks
             let gpu_block = OffloadedQwenBlock::load(cfg, gpu_vb.pp("transformer_blocks").pp(0))?;
             blocks.push(BlockResidency::Gpu(gpu_block));
@@ -556,7 +564,7 @@ impl OffloadedQwenImageTransformer {
 
         // Load remaining blocks — GPU-direct until budget exhausted, then CPU
         for i in 1..cfg.num_layers {
-            if i < max_gpu_blocks {
+            if plan.resident.get(i).copied().unwrap_or(false) {
                 let block = OffloadedQwenBlock::load(cfg, gpu_vb.pp("transformer_blocks").pp(i))?;
                 blocks.push(BlockResidency::Gpu(block));
             } else {
@@ -568,12 +576,18 @@ impl OffloadedQwenImageTransformer {
                     "Loaded {}/{} blocks ({} GPU, {} CPU)",
                     i + 1,
                     cfg.num_layers,
-                    (i + 1).min(max_gpu_blocks),
-                    (i + 1).saturating_sub(max_gpu_blocks),
+                    blocks
+                        .iter()
+                        .filter(|b| matches!(b, BlockResidency::Gpu(_)))
+                        .count(),
+                    blocks
+                        .iter()
+                        .filter(|b| matches!(b, BlockResidency::Cpu(_)))
+                        .count(),
                 ));
             }
         }
-        let gpu_count = max_gpu_blocks;
+        let gpu_count = plan.resident_count();
 
         Ok(Self {
             time_embed,

@@ -1302,6 +1302,7 @@ impl QwenImageEngine {
                         cfg,
                         device,
                         self.base.gpu_ordinal,
+                        activation_budget,
                         &self.base.progress,
                     )?,
                 ))

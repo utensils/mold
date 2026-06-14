@@ -6,7 +6,7 @@ Common issues when running mold locally or against a remote GPU host.
 
 If generation fails with an out-of-memory message:
 
-- Add `--offload` to stream transformer blocks between CPU and GPU.
+- Add `--offload` to use adaptive transformer block offload.
 - Use a smaller quantization such as `:q6`, `:q4`, or a lighter family like
   `flux2-klein`.
 - Lower `--width` and `--height`.
@@ -68,7 +68,9 @@ binary includes GPU support.
 
 Slow generation is often expected when mold is preserving VRAM:
 
-- `--offload` can reduce VRAM dramatically, but it is usually 3-5x slower.
+- `--offload` can reduce VRAM dramatically. FLUX, Flux.2, Z-Image, and
+  Qwen-Image keep fitting blocks GPU-resident and stream only the remainder;
+  SD3 still streams every MMDiT block.
 - Text encoders may be placed on CPU automatically when VRAM is tight.
 - `--eager` can improve throughput if your GPU has enough free memory.
 
@@ -89,7 +91,7 @@ curl http://localhost:7680/api/status
 ```
 
 Then wait for the cooldown, lower the request size, choose a smaller
-quantization, or force a lower-memory path such as `--offload` or
+quantization, or force a lower-memory path such as adaptive `--offload` or
 `--device-text-encoders cpu`.
 
 ## Worker Degraded State

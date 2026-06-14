@@ -466,9 +466,7 @@ pub struct ZImageEngine {
     base: EngineBase<LoadedZImage>,
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
-    /// Force block-level transformer offload once the Z-Image runtime supports
-    /// streaming BF16 blocks. For now this is plumbed so requests are explicit
-    /// instead of being silently treated as ordinary eager loads.
+    /// Force adaptive block-level transformer offload.
     offload: bool,
     prompt_cache: Mutex<LruCache<String, CachedTensor>>,
     /// Per-request placement override.
@@ -665,6 +663,7 @@ impl ZImageEngine {
         device: &Device,
         dtype: DType,
         cfg: &Config,
+        activation_budget: u64,
     ) -> Result<ZImageTransformer> {
         let is_gguf = self.detect_is_gguf();
         let xformer_paths = self.transformer_paths();
@@ -757,7 +756,14 @@ impl ZImageEngine {
                 bytes_total,
             );
             Ok(ZImageTransformer::Offloaded(Box::new(
-                super::offload::OffloadedZImageTransformer::new(cfg, gpu_vb, cpu_vb)?,
+                super::offload::OffloadedZImageTransformer::new(
+                    cfg,
+                    gpu_vb,
+                    cpu_vb,
+                    self.base.gpu_ordinal,
+                    activation_budget,
+                    &self.base.progress,
+                )?,
             )))
         } else {
             use candle_core::safetensors::MmapedSafetensors;
@@ -851,7 +857,7 @@ impl ZImageEngine {
         self.base.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
 
-        let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
+        let transformer = self.load_transformer(&device, dtype, &transformer_cfg, 0)?;
 
         self.base
             .progress
@@ -1013,7 +1019,7 @@ impl ZImageEngine {
     /// Reload the transformer from disk (called when it was dropped to free VRAM for VAE decode).
     fn reload_transformer(&self, loaded: &mut LoadedZImage) -> Result<()> {
         let transformer =
-            self.load_transformer(&loaded.device, loaded.dtype, &loaded.transformer_cfg)?;
+            self.load_transformer(&loaded.device, loaded.dtype, &loaded.transformer_cfg, 0)?;
         loaded.transformer = Some(transformer);
         Ok(())
     }
@@ -1323,7 +1329,8 @@ impl ZImageEngine {
         };
         self.base.progress.stage_start(&xformer_label);
         let xformer_start = Instant::now();
-        let transformer = self.load_transformer(&device, dtype, &transformer_cfg)?;
+        let transformer =
+            self.load_transformer(&device, dtype, &transformer_cfg, xformer_activation_budget)?;
         self.base
             .progress
             .stage_done(&xformer_label, xformer_start.elapsed());

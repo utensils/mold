@@ -69,9 +69,7 @@ pub struct Flux2Engine {
     base: EngineBase<LoadedFlux2>,
     /// Qwen3 variant preference: None/"auto" = VRAM-based, "bf16" = force BF16, "q8"/etc = specific.
     qwen3_variant: Option<String>,
-    /// Force block-level transformer offload once the Flux.2 runtime supports
-    /// streaming BF16 blocks. Plumbed now so the request is explicit instead
-    /// of being silently treated as a regular dense load.
+    /// Force adaptive block-level transformer offload.
     offload: bool,
     prompt_cache: Mutex<LruCache<String, CachedTensor>>,
     /// Per-request placement override. Set at the start of `generate()`,
@@ -438,6 +436,7 @@ impl Flux2Engine {
         cfg: &Flux2Config,
         gpu_dtype: DType,
         device: &Device,
+        activation_budget: u64,
     ) -> Result<(Flux2TransformerWrapper, &'static str)> {
         let has_lora = !self.pending_loras.is_empty();
         if self.is_gguf_transformer() {
@@ -504,7 +503,14 @@ impl Flux2Engine {
                 let flux_vb = candle_nn::VarBuilder::from_backend(backend, gpu_dtype, Device::Cpu);
                 return Ok((
                     Flux2TransformerWrapper::Offloaded(
-                        super::transformer::OffloadedFlux2Transformer::new(cfg, flux_vb, device)?,
+                        super::transformer::OffloadedFlux2Transformer::new(
+                            cfg,
+                            flux_vb,
+                            device,
+                            self.base.gpu_ordinal,
+                            activation_budget,
+                            &self.base.progress,
+                        )?,
                     ),
                     "Loading Flux.2 transformer (offload, BF16, single-file remap)",
                 ));
@@ -644,7 +650,14 @@ impl Flux2Engine {
             if let Some(label) = offloaded_label {
                 return Ok((
                     Flux2TransformerWrapper::Offloaded(
-                        super::transformer::OffloadedFlux2Transformer::new(cfg, flux_vb, device)?,
+                        super::transformer::OffloadedFlux2Transformer::new(
+                            cfg,
+                            flux_vb,
+                            device,
+                            self.base.gpu_ordinal,
+                            activation_budget,
+                            &self.base.progress,
+                        )?,
                     ),
                     label,
                 ));
@@ -711,6 +724,7 @@ impl Flux2Engine {
                 &cfg,
                 self.base.loaded.as_ref().unwrap().dtype,
                 &self.base.loaded.as_ref().unwrap().device.clone(),
+                0,
             )?;
             self.base.loaded.as_mut().unwrap().transformer = Some(transformer);
             self.base
@@ -834,7 +848,8 @@ impl Flux2Engine {
         // --- Load transformer on GPU first ---
         let flux2_cfg = self.resolve_config();
         let xformer_stage = Instant::now();
-        let (transformer, xformer_label) = self.load_transformer(&flux2_cfg, gpu_dtype, &device)?;
+        let (transformer, xformer_label) =
+            self.load_transformer(&flux2_cfg, gpu_dtype, &device, 0)?;
         self.base
             .progress
             .stage_done(xformer_label, xformer_stage.elapsed());
@@ -1188,7 +1203,8 @@ impl Flux2Engine {
 
         let flux2_cfg = self.resolve_config();
         let xformer_stage = Instant::now();
-        let (transformer, xformer_label) = self.load_transformer(&flux2_cfg, gpu_dtype, &device)?;
+        let (transformer, xformer_label) =
+            self.load_transformer(&flux2_cfg, gpu_dtype, &device, xformer_activation_budget)?;
         self.base
             .progress
             .stage_done(xformer_label, xformer_stage.elapsed());

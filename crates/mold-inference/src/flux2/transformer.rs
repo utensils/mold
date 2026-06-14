@@ -11,6 +11,10 @@
 //!
 //! Loads from HuggingFace diffusers `Flux2Transformer2DModel` safetensors format.
 
+use crate::adaptive_offload::{
+    plan_adaptive_residency, AdaptiveResidencyPlan, ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
+};
+use crate::progress::ProgressReporter;
 use candle_core::{DType, IndexOp, Module, Result, Tensor, D};
 use candle_nn::{LayerNorm, Linear, RmsNorm, VarBuilder};
 use std::sync::{Arc, OnceLock};
@@ -228,6 +232,47 @@ fn layer_norm_to_device(norm: &LayerNorm, device: &candle_core::Device) -> Resul
 fn rms_norm_to_device(norm: &RmsNorm, device: &candle_core::Device) -> Result<RmsNorm> {
     let inner = norm.clone().into_inner();
     Ok(RmsNorm::new(inner.weight().to_device(device)?, 1e-6))
+}
+
+fn tensor_bytes(t: &Tensor) -> usize {
+    t.elem_count() * t.dtype().size_in_bytes()
+}
+
+fn flux2_linear_bytes(linear: &Flux2Linear) -> usize {
+    match linear {
+        Flux2Linear::Standard(linear) => {
+            tensor_bytes(linear.weight()) + linear.bias().map(tensor_bytes).unwrap_or(0)
+        }
+        Flux2Linear::Fp8 {
+            weight,
+            scale,
+            bias,
+        } => {
+            tensor_bytes(weight)
+                + scale.as_ref().map(tensor_bytes).unwrap_or(0)
+                + bias.as_ref().map(tensor_bytes).unwrap_or(0)
+        }
+        Flux2Linear::Nvfp4Streaming {
+            packed,
+            block_scales,
+            bias,
+            cache,
+            ..
+        } => {
+            tensor_bytes(packed)
+                + tensor_bytes(block_scales)
+                + bias.as_ref().map(tensor_bytes).unwrap_or(0)
+                + cache.get().map(tensor_bytes).unwrap_or(0)
+        }
+    }
+}
+
+fn layer_norm_bytes(norm: &LayerNorm) -> usize {
+    tensor_bytes(norm.weight()) + norm.bias().map(tensor_bytes).unwrap_or(0)
+}
+
+fn rms_norm_bytes(norm: &RmsNorm) -> usize {
+    tensor_bytes(norm.clone().into_inner().weight())
 }
 
 /// Dequantize the FULL un-sliced NVFP4 weight to a BF16 tensor on CPU. Pure
@@ -686,6 +731,10 @@ impl Mlp {
     }
 }
 
+fn mlp_bytes(mlp: &Mlp) -> usize {
+    flux2_linear_bytes(&mlp.lin1) + flux2_linear_bytes(&mlp.lin2)
+}
+
 impl candle_core::Module for Mlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let x = xs.apply(&self.lin1)?;
@@ -770,6 +819,15 @@ impl DoubleAttention {
             num_heads: self.num_heads,
         })
     }
+}
+
+fn double_attention_bytes(attention: &DoubleAttention) -> usize {
+    flux2_linear_bytes(&attention.to_q)
+        + flux2_linear_bytes(&attention.to_k)
+        + flux2_linear_bytes(&attention.to_v)
+        + flux2_linear_bytes(&attention.to_out)
+        + rms_norm_bytes(&attention.norm_q)
+        + rms_norm_bytes(&attention.norm_k)
 }
 
 #[derive(Debug, Clone)]
@@ -859,6 +917,17 @@ impl DoubleStreamBlock {
     }
 }
 
+fn double_stream_block_bytes(block: &DoubleStreamBlock) -> usize {
+    layer_norm_bytes(&block.img_norm1)
+        + double_attention_bytes(&block.img_attn)
+        + layer_norm_bytes(&block.img_norm2)
+        + mlp_bytes(&block.img_mlp)
+        + double_attention_bytes(&block.txt_attn)
+        + layer_norm_bytes(&block.txt_norm1)
+        + layer_norm_bytes(&block.txt_norm2)
+        + mlp_bytes(&block.txt_mlp)
+}
+
 // ---------------------------------------------------------------------------
 // SingleStreamBlock (diffusers naming)
 // ---------------------------------------------------------------------------
@@ -928,6 +997,14 @@ impl SingleStreamBlock {
         let output = Tensor::cat(&[attn, mlp_out], 2)?.apply(&self.linear2)?;
         xs + mod_out.gate(&output)
     }
+}
+
+fn single_stream_block_bytes(block: &SingleStreamBlock) -> usize {
+    flux2_linear_bytes(&block.linear1)
+        + flux2_linear_bytes(&block.linear2)
+        + rms_norm_bytes(&block.norm_q)
+        + rms_norm_bytes(&block.norm_k)
+        + layer_norm_bytes(&block.pre_norm)
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,6 +1092,56 @@ pub(crate) fn flux2_streaming_block_plan(cfg: &Flux2Config) -> Vec<Flux2Streamin
     blocks
 }
 
+enum DoubleBlockSlot {
+    Resident(DoubleStreamBlock),
+    Streamed(DoubleStreamBlock),
+}
+
+enum SingleBlockSlot {
+    Resident(SingleStreamBlock),
+    Streamed(SingleStreamBlock),
+}
+
+fn is_probable_cuda_oom(err: &candle_core::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("cuda_error_out_of_memory")
+        || msg.contains("out of memory")
+        || msg.contains("memory allocation")
+}
+
+fn materialize_flux2_block_slots(
+    double_blocks: &[DoubleStreamBlock],
+    single_blocks: &[SingleStreamBlock],
+    plan: &AdaptiveResidencyPlan,
+    device: &candle_core::Device,
+) -> Result<(Vec<DoubleBlockSlot>, Vec<SingleBlockSlot>)> {
+    let mut double_slots = Vec::with_capacity(double_blocks.len());
+    for (i, block) in double_blocks.iter().enumerate() {
+        if plan.resident.get(i).copied().unwrap_or(false) {
+            double_slots.push(DoubleBlockSlot::Resident(block.to_device(device)?));
+        } else {
+            double_slots.push(DoubleBlockSlot::Streamed(block.clone()));
+        }
+    }
+
+    let single_offset = double_blocks.len();
+    let mut single_slots = Vec::with_capacity(single_blocks.len());
+    for (i, block) in single_blocks.iter().enumerate() {
+        if plan
+            .resident
+            .get(single_offset + i)
+            .copied()
+            .unwrap_or(false)
+        {
+            single_slots.push(SingleBlockSlot::Resident(block.to_device(device)?));
+        } else {
+            single_slots.push(SingleBlockSlot::Streamed(block.clone()));
+        }
+    }
+
+    Ok((double_slots, single_slots))
+}
+
 pub(crate) struct OffloadedFlux2Transformer {
     block_plan: Vec<Flux2StreamingBlock>,
     img_in: Flux2Linear,
@@ -1026,8 +1153,8 @@ pub(crate) struct OffloadedFlux2Transformer {
     double_mod_img: Modulation2,
     double_mod_txt: Modulation2,
     single_mod: Modulation1,
-    double_blocks: Vec<DoubleStreamBlock>,
-    single_blocks: Vec<SingleStreamBlock>,
+    double_blocks: Vec<DoubleBlockSlot>,
+    single_blocks: Vec<SingleBlockSlot>,
     final_layer: LastLayer,
     device: candle_core::Device,
 }
@@ -1037,39 +1164,123 @@ impl OffloadedFlux2Transformer {
         cfg: &Flux2Config,
         cpu_vb: VarBuilder,
         device: &candle_core::Device,
+        gpu_ordinal: usize,
+        activation_budget: u64,
+        progress: &ProgressReporter,
     ) -> Result<Self> {
         let block_plan = flux2_streaming_block_plan(cfg);
         let dense = Flux2Transformer::new(cfg, cpu_vb)?;
-        Self::from_dense(dense, block_plan, device)
+        Self::from_dense(
+            dense,
+            block_plan,
+            device,
+            gpu_ordinal,
+            activation_budget,
+            progress,
+        )
     }
 
     fn from_dense(
         dense: Flux2Transformer,
         block_plan: Vec<Flux2StreamingBlock>,
         device: &candle_core::Device,
+        gpu_ordinal: usize,
+        activation_budget: u64,
+        progress: &ProgressReporter,
     ) -> Result<Self> {
+        let Flux2Transformer {
+            img_in,
+            txt_in,
+            time_in,
+            vector_in,
+            guidance_in,
+            pe_embedder,
+            double_mod_img,
+            double_mod_txt,
+            single_mod,
+            double_blocks,
+            single_blocks,
+            final_layer,
+        } = dense;
+
+        let img_in = img_in.to_device(device)?;
+        let txt_in = txt_in.to_device(device)?;
+        let time_in = time_in.to_device(device)?;
+        let vector_in = vector_in
+            .as_ref()
+            .map(|embedder| embedder.to_device(device))
+            .transpose()?;
+        let guidance_in = guidance_in
+            .as_ref()
+            .map(|embedder| embedder.to_device(device))
+            .transpose()?;
+        let double_mod_img = double_mod_img.to_device(device)?;
+        let double_mod_txt = double_mod_txt.to_device(device)?;
+        let single_mod = single_mod.to_device(device)?;
+        let final_layer = final_layer.to_device(device)?;
+
+        let mut block_sizes = Vec::with_capacity(double_blocks.len() + single_blocks.len());
+        block_sizes.extend(double_blocks.iter().map(double_stream_block_bytes));
+        block_sizes.extend(single_blocks.iter().map(single_stream_block_bytes));
+
+        let free_vram = crate::device::usable_free_vram_bytes(gpu_ordinal).unwrap_or(0);
+        let mut plan = plan_adaptive_residency(
+            &block_sizes,
+            free_vram,
+            activation_budget,
+            ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
+        );
+
+        let (double_blocks, single_blocks, plan) = loop {
+            match materialize_flux2_block_slots(&double_blocks, &single_blocks, &plan, device) {
+                Ok((double_slots, single_slots)) => break (double_slots, single_slots, plan),
+                Err(err)
+                    if device.is_cuda()
+                        && plan.resident_count() > 0
+                        && is_probable_cuda_oom(&err) =>
+                {
+                    progress.info(&format!(
+                        "Flux.2 adaptive offload: resident allocation OOM at {} resident blocks; \
+                         retrying with fewer resident blocks",
+                        plan.resident_count()
+                    ));
+                    if let Err(sync_err) = device.synchronize() {
+                        tracing::warn!(
+                            "Flux.2 adaptive offload: synchronize after OOM failed: {sync_err}"
+                        );
+                    }
+                    if !plan.demote_largest_resident(&block_sizes) {
+                        return Err(err);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        };
+
+        progress.info(&format!(
+            "Flux.2 adaptive offload: {} resident / {} streamed blocks \
+             (resident {:.2} GB, streamed {:.2} GB per denoise pass, reserve {:.2} GB)",
+            plan.resident_count(),
+            plan.streamed_count(),
+            plan.resident_bytes as f64 / 1_000_000_000.0,
+            plan.streamed_bytes as f64 / 1_000_000_000.0,
+            plan.reserved_bytes() as f64 / 1_000_000_000.0,
+        ));
+
         Ok(Self {
             block_plan,
-            img_in: dense.img_in.to_device(device)?,
-            txt_in: dense.txt_in.to_device(device)?,
-            time_in: dense.time_in.to_device(device)?,
-            vector_in: dense
-                .vector_in
-                .as_ref()
-                .map(|embedder| embedder.to_device(device))
-                .transpose()?,
-            guidance_in: dense
-                .guidance_in
-                .as_ref()
-                .map(|embedder| embedder.to_device(device))
-                .transpose()?,
-            pe_embedder: dense.pe_embedder,
-            double_mod_img: dense.double_mod_img.to_device(device)?,
-            double_mod_txt: dense.double_mod_txt.to_device(device)?,
-            single_mod: dense.single_mod.to_device(device)?,
-            double_blocks: dense.double_blocks,
-            single_blocks: dense.single_blocks,
-            final_layer: dense.final_layer.to_device(device)?,
+            img_in,
+            txt_in,
+            time_in,
+            vector_in,
+            guidance_in,
+            pe_embedder,
+            double_mod_img,
+            double_mod_txt,
+            single_mod,
+            double_blocks,
+            single_blocks,
+            final_layer,
             device: device.clone(),
         })
     }
@@ -1120,16 +1331,35 @@ impl OffloadedFlux2Transformer {
         );
 
         for block in &self.double_blocks {
-            let block = block.to_device(device)?;
-            (img, txt) =
-                block.forward(&img, &txt, &img_mod1, &img_mod2, &txt_mod1, &txt_mod2, &pe)?;
+            match block {
+                DoubleBlockSlot::Resident(block) => {
+                    (img, txt) = block
+                        .forward(&img, &txt, &img_mod1, &img_mod2, &txt_mod1, &txt_mod2, &pe)?;
+                }
+                DoubleBlockSlot::Streamed(block) => {
+                    let block = block.to_device(device)?;
+                    (img, txt) = block
+                        .forward(&img, &txt, &img_mod1, &img_mod2, &txt_mod1, &txt_mod2, &pe)?;
+                    device.synchronize()?;
+                    drop(block);
+                }
+            }
         }
 
         let single_mod = self.single_mod.forward(&vec_)?;
         let mut img = Tensor::cat(&[&txt, &img], 1)?;
         for block in &self.single_blocks {
-            let block = block.to_device(device)?;
-            img = block.forward(&img, &single_mod, &pe)?;
+            match block {
+                SingleBlockSlot::Resident(block) => {
+                    img = block.forward(&img, &single_mod, &pe)?;
+                }
+                SingleBlockSlot::Streamed(block) => {
+                    let block = block.to_device(device)?;
+                    img = block.forward(&img, &single_mod, &pe)?;
+                    device.synchronize()?;
+                    drop(block);
+                }
+            }
         }
         let img = img.i((.., txt.dim(1)?..))?;
         self.final_layer.forward(&img, &vec_)

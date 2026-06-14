@@ -820,6 +820,14 @@ impl LoraBypassMode {
     }
 }
 
+fn should_use_offload_bypass_registry(
+    use_offload: bool,
+    has_lora: bool,
+    bypass_mode: LoraBypassMode,
+) -> bool {
+    use_offload && has_lora && bypass_mode != LoraBypassMode::Off
+}
+
 /// Build a [`super::lora_bypass::LoraRegistry`] for any bypass-capable
 /// path (offload or GGUF/quantized).
 ///
@@ -1888,7 +1896,22 @@ impl FluxEngine {
         // every targeted CPU-resident BF16 tensor and rebuilds the
         // ~24 GB block buffer on every LoRA swap. Bypass keeps adapters
         // GPU-resident, so a swap is just a registry replace.
-        let use_offload_bypass = use_offload && has_lora && bypass_mode != LoraBypassMode::Off;
+        let use_offload_bypass =
+            should_use_offload_bypass_registry(use_offload, has_lora, bypass_mode);
+        let offload_lora_registry = if use_offload_bypass {
+            // Build the registry before adaptive residency planning so its
+            // GPU-resident adapter tensors are included in the free-VRAM
+            // reading used to decide how many base blocks can stay resident.
+            build_lora_registry(
+                &active_loras,
+                &flux_cfg,
+                &device,
+                gpu_dtype,
+                &self.base.progress,
+            )?
+        } else {
+            None
+        };
 
         let flux_model = if use_offload {
             // Load transformer blocks on CPU. With bypass enabled the
@@ -1914,22 +1937,15 @@ impl FluxEngine {
                     &self.base.progress,
                 )?)
             };
-            let mut offloaded = crate::flux::offload::OffloadedFluxTransformer::load(
+            let offloaded = crate::flux::offload::OffloadedFluxTransformer::load(
                 cpu_vb,
                 &flux_cfg,
                 &device,
+                self.base.gpu_ordinal,
+                activation_budget,
+                offload_lora_registry,
                 &self.base.progress,
             )?;
-            if use_offload_bypass {
-                let registry = build_lora_registry(
-                    &active_loras,
-                    &flux_cfg,
-                    &device,
-                    gpu_dtype,
-                    &self.base.progress,
-                )?;
-                offloaded.set_lora_registry(registry);
-            }
             FluxTransformer::Offloaded(offloaded)
         } else if is_quantized && has_lora {
             // GGUF + LoRA: bypass-mode keeps base weights untouched and
@@ -2900,7 +2916,8 @@ impl FluxEngine {
 mod tests {
     use super::{
         effective_loras, flux_rms_norm_scale_aliases, flux_runtime_dtype,
-        flux_transformer_var_builder, park_cond_to_cpu, LoraBypassMode,
+        flux_transformer_var_builder, park_cond_to_cpu, should_use_offload_bypass_registry,
+        LoraBypassMode,
     };
     use crate::LoadStrategy;
     use candle_core::{DType, Device, Result, Tensor};
@@ -2936,6 +2953,35 @@ mod tests {
         assert_eq!(with_env(Some("auto")), LoraBypassMode::Auto);
         assert_eq!(with_env(Some("garbage")), LoraBypassMode::Auto);
         assert_eq!(with_env(None), LoraBypassMode::Auto);
+    }
+
+    #[test]
+    fn offload_lora_registry_is_built_before_adaptive_planning_when_enabled() {
+        assert!(should_use_offload_bypass_registry(
+            true,
+            true,
+            LoraBypassMode::Auto
+        ));
+        assert!(should_use_offload_bypass_registry(
+            true,
+            true,
+            LoraBypassMode::On
+        ));
+        assert!(!should_use_offload_bypass_registry(
+            true,
+            true,
+            LoraBypassMode::Off
+        ));
+        assert!(!should_use_offload_bypass_registry(
+            false,
+            true,
+            LoraBypassMode::Auto
+        ));
+        assert!(!should_use_offload_bypass_registry(
+            true,
+            false,
+            LoraBypassMode::Auto
+        ));
     }
 
     #[test]
