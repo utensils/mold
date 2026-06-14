@@ -371,9 +371,11 @@ impl SingleFileBackend {
     /// are set — Klein has neither.
     ///
     /// **Detection contract**: header-detected `Nvfp4` checkpoints route
-    /// through the NVFP4 entry variants (`Nvfp4`/`Nvfp4Slice`), which
-    /// fully dequantise (FP4 × FP8-block × F32-tensor) to FP8-E4M3 on
-    /// lookup. Non-BFL-native (root-level diffusers) layouts fail with
+    /// through synthetic NVFP4 subkeys (`weight.nvfp4_packed`,
+    /// `weight.nvfp4_block_scales`, `weight.nvfp4_tensor_scale`). The
+    /// consuming `Flux2Linear::Nvfp4Streaming` lazily dequantizes
+    /// FP4 × FP8-block × F32-tensor-scale to a CPU BF16 cache at first
+    /// forward. Non-BFL-native (root-level diffusers) layouts fail with
     /// a clear message.
     ///
     /// Fused-QKV slabs in `double_blocks.{i}.{img,txt}_attn.qkv.weight`

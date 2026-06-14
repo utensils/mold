@@ -51,8 +51,8 @@ fn is_single_file(paths: &ModelPaths) -> bool {
 /// paths.vae` heuristic doesn't apply. Header-peek the transformer
 /// instead. Returns `true` for `BflNative`, `BflNativeRoot`, and
 /// `Nvfp4` — all three route through `SingleFileBackend` (NVFP4
-/// dequantises FP4×FP8-block to FP8-E4M3 on lookup; the BFL variants
-/// pass tensors through directly). Returns `false` for sharded
+/// exposes packed FP4, FP8 block scales, and tensor scales as streaming
+/// subkeys; the BFL variants pass tensors through directly). Returns `false` for sharded
 /// transformers and for any non-`safetensors` path so HF diffusers
 /// layouts and GGUF quantised weights stay on the existing load paths.
 fn is_flux2_bfl_native_single_file(paths: &ModelPaths) -> bool {

@@ -8,8 +8,7 @@ use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn as nn;
 use nn::{Module, VarBuilder};
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::adaptive_offload::AdaptiveResidencyPlan;
 use crate::ltx2::guidance::{BatchedPerturbationConfig, PerturbationType};
@@ -250,6 +249,41 @@ enum LtxLinear {
         bias: Option<Tensor>,
         adapters: Vec<LinearLoraAdapter>,
     },
+    Nvfp4Streaming {
+        packed: Tensor,
+        block_scales: Tensor,
+        tensor_scale: f32,
+        out_dim: usize,
+        #[allow(dead_code)]
+        in_dim: usize,
+        bias: Option<Tensor>,
+        adapters: Vec<LinearLoraAdapter>,
+        cache: Arc<OnceLock<Tensor>>,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Nvfp4LinearCache {
+    entries: Arc<Mutex<HashMap<String, Arc<OnceLock<Tensor>>>>>,
+}
+
+impl Nvfp4LinearCache {
+    fn entry(&self, key: &str) -> Arc<OnceLock<Tensor>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(OnceLock::new()))
+            .clone()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .len()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -266,6 +300,7 @@ enum Fp8WeightScaleMode {
 }
 
 impl LtxLinear {
+    #[cfg(test)]
     fn load(
         in_dim: usize,
         out_dim: usize,
@@ -273,6 +308,78 @@ impl LtxLinear {
         vb: VarBuilder,
         adapters: Vec<LinearLoraAdapter>,
     ) -> Result<Self> {
+        Self::load_with_nvfp4_cache(in_dim, out_dim, has_bias, vb, adapters, None, None)
+    }
+
+    fn load_with_nvfp4_cache(
+        in_dim: usize,
+        out_dim: usize,
+        has_bias: bool,
+        vb: VarBuilder,
+        adapters: Vec<LinearLoraAdapter>,
+        nvfp4_cache: Option<&Nvfp4LinearCache>,
+        cache_key: Option<&str>,
+    ) -> Result<Self> {
+        if vb.contains_tensor("weight.nvfp4_packed") {
+            let cpu = Device::Cpu;
+            let packed = vb
+                .get_unchecked_dtype("weight.nvfp4_packed", DType::U8)?
+                .to_device(&cpu)?;
+            let block_scales = vb
+                .get_unchecked_dtype("weight.nvfp4_block_scales", DType::F8E4M3)?
+                .to_device(&cpu)?;
+            let tensor_scale = vb
+                .get_unchecked_dtype("weight.nvfp4_tensor_scale", DType::F32)?
+                .to_dtype(DType::F32)?
+                .to_scalar::<f32>()?;
+
+            let packed_dims = packed.dims();
+            if packed_dims.len() != 2 {
+                candle_core::bail!(
+                    "LTX-2 NVFP4 packed weight must be rank 2, got {:?}",
+                    packed_dims,
+                );
+            }
+            let n = packed_dims[0];
+            let k = packed_dims[1] * 2;
+            if n != out_dim || k != in_dim {
+                candle_core::bail!(
+                    "LTX-2 NVFP4 shape mismatch: checkpoint weight [{n}, {k}], module expected [{out_dim}, {in_dim}]",
+                );
+            }
+            let scale_dims = block_scales.dims();
+            let expected_scale_rows = n.div_ceil(128) * 128;
+            let expected_scale_cols = (k / crate::nvfp4::NVFP4_BLOCK_SIZE).div_ceil(4) * 4;
+            if scale_dims != [expected_scale_rows, expected_scale_cols] {
+                candle_core::bail!(
+                    "LTX-2 NVFP4 block-scale shape mismatch: checkpoint {:?}, expected [{expected_scale_rows}, {expected_scale_cols}] for packed [{n}, {}]",
+                    scale_dims,
+                    packed_dims[1],
+                );
+            }
+
+            let bias = if has_bias {
+                Some(vb.get(out_dim, "bias")?)
+            } else {
+                None
+            };
+            let cache = nvfp4_cache
+                .zip(cache_key)
+                .map(|(cache, key)| cache.entry(key))
+                .unwrap_or_else(|| Arc::new(OnceLock::new()));
+
+            return Ok(Self::Nvfp4Streaming {
+                packed,
+                block_scales,
+                tensor_scale,
+                out_dim,
+                in_dim,
+                bias,
+                adapters,
+                cache,
+            });
+        }
+
         let weight = vb.get((out_dim, in_dim), "weight")?;
         let weight_scale = if vb.contains_tensor("weight_scale") {
             Some(vb.get((), "weight_scale")?)
@@ -480,6 +587,104 @@ fn fp8_linear_forward_chunked(
     }
 }
 
+fn nvfp4_linear_output_chunk_size(out_dim: usize, device: &Device) -> usize {
+    if !device.is_cuda() {
+        return out_dim;
+    }
+    if out_dim >= 16_384 {
+        1_024
+    } else if out_dim >= 8_192 {
+        1_536
+    } else if out_dim >= 4_096 {
+        2_048.min(out_dim)
+    } else {
+        out_dim
+    }
+}
+
+fn nvfp4_linear_forward_chunked(
+    xs: &Tensor,
+    bf16_weight_cpu: &Tensor,
+    runtime_dtype: DType,
+    chunk_size: usize,
+) -> Result<Tensor> {
+    let out_dim = bf16_weight_cpu.dim(0)?;
+    if chunk_size >= out_dim {
+        let weight = bf16_weight_cpu
+            .to_device(xs.device())?
+            .to_dtype(runtime_dtype)?;
+        let weight_t = weight.t()?;
+        return match *xs.dims() {
+            [batch0, batch1, tokens, hidden] => xs
+                .reshape((batch0 * batch1 * tokens, hidden))?
+                .matmul(&weight_t)?
+                .reshape((batch0, batch1, tokens, ())),
+            [batch, tokens, hidden] => xs
+                .reshape((batch * tokens, hidden))?
+                .matmul(&weight_t)?
+                .reshape((batch, tokens, ())),
+            _ => xs.matmul(&weight_t),
+        };
+    }
+
+    let mut outputs = Vec::with_capacity(out_dim.div_ceil(chunk_size));
+    match *xs.dims() {
+        [batch0, batch1, tokens, hidden] => {
+            let xs_flat = xs.reshape((batch0 * batch1 * tokens, hidden))?;
+            let mut offset = 0;
+            while offset < out_dim {
+                let rows = chunk_size.min(out_dim - offset);
+                let weight_chunk = bf16_weight_cpu
+                    .narrow(0, offset, rows)?
+                    .contiguous()?
+                    .to_device(xs.device())?
+                    .to_dtype(runtime_dtype)?;
+                let chunk = xs_flat
+                    .matmul(&weight_chunk.t()?)?
+                    .reshape((batch0, batch1, tokens, rows))?;
+                outputs.push(chunk);
+                offset += rows;
+            }
+            let refs = outputs.iter().collect::<Vec<_>>();
+            Tensor::cat(&refs, D::Minus1)
+        }
+        [batch, tokens, hidden] => {
+            let xs_flat = xs.reshape((batch * tokens, hidden))?;
+            let mut offset = 0;
+            while offset < out_dim {
+                let rows = chunk_size.min(out_dim - offset);
+                let weight_chunk = bf16_weight_cpu
+                    .narrow(0, offset, rows)?
+                    .contiguous()?
+                    .to_device(xs.device())?
+                    .to_dtype(runtime_dtype)?;
+                let chunk = xs_flat
+                    .matmul(&weight_chunk.t()?)?
+                    .reshape((batch, tokens, rows))?;
+                outputs.push(chunk);
+                offset += rows;
+            }
+            let refs = outputs.iter().collect::<Vec<_>>();
+            Tensor::cat(&refs, D::Minus1)
+        }
+        _ => {
+            let mut offset = 0;
+            while offset < out_dim {
+                let rows = chunk_size.min(out_dim - offset);
+                let weight_chunk = bf16_weight_cpu
+                    .narrow(0, offset, rows)?
+                    .contiguous()?
+                    .to_device(xs.device())?
+                    .to_dtype(runtime_dtype)?;
+                outputs.push(xs.matmul(&weight_chunk.t()?)?);
+                offset += rows;
+            }
+            let refs = outputs.iter().collect::<Vec<_>>();
+            Tensor::cat(&refs, D::Minus1)
+        }
+    }
+}
+
 impl Module for LtxLinear {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
@@ -526,6 +731,53 @@ impl Module for LtxLinear {
                 )?;
                 let out = match bias {
                     Some(bias) => out.broadcast_add(&bias.to_dtype(dtype)?),
+                    None => Ok(out),
+                }?;
+                apply_linear_loras(out, &xs, adapters, dtype)
+            }
+            Self::Nvfp4Streaming {
+                packed,
+                block_scales,
+                tensor_scale,
+                out_dim,
+                bias,
+                adapters,
+                cache,
+                ..
+            } => {
+                let _backend = crate::nvfp4::resolve_nvfp4_backend(xs.device())?;
+                let dtype = match xs.dtype() {
+                    DType::F8E4M3 => DType::BF16,
+                    other => other,
+                };
+                let xs = if xs.dtype() == dtype {
+                    xs.clone()
+                } else {
+                    xs.to_dtype(dtype)?
+                };
+                let bf16_weight_cpu = match cache.get() {
+                    Some(tensor) => tensor,
+                    None => {
+                        let dequanted = crate::nvfp4::dequant_nvfp4_to_bf16_cpu(
+                            packed,
+                            block_scales,
+                            *tensor_scale,
+                        )?;
+                        let _ = cache.set(dequanted);
+                        cache.get().expect("cache populated above")
+                    }
+                };
+                let chunk_size = nvfp4_linear_output_chunk_size(*out_dim, xs.device());
+                let out = nvfp4_linear_forward_chunked(&xs, bf16_weight_cpu, dtype, chunk_size)?;
+                let out = match bias {
+                    Some(bias) => {
+                        let bias = if bias.device().same_device(out.device()) {
+                            bias.to_dtype(dtype)?
+                        } else {
+                            bias.to_device(out.device())?.to_dtype(dtype)?
+                        };
+                        out.broadcast_add(&bias)
+                    }
                     None => Ok(out),
                 }?;
                 apply_linear_loras(out, &xs, adapters, dtype)
@@ -587,13 +839,16 @@ impl GeluProjection {
         vb: VarBuilder,
         lora_registry: Option<&Ltx2LoraRegistry>,
         lora_key: &str,
+        nvfp4_cache: Option<&Nvfp4LinearCache>,
     ) -> Result<Self> {
-        let proj = LtxLinear::load(
+        let proj = LtxLinear::load_with_nvfp4_cache(
             dim_in,
             dim_out,
             true,
             vb.pp("proj"),
             lora_adapters_for(lora_registry, lora_key),
+            nvfp4_cache,
+            Some(lora_key),
         )?;
         Ok(Self { proj })
     }
@@ -626,6 +881,7 @@ impl FeedForward {
         vb: VarBuilder,
         lora_registry: Option<&Ltx2LoraRegistry>,
         lora_key_prefix: &str,
+        nvfp4_cache: Option<&Nvfp4LinearCache>,
     ) -> Result<Self> {
         let hidden = dim * 4;
         let net_0 = GeluProjection::new(
@@ -634,13 +890,16 @@ impl FeedForward {
             vb.pp("net.0"),
             lora_registry,
             &format!("{lora_key_prefix}.net.0.proj"),
+            nvfp4_cache,
         )?;
-        let net_2 = LtxLinear::load(
+        let net_2 = LtxLinear::load_with_nvfp4_cache(
             hidden,
             dim,
             true,
             vb.pp("net.2"),
             lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.net.2")),
+            nvfp4_cache,
+            Some(&format!("{lora_key_prefix}.net.2")),
         )?;
         Ok(Self { net_0, net_2 })
     }
@@ -1219,6 +1478,7 @@ impl LtxAttention {
         vb: VarBuilder,
         lora_registry: Option<&Ltx2LoraRegistry>,
         lora_key_prefix: &str,
+        nvfp4_cache: Option<&Nvfp4LinearCache>,
     ) -> Result<Self> {
         if qk_norm != "rms_norm_across_heads" && qk_norm != "rms_norm" {
             candle_core::bail!(
@@ -1234,43 +1494,58 @@ impl LtxAttention {
         let norm_q = RmsNorm::new(inner_dim, norm_eps, true, vb.pp("norm_q"))?;
         let norm_k = RmsNorm::new(inner_kv_dim, norm_eps, true, vb.pp("norm_k"))?;
 
-        let to_q = LtxLinear::load(
+        let to_q_key = format!("{lora_key_prefix}.to_q");
+        let to_q = LtxLinear::load_with_nvfp4_cache(
             query_dim,
             inner_dim,
             bias,
             vb.pp("to_q"),
-            lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.to_q")),
+            lora_adapters_for(lora_registry, &to_q_key),
+            nvfp4_cache,
+            Some(&to_q_key),
         )?;
-        let to_k = LtxLinear::load(
+        let to_k_key = format!("{lora_key_prefix}.to_k");
+        let to_k = LtxLinear::load_with_nvfp4_cache(
             cross_attention_dim,
             inner_kv_dim,
             bias,
             vb.pp("to_k"),
-            lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.to_k")),
+            lora_adapters_for(lora_registry, &to_k_key),
+            nvfp4_cache,
+            Some(&to_k_key),
         )?;
-        let to_v = LtxLinear::load(
+        let to_v_key = format!("{lora_key_prefix}.to_v");
+        let to_v = LtxLinear::load_with_nvfp4_cache(
             cross_attention_dim,
             inner_kv_dim,
             bias,
             vb.pp("to_v"),
-            lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.to_v")),
+            lora_adapters_for(lora_registry, &to_v_key),
+            nvfp4_cache,
+            Some(&to_v_key),
         )?;
 
-        let to_out = LtxLinear::load(
+        let to_out_key = format!("{lora_key_prefix}.to_out.0");
+        let to_out = LtxLinear::load_with_nvfp4_cache(
             inner_dim,
             query_dim,
             out_bias,
             vb.pp("to_out").pp("0"),
-            lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.to_out.0")),
+            lora_adapters_for(lora_registry, &to_out_key),
+            nvfp4_cache,
+            Some(&to_out_key),
         )?;
         let to_gate_logits = apply_gated_attention
             .then(|| {
-                LtxLinear::load(
+                let to_gate_logits_key = format!("{lora_key_prefix}.to_gate_logits");
+                LtxLinear::load_with_nvfp4_cache(
                     query_dim,
                     heads,
                     true,
                     vb.pp("to_gate_logits"),
-                    lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.to_gate_logits")),
+                    lora_adapters_for(lora_registry, &to_gate_logits_key),
+                    nvfp4_cache,
+                    Some(&to_gate_logits_key),
                 )
             })
             .transpose()?;
@@ -1668,6 +1943,7 @@ impl LtxVideoTransformerBlock {
         vb: VarBuilder,
         lora_registry: Option<&Ltx2LoraRegistry>,
         block_key: &str,
+        nvfp4_cache: Option<&Nvfp4LinearCache>,
     ) -> Result<Self> {
         let norm1 = RmsNorm::new(dim, eps, elementwise_affine, vb.pp("norm1"))?;
         let attn1 = LtxAttention::new(
@@ -1685,6 +1961,7 @@ impl LtxVideoTransformerBlock {
             vb.pp("attn1"),
             lora_registry,
             &format!("{block_key}.attn1"),
+            nvfp4_cache,
         )?;
         let norm2 = RmsNorm::new(dim, eps, elementwise_affine, vb.pp("norm2"))?;
         let attn2 = LtxAttention::new(
@@ -1702,10 +1979,17 @@ impl LtxVideoTransformerBlock {
             vb.pp("attn2"),
             lora_registry,
             &format!("{block_key}.attn2"),
+            nvfp4_cache,
         )?;
         let norm3 = RmsNorm::new(dim, eps, elementwise_affine, vb.pp("norm3"))?;
 
-        let ff = FeedForward::new(dim, vb.pp("ff"), lora_registry, &format!("{block_key}.ff"))?;
+        let ff = FeedForward::new(
+            dim,
+            vb.pp("ff"),
+            lora_registry,
+            &format!("{block_key}.ff"),
+            nvfp4_cache,
+        )?;
         let scale_shift_table = vb.get((6, dim), "scale_shift_table")?;
 
         Ok(Self {
@@ -1852,7 +2136,8 @@ pub struct Ltx2VideoTransformer3DModel {
     rope: Ltx2VideoRotaryPosEmbed,
     transformer_blocks: TransformerBlockSource,
     norm_out: LayerNormNoParams,
-    proj_out: nn::Linear,
+    proj_out: LtxLinear,
+    nvfp4_cache: Nvfp4LinearCache,
     config: Ltx2VideoTransformer3DModelConfig,
     skip_block_list: Vec<usize>,
     /// Timestep scaling factor (1000.0 for LTX Video, matching Python's
@@ -1870,6 +2155,7 @@ impl Ltx2VideoTransformer3DModel {
             config.out_channels
         };
         let inner_dim = config.num_attention_heads * config.attention_head_dim;
+        let nvfp4_cache = Nvfp4LinearCache::default();
 
         let proj_in = nn::linear(config.in_channels, inner_dim, vb.pp("proj_in"))?;
         let scale_shift_table = vb.get((2, inner_dim), "scale_shift_table")?;
@@ -1908,11 +2194,20 @@ impl Ltx2VideoTransformer3DModel {
                 vb.pp("transformer_blocks").pp(layer_idx.to_string()),
                 None,
                 &format!("diffusion_model.transformer_blocks.{layer_idx}"),
+                Some(&nvfp4_cache),
             )?);
         }
 
         let norm_out = LayerNormNoParams::new(1e-6);
-        let proj_out = nn::linear(inner_dim, out_channels, vb.pp("proj_out"))?;
+        let proj_out = LtxLinear::load_with_nvfp4_cache(
+            inner_dim,
+            out_channels,
+            true,
+            vb.pp("proj_out"),
+            vec![],
+            Some(&nvfp4_cache),
+            Some("diffusion_model.proj_out"),
+        )?;
 
         Ok(Self {
             proj_in,
@@ -1923,6 +2218,7 @@ impl Ltx2VideoTransformer3DModel {
             transformer_blocks: TransformerBlockSource::Eager(transformer_blocks),
             norm_out,
             proj_out,
+            nvfp4_cache,
             config: config.clone(),
             skip_block_list: Vec::new(),
             timestep_scale_multiplier: 1000.0,
@@ -1939,6 +2235,7 @@ impl Ltx2VideoTransformer3DModel {
             config.out_channels
         };
         let inner_dim = config.num_attention_heads * config.attention_head_dim;
+        let nvfp4_cache = Nvfp4LinearCache::default();
 
         let proj_in = nn::linear(config.in_channels, inner_dim, vb.pp("proj_in"))?;
         let scale_shift_table = vb.get((2, inner_dim), "scale_shift_table")?;
@@ -1961,7 +2258,15 @@ impl Ltx2VideoTransformer3DModel {
         );
 
         let norm_out = LayerNormNoParams::new(1e-6);
-        let proj_out = nn::linear(inner_dim, out_channels, vb.pp("proj_out"))?;
+        let proj_out = LtxLinear::load_with_nvfp4_cache(
+            inner_dim,
+            out_channels,
+            true,
+            vb.pp("proj_out"),
+            vec![],
+            Some(&nvfp4_cache),
+            Some("diffusion_model.proj_out"),
+        )?;
 
         Ok(Self {
             proj_in,
@@ -1972,6 +2277,7 @@ impl Ltx2VideoTransformer3DModel {
             transformer_blocks: TransformerBlockSource::Streaming(vb.pp("transformer_blocks")),
             norm_out,
             proj_out,
+            nvfp4_cache,
             config: config.clone(),
             skip_block_list: Vec::new(),
             timestep_scale_multiplier: 1000.0,
@@ -2007,6 +2313,7 @@ impl Ltx2VideoTransformer3DModel {
             blocks_vb.pp(index.to_string()),
             None,
             &format!("diffusion_model.transformer_blocks.{index}"),
+            Some(&self.nvfp4_cache),
         )
     }
 
@@ -2289,6 +2596,7 @@ impl LtxAvTransformerBlock {
         vb: VarBuilder,
         lora_registry: Option<&Ltx2LoraRegistry>,
         block_key: &str,
+        nvfp4_cache: Option<&Nvfp4LinearCache>,
     ) -> Result<Self> {
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
@@ -2308,6 +2616,7 @@ impl LtxAvTransformerBlock {
             vb.pp("attn1"),
             lora_registry,
             &format!("{block_key}.attn1"),
+            nvfp4_cache,
         )?;
         let video_attn2 = LtxAttention::new(
             video_dim,
@@ -2324,12 +2633,14 @@ impl LtxAvTransformerBlock {
             vb.pp("attn2"),
             lora_registry,
             &format!("{block_key}.attn2"),
+            nvfp4_cache,
         )?;
         let video_ff = FeedForward::new(
             video_dim,
             vb.pp("ff"),
             lora_registry,
             &format!("{block_key}.ff"),
+            nvfp4_cache,
         )?;
         let video_scale_shift_table = vb.get(
             (if config.cross_attention_adaln { 9 } else { 6 }, video_dim),
@@ -2351,6 +2662,7 @@ impl LtxAvTransformerBlock {
             vb.pp("audio_attn1"),
             lora_registry,
             &format!("{block_key}.audio_attn1"),
+            nvfp4_cache,
         )?;
         let audio_attn2 = LtxAttention::new(
             audio_dim,
@@ -2367,12 +2679,14 @@ impl LtxAvTransformerBlock {
             vb.pp("audio_attn2"),
             lora_registry,
             &format!("{block_key}.audio_attn2"),
+            nvfp4_cache,
         )?;
         let audio_ff = FeedForward::new(
             audio_dim,
             vb.pp("audio_ff"),
             lora_registry,
             &format!("{block_key}.audio_ff"),
+            nvfp4_cache,
         )?;
         let audio_scale_shift_table = vb.get(
             (if config.cross_attention_adaln { 9 } else { 6 }, audio_dim),
@@ -2394,6 +2708,7 @@ impl LtxAvTransformerBlock {
             vb.pp("audio_to_video_attn"),
             lora_registry,
             &format!("{block_key}.audio_to_video_attn"),
+            nvfp4_cache,
         )?;
         let video_to_audio_attn = LtxAttention::new(
             audio_dim,
@@ -2410,6 +2725,7 @@ impl LtxAvTransformerBlock {
             vb.pp("video_to_audio_attn"),
             lora_registry,
             &format!("{block_key}.video_to_audio_attn"),
+            nvfp4_cache,
         )?;
         let scale_shift_table_a2v_ca_audio =
             vb.get((5, audio_dim), "scale_shift_table_a2v_ca_audio")?;
@@ -2849,14 +3165,14 @@ pub struct Ltx2AvTransformer3DModel {
     caption_projection: Option<PixArtAlphaTextProjection>,
     scale_shift_table: Tensor,
     norm_out: LayerNormNoParams,
-    proj_out: nn::Linear,
+    proj_out: LtxLinear,
     audio_patchify_proj: nn::Linear,
     audio_adaln_single: AdaLayerNormSingle,
     audio_prompt_adaln_single: Option<AdaLayerNormSingle>,
     audio_caption_projection: Option<PixArtAlphaTextProjection>,
     audio_scale_shift_table: Tensor,
     audio_norm_out: LayerNormNoParams,
-    audio_proj_out: nn::Linear,
+    audio_proj_out: LtxLinear,
     av_ca_video_scale_shift_adaln_single: AdaLayerNormSingle,
     av_ca_audio_scale_shift_adaln_single: AdaLayerNormSingle,
     av_ca_a2v_gate_adaln_single: AdaLayerNormSingle,
@@ -2866,6 +3182,7 @@ pub struct Ltx2AvTransformer3DModel {
     cross_rope: Ltx2VideoRotaryPosEmbed,
     transformer_blocks: AvTransformerBlockSource,
     lora_registry: Option<Arc<Ltx2LoraRegistry>>,
+    nvfp4_cache: Nvfp4LinearCache,
     config: Ltx2VideoTransformer3DModelConfig,
 }
 
@@ -2877,6 +3194,7 @@ impl Ltx2AvTransformer3DModel {
     ) -> Result<Self> {
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
+        let nvfp4_cache = Nvfp4LinearCache::default();
         let adaln_embedding_coefficient = if config.cross_attention_adaln { 9 } else { 6 };
         let cross_max = config
             .positional_embedding_max_pos
@@ -2897,6 +3215,7 @@ impl Ltx2AvTransformer3DModel {
                 vb.pp("transformer_blocks").pp(layer_idx.to_string()),
                 lora_registry.as_deref(),
                 &format!("diffusion_model.transformer_blocks.{layer_idx}"),
+                Some(&nvfp4_cache),
             )?);
             if ltx2_load_debug_enabled() {
                 eprintln!(
@@ -2935,7 +3254,15 @@ impl Ltx2AvTransformer3DModel {
             },
             scale_shift_table: vb.get((2, video_dim), "scale_shift_table")?,
             norm_out: LayerNormNoParams::new(config.norm_eps),
-            proj_out: nn::linear(video_dim, config.out_channels, vb.pp("proj_out"))?,
+            proj_out: LtxLinear::load_with_nvfp4_cache(
+                video_dim,
+                config.out_channels,
+                true,
+                vb.pp("proj_out"),
+                lora_adapters_for(lora_registry.as_deref(), "diffusion_model.proj_out"),
+                Some(&nvfp4_cache),
+                Some("diffusion_model.proj_out"),
+            )?,
             audio_patchify_proj: nn::linear(
                 config.audio_in_channels,
                 audio_dim,
@@ -2967,10 +3294,14 @@ impl Ltx2AvTransformer3DModel {
             },
             audio_scale_shift_table: vb.get((2, audio_dim), "audio_scale_shift_table")?,
             audio_norm_out: LayerNormNoParams::new(config.norm_eps),
-            audio_proj_out: nn::linear(
+            audio_proj_out: LtxLinear::load_with_nvfp4_cache(
                 audio_dim,
                 config.audio_out_channels,
+                true,
                 vb.pp("audio_proj_out"),
+                lora_adapters_for(lora_registry.as_deref(), "diffusion_model.audio_proj_out"),
+                Some(&nvfp4_cache),
+                Some("diffusion_model.audio_proj_out"),
             )?,
             av_ca_video_scale_shift_adaln_single: AdaLayerNormSingle::new_with_coefficient(
                 video_dim,
@@ -3021,6 +3352,7 @@ impl Ltx2AvTransformer3DModel {
             ),
             transformer_blocks: AvTransformerBlockSource::Eager(transformer_blocks),
             lora_registry,
+            nvfp4_cache,
             config: config.clone(),
         })
     }
@@ -3030,8 +3362,9 @@ impl Ltx2AvTransformer3DModel {
         vb: VarBuilder<'static>,
         lora_registry: Option<Arc<Ltx2LoraRegistry>>,
     ) -> Result<Self> {
+        let nvfp4_cache = Nvfp4LinearCache::default();
         let transformer_blocks = AvTransformerBlockSource::Streaming(vb.pp("transformer_blocks"));
-        Self::new_with_block_source(config, vb, lora_registry, transformer_blocks)
+        Self::new_with_block_source(config, vb, lora_registry, transformer_blocks, nvfp4_cache)
     }
 
     pub(crate) fn new_adaptive(
@@ -3040,6 +3373,7 @@ impl Ltx2AvTransformer3DModel {
         lora_registry: Option<Arc<Ltx2LoraRegistry>>,
         plan: AdaptiveResidencyPlan,
     ) -> Result<Self> {
+        let nvfp4_cache = Nvfp4LinearCache::default();
         if plan.resident.len() != config.num_layers {
             candle_core::bail!(
                 "LTX-2 adaptive residency plan has {} layers, expected {}",
@@ -3057,6 +3391,7 @@ impl Ltx2AvTransformer3DModel {
                     blocks_vb.pp(index.to_string()),
                     lora_registry.as_deref(),
                     &format!("diffusion_model.transformer_blocks.{index}"),
+                    Some(&nvfp4_cache),
                 )?));
             } else {
                 resident_blocks.push(None);
@@ -3068,7 +3403,7 @@ impl Ltx2AvTransformer3DModel {
             streamed_vb: blocks_vb,
             plan,
         };
-        Self::new_with_block_source(config, vb, lora_registry, transformer_blocks)
+        Self::new_with_block_source(config, vb, lora_registry, transformer_blocks, nvfp4_cache)
     }
 
     fn new_with_block_source(
@@ -3076,6 +3411,7 @@ impl Ltx2AvTransformer3DModel {
         vb: VarBuilder<'static>,
         lora_registry: Option<Arc<Ltx2LoraRegistry>>,
         transformer_blocks: AvTransformerBlockSource,
+        nvfp4_cache: Nvfp4LinearCache,
     ) -> Result<Self> {
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
@@ -3121,7 +3457,15 @@ impl Ltx2AvTransformer3DModel {
             },
             scale_shift_table: vb.get((2, video_dim), "scale_shift_table")?,
             norm_out: LayerNormNoParams::new(config.norm_eps),
-            proj_out: nn::linear(video_dim, config.out_channels, vb.pp("proj_out"))?,
+            proj_out: LtxLinear::load_with_nvfp4_cache(
+                video_dim,
+                config.out_channels,
+                true,
+                vb.pp("proj_out"),
+                lora_adapters_for(lora_registry.as_deref(), "diffusion_model.proj_out"),
+                Some(&nvfp4_cache),
+                Some("diffusion_model.proj_out"),
+            )?,
             audio_patchify_proj: nn::linear(
                 config.audio_in_channels,
                 audio_dim,
@@ -3153,10 +3497,14 @@ impl Ltx2AvTransformer3DModel {
             },
             audio_scale_shift_table: vb.get((2, audio_dim), "audio_scale_shift_table")?,
             audio_norm_out: LayerNormNoParams::new(config.norm_eps),
-            audio_proj_out: nn::linear(
+            audio_proj_out: LtxLinear::load_with_nvfp4_cache(
                 audio_dim,
                 config.audio_out_channels,
+                true,
                 vb.pp("audio_proj_out"),
+                lora_adapters_for(lora_registry.as_deref(), "diffusion_model.audio_proj_out"),
+                Some(&nvfp4_cache),
+                Some("diffusion_model.audio_proj_out"),
             )?,
             av_ca_video_scale_shift_adaln_single: AdaLayerNormSingle::new_with_coefficient(
                 video_dim,
@@ -3207,6 +3555,7 @@ impl Ltx2AvTransformer3DModel {
             ),
             transformer_blocks,
             lora_registry,
+            nvfp4_cache,
             config: config.clone(),
         })
     }
@@ -3240,6 +3589,7 @@ impl Ltx2AvTransformer3DModel {
             blocks_vb.pp(index.to_string()),
             self.lora_registry.as_deref(),
             &format!("diffusion_model.transformer_blocks.{index}"),
+            Some(&self.nvfp4_cache),
         )
     }
 
@@ -3429,7 +3779,7 @@ impl Ltx2AvTransformer3DModel {
     fn process_output(
         scale_shift_table: &Tensor,
         norm_out: &LayerNormNoParams,
-        proj_out: &nn::Linear,
+        proj_out: &LtxLinear,
         x: &Tensor,
         embedded_timestep: &Tensor,
     ) -> Result<Tensor> {
@@ -3755,7 +4105,8 @@ mod tests {
         cached_timestep_embedding_inv_freq, emulate_static_fp8_input_quantization, gate_tokens,
         modulate_tokens, LayerNormNoParams, LinearLoraAdapter, Ltx2AvTransformer3DModel,
         Ltx2VideoRotaryPosEmbed, Ltx2VideoTransformer3DModelConfig, LtxAttention, LtxLinear,
-        LtxRopeType, TimestepEmbeddingInvFreqCache, TimestepEmbeddingInvFreqCacheKey,
+        LtxRopeType, Nvfp4LinearCache, TimestepEmbeddingInvFreqCache,
+        TimestepEmbeddingInvFreqCacheKey,
     };
 
     fn fp8_input_scale_env_lock() -> &'static Mutex<()> {
@@ -3940,6 +4291,53 @@ mod tests {
                 Tensor::new(1.0f32, &device).unwrap(),
             );
         }
+    }
+
+    fn insert_nvfp4_linear(
+        tensors: &mut HashMap<String, Tensor>,
+        prefix: &str,
+        out_dim: usize,
+        in_dim: usize,
+    ) {
+        assert!(
+            in_dim.is_multiple_of(crate::nvfp4::NVFP4_BLOCK_SIZE),
+            "NVFP4 test fixture input dim must be block-aligned"
+        );
+        let device = Device::Cpu;
+        let packed = vec![0x22u8; out_dim * in_dim / 2];
+        tensors.insert(
+            format!("{prefix}.weight.nvfp4_packed"),
+            Tensor::from_vec(packed, (out_dim, in_dim / 2), &device).unwrap(),
+        );
+
+        let scale_cols = in_dim / crate::nvfp4::NVFP4_BLOCK_SIZE;
+        let unswizzled = vec![1.0f32; out_dim * scale_cols];
+        let swizzled =
+            crate::nvfp4::swizzle_block_scales(&unswizzled, out_dim, scale_cols).unwrap();
+        tensors.insert(
+            format!("{prefix}.weight.nvfp4_block_scales"),
+            Tensor::from_vec(
+                swizzled,
+                (out_dim.div_ceil(128) * 128, scale_cols.div_ceil(4) * 4),
+                &device,
+            )
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap(),
+        );
+        tensors.insert(
+            format!("{prefix}.weight.nvfp4_tensor_scale"),
+            Tensor::new(1.0f32, &device).unwrap(),
+        );
+        tensors.insert(
+            format!("{prefix}.bias"),
+            Tensor::from_vec(
+                patterned_values(out_dim, prefix.len() + 7),
+                out_dim,
+                &device,
+            )
+            .unwrap(),
+        );
     }
 
     fn insert_rms_norm(tensors: &mut HashMap<String, Tensor>, prefix: &str, dim: usize) {
@@ -4220,8 +4618,14 @@ mod tests {
     }
 
     fn av_transformer_var_builder() -> VarBuilder<'static> {
+        av_transformer_var_builder_with_options(tiny_av_config(), false)
+    }
+
+    fn av_transformer_var_builder_with_options(
+        config: Ltx2VideoTransformer3DModelConfig,
+        nvfp4_outputs: bool,
+    ) -> VarBuilder<'static> {
         let device = Device::Cpu;
-        let config = tiny_av_config();
         let video_dim = config.inner_dim();
         let audio_dim = config.audio_num_attention_heads * config.audio_attention_head_dim;
         let mut tensors = HashMap::new();
@@ -4242,13 +4646,17 @@ mod tests {
             video_dim,
         );
         insert_matrix(&mut tensors, "scale_shift_table", 2, video_dim, 11);
-        insert_linear(
-            &mut tensors,
-            "proj_out",
-            config.out_channels,
-            video_dim,
-            false,
-        );
+        if nvfp4_outputs {
+            insert_nvfp4_linear(&mut tensors, "proj_out", config.out_channels, video_dim);
+        } else {
+            insert_linear(
+                &mut tensors,
+                "proj_out",
+                config.out_channels,
+                video_dim,
+                false,
+            );
+        }
 
         insert_linear(
             &mut tensors,
@@ -4266,13 +4674,22 @@ mod tests {
             audio_dim,
         );
         insert_matrix(&mut tensors, "audio_scale_shift_table", 2, audio_dim, 13);
-        insert_linear(
-            &mut tensors,
-            "audio_proj_out",
-            config.audio_out_channels,
-            audio_dim,
-            false,
-        );
+        if nvfp4_outputs {
+            insert_nvfp4_linear(
+                &mut tensors,
+                "audio_proj_out",
+                config.audio_out_channels,
+                audio_dim,
+            );
+        } else {
+            insert_linear(
+                &mut tensors,
+                "audio_proj_out",
+                config.audio_out_channels,
+                audio_dim,
+                false,
+            );
+        }
 
         insert_adaln_single(
             &mut tensors,
@@ -4329,6 +4746,7 @@ mod tests {
             attention_var_builder(4),
             None,
             "diffusion_model.transformer_blocks.0.attn2",
+            None,
         )
         .unwrap();
         let hidden_states = Tensor::new(
@@ -4410,6 +4828,7 @@ mod tests {
             attention_var_builder(4),
             None,
             "diffusion_model.transformer_blocks.0.attn1",
+            None,
         )
         .unwrap();
         let gated = LtxAttention::new(
@@ -4427,6 +4846,7 @@ mod tests {
             attention_var_builder_with_gate(4, Some(0.0)),
             None,
             "diffusion_model.transformer_blocks.0.attn1",
+            None,
         )
         .unwrap();
 
@@ -4464,6 +4884,7 @@ mod tests {
             attention_var_builder(4),
             None,
             "diffusion_model.transformer_blocks.0.attn1",
+            None,
         )
         .unwrap();
         let perturbation_mask = Tensor::new(&[[[1.0f32]], [[0.0f32]]], &Device::Cpu).unwrap();
@@ -4676,7 +5097,154 @@ mod tests {
                 assert!(bias.is_some());
                 assert!(adapters.is_empty());
             }
-            LtxLinear::Standard { .. } => panic!("expected fp8 linear"),
+            LtxLinear::Standard { .. } | LtxLinear::Nvfp4Streaming { .. } => {
+                panic!("expected fp8 linear")
+            }
+        }
+    }
+
+    #[test]
+    fn ltx2_nvfp4_linear_loads_packed_sidecars_and_applies_tensor_scale() {
+        let device = Device::Cpu;
+        let mut tensors = HashMap::new();
+        let mut packed = vec![0x22u8; 8];
+        packed.extend(std::iter::repeat_n(0x44u8, 8));
+        tensors.insert(
+            "weight.nvfp4_packed".to_string(),
+            Tensor::from_vec(packed, (2, 8), &device).unwrap(),
+        );
+        tensors.insert(
+            "weight.nvfp4_block_scales".to_string(),
+            {
+                let swizzled = crate::nvfp4::swizzle_block_scales(&[1.0f32, 1.0], 2, 1).unwrap();
+                Tensor::from_vec(swizzled, (128, 4), &device)
+            }
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap(),
+        );
+        tensors.insert(
+            "weight.nvfp4_tensor_scale".to_string(),
+            Tensor::new(0.5f32, &device).unwrap(),
+        );
+        tensors.insert(
+            "bias".to_string(),
+            Tensor::from_vec(vec![0.25f32, -0.5], 2, &device).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+
+        let linear = LtxLinear::load(16, 2, true, vb, vec![]).unwrap();
+        let xs = Tensor::ones((1, 1, 16), DType::F32, &device).unwrap();
+        let out = linear.forward(&xs).unwrap().to_dtype(DType::F32).unwrap();
+
+        let actual = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(actual.len(), 2);
+        assert!((actual[0] - 8.25).abs() < 1e-3, "{actual:?}");
+        assert!((actual[1] - 15.5).abs() < 1e-3, "{actual:?}");
+    }
+
+    fn nvfp4_linear_var_builder() -> VarBuilder<'static> {
+        let device = Device::Cpu;
+        let mut tensors = HashMap::new();
+        let mut packed = vec![0x22u8; 8];
+        packed.extend(std::iter::repeat_n(0x44u8, 8));
+        tensors.insert(
+            "weight.nvfp4_packed".to_string(),
+            Tensor::from_vec(packed, (2, 8), &device).unwrap(),
+        );
+        tensors.insert(
+            "weight.nvfp4_block_scales".to_string(),
+            {
+                let swizzled = crate::nvfp4::swizzle_block_scales(&[1.0f32, 1.0], 2, 1).unwrap();
+                Tensor::from_vec(swizzled, (128, 4), &device)
+            }
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap(),
+        );
+        tensors.insert(
+            "weight.nvfp4_tensor_scale".to_string(),
+            Tensor::new(1.0f32, &device).unwrap(),
+        );
+        tensors.insert(
+            "bias".to_string(),
+            Tensor::from_vec(vec![0.25f32, -0.5], 2, &device).unwrap(),
+        );
+        VarBuilder::from_tensors(tensors, DType::F32, &device)
+    }
+
+    #[test]
+    fn ltx2_nvfp4_linear_reuses_shared_cache_entry_for_same_key() {
+        let cache = Nvfp4LinearCache::default();
+        let first = LtxLinear::load_with_nvfp4_cache(
+            16,
+            2,
+            true,
+            nvfp4_linear_var_builder(),
+            vec![],
+            Some(&cache),
+            Some("diffusion_model.transformer_blocks.0.attn1.to_q"),
+        )
+        .unwrap();
+        let second = LtxLinear::load_with_nvfp4_cache(
+            16,
+            2,
+            true,
+            nvfp4_linear_var_builder(),
+            vec![],
+            Some(&cache),
+            Some("diffusion_model.transformer_blocks.0.attn1.to_q"),
+        )
+        .unwrap();
+        let third = LtxLinear::load_with_nvfp4_cache(
+            16,
+            2,
+            true,
+            nvfp4_linear_var_builder(),
+            vec![],
+            Some(&cache),
+            Some("diffusion_model.transformer_blocks.1.attn1.to_q"),
+        )
+        .unwrap();
+
+        let first_cache = match &first {
+            LtxLinear::Nvfp4Streaming { cache, .. } => cache,
+            other => panic!("expected NVFP4 linear, got {other:?}"),
+        };
+        let second_cache = match &second {
+            LtxLinear::Nvfp4Streaming { cache, .. } => cache,
+            other => panic!("expected NVFP4 linear, got {other:?}"),
+        };
+        let third_cache = match &third {
+            LtxLinear::Nvfp4Streaming { cache, .. } => cache,
+            other => panic!("expected NVFP4 linear, got {other:?}"),
+        };
+
+        assert!(std::sync::Arc::ptr_eq(first_cache, second_cache));
+        assert!(!std::sync::Arc::ptr_eq(first_cache, third_cache));
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn av_transformer_loads_nvfp4_top_level_output_projections() {
+        let mut config = tiny_av_config();
+        config.attention_head_dim = 16;
+        config.audio_attention_head_dim = 16;
+        let vb = av_transformer_var_builder_with_options(config.clone(), true);
+
+        let model = Ltx2AvTransformer3DModel::new_streaming(&config, vb, None).unwrap();
+
+        match &model.proj_out {
+            LtxLinear::Nvfp4Streaming { out_dim, .. } => {
+                assert_eq!(*out_dim, config.out_channels);
+            }
+            other => panic!("expected NVFP4 video proj_out, got {other:?}"),
+        }
+        match &model.audio_proj_out {
+            LtxLinear::Nvfp4Streaming { out_dim, .. } => {
+                assert_eq!(*out_dim, config.audio_out_channels);
+            }
+            other => panic!("expected NVFP4 audio_proj_out, got {other:?}"),
         }
     }
 

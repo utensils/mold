@@ -7,6 +7,7 @@ mod guidance;
 mod lora;
 pub mod media;
 mod model;
+mod nvfp4;
 mod pipeline;
 mod plan;
 mod preset;

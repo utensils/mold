@@ -275,48 +275,6 @@ fn rms_norm_bytes(norm: &RmsNorm) -> usize {
     tensor_bytes(norm.clone().into_inner().weight())
 }
 
-/// Dequantize the FULL un-sliced NVFP4 weight to a BF16 tensor on CPU. Pure
-/// scalar Rust; identical math to the (now-deleted) `dequant_nvfp4` method
-/// on the backend, minus the device move.
-fn dequant_nvfp4_to_bf16_cpu(
-    packed: &Tensor,
-    block_scales: &Tensor,
-    tensor_scale: f32,
-) -> Result<Tensor> {
-    use crate::nvfp4::{dequantize_nvfp4_to_f32, unswizzle_block_scales, NVFP4_BLOCK_SIZE};
-
-    let packed_dims = packed.dims();
-    let scale_dims = block_scales.dims();
-    if packed_dims.len() != 2 || scale_dims.len() != 2 {
-        candle_core::bail!(
-            "NVFP4 streaming: rank mismatch — packed {:?}, scales {:?}",
-            packed_dims,
-            scale_dims,
-        );
-    }
-    let n_rows = packed_dims[0];
-    let n_cols = packed_dims[1] * 2;
-    let num_cols_blocks = n_cols / NVFP4_BLOCK_SIZE;
-    let packed_bytes: Vec<u8> = packed.flatten_all()?.to_vec1()?;
-    let swizzled_scales: Vec<f32> = block_scales
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1()?;
-    // ComfyUI's NVFP4 converter stores block_scales in cuBLAS SWIZZLE_32_4_4
-    // tiled layout (see comfy_kitchen.float_utils.to_blocked). Unswizzle to
-    // natural row-major before per-block dequant.
-    let scales_f32 = unswizzle_block_scales(&swizzled_scales, n_rows, num_cols_blocks)
-        .map_err(|e| candle_core::Error::Msg(format!("NVFP4 unswizzle: {e}")))?;
-    let mut dequant = dequantize_nvfp4_to_f32(&packed_bytes, &scales_f32, n_rows, n_cols)
-        .map_err(|e| candle_core::Error::Msg(format!("NVFP4 streaming dequant: {e}")))?;
-    for v in dequant.iter_mut() {
-        *v *= tensor_scale;
-    }
-    let cpu = candle_core::Device::Cpu;
-    let f32_t = Tensor::from_vec(dequant, (n_rows, n_cols), &cpu)?;
-    f32_t.to_dtype(DType::BF16)
-}
-
 impl Module for Flux2Linear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
@@ -361,14 +319,18 @@ impl Module for Flux2Linear {
                 cache,
                 ..
             } => {
+                let _backend = crate::nvfp4::resolve_nvfp4_backend(x.device())?;
                 // First forward: dequant FULL weight to BF16 on CPU and stash
                 // it. Subsequent forwards skip straight to the slice + DMA.
                 // OnceLock::get_or_try_init isn't stable yet; emulate it.
                 let bf16_full = match cache.get() {
                     Some(t) => t,
                     None => {
-                        let dequanted =
-                            dequant_nvfp4_to_bf16_cpu(packed, block_scales, *tensor_scale)?;
+                        let dequanted = crate::nvfp4::dequant_nvfp4_to_bf16_cpu(
+                            packed,
+                            block_scales,
+                            *tensor_scale,
+                        )?;
                         // Race-safe set: if another thread won, we drop ours
                         // and use theirs. Either way the value cached is the
                         // same dequant of the same source.

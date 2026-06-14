@@ -7,10 +7,10 @@
 //! by `SingleFileBackend::from_flux2_singlefile`.
 //!
 //! Some uploads also ship NVFP4-quantised weights with extra
-//! `*.weight_scale_2` / `*.input_scale` / `*.comfy_quant` markers — those
-//! aren't loadable by mold's BF16/FP16/FP8 path and are surfaced here so
-//! the caller can reject them with a useful message instead of failing
-//! deep inside `vb.get(...)`.
+//! `*.weight_scale_2` / `*.input_scale` / `*.comfy_quant` markers. Those
+//! route through `SingleFileBackend` synthetic `weight.nvfp4_*` subkeys and
+//! `Flux2Linear::Nvfp4Streaming` instead of the normal BF16/FP16/FP8 weight
+//! lookup.
 //!
 //! Reads only the safetensors JSON header; tensor data is never touched.
 
@@ -39,8 +39,8 @@ pub enum Flux2SingleFileFormat {
     /// directly — rare for single-file uploads.
     Diffusers,
     /// NVFP4-quantised single-file. Detected via `*.weight_scale_2`,
-    /// `*.input_scale`, or `*.comfy_quant` markers in the header. mold's
-    /// loader does not support NVFP4; pick a non-NVFP4 fine-tune.
+    /// `*.input_scale`, or `*.comfy_quant` markers in the header. Loadable
+    /// through the portable streaming NVFP4 path.
     Nvfp4,
     /// No recognisable Flux.2 signature in the header.
     Unknown,

@@ -944,7 +944,12 @@ pub fn reserved_vram_bytes() -> u64 {
 /// reports — otherwise the ComfyUI-style reserve looks like ghost VRAM in
 /// `nvidia-smi`.
 pub fn usable_free_vram_bytes(ordinal: usize) -> Option<u64> {
-    free_vram_bytes(ordinal).map(|f| f.saturating_sub(reserved_vram_bytes()))
+    let reserve = reserved_vram_bytes();
+    free_vram_bytes(ordinal).map(|free| usable_free_vram_from_raw(free, reserve))
+}
+
+fn usable_free_vram_from_raw(free: u64, reserve: u64) -> u64 {
+    free.saturating_sub(reserve)
 }
 
 /// Total VRAM currently in use (`total - free`) for the specified GPU
@@ -2291,18 +2296,22 @@ mod tests {
         unsafe { std::env::remove_var("MOLD_RESERVE_VRAM_MB") };
 
         // ── Part 2: usable_free_vram_bytes wrapper ──────────────────────
-        let raw = free_vram_bytes(0);
+        assert_eq!(usable_free_vram_from_raw(1_500, 500), 1_000);
+        assert_eq!(usable_free_vram_from_raw(500, 1_500), 0);
+
+        unsafe { std::env::set_var("MOLD_RESERVE_VRAM_MB", u64::MAX.to_string()) };
+        let has_raw_reading = free_vram_bytes(0).is_some();
         let usable = usable_free_vram_bytes(0);
-        match (raw, usable) {
-            (Some(raw), Some(usable)) => {
-                assert!(usable <= raw, "usable ({usable}) must be ≤ raw ({raw})");
-                assert_eq!(usable, raw.saturating_sub(reserved_vram_bytes()));
-            }
-            (None, None) => {}
-            (Some(_), None) | (None, Some(_)) => {
-                panic!("usable_free_vram_bytes must mirror free_vram_bytes presence");
-            }
+        assert_eq!(
+            usable.is_some(),
+            has_raw_reading,
+            "usable_free_vram_bytes must mirror free_vram_bytes presence"
+        );
+        if has_raw_reading {
+            assert_eq!(usable, Some(0));
         }
+
+        unsafe { std::env::remove_var("MOLD_RESERVE_VRAM_MB") };
     }
 
     // ── vram_load_delta ──────────────────────────────────────────────────

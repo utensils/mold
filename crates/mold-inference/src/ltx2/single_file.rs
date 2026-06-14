@@ -62,6 +62,11 @@ pub struct Ltx2SingleFileBundle {
     /// checkpoints always include the VAE; transformer-only fine-tunes
     /// will have `has_vae = false` and will be rejected by `from_single_file`.
     pub has_vae: bool,
+    /// `true` when the header carries NVFP4 sidecars (`*.weight_scale_2`
+    /// or `*.comfy_quant`). The runtime handles these through synthetic
+    /// `weight.nvfp4_*` subkeys.
+    #[allow(dead_code)]
+    pub has_nvfp4: bool,
     /// `__metadata__.model_version` from the safetensors header, when
     /// present. Official Lightricks LTX-2 v2.3 checkpoints stamp `"2.3.0"`
     /// here. Used by `Ltx2Engine::from_single_file` to derive a preset
@@ -83,18 +88,6 @@ pub enum LoadError {
          (expected `transformer_blocks.*` or `model.diffusion_model.transformer_blocks.*`)"
     )]
     NoTransformerKeys,
-    /// Checkpoint has NVFP4 quantization markers (`*.weight_scale_2`,
-    /// `*.input_scale`, `*.comfy_quant`). Mold's LTX-2 runtime supports
-    /// BF16 / FP16 / FP8 storage only — Flux.2 has NVFP4 streaming
-    /// dequant but LTX-2 does not, so loading the file would surface a
-    /// deep shape-mismatch error mid-generation.
-    #[error(
-        "LTX-2 checkpoint is NVFP4-quantized — mold's LTX-2 runtime supports \
-         BF16/FP16/FP8 storage only. Pick a non-NVFP4 fine-tune (filename usually \
-         lacks `FP4` / `nvfp4` markers, and the safetensors header has no \
-         `*.weight_scale_2` keys)"
-    )]
-    Nvfp4Unsupported,
 }
 
 /// Header-parse the safetensors at `path` and return the detected layout.
@@ -113,17 +106,11 @@ pub fn load(path: &Path) -> Result<Ltx2SingleFileBundle, LoadError> {
         if key == "__metadata__" {
             continue;
         }
-        // NVFP4 marker tensors land alongside the packed weights — any one
-        // is enough to know the file is NVFP4 (cv:2781713's transformer
-        // alone has ~3000 of them). Detect early so the user gets an
-        // actionable error before the runtime hits a shape-mismatch when
-        // packed FP4 blocks present as half-width tensors.
-        if key.ends_with(".weight_scale_2")
-            || key.ends_with(".weight_scale")
-            || key.ends_with(".input_scale")
-            || key.ends_with(".comfy_quant")
-        {
+        if key.ends_with(".weight_scale_2") || key.ends_with(".comfy_quant") {
             nvfp4 = true;
+            continue;
+        }
+        if key.ends_with(".weight_scale") || key.ends_with(".input_scale") {
             continue;
         }
         if has_prefix(key, NATIVE_TRANSFORMER_KEY) {
@@ -133,10 +120,6 @@ pub fn load(path: &Path) -> Result<Ltx2SingleFileBundle, LoadError> {
         } else if has_prefix(key, VAE_KEY) {
             vae_count += 1;
         }
-    }
-
-    if nvfp4 {
-        return Err(LoadError::Nvfp4Unsupported);
     }
 
     let (format, transformer_key_count) = if diffusers_count > 0 {
@@ -157,6 +140,7 @@ pub fn load(path: &Path) -> Result<Ltx2SingleFileBundle, LoadError> {
         format,
         transformer_key_count,
         has_vae: vae_count > 0,
+        has_nvfp4: nvfp4,
         model_version,
     })
 }
@@ -295,24 +279,25 @@ mod tests {
     }
 
     #[test]
-    fn nvfp4_checkpoint_returns_actionable_error() {
-        // cv:2781713 (`ltx23FP4_ltx23OfficialDev.safetensors`) is an
-        // NVFP4-quantized LTX-2 v2.3 fine-tune. Mold's LTX-2 runtime
-        // doesn't support NVFP4; without this check the load would
-        // proceed and surface a deep shape-mismatch error like
-        // `expected: [4096, 4096], got: [4096, 2048]` mid-generation.
+    fn nvfp4_checkpoint_parses_as_supported_transformer() {
+        // cv:2778348 (`ltx23_nvfp4.safetensors`) is an NVFP4-quantized
+        // LTX-2 v2.3 fine-tune. The header parser must accept it and let
+        // the runtime's NVFP4 subkey backend route packed FP4 weights.
         let p = temp_path("nvfp4");
         write_fixture(
             &p,
             &[
                 "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight",
+                "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight_scale",
                 "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight_scale_2",
                 "vae.encoder.conv_in.weight",
             ],
         );
-        let err = load(&p).expect_err("NVFP4 marker must reject");
-        assert!(matches!(err, LoadError::Nvfp4Unsupported), "got: {err:?}");
-        assert!(err.to_string().contains("NVFP4"));
+        let bundle = load(&p).expect("NVFP4 LTX-2 checkpoint should parse");
+        assert_eq!(bundle.format, LtxKeyFormat::Diffusers);
+        assert_eq!(bundle.transformer_key_count, 1);
+        assert!(bundle.has_nvfp4);
+        assert!(bundle.has_vae);
         let _ = std::fs::remove_file(p);
     }
 

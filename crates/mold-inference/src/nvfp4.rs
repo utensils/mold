@@ -1,4 +1,4 @@
-//! NVFP4 (NVIDIA FP4) → FP8-E4M3 dequantization.
+//! NVFP4 (NVIDIA FP4) portable dequantization.
 //!
 //! NVFP4 stores each weight as three layers of quantization:
 //!
@@ -8,10 +8,11 @@
 //!
 //! Full-precision reconstruction is `W[n,k] = E2M1[bits] × E4M3[block] × F32_tensor_scale`.
 //!
-//! This module performs the FP4×FP8-block product into f32, leaving the
-//! per-tensor F32 scale to be applied during matmul. That keeps stored weights
-//! in FP8-E4M3's representable range and matches mold's existing FP8 forward
-//! path (`QwenLinear::Fp8`) which already supports an optional per-tensor scale.
+//! The portable runtime performs the FP4×FP8-block product into f32, applies
+//! the per-tensor F32 scale, then stores a BF16 CPU cache for streaming matmul.
+//! Native Blackwell FP4 tensor-core execution is gated behind
+//! `MOLD_NVFP4_BACKEND=native` and is intentionally unavailable until validated
+//! on real sm_120 hardware.
 //!
 //! Pack order: within each U8 the **high** nibble (`>> 4`) holds K=2i (even),
 //! the **low** nibble (`& 0x0F`) holds K=2i+1 (odd). Matches ComfyUI's
@@ -20,9 +21,44 @@
 //! and the eager `dequantize_nvfp4` `torch.stack([hi, lo], dim=-1)` ordering.
 
 use anyhow::{bail, Result};
+use candle_core::{DType, Device, Tensor};
 
 /// Block of 16 weights share one FP8-E4M3 scale.
 pub const NVFP4_BLOCK_SIZE: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Nvfp4Backend {
+    Portable,
+    #[allow(dead_code)]
+    Native,
+}
+
+/// Resolve the runtime NVFP4 backend from `MOLD_NVFP4_BACKEND`.
+///
+/// `auto` currently means the portable BF16 streaming backend everywhere. The
+/// native backend must not silently activate until it has passed numerical and
+/// generation validation on sm_120/Blackwell hardware.
+pub(crate) fn resolve_nvfp4_backend(device: &Device) -> candle_core::Result<Nvfp4Backend> {
+    let value = std::env::var("MOLD_NVFP4_BACKEND").ok();
+    resolve_nvfp4_backend_value(device, value.as_deref())
+}
+
+fn resolve_nvfp4_backend_value(
+    device: &Device,
+    value: Option<&str>,
+) -> candle_core::Result<Nvfp4Backend> {
+    let value = value.unwrap_or("auto");
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" | "portable" => Ok(Nvfp4Backend::Portable),
+        "native" => Err(candle_core::Error::Msg(format!(
+            "MOLD_NVFP4_BACKEND=native requires sm_120/Blackwell NVFP4 tensor-core support; \
+             current device/build ({device:?}) supports only the portable BF16 streaming backend"
+        ))),
+        other => Err(candle_core::Error::Msg(format!(
+            "invalid MOLD_NVFP4_BACKEND={other:?}; expected auto, portable, or native"
+        ))),
+    }
+}
 
 /// Apply the cuBLAS SWIZZLE_32_4_4 tiled layout (forward of
 /// `unswizzle_block_scales`). Mirrors `comfy_kitchen.float_utils.to_blocked`
@@ -212,9 +248,79 @@ pub fn dequantize_nvfp4_to_f32(
     Ok(out)
 }
 
+/// Dequantize a full, unsliced NVFP4 weight to a BF16 tensor on CPU.
+///
+/// `packed` must be U8 `[N, K/2]`. `block_scales` must be F8E4M3 in the
+/// cuBLAS `SWIZZLE_32_4_4` tiled layout produced by ComfyUI-style NVFP4
+/// converters. `tensor_scale` is applied before the BF16 cast.
+pub(crate) fn dequant_nvfp4_to_bf16_cpu(
+    packed: &Tensor,
+    block_scales: &Tensor,
+    tensor_scale: f32,
+) -> candle_core::Result<Tensor> {
+    let packed_dims = packed.dims();
+    let scale_dims = block_scales.dims();
+    if packed_dims.len() != 2 || scale_dims.len() != 2 {
+        candle_core::bail!(
+            "NVFP4 streaming: rank mismatch — packed {:?}, scales {:?}",
+            packed_dims,
+            scale_dims,
+        );
+    }
+    let n_rows = packed_dims[0];
+    let n_cols = packed_dims[1] * 2;
+    let num_cols_blocks = n_cols / NVFP4_BLOCK_SIZE;
+    let packed_bytes: Vec<u8> = packed.flatten_all()?.to_vec1()?;
+    let swizzled_scales: Vec<f32> = block_scales
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1()?;
+    let scales_f32 = unswizzle_block_scales(&swizzled_scales, n_rows, num_cols_blocks)
+        .map_err(|err| candle_core::Error::Msg(format!("NVFP4 unswizzle: {err}")))?;
+    let mut dequant = dequantize_nvfp4_to_f32(&packed_bytes, &scales_f32, n_rows, n_cols)
+        .map_err(|err| candle_core::Error::Msg(format!("NVFP4 streaming dequant: {err}")))?;
+    for value in &mut dequant {
+        *value *= tensor_scale;
+    }
+    let f32_t = Tensor::from_vec(dequant, (n_rows, n_cols), &Device::Cpu)?;
+    f32_t.to_dtype(DType::BF16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::Device;
+
+    #[test]
+    fn nvfp4_backend_auto_and_portable_resolve_to_portable() {
+        let device = Device::Cpu;
+        assert_eq!(
+            resolve_nvfp4_backend_value(&device, None).unwrap(),
+            Nvfp4Backend::Portable
+        );
+        assert_eq!(
+            resolve_nvfp4_backend_value(&device, Some("auto")).unwrap(),
+            Nvfp4Backend::Portable
+        );
+        assert_eq!(
+            resolve_nvfp4_backend_value(&device, Some("portable")).unwrap(),
+            Nvfp4Backend::Portable
+        );
+    }
+
+    #[test]
+    fn nvfp4_backend_native_requires_blackwell() {
+        let err = resolve_nvfp4_backend_value(&Device::Cpu, Some("native"))
+            .expect_err("native must fail on CPU");
+        assert!(err.to_string().contains("requires sm_120/Blackwell"));
+    }
+
+    #[test]
+    fn nvfp4_backend_rejects_invalid_value() {
+        let err = resolve_nvfp4_backend_value(&Device::Cpu, Some("banana"))
+            .expect_err("invalid backend must fail");
+        assert!(err.to_string().contains("MOLD_NVFP4_BACKEND"));
+    }
 
     #[test]
     fn e2m1_lut_matches_spec() {

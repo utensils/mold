@@ -3380,7 +3380,7 @@ mod tests {
         assert!(
             !server_offload_enabled_for_paths(&paths, Some(hint), false),
             "global MOLD_OFFLOAD must not force Flux.2 NVFP4 block offload \
-             because the runtime does not support NVFP4 streaming layers"
+             because the NVFP4 streaming linear path is the memory-control mechanism"
         );
     }
 

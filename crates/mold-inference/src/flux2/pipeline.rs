@@ -125,9 +125,13 @@ enum Flux2OffloadDecision {
 fn flux2_offload_decision(
     forced_offload: bool,
     is_gguf: bool,
+    is_nvfp4: bool,
     has_lora: bool,
 ) -> Flux2OffloadDecision {
     if !forced_offload {
+        return Flux2OffloadDecision::Disabled;
+    }
+    if is_nvfp4 {
         return Flux2OffloadDecision::Disabled;
     }
     if is_gguf {
@@ -485,6 +489,7 @@ impl Flux2Engine {
                 "Loading Flux.2 transformer (GPU, GGUF)",
             ))
         } else if self.is_bfl_native_single_file() {
+            let is_nvfp4 = self.is_nvfp4_single_file();
             // Civitai / ComfyUI single-file checkpoints carry BFL-native
             // tensor names (`model.diffusion_model.*`); the diffusers
             // `Flux2Transformer::new` consumer is wrapped over a
@@ -499,7 +504,7 @@ impl Flux2Engine {
                     cfg,
                 )?;
             let backend: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(backend);
-            if self.offload && !has_lora {
+            if self.offload && !has_lora && !is_nvfp4 {
                 let flux_vb = candle_nn::VarBuilder::from_backend(backend, gpu_dtype, Device::Cpu);
                 return Ok((
                     Flux2TransformerWrapper::Offloaded(
@@ -679,9 +684,9 @@ impl Flux2Engine {
     /// `true` when the transformer is a single `.safetensors` file whose
     /// tensor keys are BFL-native (`model.diffusion_model.*`). Returns
     /// `true` for `BflNative`, `BflNativeRoot`, and `Nvfp4` — all route
-    /// through `SingleFileBackend` (the NVFP4 path dequantises FP4×FP8
-    /// blocks to FP8-E4M3 on lookup; the BFL variants pass tensors
-    /// through directly). Sharded loads (HF diffusers layout) and any
+    /// through `SingleFileBackend` (the NVFP4 path exposes packed FP4,
+    /// FP8 block scales, and tensor scales as streaming subkeys; the BFL
+    /// variants pass tensors through directly). Sharded loads (HF diffusers layout) and any
     /// non-safetensors path skip this detection. Header-peeks the file
     /// once per load — a few KB read.
     fn is_bfl_native_single_file(&self) -> bool {
@@ -701,6 +706,24 @@ impl Flux2Engine {
             Ok(super::single_file::Flux2SingleFileFormat::BflNative)
                 | Ok(super::single_file::Flux2SingleFileFormat::BflNativeRoot)
                 | Ok(super::single_file::Flux2SingleFileFormat::Nvfp4)
+        )
+    }
+
+    fn is_nvfp4_single_file(&self) -> bool {
+        if !self.base.paths.transformer_shards.is_empty() {
+            return false;
+        }
+        let path = &self.base.paths.transformer;
+        let is_safetensors = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"));
+        if !is_safetensors {
+            return false;
+        }
+        matches!(
+            super::single_file::detect_format(path),
+            Ok(super::single_file::Flux2SingleFileFormat::Nvfp4)
         )
     }
 
@@ -960,7 +983,12 @@ impl Flux2Engine {
         let text_tokenizer_path = self.validate_paths()?;
         let is_gguf = self.is_gguf_transformer();
 
-        match flux2_offload_decision(self.offload, is_gguf, !self.pending_loras.is_empty()) {
+        match flux2_offload_decision(
+            self.offload,
+            is_gguf,
+            self.is_nvfp4_single_file(),
+            !self.pending_loras.is_empty(),
+        ) {
             Flux2OffloadDecision::Disabled => {}
             Flux2OffloadDecision::Unsupported(reason) => bail!("{reason}"),
             Flux2OffloadDecision::Selected => {}
@@ -1898,20 +1926,24 @@ mod tests {
     #[test]
     fn flux2_offload_decision_gates_current_unsupported_cases() {
         assert_eq!(
-            flux2_offload_decision(false, false, false),
+            flux2_offload_decision(false, false, false, false),
             Flux2OffloadDecision::Disabled
         );
         assert_eq!(
-            flux2_offload_decision(true, false, false),
+            flux2_offload_decision(true, false, false, false),
             Flux2OffloadDecision::Selected
         );
+        assert_eq!(
+            flux2_offload_decision(true, false, true, false),
+            Flux2OffloadDecision::Disabled
+        );
         assert!(matches!(
-            flux2_offload_decision(true, true, false),
+            flux2_offload_decision(true, true, false, false),
             Flux2OffloadDecision::Unsupported(reason)
                 if reason.contains("GGUF variants")
         ));
         assert!(matches!(
-            flux2_offload_decision(true, false, true),
+            flux2_offload_decision(true, false, false, true),
             Flux2OffloadDecision::Unsupported(reason)
                 if reason.contains("LoRA")
         ));

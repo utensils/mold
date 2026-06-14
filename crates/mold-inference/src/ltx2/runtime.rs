@@ -4455,10 +4455,15 @@ fn load_ltx2_av_transformer_with_loras(
     let force_eager = std::env::var_os("MOLD_LTX2_FORCE_EAGER").is_some();
     let config = ltx2_video_transformer_config(plan);
     let lora_registry = super::lora::load_lora_registry(loras)?;
-    let checkpoint_is_fp8 = ltx2_checkpoint_is_fp8(plan);
-    let vb = if checkpoint_is_fp8 {
+    let checkpoint_path = Path::new(&plan.checkpoint_path);
+    let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
+    let checkpoint_is_fp8 = !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan);
+    let vb = if checkpoint_is_nvfp4 {
+        let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
+        VarBuilder::from_backend(Box::new(backend), gpu_dtype(device), device.clone())
+    } else if checkpoint_is_fp8 {
         load_fp8_safetensors_with_callback(
-            std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
+            std::slice::from_ref(&checkpoint_path),
             device,
             "LTX-2 transformer",
             progress,
@@ -4466,14 +4471,18 @@ fn load_ltx2_av_transformer_with_loras(
     } else {
         let dtype = transformer_weight_dtype(plan, device);
         load_safetensors_with_progress_callback(
-            std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
+            std::slice::from_ref(&checkpoint_path),
             dtype,
             device,
             "LTX-2 transformer",
             progress,
         )?
     };
-    let vb = vb.rename_f(remap_ltx2_transformer_key);
+    let vb = if checkpoint_is_nvfp4 {
+        vb
+    } else {
+        vb.rename_f(remap_ltx2_transformer_key)
+    };
     if select_ltx2_transformer_residency_mode(
         device.is_cuda(),
         checkpoint_is_fp8,
@@ -4814,18 +4823,7 @@ fn ltx2_scheduler_config() -> FlowMatchEulerDiscreteSchedulerConfig {
 }
 
 fn remap_ltx2_transformer_key(name: &str) -> String {
-    let mapped = name
-        .split('.')
-        .map(|component| match component {
-            "proj_in" => "patchify_proj",
-            "time_embed" => "adaln_single",
-            "norm_q" => "q_norm",
-            "norm_k" => "k_norm",
-            _ => component,
-        })
-        .collect::<Vec<_>>()
-        .join(".");
-    format!("model.diffusion_model.{mapped}")
+    super::nvfp4::remap_ltx2_transformer_key(name)
 }
 
 fn ltx2_transformer_block_index(name: &str) -> Option<usize> {
