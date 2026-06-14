@@ -3,6 +3,7 @@
 use candle_core::{bail, DType, IndexOp, Result, Tensor};
 use candle_nn::{group_norm, ops, Conv2d, Conv2dConfig, GroupNorm, VarBuilder};
 use std::collections::HashMap;
+use std::env;
 use std::sync::{Arc, Mutex};
 
 fn cat_dim(xs: &[Tensor], dim: usize) -> Result<Tensor> {
@@ -997,6 +998,33 @@ pub struct DecoderOutput {
     pub sample: Tensor,
 }
 
+const DEFAULT_TEMPORAL_DECODE_CHUNK_LATENT_FRAMES: usize = 4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TemporalDecodeChunk {
+    input_start: usize,
+    input_end: usize,
+    output_start: usize,
+    output_end: usize,
+}
+
+fn temporal_output_frames_for_latents(latent_frames: usize, temporal_scale: usize) -> usize {
+    if latent_frames == 0 {
+        0
+    } else {
+        (latent_frames - 1)
+            .saturating_mul(temporal_scale.max(1))
+            .saturating_add(1)
+    }
+}
+
+fn positive_env_usize(key: &str) -> Option<usize> {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
 #[derive(Debug, Clone)]
 pub struct Ltx2VideoEncoder {
     patch_size: usize,
@@ -1337,7 +1365,11 @@ impl AutoencoderKLLtx2Video {
         _train: bool,
     ) -> Result<(Option<DecoderOutput>, Tensor)> {
         let latents = self.denormalize_latents(latents)?;
-        let decoded = self.decoder.forward(&latents)?;
+        let decoded = if self.use_framewise_decoding || self.use_tiling {
+            self.decode_temporal_chunks(&latents)?
+        } else {
+            self.decoder.forward(&latents)?
+        };
         if return_dict {
             Ok((
                 Some(DecoderOutput {
@@ -1348,6 +1380,104 @@ impl AutoencoderKLLtx2Video {
         } else {
             Ok((None, decoded))
         }
+    }
+
+    fn temporal_decode_chunk_latent_frames(&self) -> usize {
+        positive_env_usize("MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES")
+            .unwrap_or(DEFAULT_TEMPORAL_DECODE_CHUNK_LATENT_FRAMES)
+    }
+
+    fn temporal_decode_context_latent_frames(&self) -> usize {
+        positive_env_usize("MOLD_LTX2_VAE_DECODE_CONTEXT_FRAMES")
+            .unwrap_or_else(|| self.decoder_temporal_context_latent_frames())
+    }
+
+    fn decoder_temporal_context_latent_frames(&self) -> usize {
+        let mut causal_conv_count = 2usize; // decoder conv_in + conv_out.
+        for block in &self.config.decoder_blocks {
+            match block.name.as_str() {
+                "res_x" | "res_x_y" => {
+                    causal_conv_count =
+                        causal_conv_count.saturating_add(block.num_layers.saturating_mul(2));
+                }
+                name if name.starts_with("compress_") => {
+                    causal_conv_count = causal_conv_count.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+        causal_conv_count.saturating_mul(2)
+    }
+
+    fn temporal_decode_chunk_plan(
+        &self,
+        latent_frames: usize,
+        chunk_latent_frames: usize,
+    ) -> Result<Vec<TemporalDecodeChunk>> {
+        if chunk_latent_frames == 0 {
+            bail!("LTX-2 VAE temporal decode chunk size must be greater than zero");
+        }
+        if latent_frames == 0 {
+            return Ok(Vec::new());
+        }
+
+        let temporal_scale = self.temporal_compression_ratio.max(1);
+        let context = self.temporal_decode_context_latent_frames();
+        let mut chunks = Vec::new();
+        let mut start = 0usize;
+        while start < latent_frames {
+            let end = start.saturating_add(chunk_latent_frames).min(latent_frames);
+            let input_start = start.saturating_sub(context);
+            let input_end = end.saturating_add(context).min(latent_frames);
+            let output_start = temporal_output_frames_for_latents(
+                start.saturating_sub(input_start),
+                temporal_scale,
+            );
+            let output_end =
+                temporal_output_frames_for_latents(end.saturating_sub(input_start), temporal_scale);
+            chunks.push(TemporalDecodeChunk {
+                input_start,
+                input_end,
+                output_start,
+                output_end,
+            });
+            start = end;
+        }
+        Ok(chunks)
+    }
+
+    fn decode_temporal_chunks(&self, latents: &Tensor) -> Result<Tensor> {
+        let latent_frames = latents.dim(2)?;
+        let chunks = self.temporal_decode_chunk_plan(
+            latent_frames,
+            self.temporal_decode_chunk_latent_frames(),
+        )?;
+        if chunks.len() <= 1 {
+            return self.decoder.forward(latents);
+        }
+
+        let mut decoded_chunks = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            let chunk_latents = latents.i((.., .., chunk.input_start..chunk.input_end, .., ..))?;
+            let decoded = self.decoder.forward(&chunk_latents)?;
+            let decoded_frames = decoded.dim(2)?;
+            if chunk.output_end > decoded_frames {
+                bail!(
+                    "LTX-2 VAE temporal chunk output {}..{} exceeds decoded frame count {}",
+                    chunk.output_start,
+                    chunk.output_end,
+                    decoded_frames
+                );
+            }
+            decoded_chunks.push(decoded.i((
+                ..,
+                ..,
+                chunk.output_start..chunk.output_end,
+                ..,
+                ..,
+            ))?);
+        }
+        cat_dim(&decoded_chunks, 2)
     }
 }
 
@@ -1384,6 +1514,32 @@ mod tests {
         );
     }
 
+    fn insert_patterned_conv(
+        tensors: &mut HashMap<String, Tensor>,
+        path: &str,
+        in_channels: usize,
+        out_channels: usize,
+        kernel: (usize, usize, usize),
+    ) {
+        let len = out_channels * in_channels * kernel.0 * kernel.1 * kernel.2;
+        let weights = (0..len)
+            .map(|idx| ((idx % 17) as f32 - 8.0) * 0.0025)
+            .collect::<Vec<_>>();
+        tensors.insert(
+            format!("{path}.conv.weight"),
+            Tensor::from_vec(
+                weights,
+                (out_channels, in_channels, kernel.0, kernel.1, kernel.2),
+                &Device::Cpu,
+            )
+            .unwrap(),
+        );
+        tensors.insert(
+            format!("{path}.conv.bias"),
+            Tensor::zeros(out_channels, DType::F32, &Device::Cpu).unwrap(),
+        );
+    }
+
     fn insert_res_stack(
         tensors: &mut HashMap<String, Tensor>,
         path: &str,
@@ -1399,6 +1555,30 @@ mod tests {
                 (3, 3, 3),
             );
             insert_conv(
+                tensors,
+                &format!("{path}.res_blocks.{index}.conv2"),
+                channels,
+                channels,
+                (3, 3, 3),
+            );
+        }
+    }
+
+    fn insert_patterned_res_stack(
+        tensors: &mut HashMap<String, Tensor>,
+        path: &str,
+        channels: usize,
+        num_layers: usize,
+    ) {
+        for index in 0..num_layers {
+            insert_patterned_conv(
+                tensors,
+                &format!("{path}.res_blocks.{index}.conv1"),
+                channels,
+                channels,
+                (3, 3, 3),
+            );
+            insert_patterned_conv(
                 tensors,
                 &format!("{path}.res_blocks.{index}.conv2"),
                 channels,
@@ -1512,6 +1692,142 @@ mod tests {
         );
 
         VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
+    }
+
+    fn patterned_autoencoder_var_builder(
+        config: &AutoencoderKLLtx2VideoConfig,
+    ) -> VarBuilder<'static> {
+        let mut tensors = HashMap::new();
+
+        insert_conv(
+            &mut tensors,
+            "encoder.conv_in",
+            config.in_channels * config.patch_size * config.patch_size,
+            config.encoder_base_channels,
+            (3, 3, 3),
+        );
+        let mut encoder_channels = config.encoder_base_channels;
+        for (index, block) in config.encoder_blocks.iter().enumerate() {
+            match block.name.as_str() {
+                "res_x" => {
+                    insert_res_stack(
+                        &mut tensors,
+                        &format!("encoder.down_blocks.{index}"),
+                        encoder_channels,
+                        block.num_layers,
+                    );
+                }
+                "compress_all_res" | "compress_space_res" | "compress_time_res" => {
+                    let stride = match block.name.as_str() {
+                        "compress_space_res" => (1, 2, 2),
+                        "compress_time_res" => (2, 1, 1),
+                        _ => (2, 2, 2),
+                    };
+                    let stride_product = stride.0 * stride.1 * stride.2;
+                    insert_conv(
+                        &mut tensors,
+                        &format!("encoder.down_blocks.{index}.conv"),
+                        encoder_channels,
+                        encoder_channels * block.multiplier / stride_product,
+                        (3, 3, 3),
+                    );
+                    encoder_channels *= block.multiplier;
+                }
+                other => panic!("unsupported test encoder block {other}"),
+            }
+        }
+        insert_conv(
+            &mut tensors,
+            "encoder.conv_out",
+            encoder_channels,
+            config.latent_channels + 1,
+            (3, 3, 3),
+        );
+
+        let feature_scale = config
+            .decoder_blocks
+            .iter()
+            .filter(|block| block.name.starts_with("compress_"))
+            .map(|block| block.multiplier.max(1))
+            .product::<usize>();
+        let mut decoder_channels = config.decoder_base_channels * feature_scale.max(1);
+        insert_patterned_conv(
+            &mut tensors,
+            "decoder.conv_in",
+            config.latent_channels,
+            decoder_channels,
+            (3, 3, 3),
+        );
+        for (index, block) in config.decoder_blocks.iter().rev().enumerate() {
+            match block.name.as_str() {
+                "res_x" => {
+                    insert_patterned_res_stack(
+                        &mut tensors,
+                        &format!("decoder.up_blocks.{index}"),
+                        decoder_channels,
+                        block.num_layers,
+                    );
+                }
+                "compress_all" => {
+                    let stride_product = 8;
+                    insert_patterned_conv(
+                        &mut tensors,
+                        &format!("decoder.up_blocks.{index}.conv"),
+                        decoder_channels,
+                        stride_product * decoder_channels / block.multiplier,
+                        (3, 3, 3),
+                    );
+                    decoder_channels /= block.multiplier;
+                }
+                other => panic!("unsupported test decoder block {other}"),
+            }
+        }
+        insert_patterned_conv(
+            &mut tensors,
+            "decoder.conv_out",
+            decoder_channels,
+            config.out_channels * config.patch_size * config.patch_size,
+            (3, 3, 3),
+        );
+
+        tensors.insert(
+            "per_channel_statistics.mean-of-means".to_string(),
+            Tensor::zeros(config.latent_channels, DType::F32, &Device::Cpu).unwrap(),
+        );
+        tensors.insert(
+            "per_channel_statistics.std-of-means".to_string(),
+            Tensor::ones(config.latent_channels, DType::F32, &Device::Cpu).unwrap(),
+        );
+
+        VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
+    }
+
+    fn assert_tensors_close(lhs: &Tensor, rhs: &Tensor, tolerance: f32) {
+        assert_eq!(lhs.shape(), rhs.shape());
+        let lhs = lhs
+            .to_device(&Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let rhs = rhs
+            .to_device(&Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        for (idx, (l, r)) in lhs.iter().zip(rhs.iter()).enumerate() {
+            assert!(
+                (l - r).abs() <= tolerance,
+                "tensor mismatch at {idx}: {l} vs {r}"
+            );
+        }
     }
 
     #[test]
@@ -1664,6 +1980,55 @@ mod tests {
         let latents = Tensor::zeros((1, 4, 2, 2, 2), DType::F32, &Device::Cpu).unwrap();
         let (_output, video) = vae.decode(&latents, None, false, false).unwrap();
         assert_eq!(video.dims5().unwrap(), (1, 3, 3, 8, 8));
+    }
+
+    #[test]
+    fn autoencoder_framewise_decode_matches_full_decode_across_chunk_boundaries() {
+        let config = AutoencoderKLLtx2VideoConfig {
+            in_channels: 3,
+            out_channels: 3,
+            latent_channels: 4,
+            encoder_blocks: vec![VaeBlockConfig::res_x(1)],
+            decoder_blocks: vec![
+                VaeBlockConfig::res_x(1),
+                VaeBlockConfig::compress("compress_all", 2, true),
+                VaeBlockConfig::res_x(1),
+            ],
+            patch_size: 1,
+            resnet_eps: 1e-6,
+            scaling_factor: 1.0,
+            latent_log_var: super::LatentLogVar::Uniform,
+            encoder_base_channels: 4,
+            decoder_base_channels: 4,
+            encoder_spatial_padding_mode: SpatialPaddingMode::Zeros,
+            decoder_spatial_padding_mode: SpatialPaddingMode::Zeros,
+            spatial_compression_ratio: 2,
+            temporal_compression_ratio: 2,
+            timestep_conditioning: false,
+            decoder_causal: true,
+            latents_mean: vec![0.0; 4],
+            latents_std: vec![1.0; 4],
+        };
+        let full =
+            AutoencoderKLLtx2Video::new(config.clone(), patterned_autoencoder_var_builder(&config))
+                .unwrap();
+        let mut chunked =
+            AutoencoderKLLtx2Video::new(config.clone(), patterned_autoencoder_var_builder(&config))
+                .unwrap();
+        chunked.use_framewise_decoding = true;
+        let values = (0..(4 * 9 * 3 * 3))
+            .map(|idx| ((idx % 23) as f32 - 11.0) / 13.0)
+            .collect::<Vec<_>>();
+        let latents = Tensor::from_vec(values, (1, 4, 9, 3, 3), &Device::Cpu).unwrap();
+
+        let chunks = chunked.temporal_decode_chunk_plan(9, 4).unwrap();
+        assert_eq!(chunks.len(), 3);
+
+        let (_full_output, full_video) = full.decode(&latents, None, false, false).unwrap();
+        let (_chunked_output, chunked_video) =
+            chunked.decode(&latents, None, false, false).unwrap();
+
+        assert_tensors_close(&full_video, &chunked_video, 1e-4);
     }
 
     #[test]

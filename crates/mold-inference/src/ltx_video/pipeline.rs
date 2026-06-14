@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::ltx_video::{
@@ -21,6 +21,7 @@ use candle_transformers::models::ltx_video::{
 
 use mold_core::{GenerateRequest, GenerateResponse, ModelPaths, OutputFormat, VideoData};
 
+use crate::device::{fmt_gb, usable_free_vram_bytes};
 use crate::engine::{gpu_dtype, rand_seed, seeded_randn, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::progress::{ProgressCallback, ProgressEvent};
@@ -63,6 +64,7 @@ const LTX_098_13B_DEV_FIRST_PASS_SKIP_BLOCKS: &[&[usize]] = &[
     &[28],
 ];
 const LTX_098_13B_DEV_SECOND_PASS_SKIP_BLOCKS: &[usize] = &[27];
+const LTX_VIDEO_FULL_RESIDENT_RUNTIME_HEADROOM: u64 = 2_000_000_000;
 
 fn is_official_ltx_transformer_checkpoint(path: &std::path::Path) -> bool {
     path.file_name()
@@ -367,6 +369,38 @@ fn transformer_13b_config() -> LtxVideoTransformer3DModelConfig {
         caption_channels: 4096,
         ..Default::default()
     }
+}
+
+fn is_legacy_ltx_video_13b(model_name: &str, preset: &LtxModelPreset) -> bool {
+    model_name.contains("13b")
+        || (preset.transformer_config.num_layers >= 48
+            && preset.transformer_config.attention_head_dim >= 128)
+}
+
+fn ltx_video_transformer_residency_guard(
+    model_name: &str,
+    preset: &LtxModelPreset,
+    transformer_bytes: u64,
+    usable_vram_bytes: Option<u64>,
+    is_cuda: bool,
+) -> Result<()> {
+    if !is_cuda || !is_legacy_ltx_video_13b(model_name, preset) {
+        return Ok(());
+    }
+    let Some(usable_vram_bytes) = usable_vram_bytes.filter(|bytes| *bytes > 0) else {
+        return Ok(());
+    };
+    let required = transformer_bytes.saturating_add(LTX_VIDEO_FULL_RESIDENT_RUNTIME_HEADROOM);
+    if required <= usable_vram_bytes {
+        return Ok(());
+    }
+
+    bail!(
+        "legacy LTX-Video 13B BF16 requires full transformer residency ({} weights + {} runtime headroom) but only {} usable VRAM is available. MOLD_OFFLOAD is not implemented for this legacy transformer yet; use ltx-video-0.9.8-2b-distilled, lower --width/--height/--frames, or use an LTX-2 FP8 model with adaptive offload.",
+        fmt_gb(transformer_bytes),
+        fmt_gb(LTX_VIDEO_FULL_RESIDENT_RUNTIME_HEADROOM),
+        fmt_gb(usable_vram_bytes),
+    )
 }
 
 fn improved_vae_config() -> AutoencoderKLLtxVideoConfig {
@@ -966,6 +1000,19 @@ impl LtxVideoEngine {
         if is_gguf {
             bail!("GGUF quantized LTX Video transformer is not yet supported — use :bf16 variant");
         }
+        let transformer_bytes = transformer_files.iter().try_fold(0u64, |acc, path| {
+            let metadata = std::fs::metadata(path).with_context(|| {
+                format!("failed to stat LTX Video transformer {}", path.display())
+            })?;
+            Ok::<_, anyhow::Error>(acc.saturating_add(metadata.len()))
+        })?;
+        ltx_video_transformer_residency_guard(
+            &self.base.model_name,
+            preset,
+            transformer_bytes,
+            usable_free_vram_bytes(self.base.gpu_ordinal),
+            device.is_cuda(),
+        )?;
 
         // SAFETY: mmap'd safetensors files are immutable model weights.
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&transformer_files, dtype, device)? };
@@ -1983,6 +2030,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ltx_video_13b_bf16_fails_before_allocation_when_vram_cannot_hold_residency() {
+        let preset = LtxModelPreset::for_model("ltx-video-0.9.8-13b-dev:bf16").unwrap();
+        let err = super::ltx_video_transformer_residency_guard(
+            "ltx-video-0.9.8-13b-dev:bf16",
+            &preset,
+            26_000_000_000,
+            Some(24_000_000_000),
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("MOLD_OFFLOAD"));
+        assert!(err.contains("ltx-video-0.9.8-2b-distilled"));
+        assert!(err.contains("--width/--height/--frames"));
+    }
+
+    #[test]
+    fn ltx_video_2b_bf16_residency_guard_does_not_reject() {
+        let preset = LtxModelPreset::for_model("ltx-video-0.9.8-2b-distilled:bf16").unwrap();
+        super::ltx_video_transformer_residency_guard(
+            "ltx-video-0.9.8-2b-distilled:bf16",
+            &preset,
+            26_000_000_000,
+            Some(24_000_000_000),
+            true,
+        )
+        .unwrap();
     }
 
     #[test]

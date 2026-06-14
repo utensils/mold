@@ -54,9 +54,10 @@ explicitly unsupported for this family.
 
 ### Offloading
 
-`--offload` uses adaptive block residency for FLUX, Flux.2, Z-Image, and
-Qwen-Image BF16 paths: mold keeps the blocks that fit on GPU and streams only
-the remainder. SD3 still uses full MMDiT block streaming.
+`--offload` uses mold-owned block streaming for FLUX, Flux.2, Z-Image,
+Qwen-Image, LTX-2, and SD3 paths where implemented. FLUX, Flux.2, Z-Image, and
+Qwen-Image keep the blocks that fit on GPU and stream only the remainder.
+LTX-2 and SD3 use full block streaming when offload is forced.
 
 Use it when a model otherwise would not fit. Do not use it when the model
 already fits comfortably in VRAM. Progress output reports resident blocks,

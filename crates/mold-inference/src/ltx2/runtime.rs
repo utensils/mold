@@ -45,12 +45,13 @@ use crate::adaptive_offload::{
 };
 use crate::device::{
     activation_bytes, dtype_bytes, fmt_gb, free_vram_bytes, thread_gpu_ordinal,
-    usable_free_vram_bytes, ActivationFamily,
+    try_synchronize_device, usable_free_vram_bytes, ActivationFamily,
 };
 use crate::engine::{gpu_dtype, seeded_randn};
 use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
 use crate::progress::{ProgressCallback, ProgressEvent};
+use crate::vae_tiling::is_cuda_oom;
 use crate::weight_loader::{
     load_fp8_safetensors_with_callback, load_safetensors_with_progress_callback,
 };
@@ -1454,10 +1455,7 @@ fn maybe_load_stage_video_conditioning(
         || include_reference_video
         || !plan.conditioning.latents.is_empty();
     let mut vae = if need_vae {
-        let mut loaded = load_ltx2_video_vae(plan, device, dtype, progress)?;
-        loaded.use_tiling = false;
-        loaded.use_framewise_decoding = false;
-        Some(loaded)
+        Some(load_ltx2_video_vae(plan, device, dtype, progress)?)
     } else {
         None
     };
@@ -2103,11 +2101,9 @@ fn render_real_distilled_av(
     }
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
         let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-        debug_vae.use_tiling = false;
-        debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
             "stage1",
-            &debug_vae,
+            &mut debug_vae,
             &stage1_video_latents,
             prepared.video_pixel_shape,
             dtype,
@@ -2150,11 +2146,9 @@ fn render_real_distilled_av(
     )?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
         let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-        debug_vae.use_tiling = false;
-        debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
             "stage1-upscaled",
-            &debug_vae,
+            &mut debug_vae,
             &stage2_clean_video_latents,
             stage2_pixel_shape,
             dtype,
@@ -2267,8 +2261,6 @@ fn render_real_distilled_av(
         log_tensor_stats("final_video_latents", &latents)?;
     }
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    vae.use_tiling = false;
-    vae.use_framewise_decoding = false;
     let decode_start = Instant::now();
     // Chain-stage hook: capture the pre-decode F32 latents so
     // `Ltx2Engine::render_chain_stage` can narrow the tail off for the next
@@ -2280,7 +2272,9 @@ fn render_real_distilled_av(
             *guard = Some(latents.clone());
         }
     }
-    let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
+    let decode_latents = latents.to_dtype(dtype)?;
+    configure_ltx2_vae_decode_memory_mode(&mut vae, &decode_latents, device)?;
+    let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
     if debug_enabled {
         log_tensor_stats("decoded_video", &video)?;
     }
@@ -2459,11 +2453,9 @@ fn render_real_two_stage_av(
     device.synchronize()?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
         let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-        debug_vae.use_tiling = false;
-        debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
             "stage1",
-            &debug_vae,
+            &mut debug_vae,
             &stage1_video_latents,
             prepared.video_pixel_shape,
             dtype,
@@ -2505,11 +2497,9 @@ fn render_real_two_stage_av(
     )?;
     if env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
         let mut debug_vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-        debug_vae.use_tiling = false;
-        debug_vae.use_framewise_decoding = false;
         maybe_write_debug_stage_video(
             "stage1-upscaled",
-            &debug_vae,
+            &mut debug_vae,
             &stage2_clean_video_latents,
             stage2_pixel_shape,
             dtype,
@@ -2623,10 +2613,10 @@ fn render_real_two_stage_av(
     let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    vae.use_tiling = false;
-    vae.use_framewise_decoding = false;
     let decode_start = Instant::now();
-    let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
+    let decode_latents = latents.to_dtype(dtype)?;
+    configure_ltx2_vae_decode_memory_mode(&mut vae, &decode_latents, device)?;
+    let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
     let frames = decoded_video_to_frames(&video, requested_pixel_shape)?;
     if device.is_cuda() {
         device.synchronize()?;
@@ -2803,9 +2793,9 @@ fn render_real_one_stage_av(
     }
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    vae.use_tiling = false;
-    vae.use_framewise_decoding = false;
-    let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
+    let decode_latents = latents.to_dtype(dtype)?;
+    configure_ltx2_vae_decode_memory_mode(&mut vae, &decode_latents, device)?;
+    let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
     if debug_enabled {
         log_tensor_stats("decoded_video", &video)?;
     }
@@ -2965,9 +2955,9 @@ fn render_real_retake_av(
     }
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    vae.use_tiling = false;
-    vae.use_framewise_decoding = false;
-    let (_dec_output, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
+    let decode_latents = latents.to_dtype(dtype)?;
+    configure_ltx2_vae_decode_memory_mode(&mut vae, &decode_latents, device)?;
+    let (_dec_output, video) = vae.decode(&decode_latents, None, false, false)?;
     let frames = decoded_video_to_frames(&video, prepared.video_pixel_shape)?;
     if device.is_cuda() {
         device.synchronize()?;
@@ -3827,9 +3817,7 @@ fn maybe_load_native_conditioning_video(
         })
         .collect::<Vec<_>>();
     let video = video_tensor_from_frames(&resized, device, dtype)?;
-    let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
-    vae.use_tiling = false;
-    vae.use_framewise_decoding = false;
+    let vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     let latents = conform_video_latent_length(&vae.encode(&video)?, latent_shape)?;
     drop(vae);
     if device.is_cuda() {
@@ -4013,7 +4001,7 @@ fn waveform_to_audio_track(
 
 fn maybe_write_debug_stage_video(
     stage: &str,
-    vae: &AutoencoderKLLtx2Video,
+    vae: &mut AutoencoderKLLtx2Video,
     latents: &Tensor,
     pixel_shape: VideoPixelShape,
     dtype: DType,
@@ -4022,7 +4010,9 @@ fn maybe_write_debug_stage_video(
         return Ok(());
     };
 
-    let (_decoded, video) = vae.decode(&latents.to_dtype(dtype)?, None, false, false)?;
+    let decode_latents = latents.to_dtype(dtype)?;
+    configure_ltx2_vae_decode_memory_mode(vae, &decode_latents, decode_latents.device())?;
+    let (_decoded, video) = vae.decode(&decode_latents, None, false, false)?;
     let frames = decoded_video_to_frames(&video, pixel_shape)?;
     let prefix = prefix.to_string_lossy();
     let first_frame_path = std::path::PathBuf::from(format!("{prefix}-{stage}-first-frame.png"));
@@ -4461,11 +4451,12 @@ fn load_ltx2_av_transformer_with_loras(
     loras: &[LoraWeight],
     progress: Option<&ProgressCallback>,
 ) -> Result<Ltx2AvTransformer3DModel> {
-    let force_streaming = std::env::var_os("MOLD_LTX2_FORCE_STREAMING").is_some();
+    let force_streaming = ltx2_force_streaming_enabled();
     let force_eager = std::env::var_os("MOLD_LTX2_FORCE_EAGER").is_some();
     let config = ltx2_video_transformer_config(plan);
     let lora_registry = super::lora::load_lora_registry(loras)?;
-    let vb = if ltx2_checkpoint_is_fp8(plan) {
+    let checkpoint_is_fp8 = ltx2_checkpoint_is_fp8(plan);
+    let vb = if checkpoint_is_fp8 {
         load_fp8_safetensors_with_callback(
             std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
             device,
@@ -4483,7 +4474,15 @@ fn load_ltx2_av_transformer_with_loras(
         )?
     };
     let vb = vb.rename_f(remap_ltx2_transformer_key);
-    if device.is_cuda() && ltx2_checkpoint_is_fp8(plan) && force_eager && !force_streaming {
+    if select_ltx2_transformer_residency_mode(
+        device.is_cuda(),
+        checkpoint_is_fp8,
+        force_eager,
+        force_streaming,
+        false,
+        0,
+    ) == Ltx2TransformerResidencyMode::Eager
+    {
         Ok(Ltx2AvTransformer3DModel::new(&config, vb, lora_registry)?)
     } else if device.is_cuda() && !force_streaming {
         let gpu_ordinal = thread_gpu_ordinal().unwrap_or(0);
@@ -4492,8 +4491,18 @@ fn load_ltx2_av_transformer_with_loras(
             Path::new(&plan.checkpoint_path),
             config.num_layers,
         ) {
-            Ok(block_sizes) if free_vram > 0 && block_sizes.iter().any(|size| *size > 0) => {
-                let residency_plan = ltx2_adaptive_transformer_plan(plan, &block_sizes, free_vram);
+            Ok(block_sizes)
+                if select_ltx2_transformer_residency_mode(
+                    device.is_cuda(),
+                    checkpoint_is_fp8,
+                    force_eager,
+                    force_streaming,
+                    block_sizes.iter().any(|size| *size > 0),
+                    free_vram,
+                ) == Ltx2TransformerResidencyMode::Adaptive =>
+            {
+                let mut residency_plan =
+                    ltx2_adaptive_transformer_plan(plan, &block_sizes, free_vram);
                 emit_info(
                     progress,
                     format!(
@@ -4505,12 +4514,34 @@ fn load_ltx2_av_transformer_with_loras(
                         fmt_gb(residency_plan.reserved_bytes()),
                     ),
                 );
-                Ok(Ltx2AvTransformer3DModel::new_adaptive(
-                    &config,
-                    vb,
-                    lora_registry,
-                    residency_plan,
-                )?)
+                loop {
+                    match Ltx2AvTransformer3DModel::new_adaptive(
+                        &config,
+                        vb.clone(),
+                        lora_registry.clone(),
+                        residency_plan.clone(),
+                    ) {
+                        Ok(transformer) => break Ok(transformer),
+                        Err(err)
+                            if device.is_cuda()
+                                && residency_plan.resident_count() > 0
+                                && is_cuda_oom(&err) =>
+                        {
+                            emit_info(
+                                progress,
+                                format!(
+                                    "LTX-2 adaptive offload: resident allocation OOM at {} resident blocks; retrying with fewer resident blocks",
+                                    residency_plan.resident_count()
+                                ),
+                            );
+                            try_synchronize_device(gpu_ordinal);
+                            if !residency_plan.demote_largest_resident(&block_sizes) {
+                                return Err(err.into());
+                            }
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                }
             }
             Ok(_) | Err(_) => Ok(Ltx2AvTransformer3DModel::new_streaming(
                 &config,
@@ -4564,6 +4595,44 @@ fn ltx2_adaptive_transformer_plan(
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ltx2TransformerResidencyMode {
+    Eager,
+    Streaming,
+    Adaptive,
+}
+
+fn ltx2_force_streaming_enabled() -> bool {
+    if env::var_os("MOLD_LTX2_FORCE_STREAMING").is_some() {
+        return true;
+    }
+    matches!(
+        env::var("MOLD_OFFLOAD").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+fn select_ltx2_transformer_residency_mode(
+    is_cuda: bool,
+    checkpoint_is_fp8: bool,
+    force_eager: bool,
+    force_streaming: bool,
+    has_block_sizes: bool,
+    free_vram: u64,
+) -> Ltx2TransformerResidencyMode {
+    if !is_cuda || force_streaming {
+        return Ltx2TransformerResidencyMode::Streaming;
+    }
+    if checkpoint_is_fp8 && force_eager {
+        return Ltx2TransformerResidencyMode::Eager;
+    }
+    if has_block_sizes && free_vram > 0 {
+        Ltx2TransformerResidencyMode::Adaptive
+    } else {
+        Ltx2TransformerResidencyMode::Streaming
+    }
+}
+
 fn load_ltx2_video_vae(
     plan: &Ltx2GeneratePlan,
     device: &candle_core::Device,
@@ -4581,6 +4650,69 @@ fn load_ltx2_video_vae(
         ltx2_video_vae_config(plan),
         vb.pp("vae"),
     )?)
+}
+
+fn configure_ltx2_vae_decode_memory_mode(
+    vae: &mut AutoencoderKLLtx2Video,
+    latents: &Tensor,
+    device: &candle_core::Device,
+) -> Result<()> {
+    vae.use_framewise_decoding = should_use_ltx2_framewise_decode(vae, latents, device)?;
+    if vae.use_framewise_decoding {
+        tracing::info!(
+            "LTX-2 VAE decode using temporal chunks; projected full decode workspace {} exceeds memory budget",
+            fmt_gb(projected_ltx2_vae_decode_workspace_bytes(vae, latents)?)
+        );
+    }
+    Ok(())
+}
+
+fn should_use_ltx2_framewise_decode(
+    vae: &AutoencoderKLLtx2Video,
+    latents: &Tensor,
+    device: &candle_core::Device,
+) -> Result<bool> {
+    if env::var_os("MOLD_LTX2_VAE_FORCE_FULL_DECODE").is_some() {
+        return Ok(false);
+    }
+    if env::var_os("MOLD_LTX2_VAE_FORCE_FRAMEWISE").is_some() {
+        return Ok(true);
+    }
+    if !device.is_cuda() {
+        return Ok(false);
+    }
+
+    let projected = projected_ltx2_vae_decode_workspace_bytes(vae, latents)?;
+    let gpu_ordinal = thread_gpu_ordinal().unwrap_or(0);
+    let Some(free_vram) = usable_free_vram_bytes(gpu_ordinal) else {
+        return Ok(false);
+    };
+    Ok(projected.saturating_add(ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM) > free_vram)
+}
+
+fn projected_ltx2_vae_decode_workspace_bytes(
+    vae: &AutoencoderKLLtx2Video,
+    latents: &Tensor,
+) -> Result<u64> {
+    let (batch, _channels, latent_frames, latent_height, latent_width) = latents.dims5()?;
+    let temporal_scale = vae.temporal_compression_ratio().max(1);
+    let spatial_scale = vae.spatial_compression_ratio().max(1);
+    let frames = if latent_frames == 0 {
+        0
+    } else {
+        (latent_frames - 1)
+            .saturating_mul(temporal_scale)
+            .saturating_add(1)
+    };
+    let height = latent_height.saturating_mul(spatial_scale);
+    let width = latent_width.saturating_mul(spatial_scale);
+    let output_channels = vae.config().out_channels;
+    let sample_bytes = [batch, output_channels, frames, height, width]
+        .into_iter()
+        .try_fold(1u64, |acc, value| acc.checked_mul(value as u64))
+        .and_then(|elements| elements.checked_mul(dtype_bytes(latents.dtype()) as u64))
+        .context("LTX-2 VAE decode byte estimate overflowed")?;
+    Ok(sample_bytes.saturating_mul(8))
 }
 
 fn ltx2_video_transformer_config(plan: &Ltx2GeneratePlan) -> Ltx2VideoTransformer3DModelConfig {
@@ -6418,6 +6550,73 @@ mod tests {
         let sizes = super::ltx2_transformer_block_sizes_from_safetensors(&path, 3).unwrap();
 
         assert_eq!(sizes, vec![16, 20, 0]);
+    }
+
+    #[test]
+    fn ltx2_transformer_residency_defaults_cuda_fp8_to_adaptive() {
+        assert_eq!(
+            super::select_ltx2_transformer_residency_mode(
+                true,
+                true,
+                false,
+                false,
+                true,
+                24_000_000_000
+            ),
+            super::Ltx2TransformerResidencyMode::Adaptive
+        );
+    }
+
+    #[test]
+    fn ltx2_transformer_residency_force_streaming_wins() {
+        assert_eq!(
+            super::select_ltx2_transformer_residency_mode(
+                true,
+                true,
+                true,
+                true,
+                true,
+                24_000_000_000
+            ),
+            super::Ltx2TransformerResidencyMode::Streaming
+        );
+    }
+
+    #[test]
+    fn ltx2_transformer_residency_force_eager_is_explicit_cuda_fp8_only() {
+        assert_eq!(
+            super::select_ltx2_transformer_residency_mode(
+                true,
+                true,
+                true,
+                false,
+                true,
+                24_000_000_000
+            ),
+            super::Ltx2TransformerResidencyMode::Eager
+        );
+        assert_eq!(
+            super::select_ltx2_transformer_residency_mode(
+                true,
+                false,
+                true,
+                false,
+                true,
+                24_000_000_000
+            ),
+            super::Ltx2TransformerResidencyMode::Adaptive
+        );
+        assert_eq!(
+            super::select_ltx2_transformer_residency_mode(
+                false,
+                true,
+                true,
+                false,
+                true,
+                24_000_000_000
+            ),
+            super::Ltx2TransformerResidencyMode::Streaming
+        );
     }
 
     #[test]

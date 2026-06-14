@@ -160,7 +160,7 @@ generation templates. The running strip consumes `GET /api/queue` and
   diffusers (PEFT canonical), Kohya/sd-scripts, OneTrainer, and PEFT
   default-adapter naming. Z-Image fused-QKV LoRAs (cv:2904324) splat
   across the split `attention.to_q/to_k/to_v` candle tensors automatically.
-- FLUX, Flux.2, Z-Image, and Qwen-Image BF16 offload uses adaptive block residency: mold keeps the blocks that fit on GPU and streams only the remainder. SD3 offload still streams every MMDiT block.
+- FLUX, Flux.2, Z-Image, Qwen-Image, and LTX-2 CUDA offload use mold-owned block streaming. FLUX / Flux.2 / Z-Image / Qwen-Image keep fitting blocks resident and stream overflow blocks; LTX-2 defaults to adaptive residency and `MOLD_OFFLOAD=1` forces full streaming. SD3 offload still streams every MMDiT block.
 - GGUF Q4/Q6 work at 1024x1024; Q8 works at 512x512 (Q8 + LoRA at 1024x1024 is tight on 24GB, see #95)
 
 **Per-model config defaults** (config.toml):
@@ -195,7 +195,7 @@ mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -
 
 **Constraints:** Frame count must be 8n+1 (9, 17, 25, 33, 49, ...). Dimensions must be multiples of 32. Current LTX defaults are 1216x704, 25 frames, 30 fps. Distilled models use fewer steps.
 
-**Current status:** `ltx-video-0.9.6-distilled:bf16` is still the safest default, but the `0.9.8` models now run the full multiscale refinement path. mold pulls the required spatial upscaler asset explicitly, keeps the shared T5 assets under `shared/flux/...`, and intentionally continues using the compatible `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported.
+**Current status:** `ltx-video-0.9.6-distilled:bf16` is still the safest default, but the `0.9.8` models now run the full multiscale refinement path. mold pulls the required spatial upscaler asset explicitly, keeps the shared T5 assets under `shared/flux/...`, and intentionally continues using the compatible `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported. Legacy LTX-Video 13B BF16 still has no streaming transformer; CUDA runs preflight full-resident VRAM and fail before allocation when it cannot fit.
 
 **Output formats:** `apng` (default, lossless, metadata), `gif` (256 colors), `mp4` (H.264, requires `mp4` feature), `webp` (requires `webp` feature).
 
@@ -687,7 +687,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_PORT`                 | `7680`                  | Server port                                                                |
 | `MOLD_LOG`                  | `warn`                  | Log level (trace/debug/info/warn/error)                                    |
 | `MOLD_EAGER`                | unset                   | Set `1` to keep all components loaded                                      |
-| `MOLD_OFFLOAD`              | unset                   | Set `1` to force adaptive block offload for FLUX, Flux.2, Z-Image, Qwen-Image, and SD3 BF16 paths. FLUX/Flux.2/Z-Image/Qwen keep fitting blocks GPU-resident; SD3 still full-streams. |
+| `MOLD_OFFLOAD`              | unset                   | Set `1` to force block offload for FLUX, Flux.2, Z-Image, Qwen-Image, LTX-2, and SD3 BF16/FP8 paths where implemented. FLUX/Flux.2/Z-Image/Qwen keep fitting blocks GPU-resident; LTX-2 full-streams; SD3 still full-streams. |
 | `MOLD_RESERVE_VRAM_MB`      | 400 (Linux), 600 (Win), 0 (macOS) | OS / cuBLAS workspace reserve subtracted from `free_vram_bytes` before any budget decision. `0` disables |
 | `MOLD_KEEP_TE_RAM`          | unset                   | Set `1` to park text encoders on CPU between requests instead of dropping them (FP16/BF16 only; GGUF falls through to drop+reload). Disabled on Metal. |
 | `MOLD_LORA_BYPASS`          | `auto`                  | FLUX LoRA application path: `auto` (bypass when LoRAs present, covers offload AND GGUF/quantized via `quantized_transformer.rs`), `on` (always bypass), `off` (legacy merge / `gguf_lora_var_builder`) |
@@ -749,7 +749,7 @@ Models auto-pull if not downloaded: `mold run flux2-klein "a cat"` will download
 - For img2img, source images auto-resize to fit the model's native resolution (preserving aspect ratio). A 1024x1024 source with SD1.5 (512x512 native) generates at 512x512; a 1920x1080 source generates at 512x288. Use `--width`/`--height` to override
 - Set `MOLD_HOME` to relocate all mold data (config, cache, models)
 - LoRA adapters require FLUX BF16 models; use `--lora-scale 0.5-0.8` for subtle effects
-- On 24GB cards, use `--offload` with BF16 FLUX / Flux.2 / Z-Image / Qwen-Image / SD3 when quantization is not acceptable. FLUX / Flux.2 / Z-Image / Qwen-Image keep fitting blocks resident; SD3 still full-streams and rejects LoRA + offload.
+- On 24GB cards, use `--offload` with BF16 FLUX / Flux.2 / Z-Image / Qwen-Image / SD3 when quantization is not acceptable, and with LTX-2 when you want the conservative full-streaming path. FLUX / Flux.2 / Z-Image / Qwen-Image keep fitting blocks resident; LTX-2 and SD3 full-stream.
 
 ## Discord Bot
 
