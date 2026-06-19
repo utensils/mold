@@ -131,6 +131,16 @@
             CUDA_PATH = "${cudaToolkit}";
             CUDA_COMPUTE_CAP = cudaComputeCap;
             NIX_LDFLAGS = "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
+
+            # CLI integration tests exec the freshly-built target binary before
+            # Nix fixup patches its runtime paths. Keep libstdc++ visible during
+            # crane's check phase so those smoke tests exercise the real binary
+            # instead of failing in the dynamic loader inside the sandbox.
+            preCheck = ''
+              export LD_LIBRARY_PATH=${
+                lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]
+              }''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            '';
           };
 
           opensslPkgConfigPath = "${pkgs.openssl.dev}/lib/pkgconfig";
