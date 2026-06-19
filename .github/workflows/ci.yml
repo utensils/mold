@@ -57,6 +57,14 @@ jobs:
         working-directory: web
         run: bun run build
 
+  nix-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Build mold-web with Nix sandbox
+        run: nix build .#mold-web --print-build-logs
+
   rust:
     runs-on: ubuntu-latest
     env:
