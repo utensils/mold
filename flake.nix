@@ -205,15 +205,16 @@
             bunDeps = pkgs.bun2nix.fetchBunDeps {
               bunNix = ./web/bun.nix;
             };
-            # Do NOT set bunInstallFlags here. The bun2nix hook defaults to
-            # "--linker=isolated --backend=symlink", which is exactly what we need:
-            #   --linker=isolated  avoids AccessDenied when the hoisted linker tries
-            #                      to create nested estree-walker dirs (Vue v2 vs v3).
-            #   --backend=symlink  makes bun resolve packages from BUN_INSTALL_CACHE_DIR
-            #                      via symlinks; without it bun ignores the pre-fetched
-            #                      cache on aarch64-darwin and makes live npm fetches
-            #                      that hang inside the Nix sandbox (issue #286).
-            #
+            # Keep the install path fully offline and platform-stable. Do not rely
+            # on bun2nix hook defaults here: bun2nix revs have differed on whether
+            # they pass --backend=symlink, and without it Bun ignores
+            # BUN_INSTALL_CACHE_DIR and attempts live npm fetches inside the Nix
+            # sandbox (issues #286 and #330).
+            bunInstallFlags = [
+              "--linker=isolated" # avoids AccessDenied from the hoisted linker creating nested estree-walker dirs.
+              "--backend=symlink" # resolves packages from BUN_INSTALL_CACHE_DIR via symlinks.
+            ];
+
             # Skip the lifecycle-scripts phase (second bun install without
             # --ignore-scripts). All native-binary packages (esbuild, rollup,
             # @tailwindcss/oxide, lightningcss) ship their platform-specific tarballs
