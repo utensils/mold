@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-06-20
+
+### Fixed
+
+- **Nix sandbox Linux builds can generate shell completions during `postInstall`.** The CUDA-free completion helper now gets `libstdc++.so.6` on `LD_LIBRARY_PATH` before Nix fixup patches runtime paths, preventing completion files from being empty when `target/release/mold completions ...` runs in hermetic x86_64-linux builders. ([#336](https://github.com/utensils/mold/issues/336))
+
 ## [0.13.0] - 2026-06-20
 
 ### Changed
@@ -61,7 +67,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Nix sandbox Linux builds can generate shell completions during `postInstall`.** The CUDA-free completion helper now gets `libstdc++.so.6` on `LD_LIBRARY_PATH` before Nix fixup patches runtime paths, preventing completion files from being empty when `target/release/mold completions ...` runs in hermetic x86_64-linux builders. ([#336](https://github.com/utensils/mold/issues/336))
 - **Nix sandbox CUDA builds no longer exec the build-tree `mold` binary during Rust checks.** Crane's Linux check phase now runs binary unit tests only, avoiding integration-test startup failures on `libcuda.so.1` inside hermetic builders where the host NVIDIA driver is intentionally unavailable; exec-based CLI smoke tests remain covered outside the sandbox. ([#332](https://github.com/utensils/mold/issues/332))
 - **LTX-2 CUDA unload now runs a reclaim rung after dropping runtime state.** Native LTX-2 unload drops the retained runtime session before resetting the assigned CUDA primary context, giving OOM recovery and explicit model eviction the same hard reclaim path while CPU fallback unloads remain no-ops.
 - **LTX-2 / LTX-2.3 frame counts now respect the temporal RoPE budget.** Requests whose stage-1 frame count exceeds 153 frames now fail validation with an explicit "temporal RoPE budget" error before inference starts, preventing over-budget 19B/22B runs from producing rainbow/static noise instead of prompt-relevant video. Long clips can still use `--temporal-upscale x2` when the stage-1 render stays within the budget ([#226](https://github.com/utensils/mold/issues/226)).
@@ -759,7 +764,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/utensils/mold/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/utensils/mold/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/utensils/mold/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/utensils/mold/compare/v0.10.0...v0.12.0
