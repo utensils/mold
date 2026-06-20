@@ -18,7 +18,7 @@ import type {
   QueueEntry,
   QueueListing,
 } from "./types";
-import { streamSse } from "./lib/sse";
+import { postSseJsonStream, type StreamError } from "./lib/apiStream";
 
 // Relative URLs keep the SPA portable: in dev Vite's proxy forwards to the
 // mold server; in prod the SPA is served by the same server, same origin.
@@ -190,11 +190,7 @@ export async function expandPrompt(
 export interface GenerateStreamHandlers {
   onProgress: (evt: SseProgressEvent) => void;
   onComplete: (evt: SseCompleteEvent) => void;
-  onError: (
-    err:
-      | { kind: "http"; status: number; retryAfter?: number; body: string }
-      | { kind: "network"; message: string },
-  ) => void;
+  onError: (err: StreamError) => void;
 }
 
 export async function generateStream(
@@ -202,84 +198,23 @@ export async function generateStream(
   handlers: GenerateStreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  // Tracks whether a terminal SSE signal (`complete`, server `error`
-  // event, or HTTP-level failure) has fired. Without this guard a
-  // silent mid-stream close — network blip, server restart, proxy
-  // idle timeout — leaves the caller's job in `running` forever
-  // because the fetch reader resolves cleanly with no event delivered.
-  let terminal = false;
-  try {
-    const res = await streamSse({
-      url: `${base}/api/generate/stream`,
-      body: req,
-      signal,
-      onEvent: (evt) => {
-        if (!evt.data) return;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(evt.data);
-        } catch {
-          return;
-        }
-        if (evt.event === "complete") {
-          terminal = true;
-          handlers.onComplete(parsed as SseCompleteEvent);
-        } else if (evt.event === "error") {
-          terminal = true;
-          const body = evt.data;
-          handlers.onError({ kind: "http", status: 0, body });
-        } else {
-          // Default `progress` event — the server emits many progress types
-          // tagged with an internal `type` discriminator.
-          handlers.onProgress(parsed as SseProgressEvent);
-        }
-      },
-      onHttpError: (res) => {
-        terminal = true;
-        const retryAfterHeader = res.headers.get("Retry-After");
-        const retryAfter = retryAfterHeader
-          ? Number.parseFloat(retryAfterHeader)
-          : undefined;
-        res
-          .text()
-          .then((body) =>
-            handlers.onError({
-              kind: "http",
-              status: res.status,
-              retryAfter: Number.isFinite(retryAfter) ? retryAfter : undefined,
-              body,
-            }),
-          )
-          .catch(() =>
-            handlers.onError({ kind: "http", status: res.status, body: "" }),
-          );
-      },
-    });
-    void res;
-    if (!terminal && !signal?.aborted) {
-      handlers.onError({
-        kind: "network",
-        message: "stream closed before completion",
-      });
-    }
-  } catch (err) {
-    if (signal?.aborted) return; // user canceled
-    if (terminal) return;
-    handlers.onError({
-      kind: "network",
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
+  await postSseJsonStream<
+    GenerateRequestWire,
+    SseProgressEvent,
+    SseCompleteEvent
+  >({
+    url: `${base}/api/generate/stream`,
+    body: req,
+    signal,
+    handlers,
+    silentCloseMessage: "stream closed before completion",
+  });
 }
 
 export interface UpscaleStreamHandlers {
   onProgress: (evt: SseProgressEvent) => void;
   onComplete: (evt: SseUpscaleCompleteEvent) => void;
-  onError: (
-    err:
-      | { kind: "http"; status: number; retryAfter?: number; body: string }
-      | { kind: "network"; message: string },
-  ) => void;
+  onError: (err: StreamError) => void;
 }
 
 export async function upscaleStream(
@@ -287,65 +222,23 @@ export async function upscaleStream(
   handlers: UpscaleStreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  let terminal = false;
-  try {
-    await streamSse({
-      url: `${base}/api/upscale/stream`,
-      body: req,
-      signal,
-      onEvent: (evt) => {
-        if (!evt.data) return;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(evt.data);
-        } catch {
-          return;
-        }
-        if (evt.event === "complete") {
-          terminal = true;
-          handlers.onComplete(parsed as SseUpscaleCompleteEvent);
-        } else if (evt.event === "error") {
-          terminal = true;
-          handlers.onError({ kind: "http", status: 0, body: evt.data });
-        } else {
-          handlers.onProgress(parsed as SseProgressEvent);
-        }
-      },
-      onHttpError: (res) => {
-        terminal = true;
-        res
-          .text()
-          .then((body) =>
-            handlers.onError({ kind: "http", status: res.status, body }),
-          )
-          .catch(() =>
-            handlers.onError({ kind: "http", status: res.status, body: "" }),
-          );
-      },
-    });
-    if (!terminal && !signal?.aborted) {
-      handlers.onError({
-        kind: "network",
-        message: "upscale stream closed before completion",
-      });
-    }
-  } catch (err) {
-    if (signal?.aborted || terminal) return;
-    handlers.onError({
-      kind: "network",
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
+  await postSseJsonStream<
+    UpscaleRequestWire,
+    SseProgressEvent,
+    SseUpscaleCompleteEvent
+  >({
+    url: `${base}/api/upscale/stream`,
+    body: req,
+    signal,
+    handlers,
+    silentCloseMessage: "upscale stream closed before completion",
+  });
 }
 
 export interface ChainStreamHandlers {
   onProgress: (evt: ChainProgressEvent) => void;
   onComplete: (evt: SseChainCompleteEvent) => void;
-  onError: (
-    err:
-      | { kind: "http"; status: number; retryAfter?: number; body: string }
-      | { kind: "network"; message: string },
-  ) => void;
+  onError: (err: StreamError) => void;
 }
 
 /** POST /api/generate/chain/stream — SSE stream for chained video
@@ -356,68 +249,17 @@ export async function generateChainStream(
   handlers: ChainStreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  // See `generateStream` for the rationale — same silent-close guard
-  // applied to the chain endpoint.
-  let terminal = false;
-  try {
-    const res = await streamSse({
-      url: `${base}/api/generate/chain/stream`,
-      body: req,
-      signal,
-      onEvent: (evt) => {
-        if (!evt.data) return;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(evt.data);
-        } catch {
-          return;
-        }
-        if (evt.event === "complete") {
-          terminal = true;
-          handlers.onComplete(parsed as SseChainCompleteEvent);
-        } else if (evt.event === "error") {
-          terminal = true;
-          handlers.onError({ kind: "http", status: 0, body: evt.data });
-        } else {
-          handlers.onProgress(parsed as ChainProgressEvent);
-        }
-      },
-      onHttpError: (res) => {
-        terminal = true;
-        const retryAfterHeader = res.headers.get("Retry-After");
-        const retryAfter = retryAfterHeader
-          ? Number.parseFloat(retryAfterHeader)
-          : undefined;
-        res
-          .text()
-          .then((body) =>
-            handlers.onError({
-              kind: "http",
-              status: res.status,
-              retryAfter: Number.isFinite(retryAfter) ? retryAfter : undefined,
-              body,
-            }),
-          )
-          .catch(() =>
-            handlers.onError({ kind: "http", status: res.status, body: "" }),
-          );
-      },
-    });
-    void res;
-    if (!terminal && !signal?.aborted) {
-      handlers.onError({
-        kind: "network",
-        message: "stream closed before completion",
-      });
-    }
-  } catch (err) {
-    if (signal?.aborted) return;
-    if (terminal) return;
-    handlers.onError({
-      kind: "network",
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
+  await postSseJsonStream<
+    ChainRequestWire,
+    ChainProgressEvent,
+    SseChainCompleteEvent
+  >({
+    url: `${base}/api/generate/chain/stream`,
+    body: req,
+    signal,
+    handlers,
+    silentCloseMessage: "stream closed before completion",
+  });
 }
 
 // ─── Downloads UI (Agent A) ───────────────────────────────────────────────────

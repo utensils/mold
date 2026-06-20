@@ -1,0 +1,771 @@
+use std::path::Path;
+
+use mold_core::{GenerateRequest, ModelPaths};
+use mold_inference::device::{activation_bytes, activation_family_for, ActivationFamily};
+
+use crate::routes::ApiError;
+
+fn transformer_path_lower(paths: &ModelPaths) -> String {
+    paths.transformer.to_string_lossy().to_ascii_lowercase()
+}
+
+fn transformer_path_looks_flux2(path: &str) -> bool {
+    path.contains("/flux2/") || path.contains("flux2")
+}
+
+fn transformer_path_looks_ltx2(path: &str) -> bool {
+    path.contains("/ltx2/") || path.contains("ltx2")
+}
+
+fn transformer_path_looks_zimage(path: &str) -> bool {
+    path.contains("/z-image/") || path.contains("zimage")
+}
+
+fn transformer_path_is_gguf(paths: &ModelPaths) -> bool {
+    paths
+        .transformer
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
+}
+
+fn model_component_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn transformer_component_size(paths: &ModelPaths) -> u64 {
+    if paths.transformer_shards.is_empty() {
+        model_component_size(&paths.transformer)
+    } else {
+        paths
+            .transformer_shards
+            .iter()
+            .map(|path| model_component_size(path))
+            .sum()
+    }
+}
+
+fn large_flux_bf16_should_auto_offload(paths: &ModelPaths, hint: Option<ActivationHint>) -> bool {
+    const LARGE_FLUX_BF16_TRANSFORMER_BYTES: u64 = 20_000_000_000;
+
+    if !hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
+        || transformer_path_is_gguf(paths)
+    {
+        return false;
+    }
+
+    let transformer_path = transformer_path_lower(paths);
+    if transformer_path_looks_flux2(&transformer_path)
+        || transformer_path_looks_zimage(&transformer_path)
+        || transformer_path_looks_ltx2(&transformer_path)
+        || transformer_path.contains("nvfp4")
+    {
+        return false;
+    }
+
+    transformer_component_size(paths) >= LARGE_FLUX_BF16_TRANSFORMER_BYTES
+}
+
+/// Per-request shape hint passed into [`preflight_memory_guard`] so the
+/// activation budget can scale with resolution / dtype / arch. `None`
+/// degrades to the previous fixed-headroom approximation (the
+/// `MEMORY_BUDGET_HEADROOM` baked into `estimate_peak_memory`'s 2 GB
+/// constant), which keeps behavior identical for callers that don't yet
+/// have a request in scope (e.g. admin-API model loads with no resolution
+/// context).
+///
+/// Public because `gpu_worker::ensure_model_ready_sync` and
+/// `gpu_worker::run_chain_blocking` (both `pub`) take it as a parameter.
+#[derive(Debug, Clone, Copy)]
+pub struct ActivationHint {
+    /// Image-space width.
+    pub width: u32,
+    /// Image-space height.
+    pub height: u32,
+    /// CFG-doubled forwards typically pass `2`; non-CFG passes `1`.
+    pub batch: u32,
+    /// Bytes per element (`2` for bf16/fp16, `4` for f32).
+    pub dtype_bytes: u32,
+    /// Architecture family — drives the per-arch factor in
+    /// `mold_inference::device::activation_bytes`.
+    pub family: ActivationFamily,
+}
+
+impl ActivationHint {
+    /// Build a hint from a [`GenerateRequest`] and the manifest family slug
+    /// (e.g. `"flux"`, `"sdxl"`). The family slug is what
+    /// [`activation_family_for`] expects — when the caller doesn't have a
+    /// strong family signal (catalog ID without an installed manifest, etc.)
+    /// passing the empty string falls back to `ActivationFamily::FluxDit`.
+    pub fn from_request(req: &GenerateRequest, family_slug: &str) -> Self {
+        // CFG-doubled forwards: SDXL/SD3 batch=2 when guidance ≈/> 1.0; FLUX,
+        // Z-Image, Flux.2 are guidance-distilled and run a single forward.
+        let family = activation_family_for(family_slug);
+        let batch = match family {
+            ActivationFamily::SdxlUnet | ActivationFamily::Sd3Mmdit if req.guidance > 1.0 => 2,
+            _ => 1,
+        };
+        Self {
+            width: req.width,
+            height: req.height,
+            batch,
+            // Server-side preflight assumes bf16/fp16 activations — every
+            // diffusion family in this repo runs in bf16/fp16 on GPU.
+            dtype_bytes: 2,
+            family,
+        }
+    }
+
+    /// Compute the activation budget bytes from this hint.
+    pub fn budget_bytes(&self) -> u64 {
+        activation_bytes(
+            self.width,
+            self.height,
+            self.batch,
+            self.dtype_bytes,
+            self.family,
+        )
+    }
+}
+
+// ── MPS memory guard ────────────────────────────────────────────────────────
+
+/// Pure logic for the server memory guard, factored out for testing.
+///
+/// Hard-fails if peak > 90% of available (model won't fit even with page reclamation).
+/// Warns if peak > 80% of available (tight but feasible).
+///
+/// `suggestion` is appended to the rejection message so call sites can surface
+/// arch-specific remediation (e.g. reduce `--frames` / `--width` for LTX-Video).
+pub(crate) fn check_model_memory_budget(
+    model_name: &str,
+    peak_bytes: u64,
+    available_bytes: u64,
+    suggestion: &str,
+) -> Result<(), ApiError> {
+    let hard_limit = available_bytes * 9 / 10; // 90%
+    if peak_bytes > hard_limit {
+        return Err(ApiError::insufficient_memory(format!(
+            "model '{}' estimated peak ~{:.1} GB exceeds the per-load budget cap ~{:.1} GB \
+             (90% of {:.1} GB free, with 2 GB activation headroom built into peak estimate; \
+             encoders are dropped before denoise). {}",
+            model_name,
+            peak_bytes as f64 / 1_000_000_000.0,
+            hard_limit as f64 / 1_000_000_000.0,
+            available_bytes as f64 / 1_000_000_000.0,
+            suggestion,
+        )));
+    }
+
+    let warn_limit = available_bytes * 8 / 10; // 80%
+    if peak_bytes > warn_limit {
+        tracing::warn!(
+            model = %model_name,
+            peak_gb = format_args!("{:.1}", peak_bytes as f64 / 1_000_000_000.0),
+            available_gb = format_args!("{:.1}", available_bytes as f64 / 1_000_000_000.0),
+            "model is close to memory limit — may trigger page reclamation"
+        );
+    }
+
+    Ok(())
+}
+
+/// Build the suggestion text appended to preflight rejection messages.
+/// For LTX-Video (non-streaming full-weight load) the dominant knob is
+/// reducing `frames` or `width`/`height`; for image families, resolution and
+/// batch size are usually the first levers because activation and VAE
+/// workspace can dominate the checkpoint size.
+pub(crate) fn rejection_suggestion(hint: Option<ActivationHint>) -> &'static str {
+    match hint.map(|h| h.family) {
+        Some(ActivationFamily::LtxVideo) => {
+            "Try reducing --frames or --width/--height, use a quantized variant \
+             (e.g. ':q8'), or close other GPU apps."
+        }
+        _ => {
+            "Try lowering --width/--height, reduce --batch, use a smaller/quantized \
+             variant if available, enable --offload for FLUX, or close other GPU apps."
+        }
+    }
+}
+
+/// Pure inner: given an `available_bytes` budget and the active model's
+/// reclaimable VRAM, decide whether the new model fits. Adding
+/// `active_vram_bytes` to `available_bytes` accounts for the currently-loaded
+/// model that will be unloaded before the new one loads — without this, a
+/// swap of two near-equal-size models would be falsely rejected even though
+/// the swap is feasible.
+///
+/// Peak is estimated under `LoadStrategy::Sequential` because every diffusion
+/// family in this repo (FLUX, SD3, Z-Image, Flux.2, Qwen-Image, LTX) drops
+/// text encoders from GPU after encoding before the transformer denoises.
+/// The Eager sum (`transformer + vae + all_encoders`) overcounts by the
+/// encoder weight on every load — enough to false-reject a quantized FLUX on
+/// a 24 GB card even when the swap would actually fit.
+///
+/// `hint` adds a resolution-scaled activation budget on top of the
+/// component-size peak so a 2048² generation isn't under-budgeted. When
+/// `None` the inner peak retains the existing 2 GB
+/// `MEMORY_BUDGET_HEADROOM` constant from `estimate_peak_memory` and no
+/// extra is added — equivalent to the pre-Tier-2.3 behavior.
+pub(crate) fn preflight_memory_guard_with_available(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+    available_bytes: u64,
+    hint: Option<ActivationHint>,
+) -> Result<(), ApiError> {
+    // Streaming-transformer families (LTX-Video / LTX-2) load only a couple
+    // of transformer blocks onto GPU at a time via `new_streaming` — the
+    // file-size-based estimate (which assumes the whole transformer becomes
+    // GPU-resident) over-counts by ~40+ GB for the 22B LTX-2 preset and
+    // false-rejects on 24 GB cards. When the hint marks the family as
+    // streaming, we replace the file-size transformer component with a
+    // generous fixed cap that covers `streaming_prefetch_count` blocks
+    // plus the always-resident top-level weights (proj_in / proj_out /
+    // time_embed / caption_projection / scale_shift_table / norms).
+    let transformer_path = transformer_path_lower(paths);
+    let streaming = hint
+        .map(|h| h.family.streaming_transformer())
+        .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
+    let flux_offload = (hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
+        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1"))
+        || large_flux_bf16_should_auto_offload(paths, hint);
+    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
+        && paths
+            .transformer
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+    let peak = base_peak_memory_for_paths(paths, hint, streaming, flux_offload, qwen_quantized);
+    // Add the per-request activation budget on top of the file-size peak.
+    // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
+    // is a generic "kernels + small state" constant that doesn't scale; the
+    // hint is the resolution/dtype/arch-aware delta on top.
+    let activation = activation_memory_for_estimate(hint, qwen_quantized);
+    let peak_with_activation = peak.saturating_add(activation);
+    let effective_available = available_bytes.saturating_add(active_vram_bytes);
+    if qwen_quantized && peak_with_activation <= effective_available {
+        return Ok(());
+    }
+    let suggestion = rejection_suggestion(hint);
+
+    check_model_memory_budget(
+        model_name,
+        peak_with_activation,
+        effective_available,
+        suggestion,
+    )
+}
+
+fn base_peak_memory_for_paths(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    streaming: bool,
+    flux_offload: bool,
+    qwen_quantized: bool,
+) -> u64 {
+    if streaming {
+        // LTX-2 also pays for a Gemma 3 12B prompt encoder. Auto placement
+        // may try GPU first, but the runtime catches prompt-encoder CUDA OOMs
+        // and retries on CPU before loading the streamed transformer. Preflight
+        // must not reject that recoverable path. Only an explicit same-GPU pin
+        // (`MOLD_LTX2_GEMMA_DEVICE=gpu`) is counted against this GPU because
+        // the runtime will surface that OOM instead of rewriting the request.
+        let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
+        return streaming_transformer_peak(paths, gemma_competes);
+    } else if flux_offload {
+        return streaming_transformer_peak(paths, false);
+    } else if hint.is_some_and(|h| h.family == ActivationFamily::Sd3Mmdit) {
+        return sd3_sequential_peak(paths);
+    } else if qwen_quantized {
+        return qwen_image_quantized_sequential_peak(paths, hint);
+    }
+
+    mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Sequential)
+}
+
+fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: bool) -> u64 {
+    if qwen_quantized {
+        0
+    } else {
+        hint.map(|h| h.budget_bytes()).unwrap_or(0)
+    }
+}
+
+/// Peak GPU residency for streaming-transformer families. Mirrors the
+/// Sequential strategy in `device::estimate_peak_memory` but replaces the
+/// `transformer_size + vae_size` term with a `STREAMING_TRANSFORMER_CAP`
+/// that bounds "block-streaming overhead, fully-resident top-level weights,
+/// and VAE."
+///
+/// When `gemma_on_cpu` is true, encoder_total is dropped from the max because
+/// the prompt encoder won't compete for VRAM at all — it lives in system RAM
+/// and pipes its conditioning across to the transformer GPU at encode time.
+/// When false, the encoder phase still pays full encoder_total (text encoders
+/// load whole; the runtime drops them before denoise but during the encode
+/// phase they're co-resident with allocations made earlier in the request).
+///
+/// The cap is conservative: at 22B BF16 with `streaming_prefetch_count=2`,
+/// two blocks ≈ 1.83 GB + non-block fragments ≈ 200 MB + VAE ≈ 200 MB
+/// ≈ 2.3 GB. The 6 GB cap leaves room for activation workspace, OS
+/// fragmentation, and future LTX presets without revisiting this file.
+fn streaming_transformer_peak(
+    paths: &ModelPaths,
+    gemma_competes_with_transformer_gpu: bool,
+) -> u64 {
+    const STREAMING_TRANSFORMER_CAP: u64 = 6_000_000_000; // 6 GB
+    const HEADROOM: u64 = 2_000_000_000; // 2 GB, mirrors device::MEMORY_BUDGET_HEADROOM
+
+    let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let t5_size = paths.t5_encoder.as_ref().map(|p| file_size(p)).unwrap_or(0);
+    let clip_size = paths
+        .clip_encoder
+        .as_ref()
+        .map(|p| file_size(p))
+        .unwrap_or(0);
+    let clip2_size = paths
+        .clip_encoder_2
+        .as_ref()
+        .map(|p| file_size(p))
+        .unwrap_or(0);
+    let text_encoder_size: u64 = paths.text_encoder_files.iter().map(|p| file_size(p)).sum();
+    let encoder_total = if gemma_competes_with_transformer_gpu {
+        t5_size + clip_size + clip2_size + text_encoder_size
+    } else {
+        0
+    };
+
+    let inference_phase = STREAMING_TRANSFORMER_CAP;
+    std::cmp::max(encoder_total, inference_phase) + HEADROOM
+}
+
+/// Peak GPU residency for SD3's staged sequential runtime. SD3 loads the
+/// triple text encoder, drops it, optionally VAE-encodes the source image,
+/// drops VAE, loads MMDiT for denoise, drops it, then loads VAE again for
+/// decode. GGUF SD3 models use the monolithic Stability safetensors file as
+/// the VAE source, but only VAE tensors are materialized by the runtime.
+fn sd3_sequential_peak(paths: &ModelPaths) -> u64 {
+    const SD3_VAE_RESIDENCY_CAP: u64 = 1_000_000_000; // VAE portion is ~300 MB; keep slack.
+    const HEADROOM: u64 = 2_000_000_000; // mirrors device::MEMORY_BUDGET_HEADROOM
+
+    let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let transformer_size = if !paths.transformer_shards.is_empty() {
+        paths.transformer_shards.iter().map(|p| file_size(p)).sum()
+    } else {
+        file_size(&paths.transformer)
+    };
+    let vae_size = file_size(&paths.vae).min(SD3_VAE_RESIDENCY_CAP);
+    let t5_size = paths.t5_encoder.as_ref().map(|p| file_size(p)).unwrap_or(0);
+    let clip_size = paths
+        .clip_encoder
+        .as_ref()
+        .map(|p| file_size(p))
+        .unwrap_or(0);
+    let clip2_size = paths
+        .clip_encoder_2
+        .as_ref()
+        .map(|p| file_size(p))
+        .unwrap_or(0);
+    let text_encoder_size: u64 = paths.text_encoder_files.iter().map(|p| file_size(p)).sum();
+    let encoder_total = t5_size + clip_size + clip2_size + text_encoder_size;
+
+    transformer_size.max(vae_size).max(encoder_total) + HEADROOM
+}
+
+/// Peak GPU residency for Qwen-Image GGUF under its low-memory sequential
+/// runtime. The quantized CUDA path disables CFG batching under pressure, so
+/// the transformer phase is the quantized transformer plus a single-forward
+/// activation reserve. Text encoder and VAE run in separate phases.
+fn qwen_image_quantized_sequential_peak(paths: &ModelPaths, hint: Option<ActivationHint>) -> u64 {
+    const QWEN_GGUF_PHASE_HEADROOM: u64 = 128_000_000;
+
+    let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let transformer_size = if !paths.transformer_shards.is_empty() {
+        paths.transformer_shards.iter().map(|p| file_size(p)).sum()
+    } else {
+        file_size(&paths.transformer)
+    };
+    let text_encoder_size: u64 = paths.text_encoder_files.iter().map(|p| file_size(p)).sum();
+    let vae_size = file_size(&paths.vae);
+    let activation = hint
+        .map(|h| {
+            mold_inference::device::activation_bytes(
+                h.width,
+                h.height,
+                1,
+                h.dtype_bytes,
+                ActivationFamily::QwenImageDit,
+            )
+        })
+        .unwrap_or(0);
+
+    transformer_size
+        .saturating_add(activation)
+        .saturating_add(QWEN_GGUF_PHASE_HEADROOM)
+        .max(text_encoder_size)
+        .max(vae_size)
+}
+
+/// Whether preflight should count the LTX-2 Gemma prompt encoder against the
+/// transformer's GPU budget. Auto placement can recover from CUDA OOM by
+/// retrying the prompt path on CPU; explicit same-GPU placement cannot.
+fn ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal: usize) -> bool {
+    matches!(
+        mold_inference::device::resolve_ltx2_gemma_device_override(gpu_ordinal),
+        Some(mold_inference::device::LtxGemmaPlacement::Gpu(ordinal)) if ordinal == gpu_ordinal
+    )
+}
+
+/// Check whether estimated peak memory fits before committing to a model load.
+///
+/// Budgeting strategy on CUDA:
+/// - **No active model on this GPU** — the new load lands in whatever is
+///   currently free, so use `free_vram_bytes(gpu_ordinal)`.
+/// - **Active model present** — the call site unloads it and runs
+///   `cuDevicePrimaryCtxReset_v2`, which releases *every* allocation on the
+///   device (transformer, leftover activation buffers, fragmentation in the
+///   caching pool). The realistic post-reclaim budget is total VRAM, not
+///   `free + recorded active_vram`. Using the latter under-counts whatever
+///   the cache forgot to track (notably the encoder churn during the
+///   previous generation) and produces false rejections.
+///
+/// On macOS (unified memory) we keep the additive `available + active_vram`
+/// budget because Metal has no equivalent device-wide context reset; tensors
+/// freed during `unload()` simply return to the system page cache.
+/// On other platforms with no memory query available, the guard is a no-op.
+pub(crate) fn preflight_memory_guard(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
+) -> Result<(), ApiError> {
+    // CUDA branch: when an active model will be reclaimed via primary-context
+    // reset, the post-reclaim budget is the device total, not free+active.
+    #[cfg(feature = "cuda")]
+    {
+        if active_vram_bytes > 0 {
+            if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
+                return preflight_memory_guard_with_available(model_name, paths, 0, total, hint);
+            }
+        }
+        // Ghost-VRAM case: no active model in our cache, but the device
+        // reports `free` significantly below `total` because cuBLAS / cuDNN /
+        // kernel modules from a previous load are still squatting on
+        // workspace allocations. Reclaim the primary context — we have
+        // nothing live to lose — and re-query before deciding. After reclaim,
+        // re-query through `usable_free_vram_bytes` so the OS reserve
+        // (T2-B) is respected on the post-reclaim reading too.
+        if let (Some(free), Some(total)) = (
+            mold_inference::device::free_vram_bytes(gpu_ordinal),
+            mold_inference::device::total_vram_bytes(gpu_ordinal),
+        ) {
+            const GHOST_VRAM_THRESHOLD: u64 = 1_500_000_000; // 1.5 GB
+            if total.saturating_sub(free) > GHOST_VRAM_THRESHOLD {
+                tracing::info!(
+                    gpu = gpu_ordinal,
+                    free_gb = format_args!("{:.1}", free as f64 / 1e9),
+                    total_gb = format_args!("{:.1}", total as f64 / 1e9),
+                    "no active model on this GPU but VRAM is held — reclaiming primary context",
+                );
+                mold_inference::device::reclaim_gpu_memory(gpu_ordinal);
+            }
+            let effective_free = mold_inference::device::usable_free_vram_bytes(gpu_ordinal)
+                .unwrap_or_else(|| {
+                    free.saturating_sub(mold_inference::device::reserved_vram_bytes())
+                });
+            return preflight_memory_guard_with_available(
+                model_name,
+                paths,
+                active_vram_bytes,
+                effective_free,
+                hint,
+            );
+        }
+        // Fallback if total_vram is unavailable: still go through the
+        // reserve-adjusted reading.
+        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
+            return preflight_memory_guard_with_available(
+                model_name,
+                paths,
+                active_vram_bytes,
+                free,
+                hint,
+            );
+        }
+    }
+
+    // macOS unified memory: query system memory and add reclaimable footprint.
+    if let Some(available) = mold_inference::device::available_system_memory_bytes() {
+        if available > 0 {
+            return preflight_memory_guard_with_available(
+                model_name,
+                paths,
+                active_vram_bytes,
+                available,
+                hint,
+            );
+        }
+    }
+
+    // No memory info available on this platform — skip the guard.
+    Ok(())
+}
+
+/// Effective memory budget to use when deciding whether a server engine can
+/// stay eager-loaded or should degrade to load-use-drop sequential mode.
+///
+/// This mirrors the budget shape in [`preflight_memory_guard`]: CUDA swaps can
+/// reclaim the whole primary context when an active model exists, while Metal
+/// uses unified system memory and adds the active footprint as reclaimable.
+pub(crate) fn effective_load_available_bytes(
+    active_vram_bytes: u64,
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+) -> Option<u64> {
+    #[cfg(feature = "cuda")]
+    {
+        if active_vram_bytes > 0 {
+            if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
+                return Some(total);
+            }
+        }
+        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
+            return Some(free);
+        }
+    }
+
+    mold_inference::device::available_system_memory_bytes()
+        .filter(|available| *available > 0)
+        .map(|available| available.saturating_add(active_vram_bytes))
+}
+
+/// Choose the server load strategy for the current memory budget.
+///
+/// The server normally prefers eager engines so the active model stays hot.
+/// When eager residency would exceed the same 90% cap used by preflight but
+/// the model fits under sequential load-use-drop, degrade to Sequential. This
+/// keeps preflight and the actual load path consistent: a model admitted only
+/// because text encoders can be dropped should not then OOM during eager
+/// startup before it gets a chance to generate.
+pub(crate) fn select_server_load_strategy_for_budget(
+    paths: &ModelPaths,
+    available_bytes: Option<u64>,
+    hint: Option<ActivationHint>,
+) -> mold_inference::LoadStrategy {
+    let transformer_is_gguf = transformer_path_is_gguf(paths);
+
+    if hint.is_some_and(|h| h.family == ActivationFamily::ZImageDit) && !transformer_is_gguf {
+        return mold_inference::LoadStrategy::Sequential;
+    }
+    if transformer_is_gguf
+        && hint.is_some_and(|h| {
+            matches!(
+                h.family,
+                ActivationFamily::Sd3Mmdit | ActivationFamily::ZImageDit
+            )
+        })
+    {
+        return mold_inference::LoadStrategy::Eager;
+    }
+    let qwen_quantized =
+        hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit) && transformer_is_gguf;
+
+    let Some(available_bytes) = available_bytes.filter(|v| *v > 0) else {
+        return mold_inference::LoadStrategy::Eager;
+    };
+
+    if qwen_quantized {
+        let peak = qwen_image_quantized_sequential_peak(paths, hint);
+        if peak <= available_bytes {
+            return mold_inference::LoadStrategy::Sequential;
+        }
+    }
+
+    let activation = hint.map(|h| h.budget_bytes()).unwrap_or(0);
+    let eager_peak =
+        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
+            .saturating_add(activation);
+    let sequential_peak = mold_inference::device::estimate_peak_memory(
+        paths,
+        mold_inference::LoadStrategy::Sequential,
+    )
+    .saturating_add(activation);
+    let hard_limit = available_bytes.saturating_mul(9) / 10;
+
+    if eager_peak > hard_limit && sequential_peak <= hard_limit {
+        mold_inference::LoadStrategy::Sequential
+    } else {
+        mold_inference::LoadStrategy::Eager
+    }
+}
+
+pub(crate) fn select_server_load_strategy_for_device(
+    paths: &ModelPaths,
+    available_bytes: Option<u64>,
+    device_total_bytes: Option<u64>,
+    hint: Option<ActivationHint>,
+) -> mold_inference::LoadStrategy {
+    let capped_available = match (
+        available_bytes.filter(|available| *available > 0),
+        device_total_bytes.filter(|total| *total > 0),
+    ) {
+        (Some(available), Some(total)) => Some(available.min(total)),
+        (available, None) => available,
+        (None, Some(total)) => Some(total),
+    };
+
+    select_server_load_strategy_for_budget(paths, capped_available, hint)
+}
+
+pub(crate) fn server_offload_enabled_for_paths(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+) -> bool {
+    let forced_offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let transformer_path = transformer_path_lower(paths);
+    let transformer_looks_flux2 = transformer_path_looks_flux2(&transformer_path);
+    let transformer_looks_zimage = transformer_path_looks_zimage(&transformer_path);
+    let transformer_looks_nvfp4 = transformer_path.contains("nvfp4");
+
+    if request_has_lora
+        && (transformer_looks_flux2
+            || transformer_looks_zimage
+            || hint.is_some_and(|h| {
+                matches!(
+                    h.family,
+                    ActivationFamily::Flux2Dit | ActivationFamily::ZImageDit
+                )
+            }))
+    {
+        return false;
+    }
+
+    let transformer_is_gguf = transformer_path_is_gguf(paths);
+
+    if transformer_looks_nvfp4
+        && (transformer_looks_flux2 || hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit))
+    {
+        return false;
+    }
+
+    if transformer_is_gguf
+        && hint.is_some_and(|h| {
+            matches!(
+                h.family,
+                ActivationFamily::Sd3Mmdit
+                    | ActivationFamily::ZImageDit
+                    | ActivationFamily::Flux2Dit
+            )
+        })
+    {
+        return false;
+    }
+
+    forced_offload || large_flux_bf16_should_auto_offload(paths, hint)
+}
+
+pub(crate) fn request_requires_fresh_engine_for_offload_policy(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+) -> bool {
+    request_has_lora
+        && server_offload_enabled_for_paths(paths, hint, false)
+        && !server_offload_enabled_for_paths(paths, hint, true)
+}
+
+pub(crate) struct GenerationMemoryBudget {
+    pub(crate) peak_memory_bytes: u64,
+    pub(crate) activation_memory_bytes: u64,
+    pub(crate) available_memory_bytes: Option<u64>,
+    pub(crate) load_strategy: mold_inference::LoadStrategy,
+    pub(crate) fits_available_memory: Option<bool>,
+}
+
+pub(crate) fn estimate_generation_memory_for_request(
+    req: &GenerateRequest,
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+) -> GenerationMemoryBudget {
+    let transformer_path = transformer_path_lower(paths);
+    let streaming = hint
+        .map(|h| h.family.streaming_transformer())
+        .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
+    let flux_offload = (hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
+        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1"))
+        || large_flux_bf16_should_auto_offload(paths, hint);
+    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
+        && transformer_path_is_gguf(paths);
+    let base_peak =
+        base_peak_memory_for_paths(paths, hint, streaming, flux_offload, qwen_quantized);
+    let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
+    let peak = base_peak.saturating_add(activation);
+    let available = effective_load_available_bytes(0, 0);
+    let load_strategy = select_server_load_strategy_for_budget(paths, available, hint);
+    let fits = available.map(|available| peak <= available.saturating_mul(9) / 10);
+
+    GenerationMemoryBudget {
+        peak_memory_bytes: peak,
+        activation_memory_bytes: activation,
+        available_memory_bytes: available,
+        load_strategy,
+        fits_available_memory: fits,
+    }
+}
+
+fn request_sensitive_activation_memory(
+    req: &GenerateRequest,
+    hint: Option<ActivationHint>,
+    qwen_quantized: bool,
+) -> u64 {
+    let base = activation_memory_for_estimate(hint, qwen_quantized);
+    let batch = u64::from(req.batch_size.max(1));
+    let video_frames = u64::from(req.frames.unwrap_or(1).max(1));
+    let video_factor = if hint.is_some_and(|h| h.family.streaming_transformer()) {
+        // Video runtimes denoise multiple latent frames but do not keep every
+        // frame's full activation workspace resident at once. Scale
+        // sublinearly so longer clips still move the estimate without
+        // turning it into a file-size guess.
+        video_frames.div_ceil(25).max(1)
+    } else {
+        1
+    };
+    let cfg_factor = if req.guidance > 1.0 && req.negative_prompt.is_some() {
+        2
+    } else {
+        1
+    };
+
+    let mut activation = base
+        .saturating_mul(batch)
+        .saturating_mul(video_factor)
+        .saturating_mul(cfg_factor);
+
+    let pixel_bytes = u64::from(req.width)
+        .saturating_mul(u64::from(req.height))
+        .saturating_mul(4);
+    if req.source_image.is_some()
+        || req
+            .edit_images
+            .as_ref()
+            .is_some_and(|images| !images.is_empty())
+    {
+        activation = activation.saturating_add(pixel_bytes.saturating_mul(batch));
+    }
+    if req.mask_image.is_some() {
+        activation = activation.saturating_add(pixel_bytes / 2);
+    }
+    if req.control_image.is_some() || req.control_model.as_deref().is_some_and(|m| !m.is_empty()) {
+        activation = activation.saturating_add(pixel_bytes.saturating_mul(2));
+    }
+    if req.upscale_model.as_deref().is_some_and(|m| !m.is_empty()) {
+        activation = activation.saturating_add(pixel_bytes.saturating_mul(4));
+    }
+    let lora_count = req
+        .loras
+        .as_ref()
+        .map(|loras| loras.len())
+        .unwrap_or_else(|| usize::from(req.lora.is_some())) as u64;
+    activation.saturating_add(lora_count.saturating_mul(128 * 1024 * 1024))
+}
