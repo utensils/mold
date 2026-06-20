@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-20
+
 ### Changed
 
 - **Adaptive block residency for offload paths.** FLUX BF16 offload now keeps the largest safe set of transformer blocks GPU-resident and streams only the overflow blocks, using actual loaded per-block tensor sizes plus activation budget, runtime headroom, and largest-streamed-block reserve. Flux.2, Z-Image, and Qwen-Image offload use the same shared residency planner; SD3 remains the older full-streaming implementation because its offload path rebuilds trait-object joint blocks from a CPU tensor map rather than storing block objects. FLUX LoRA bypass registries are built before adaptive planning so adapter VRAM is included in the free-memory measurement, and FLUX/Flux.2/Z-Image resident materialization backs off on CUDA OOM before falling back toward full streaming. Progress logs now report resident/streamed block counts, resident GB, streamed GB per denoise pass, and reserved headroom.
@@ -757,7 +759,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/utensils/mold/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/utensils/mold/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/utensils/mold/compare/v0.10.0...v0.12.0
 [0.10.0]: https://github.com/utensils/mold/compare/v0.8.1...v0.10.0

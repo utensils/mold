@@ -171,6 +171,21 @@ const controlNetModel: ModelInfoExtended = {
   description: "ControlNet Canny edge detection for SD1.5",
 };
 
+const videoModel: ModelInfoExtended = {
+  name: "ltx-video-0.9.6-distilled:bf16",
+  family: "ltx-video",
+  size_gb: 10,
+  is_loaded: false,
+  last_used: null,
+  hf_repo: "Lightricks/LTX-Video",
+  downloaded: true,
+  default_width: 1216,
+  default_height: 704,
+  default_steps: 8,
+  default_guidance: 1,
+  description: "",
+};
+
 function makeForm(
   overrides: Partial<GenerateFormState> = {},
 ): GenerateFormState {
@@ -357,6 +372,84 @@ describe("GenerateParamsPanel", () => {
     await w.find("[data-test='params-summary-toggle']").trigger("click");
 
     expect(w.text()).toContain("Strength");
+  });
+
+  it("keeps video frames, length, and fps editable and synchronized", async () => {
+    const w = mountPanel(
+      makeForm({
+        model: videoModel.name,
+        modelFamily: videoModel.family,
+        width: videoModel.default_width,
+        height: videoModel.default_height,
+        steps: videoModel.default_steps,
+        guidance: videoModel.default_guidance,
+        frames: 25,
+        fps: 24,
+        outputFormat: "mp4",
+      }),
+      [videoModel],
+    );
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    await w.find("[data-test='video-frames']").setValue("49");
+    let last = w.emitted("update:modelValue")!.at(-1)![0] as GenerateFormState;
+    expect(last.frames).toBe(49);
+    expect(last.fps).toBe(24);
+
+    await w.setProps({ modelValue: last });
+    expect(
+      (w.find("[data-test='video-length']").element as HTMLInputElement).value,
+    ).toBe("2.04");
+
+    await w.find("[data-test='video-length']").setValue("3");
+    last = w.emitted("update:modelValue")!.at(-1)![0] as GenerateFormState;
+    expect(last.frames).toBe(73);
+    expect(last.fps).toBe(24);
+
+    await w.setProps({ modelValue: last });
+    expect(
+      (w.find("[data-test='video-frames']").element as HTMLInputElement).value,
+    ).toBe("73");
+
+    await w.find("[data-test='video-fps']").setValue("30");
+    last = w.emitted("update:modelValue")!.at(-1)![0] as GenerateFormState;
+    expect(last.fps).toBe(30);
+    expect(last.frames).toBe(89);
+
+    await w.setProps({ modelValue: last });
+    expect(
+      (w.find("[data-test='video-length']").element as HTMLInputElement).value,
+    ).toBe("2.97");
+  });
+
+  it("keeps video length steady while replacing fps through partial input", async () => {
+    const w = mountPanel(
+      makeForm({
+        model: videoModel.name,
+        modelFamily: videoModel.family,
+        width: videoModel.default_width,
+        height: videoModel.default_height,
+        steps: videoModel.default_steps,
+        guidance: videoModel.default_guidance,
+        frames: 49,
+        fps: 24,
+        outputFormat: "mp4",
+      }),
+      [videoModel],
+    );
+    await w.find("[data-test='params-summary-toggle']").trigger("click");
+
+    const fps = w.find("[data-test='video-fps']");
+    await fps.trigger("focus");
+    await fps.setValue("3");
+    let last = w.emitted("update:modelValue")!.at(-1)![0] as GenerateFormState;
+    await w.setProps({ modelValue: last });
+
+    await fps.setValue("30");
+    last = w.emitted("update:modelValue")!.at(-1)![0] as GenerateFormState;
+
+    expect(last.fps).toBe(30);
+    expect(last.frames).toBe(65);
   });
 
   it("keeps direct mask upload available and stores the uploaded mask", async () => {

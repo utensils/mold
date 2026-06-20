@@ -3,9 +3,11 @@ import {
   fetchQueue,
   generateStream,
   generateChainStream,
+  upscaleStream,
   updateQueueJobTargetGpu,
   type ChainStreamHandlers,
   type GenerateStreamHandlers,
+  type UpscaleStreamHandlers,
 } from "./api";
 import type {
   ChainProgressEvent,
@@ -14,6 +16,7 @@ import type {
   SseChainCompleteEvent,
   SseCompleteEvent,
   SseProgressEvent,
+  UpscaleRequestWire,
 } from "./types";
 import type { SseEvent, StreamSseOptions } from "./lib/sse";
 
@@ -47,6 +50,14 @@ function chainHandlers() {
   };
 }
 
+function upscaleHandlers() {
+  return {
+    onProgress: vi.fn<UpscaleStreamHandlers["onProgress"]>(),
+    onComplete: vi.fn<UpscaleStreamHandlers["onComplete"]>(),
+    onError: vi.fn<UpscaleStreamHandlers["onError"]>(),
+  };
+}
+
 function singleRequest(): GenerateRequestWire {
   return {
     prompt: "a cat",
@@ -67,6 +78,15 @@ function chainRequest(): ChainRequestWire {
     model: "ltx-2-19b-distilled:fp8",
     stages: [{ prompt: "a cat", frames: 97, transition: "smooth" }],
   } as ChainRequestWire;
+}
+
+function upscaleRequest(): UpscaleRequestWire {
+  return {
+    image: "AAAA",
+    model: "real-esrgan-x4plus:fp16",
+    scale: 4,
+    output_format: "png",
+  } as UpscaleRequestWire;
 }
 
 /** Helper: install a streamSse fake that runs `driver` with the caller's
@@ -300,5 +320,29 @@ describe("generateChainStream", () => {
     await generateChainStream(chainRequest(), h);
     expect(h.onComplete).toHaveBeenCalledOnce();
     expect(h.onError).not.toHaveBeenCalled();
+  });
+});
+
+describe("upscaleStream", () => {
+  it("preserves Retry-After on HTTP errors", async () => {
+    installDriver((_onEvent, onHttpError) => {
+      const res = new Response("busy", {
+        status: 503,
+        headers: { "Retry-After": "1.5" },
+      });
+      onHttpError?.(res);
+    });
+
+    const h = upscaleHandlers();
+    await upscaleStream(upscaleRequest(), h);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.onError).toHaveBeenCalledOnce();
+    const err = h.onError.mock.calls[0][0];
+    if (err.kind !== "http") throw new Error("expected http error");
+    expect(err.status).toBe(503);
+    expect(err.retryAfter).toBe(1.5);
   });
 });
