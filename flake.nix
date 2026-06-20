@@ -273,6 +273,16 @@
               // lib.optionalAttrs isLinux {
                 CUDA_COMPUTE_CAP = computeCap;
 
+                # Linux postInstall generates shell completions by execing the
+                # freshly-built CUDA-free target binary before Nix fixup patches
+                # its runtime paths. Keep libstdc++ visible so sandboxed builds
+                # do not fail in the dynamic loader before reaching `main()`.
+                preInstall = ''
+                  export LD_LIBRARY_PATH=${
+                    lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]
+                  }''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+                '';
+
                 # Sandboxed Linux builders do not provide the host NVIDIA
                 # driver (`libcuda.so.1`). The CUDA-linked CLI can therefore
                 # fail in the dynamic loader before reaching `main()` when
