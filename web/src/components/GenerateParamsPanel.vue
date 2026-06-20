@@ -222,12 +222,55 @@ const videoLength = computed(() => {
   return fps > 0 ? frames / fps : 0;
 });
 
+type VideoField = "frames" | "length" | "fps";
+
+const activeVideoField = ref<VideoField | null>(null);
+const frameInput = ref("");
+const lengthInput = ref("");
+const fpsInput = ref("");
+const fpsEditLength = ref<number | null>(null);
+
+function syncVideoInputs() {
+  if (activeVideoField.value !== "frames") {
+    frameInput.value = String(props.modelValue.frames ?? 25);
+  }
+  if (activeVideoField.value !== "length") {
+    lengthInput.value = videoLength.value.toFixed(2);
+  }
+  if (activeVideoField.value !== "fps") {
+    fpsInput.value = String(props.modelValue.fps ?? 24);
+  }
+}
+
+watch(
+  () => [props.modelValue.frames, props.modelValue.fps] as const,
+  syncVideoInputs,
+  { immediate: true },
+);
+
+function focusVideoField(field: VideoField) {
+  activeVideoField.value = field;
+  fpsEditLength.value = field === "fps" ? videoLength.value : null;
+}
+
+function blurVideoField(field: VideoField) {
+  if (activeVideoField.value === field) {
+    activeVideoField.value = null;
+    if (field === "fps") {
+      fpsEditLength.value = null;
+    }
+    syncVideoInputs();
+  }
+}
+
 function onChangeFrames(raw: string) {
+  frameInput.value = raw;
   const n = clampFrames(Number(raw));
   patch("frames", n);
 }
 
 function onChangeLength(raw: string) {
+  lengthInput.value = raw;
   const secs = Number(raw);
   if (!Number.isFinite(secs) || secs <= 0) return;
   const fps = props.modelValue.fps ?? 24;
@@ -235,10 +278,11 @@ function onChangeLength(raw: string) {
 }
 
 function onChangeFps(raw: string) {
+  fpsInput.value = raw;
   const nextFps = Number(raw);
   if (!Number.isFinite(nextFps) || nextFps <= 0) return;
   // Changing fps keeps length steady and adjusts frames.
-  const length = videoLength.value;
+  const length = fpsEditLength.value ?? videoLength.value;
   emit("update:modelValue", {
     ...props.modelValue,
     fps: nextFps,
@@ -1102,9 +1146,12 @@ function removeKeyframe(index: number) {
           <label class="text-xs uppercase text-slate-400">Frames (8n+1)</label>
           <input
             type="number"
-            :value="modelValue.frames ?? 25"
+            :value="frameInput"
             class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
-            @change="onChangeFrames(($event.target as HTMLInputElement).value)"
+            data-test="video-frames"
+            @focus="focusVideoField('frames')"
+            @blur="blurVideoField('frames')"
+            @input="onChangeFrames(($event.target as HTMLInputElement).value)"
           />
         </div>
         <div>
@@ -1113,19 +1160,24 @@ function removeKeyframe(index: number) {
             type="number"
             step="0.1"
             min="0.1"
-            :value="videoLength.toFixed(2)"
+            :value="lengthInput"
             class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
             data-test="video-length"
-            @change="onChangeLength(($event.target as HTMLInputElement).value)"
+            @focus="focusVideoField('length')"
+            @blur="blurVideoField('length')"
+            @input="onChangeLength(($event.target as HTMLInputElement).value)"
           />
         </div>
         <div>
           <label class="text-xs uppercase text-slate-400">FPS</label>
           <input
             type="number"
-            :value="modelValue.fps ?? 24"
+            :value="fpsInput"
             class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
-            @change="onChangeFps(($event.target as HTMLInputElement).value)"
+            data-test="video-fps"
+            @focus="focusVideoField('fps')"
+            @blur="blurVideoField('fps')"
+            @input="onChangeFps(($event.target as HTMLInputElement).value)"
           />
         </div>
       </section>
