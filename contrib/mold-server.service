@@ -21,7 +21,7 @@ Environment=MOLD_PORT=7680
 # Environment=MOLD_RATE_LIMIT=10/min
 # Environment=MOLD_RATE_LIMIT_BURST=20
 
-# NixOS: CUDA driver access
+# NixOS with a non-flake /usr/local/bin/mold: CUDA driver access
 # Environment=LD_LIBRARY_PATH=/run/opengl-driver/lib
 
 # Security hardening

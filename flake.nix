@@ -120,6 +120,7 @@
               pkgs.libiconv
             ]
             ++ lib.optionals isLinux [
+              pkgs.stdenv.cc.cc.lib
               pkgs.cudaPackages.cuda_cudart
               pkgs.cudaPackages.libcublas.lib
               pkgs.cudaPackages.cuda_nvtx.lib
@@ -256,10 +257,17 @@
                 postInstall =
                   if isLinux then
                     ''
+                      # Build a CUDA-free helper for completion generation, then
+                      # patch its RUNPATH before execing it. The installed binary
+                      # is CUDA-linked and cannot run in the sandbox because the
+                      # host-only NVIDIA driver (`libcuda.so.1`) is absent.
+                      cargoWithProfile build -p mold-ai --features ${completionFeatures}
+                      patchelf --set-rpath ${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]} target/release/mold
+
                       installShellCompletion --cmd mold \
-                        --bash <(cargoWithProfile run -p mold-ai --features ${completionFeatures} -- completions bash) \
-                        --zsh <(cargoWithProfile run -p mold-ai --features ${completionFeatures} -- completions zsh) \
-                        --fish <(cargoWithProfile run -p mold-ai --features ${completionFeatures} -- completions fish)
+                        --bash <(target/release/mold completions bash) \
+                        --zsh <(target/release/mold completions zsh) \
+                        --fish <(target/release/mold completions fish)
                     ''
                   else
                     ''
@@ -272,16 +280,50 @@
               }
               // lib.optionalAttrs isLinux {
                 CUDA_COMPUTE_CAP = computeCap;
+                nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
+                  pkgs.installShellFiles
+                  pkgs.autoPatchelfHook
+                  pkgs.autoAddDriverRunpath
+                  (pkgs.writeTextFile {
+                    name = "mold-runpath-assert-hook";
+                    destination = "/nix-support/setup-hook";
+                    text = ''
+                      assertMoldRunpath() {
+                        rpath="$(patchelf --print-rpath $out/bin/mold)"
+                        echo "mold RUNPATH: $rpath"
 
-                # Linux postInstall generates shell completions by execing the
-                # freshly-built CUDA-free target binary before Nix fixup patches
-                # its runtime paths. Keep libstdc++ visible so sandboxed builds
-                # do not fail in the dynamic loader before reaching `main()`.
-                preInstall = ''
-                  export LD_LIBRARY_PATH=${
-                    lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]
-                  }''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-                '';
+                        case ":$rpath:" in
+                          *":${pkgs.stdenv.cc.cc.lib}/lib:"*) ;;
+                          *) echo "missing libstdc++ RUNPATH entry" >&2; exit 1 ;;
+                        esac
+                        case ":$rpath:" in
+                          *":${pkgs.cudaPackages.cuda_cudart}/lib:"*) ;;
+                          *) echo "missing CUDA runtime RUNPATH entry" >&2; exit 1 ;;
+                        esac
+                        case ":$rpath:" in
+                          *":${pkgs.cudaPackages.libcublas.lib}/lib:"*) ;;
+                          *) echo "missing libcublas RUNPATH entry" >&2; exit 1 ;;
+                        esac
+                        case ":$rpath:" in
+                          *":${pkgs.cudaPackages.libcurand.lib}/lib:"*) ;;
+                          *) echo "missing libcurand RUNPATH entry" >&2; exit 1 ;;
+                        esac
+                        case ":$rpath:" in
+                          *":/run/opengl-driver/lib:"*) ;;
+                          *) echo "missing NVIDIA driver RUNPATH entry" >&2; exit 1 ;;
+                        esac
+                      }
+
+                      postFixupHooks+=(assertMoldRunpath)
+                    '';
+                  })
+                ];
+
+                # `libcuda.so.1` comes from the host NVIDIA driver and is not
+                # available in the Nix build sandbox. Resolve CUDA toolkit libs
+                # with autoPatchelf, then let autoAddDriverRunpath add the stable
+                # NixOS driver RUNPATH after autoPatchelf's `--set-rpath` pass.
+                autoPatchelfIgnoreMissingDeps = [ "libcuda.so.1" ];
 
                 # Sandboxed Linux builders do not provide the host NVIDIA
                 # driver (`libcuda.so.1`). The CUDA-linked CLI can therefore

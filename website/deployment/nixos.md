@@ -173,7 +173,6 @@ so Prometheus/Grafana Agent can scrape it without an API key.
 - **System user** `mold:mold` with home at `homeDir`
 - **Directories** via tmpfiles: `homeDir`, `modelsDir`, and `outputDir` (if set)
 - **Systemd service** `mold.service` — runs `mold serve` with:
-  - `LD_LIBRARY_PATH=/run/opengl-driver/lib` for NixOS CUDA driver access
   - `video` and `render` supplementary groups for GPU access
   - Hardened: `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome`,
     `PrivateTmp`
