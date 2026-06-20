@@ -8,6 +8,7 @@ pub mod gpu_pool;
 pub mod gpu_worker;
 pub mod job_registry;
 pub mod logging;
+mod memory_preflight;
 #[cfg(feature = "metrics")]
 pub mod metrics;
 pub mod model_cache;
