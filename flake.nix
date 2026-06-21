@@ -427,14 +427,16 @@
               base_rpath="/nix/store/test-libstdcxx/lib:/nix/store/test-libcublas/lib:/nix/store/test-libcurand/lib:/run/opengl-driver/lib"
 
               MOLD_TEST_RPATH="$base_rpath"
-              MOLD_TEST_NEEDED="libcublas.so.12
-              libcurand.so.10"
+              MOLD_TEST_NEEDED="$(printf '%s\n' \
+                "libcublas.so.12" \
+                "libcurand.so.10")"
               export MOLD_TEST_RPATH MOLD_TEST_NEEDED
               assertMoldRunpath
 
-              MOLD_TEST_NEEDED="libcudart.so.12
-              libcublas.so.12
-              libcurand.so.10"
+              MOLD_TEST_NEEDED="$(printf '%s\n' \
+                "libcudart.so.12" \
+                "libcublas.so.12" \
+                "libcurand.so.10")"
               export MOLD_TEST_NEEDED
               if ( assertMoldRunpath ); then
                 echo "expected missing libcudart RUNPATH to fail when libcudart is needed" >&2
