@@ -304,7 +304,6 @@ in
         MOLD_PORT = toString cfg.port;
         MOLD_MODELS_DIR = cfg.modelsDir;
         MOLD_LOG = cfg.logLevel;
-        LD_LIBRARY_PATH = "/run/opengl-driver/lib";
       }
       // lib.optionalAttrs (cfg.corsOrigin != null) {
         MOLD_CORS_ORIGIN = cfg.corsOrigin;

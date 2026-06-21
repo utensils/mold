@@ -39,6 +39,6 @@ Key settings:
 [Service]
 ExecStart=/usr/local/bin/mold serve --port 7680 --bind 0.0.0.0
 Environment=MOLD_LOG=info
-# NixOS: uncomment for CUDA driver access
+# NixOS with a non-flake `/usr/local/bin/mold`: uncomment for CUDA driver access
 # Environment=LD_LIBRARY_PATH=/run/opengl-driver/lib
 ```

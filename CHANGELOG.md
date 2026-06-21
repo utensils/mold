@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Nix CUDA packages now install `mold` with a complete RUNPATH.** Linux builds auto-patch `$out/bin/mold` for `libstdc++` and CUDA toolkit libraries, add `/run/opengl-driver/lib` for the host NVIDIA driver, and assert those entries during fixup so the NixOS service no longer needs `LD_LIBRARY_PATH` to start. ([#338](https://github.com/utensils/mold/issues/338))
+
 ## [0.13.1] - 2026-06-20
 
 ### Fixed
