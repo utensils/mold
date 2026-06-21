@@ -181,6 +181,64 @@
             ./scripts/ensure-web-dist.sh
           '';
 
+          assertMoldRunpathScriptFor =
+            {
+              ccLib,
+              cudaCudart,
+              libcublas,
+              libcurand,
+            }:
+            ''
+              assertMoldRunpath() {
+                rpath="$(patchelf --print-rpath $out/bin/mold)"
+                needed="$(patchelf --print-needed $out/bin/mold)"
+                echo "mold RUNPATH: $rpath"
+                echo "mold NEEDED: $needed"
+
+                case ":$rpath:" in
+                  *":${ccLib}/lib:"*) ;;
+                  *) echo "missing libstdc++ RUNPATH entry" >&2; exit 1 ;;
+                esac
+                case "$needed" in
+                  *libcudart.so*)
+                    case ":$rpath:" in
+                      *":${cudaCudart}/lib:"*) ;;
+                      *) echo "missing CUDA runtime RUNPATH entry" >&2; exit 1 ;;
+                    esac
+                    ;;
+                esac
+                case ":$rpath:" in
+                  *":${libcublas}/lib:"*) ;;
+                  *) echo "missing libcublas RUNPATH entry" >&2; exit 1 ;;
+                esac
+                case ":$rpath:" in
+                  *":${libcurand}/lib:"*) ;;
+                  *) echo "missing libcurand RUNPATH entry" >&2; exit 1 ;;
+                esac
+                case ":$rpath:" in
+                  *":/run/opengl-driver/lib:"*) ;;
+                  *) echo "missing NVIDIA driver RUNPATH entry" >&2; exit 1 ;;
+                esac
+              }
+            '';
+
+          assertMoldRunpathScript = assertMoldRunpathScriptFor {
+            ccLib = "${pkgs.stdenv.cc.cc.lib}";
+            cudaCudart = "${pkgs.cudaPackages.cuda_cudart}";
+            libcublas = "${pkgs.cudaPackages.libcublas.lib}";
+            libcurand = "${pkgs.cudaPackages.libcurand.lib}";
+          };
+
+          moldRunpathAssertHook = pkgs.writeTextFile {
+            name = "mold-runpath-assert-hook";
+            destination = "/nix-support/setup-hook";
+            text = ''
+              ${assertMoldRunpathScript}
+
+              postFixupHooks+=(assertMoldRunpath)
+            '';
+          };
+
           # Merged CUDA toolkit so bindgen_cuda can find both bin/nvcc and include/cuda.h
           cudaToolkit = pkgs.symlinkJoin {
             name = "cuda-toolkit-merged";
@@ -284,39 +342,7 @@
                   pkgs.installShellFiles
                   pkgs.autoPatchelfHook
                   pkgs.autoAddDriverRunpath
-                  (pkgs.writeTextFile {
-                    name = "mold-runpath-assert-hook";
-                    destination = "/nix-support/setup-hook";
-                    text = ''
-                      assertMoldRunpath() {
-                        rpath="$(patchelf --print-rpath $out/bin/mold)"
-                        echo "mold RUNPATH: $rpath"
-
-                        case ":$rpath:" in
-                          *":${pkgs.stdenv.cc.cc.lib}/lib:"*) ;;
-                          *) echo "missing libstdc++ RUNPATH entry" >&2; exit 1 ;;
-                        esac
-                        case ":$rpath:" in
-                          *":${pkgs.cudaPackages.cuda_cudart}/lib:"*) ;;
-                          *) echo "missing CUDA runtime RUNPATH entry" >&2; exit 1 ;;
-                        esac
-                        case ":$rpath:" in
-                          *":${pkgs.cudaPackages.libcublas.lib}/lib:"*) ;;
-                          *) echo "missing libcublas RUNPATH entry" >&2; exit 1 ;;
-                        esac
-                        case ":$rpath:" in
-                          *":${pkgs.cudaPackages.libcurand.lib}/lib:"*) ;;
-                          *) echo "missing libcurand RUNPATH entry" >&2; exit 1 ;;
-                        esac
-                        case ":$rpath:" in
-                          *":/run/opengl-driver/lib:"*) ;;
-                          *) echo "missing NVIDIA driver RUNPATH entry" >&2; exit 1 ;;
-                        esac
-                      }
-
-                      postFixupHooks+=(assertMoldRunpath)
-                    '';
-                  })
+                  moldRunpathAssertHook
                 ];
 
                 # `libcuda.so.1` comes from the host NVIDIA driver and is not
@@ -363,6 +389,64 @@
           }
           // lib.optionalAttrs isLinux {
             mold-sm120 = mkMold "120"; # Blackwell (RTX 50-series)
+          };
+
+          checks = {
+            runpath-assertion = pkgs.runCommand "mold-runpath-assertion-check" { } ''
+              set -eu
+
+              mkdir -p "$out/bin" "$TMPDIR/bin"
+              touch "$out/bin/mold"
+
+              cat > "$TMPDIR/bin/patchelf" <<'EOF'
+              #!${pkgs.runtimeShell}
+              set -eu
+              case "$1" in
+                --print-rpath)
+                  printf '%s\n' "$MOLD_TEST_RPATH"
+                  ;;
+                --print-needed)
+                  printf '%s\n' "$MOLD_TEST_NEEDED"
+                  ;;
+                *)
+                  echo "unexpected patchelf args: $*" >&2
+                  exit 2
+                  ;;
+              esac
+              EOF
+              chmod +x "$TMPDIR/bin/patchelf"
+              export PATH="$TMPDIR/bin:$PATH"
+
+              ${assertMoldRunpathScriptFor {
+                ccLib = "/nix/store/test-libstdcxx";
+                cudaCudart = "/nix/store/test-cuda-cudart";
+                libcublas = "/nix/store/test-libcublas";
+                libcurand = "/nix/store/test-libcurand";
+              }}
+
+              base_rpath="/nix/store/test-libstdcxx/lib:/nix/store/test-libcublas/lib:/nix/store/test-libcurand/lib:/run/opengl-driver/lib"
+
+              MOLD_TEST_RPATH="$base_rpath"
+              MOLD_TEST_NEEDED="$(printf '%s\n' \
+                "libcublas.so.12" \
+                "libcurand.so.10")"
+              export MOLD_TEST_RPATH MOLD_TEST_NEEDED
+              assertMoldRunpath
+
+              MOLD_TEST_NEEDED="$(printf '%s\n' \
+                "libcudart.so.12" \
+                "libcublas.so.12" \
+                "libcurand.so.10")"
+              export MOLD_TEST_NEEDED
+              if ( assertMoldRunpath ); then
+                echo "expected missing libcudart RUNPATH to fail when libcudart is needed" >&2
+                exit 1
+              fi
+
+              MOLD_TEST_RPATH="$base_rpath:/nix/store/test-cuda-cudart/lib"
+              export MOLD_TEST_RPATH
+              assertMoldRunpath
+            '';
           };
 
           apps.default = {
