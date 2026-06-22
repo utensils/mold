@@ -16,18 +16,24 @@
 /// `EPIPE` rather than terminating the process. Idempotent; safe to call after
 /// the CLI has reset the disposition to `SIG_DFL`. No-op on non-unix targets.
 #[cfg(unix)]
-pub fn ignore_sigpipe() {
+pub(crate) fn ignore_sigpipe() {
     // SAFETY: installing `SIG_IGN` for a signal is async-signal-safe and has no
-    // memory-safety implications. `libc::signal` returns the previous handler,
-    // which we intentionally discard.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-    }
+    // memory-safety implications.
+    let prev = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    // `signal()` cannot fail for SIGPIPE + SIG_IGN in practice (no EINVAL), but
+    // a debug assertion makes a regression visible in dev/test without any cost
+    // in release builds.
+    debug_assert_ne!(
+        prev,
+        libc::SIG_ERR,
+        "failed to set SIGPIPE to SIG_IGN: {}",
+        std::io::Error::last_os_error()
+    );
 }
 
 /// No-op on non-unix targets, where SIGPIPE does not exist.
 #[cfg(not(unix))]
-pub fn ignore_sigpipe() {}
+pub(crate) fn ignore_sigpipe() {}
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -52,13 +58,35 @@ mod tests {
         oldact.sa_sigaction
     }
 
+    /// Restores the SIGPIPE disposition captured at construction when dropped, so
+    /// a test that mutates this process-global state doesn't leak it to the rest
+    /// of the suite — even if the test panics partway through.
+    struct RestoreSigpipe(libc::sighandler_t);
+
+    impl RestoreSigpipe {
+        fn capture() -> Self {
+            Self(current_sigpipe_handler())
+        }
+    }
+
+    impl Drop for RestoreSigpipe {
+        fn drop(&mut self) {
+            unsafe {
+                libc::signal(libc::SIGPIPE, self.0);
+            }
+        }
+    }
+
     /// The actual failure mode from #342: with `SIG_DFL` a write to a pipe whose
     /// read end is closed kills the process; with our fix it must return `EPIPE`.
     /// If `ignore_sigpipe()` did nothing, this test would terminate the whole test
     /// binary via SIGPIPE instead of failing an assertion.
     #[test]
     fn write_to_broken_pipe_returns_epipe_not_signal() {
-        let _guard = SIGPIPE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = SIGPIPE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Declared after the lock so it drops first: restore SIGPIPE while still
+        // holding the mutex, before any other test can observe it.
+        let _restore = RestoreSigpipe::capture();
 
         // Worst case: the CLI's global reset is in effect.
         unsafe {
@@ -97,7 +125,8 @@ mod tests {
     /// to `SIG_DFL` first (mirroring the CLI's `main()` global reset).
     #[test]
     fn ignore_sigpipe_installs_sig_ign_over_sig_dfl() {
-        let _guard = SIGPIPE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = SIGPIPE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = RestoreSigpipe::capture();
 
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);

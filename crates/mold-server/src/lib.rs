@@ -19,7 +19,7 @@ pub mod request_id;
 pub mod resources;
 pub mod routes;
 pub mod routes_chain;
-pub mod signals;
+mod signals;
 pub mod state;
 pub mod web_ui;
 
