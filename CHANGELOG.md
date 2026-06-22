@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`mold serve` no longer dies from SIGPIPE when a client connection drops mid-write.** The CLI resets SIGPIPE to `SIG_DFL` in `main()` so short-lived piped commands (e.g. `mold run … | head`) terminate cleanly, but for the long-running server that disposition was fatal — a single client disconnecting mid-response (a timed-out request, a health check, the Discord bot's `/api/models` poll) delivered SIGPIPE and silently took down the whole server with no panic or error log. `mold_server::run_server()` now re-arms `SIG_IGN` at startup so such writes surface as recoverable `EPIPE` errors handled per-request by axum/hyper. ([#342](https://github.com/utensils/mold/issues/342))
 - **Nix CUDA packages now install `mold` with a complete RUNPATH.** Linux builds auto-patch `$out/bin/mold` for `libstdc++` and CUDA toolkit libraries, add `/run/opengl-driver/lib` for the host NVIDIA driver, and assert those entries during fixup so the NixOS service no longer needs `LD_LIBRARY_PATH` to start. ([#338](https://github.com/utensils/mold/issues/338))
 - **Nix CUDA RUNPATH assertions no longer require unused `libcudart`.** The Linux package now checks the CUDA runtime RUNPATH only when `$out/bin/mold` actually declares a `libcudart.so` dependency, so driver-API builds that need cuBLAS/cuRAND but not dynamic cudart can pass fixup. ([#340](https://github.com/utensils/mold/issues/340))
 

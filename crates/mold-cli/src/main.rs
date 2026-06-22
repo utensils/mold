@@ -1222,6 +1222,9 @@ async fn main() {
     // Reset SIGPIPE to default (terminate) so piping doesn't panic.
     // Rust ignores SIGPIPE by default, causing "broken pipe" panics when
     // stdout is a pipe and the reader closes (e.g. `mold run ... | head`).
+    // NOTE: this disposition is wrong for long-running servers — a client
+    // dropping mid-write would kill the process via SIGPIPE. `mold serve`
+    // re-arms SIG_IGN in `mold_server::run_server()` (see issue #342).
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);

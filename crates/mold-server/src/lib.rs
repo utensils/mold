@@ -19,6 +19,7 @@ pub mod request_id;
 pub mod resources;
 pub mod routes;
 pub mod routes_chain;
+pub mod signals;
 pub mod state;
 pub mod web_ui;
 
@@ -52,6 +53,13 @@ pub async fn run_server(
     gpu_selection: GpuSelection,
     queue_size: usize,
 ) -> Result<()> {
+    // Re-arm SIG_IGN for SIGPIPE. The CLI resets it to SIG_DFL in main() for
+    // clean piping of short-lived commands, but for this long-running server
+    // that is fatal — a single client dropping mid-write would kill the whole
+    // process (issue #342). With SIG_IGN, such writes surface as EPIPE and are
+    // handled per-request by hyper/axum.
+    signals::ignore_sigpipe();
+
     Config::install_runtime_models_dir_override(models_dir.clone());
 
     let mut config = Config::load_or_default();
