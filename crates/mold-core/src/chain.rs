@@ -44,7 +44,7 @@ pub enum TransitionMode {
 /// this in a request before B lands causes `ChainRequest::normalise` to
 /// return 422. Defined now so scripts that round-trip through v1 clients
 /// don't drop fields silently.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LoraSpec {
     pub path: String,
     pub scale: f64,
@@ -54,7 +54,7 @@ pub struct LoraSpec {
 
 /// Per-stage named reference character/style. **Reserved for sub-project
 /// B** — populating this causes `ChainRequest::normalise` to return 422.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NamedRef {
     pub name: String,
     #[serde(with = "crate::types::base64_bytes")]
@@ -66,7 +66,7 @@ pub struct NamedRef {
 /// `motion_tail_frames` pixel frames of their output because those duplicate
 /// the tail of the previous stage that the engine carried across as
 /// latent-space conditioning).
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainStage {
     /// Prompt used for this stage. In v1 all stages receive the same prompt
     /// (auto-expand form replicates it); the movie-maker UI in v2 will let
@@ -133,7 +133,7 @@ pub struct ChainStage {
 /// (`stages` non-empty) or the auto-expand form (`prompt` + `total_frames` +
 /// `clip_frames`); [`ChainRequest::normalise`] collapses the latter into the
 /// former so downstream code only deals with `stages`.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainRequest {
     #[schema(example = "ltx-2-19b-distilled:fp8")]
     pub model: String,

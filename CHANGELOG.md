@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- metadata DB schema v11 adds chain_jobs + chain_job_stages tables (groundwork for durable chain jobs).
+
 ### Fixed
 
 - **`mold serve` no longer dies from SIGPIPE when a client connection drops mid-write.** The CLI resets SIGPIPE to `SIG_DFL` in `main()` so short-lived piped commands (e.g. `mold run … | head`) terminate cleanly, but for the long-running server that disposition was fatal — a single client disconnecting mid-response (a timed-out request, a health check, the Discord bot's `/api/models` poll) delivered SIGPIPE and silently took down the whole server with no panic or error log. `mold_server::run_server()` now re-arms `SIG_IGN` at startup so such writes surface as recoverable `EPIPE` errors handled per-request by axum/hyper. ([#342](https://github.com/utensils/mold/issues/342))

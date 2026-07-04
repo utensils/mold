@@ -288,11 +288,37 @@ const V10_GENERATION_METADATA_JSON: &str = r#"
 ALTER TABLE generations ADD COLUMN metadata_json TEXT;
 "#;
 
-// TODO(BR55 Phase 6): add V11_CHAIN_JOBS SQL const (chain_jobs +
-// chain_job_stages tables per spec §3.1 — approved Phase 1 DDL with
-// TEXT PRIMARY KEY uuid ids, snake_case TEXT states, i64 bit-cast seeds,
-// ON DELETE CASCADE on chain_job_stages.job_id), register it in
-// MIGRATIONS[] below, and bump SCHEMA_VERSION to 11.
+/// v11 → durable chain-job index. The manifest in each job directory is
+/// the portable source of truth; these tables provide queryable state and
+/// startup reconciliation scans.
+const V11_CHAIN_JOBS: &str = r#"
+CREATE TABLE chain_jobs (
+    id            TEXT PRIMARY KEY,
+    state         TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    request_json  TEXT NOT NULL,
+    job_dir       TEXT NOT NULL,
+    stage_count   INTEGER NOT NULL,
+    current_stage INTEGER NOT NULL DEFAULT 0,
+    error         TEXT,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    finalized_at  INTEGER
+);
+
+CREATE TABLE chain_job_stages (
+    job_id             TEXT NOT NULL REFERENCES chain_jobs(id) ON DELETE CASCADE,
+    stage_idx          INTEGER NOT NULL,
+    state              TEXT NOT NULL,
+    seed               INTEGER NOT NULL,
+    frames_emitted     INTEGER,
+    generation_time_ms INTEGER,
+    segment_rel_path   TEXT,
+    error              TEXT,
+    updated_at         INTEGER NOT NULL,
+    PRIMARY KEY (job_id, stage_idx)
+);
+"#;
 
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
@@ -337,11 +363,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 10,
         kind: MigrationKind::Sql(V10_GENERATION_METADATA_JSON),
     },
+    Migration {
+        version: 11,
+        kind: MigrationKind::Sql(V11_CHAIN_JOBS),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -677,7 +707,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 10);
+        assert_eq!(SCHEMA_VERSION, 11);
     }
 
     /// v6: `settings` keeps every existing row under `profile = 'default'`
@@ -929,8 +959,8 @@ mod v9_tests {
     use rusqlite::Connection;
 
     #[test]
-    fn schema_version_is_ten() {
-        assert_eq!(SCHEMA_VERSION, 10);
+    fn schema_version_is_eleven() {
+        assert_eq!(SCHEMA_VERSION, 11);
     }
 
     #[test]
