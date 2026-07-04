@@ -1043,5 +1043,116 @@ request_json = "{}"
         assert!(layout.boundary_out_dir(7).is_dir());
     }
 
-    // TODO(BR55 Phase 6): Add one serde-tag fixture per ChainJobEvent variant and assert Rust serialization against web vitest mirrors.
+    fn event_detail_fixture() -> ChainJobDetail {
+        let request = crate::chain::ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".into(),
+            stages: vec![sample_stage("stage zero", None)],
+            motion_tail_frames: 0,
+            width: 64,
+            height: 64,
+            fps: 12,
+            seed: Some(42),
+            steps: 4,
+            guidance: 3.0,
+            strength: 1.0,
+            output_format: OutputFormat::Mp4,
+            placement: None,
+            prompt: None,
+            total_frames: None,
+            clip_frames: None,
+            source_image: None,
+            enable_audio: None,
+        };
+        ChainJobDetail {
+            summary: ChainJobSummary {
+                id: "job-1".into(),
+                state: ChainJobState::Running,
+                model: request.model.clone(),
+                stage_count: 1,
+                current_stage: 0,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 2,
+                error: None,
+                ephemeral: false,
+            },
+            stages: vec![ChainJobStageDetail {
+                idx: 0,
+                state: StageState::Pending,
+                seed: 42,
+                frames_emitted: None,
+                generation_time_ms: None,
+                has_preview: false,
+                error: None,
+            }],
+            finalizes: vec![],
+            retakes: vec![],
+            script: crate::chain::ChainScript::from(&request),
+        }
+    }
+
+    #[test]
+    fn chain_job_event_serde_tag_fixtures_match_web_contract() {
+        let fixtures = vec![
+            (
+                ChainJobEvent::Snapshot {
+                    job: event_detail_fixture(),
+                },
+                serde_json::json!("snapshot"),
+            ),
+            (
+                ChainJobEvent::StageStart { stage_idx: 2 },
+                serde_json::json!({"type":"stage_start","stage_idx":2}),
+            ),
+            (
+                ChainJobEvent::DenoiseStep {
+                    stage_idx: 2,
+                    step: 3,
+                    total: 8,
+                },
+                serde_json::json!({"type":"denoise_step","stage_idx":2,"step":3,"total":8}),
+            ),
+            (
+                ChainJobEvent::StageDone {
+                    stage_idx: 2,
+                    frames_emitted: 97,
+                    has_preview: true,
+                },
+                serde_json::json!({"type":"stage_done","stage_idx":2,"frames_emitted":97,"has_preview":true}),
+            ),
+            (
+                ChainJobEvent::Yielded {
+                    pending_small_jobs: 4,
+                },
+                serde_json::json!({"type":"yielded","pending_small_jobs":4}),
+            ),
+            (
+                ChainJobEvent::Finalizing { total_frames: 194 },
+                serde_json::json!({"type":"finalizing","total_frames":194}),
+            ),
+            (
+                ChainJobEvent::Finalized {
+                    output: "final/output-1.mp4".into(),
+                    take: 1,
+                },
+                serde_json::json!({"type":"finalized","output":"final/output-1.mp4","take":1}),
+            ),
+            (
+                ChainJobEvent::StateChanged {
+                    state: ChainJobState::Completed,
+                    error: None,
+                },
+                serde_json::json!({"type":"state_changed","state":"completed","error":null}),
+            ),
+        ];
+
+        for (event, expected) in fixtures {
+            let value = serde_json::to_value(&event).expect("event serializes");
+            if expected == serde_json::json!("snapshot") {
+                assert_eq!(value.get("type"), Some(&serde_json::json!("snapshot")));
+                assert_eq!(value.pointer("/job/id"), Some(&serde_json::json!("job-1")));
+            } else {
+                assert_eq!(value, expected);
+            }
+        }
+    }
 }

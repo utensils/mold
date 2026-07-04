@@ -28,12 +28,11 @@ mod tests {
 
     use crate::{routes::create_router, state::AppState};
 
-    /// Serialize tests that mutate MOLD_MODELS_DIR env var.
+    /// Serialize tests that mutate process-global mold env vars.
     /// Uses std::sync::Mutex (not tokio) so it works across independent
     /// tokio runtimes that #[tokio::test] creates per test.
     fn env_lock() -> &'static std::sync::Mutex<()> {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        &ENV_LOCK
+        crate::test_support::env_lock()
     }
 
     /// Parse response body as JSON and return the value.
@@ -1748,7 +1747,6 @@ mod tests {
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
-            chain_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             job_registry: crate::job_registry::JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
@@ -1809,7 +1807,6 @@ mod tests {
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
-            chain_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             job_registry: crate::job_registry::JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
@@ -2073,7 +2070,6 @@ mod tests {
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
-            chain_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             job_registry: crate::job_registry::JobRegistry::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(

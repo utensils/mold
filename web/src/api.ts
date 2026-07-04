@@ -267,47 +267,94 @@ export async function generateChainStream(
   });
 }
 
-export function createChainJob(
-  _req: ChainRequestWire,
+async function requireJson<T>(res: Response, label: string): Promise<T> {
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`${label} failed: ${res.status} ${text}`.trim());
+  }
+  return (await res.json()) as T;
+}
+
+export async function createChainJob(
+  req: ChainRequestWire,
 ): Promise<CreateChainJobResponse> {
-  throw new Error("TODO(BR55 Phase 6): implement createChainJob API helper");
+  const res = await fetch(`${base}/api/chain-jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return requireJson<CreateChainJobResponse>(res, "POST /api/chain-jobs");
 }
 
-export function listChainJobs(): Promise<ChainJobListing> {
-  throw new Error("TODO(BR55 Phase 6): implement listChainJobs API helper");
+export async function listChainJobs(): Promise<ChainJobListing> {
+  const res = await fetch(`${base}/api/chain-jobs`);
+  return requireJson<ChainJobListing>(res, "GET /api/chain-jobs");
 }
 
-export function getChainJob(_id: string): Promise<ChainJobDetail> {
-  throw new Error("TODO(BR55 Phase 6): implement getChainJob API helper");
+export async function getChainJob(id: string): Promise<ChainJobDetail> {
+  const res = await fetch(`${base}/api/chain-jobs/${encodeURIComponent(id)}`);
+  return requireJson<ChainJobDetail>(res, `GET /api/chain-jobs/${id}`);
 }
 
-export function resumeChainJob(_id: string): Promise<ChainJobSummary> {
-  throw new Error("TODO(BR55 Phase 6): implement resumeChainJob API helper");
-}
-
-export function retakeChainJob(
-  _id: string,
-  _req: RetakeRequest,
-): Promise<ChainJobSummary> {
-  throw new Error("TODO(BR55 Phase 6): implement retakeChainJob API helper");
-}
-
-export function cancelChainJob(_id: string): Promise<ChainJobSummary> {
-  throw new Error("TODO(BR55 Phase 6): implement cancelChainJob API helper");
-}
-
-export function deleteChainJob(_id: string): Promise<void> {
-  throw new Error("TODO(BR55 Phase 6): implement deleteChainJob API helper");
-}
-
-export function chainJobEventsUrl(_id: string): string {
-  throw new Error("TODO(BR55 Phase 6): implement chainJobEventsUrl API helper");
-}
-
-export function chainJobStagePreviewUrl(_id: string, _idx: number): string {
-  throw new Error(
-    "TODO(BR55 Phase 6): implement chainJobStagePreviewUrl API helper",
+export async function resumeChainJob(id: string): Promise<ChainJobSummary> {
+  const res = await fetch(
+    `${base}/api/chain-jobs/${encodeURIComponent(id)}/resume`,
+    { method: "POST" },
   );
+  return requireJson<ChainJobSummary>(res, `POST /api/chain-jobs/${id}/resume`);
+}
+
+export async function retakeChainJob(
+  id: string,
+  req: RetakeRequest,
+): Promise<ChainJobSummary> {
+  const res = await fetch(
+    `${base}/api/chain-jobs/${encodeURIComponent(id)}/retake`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(req),
+    },
+  );
+  return requireJson<ChainJobSummary>(res, `POST /api/chain-jobs/${id}/retake`);
+}
+
+export async function cancelChainJob(id: string): Promise<ChainJobSummary> {
+  const res = await fetch(
+    `${base}/api/chain-jobs/${encodeURIComponent(id)}/cancel`,
+    { method: "POST" },
+  );
+  return requireJson<ChainJobSummary>(res, `POST /api/chain-jobs/${id}/cancel`);
+}
+
+export async function deleteChainJob(id: string): Promise<void> {
+  const res = await fetch(`${base}/api/chain-jobs/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `DELETE /api/chain-jobs/${id} failed: ${res.status} ${text}`.trim(),
+    );
+  }
+}
+
+export async function gcChainJobs(): Promise<{
+  swept_ephemeral_jobs: number;
+  pruned_artifact_dirs: number;
+}> {
+  const res = await fetch(`${base}/api/chain-jobs/gc`, { method: "POST" });
+  return requireJson(res, "POST /api/chain-jobs/gc");
+}
+
+export function chainJobEventsUrl(id: string): string {
+  return `${base}/api/chain-jobs/${encodeURIComponent(id)}/events`;
+}
+
+export function chainJobStagePreviewUrl(id: string, idx: number): string {
+  return `${base}/api/chain-jobs/${encodeURIComponent(id)}/stages/${encodeURIComponent(
+    String(idx),
+  )}/preview`;
 }
 
 // ─── Downloads UI (Agent A) ───────────────────────────────────────────────────

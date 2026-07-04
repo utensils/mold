@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Composer from "../components/Composer.vue";
+import ChainJobCard from "../components/ChainJobCard.vue";
 import GenerateParamsPanel from "../components/GenerateParamsPanel.vue";
 type GenerateParamsPanelInstance = InstanceType<typeof GenerateParamsPanel>;
 import LoraPicker from "../components/LoraPicker.vue";
@@ -13,6 +14,7 @@ import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
 import TopBar from "../components/TopBar.vue";
 import {
+  createChainJob,
   deleteGalleryImage,
   fetchModels,
   listGallery,
@@ -25,6 +27,7 @@ import {
 } from "../composables/useGenerateForm";
 import { isQwenImageEditFamily } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
+import { useChainJobStream } from "../composables/useChainJobStream";
 import { useQueue } from "../composables/useQueue";
 import { decideChainRouting } from "../lib/chainRouting";
 import { isStandaloneGenerationModel } from "../lib/modelFilters";
@@ -173,6 +176,9 @@ const selectedIndex = ref<number>(-1);
 // fires for any subsequent transitions, regardless of which route was
 // active when the SSE complete event arrived.
 const stream = useGenerateStream();
+const submittedChainJobId = ref<string | null>(null);
+const submittedChainJob = useChainJobStream(submittedChainJobId);
+const submittedChainJobDetail = submittedChainJob.detail;
 
 async function refreshModels() {
   try {
@@ -471,7 +477,7 @@ async function onSubmit() {
   }
 }
 
-function onSubmitScript(script: ChainScriptToml) {
+async function onSubmitScript(script: ChainScriptToml) {
   const stages: ChainStageWire[] = script.stage.map((s) => ({
     prompt: s.prompt,
     frames: s.frames,
@@ -495,15 +501,12 @@ function onSubmitScript(script: ChainScriptToml) {
     output_format: script.chain.output_format,
     enable_audio: script.chain.enable_audio,
   };
-  const decision = {
-    kind: "chain" as const,
-    clipFrames: stages[0]?.frames ?? 97,
-    motionTail: script.chain.motion_tail_frames,
-    stageCount: stages.length,
-  };
-  // TODO(BR55 Phase 6): Replace Script mode stream.submit legacy chain call with createChainJob and useChainJobStream running-card wiring.
-  // TODO(BR55 Phase 6): Keep useGenerateStream chain branch serving auto-promoted single-clip-to-chain legacy shim path unchanged.
-  stream.submit(req, decision);
+  try {
+    const { job_id } = await createChainJob(req);
+    submittedChainJobId.value = job_id;
+  } catch (e) {
+    composerError.value = e instanceof Error ? e.message : String(e);
+  }
 }
 
 const expandStagePrompt = ref("");
@@ -732,6 +735,13 @@ onBeforeUnmount(() => {
           @dismiss="stream.remove"
           @clear-finished="stream.clearDone"
           @lane-change="onQueueLaneChange"
+        />
+
+        <ChainJobCard
+          v-if="submittedChainJobDetail"
+          class="mt-4"
+          :job="submittedChainJobDetail"
+          @updated="submittedChainJobId = submittedChainJobDetail?.id ?? null"
         />
 
         <section class="mt-4">

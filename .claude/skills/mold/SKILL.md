@@ -32,7 +32,7 @@ polling, gallery search/fetch, model and LoRA listing, and server status tools.
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `mcp`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`, `lambda`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `mcp`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`, `lambda`, `jobs`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images
@@ -224,7 +224,7 @@ mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control do
 
 **Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`, `--clip-frames`, `--motion-tail`
 
-**Chained (arbitrary-length) video output:** for LTX-2 19B and 22B distilled models, `--frames` above the 97-frame per-clip cap automatically renders multiple clips with a motion-tail of latents carried across each clip boundary, then stitches them into a single MP4. The CLI picks this path transparently — `mold run ltx-2-19b-distilled:fp8 "a cat walking" --frames 400` produces one 400-frame MP4 from 5 chained stages. Advanced callers can override the per-clip length via `--clip-frames N` (must be `8k+1`, clamped to the model cap) and the overlap via `--motion-tail N` (default 4 pixel frames, 0 disables carryover). Chains fail closed on mid-stage failure (no partial output) and run on a single GPU. Other model families reject `--frames > 97` with an actionable error.
+**Chained (arbitrary-length) video output:** for LTX-2 19B and 22B distilled models, `--frames` above the 97-frame per-clip cap automatically renders multiple clips with a motion-tail of latents carried across each clip boundary, then stitches them into a single MP4. The CLI picks this path transparently — `mold run ltx-2-19b-distilled:fp8 "a cat walking" --frames 400` produces one 400-frame MP4 from 5 chained stages. Advanced callers can override the per-clip length via `--clip-frames N` (must be `8k+1`, clamped to the model cap) and the overlap via `--motion-tail N` (default 4 pixel frames, 0 disables carryover). Legacy `mold run` returns only the final output, while durable job workflows use `mold jobs` / `/api/chain-jobs` for resume and retake. Other model families reject `--frames > 97` with an actionable error.
 
 **Current constraints:** `x2` spatial upscaling is wired across the family, `x1.5` spatial upscaling is wired for `ltx-2.3-*`, and `x2` temporal upscaling is wired in the native runtime. Camera-control preset aliases currently auto-resolve the published LTX-2 19B LoRAs only. The family runs through the native Rust stack in `mold-inference`, with CUDA as the supported backend for real local generation, CPU as a correctness-only fallback, and Metal unsupported. On 24 GB Ada GPUs such as the RTX 4090, the validated path stays on the compatible `fp8-cast` mode rather than Hopper-only `fp8-scaled-mm`. The native CUDA matrix is validated across 19B/22B text+audio-video, image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`). Explicit LTX-2 unload drops the retained runtime before resetting the assigned CUDA primary context; CPU fallback unload remains a plain state clear. When requests go through `mold serve`, the built-in body limit is `64 MiB`, which is enough for common inline source-video and source-audio workflows.
 
@@ -258,6 +258,26 @@ mold run ltx-2-19b-distilled:fp8 \
 - Chain endpoint: `POST /api/generate/chain[/stream]`
 - Capabilities: `GET /api/capabilities/chain-limits?model=<name>`
 - Max stages: 16. LTX-2 distilled cap: 97 frames/clip.
+
+### mold jobs CLI
+
+Durable chain jobs can be inspected and controlled through `mold jobs` against
+a running server:
+
+```bash
+mold jobs list [--json]
+mold jobs show <id> [--json]
+mold jobs resume <id>
+mold jobs retake <id> --stage <N> [--mode cascade|splice] [--seed-offset <U64>] [--prompt <TEXT>]
+mold jobs cancel <id>
+mold jobs delete <id> [--yes]
+mold jobs gc
+```
+
+The commands use `MOLD_HOST` and `MOLD_API_KEY` like other remote
+CLI surfaces. `mold jobs gc` mirrors `POST /api/chain-jobs/gc`, pruning
+successful ephemeral shim jobs and completed non-ephemeral artifacts older than
+`chain.jobs_artifact_ttl_days`.
 
 ## Model Selection Guide
 
@@ -659,13 +679,13 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 
 - `POST /api/generate` — image/video generation, raw bytes response
 - `POST /api/generate/stream` — SSE progress + base64 complete event
-- `POST /api/generate/chain` — chained arbitrary-length video (LTX-2 distilled); body is `mold_core::chain::ChainRequest` (canonical `stages[]` or auto-expand `prompt`+`total_frames`+`clip_frames`)
-- `POST /api/generate/chain/stream` — same as above, SSE progress with per-stage `denoise_step` events
+- `POST /api/generate/chain` — chained arbitrary-length video (LTX-2 distilled); body is `mold_core::chain::ChainRequest` (canonical `stages[]` or auto-expand `prompt`+`total_frames`+`clip_frames`); executes through the durable chain-job runner while keeping the legacy response shape
+- `POST /api/generate/chain/stream` — same as above, SSE progress with per-stage `denoise_step` events and additive `job_id` fields on progress frames
 - Durable chain jobs:
   - `POST /api/chain-jobs` · `GET /api/chain-jobs` · `GET /api/chain-jobs/:id`
   - `GET /api/chain-jobs/:id/events` — SSE snapshot + live job events
   - `POST /api/chain-jobs/:id/resume` · `POST /api/chain-jobs/:id/retake` · `POST /api/chain-jobs/:id/cancel`
-  - `DELETE /api/chain-jobs/:id` · `GET /api/chain-jobs/:id/stages/:idx/preview`
+  - `DELETE /api/chain-jobs/:id` · `POST /api/chain-jobs/gc` · `GET /api/chain-jobs/:id/stages/:idx/preview`
 - `POST /api/expand` — LLM prompt expansion
 - `GET /api/models` · `GET /api/loras` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
 - `GET /api/gallery` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`

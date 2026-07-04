@@ -1,23 +1,10 @@
 //! Server-side chained video generation endpoints.
 //!
 //! Exposes `POST /api/generate/chain` (synchronous) and
-//! `POST /api/generate/chain/stream` (SSE). Both drive
-//! [`mold_inference::chain::ChainOrchestrator`] through an engine's
-//! [`mold_inference::chain::ChainStageRenderer`] view.
-//!
-//! Unlike the single-shot generate path (which queues through
-//! [`crate::state::QueueHandle`] to keep small GPU jobs FIFO-fair), chains
-//! are multi-minute compound jobs — the handler take/restores the engine
-//! out of the model cache and runs the full sequence in a
-//! [`tokio::task::spawn_blocking`] so the sync orchestrator never blocks
-//! the async runtime. While the chain is running the engine is removed
-//! from the cache, so concurrent generate/chain requests for the same
-//! model cannot race.
-
-use std::convert::Infallible;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+//! `POST /api/generate/chain/stream` (SSE). Both are compatibility shims over
+//! the durable chain-job runner: create an ephemeral job, map runner events
+//! back to the legacy wire shape, and delete successful ephemeral artifacts
+//! after assembling the response.
 
 use axum::{
     extract::State,
@@ -26,23 +13,19 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::chain::{
-    ChainProgressEvent, ChainRequest, ChainResponse, ChainScript, SseChainCompleteEvent,
+    ChainFailure, ChainProgressEvent, ChainRequest, ChainResponse, ChainScript,
+    SseChainCompleteEvent,
 };
-use mold_core::chain_job::{ChainJobEvent, ChainJobState};
+use mold_core::chain_job::{settled, ChainJobEvent, ChainJobState};
 use mold_core::{OutputFormat, OutputMetadata, VideoData};
 use mold_db::MetadataDb;
-use sha2::{Digest, Sha256};
+use std::convert::Infallible;
 use tokio_stream::StreamExt as _;
 
 use crate::chain_job_runner::{ChainJobRunnerHandle, EphemeralClaimGuard};
-use crate::gpu_pool::{ActiveGeneration, GpuWorker};
-use crate::gpu_worker;
-use crate::model_cache::CachedEngine;
-use crate::model_manager;
 use crate::queue::save_video_to_dir;
 use crate::routes::ApiError;
 use crate::state::AppState;
-use mold_inference::chain::{ChainOrchestrator, ChainOrchestratorError};
 
 /// Internal wire event used by the chain SSE stream before per-event
 /// serialization. Separate from [`crate::state::SseMessage`] because chain
@@ -50,7 +33,7 @@ use mold_inference::chain::{ChainOrchestrator, ChainOrchestratorError};
 /// progress events are chain-shaped (`ChainProgressEvent`) rather than the
 /// single-stage `SseProgressEvent`.
 pub(crate) enum ChainSseMessage {
-    Progress(ChainProgressEvent),
+    Progress(serde_json::Value),
     Complete(Box<SseChainCompleteEvent>),
     Error(String),
 }
@@ -75,19 +58,56 @@ fn chain_sse_event(msg: ChainSseMessage) -> SseEvent {
     }
 }
 
-/// Create + claim an ephemeral job for a sync request. Async (performs the
-/// validation-split's async half: family validation + normalise); rewrites
-/// output_format→Mp4 (P1 binding), remembers the original for the response.
-#[allow(
-    dead_code,
-    unused_variables,
-    reason = "Phase 3 placeholder — removed in Phase 6"
-)]
 async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, ApiError> {
-    todo!("TODO(BR55 Phase 6): create claimed ephemeral chain job for legacy shim request")
+    let handle = state.chain_jobs.as_ref().ok_or_else(|| {
+        ApiError::with_code(
+            "durable chain jobs are unavailable because the metadata DB is disabled",
+            "CHAIN_JOBS_UNAVAILABLE",
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
+    let db = state.metadata_db.as_ref().as_ref().ok_or_else(|| {
+        ApiError::with_code(
+            "durable chain jobs are unavailable because the metadata DB is disabled",
+            "CHAIN_JOBS_UNAVAILABLE",
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
+
+    let mut req = req;
+    validate_and_normalize_chain_family(state, &mut req).await?;
+    let mut req = req
+        .normalise()
+        .map_err(|e| ApiError::validation(e.to_string()))?;
+    validate_and_normalize_chain_family(state, &mut req).await?;
+
+    let original_format = req.output_format;
+    req.output_format = OutputFormat::Mp4;
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let guard = handle.claim_ephemeral(&job_id);
+    let jobs_root = crate::routes_chain_jobs::jobs_root()?;
+    if let Err(err) = crate::chain_job_runner::create_job_with_params(
+        db,
+        &jobs_root,
+        crate::chain_job_runner::CreateJobParams {
+            id: job_id.clone(),
+            ephemeral: true,
+            request: req,
+        },
+    ) {
+        drop(guard);
+        return Err(ApiError::internal(format!(
+            "failed to create legacy chain shim job: {err:#}"
+        )));
+    }
+    handle.kick();
+    Ok(ShimJob {
+        job_id,
+        original_format,
+        guard,
+    })
 }
 
-#[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
 struct ShimJob {
     job_id: String,
     original_format: OutputFormat,
@@ -100,17 +120,80 @@ struct ShimJob {
 /// jobs a closed receiver by design). Timeout-free because the R2 terminal
 /// contract guarantees settlement AND the closed-receiver branch covers
 /// publish_then_remove racing the subscribe.
-#[allow(
-    dead_code,
-    unused_variables,
-    reason = "Phase 3 placeholder — removed in Phase 6"
-)]
 async fn shim_wait_settled(
     handle: &ChainJobRunnerHandle,
     db: &MetadataDb,
     job_id: &str,
 ) -> Result<(ChainJobState, Option<String>), ApiError> {
-    todo!("TODO(BR55 Phase 6): wait for durable chain job settlement for legacy shim response")
+    loop {
+        let mut live = handle
+            .subscribe(db, job_id)
+            .map_err(|e| ApiError::internal(format!("failed to subscribe to shim job: {e:#}")))?;
+        match live.recv().await {
+            Ok(ChainJobEvent::StateChanged { state, error }) if settled(state) => {
+                return Ok((state, error));
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+            | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                let row = mold_db::chain_jobs::get_job(db, job_id).map_err(|e| {
+                    ApiError::internal(format!("failed to re-read shim job state: {e:#}"))
+                })?;
+                let Some(row) = row else {
+                    return Err(ApiError::internal(format!(
+                        "legacy chain shim job {job_id} disappeared before settlement"
+                    )));
+                };
+                if settled(row.state) {
+                    return Ok((row.state, row.error));
+                }
+            }
+        }
+    }
+}
+
+fn shim_chain_failure(
+    db: &MetadataDb,
+    job_id: &str,
+    settled_error: Option<String>,
+) -> Result<ChainFailure, ApiError> {
+    let row = mold_db::chain_jobs::get_job(db, job_id)
+        .map_err(|e| ApiError::internal(format!("failed to read failed shim job row: {e:#}")))?
+        .ok_or_else(|| {
+            ApiError::internal(format!(
+                "legacy chain shim job {job_id} disappeared before failure response"
+            ))
+        })?;
+    let stages = mold_db::chain_jobs::stages_for_job(db, job_id)
+        .map_err(|e| ApiError::internal(format!("failed to read failed shim job stages: {e:#}")))?;
+    let failed = stages
+        .iter()
+        .find(|stage| stage.state == mold_core::chain_job::StageState::Failed);
+    let elapsed_stages = stages
+        .iter()
+        .filter(|stage| stage.state == mold_core::chain_job::StageState::Completed)
+        .count() as u32;
+    let elapsed_ms = stages
+        .iter()
+        .filter(|stage| stage.state == mold_core::chain_job::StageState::Completed)
+        .filter_map(|stage| stage.generation_time_ms)
+        .sum::<u64>();
+    let failed_stage_idx = failed
+        .map(|stage| stage.stage_idx)
+        .unwrap_or_else(|| row.current_stage.min(row.stage_count.saturating_sub(1)));
+    let stage_error = failed
+        .and_then(|stage| stage.error.clone())
+        .or(row.error)
+        .or(settled_error)
+        .unwrap_or_else(|| "chain job settled as failed".to_string());
+
+    Ok(ChainFailure {
+        error: "stage render failed".into(),
+        failed_stage_idx,
+        elapsed_stages,
+        elapsed_ms,
+        stage_error,
+    })
 }
 
 /// Build the legacy ChainResponse from the settled job. MP4 PASSTHROUGH
@@ -121,16 +204,150 @@ async fn shim_wait_settled(
 /// (format field reports ACTUAL bytes, incl. the Webp→Apng fallback).
 /// generation_time_ms = Σ stage rows, script echo. THEN delete job dir +
 /// row (read-then-delete; single requester owns the claim).
-#[allow(
-    dead_code,
-    unused_variables,
-    reason = "Phase 3 placeholder — removed in Phase 6"
-)]
 fn shim_build_response_and_cleanup(
     state: &AppState,
     shim: ShimJob,
 ) -> Result<ChainResponse, ApiError> {
-    todo!("TODO(BR55 Phase 6): build legacy ChainResponse from settled ephemeral job and delete it")
+    let handle = state.chain_jobs.as_ref().ok_or_else(|| {
+        ApiError::with_code(
+            "durable chain jobs are unavailable because the metadata DB is disabled",
+            "CHAIN_JOBS_UNAVAILABLE",
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
+    let db = state.metadata_db.as_ref().as_ref().ok_or_else(|| {
+        ApiError::with_code(
+            "durable chain jobs are unavailable because the metadata DB is disabled",
+            "CHAIN_JOBS_UNAVAILABLE",
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
+    let _claim = shim.guard;
+    let _guard = handle.blocking_lock_job(&shim.job_id);
+    let row = mold_db::chain_jobs::get_job(db, &shim.job_id)
+        .map_err(|e| ApiError::internal(format!("failed to read shim job row: {e:#}")))?
+        .ok_or_else(|| {
+            ApiError::internal(format!(
+                "legacy chain shim job {} disappeared before response build",
+                shim.job_id
+            ))
+        })?;
+    let manifest = mold_core::chain_job::ChainJobManifest::read_from_dir(&row.job_dir)
+        .map_err(|e| ApiError::internal(format!("failed to read shim job manifest: {e:#}")))?;
+    let final_record = manifest.finalizes.last().ok_or_else(|| {
+        ApiError::internal(format!(
+            "legacy chain shim job {} completed without a final output",
+            shim.job_id
+        ))
+    })?;
+    let final_path = row.job_dir.join(&final_record.output);
+    let (probe, frames) = mold_inference::ltx2::media::decode_video_frames_from_path(&final_path)
+        .map_err(|e| {
+        ApiError::internal(format!(
+            "failed to decode legacy chain shim output '{}': {e:#}",
+            final_path.display()
+        ))
+    })?;
+    if frames.is_empty() {
+        return Err(ApiError::internal(
+            "legacy chain shim output decoded to zero frames",
+        ));
+    }
+    let mut req = crate::chain_job_runner::effective_request(&manifest)
+        .map_err(|e| ApiError::internal(format!("failed to read effective shim request: {e:#}")))?;
+    req.output_format = shim.original_format;
+
+    let (bytes, actual_format, gif_preview) = if shim.original_format == OutputFormat::Mp4 {
+        let bytes = std::fs::read(&final_path).map_err(|e| {
+            ApiError::internal(format!(
+                "failed to read legacy chain shim final MP4 '{}': {e}",
+                final_path.display()
+            ))
+        })?;
+        let gif_preview = match mold_inference::ltx_video::video_enc::encode_gif(&frames, req.fps) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!("legacy chain shim GIF preview encode failed: {err:#}");
+                Vec::new()
+            }
+        };
+        (bytes, OutputFormat::Mp4, gif_preview)
+    } else {
+        encode_chain_output(&frames, req.fps, shim.original_format, None)
+            .map_err(|e| ApiError::internal(format!("encode legacy chain shim output: {e:#}")))?
+    };
+    let thumbnail = chain_thumbnail(&frames);
+    let frame_count = probe.frames.unwrap_or(frames.len() as u32);
+    let generation_time_ms = manifest
+        .stage_status
+        .iter()
+        .filter_map(|stage| stage.generation_time_ms)
+        .sum::<u64>();
+
+    let output_dir = {
+        let config = state.config.blocking_read();
+        if config.is_output_disabled() {
+            None
+        } else {
+            Some(config.effective_output_dir())
+        }
+    };
+    if let Some(dir) = output_dir {
+        let metadata = chain_output_metadata(&req, frame_count);
+        save_video_to_dir(
+            &dir,
+            &bytes,
+            &gif_preview,
+            actual_format,
+            &req.model,
+            &metadata,
+            Some(generation_time_ms as i64),
+            Some(db),
+        );
+    }
+
+    let video = VideoData {
+        data: bytes,
+        format: actual_format,
+        width: probe.width,
+        height: probe.height,
+        frames: frame_count,
+        fps: probe.fps,
+        thumbnail,
+        gif_preview,
+        has_audio: actual_format == OutputFormat::Mp4 && probe.has_audio,
+        duration_ms: probe
+            .duration_ms
+            .or_else(|| (probe.fps > 0).then_some((frame_count as u64 * 1000) / probe.fps as u64)),
+        audio_sample_rate: (actual_format == OutputFormat::Mp4)
+            .then_some(probe.audio_sample_rate)
+            .flatten(),
+        audio_channels: (actual_format == OutputFormat::Mp4)
+            .then_some(probe.audio_channels)
+            .flatten(),
+    };
+    let response = ChainResponse {
+        video,
+        stage_count: manifest.stage_status.len() as u32,
+        gpu: None,
+        script: ChainScript::from(&req),
+        vram_estimate: None,
+    };
+
+    if row.job_dir.exists() {
+        std::fs::remove_dir_all(&row.job_dir).map_err(|e| {
+            ApiError::internal(format!(
+                "failed to remove legacy chain shim job dir '{}': {e}",
+                row.job_dir.display()
+            ))
+        })?;
+    }
+    mold_db::chain_jobs::delete_job_not_running(db, &shim.job_id).map_err(|e| {
+        ApiError::internal(format!("failed to delete legacy chain shim row: {e:#}"))
+    })?;
+    handle.cleanup_deleted(&shim.job_id);
+    handle.remove_job_lock(&shim.job_id);
+    Ok(response)
 }
 
 /// Legacy event mapping for the streaming shim: ChainJobEvent → Option of
@@ -139,13 +356,55 @@ fn shim_build_response_and_cleanup(
 /// mechanism). Snapshot → synthesized chain_start; StageStart/DenoiseStep/
 /// StageDone map 1:1; Finalizing → stitching; Yielded/Finalized/
 /// StateChanged(non-settled) → None.
-#[allow(
-    dead_code,
-    unused_variables,
-    reason = "Phase 3 placeholder — removed in Phase 6"
-)]
 fn map_job_event_to_legacy(ev: &ChainJobEvent, job_id: &str) -> Option<serde_json::Value> {
-    todo!("TODO(BR55 Phase 6): map durable chain job events to legacy chain progress JSON with job_id")
+    let progress = match ev {
+        ChainJobEvent::Snapshot { job } => {
+            let estimated_total_frames = job
+                .script
+                .stages
+                .iter()
+                .map(|stage| stage.frames)
+                .sum::<u32>();
+            ChainProgressEvent::ChainStart {
+                stage_count: job.summary.stage_count,
+                estimated_total_frames,
+            }
+        }
+        ChainJobEvent::StageStart { stage_idx } => ChainProgressEvent::StageStart {
+            stage_idx: *stage_idx,
+        },
+        ChainJobEvent::DenoiseStep {
+            stage_idx,
+            step,
+            total,
+        } => ChainProgressEvent::DenoiseStep {
+            stage_idx: *stage_idx,
+            step: *step,
+            total: *total,
+        },
+        ChainJobEvent::StageDone {
+            stage_idx,
+            frames_emitted,
+            ..
+        } => ChainProgressEvent::StageDone {
+            stage_idx: *stage_idx,
+            frames_emitted: *frames_emitted,
+        },
+        ChainJobEvent::Finalizing { total_frames } => ChainProgressEvent::Stitching {
+            total_frames: *total_frames,
+        },
+        ChainJobEvent::Yielded { .. }
+        | ChainJobEvent::Finalized { .. }
+        | ChainJobEvent::StateChanged { .. } => return None,
+    };
+    let mut value = serde_json::to_value(progress).ok()?;
+    if let serde_json::Value::Object(object) = &mut value {
+        object.insert(
+            "job_id".to_string(),
+            serde_json::Value::String(job_id.to_string()),
+        );
+    }
+    Some(value)
 }
 
 /// Encode chain frames into bytes for the requested output format. Returns
@@ -280,61 +539,6 @@ fn chain_output_metadata(req: &ChainRequest, frame_count: u32) -> OutputMetadata
     }
 }
 
-/// Trim a frame buffer to the caller's requested total frame count, per
-/// the signed-off "trim from tail" decision (2026-04-20). The orchestrator
-/// always over-produces to hit or exceed `total_frames`; trimming here
-/// keeps the output length deterministic without altering per-stage
-/// denoise behaviour.
-fn trim_to_total_frames(frames: &mut Vec<image::RgbImage>, total_frames: Option<u32>) {
-    if let Some(target) = total_frames {
-        let target = target as usize;
-        if frames.len() > target {
-            frames.truncate(target);
-        }
-    }
-}
-
-/// Assemble per-stage frame clips into a single output buffer using
-/// [`mold_inference::chain::stitch::StitchPlan`], honouring per-boundary
-/// transition rules (Smooth / Cut / Fade). Returns the stitched frames
-/// and, when any stage produced audio, the corresponding stitched audio
-/// track. Splitting the two return paths in one helper keeps the route
-/// handlers from re-deriving the same boundary/fade slices twice.
-pub(crate) fn stitch_chain_output(
-    chain_output: mold_inference::chain::ChainRunOutput,
-    req: &mold_core::chain::ChainRequest,
-) -> Result<
-    (
-        Vec<image::RgbImage>,
-        Option<mold_inference::chain::NativeAudioTrack>,
-    ),
-    mold_inference::chain::stitch::StitchError,
-> {
-    use mold_inference::chain::stitch::{stitch_audio_clips, StitchPlan};
-    let boundaries: Vec<_> = req.stages.iter().skip(1).map(|s| s.transition).collect();
-    let fade_lens: Vec<_> = req
-        .stages
-        .iter()
-        .skip(1)
-        .map(|s| s.fade_frames.unwrap_or(8))
-        .collect();
-    let audio = stitch_audio_clips(
-        &chain_output.stage_audio,
-        &boundaries,
-        &fade_lens,
-        req.motion_tail_frames,
-        req.fps,
-    )?;
-    let plan = StitchPlan {
-        clips: chain_output.stage_frames,
-        boundaries,
-        fade_lens,
-        motion_tail_frames: req.motion_tail_frames,
-    };
-    let frames = plan.assemble()?;
-    Ok((frames, audio))
-}
-
 /// Produce a PNG thumbnail for the chain output — best-effort, returns
 /// an empty `Vec` on failure so the save/response paths still succeed.
 fn chain_thumbnail(frames: &[image::RgbImage]) -> Vec<u8> {
@@ -344,46 +548,6 @@ fn chain_thumbnail(frames: &[image::RgbImage]) -> Vec<u8> {
             tracing::warn!("chain thumbnail encode failed: {e:#}");
             Vec::new()
         }
-    }
-}
-
-/// Build a `VideoData` for the `ChainResponse` body. `audio` is populated
-/// only when the chain emitted an audio track AND the encoded output
-/// format can carry it (currently MP4 only).
-fn build_video_data(
-    bytes: Vec<u8>,
-    format: OutputFormat,
-    req: &ChainRequest,
-    frame_count: u32,
-    thumbnail: Vec<u8>,
-    gif_preview: Vec<u8>,
-    audio: Option<&mold_inference::chain::NativeAudioTrack>,
-) -> VideoData {
-    let duration_ms = if req.fps == 0 {
-        None
-    } else {
-        Some((frame_count as u64 * 1000) / req.fps as u64)
-    };
-    let has_audio = audio.is_some() && format == OutputFormat::Mp4;
-    let (audio_sample_rate, audio_channels) = if has_audio {
-        let track = audio.expect("has_audio implies Some");
-        (Some(track.sample_rate), Some(track.channels as u32))
-    } else {
-        (None, None)
-    };
-    VideoData {
-        data: bytes,
-        format,
-        width: req.width,
-        height: req.height,
-        frames: frame_count,
-        fps: req.fps,
-        thumbnail,
-        gif_preview,
-        has_audio,
-        duration_ms,
-        audio_sample_rate,
-        audio_channels,
     }
 }
 
@@ -424,542 +588,6 @@ fn build_sse_chain_complete_event(
         script: resp.script.clone(),
         vram_estimate: resp.vram_estimate.clone(),
     }
-}
-
-/// Errors surfaced from the chain-run helper. Mapped to appropriate HTTP
-/// status codes by the route handlers.
-#[derive(Debug)]
-enum ChainRunError {
-    /// Model family doesn't support chain rendering (422).
-    UnsupportedModel(String),
-    /// Engine missing from cache after `ensure_model_ready` (500).
-    CacheMiss(String),
-    /// Orchestrator returned an error mid-chain from an invalid request (502).
-    Inference(String),
-    /// Orchestrator returned a typed stage failure mid-chain (502 with body).
-    StageFailed(mold_core::chain::ChainFailure),
-    /// Output encoding failure (500).
-    Encode(String),
-    /// `StitchPlan::assemble` failed (500).
-    StitchFailed(String),
-    /// Task panic or join error (500).
-    Internal(String),
-    /// No GPU worker available to service this chain (503).
-    NoWorker(String),
-    /// `spawn_blocking` task failed to join (500).
-    Join(String),
-}
-
-impl From<ChainRunError> for ApiError {
-    fn from(err: ChainRunError) -> Self {
-        match err {
-            ChainRunError::UnsupportedModel(msg) => ApiError::validation(msg),
-            ChainRunError::CacheMiss(msg) => ApiError::internal(msg),
-            ChainRunError::Inference(msg) => {
-                ApiError::internal_with_status(msg, axum::http::StatusCode::BAD_GATEWAY)
-            }
-            // The SSE error channel is string-only (`ChainSseMessage::Error(String)`),
-            // so the structured fields (`failed_stage_idx`, `elapsed_stages`,
-            // `elapsed_ms`) are deliberately collapsed to `stage_error` here.
-            // Clients that need the typed shape use the non-streaming
-            // `/api/generate/chain` handler which returns a `ChainFailure`
-            // body at status 502.
-            ChainRunError::StageFailed(failure) => ApiError::internal_with_status(
-                failure.stage_error,
-                axum::http::StatusCode::BAD_GATEWAY,
-            ),
-            ChainRunError::Encode(msg) => ApiError::internal(msg),
-            ChainRunError::StitchFailed(msg) => ApiError::internal(msg),
-            ChainRunError::Internal(msg) => ApiError::internal(msg),
-            ChainRunError::NoWorker(msg) => {
-                ApiError::internal_with_status(msg, axum::http::StatusCode::SERVICE_UNAVAILABLE)
-            }
-            ChainRunError::Join(msg) => ApiError::internal(msg),
-        }
-    }
-}
-
-/// Dispatch a chain request to the pooled or legacy handler based on
-/// whether the server discovered any GPU workers at startup.
-///
-/// In multi-worker mode (production CUDA / Metal), the pooled path
-/// uses `gpu_worker::run_chain_blocking` to acquire the target GPU's
-/// per-worker `model_load_lock` — preventing the SEGV race that arose
-/// when the legacy path's `reclaim_gpu_memory(0)` collided with a
-/// single-clip worker's reset on the same context.
-///
-/// No-worker mode (CPU-only dev boxes, CI) falls through to the legacy
-/// path, which still uses `state.chain_lock` + `state.model_cache`.
-async fn run_chain(
-    state: &AppState,
-    req: ChainRequest,
-    progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
-) -> Result<(ChainResponse, u64), ChainRunError> {
-    if state.gpu_pool.worker_count() > 0 {
-        run_chain_pooled(state, req, progress_cb).await
-    } else {
-        run_chain_legacy(state, req, progress_cb).await
-    }
-}
-
-async fn run_chain_pooled(
-    state: &AppState,
-    req: ChainRequest,
-    progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
-) -> Result<(ChainResponse, u64), ChainRunError> {
-    // TODO(BR55 Phase 6): Delete run_chain_pooled when legacy generate-chain handlers are fully replaced by durable job shims.
-    // ── Worker selection ────────────────────────────────────────────
-    let worker = select_worker_for_chain(state, &req)?;
-
-    // ── Announce busy state so the dispatcher biases away ──────────
-    // RAII guards: drop unconditionally on the way out (success or error)
-    // so select_worker's "Tier 1 idle" / "Tier 2 busy" logic sees this
-    // worker correctly after the chain ends.
-    let _in_flight_guard = InFlightGuard::increment(worker.clone());
-    let _active_gen_guard = ActiveGenerationGuard::set(worker.clone(), &req)
-        .map_err(|e| ChainRunError::Internal(e.to_string()))?;
-
-    // ── Run the chain inside spawn_blocking ─────────────────────────
-    let config_snapshot = state.config.read().await.clone();
-    // Activation hint for the per-stage shape — every stage runs at
-    // (req.width, req.height) under chain mode.
-    let chain_hint =
-        model_manager::family_for_model_sync(&req.model, &config_snapshot).map(|family| {
-            model_manager::ActivationHint {
-                width: req.width,
-                height: req.height,
-                batch: 1,
-                dtype_bytes: 2,
-                family: mold_inference::device::activation_family_for(&family),
-            }
-        });
-    let worker_task = worker.clone();
-    let req_task = req.clone();
-    let progress_cb_task = progress_cb;
-
-    let join_result = tokio::task::spawn_blocking(move || -> ChainPooledOutcome {
-        let model_name = req_task.model.clone();
-        let mut progress_cb = progress_cb_task;
-        gpu_worker::run_chain_blocking(
-            &worker_task,
-            &model_name,
-            &config_snapshot,
-            chain_hint,
-            move |engine| -> Result<mold_inference::chain::ChainRunOutput, ClosureError> {
-                let renderer = engine.as_chain_renderer().ok_or_else(|| {
-                    ClosureError::Unsupported(format!(
-                        "model '{}' does not support chained video generation",
-                        req_task.model
-                    ))
-                })?;
-                let mut orch = ChainOrchestrator::new(renderer);
-                let run_result = if let Some(cb) = progress_cb.as_deref_mut() {
-                    orch.run(&req_task, Some(cb))
-                } else {
-                    orch.run(&req_task, None)
-                };
-                run_result.map_err(ClosureError::Orchestrator)
-            },
-        )
-    })
-    .await;
-
-    // ── Unwrap the three layers (join, helper-prep, closure) ────────
-    let chain_output = match join_result {
-        Err(join_err) => {
-            return Err(ChainRunError::Join(format!(
-                "chain task failed: {join_err}"
-            )));
-        }
-        Ok(Err(prep_err)) => {
-            return Err(ChainRunError::CacheMiss(format!("{prep_err:#}")));
-        }
-        Ok(Ok(Err(ClosureError::Unsupported(msg)))) => {
-            return Err(ChainRunError::UnsupportedModel(msg));
-        }
-        Ok(Ok(Err(ClosureError::Orchestrator(orch_err)))) => {
-            return Err(match orch_err {
-                ChainOrchestratorError::StageFailed {
-                    stage_idx,
-                    elapsed_stages,
-                    elapsed_ms,
-                    inner,
-                } => ChainRunError::StageFailed(mold_core::chain::ChainFailure {
-                    error: "stage render failed".into(),
-                    failed_stage_idx: stage_idx,
-                    elapsed_stages,
-                    elapsed_ms,
-                    stage_error: format!("{inner:#}"),
-                }),
-                ChainOrchestratorError::Invalid(inner) => {
-                    ChainRunError::Inference(format!("{inner:#}"))
-                }
-            });
-        }
-        Ok(Ok(Ok(outcome))) => outcome,
-    };
-
-    // ── Stitch / encode / save / return ────────────────────────────
-    // This block MIRRORS run_chain_legacy's tail (lines 468-532 of this
-    // file prior to Task 4's split). Keep them in sync if either changes.
-    let stage_count = chain_output.stage_count;
-    let generation_time_ms = chain_output.generation_time_ms;
-
-    let (mut frames, audio) = stitch_chain_output(chain_output, &req)
-        .map_err(|e| ChainRunError::StitchFailed(e.to_string()))?;
-    trim_to_total_frames(&mut frames, req.total_frames);
-
-    if frames.is_empty() {
-        return Err(ChainRunError::Encode(
-            "chain run emitted zero frames after trim".to_string(),
-        ));
-    }
-
-    let (bytes, output_format, gif_preview) =
-        encode_chain_output(&frames, req.fps, req.output_format, audio.as_ref())
-            .map_err(|e| ChainRunError::Encode(format!("encode chain output: {e:#}")))?;
-    let thumbnail = chain_thumbnail(&frames);
-    let frame_count = frames.len() as u32;
-
-    let output_dir = {
-        let config = state.config.read().await;
-        if config.is_output_disabled() {
-            None
-        } else {
-            Some(config.effective_output_dir())
-        }
-    };
-    if let Some(dir) = output_dir {
-        let metadata = chain_output_metadata(&req, frame_count);
-        let bytes_clone = bytes.clone();
-        let gif_clone = gif_preview.clone();
-        let model = req.model.clone();
-        let db = state.metadata_db.clone();
-        tokio::task::spawn_blocking(move || {
-            save_video_to_dir(
-                &dir,
-                &bytes_clone,
-                &gif_clone,
-                output_format,
-                &model,
-                &metadata,
-                Some(generation_time_ms as i64),
-                db.as_ref().as_ref(),
-            );
-        });
-    }
-
-    let video = build_video_data(
-        bytes,
-        output_format,
-        &req,
-        frame_count,
-        thumbnail,
-        gif_preview,
-        audio.as_ref(),
-    );
-    let response = ChainResponse {
-        video,
-        stage_count,
-        gpu: None,
-        script: ChainScript::from(&req),
-        vram_estimate: None,
-    };
-    Ok((response, generation_time_ms))
-}
-
-/// Internal typed error returned by the `run_chain_blocking` closure in
-/// `run_chain_pooled`. Lets the caller distinguish an unsupported-model
-/// bailout from an orchestrator failure without string-matching.
-enum ClosureError {
-    Unsupported(String),
-    Orchestrator(ChainOrchestratorError),
-}
-
-/// Concrete `ChainPrep` type used by `run_chain_pooled`'s spawn_blocking
-/// task. Names the Result-in-Result-in-Result explicitly so the unwrap
-/// block above can match exhaustively.
-type ChainPooledOutcome =
-    gpu_worker::ChainPrep<mold_inference::chain::ChainRunOutput, ClosureError>;
-
-/// Pick a `GpuWorker` for this chain. Honours `req.placement` if set,
-/// otherwise delegates to `gpu_pool.select_worker` with the same VRAM
-/// estimate logic as single-clip dispatch.
-fn select_worker_for_chain(
-    state: &AppState,
-    req: &ChainRequest,
-) -> Result<Arc<GpuWorker>, ChainRunError> {
-    if let Some(ord) = state
-        .gpu_pool
-        .resolve_explicit_placement_gpu(req.placement.as_ref())
-        .map_err(ChainRunError::UnsupportedModel)?
-    {
-        return state.gpu_pool.worker_by_ordinal(ord).ok_or_else(|| {
-            ChainRunError::NoWorker(format!("gpu:{ord} is not in the worker pool"))
-        });
-    }
-
-    let est = crate::queue::estimate_model_vram(&req.model);
-    state
-        .gpu_pool
-        .select_worker(&req.model, est)
-        .ok_or_else(|| {
-            ChainRunError::NoWorker(format!("no GPU worker available for model '{}'", req.model))
-        })
-}
-
-/// RAII guard that bumps `worker.in_flight` on creation and decrements it on Drop.
-struct InFlightGuard {
-    worker: Arc<GpuWorker>,
-}
-
-impl InFlightGuard {
-    fn increment(worker: Arc<GpuWorker>) -> Self {
-        worker.in_flight.fetch_add(1, Ordering::SeqCst);
-        Self { worker }
-    }
-}
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.worker.in_flight.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-/// RAII guard that sets `worker.active_generation` on creation and clears it on Drop.
-struct ActiveGenerationGuard {
-    worker: Arc<GpuWorker>,
-}
-
-impl ActiveGenerationGuard {
-    fn set(worker: Arc<GpuWorker>, req: &ChainRequest) -> anyhow::Result<Self> {
-        let first_prompt = req.stages.first().map(|s| s.prompt.as_str()).unwrap_or("");
-        {
-            let mut slot = worker
-                .active_generation
-                .write()
-                .map_err(|e| anyhow::anyhow!("active_generation lock poisoned: {e}"))?;
-            *slot = Some(ActiveGeneration {
-                model: req.model.clone(),
-                prompt_sha256: format!("{:x}", Sha256::digest(first_prompt.as_bytes())),
-                started_at_unix_ms: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-                started_at: Instant::now(),
-            });
-        } // drop the write guard before moving worker
-        Ok(Self { worker })
-    }
-}
-
-impl Drop for ActiveGenerationGuard {
-    fn drop(&mut self) {
-        if let Ok(mut slot) = self.worker.active_generation.write() {
-            *slot = None;
-        }
-    }
-}
-
-/// Drive the chain to completion. Shared between the non-streaming and SSE
-/// paths — the only caller-provided variable is `progress_cb`, which is
-/// `None` for the plain JSON endpoint and `Some` for the SSE endpoint.
-async fn run_chain_legacy(
-    state: &AppState,
-    req: ChainRequest,
-    progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
-) -> Result<(ChainResponse, u64), ChainRunError> {
-    // TODO(BR55 Phase 6): Delete run_chain_legacy when legacy generate-chain handlers are fully replaced by durable job shims.
-    // Serialize concurrent chain requests. The chain handler deliberately
-    // takes the engine out of `model_cache` for the full multi-minute run
-    // (see below) — without this lock a second chain request arriving
-    // mid-run calls `ensure_model_ready`, sees an empty cache, tries to
-    // load a second copy of the model, and the subsequent `cache.take()`
-    // reports "engine vanished from cache after ensure_model_ready".
-    // Holding for the whole chain is intentional: single-clip requests
-    // keep flowing through the normal generation queue; only chains wait
-    // on each other.
-    // TODO(BR55 Phase 6): Delete state.chain_lock chain serialization when the legacy chain path is orphaned.
-    let _chain_guard = state.chain_lock.lock().await;
-
-    // Ensure the model is loaded. Progress forwarding is not plumbed yet —
-    // load-time events go through the model manager's own tracing. Chain
-    // stage events (StageStart/DenoiseStep/StageDone/Stitching) come from
-    // the orchestrator during the blocking task below.
-    //
-    // Activation hint reuses the chain's per-stage shape (every stage runs
-    // the same width/height for now). Family lookup goes through the same
-    // helper used by single-clip generation so cv:* / hf:* IDs resolve.
-    let chain_hint = if let Some(family) = model_manager::family_for_model(state, &req.model).await
-    {
-        let family = mold_inference::device::activation_family_for(&family);
-        Some(model_manager::ActivationHint {
-            width: req.width,
-            height: req.height,
-            batch: 1, // chain is video; transformer batches per frame, not per CFG
-            dtype_bytes: 2,
-            family,
-        })
-    } else {
-        None
-    };
-    model_manager::ensure_model_ready(state, &req.model, None, chain_hint, false)
-        .await
-        .map_err(|e| ChainRunError::CacheMiss(e.error))?;
-
-    // Take the engine out of the cache so the blocking orchestrator run
-    // owns it for the full multi-minute chain without holding the async
-    // mutex guard across an await. Restore when we're done (or on error).
-    let mut cache = state.model_cache.lock().await;
-    let cached: CachedEngine = cache.take(&req.model).ok_or_else(|| {
-        ChainRunError::CacheMiss(format!(
-            "engine '{}' vanished from cache after ensure_model_ready",
-            req.model
-        ))
-    })?;
-    drop(cache);
-
-    let req_for_task = req.clone();
-    let join_handle = tokio::task::spawn_blocking(move || {
-        let mut cached = cached;
-        let mut progress_cb = progress_cb;
-        let outcome = {
-            let engine = &mut cached.engine;
-            match engine.as_chain_renderer() {
-                Some(renderer) => {
-                    let mut orch = mold_inference::chain::ChainOrchestrator::new(renderer);
-                    // The orchestrator expects `Option<&mut dyn FnMut(...)>`
-                    // — synthesise that from the optional boxed callback we
-                    // moved into this task.
-                    let result = if let Some(cb) = progress_cb.as_deref_mut() {
-                        orch.run(&req_for_task, Some(cb))
-                    } else {
-                        orch.run(&req_for_task, None)
-                    };
-                    result.map_err(|e| {
-                        use mold_inference::chain::ChainOrchestratorError;
-                        match e {
-                            ChainOrchestratorError::StageFailed {
-                                stage_idx,
-                                elapsed_stages,
-                                elapsed_ms,
-                                inner,
-                            } => ChainRunError::StageFailed(mold_core::chain::ChainFailure {
-                                error: "stage render failed".into(),
-                                failed_stage_idx: stage_idx,
-                                elapsed_stages,
-                                elapsed_ms,
-                                stage_error: format!("{inner:#}"),
-                            }),
-                            ChainOrchestratorError::Invalid(inner) => {
-                                ChainRunError::Inference(format!("{inner:#}"))
-                            }
-                        }
-                    })
-                }
-                None => Err(ChainRunError::UnsupportedModel(format!(
-                    "model '{}' does not support chained video generation",
-                    req_for_task.model
-                ))),
-            }
-        };
-        (cached, outcome)
-    });
-
-    let (cached, outcome) = match join_handle.await {
-        Ok(pair) => pair,
-        Err(join_err) => {
-            // The blocking chain task aborted before returning the engine.
-            // We have no `CachedEngine` to restore, but we still hold an
-            // in_flight marker from the `cache.take(&req.model)` above.
-            // Without this cleanup the marker leaks forever: every later
-            // `ensure_model_ready` would fast-path through `contains()`
-            // (still true) and every later `cache.take()` would return
-            // None — permanently jamming this model. Clear the marker so
-            // the next request rebuilds the engine cleanly.
-            {
-                let mut cache = state.model_cache.lock().await;
-                cache.clear_in_flight(&req.model);
-            }
-            return Err(ChainRunError::Internal(format!(
-                "chain orchestrator task failed: {join_err}"
-            )));
-        }
-    };
-
-    // Restore the engine to the cache regardless of success/failure so the
-    // next request can reuse it.
-    {
-        let mut cache = state.model_cache.lock().await;
-        cache.restore(cached);
-    }
-
-    let chain_output = outcome?;
-    let stage_count = chain_output.stage_count;
-    let generation_time_ms = chain_output.generation_time_ms;
-
-    let (mut frames, audio) = stitch_chain_output(chain_output, &req)
-        .map_err(|e| ChainRunError::StitchFailed(e.to_string()))?;
-    trim_to_total_frames(&mut frames, req.total_frames);
-
-    if frames.is_empty() {
-        return Err(ChainRunError::Encode(
-            "chain run emitted zero frames after trim".to_string(),
-        ));
-    }
-
-    let (bytes, output_format, gif_preview) =
-        encode_chain_output(&frames, req.fps, req.output_format, audio.as_ref())
-            .map_err(|e| ChainRunError::Encode(format!("encode chain output: {e:#}")))?;
-    let thumbnail = chain_thumbnail(&frames);
-    let frame_count = frames.len() as u32;
-
-    // Save to the gallery directory (best-effort, non-blocking).
-    let output_dir = {
-        let config = state.config.read().await;
-        if config.is_output_disabled() {
-            None
-        } else {
-            Some(config.effective_output_dir())
-        }
-    };
-    if let Some(dir) = output_dir {
-        let metadata = chain_output_metadata(&req, frame_count);
-        let bytes_clone = bytes.clone();
-        let gif_clone = gif_preview.clone();
-        let model = req.model.clone();
-        let db = state.metadata_db.clone();
-        tokio::task::spawn_blocking(move || {
-            save_video_to_dir(
-                &dir,
-                &bytes_clone,
-                &gif_clone,
-                output_format,
-                &model,
-                &metadata,
-                Some(generation_time_ms as i64),
-                db.as_ref().as_ref(),
-            );
-        });
-    }
-
-    let video = build_video_data(
-        bytes,
-        output_format,
-        &req,
-        frame_count,
-        thumbnail,
-        gif_preview,
-        audio.as_ref(),
-    );
-    let response = ChainResponse {
-        video,
-        stage_count,
-        gpu: None,
-        script: ChainScript::from(&req),
-        vram_estimate: None,
-    };
-    Ok((response, generation_time_ms))
 }
 
 /// Validate the chain request's model family and apply family-specific
@@ -1043,40 +671,60 @@ pub async fn generate_chain(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    // TODO(BR55 Phase 6): Replace generate_chain internals with shim_start_job, shim_wait_settled, and shim_build_response_and_cleanup.
-    // Family fixups (motion_tail clamp) must run BEFORE `normalise()`
-    // because normalise enforces `motion_tail < frames_per_stage` and would
-    // reject ltx-video's default 17-frame tail when stages are short.
-    let mut req = req;
-    if let Err(api_err) = validate_and_normalize_chain_family(&state, &mut req).await {
-        return api_err.into_response();
-    }
-    let mut req = match req.normalise() {
-        Ok(r) => r,
-        Err(e) => return ApiError::validation(e.to_string()).into_response(),
+    let shim = match shim_start_job(&state, req).await {
+        Ok(shim) => shim,
+        Err(api_err) => return api_err.into_response(),
     };
-    // Re-clamp post-normalise — normalise may have populated stages from the
-    // auto-expand path, and we want the final shape to satisfy the same
-    // family invariants. Idempotent for the already-clamped case.
-    if let Err(api_err) = validate_and_normalize_chain_family(&state, &mut req).await {
-        return api_err.into_response();
-    }
-
-    tracing::info!(
-        model = %req.model,
-        stages = req.stages.len(),
-        width = req.width,
-        height = req.height,
-        fps = req.fps,
-        "generate/chain request"
-    );
-
-    match run_chain(&state, req, None).await {
-        Ok((response, _elapsed_ms)) => Json(response).into_response(),
-        Err(ChainRunError::StageFailed(failure)) => {
-            (StatusCode::BAD_GATEWAY, Json(failure)).into_response()
+    tracing::info!(job_id = %shim.job_id, "generate/chain legacy shim request");
+    let handle = match state.chain_jobs.as_ref() {
+        Some(handle) => handle.clone(),
+        None => {
+            return ApiError::with_code(
+                "durable chain jobs are unavailable because the metadata DB is disabled",
+                "CHAIN_JOBS_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+            .into_response()
         }
-        Err(other) => ApiError::from(other).into_response(),
+    };
+    let db = match state.metadata_db.as_ref().as_ref() {
+        Some(db) => db,
+        None => {
+            return ApiError::with_code(
+                "durable chain jobs are unavailable because the metadata DB is disabled",
+                "CHAIN_JOBS_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+            .into_response()
+        }
+    };
+    let (settled_state, error) = match shim_wait_settled(&handle, db, &shim.job_id).await {
+        Ok(result) => result,
+        Err(api_err) => return api_err.into_response(),
+    };
+    if settled_state != ChainJobState::Completed {
+        if settled_state == ChainJobState::Failed {
+            return match shim_chain_failure(db, &shim.job_id, error) {
+                Ok(failure) => (StatusCode::BAD_GATEWAY, Json(failure)).into_response(),
+                Err(api_err) => api_err.into_response(),
+            };
+        }
+        return ApiError::internal_with_status(
+            error.unwrap_or_else(|| format!("chain job settled as {}", settled_state.as_str())),
+            StatusCode::BAD_GATEWAY,
+        )
+        .into_response();
+    }
+    let state_for_build = state.clone();
+    match tokio::task::spawn_blocking(move || {
+        shim_build_response_and_cleanup(&state_for_build, shim)
+    })
+    .await
+    {
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err(api_err)) => api_err.into_response(),
+        Err(err) => ApiError::internal(format!("legacy chain shim response task failed: {err}"))
+            .into_response(),
     }
 }
 
@@ -1100,45 +748,159 @@ pub async fn generate_chain_stream(
     State(state): State<AppState>,
     Json(req): Json<ChainRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    // TODO(BR55 Phase 6): Replace generate_chain_stream internals with ephemeral job shim stream using map_job_event_to_legacy.
-    // Family fixups (motion_tail clamp) must run BEFORE `normalise()`
-    // because normalise enforces `motion_tail < frames_per_stage` and would
-    // reject ltx-video's default 17-frame tail when stages are short.
-    let mut req = req;
-    validate_and_normalize_chain_family(&state, &mut req).await?;
-    let mut req = req
-        .normalise()
-        .map_err(|e| ApiError::validation(e.to_string()))?;
-    // Re-validate post-normalise (idempotent for already-clamped requests;
-    // catches the auto-expand path where normalise materialised the stages).
-    validate_and_normalize_chain_family(&state, &mut req).await?;
-
-    tracing::info!(
-        model = %req.model,
-        stages = req.stages.len(),
-        width = req.width,
-        height = req.height,
-        fps = req.fps,
-        "generate/chain/stream request"
-    );
-
+    let shim = shim_start_job(&state, req).await?;
+    tracing::info!(job_id = %shim.job_id, "generate/chain/stream legacy shim request");
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChainSseMessage>();
     let state_clone = state.clone();
+    let db_holder = state.metadata_db.clone();
     let tx_for_task = tx.clone();
+    let handle = state
+        .chain_jobs
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::with_code(
+                "durable chain jobs are unavailable because the metadata DB is disabled",
+                "CHAIN_JOBS_UNAVAILABLE",
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            )
+        })?
+        .clone();
 
     tokio::spawn(async move {
-        let tx_for_cb = tx_for_task.clone();
-        let cb: Box<dyn FnMut(ChainProgressEvent) + Send> = Box::new(move |event| {
-            let _ = tx_for_cb.send(ChainSseMessage::Progress(event));
-        });
-        match run_chain(&state_clone, req, Some(cb)).await {
-            Ok((response, elapsed_ms)) => {
-                let complete = build_sse_chain_complete_event(&response, elapsed_ms);
-                let _ = tx_for_task.send(ChainSseMessage::Complete(Box::new(complete)));
+        let job_id = shim.job_id.clone();
+        let db = match db_holder.as_ref().as_ref() {
+            Some(db) => db,
+            None => {
+                let _ = tx_for_task.send(ChainSseMessage::Error(
+                    "durable chain jobs are unavailable because the metadata DB is disabled"
+                        .to_string(),
+                ));
+                return;
+            }
+        };
+        let root = match crate::routes_chain_jobs::jobs_root() {
+            Ok(root) => root,
+            Err(err) => {
+                let _ = tx_for_task.send(ChainSseMessage::Error(err.error));
+                return;
+            }
+        };
+        match crate::routes_chain_jobs::job_detail_for(db, &root, &job_id) {
+            Ok(Some(detail)) => {
+                if let Some(progress) =
+                    map_job_event_to_legacy(&ChainJobEvent::Snapshot { job: detail }, &job_id)
+                {
+                    let _ = tx_for_task.send(ChainSseMessage::Progress(progress));
+                }
+            }
+            Ok(None) => {
+                let _ = tx_for_task.send(ChainSseMessage::Error(format!(
+                    "legacy chain shim job {job_id} disappeared before stream snapshot"
+                )));
+                return;
             }
             Err(err) => {
-                let api_err: ApiError = err.into();
+                let _ = tx_for_task.send(ChainSseMessage::Error(format!(
+                    "failed to load legacy chain shim snapshot: {err:#}"
+                )));
+                return;
+            }
+        }
+
+        let mut live = match handle.subscribe(db, &job_id) {
+            Ok(live) => live,
+            Err(err) => {
+                let _ = tx_for_task.send(ChainSseMessage::Error(format!(
+                    "failed to subscribe to legacy chain shim job: {err:#}"
+                )));
+                return;
+            }
+        };
+        let mut terminal: Option<(ChainJobState, Option<String>)> = None;
+        while terminal.is_none() {
+            match live.recv().await {
+                Ok(event) => {
+                    if let Some(progress) = map_job_event_to_legacy(&event, &job_id) {
+                        let _ = tx_for_task.send(ChainSseMessage::Progress(progress));
+                    }
+                    if let ChainJobEvent::StateChanged { state, error } = event {
+                        if settled(state) {
+                            terminal = Some((state, error));
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    match mold_db::chain_jobs::get_job(db, &job_id) {
+                        Ok(Some(row)) if settled(row.state) => {
+                            terminal = Some((row.state, row.error));
+                        }
+                        Ok(Some(_)) => {
+                            live = match handle.subscribe(db, &job_id) {
+                                Ok(live) => live,
+                                Err(err) => {
+                                    let _ = tx_for_task.send(ChainSseMessage::Error(format!(
+                                        "failed to re-subscribe to legacy chain shim job: {err:#}"
+                                    )));
+                                    return;
+                                }
+                            };
+                        }
+                        Ok(None) => {
+                            let _ = tx_for_task.send(ChainSseMessage::Error(format!(
+                                "legacy chain shim job {job_id} disappeared before settlement"
+                            )));
+                            return;
+                        }
+                        Err(err) => {
+                            let _ = tx_for_task.send(ChainSseMessage::Error(format!(
+                                "failed to re-read legacy chain shim state: {err:#}"
+                            )));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        let (settled_state, error) = terminal.expect("terminal set");
+        if settled_state != ChainJobState::Completed {
+            let _ =
+                tx_for_task.send(ChainSseMessage::Error(error.unwrap_or_else(|| {
+                    format!("chain job settled as {}", settled_state.as_str())
+                })));
+            return;
+        }
+        let generation_time_ms = mold_db::chain_jobs::get_job(db, &job_id)
+            .ok()
+            .flatten()
+            .and_then(|row| {
+                mold_core::chain_job::ChainJobManifest::read_from_dir(&row.job_dir).ok()
+            })
+            .map(|manifest| {
+                manifest
+                    .stage_status
+                    .iter()
+                    .filter_map(|stage| stage.generation_time_ms)
+                    .sum::<u64>()
+            })
+            .unwrap_or(0);
+        match tokio::task::spawn_blocking(move || {
+            shim_build_response_and_cleanup(&state_clone, shim)
+        })
+        .await
+        {
+            Ok(Ok(response)) => {
+                let complete = build_sse_chain_complete_event(&response, generation_time_ms);
+                let _ = tx_for_task.send(ChainSseMessage::Complete(Box::new(complete)));
+            }
+            Ok(Err(api_err)) => {
                 let _ = tx_for_task.send(ChainSseMessage::Error(api_err.error));
+            }
+            Err(err) => {
+                let _ = tx_for_task.send(ChainSseMessage::Error(format!(
+                    "legacy chain shim response task failed: {err}"
+                )));
             }
         }
         // `tx_for_task` is dropped here, closing the channel and finalizing
@@ -1159,140 +921,23 @@ pub async fn generate_chain_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu_pool::GpuJob;
-    use anyhow::Result;
-    use image::{Rgb, RgbImage};
-    use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
-    use mold_core::{GenerateRequest, GenerateResponse};
-    use mold_inference::chain::{
-        ChainStageRenderer, ChainTail, NativeAudioTrack, StageOutcome, StageProgressEvent,
+    use axum::{body::to_bytes, response::IntoResponse};
+    use image::{AnimationDecoder, Rgb, RgbImage};
+    use mold_core::chain::{ChainFailure, ChainRequest, ChainStage, TransitionMode};
+    use mold_core::chain_job::{
+        ChainJobDetail, ChainJobManifest, ChainJobStageDetail, ChainJobState, ChainJobSummary,
+        FinalizeRecord, JobDirLayout, StageState,
     };
-    use mold_inference::device::DiscoveredGpu;
-    use mold_inference::shared_pool::SharedPool;
-    use mold_inference::InferenceEngine;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, RwLock};
+    use mold_db::{chain_jobs, MetadataDb};
+    use std::ops::ControlFlow;
+    use std::sync::Arc;
 
-    /// Mock engine that delegates to a simple chain renderer producing
-    /// deterministic solid-color frames + a zero-valued latent tail. The
-    /// chain renderer is owned by the engine so `as_chain_renderer` can
-    /// hand out a `&mut dyn ChainStageRenderer` over it.
-    struct ChainMockEngine {
-        loaded: bool,
-        fail_on_stage: Option<usize>,
-        renderer_calls: Arc<Mutex<usize>>,
-    }
-
-    impl ChainMockEngine {
-        fn ready() -> Self {
-            Self {
-                loaded: true,
-                fail_on_stage: None,
-                renderer_calls: Arc::new(Mutex::new(0)),
-            }
-        }
-        fn failing_at(idx: usize) -> Self {
-            Self {
-                loaded: true,
-                fail_on_stage: Some(idx),
-                renderer_calls: Arc::new(Mutex::new(0)),
-            }
-        }
-    }
-
-    impl ChainStageRenderer for ChainMockEngine {
-        fn render_stage(
-            &mut self,
-            stage_req: &GenerateRequest,
-            _carry: Option<&ChainTail>,
-            _motion_tail_pixel_frames: u32,
-            _stage_progress: Option<&mut dyn FnMut(StageProgressEvent)>,
-        ) -> Result<StageOutcome> {
-            let idx = {
-                let mut calls = self.renderer_calls.lock().unwrap();
-                let idx = *calls;
-                *calls += 1;
-                idx
-            };
-            if self.fail_on_stage == Some(idx) {
-                anyhow::bail!("simulated chain failure at stage {idx}");
-            }
-            let frame_count = stage_req.frames.expect("chain stage missing frame count") as usize;
-            let width = stage_req.width;
-            let height = stage_req.height;
-            let mut frames = Vec::with_capacity(frame_count);
-            for f in 0..frame_count {
-                let shade = (idx as u8).wrapping_mul(17).wrapping_add(f as u8);
-                frames.push(RgbImage::from_pixel(width, height, Rgb([shade, 0, 0])));
-            }
-            let tail_pixel_frames = 4usize;
-            let take_from = frames
-                .len()
-                .saturating_sub(tail_pixel_frames)
-                .min(frames.len());
-            let tail_rgb_frames = frames[take_from..].to_vec();
-            // Honour the chain's audio request: when the stage GenerateRequest
-            // asks for audio, fabricate a deterministic per-stage track so the
-            // route handler's stitch + mux paths can be exercised end-to-end
-            // without standing up a real LTX-2 vocoder.
-            let audio = if stage_req.enable_audio == Some(true) {
-                let samples_per_frame = 100usize;
-                let interleaved_samples: Vec<f32> = (0..frame_count * samples_per_frame)
-                    .map(|n| ((idx as i32 * 1_000) + n as i32) as f32)
-                    .collect();
-                Some(NativeAudioTrack {
-                    interleaved_samples,
-                    sample_rate: 48_000,
-                    channels: 2,
-                })
-            } else {
-                None
-            };
-            Ok(StageOutcome {
-                frames,
-                tail: ChainTail {
-                    frames: tail_pixel_frames as u32,
-                    tail_rgb_frames,
-                },
-                audio,
-                generation_time_ms: 10,
-            })
-        }
-    }
-
-    impl InferenceEngine for ChainMockEngine {
-        fn generate(&mut self, _req: &GenerateRequest) -> Result<GenerateResponse> {
-            anyhow::bail!("chain mock engine does not support single-shot generate")
-        }
-        fn model_name(&self) -> &str {
-            "ltx-2-19b-distilled:mock"
-        }
-        fn is_loaded(&self) -> bool {
-            self.loaded
-        }
-        fn load(&mut self) -> Result<()> {
-            self.loaded = true;
-            Ok(())
-        }
-        fn as_chain_renderer(
-            &mut self,
-        ) -> Option<&mut dyn mold_inference::chain::ChainStageRenderer> {
-            Some(self)
-        }
-    }
-
-    /// Build an AppState whose model cache already contains a chain-capable
-    /// mock engine under the model name the tests pass in their requests.
-    fn state_with_chain_engine(engine: ChainMockEngine) -> AppState {
-        AppState::with_engine(engine)
-    }
-
-    fn chain_req_for_mock(model: &str, stages: u32) -> ChainRequest {
+    fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
-            model: model.to_string(),
-            stages: (0..stages)
-                .map(|_| ChainStage {
-                    prompt: "a cat walking".into(),
+            model: "ltx-2-19b-distilled:mock".into(),
+            stages: vec![
+                ChainStage {
+                    prompt: "stage zero".into(),
                     frames: 9,
                     source_image: None,
                     negative_prompt: None,
@@ -1302,9 +947,21 @@ mod tests {
                     model: None,
                     loras: vec![],
                     references: vec![],
-                })
-                .collect(),
-            motion_tail_frames: 0, // simplifies frame accounting for the mock
+                },
+                ChainStage {
+                    prompt: "stage one".into(),
+                    frames: 17,
+                    source_image: None,
+                    negative_prompt: None,
+                    seed_offset: Some(7),
+                    transition: TransitionMode::Cut,
+                    fade_frames: None,
+                    model: None,
+                    loras: vec![],
+                    references: vec![],
+                },
+            ],
+            motion_tail_frames: 0,
             width: 64,
             height: 64,
             fps: 12,
@@ -1312,7 +969,7 @@ mod tests {
             steps: 4,
             guidance: 3.0,
             strength: 1.0,
-            output_format: OutputFormat::Apng, // avoid needing the mp4 feature in tests
+            output_format: format,
             placement: None,
             prompt: None,
             total_frames: None,
@@ -1322,275 +979,683 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn chain_happy_path_returns_stage_count_and_video() {
-        let engine = ChainMockEngine::ready();
-        let state = state_with_chain_engine(engine);
-        let req = chain_req_for_mock("ltx-2-19b-distilled:mock", 3);
-
-        let (resp, elapsed_ms) = run_chain(&state, req, None)
-            .await
-            .expect("chain run succeeds");
-
-        assert_eq!(resp.stage_count, 3, "response must report all 3 stages");
-        assert_eq!(resp.video.fps, 12);
-        assert_eq!(resp.video.frames, 9 * 3, "3 stages × 9 frames with tail=0");
-        assert_eq!(resp.video.format, OutputFormat::Apng);
-        assert!(!resp.video.data.is_empty(), "apng bytes written");
-        // elapsed_ms is the sum of the mock's reported per-stage time (10ms each).
-        assert_eq!(elapsed_ms, 30);
-    }
-
-    #[tokio::test]
-    async fn chain_stream_emits_progress_then_complete_in_order() {
-        let engine = ChainMockEngine::ready();
-        let state = state_with_chain_engine(engine);
-        let req = chain_req_for_mock("ltx-2-19b-distilled:mock", 2);
-
-        let collected: Arc<Mutex<Vec<ChainProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let collected_cb = collected.clone();
-        let cb: Box<dyn FnMut(ChainProgressEvent) + Send> = Box::new(move |ev| {
-            collected_cb.lock().unwrap().push(ev);
-        });
-        let (resp, _) = run_chain(&state, req, Some(cb))
-            .await
-            .expect("chain run succeeds");
-
-        assert_eq!(resp.stage_count, 2);
-        let events = collected.lock().unwrap();
-        assert!(!events.is_empty(), "progress events must flow");
-        assert!(
-            matches!(
-                events[0],
-                ChainProgressEvent::ChainStart { stage_count: 2, .. }
-            ),
-            "first event must be ChainStart, got {:?}",
-            events[0]
-        );
-        assert!(
-            matches!(events.last().unwrap(), ChainProgressEvent::Stitching { .. }),
-            "last event must be Stitching, got {:?}",
-            events.last()
-        );
-        // There must be exactly one StageStart + StageDone per stage.
-        let stage_starts = events
-            .iter()
-            .filter(|e| matches!(e, ChainProgressEvent::StageStart { .. }))
-            .count();
-        let stage_dones = events
-            .iter()
-            .filter(|e| matches!(e, ChainProgressEvent::StageDone { .. }))
-            .count();
-        assert_eq!(stage_starts, 2);
-        assert_eq!(stage_dones, 2);
-    }
-
-    #[tokio::test]
-    async fn chain_mid_chain_failure_maps_to_bad_gateway() {
-        let engine = ChainMockEngine::failing_at(1);
-        let state = state_with_chain_engine(engine);
-        let req = chain_req_for_mock("ltx-2-19b-distilled:mock", 3);
-
-        let err = run_chain(&state, req, None)
-            .await
-            .expect_err("mid-chain failure must bubble up");
-        match err {
-            ChainRunError::StageFailed(failure) => {
-                assert_eq!(
-                    failure.failed_stage_idx, 1,
-                    "failed_stage_idx must be 1, got {}",
-                    failure.failed_stage_idx
-                );
-                assert!(
-                    failure.stage_error.contains("simulated chain failure"),
-                    "stage_error must carry renderer message, got: {}",
-                    failure.stage_error
-                );
-            }
-            other => panic!("expected StageFailed error, got {other:?}"),
+    fn detail() -> ChainJobDetail {
+        let request = req(OutputFormat::Mp4)
+            .normalise()
+            .expect("request normalises");
+        ChainJobDetail {
+            summary: ChainJobSummary {
+                id: "job-1".into(),
+                state: ChainJobState::Running,
+                model: request.model.clone(),
+                stage_count: request.stages.len() as u32,
+                current_stage: 0,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 2,
+                error: None,
+                ephemeral: true,
+            },
+            stages: request
+                .stages
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| ChainJobStageDetail {
+                    idx: idx as u32,
+                    state: StageState::Pending,
+                    seed: 42,
+                    frames_emitted: None,
+                    generation_time_ms: None,
+                    has_preview: false,
+                    error: None,
+                })
+                .collect(),
+            finalizes: vec![],
+            retakes: vec![],
+            script: ChainScript::from(&request),
         }
+    }
+
+    struct MoldHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl MoldHomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let lock = crate::test_support::env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var_os("MOLD_HOME");
+            std::env::set_var("MOLD_HOME", path);
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for MoldHomeGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("MOLD_HOME", value),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    fn test_frame(value: u8) -> RgbImage {
+        RgbImage::from_pixel(64, 64, Rgb([value, value, value]))
+    }
+
+    fn test_frames(value: u8) -> Vec<RgbImage> {
+        (0..9).map(|idx| test_frame(value + idx)).collect()
+    }
+
+    fn audio_muxed_mp4_fixture() -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(include_str!("testdata/audio_muxed_final_mp4.b64").trim())
+            .unwrap()
+    }
+
+    fn assert_decodable_apng(bytes: &[u8]) {
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        let decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(bytes))
+            .expect("APNG response should parse as PNG");
+        let apng = decoder.apng().expect("PNG response should be animated");
+        let frames = apng
+            .into_frames()
+            .collect_frames()
+            .expect("APNG frames should decode");
+        assert!(!frames.is_empty(), "APNG should contain animation frames");
+    }
+
+    async fn wait_for_bus_subscription(
+        handle: &crate::chain_job_runner::ChainJobRunnerHandle,
+        job_id: &str,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if handle.events_for_tests().contains_for_tests(job_id) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("shim task should subscribe to job events");
+    }
+
+    async fn wait_for_single_chain_job(db: &MetadataDb) -> mold_db::chain_jobs::ChainJobRow {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let mut jobs = chain_jobs::list_jobs(db).unwrap();
+                if jobs.len() == 1 {
+                    return jobs.remove(0);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("streaming shim should create one chain job")
+    }
+
+    fn parse_sse_json_events(body: &str) -> Vec<(String, serde_json::Value)> {
+        body.split("\n\n")
+            .filter_map(|raw| {
+                let mut event = None;
+                let mut data = None;
+                for line in raw.lines() {
+                    if let Some(value) = line.strip_prefix("event:") {
+                        event = Some(value.trim().to_string());
+                    } else if let Some(value) = line.strip_prefix("data:") {
+                        data = Some(value.trim().to_string());
+                    }
+                }
+                Some((event?, serde_json::from_str(&data?).unwrap()))
+            })
+            .collect()
+    }
+
+    fn completed_ephemeral_job(
+        db: &MetadataDb,
+        jobs_root: &std::path::Path,
+        job_id: &str,
+        req: &ChainRequest,
+        stage_times: &[u64],
+        final_bytes: &[u8],
+    ) -> mold_db::chain_jobs::ChainJobRow {
+        let row = crate::chain_job_runner::create_job_with_params(
+            db,
+            jobs_root,
+            crate::chain_job_runner::CreateJobParams {
+                id: job_id.to_string(),
+                ephemeral: true,
+                request: req.clone(),
+            },
+        )
+        .unwrap();
+        mark_ephemeral_job_completed(db, &row, req, stage_times, final_bytes);
+        chain_jobs::get_job(db, job_id).unwrap().unwrap()
+    }
+
+    fn mark_ephemeral_job_completed(
+        db: &MetadataDb,
+        row: &mold_db::chain_jobs::ChainJobRow,
+        req: &ChainRequest,
+        stage_times: &[u64],
+        final_bytes: &[u8],
+    ) {
+        let layout = JobDirLayout::new(row.job_dir.clone());
+        let final_path = layout.final_output_path(1);
+        std::fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+        std::fs::write(&final_path, final_bytes).unwrap();
+
+        let mut manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+        for (idx, status) in manifest.stage_status.iter_mut().enumerate() {
+            status.state = StageState::Completed;
+            status.frames_emitted = Some(req.stages[idx].frames);
+            status.generation_time_ms = Some(stage_times[idx]);
+            status.error = None;
+            chain_jobs::upsert_stage(
+                db,
+                &mold_db::chain_jobs::ChainJobStageRow {
+                    job_id: row.id.clone(),
+                    stage_idx: idx as u32,
+                    state: StageState::Completed,
+                    seed: status.seed,
+                    frames_emitted: status.frames_emitted,
+                    generation_time_ms: status.generation_time_ms,
+                    segment_rel_path: None,
+                    error: None,
+                    updated_at_ms: 5_000,
+                },
+            )
+            .unwrap();
+        }
+        manifest.finalizes.push(FinalizeRecord {
+            output: "final/output-1.mp4".into(),
+            at_unix_ms: 6_000,
+            stage_seeds: manifest
+                .stage_status
+                .iter()
+                .map(|stage| stage.seed)
+                .collect(),
+        });
+        manifest.write_atomic(&row.job_dir).unwrap();
+        chain_jobs::repair_job_from_manifest(
+            db,
+            &row.id,
+            ChainJobState::Completed,
+            req.stages.len() as u32,
+            None,
+            6_000,
+            Some(6_000),
+        )
+        .unwrap();
+    }
+
+    fn state_with_db_and_handle(
+        db: MetadataDb,
+        handle: Arc<crate::chain_job_runner::ChainJobRunnerHandle>,
+        output_dir: &std::path::Path,
+    ) -> AppState {
+        let config = mold_core::Config {
+            output_dir: Some(output_dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let mut state = AppState::for_tests();
+        state.config = Arc::new(tokio::sync::RwLock::new(config));
+        state.metadata_db = Arc::new(Some(db));
+        state.chain_jobs = Some(handle);
+        state
+    }
+
+    struct HandlerFailingExecutor;
+
+    impl crate::chain_job_runner::StageExecutor for HandlerFailingExecutor {
+        fn render_stage(
+            &self,
+            _model: &str,
+            stage_req: &mold_core::GenerateRequest,
+            _carry: Option<&mold_inference::chain::ChainTail>,
+            _motion_tail_frames: u32,
+            progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+        ) -> anyhow::Result<crate::chain_job_runner::StageRenderOutcome> {
+            let _ = progress(1, 2);
+            if stage_req.prompt == "stage one" {
+                anyhow::bail!("simulated chain failure at stage one");
+            }
+            Ok(crate::chain_job_runner::StageRenderOutcome::Done(
+                mold_inference::chain::StageOutcome {
+                    tail: mold_inference::chain::ChainTail {
+                        frames: 0,
+                        tail_rgb_frames: Vec::new(),
+                    },
+                    frames: test_frames(80),
+                    audio: None,
+                    generation_time_ms: 10,
+                },
+            ))
+        }
+    }
+
+    struct NoQueuedSmallJobs;
+
+    impl crate::chain_job_runner::QueueProbe for NoQueuedSmallJobs {
+        fn small_jobs_waiting(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn shim_mp4_passthrough_returns_final_file_bytes_audio_metadata_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("mold-home");
+        let _home_guard = MoldHomeGuard::set(&home);
+        let db = MetadataDb::open_in_memory().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let output_dir = dir.path().join("gallery");
+        let request = req(OutputFormat::Mp4).normalise().unwrap();
+        let final_bytes = audio_muxed_mp4_fixture();
+        let row = completed_ephemeral_job(
+            &db,
+            &jobs_root,
+            "01JBR55SHIMDONE",
+            &request,
+            &[11, 22],
+            &final_bytes,
+        );
+        let job_dir = row.job_dir.clone();
+        let final_path = JobDirLayout::new(job_dir.clone()).final_output_path(1);
+        let expected_final_bytes = std::fs::read(&final_path).unwrap();
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        let guard = handle.claim_ephemeral(&row.id);
+        let state = state_with_db_and_handle(db, handle, &output_dir);
+
+        let response = shim_build_response_and_cleanup(
+            &state,
+            ShimJob {
+                job_id: row.id.clone(),
+                original_format: OutputFormat::Mp4,
+                guard,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.video.format, OutputFormat::Mp4);
+        assert_eq!(response.video.data, expected_final_bytes);
+        assert!(!response.video.thumbnail.is_empty());
+        assert!(!response.video.gif_preview.is_empty());
+        assert!(response.video.has_audio);
+        assert_eq!(response.video.audio_sample_rate, Some(48_000));
+        assert_eq!(response.video.audio_channels, Some(2));
+        assert_eq!(response.stage_count, 2);
+        assert_eq!(
+            serde_json::to_value(&response.script).unwrap(),
+            serde_json::to_value(ChainScript::from(&request)).unwrap()
+        );
+        let complete = build_sse_chain_complete_event(&response, 33);
+        assert_eq!(complete.generation_time_ms, Some(33));
+        let db = state.metadata_db.as_ref().as_ref().unwrap();
+        let rows = db.list(Some(&output_dir)).unwrap();
+        assert_eq!(rows.len(), 1, "shim owns the sole ephemeral gallery row");
+        assert_eq!(rows[0].generation_time_ms, Some(33));
+        assert!(!job_dir.exists(), "shim deletes the ephemeral job dir");
+        assert!(chain_jobs::get_job(db, "01JBR55SHIMDONE")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn shim_apng_request_returns_decodable_apng_with_previews() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("mold-home");
+        let _home_guard = MoldHomeGuard::set(&home);
+        let db = MetadataDb::open_in_memory().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let output_dir = dir.path().join("gallery");
+        let request = req(OutputFormat::Apng).normalise().unwrap();
+        let final_bytes = audio_muxed_mp4_fixture();
+        let row = completed_ephemeral_job(
+            &db,
+            &jobs_root,
+            "01JBR55SHIMAPNG",
+            &request,
+            &[11, 22],
+            &final_bytes,
+        );
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        let guard = handle.claim_ephemeral(&row.id);
+        let state = state_with_db_and_handle(db, handle, &output_dir);
+
+        let response = shim_build_response_and_cleanup(
+            &state,
+            ShimJob {
+                job_id: row.id.clone(),
+                original_format: OutputFormat::Apng,
+                guard,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.video.format, OutputFormat::Apng);
+        assert_decodable_apng(&response.video.data);
+        assert!(!response.video.thumbnail.is_empty());
+        assert!(!response.video.gif_preview.is_empty());
+        assert!(!response.video.has_audio);
+        assert_eq!(response.video.audio_sample_rate, None);
+        assert_eq!(response.video.audio_channels, None);
+    }
+
+    #[tokio::test]
+    async fn shim_wait_settled_observes_live_completed_state_change() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let jobs_root = tempfile::tempdir().unwrap();
+        let request = req(OutputFormat::Mp4).normalise().unwrap();
+        let row = crate::chain_job_runner::create_job_with_params(
+            &db,
+            jobs_root.path(),
+            crate::chain_job_runner::CreateJobParams {
+                id: "01JBR55WAITLIVE".into(),
+                ephemeral: true,
+                request,
+            },
+        )
+        .unwrap();
+        let handle = crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests();
+
+        let waiter = shim_wait_settled(&handle, &db, &row.id);
+        tokio::pin!(waiter);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    result = &mut waiter => {
+                        panic!("waiter settled before completion publish: {result:?}");
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
+                        if handle.events_for_tests().contains_for_tests(&row.id) {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("waiter should subscribe before completion publish");
+        chain_jobs::update_job_state(&db, &row.id, ChainJobState::Completed, None, 7_000).unwrap();
+        handle.publish_settled_state(&row.id, ChainJobState::Completed, None);
+
+        let (state, error) = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("settled event should wake waiter")
+            .unwrap();
+        assert_eq!(state, ChainJobState::Completed);
+        assert_eq!(error, None);
+    }
+
+    #[tokio::test]
+    async fn shim_wait_settled_rereads_completed_state_after_closed_receiver() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let jobs_root = tempfile::tempdir().unwrap();
+        let request = req(OutputFormat::Mp4).normalise().unwrap();
+        let row = crate::chain_job_runner::create_job_with_params(
+            &db,
+            jobs_root.path(),
+            crate::chain_job_runner::CreateJobParams {
+                id: "01JBR55WAITCLOSED".into(),
+                ephemeral: true,
+                request,
+            },
+        )
+        .unwrap();
+        chain_jobs::update_job_state(&db, &row.id, ChainJobState::Completed, None, 7_000).unwrap();
+        let handle = crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests();
+
+        let (state, error) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            shim_wait_settled(&handle, &db, &row.id),
+        )
+        .await
+        .expect("closed receiver should fall back to DB read")
+        .unwrap();
+        assert_eq!(state, ChainJobState::Completed);
+        assert_eq!(error, None);
+    }
+
+    #[tokio::test]
+    async fn generate_chain_stream_task_emits_snapshot_progress_then_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("mold-home");
+        let _home_guard = MoldHomeGuard::set(&home);
+        let db = MetadataDb::open_in_memory().unwrap();
+        let output_dir = dir.path().join("gallery");
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        let state = state_with_db_and_handle(db, handle.clone(), &output_dir);
+
+        let sse = generate_chain_stream(State(state.clone()), Json(req(OutputFormat::Mp4)))
+            .await
+            .unwrap();
+        let body_task = tokio::spawn(async move {
+            let response = sse.into_response();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        });
+
+        let db = state.metadata_db.as_ref().as_ref().unwrap();
+        let row = wait_for_single_chain_job(db).await;
+        wait_for_bus_subscription(&handle, &row.id).await;
+        handle
+            .events_for_tests()
+            .publish(&row.id, ChainJobEvent::StageStart { stage_idx: 0 });
+        handle.events_for_tests().publish(
+            &row.id,
+            ChainJobEvent::DenoiseStep {
+                stage_idx: 0,
+                step: 1,
+                total: 2,
+            },
+        );
+        handle.events_for_tests().publish(
+            &row.id,
+            ChainJobEvent::StageDone {
+                stage_idx: 0,
+                frames_emitted: 9,
+                has_preview: true,
+            },
+        );
+        handle
+            .events_for_tests()
+            .publish(&row.id, ChainJobEvent::Finalizing { total_frames: 26 });
+
+        let request = ChainJobManifest::read_from_dir(&row.job_dir)
+            .unwrap()
+            .request()
+            .unwrap();
+        let final_bytes = audio_muxed_mp4_fixture();
+        mark_ephemeral_job_completed(db, &row, &request, &[11, 22], &final_bytes);
+        handle.publish_settled_state(&row.id, ChainJobState::Completed, None);
+
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), body_task)
+            .await
+            .expect("stream should close after complete")
+            .unwrap();
+        let events = parse_sse_json_events(&body);
+        assert_eq!(
+            events
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["progress", "progress", "progress", "progress", "progress", "complete"],
+            "unexpected SSE body: {body}"
+        );
+
+        let progress = events
+            .iter()
+            .filter(|(name, _)| name == "progress")
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        assert_eq!(progress[0]["type"], "chain_start");
+        assert_eq!(progress[0]["job_id"], row.id);
+        assert_eq!(progress[1]["type"], "stage_start");
+        assert_eq!(progress[1]["job_id"], row.id);
+        assert_eq!(progress[2]["type"], "denoise_step");
+        assert_eq!(progress[2]["job_id"], row.id);
+        assert_eq!(progress[3]["type"], "stage_done");
+        assert_eq!(progress[3]["job_id"], row.id);
+        assert!(progress[3].get("has_preview").is_none());
+        assert_eq!(progress[4]["type"], "stitching");
+        assert_eq!(progress[4]["job_id"], row.id);
+
+        let complete = &events.last().unwrap().1;
+        assert_eq!(complete["format"], "mp4");
+        assert_eq!(complete["stage_count"], 2);
+        assert_eq!(complete["generation_time_ms"], 33);
+        assert!(
+            complete.get("job_id").is_none(),
+            "complete keeps legacy shape"
+        );
+        assert!(complete["video"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        assert!(complete["thumbnail"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        assert!(complete["gif_preview"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
     }
 
     #[tokio::test]
     async fn generate_chain_handler_returns_502_with_chain_failure_body() {
-        use axum::body::to_bytes;
-        use axum::http::StatusCode;
-        use axum::response::IntoResponse;
+        let dir = tempfile::tempdir().unwrap();
+        let _home_guard = MoldHomeGuard::set(dir.path());
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let deps = crate::chain_job_runner::RunnerDeps {
+            db: db.clone(),
+            jobs_root: dir.path().join("jobs"),
+            executor: Arc::new(HandlerFailingExecutor),
+            queue_probe: Arc::new(NoQueuedSmallJobs),
+            events: Arc::new(crate::chain_job_runner::JobEventBus::new()),
+            cancel: Arc::new(crate::chain_job_runner::CancelRegistry::new()),
+            job_locks: Arc::new(crate::chain_job_runner::JobMutationLocks::new()),
+            claims: Arc::new(crate::chain_job_runner::EphemeralClaims::default()),
+            output_dir: None,
+        };
+        let handle = crate::chain_job_runner::spawn_runner(deps);
+        let mut state = AppState::for_tests();
+        state.metadata_db = db;
+        state.chain_jobs = Some(Arc::new(handle));
 
-        let engine = ChainMockEngine::failing_at(1);
-        let state = state_with_chain_engine(engine);
-        let req = chain_req_for_mock("ltx-2-19b-distilled:mock", 3);
-
-        let resp = generate_chain(State(state), Json(req)).await;
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            generate_chain(State(state), Json(req(OutputFormat::Mp4))),
+        )
+        .await
+        .expect("generate_chain should settle");
         let (parts, body) = resp.into_response().into_parts();
 
-        assert_eq!(parts.status, StatusCode::BAD_GATEWAY, "must be 502");
-
+        assert_eq!(parts.status, axum::http::StatusCode::BAD_GATEWAY);
         let bytes = to_bytes(body, usize::MAX).await.unwrap();
-        let failure: mold_core::chain::ChainFailure =
-            serde_json::from_slice(&bytes).expect("body must be ChainFailure JSON");
-
-        assert_eq!(
-            failure.failed_stage_idx, 1,
-            "failed_stage_idx must be 1, got {}",
-            failure.failed_stage_idx
-        );
+        let failure: ChainFailure =
+            serde_json::from_slice(&bytes).expect("502 body must be ChainFailure JSON");
+        assert_eq!(failure.failed_stage_idx, 1);
+        assert_eq!(failure.elapsed_stages, 1);
+        assert_eq!(failure.elapsed_ms, 10);
         assert!(
-            failure.stage_error.contains("simulated chain failure"),
-            "stage_error must carry renderer message, got: {}",
+            failure
+                .stage_error
+                .contains("simulated chain failure at stage one"),
+            "stage_error must carry renderer message, got {}",
             failure.stage_error
         );
     }
 
-    #[tokio::test]
-    async fn chain_unsupported_model_rejects_with_validation() {
-        /// Engine that is fully capable of single-shot generate but refuses
-        /// chain rendering (mirrors every non-LTX-2 family).
-        struct NonChainEngine;
-        impl InferenceEngine for NonChainEngine {
-            fn generate(&mut self, _req: &GenerateRequest) -> Result<GenerateResponse> {
-                anyhow::bail!("no single-shot generate in this test either")
-            }
-            fn model_name(&self) -> &str {
-                "flux-dev:q8"
-            }
-            fn is_loaded(&self) -> bool {
-                true
-            }
-            fn load(&mut self) -> Result<()> {
-                Ok(())
-            }
-            // No override for as_chain_renderer — default returns None.
-        }
-
-        let state = AppState::with_engine(NonChainEngine);
-        let mut req = chain_req_for_mock("flux-dev:q8", 2);
-        req.model = "flux-dev:q8".into();
-        let err = run_chain(&state, req, None)
-            .await
-            .expect_err("non-chain model must fail");
-        match err {
-            ChainRunError::UnsupportedModel(msg) => {
-                assert!(
-                    msg.contains("does not support chained video generation"),
-                    "unsupported-model error must name the constraint, got: {msg}"
-                );
-            }
-            other => panic!("expected UnsupportedModel, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn chain_audio_dropped_for_apng_output_format() {
-        // APNG can't carry audio. The chain handler must still succeed (the
-        // mock engine emits a real track), but the resulting VideoData has
-        // has_audio=false so callers don't reach for nonexistent audio
-        // metadata. This is the "mp4 feature off + audio requested" path.
-        let engine = ChainMockEngine::ready();
-        let state = state_with_chain_engine(engine);
-        let mut req = chain_req_for_mock("ltx-2-19b-distilled:mock", 2);
-        req.enable_audio = Some(true);
-        let (resp, _) = run_chain(&state, req, None).await.expect("chain runs");
-        assert_eq!(resp.video.format, OutputFormat::Apng);
-        assert!(
-            !resp.video.has_audio,
-            "APNG output cannot carry audio; has_audio must stay false even when audio was rendered",
-        );
-        assert_eq!(resp.video.audio_sample_rate, None);
-        assert_eq!(resp.video.audio_channels, None);
-    }
-
-    #[cfg(feature = "mp4")]
-    #[tokio::test]
-    async fn chain_audio_muxed_into_mp4_output_when_enabled() {
-        // End-to-end audio happy path: the chain handler renders per-stage
-        // audio via the mock engine, the stitch layer concatenates it, and
-        // encode_chain_output muxes it into MP4 via the same path the
-        // single-clip pipeline uses. resp.video.has_audio + sample_rate +
-        // channels must reflect the muxed track.
-        let engine = ChainMockEngine::ready();
-        let state = state_with_chain_engine(engine);
-        let mut req = chain_req_for_mock("ltx-2-19b-distilled:mock", 2);
-        req.enable_audio = Some(true);
-        req.output_format = OutputFormat::Mp4;
-        let (resp, _) = run_chain(&state, req, None).await.expect("chain runs");
-        assert_eq!(resp.video.format, OutputFormat::Mp4);
-        assert!(
-            resp.video.has_audio,
-            "MP4 output with chain audio must report has_audio=true",
-        );
-        assert_eq!(resp.video.audio_sample_rate, Some(48_000));
-        assert_eq!(resp.video.audio_channels, Some(2));
-    }
-
-    #[tokio::test]
-    async fn chain_trims_frames_from_tail_when_total_frames_set() {
-        let engine = ChainMockEngine::ready();
-        let state = state_with_chain_engine(engine);
-        let mut req = chain_req_for_mock("ltx-2-19b-distilled:mock", 2);
-        // Each stage produces 9 frames with tail=0 → 18 total. Trim to 10.
-        req.total_frames = Some(10);
-
-        let (resp, _) = run_chain(&state, req, None).await.expect("chain runs");
-        assert_eq!(
-            resp.video.frames, 10,
-            "total_frames must trim the stitched output length"
-        );
-    }
-
-    fn minimal_worker_for_guard_test() -> Arc<GpuWorker> {
-        let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuJob>(2);
-        Arc::new(GpuWorker {
-            gpu: DiscoveredGpu {
-                ordinal: 0,
-                name: "fake".to_string(),
-                total_vram_bytes: 24_000_000_000,
-                free_vram_bytes: 24_000_000_000,
-            },
-            model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(3))),
-            active_generation: Arc::new(RwLock::new(None)),
-            model_load_lock: Arc::new(Mutex::new(())),
-            shared_pool: Arc::new(Mutex::new(SharedPool::new())),
-            in_flight: AtomicUsize::new(0),
-            consecutive_failures: AtomicUsize::new(0),
-            degraded_until: RwLock::new(None),
-            job_tx,
-        })
-    }
-
-    /// Guards must clear worker state even when the protected scope unwinds.
-    /// Without the Drop impls firing on panic, `in_flight` would remain
-    /// incremented forever and `active_generation` would remain set — biasing
-    /// the dispatcher's `select_worker` away from this worker permanently.
     #[test]
-    fn guards_clear_state_on_panic() {
-        let worker = minimal_worker_for_guard_test();
-        let req = chain_req_for_mock("fake-model", 1);
+    fn legacy_progress_mapping_injects_job_id_on_every_progress_event() {
+        let events = vec![
+            ChainJobEvent::Snapshot { job: detail() },
+            ChainJobEvent::StageStart { stage_idx: 1 },
+            ChainJobEvent::DenoiseStep {
+                stage_idx: 1,
+                step: 2,
+                total: 4,
+            },
+            ChainJobEvent::StageDone {
+                stage_idx: 1,
+                frames_emitted: 11,
+                has_preview: true,
+            },
+            ChainJobEvent::Finalizing { total_frames: 20 },
+        ];
 
-        let worker_for_catch = worker.clone();
-        let result = std::panic::catch_unwind(move || {
-            let _in_flight = InFlightGuard::increment(worker_for_catch.clone());
-            let _active = ActiveGenerationGuard::set(worker_for_catch.clone(), &req)
-                .expect("set active_generation");
-            assert_eq!(worker_for_catch.in_flight.load(Ordering::SeqCst), 1);
-            assert!(worker_for_catch.active_generation.read().unwrap().is_some());
-            panic!("simulated orchestrator failure");
-        });
+        for event in events {
+            let value = map_job_event_to_legacy(&event, "job-1").expect("mapped progress event");
+            assert_eq!(value.get("job_id").and_then(|v| v.as_str()), Some("job-1"));
+            assert!(
+                value.get("type").is_some(),
+                "legacy progress type preserved: {value:?}"
+            );
+        }
+    }
 
-        assert!(result.is_err(), "panic must propagate");
+    #[test]
+    fn legacy_progress_mapping_keeps_event_names_and_shapes() {
+        let snapshot = map_job_event_to_legacy(&ChainJobEvent::Snapshot { job: detail() }, "job-2")
+            .expect("snapshot maps");
         assert_eq!(
-            worker.in_flight.load(Ordering::SeqCst),
-            0,
-            "InFlightGuard must decrement on panic"
+            snapshot.get("type").and_then(|v| v.as_str()),
+            Some("chain_start")
+        );
+        assert_eq!(
+            snapshot
+                .get("estimated_total_frames")
+                .and_then(|v| v.as_u64()),
+            Some(26)
+        );
+
+        let stage_done = map_job_event_to_legacy(
+            &ChainJobEvent::StageDone {
+                stage_idx: 3,
+                frames_emitted: 15,
+                has_preview: true,
+            },
+            "job-2",
+        )
+        .expect("stage_done maps");
+        assert_eq!(
+            stage_done.get("type").and_then(|v| v.as_str()),
+            Some("stage_done")
+        );
+        assert_eq!(
+            stage_done.get("stage_idx").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            stage_done.get("frames_emitted").and_then(|v| v.as_u64()),
+            Some(15)
         );
         assert!(
-            worker.active_generation.read().unwrap().is_none(),
-            "ActiveGenerationGuard must clear on panic"
+            stage_done.get("has_preview").is_none(),
+            "legacy event remains additive only"
         );
     }
 
-    // TODO(BR55 Phase 6): Add legacy shim equivalence test for non-MP4 structural ChainResponse fields.
-    // TODO(BR55 Phase 6): Add legacy shim MP4-passthrough-audio test proving final MP4 bytes preserve muxed AAC without re-encode.
-    // TODO(BR55 Phase 6): Add validation-split test proving shim callers perform family validation normalise and non-MP4 job API rejection before create_job_with_params.
-    // TODO(BR55 Phase 6): Add legacy progress mapping test proving job_id is injected into every progress JSON object without a new event name.
+    #[test]
+    fn legacy_progress_mapping_drops_non_progress_events() {
+        for event in [
+            ChainJobEvent::Yielded {
+                pending_small_jobs: 1,
+            },
+            ChainJobEvent::Finalized {
+                output: "final/output-1.mp4".into(),
+                take: 1,
+            },
+            ChainJobEvent::StateChanged {
+                state: ChainJobState::Running,
+                error: None,
+            },
+        ] {
+            assert!(map_job_event_to_legacy(&event, "job-3").is_none());
+        }
+    }
 }

@@ -1,8 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  cancelChainJob,
+  chainJobEventsUrl,
+  chainJobStagePreviewUrl,
+  createChainJob,
+  deleteChainJob,
   fetchQueue,
+  gcChainJobs,
   generateStream,
   generateChainStream,
+  getChainJob,
+  listChainJobs,
+  resumeChainJob,
+  retakeChainJob,
   upscaleStream,
   updateQueueJobTargetGpu,
   type ChainStreamHandlers,
@@ -107,6 +117,7 @@ function installDriver(
 
 afterEach(() => {
   vi.mocked(streamSse).mockReset();
+  vi.unstubAllGlobals();
 });
 
 describe("queue api", () => {
@@ -347,5 +358,108 @@ describe("upscaleStream", () => {
   });
 });
 
-// TODO(BR55 Phase 6): Add API helper tests for create list get resume retake cancel delete and GC chain-job calls.
-// TODO(BR55 Phase 6): Add URL helper tests for chainJobEventsUrl and chainJobStagePreviewUrl encoding.
+describe("chain job api helpers", () => {
+  function installFetch(body: unknown = {}, status = 200) {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("creates, lists, gets, resumes, retakes, cancels, deletes, and GC's jobs", async () => {
+    const summary = {
+      id: "job/1",
+      state: "queued",
+      model: "ltx-2",
+      stage_count: 2,
+      current_stage: 0,
+      created_at_unix_ms: 1,
+      updated_at_unix_ms: 2,
+      error: null,
+      ephemeral: false,
+    };
+    const detail = {
+      ...summary,
+      stages: [],
+      finalizes: [],
+      retakes: [],
+      script: { schema: "mold.chain.v1", chain: {}, stage: [] },
+    };
+    const fetchMock = installFetch({ job_id: "job/1" });
+    await createChainJob(chainRequest());
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(chainRequest()),
+    });
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ jobs: [summary] })),
+    );
+    await expect(listChainJobs()).resolves.toEqual({ jobs: [summary] });
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs");
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(detail)));
+    await expect(getChainJob("job/1")).resolves.toEqual(detail);
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/job%2F1");
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(summary)));
+    await resumeChainJob("job/1");
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/chain-jobs/job%2F1/resume",
+      {
+        method: "POST",
+      },
+    );
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(summary)));
+    await retakeChainJob("job/1", { stage_idx: 1, mode: "splice" });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/chain-jobs/job%2F1/retake",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ stage_idx: 1, mode: "splice" }),
+      },
+    );
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(summary)));
+    await cancelChainJob("job/1");
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/chain-jobs/job%2F1/cancel",
+      {
+        method: "POST",
+      },
+    );
+
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 204 }));
+    await deleteChainJob("job/1");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/job%2F1", {
+      method: "DELETE",
+    });
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ swept_ephemeral_jobs: 1, pruned_artifact_dirs: 2 }),
+      ),
+    );
+    await expect(gcChainJobs()).resolves.toEqual({
+      swept_ephemeral_jobs: 1,
+      pruned_artifact_dirs: 2,
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/gc", {
+      method: "POST",
+    });
+  });
+
+  it("encodes chain job event and preview URLs", () => {
+    expect(chainJobEventsUrl("job/1")).toBe("/api/chain-jobs/job%2F1/events");
+    expect(chainJobStagePreviewUrl("job/1", 12)).toBe(
+      "/api/chain-jobs/job%2F1/stages/12/preview",
+    );
+  });
+});

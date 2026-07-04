@@ -19,6 +19,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `POST`   | `/api/chain-jobs/:id/retake`              | Retake one chain-job stage                                                                                        |
 | `POST`   | `/api/chain-jobs/:id/cancel`              | Cancel a queued or running chain job                                                                              |
 | `DELETE` | `/api/chain-jobs/:id`                     | Delete a non-running chain job                                                                                    |
+| `POST`   | `/api/chain-jobs/gc`                      | Run chain-job artifact GC                                                                                         |
 | `GET`    | `/api/chain-jobs/:id/stages/:idx/preview` | Fetch a stage preview JPEG                                                                                        |
 | `POST`   | `/api/expand`                             | Expand a prompt using LLM                                                                                         |
 | `GET`    | `/api/models`                             | List available models                                                                                             |
@@ -368,6 +369,10 @@ maps to `mold_core::chain::ChainResponse`. The canonical schema lives in the
 interactive docs at `/api/docs` (served by the running mold server) and in the
 OpenAPI JSON at `/api/openapi.json`.
 
+This legacy endpoint now executes through the durable chain-job runner
+internally. The response shape stays the same, while the backing ephemeral job
+is cleaned up after a successful response is assembled.
+
 The server accepts either a pre-authored `stages[]` body or the auto-expand
 form (single `prompt` + `total_frames` + `clip_frames`). Auto-expand is the
 shape `mold run` sends; the canonical `stages[]` shape is reserved for the
@@ -448,17 +453,16 @@ off.
 - `422 Unprocessable Entity` — unsupported model family. Only LTX-2 distilled
   engines expose a chain renderer; other families are rejected with an
   error that names the constraint.
-- `502 Bad Gateway` — a stage errored mid-chain. The whole chain is discarded
-  and nothing is written to the gallery; v1 is fail-closed and partial
-  resume is a v2 feature.
+- `502 Bad Gateway` — the backing job failed before a legacy `ChainResponse`
+  could be assembled. Use `/api/chain-jobs` for explicit durable
+  resume/retake workflows.
 
-::: tip Queue behaviour
-The chain handler deliberately **bypasses the single-job queue**. A chain is a
-multi-minute compound operation that would stall the FIFO queue for every
-other request, so the handler takes the engine out of `ModelCache` for the
-full chain duration and restores it on completion (or error). Chains
-therefore run one-at-a-time on a given GPU; submit chains to separate GPUs
-via `MOLD_GPUS` / `--gpus` if you need parallelism.
+::: tip Runner behaviour
+The legacy chain endpoints are shims over the durable runner. The runner
+checkpoints each stage under `MOLD_HOME/jobs/<job_id>`, yields at stage
+boundaries when other work is waiting, then deletes successful ephemeral shim
+artifacts after building the legacy response. The public chain-job API keeps
+artifacts for resume and retake.
 :::
 
 ## `/api/generate/chain/stream`
@@ -472,19 +476,19 @@ Progress event payloads map to `mold_core::chain::ChainProgressEvent` variants:
 
 ```text
 event: progress
-data: {"type":"chain_start","stage_count":5,"estimated_total_frames":485}
+data: {"type":"chain_start","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_count":5,"estimated_total_frames":485}
 
 event: progress
-data: {"type":"stage_start","stage_idx":0}
+data: {"type":"stage_start","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_idx":0}
 
 event: progress
-data: {"type":"denoise_step","stage_idx":0,"step":1,"total":8}
+data: {"type":"denoise_step","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_idx":0,"step":1,"total":8}
 
 event: progress
-data: {"type":"stage_done","stage_idx":0,"frames_emitted":97}
+data: {"type":"stage_done","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_idx":0,"frames_emitted":97}
 
 event: progress
-data: {"type":"stitching","total_frames":385}
+data: {"type":"stitching","job_id":"550e8400-e29b-41d4-a716-446655440000","total_frames":385}
 
 event: complete
 data: {"video":"<base64 mp4>","format":"mp4","width":1216,"height":704,"frames":400,"fps":24,"thumbnail":"<base64 png>","gif_preview":"<base64 gif>","has_audio":false,"duration_ms":16666,"stage_count":5,"gpu":0,"generation_time_ms":226812}
@@ -494,6 +498,10 @@ The `complete` event payload maps to `mold_core::chain::SseChainCompleteEvent`.
 Non-denoise engine events (weight loads, cache hits, etc.) are intentionally
 not forwarded in v1 — the UX goal is per-stage progress, not per-component
 telemetry.
+
+`job_id` is an additive field on progress events so clients can correlate a
+legacy stream with the backing durable job. The terminal `complete` payload
+keeps the legacy shape.
 
 ```bash
 curl -N -X POST http://localhost:7680/api/generate/chain/stream \
@@ -531,6 +539,7 @@ Endpoints:
 - `POST /api/chain-jobs/:id/retake` — body is `RetakeRequest` (`stage_idx`, `mode`, optional `seed_offset`, optional `prompt`).
 - `POST /api/chain-jobs/:id/cancel` — queued jobs settle as `cancelled`; running jobs stop at the next boundary/progress check.
 - `DELETE /api/chain-jobs/:id` — remove a non-running job and its job directory.
+- `POST /api/chain-jobs/gc` — prune successful ephemeral jobs and completed non-ephemeral job artifacts older than `chain.jobs_artifact_ttl_days`.
 - `GET /api/chain-jobs/:id/stages/:idx/preview` — returns `image/jpeg` when that stage has a preview.
 
 Common errors: `503 CHAIN_JOBS_UNAVAILABLE` when the metadata DB is disabled,

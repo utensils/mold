@@ -518,46 +518,120 @@ impl MoldClient {
         anyhow::bail!("chain SSE stream ended without complete event")
     }
 
-    pub async fn create_chain_job(&self, _req: &ChainRequest) -> Result<CreateChainJobResponse> {
-        todo!("TODO(BR55 Phase 6): implement typed POST /api/chain-jobs client method")
+    pub async fn create_chain_job(&self, req: &ChainRequest) -> Result<CreateChainJobResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/chain-jobs", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<CreateChainJobResponse>()
+            .await?)
     }
 
     pub async fn list_chain_jobs(&self) -> Result<ChainJobListing> {
-        todo!("TODO(BR55 Phase 6): implement typed GET /api/chain-jobs client method")
+        let resp = self
+            .client
+            .get(format!("{}/api/chain-jobs", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<ChainJobListing>()
+            .await?)
     }
 
-    pub async fn get_chain_job(&self, _id: &str) -> Result<ChainJobDetail> {
-        todo!("TODO(BR55 Phase 6): implement typed GET /api/chain-jobs/{{id}} client method")
+    pub async fn get_chain_job(&self, id: &str) -> Result<ChainJobDetail> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/chain-jobs/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<ChainJobDetail>()
+            .await?)
     }
 
-    pub async fn resume_chain_job(&self, _id: &str) -> Result<ChainJobSummary> {
-        todo!(
-            "TODO(BR55 Phase 6): implement typed POST /api/chain-jobs/{{id}}/resume client method"
-        )
+    pub async fn resume_chain_job(&self, id: &str) -> Result<ChainJobSummary> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/chain-jobs/{}/resume",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<ChainJobSummary>()
+            .await?)
     }
 
-    pub async fn retake_chain_job(
-        &self,
-        _id: &str,
-        _req: &RetakeRequest,
-    ) -> Result<ChainJobSummary> {
-        todo!(
-            "TODO(BR55 Phase 6): implement typed POST /api/chain-jobs/{{id}}/retake client method"
-        )
+    pub async fn retake_chain_job(&self, id: &str, req: &RetakeRequest) -> Result<ChainJobSummary> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/chain-jobs/{}/retake",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .json(req)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<ChainJobSummary>()
+            .await?)
     }
 
-    pub async fn cancel_chain_job(&self, _id: &str) -> Result<ChainJobSummary> {
-        todo!(
-            "TODO(BR55 Phase 6): implement typed POST /api/chain-jobs/{{id}}/cancel client method"
-        )
+    pub async fn cancel_chain_job(&self, id: &str) -> Result<ChainJobSummary> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/chain-jobs/{}/cancel",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<ChainJobSummary>()
+            .await?)
     }
 
-    pub async fn delete_chain_job(&self, _id: &str) -> Result<()> {
-        todo!("TODO(BR55 Phase 6): implement typed DELETE /api/chain-jobs/{{id}} client method")
+    pub async fn delete_chain_job(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/chain-jobs/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
     }
 
     pub async fn gc_chain_jobs(&self) -> Result<GcOutcome> {
-        todo!("TODO(BR55 Phase 6): implement typed POST /api/chain-jobs/gc client method")
+        let resp = self
+            .client
+            .post(format!("{}/api/chain-jobs/gc", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<GcOutcome>()
+            .await?)
     }
 
     /// Ask the server to pull (download) a model. Blocks until the download
@@ -924,6 +998,15 @@ fn should_fallback_loras_endpoint(err: &anyhow::Error) -> bool {
         })
 }
 
+async fn error_for_status_with_body(resp: reqwest::Response) -> Result<reqwest::Response> {
+    if resp.status().is_client_error() || resp.status().is_server_error() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("server error {status}: {body}");
+    }
+    Ok(resp)
+}
+
 fn lora_family_for_model_filter(model: &str) -> Option<String> {
     let model = model.trim();
     if model.is_empty() {
@@ -1076,6 +1159,19 @@ pub fn normalize_host(input: &str) -> String {
     } else {
         format!("http://{trimmed}:7680")
     }
+}
+
+fn encode_path_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 /// Error indicating a model was not found on the server (404 with body).

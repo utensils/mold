@@ -273,7 +273,22 @@ pub async fn run_server(
             "chain job startup reconcile complete"
         );
 
-        // TODO(BR55 Phase 6): Call chain_job_runner::startup_gc_sweep strictly between startup_reconcile and spawn_runner.
+        let gc_db = state.metadata_db.clone();
+        let gc_root = jobs_root.clone();
+        let startup_gc = tokio::task::spawn_blocking(move || {
+            let Some(db) = gc_db.as_ref().as_ref() else {
+                anyhow::bail!("metadata DB disappeared before chain startup GC");
+            };
+            chain_job_runner::startup_gc_sweep(db, &gc_root)
+        })
+        .await??;
+        tracing::info!(
+            swept_ephemeral_jobs = startup_gc.swept_ephemeral_jobs,
+            pruned_artifact_dirs = startup_gc.pruned_artifact_dirs,
+            jobs_root = %jobs_root.display(),
+            "chain job startup GC complete"
+        );
+
         let config_snapshot = state.config.read().await.clone();
         let output_dir = if config_snapshot.is_output_disabled() {
             None

@@ -183,7 +183,7 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::retake_chain_job,
         crate::routes_chain_jobs::cancel_chain_job,
         crate::routes_chain_jobs::delete_chain_job,
-        // TODO(BR55 Phase 6): Register crate::routes_chain_jobs::gc_chain_jobs in OpenAPI paths for POST /api/chain-jobs/gc.
+        crate::routes_chain_jobs::gc_chain_jobs,
         crate::routes_chain_jobs::chain_job_stage_preview,
     ),
     components(schemas(
@@ -218,7 +218,7 @@ use crate::queue::clean_error_message;
         mold_core::chain_job::ChainJobState,
         mold_core::chain_job::StageState,
         mold_core::chain_job::RetakeMode,
-        // TODO(BR55 Phase 6): Register mold_core::chain_job::GcOutcome in OpenAPI schemas for chain-job GC responses.
+        mold_core::chain_job::GcOutcome,
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,
@@ -282,7 +282,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/chain-jobs/:id/cancel",
             post(crate::routes_chain_jobs::cancel_chain_job),
         )
-        // TODO(BR55 Phase 6): Register POST /api/chain-jobs/gc route after durable runner GC request handling is implemented.
+        .route(
+            "/api/chain-jobs/gc",
+            post(crate::routes_chain_jobs::gc_chain_jobs),
+        )
         .route(
             "/api/chain-jobs/:id/stages/:idx/preview",
             get(crate::routes_chain_jobs::chain_job_stage_preview),

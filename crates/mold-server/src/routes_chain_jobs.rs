@@ -15,7 +15,7 @@ use mold_core::chain_job::{
     ChainJobState, ChainJobSummary, CreateChainJobResponse, GcOutcome, JobDirLayout, RetakeRequest,
     StageState,
 };
-use mold_db::chain_jobs::{self, ChainJobRow, ChainJobStageRow};
+use mold_db::chain_jobs::{self, ChainJobRow};
 use mold_db::MetadataDb;
 
 use crate::routes::ApiError;
@@ -46,64 +46,29 @@ pub async fn create_chain_job(
     State(state): State<AppState>,
     Json(mut req): Json<ChainRequest>,
 ) -> Result<(StatusCode, Json<CreateChainJobResponse>), ApiError> {
-    // TODO(BR55 Phase 6): Replace inline storage creation with chain_job_runner::create_job_with_params after validation and normalise.
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     crate::routes_chain::validate_and_normalize_chain_family(&state, &mut req).await?;
     let req = req
         .normalise()
         .map_err(|e| ApiError::validation(e.to_string()))?;
-
-    let jobs_root = jobs_root()?;
-    std::fs::create_dir_all(&jobs_root)
-        .map_err(|e| ApiError::internal(format!("failed to create chain jobs root: {e}")))?;
-    let job_id = uuid::Uuid::new_v4().to_string();
-    let job_dir = jobs_root.join(&job_id);
-    let layout = JobDirLayout::new(job_dir.clone());
-    layout
-        .ensure_root()
-        .map_err(|e| ApiError::internal(format!("failed to create chain job dir: {e}")))?;
-
-    let now = now_ms();
-    let manifest = ChainJobManifest::new(job_id.clone(), now as u64, &req)
-        .map_err(|e| ApiError::internal(format!("{e:#}")))?;
-    manifest
-        .write_atomic(&job_dir)
-        .map_err(|e| ApiError::internal(format!("{e:#}")))?;
-    let request_json =
-        serde_json::to_string(&req).map_err(|e| ApiError::internal(format!("{e:#}")))?;
-    let row = ChainJobRow {
-        id: job_id.clone(),
-        state: ChainJobState::Queued,
-        model: req.model.clone(),
-        request_json,
-        job_dir,
-        stage_count: req.stages.len() as u32,
-        current_stage: 0,
-        error: None,
-        created_at_ms: now,
-        updated_at_ms: now,
-        finalized_at_ms: None,
-    };
-    chain_jobs::insert_job(db, &row)
-        .map_err(|e| ApiError::internal(format!("failed to insert chain job: {e:#}")))?;
-    for stage in &manifest.stage_status {
-        chain_jobs::upsert_stage(
-            db,
-            &ChainJobStageRow {
-                job_id: job_id.clone(),
-                stage_idx: stage.idx,
-                state: stage.state,
-                seed: stage.seed,
-                frames_emitted: None,
-                generation_time_ms: None,
-                segment_rel_path: None,
-                error: None,
-                updated_at_ms: now,
-            },
-        )
-        .map_err(|e| ApiError::internal(format!("failed to insert chain stage: {e:#}")))?;
+    if req.output_format != mold_core::OutputFormat::Mp4 {
+        return Err(ApiError::validation(
+            "durable chain jobs currently require output_format = mp4; legacy /api/generate/chain may request gif/webp/apng via the shim",
+        ));
     }
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let jobs_root = jobs_root()?;
+    crate::chain_job_runner::create_job_with_params(
+        db,
+        &jobs_root,
+        crate::chain_job_runner::CreateJobParams {
+            id: job_id.clone(),
+            ephemeral: false,
+            request: req,
+        },
+    )
+    .map_err(|e| ApiError::internal(format!("failed to create chain job: {e:#}")))?;
 
     handle.kick();
     Ok((
@@ -208,7 +173,12 @@ pub async fn resume_chain_job(
     let row = chain_jobs::get_job(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
-    // TODO(BR55 Phase 6): Reject resume of ephemeral jobs with 409 CHAIN_JOB_EPHEMERAL before resumability checks.
+    if read_manifest_optional(&row, &root).is_some_and(|manifest| manifest.ephemeral) {
+        return Err(conflict(
+            CHAIN_JOB_EPHEMERAL,
+            "ephemeral chain jobs are internal to legacy generate/chain shims and cannot be resumed",
+        ));
+    }
     if ![
         ChainJobState::Interrupted,
         ChainJobState::Failed,
@@ -409,11 +379,19 @@ pub async fn delete_chain_job(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[allow(unused_variables, reason = "Phase 3 placeholder — removed in Phase 6")]
+#[utoipa::path(
+    post,
+    path = "/api/chain-jobs/gc",
+    tag = "chain-jobs",
+    responses((status = 200, description = "Chain job GC outcome", body = mold_core::chain_job::GcOutcome))
+)]
 pub async fn gc_chain_jobs(State(state): State<AppState>) -> Result<Json<GcOutcome>, ApiError> {
-    todo!(
-        "TODO(BR55 Phase 6): delegate POST /api/chain-jobs/gc to ChainJobRunnerHandle::request_gc"
-    )
+    let handle = chain_jobs_handle(&state)?;
+    let outcome = handle
+        .request_gc()
+        .await
+        .map_err(|e| ApiError::internal(format!("chain job GC failed: {e:#}")))?;
+    Ok(Json(outcome))
 }
 
 /// image/jpeg; 404 job/stage/preview missing.
@@ -457,7 +435,7 @@ pub async fn chain_job_stage_preview(
 }
 
 /// DB rows + manifest join; has_preview from disk; script = EFFECTIVE.
-fn job_detail_for(
+pub(crate) fn job_detail_for(
     db: &MetadataDb,
     _jobs_root: &FsPath,
     id: &str,
@@ -512,7 +490,7 @@ fn metadata_db(state: &AppState) -> Result<&MetadataDb, ApiError> {
     })
 }
 
-fn jobs_root() -> Result<std::path::PathBuf, ApiError> {
+pub(crate) fn jobs_root() -> Result<std::path::PathBuf, ApiError> {
     mold_core::Config::mold_dir()
         .map(|dir| dir.join("jobs"))
         .ok_or_else(|| {
@@ -615,6 +593,197 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-// TODO(BR55 Phase 6): Add resume-chain-job test for ephemeral job 409 CHAIN_JOB_EPHEMERAL.
-// TODO(BR55 Phase 6): Add gc-chain-jobs route test proving POST /api/chain-jobs/gc delegates to runner request_gc.
-// TODO(BR55 Phase 6): Add create-chain-job test proving public job creation passes ephemeral=false through create_job_with_params.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use mold_core::chain::{ChainStage, TransitionMode};
+    use mold_core::GenerateRequest;
+    use mold_core::OutputFormat;
+    use mold_inference::chain::ChainTail;
+    use std::ops::ControlFlow;
+    use std::sync::Arc;
+
+    fn req(format: OutputFormat) -> ChainRequest {
+        ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".into(),
+            stages: vec![ChainStage {
+                prompt: "stage zero".into(),
+                frames: 9,
+                source_image: None,
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Smooth,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            }],
+            motion_tail_frames: 1,
+            width: 64,
+            height: 48,
+            fps: 8,
+            seed: Some(42),
+            steps: 2,
+            guidance: 1.0,
+            strength: 1.0,
+            output_format: format,
+            placement: None,
+            prompt: None,
+            total_frames: None,
+            clip_frames: None,
+            source_image: None,
+            enable_audio: None,
+        }
+    }
+
+    fn state_with(
+        db: Arc<Option<MetadataDb>>,
+        handle: crate::chain_job_runner::ChainJobRunnerHandle,
+    ) -> AppState {
+        let mut state = AppState::for_tests();
+        state.metadata_db = db;
+        state.chain_jobs = Some(Arc::new(handle));
+        state
+    }
+
+    fn with_mold_home<R>(home: &std::path::Path, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev = std::env::var_os("MOLD_HOME");
+        std::env::set_var("MOLD_HOME", home);
+        let out = f();
+        match prev {
+            Some(value) => std::env::set_var("MOLD_HOME", value),
+            None => std::env::remove_var("MOLD_HOME"),
+        }
+        out
+    }
+
+    struct NoopExecutor;
+
+    impl crate::chain_job_runner::StageExecutor for NoopExecutor {
+        fn render_stage(
+            &self,
+            _model: &str,
+            _stage_req: &GenerateRequest,
+            _carry: Option<&ChainTail>,
+            _motion_tail_frames: u32,
+            _progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+        ) -> anyhow::Result<crate::chain_job_runner::StageRenderOutcome> {
+            anyhow::bail!("NoopExecutor should not render during route GC tests")
+        }
+    }
+
+    struct NoopProbe;
+
+    impl crate::chain_job_runner::QueueProbe for NoopProbe {
+        fn small_jobs_waiting(&self) -> usize {
+            0
+        }
+    }
+
+    #[tokio::test]
+    async fn create_chain_job_persists_public_jobs_as_non_ephemeral() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+
+        let (_status, Json(body)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(
+                State(state),
+                Json(req(OutputFormat::Mp4)),
+            ))
+        })
+        .unwrap();
+
+        let db_ref = db.as_ref().as_ref().unwrap();
+        let row = chain_jobs::get_job(db_ref, &body.job_id).unwrap().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+        assert!(!manifest.ephemeral);
+    }
+
+    #[tokio::test]
+    async fn create_chain_job_rejects_non_mp4_public_jobs() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db,
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+
+        let err = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(
+                State(state),
+                Json(req(OutputFormat::Apng)),
+            ))
+        })
+        .unwrap_err();
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn resume_ephemeral_job_returns_409() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let job_id = "01JBR55EPHRESUME";
+        with_mold_home(home.path(), || {
+            let jobs_root = home.path().join("jobs");
+            let db_ref = db.as_ref().as_ref().unwrap();
+            let row = crate::chain_job_runner::create_job_with_params(
+                db_ref,
+                &jobs_root,
+                crate::chain_job_runner::CreateJobParams {
+                    id: job_id.into(),
+                    ephemeral: true,
+                    request: req(OutputFormat::Mp4).normalise().unwrap(),
+                },
+            )
+            .unwrap();
+            chain_jobs::update_job_state(db_ref, &row.id, ChainJobState::Failed, None, now_ms())
+                .unwrap();
+        });
+        let state = state_with(
+            db,
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+
+        let err = with_mold_home(home.path(), || {
+            futures::executor::block_on(resume_chain_job(State(state), Path(job_id.to_string())))
+        })
+        .unwrap_err();
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn gc_chain_jobs_delegates_to_runner_handle() {
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let home = tempfile::tempdir().unwrap();
+        let jobs_root = home.path().join("jobs");
+        let deps = crate::chain_job_runner::RunnerDeps {
+            db: db.clone(),
+            jobs_root,
+            executor: Arc::new(NoopExecutor),
+            queue_probe: Arc::new(NoopProbe),
+            events: Arc::new(crate::chain_job_runner::JobEventBus::new()),
+            cancel: Arc::new(crate::chain_job_runner::CancelRegistry::new()),
+            job_locks: Arc::new(crate::chain_job_runner::JobMutationLocks::new()),
+            claims: Arc::new(crate::chain_job_runner::EphemeralClaims::default()),
+            output_dir: None,
+        };
+        let state = state_with(db, crate::chain_job_runner::spawn_runner(deps));
+
+        let Json(outcome) = gc_chain_jobs(State(state)).await.unwrap();
+
+        assert_eq!(outcome.swept_ephemeral_jobs, 0);
+        assert_eq!(outcome.pruned_artifact_dirs, 0);
+    }
+}

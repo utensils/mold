@@ -10,6 +10,7 @@ use base64::Engine as _;
 use mold_core::chain::{
     ChainProgressEvent, ChainRequest, ChainScript, ChainStage, SseChainCompleteEvent,
 };
+use mold_core::chain_job::{RetakeMode, RetakeRequest};
 use mold_core::error::MoldError;
 use mold_core::types::OutputFormat;
 use mold_core::MoldClient;
@@ -259,4 +260,41 @@ async fn generate_chain_stream_parses_progress_and_complete_events() {
     assert!(resp.vram_estimate.is_none());
     let ev = rx.recv().await.expect("progress event should be forwarded");
     assert_eq!(ev, progress);
+}
+
+#[tokio::test]
+async fn retake_chain_job_409_surfaces_splice_rejection_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chain-jobs/job-1/retake"))
+        .respond_with(
+            ResponseTemplate::new(409)
+                .set_body_string("splice retake cannot precede a smooth transition"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = MoldClient::new(&server.uri());
+    let err = client
+        .retake_chain_job(
+            "job-1",
+            &RetakeRequest {
+                stage_idx: 0,
+                mode: RetakeMode::Splice,
+                seed_offset: None,
+                prompt: None,
+            },
+        )
+        .await
+        .expect_err("409 splice rejection must error");
+    let msg = format!("{err:#}");
+
+    assert!(
+        msg.contains("server error 409 Conflict"),
+        "error should include status, got: {msg}",
+    );
+    assert!(
+        msg.contains("splice retake cannot precede a smooth transition"),
+        "error should include server body, got: {msg}",
+    );
 }

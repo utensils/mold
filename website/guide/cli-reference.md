@@ -80,6 +80,26 @@ mold chain validate shot.toml
 mold run --script shot.toml --dry-run
 ```
 
+## `mold jobs`
+
+Inspect and control durable chain jobs on a running `mold serve` instance. The
+commands use `MOLD_HOST` and send `MOLD_API_KEY` when configured.
+
+```bash
+mold jobs list [--json]
+mold jobs show <id> [--json]
+mold jobs resume <id>
+mold jobs retake <id> --stage <N> [--mode cascade|splice] [--seed-offset <U64>] [--prompt <TEXT>]
+mold jobs cancel <id>
+mold jobs delete <id> [--yes]
+mold jobs gc
+```
+
+Durable chain jobs store checkpoints under `MOLD_HOME/jobs/<job_id>`.
+`mold jobs gc` mirrors `POST /api/chain-jobs/gc`, pruning successful ephemeral
+shim jobs and completed non-ephemeral job artifacts older than
+`chain.jobs_artifact_ttl_days`.
+
 ## `mold expand`
 
 Preview prompt expansion without generating.

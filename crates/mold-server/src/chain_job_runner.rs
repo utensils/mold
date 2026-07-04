@@ -4,6 +4,7 @@ use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context};
@@ -12,11 +13,11 @@ use image::{ImageEncoder, RgbImage};
 use mold_core::chain::{ChainRequest, ChainStage, TransitionMode};
 use mold_core::chain_job::{
     effective_stage_seed, settled, ChainJobEvent, ChainJobManifest, ChainJobState, FinalizeRecord,
-    GcOutcome, JobDirLayout, RetakeAmendment, RetakeMode, RetakeRequest, StageState,
+    GcOutcome, JobDirLayout, RetakeAmendment, RetakeMode, RetakeRequest, StageState, STAGES_DIR,
 };
 use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
 use mold_db::chain_jobs::{self, ChainJobRow, ChainJobStageRow};
-use mold_db::MetadataDb;
+use mold_db::{settings, MetadataDb};
 use mold_inference::audio::NativeAudioTrack;
 use mold_inference::chain::stitch::fade_boundary;
 use mold_inference::chain::{ChainTail, StageOutcome, StageProgressEvent};
@@ -35,11 +36,10 @@ const AUDIO_SIDECAR_MAGIC: &[u8; 8] = b"MOLDPCM1";
 pub const EPHEMERAL_GRACE_SECS: u64 = 900;
 
 pub struct ChainJobRunnerHandle {
-    kick_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    kick_tx: tokio::sync::mpsc::UnboundedSender<RunnerCmd>,
     cancel: Arc<CancelRegistry>,
     events: Arc<JobEventBus>,
     job_locks: Arc<JobMutationLocks>,
-    #[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
     claims: Arc<EphemeralClaims>,
 }
 
@@ -52,13 +52,11 @@ pub struct CancelRegistry {
 /// by the SSE stream future) across create→settle→read→delete. Drop = sync
 /// release (std Mutex, matching Run 2 registry conventions). GC never sweeps
 /// an ephemeral with a live claim.
-#[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
 pub struct EphemeralClaimGuard {
     job_id: String,
     claims: Arc<EphemeralClaims>,
 }
 
-#[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
 #[derive(Default)]
 pub struct EphemeralClaims {
     claimed: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -86,12 +84,10 @@ pub struct RunnerDeps {
     pub events: Arc<JobEventBus>,
     pub cancel: Arc<CancelRegistry>,
     pub job_locks: Arc<JobMutationLocks>,
-    #[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
     pub claims: Arc<EphemeralClaims>,
     pub output_dir: Option<PathBuf>,
 }
 
-#[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
 pub(crate) struct CreateJobParams {
     pub id: String,
     pub ephemeral: bool,
@@ -208,20 +204,32 @@ impl Default for CancelRegistry {
 impl EphemeralClaims {
     /// RAII claim; guard held by the SHIM WORKER TASK across
     /// create→settle→read→delete (P0 note 2). Sync-only Drop.
-    #[allow(unused_variables, reason = "Phase 3 placeholder — removed in Phase 6")]
     pub fn claim(self: &Arc<Self>, job_id: &str) -> EphemeralClaimGuard {
-        todo!("TODO(BR55 Phase 6): claim ephemeral chain jobs for shim-owned create-settle-read-delete")
+        self.claimed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(job_id.to_string());
+        EphemeralClaimGuard {
+            job_id: job_id.to_string(),
+            claims: self.clone(),
+        }
     }
 
-    #[allow(unused_variables, reason = "Phase 3 placeholder — removed in Phase 6")]
     pub fn is_claimed(&self, job_id: &str) -> bool {
-        todo!("TODO(BR55 Phase 6): check whether an ephemeral chain job has a live shim claim")
+        self.claimed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(job_id)
     }
 }
 
 impl Drop for EphemeralClaimGuard {
     fn drop(&mut self) {
-        todo!("TODO(BR55 Phase 6): synchronously release the ephemeral chain job claim")
+        self.claims
+            .claimed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.job_id);
     }
 }
 
@@ -368,7 +376,7 @@ impl ChainJobRunnerHandle {
 
     /// Nudge the runner: a job row was inserted/reset to queued.
     pub fn kick(&self) {
-        let _ = self.kick_tx.send(());
+        let _ = self.kick_tx.send(RunnerCmd::Kick);
     }
 
     /// Mark cancel-requested; false when the job is unknown to the registry.
@@ -384,12 +392,26 @@ impl ChainJobRunnerHandle {
         self.job_locks.lock(job_id).await
     }
 
+    pub(crate) fn blocking_lock_job(&self, job_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.job_locks.blocking_lock(job_id)
+    }
+
     pub fn remove_job_lock(&self, job_id: &str) {
         self.job_locks.remove(job_id);
     }
 
+    pub(crate) fn claim_ephemeral(&self, job_id: &str) -> EphemeralClaimGuard {
+        self.claims.claim(job_id)
+    }
+
     pub async fn request_gc(&self) -> anyhow::Result<GcOutcome> {
-        todo!("TODO(BR55 Phase 6): send RunnerCmd::Gc and await the runner-owned GC pass")
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.kick_tx
+            .send(RunnerCmd::Gc { reply })
+            .map_err(|_| anyhow!("chain job runner stopped before GC request could be sent"))?;
+        rx.await
+            .map_err(|_| anyhow!("chain job runner stopped before replying to GC request"))?
+            .map_err(|msg| anyhow!(msg))
     }
 
     pub fn cleanup_deleted(&self, job_id: &str) {
@@ -446,17 +468,56 @@ pub fn spawn_runner(deps: RunnerDeps) -> ChainJobRunnerHandle {
 /// family is async + &AppState), normalise(), and the non-Mp4 422 gate
 /// (ApiError::validation) BEFORE calling this. This fn is sync
 /// storage-only: job dir + manifest + rows; anyhow errors = internal 500.
-#[allow(
-    dead_code,
-    unused_variables,
-    reason = "Phase 3 placeholder — removed in Phase 6"
-)]
 pub(crate) fn create_job_with_params(
     db: &MetadataDb,
     jobs_root: &Path,
     params: CreateJobParams,
 ) -> anyhow::Result<ChainJobRow> {
-    todo!("TODO(BR55 Phase 6): factor durable chain job storage creation for public jobs and ephemeral shims")
+    std::fs::create_dir_all(jobs_root)
+        .with_context(|| format!("creating chain jobs root '{}'", jobs_root.display()))?;
+    let job_dir = jobs_root.join(&params.id);
+    let layout = JobDirLayout::new(job_dir.clone());
+    layout.ensure_root()?;
+
+    let now = now_ms_i64();
+    let mut manifest = ChainJobManifest::new(params.id.clone(), now.max(0) as u64, &params.request)
+        .map_err(|e| anyhow!("{e:#}"))?;
+    manifest.ephemeral = params.ephemeral;
+    manifest
+        .write_atomic(&job_dir)
+        .map_err(|e| anyhow!("{e:#}"))?;
+    let request_json = serde_json::to_string(&params.request)?;
+    let row = ChainJobRow {
+        id: params.id.clone(),
+        state: ChainJobState::Queued,
+        model: params.request.model.clone(),
+        request_json,
+        job_dir,
+        stage_count: params.request.stages.len() as u32,
+        current_stage: 0,
+        error: None,
+        created_at_ms: now,
+        updated_at_ms: now,
+        finalized_at_ms: None,
+    };
+    chain_jobs::insert_job(db, &row)?;
+    for stage in &manifest.stage_status {
+        chain_jobs::upsert_stage(
+            db,
+            &ChainJobStageRow {
+                job_id: row.id.clone(),
+                stage_idx: stage.idx,
+                state: stage.state,
+                seed: stage.seed,
+                frames_emitted: None,
+                generation_time_ms: None,
+                segment_rel_path: None,
+                error: None,
+                updated_at_ms: now,
+            },
+        )?;
+    }
+    Ok(row)
 }
 
 /// Spec section 7 steps 1-2: flip running->interrupted; repair rows from
@@ -555,44 +616,150 @@ pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(u
 /// manifest + rows retained). EVERY delete goes through the guarded-delete
 /// discipline: per-job mutation lock + state-predicated row ops (inv 17 /
 /// P0 note 1). Sweep of an ephemeral removes dir + row (+ bus entry).
-#[allow(
-    dead_code,
-    unused_variables,
-    reason = "Phase 3 placeholder — removed in Phase 6"
-)]
 pub(crate) fn run_gc_pass(
     deps: &RunnerDeps,
     ttl_days: i64,
     now_ms: i64,
 ) -> anyhow::Result<GcOutcome> {
-    todo!("TODO(BR55 Phase 6): run runner-owned chain job GC with guarded deletes")
+    let db = deps
+        .db
+        .as_ref()
+        .as_ref()
+        .ok_or_else(|| anyhow!("chain job GC invoked without metadata DB"))?;
+    let ttl_ms = ttl_days.max(0).saturating_mul(86_400_000);
+    let grace_ms = (EPHEMERAL_GRACE_SECS as i64).saturating_mul(1_000);
+    let mut outcome = GcOutcome {
+        swept_ephemeral_jobs: 0,
+        pruned_artifact_dirs: 0,
+    };
+
+    for row in chain_jobs::list_jobs(db)? {
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir).ok();
+        if manifest.as_ref().is_some_and(|manifest| manifest.ephemeral) {
+            if deps.claims.is_claimed(&row.id) {
+                continue;
+            }
+            if settled(row.state) && now_ms.saturating_sub(row.updated_at_ms) < grace_ms {
+                continue;
+            }
+            let remove_lock = {
+                let _guard = deps.job_locks.blocking_lock(&row.id);
+                let current = match chain_jobs::get_job(db, &row.id)? {
+                    Some(current) => current,
+                    None => {
+                        continue;
+                    }
+                };
+                let within_grace = settled(current.state)
+                    && now_ms.saturating_sub(current.updated_at_ms) < grace_ms;
+                if current.state == ChainJobState::Running
+                    || deps.claims.is_claimed(&row.id)
+                    || within_grace
+                {
+                    false
+                } else {
+                    if current.job_dir.exists() {
+                        std::fs::remove_dir_all(&current.job_dir).with_context(|| {
+                            format!(
+                                "removing ephemeral chain job '{}'",
+                                current.job_dir.display()
+                            )
+                        })?;
+                    }
+                    chain_jobs::delete_job_not_running(db, &current.id)?
+                }
+            };
+            if remove_lock {
+                outcome.swept_ephemeral_jobs += 1;
+                deps.cancel.unregister(&row.id);
+                deps.events.remove(&row.id);
+                deps.job_locks.remove(&row.id);
+            }
+            continue;
+        }
+
+        if row.state == ChainJobState::Completed
+            && ttl_ms >= 0
+            && now_ms.saturating_sub(row.updated_at_ms) >= ttl_ms
+        {
+            let stages_dir = row.job_dir.join(STAGES_DIR);
+            if stages_dir.exists() {
+                let _guard = deps.job_locks.blocking_lock(&row.id);
+                let Some(current) = chain_jobs::get_job(db, &row.id)? else {
+                    continue;
+                };
+                if current.state == ChainJobState::Completed && stages_dir.exists() {
+                    std::fs::remove_dir_all(&stages_dir).with_context(|| {
+                        format!("pruning chain job stages '{}'", stages_dir.display())
+                    })?;
+                    outcome.pruned_artifact_dirs += 1;
+                }
+            }
+        }
+    }
+
+    Ok(outcome)
 }
 
 /// Startup sweep (unconditional on claims — none survive restart): all
 /// non-running ephemerals removed. Ordering pin: lib.rs calls
 /// startup_reconcile → THIS → spawn_runner, strictly sequential.
-#[allow(
-    dead_code,
-    unused_variables,
-    reason = "Phase 3 placeholder — removed in Phase 6"
-)]
 pub(crate) fn startup_gc_sweep(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<GcOutcome> {
-    todo!("TODO(BR55 Phase 6): sweep non-running ephemeral chain jobs during startup before spawning runner")
+    let mut outcome = GcOutcome {
+        swept_ephemeral_jobs: 0,
+        pruned_artifact_dirs: 0,
+    };
+    for row in chain_jobs::list_jobs(db)? {
+        let job_dir = if row.job_dir.is_absolute() {
+            row.job_dir.clone()
+        } else {
+            jobs_root.join(&row.job_dir)
+        };
+        let Ok(manifest) = ChainJobManifest::read_from_dir(&job_dir) else {
+            continue;
+        };
+        if manifest.ephemeral && row.state != ChainJobState::Running {
+            if job_dir.exists() {
+                std::fs::remove_dir_all(&job_dir).with_context(|| {
+                    format!(
+                        "removing startup ephemeral chain job '{}'",
+                        job_dir.display()
+                    )
+                })?;
+            }
+            if chain_jobs::delete_job_not_running(db, &row.id)? {
+                outcome.swept_ephemeral_jobs += 1;
+            }
+        }
+    }
+    Ok(outcome)
 }
 
-async fn run_loop(deps: Arc<RunnerDeps>, mut kick_rx: tokio::sync::mpsc::UnboundedReceiver<()>) {
+async fn run_loop(
+    deps: Arc<RunnerDeps>,
+    mut kick_rx: tokio::sync::mpsc::UnboundedReceiver<RunnerCmd>,
+) {
+    let mut daily = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+    daily.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    daily.tick().await;
     loop {
-        let mut made_progress = false;
+        while let Ok(cmd) = kick_rx.try_recv() {
+            if !handle_runner_cmd(deps.clone(), cmd).await {
+                return;
+            }
+        }
+
+        let mut ran_job = false;
         if let Some(db) = deps.db.as_ref() {
-            loop {
-                let job = match next_queued_job(db) {
-                    Ok(Some(job)) => job,
-                    Ok(None) => break,
-                    Err(err) => {
-                        tracing::warn!("chain-job queued lookup failed: {err:#}");
-                        break;
-                    }
-                };
+            let job = match next_queued_job(db) {
+                Ok(Some(job)) => Some(job),
+                Ok(None) => None,
+                Err(err) => {
+                    tracing::warn!("chain-job queued lookup failed: {err:#}");
+                    None
+                }
+            };
+            if let Some(job) = job {
                 let deps_for_job = deps.clone();
                 let job_id = job.id.clone();
                 let start_stage = job.current_stage;
@@ -607,7 +774,7 @@ async fn run_loop(deps: Arc<RunnerDeps>, mut kick_rx: tokio::sync::mpsc::Unbound
                 match join {
                     Ok(Ok(claimed)) => {
                         if claimed {
-                            made_progress = true;
+                            ran_job = true;
                         }
                     }
                     Ok(Err(err)) => {
@@ -622,14 +789,53 @@ async fn run_loop(deps: Arc<RunnerDeps>, mut kick_rx: tokio::sync::mpsc::Unbound
             }
         }
 
-        if !made_progress {
-            if kick_rx.recv().await.is_none() {
-                break;
-            }
-        } else {
+        if ran_job {
             tokio::task::yield_now().await;
+            continue;
+        }
+
+        tokio::select! {
+            maybe_cmd = kick_rx.recv() => {
+                let Some(cmd) = maybe_cmd else { break };
+                if !handle_runner_cmd(deps.clone(), cmd).await {
+                    break;
+                }
+            }
+            _ = daily.tick() => {
+                if let Err(err) = run_gc_for_runner(deps.clone()).await {
+                    tracing::warn!("daily chain job GC failed: {err}");
+                }
+            }
         }
     }
+}
+
+async fn handle_runner_cmd(deps: Arc<RunnerDeps>, cmd: RunnerCmd) -> bool {
+    match cmd {
+        RunnerCmd::Kick => true,
+        RunnerCmd::Gc { reply } => {
+            let result = run_gc_for_runner(deps).await;
+            let _ = reply.send(result);
+            true
+        }
+    }
+}
+
+async fn run_gc_for_runner(deps: Arc<RunnerDeps>) -> std::result::Result<GcOutcome, String> {
+    tokio::task::spawn_blocking(move || {
+        let db = deps
+            .db
+            .as_ref()
+            .as_ref()
+            .ok_or_else(|| "chain job GC invoked without metadata DB".to_string())?;
+        let ttl_days = settings::Settings::new(db)
+            .get_int(settings::CHAIN_JOBS_ARTIFACT_TTL_DAYS)
+            .map_err(|e| format!("{e:#}"))?
+            .unwrap_or(settings::CHAIN_JOBS_ARTIFACT_TTL_DEFAULT);
+        run_gc_pass(&deps, ttl_days, now_ms_i64()).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| format!("chain job GC task failed: {e}"))?
 }
 
 /// FIFO by created_at among state=queued.
@@ -1334,18 +1540,20 @@ fn finalize_job(
     }
     write_file(&output_path, &video_bytes)?;
 
-    if let Some(output_dir) = deps.output_dir.as_ref() {
-        let metadata = output_metadata_for_chain(&effective, frame_count);
-        save_video_to_dir(
-            output_dir,
-            &video_bytes,
-            &[],
-            OutputFormat::Mp4,
-            &effective.model,
-            &metadata,
-            None,
-            Some(db),
-        );
+    if !manifest.ephemeral {
+        if let Some(output_dir) = deps.output_dir.as_ref() {
+            let metadata = output_metadata_for_chain(&effective, frame_count);
+            save_video_to_dir(
+                output_dir,
+                &video_bytes,
+                &[],
+                OutputFormat::Mp4,
+                &effective.model,
+                &metadata,
+                None,
+                Some(db),
+            );
+        }
     }
 
     let now = now_ms_u64();
@@ -2741,6 +2949,87 @@ mod tests {
     }
 
     #[test]
+    fn ephemeral_execute_job_defers_gallery_record_to_legacy_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55EPHGALLERY",
+            &req,
+            ChainJobState::Queued,
+        );
+        let mut manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&job_dir).unwrap();
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let output_dir = dir.path().join("gallery");
+        let mut deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.output_dir = Some(output_dir.clone());
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        assert_eq!(
+            db.list(Some(&output_dir)).unwrap().len(),
+            0,
+            "ephemeral legacy shim jobs must not write runner-side gallery rows"
+        );
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
+    }
+
+    #[test]
+    fn durable_execute_job_records_exactly_one_runner_gallery_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55DURGALLERY",
+            &req,
+            ChainJobState::Queued,
+        );
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let output_dir = dir.path().join("gallery");
+        let mut deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.output_dir = Some(output_dir.clone());
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let rows = db.list(Some(&output_dir)).unwrap();
+        assert_eq!(rows.len(), 1, "durable jobs save exactly one gallery row");
+        assert_eq!(rows[0].format, OutputFormat::Mp4);
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
+    }
+
+    #[test]
     fn cancel_via_progress_marks_job_cancelled_and_keeps_completed_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
@@ -3460,11 +3749,293 @@ mod tests {
         );
     }
 
-    // TODO(BR55 Phase 6): Add GC orphan predicate coverage for ephemeral jobs where state != running and no live claim.
-    // TODO(BR55 Phase 6): Add GC coverage for EPHEMERAL_GRACE_SECS settled-unclaimed sweep grace on daily passes.
-    // TODO(BR55 Phase 6): Add non-ephemeral TTL coverage proving completed jobs prune stages/ only while retaining final/ manifest and rows.
-    // TODO(BR55 Phase 6): Add TTL exemption coverage for failed interrupted and cancelled non-ephemeral jobs.
-    // TODO(BR55 Phase 6): Add ephemeral-overrides coverage proving failed interrupted and cancelled ephemerals are swept despite TTL exemptions.
-    // TODO(BR55 Phase 6): Add cancel-then-retake coverage proving GC and ephemeral claim logic do not affect durable retake flows.
-    // TODO(BR55 Phase 6): Add RunnerCmd servicing coverage proving GC requests are drained between jobs and wait at most one job runtime.
+    #[test]
+    fn ephemeral_claim_guard_releases_on_drop() {
+        let claims = Arc::new(EphemeralClaims::default());
+        {
+            let _guard = claims.claim("01JBR55CLAIM");
+            assert!(claims.is_claimed("01JBR55CLAIM"));
+        }
+        assert!(!claims.is_claimed("01JBR55CLAIM"));
+    }
+
+    #[test]
+    fn create_job_with_params_persists_ephemeral_manifest_and_stage_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+
+        let row = create_job_with_params(
+            &db,
+            dir.path(),
+            CreateJobParams {
+                id: "01JBR55CREATE".into(),
+                ephemeral: true,
+                request: req.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(row.id, "01JBR55CREATE");
+        assert_eq!(row.state, ChainJobState::Queued);
+        assert_eq!(row.stage_count, 2);
+        assert!(row.job_dir.ends_with("01JBR55CREATE"));
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+        assert!(manifest.ephemeral);
+        assert_eq!(manifest.request().unwrap(), req);
+        let stages = chain_jobs::stages_for_job(&db, &row.id).unwrap();
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].state, StageState::Pending);
+    }
+
+    #[test]
+    fn startup_gc_sweep_removes_non_running_ephemerals_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let jobs_root = dir.path().join("jobs");
+        let ephemeral_done = persist_job(
+            &db,
+            &jobs_root.join("01JBR55EPHDONE"),
+            "01JBR55EPHDONE",
+            &req,
+            ChainJobState::Completed,
+        );
+        let mut manifest = ChainJobManifest::read_from_dir(&ephemeral_done.job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&ephemeral_done.job_dir).unwrap();
+        let ephemeral_running = persist_job(
+            &db,
+            &jobs_root.join("01JBR55EPHRUN"),
+            "01JBR55EPHRUN",
+            &req,
+            ChainJobState::Running,
+        );
+        let mut manifest = ChainJobManifest::read_from_dir(&ephemeral_running.job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&ephemeral_running.job_dir).unwrap();
+        let durable_done = persist_job(
+            &db,
+            &jobs_root.join("01JBR55DURABLE"),
+            "01JBR55DURABLE",
+            &req,
+            ChainJobState::Completed,
+        );
+
+        let outcome = startup_gc_sweep(&db, &jobs_root).unwrap();
+
+        assert_eq!(outcome.swept_ephemeral_jobs, 1);
+        assert!(chain_jobs::get_job(&db, &ephemeral_done.id)
+            .unwrap()
+            .is_none());
+        assert!(!ephemeral_done.job_dir.exists());
+        assert!(chain_jobs::get_job(&db, &ephemeral_running.id)
+            .unwrap()
+            .is_some());
+        assert!(ephemeral_running.job_dir.exists());
+        assert!(chain_jobs::get_job(&db, &durable_done.id)
+            .unwrap()
+            .is_some());
+        assert!(durable_done.job_dir.exists());
+    }
+
+    #[test]
+    fn gc_sweeps_unclaimed_ephemeral_after_grace_but_preserves_live_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let jobs_root = dir.path().join("jobs");
+        let old = persist_job(
+            &db,
+            &jobs_root.join("01JBR55OLDCLAIMLESS"),
+            "01JBR55OLDCLAIMLESS",
+            &req,
+            ChainJobState::Completed,
+        );
+        let mut manifest = ChainJobManifest::read_from_dir(&old.job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&old.job_dir).unwrap();
+        chain_jobs::update_job_state(&db, &old.id, ChainJobState::Completed, None, 1_000).unwrap();
+        let claimed = persist_job(
+            &db,
+            &jobs_root.join("01JBR55CLAIMEDGC"),
+            "01JBR55CLAIMEDGC",
+            &req,
+            ChainJobState::Completed,
+        );
+        let mut manifest = ChainJobManifest::read_from_dir(&claimed.job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&claimed.job_dir).unwrap();
+
+        let deps = deps(
+            db,
+            jobs_root,
+            Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        let _claim = deps.claims.claim(&claimed.id);
+        let outcome =
+            run_gc_pass(&deps, 7, 1_000 + (EPHEMERAL_GRACE_SECS as i64 + 1) * 1_000).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        assert_eq!(outcome.swept_ephemeral_jobs, 1);
+        assert!(chain_jobs::get_job(db, &old.id).unwrap().is_none());
+        assert!(chain_jobs::get_job(db, &claimed.id).unwrap().is_some());
+        assert!(claimed.job_dir.exists());
+    }
+
+    #[test]
+    fn gc_respects_ephemeral_grace_and_prunes_only_completed_durable_stages() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let jobs_root = dir.path().join("jobs");
+        let recent_ephemeral = persist_job(
+            &db,
+            &jobs_root.join("01JBR55RECENTEPH"),
+            "01JBR55RECENTEPH",
+            &req,
+            ChainJobState::Completed,
+        );
+        let mut manifest = ChainJobManifest::read_from_dir(&recent_ephemeral.job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&recent_ephemeral.job_dir).unwrap();
+        let now = 1_000 + 8 * 86_400_000;
+        chain_jobs::update_job_state(
+            &db,
+            &recent_ephemeral.id,
+            ChainJobState::Completed,
+            None,
+            now - (EPHEMERAL_GRACE_SECS as i64 * 1_000) + 100,
+        )
+        .unwrap();
+
+        let durable = persist_job(
+            &db,
+            &jobs_root.join("01JBR55TTL"),
+            "01JBR55TTL",
+            &req,
+            ChainJobState::Completed,
+        );
+        let layout = JobDirLayout::new(durable.job_dir.clone());
+        std::fs::create_dir_all(layout.stage_dir(0)).unwrap();
+        std::fs::write(layout.stage_dir(0).join("segment.mp4"), b"stage").unwrap();
+        std::fs::create_dir_all(durable.job_dir.join("final")).unwrap();
+        std::fs::write(durable.job_dir.join("final/output-1.mp4"), b"final").unwrap();
+        chain_jobs::update_job_state(&db, &durable.id, ChainJobState::Completed, None, 1_000)
+            .unwrap();
+
+        let deps = deps(
+            db,
+            jobs_root,
+            Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        let outcome = run_gc_pass(&deps, 7, now).unwrap();
+        let db = deps.db.as_ref().as_ref().unwrap();
+
+        assert_eq!(outcome.swept_ephemeral_jobs, 0);
+        assert_eq!(outcome.pruned_artifact_dirs, 1);
+        assert!(chain_jobs::get_job(db, &recent_ephemeral.id)
+            .unwrap()
+            .is_some());
+        assert!(recent_ephemeral.job_dir.exists());
+        assert!(!durable.job_dir.join("stages").exists());
+        assert!(durable.job_dir.join("final/output-1.mp4").exists());
+        assert!(durable.job_dir.join("manifest.toml").exists());
+        assert!(chain_jobs::get_job(db, &durable.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn gc_exempts_durable_failed_interrupted_cancelled_but_ephemeral_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let jobs_root = dir.path().join("jobs");
+        let mut durable_rows = Vec::new();
+        for (id, state) in [
+            ("01JBR55FAILED", ChainJobState::Failed),
+            ("01JBR55INTR", ChainJobState::Interrupted),
+            ("01JBR55CANCELLED", ChainJobState::Cancelled),
+        ] {
+            let row = persist_job(&db, &jobs_root.join(id), id, &req, state);
+            std::fs::create_dir_all(row.job_dir.join("stages/000")).unwrap();
+            durable_rows.push(row);
+        }
+        let eph_failed = persist_job(
+            &db,
+            &jobs_root.join("01JBR55EPHFAILED"),
+            "01JBR55EPHFAILED",
+            &req,
+            ChainJobState::Failed,
+        );
+        let mut manifest = ChainJobManifest::read_from_dir(&eph_failed.job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&eph_failed.job_dir).unwrap();
+        chain_jobs::update_job_state(&db, &eph_failed.id, ChainJobState::Failed, None, 1_000)
+            .unwrap();
+
+        let deps = deps(
+            db,
+            jobs_root,
+            Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        let outcome =
+            run_gc_pass(&deps, 7, 1_000 + (EPHEMERAL_GRACE_SECS as i64 + 1) * 1_000).unwrap();
+        let db = deps.db.as_ref().as_ref().unwrap();
+
+        assert_eq!(outcome.swept_ephemeral_jobs, 1);
+        assert!(chain_jobs::get_job(db, &eph_failed.id).unwrap().is_none());
+        for row in durable_rows {
+            assert!(chain_jobs::get_job(db, &row.id).unwrap().is_some());
+            assert!(row.job_dir.join("stages").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn runner_request_gc_replies_between_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let jobs_root = dir.path().join("jobs");
+        let _row = persist_job(
+            &db,
+            &jobs_root.join("01JBR55REQUESTGC"),
+            "01JBR55REQUESTGC",
+            &req,
+            ChainJobState::Completed,
+        );
+        let deps = RunnerDeps {
+            db: Arc::new(Some(db)),
+            jobs_root,
+            executor: Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            queue_probe: Arc::new(FakeProbe(AtomicUsize::new(0))),
+            events: Arc::new(JobEventBus::new()),
+            cancel: Arc::new(CancelRegistry::new()),
+            job_locks: Arc::new(JobMutationLocks::new()),
+            claims: Arc::new(EphemeralClaims::default()),
+            output_dir: None,
+        };
+        let handle = spawn_runner(deps);
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), handle.request_gc())
+            .await
+            .expect("GC request should be serviced without waiting for the whole queue")
+            .unwrap();
+
+        assert_eq!(outcome.swept_ephemeral_jobs, 0);
+    }
 }

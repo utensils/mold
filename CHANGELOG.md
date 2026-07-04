@@ -10,7 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - metadata DB schema v11 adds chain_jobs + chain_job_stages tables (groundwork for durable chain jobs).
-- chain-job API endpoints for async durable chain jobs: create, list, detail, events, resume, retake, cancel, delete, and stage preview.
+- chain-job API endpoints for async durable chain jobs: create, list, detail, events, resume, retake, cancel, delete, stage preview, and GC (`POST /api/chain-jobs/gc`).
+- `mold jobs` CLI commands for durable chain jobs: list, show, resume, retake, cancel, delete, and gc.
+- chain-job artifact GC with `chain.jobs_artifact_ttl_days` retention for completed non-ephemeral job artifacts.
+
+### Changed
+
+- `/api/generate/chain` and `/api/generate/chain/stream` now execute through the durable chain-job runner; response wire shapes stay compatible, and legacy progress events include an optional `job_id`.
 
 ### Fixed
 

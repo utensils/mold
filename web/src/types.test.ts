@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { inferFormatFromName, mediaKind } from "./types";
+import type {
+  ChainJobDetail,
+  ChainJobEvent,
+  ChainProgressEvent,
+} from "./types";
 
 describe("inferFormatFromName", () => {
   it.each([
@@ -40,5 +45,101 @@ describe("mediaKind", () => {
   });
 });
 
-// TODO(BR55 Phase 6): Add vitest mirrors for one ChainJobEvent serde-tag fixture per Rust variant.
-// TODO(BR55 Phase 6): Add type-level fixture coverage proving legacy ChainProgressEvent accepts optional job_id on every progress object.
+function detailFixture(): ChainJobDetail {
+  return {
+    id: "job-1",
+    state: "running",
+    model: "ltx-2-19b-distilled:fp8",
+    stage_count: 1,
+    current_stage: 0,
+    created_at_unix_ms: 1,
+    updated_at_unix_ms: 2,
+    error: null,
+    ephemeral: false,
+    stages: [
+      {
+        idx: 0,
+        state: "pending",
+        seed: "42",
+        frames_emitted: null,
+        generation_time_ms: null,
+        has_preview: false,
+        error: null,
+      },
+    ],
+    finalizes: [],
+    retakes: [],
+    script: {
+      schema: "mold.chain.v1",
+      chain: { model: "ltx-2-19b-distilled:fp8" },
+      stage: [{ prompt: "stage zero", frames: 97 }],
+    },
+  };
+}
+
+describe("ChainJobEvent serde-tag fixtures", () => {
+  it("mirrors one fixture per Rust variant", () => {
+    const events: ChainJobEvent[] = [
+      { type: "snapshot", job: detailFixture() },
+      { type: "stage_start", stage_idx: 2 },
+      { type: "denoise_step", stage_idx: 2, step: 3, total: 8 },
+      {
+        type: "stage_done",
+        stage_idx: 2,
+        frames_emitted: 97,
+        has_preview: true,
+      },
+      { type: "yielded", pending_small_jobs: 4 },
+      { type: "finalizing", total_frames: 194 },
+      { type: "finalized", output: "final/output-1.mp4", take: 1 },
+      { type: "state_changed", state: "completed", error: null },
+    ];
+
+    expect(events.map((event) => event.type)).toEqual([
+      "snapshot",
+      "stage_start",
+      "denoise_step",
+      "stage_done",
+      "yielded",
+      "finalizing",
+      "finalized",
+      "state_changed",
+    ]);
+    expect(JSON.parse(JSON.stringify(events[3]))).toEqual({
+      type: "stage_done",
+      stage_idx: 2,
+      frames_emitted: 97,
+      has_preview: true,
+    });
+  });
+});
+
+describe("legacy ChainProgressEvent job_id", () => {
+  it("accepts optional job_id on every progress variant", () => {
+    const events: ChainProgressEvent[] = [
+      {
+        type: "chain_start",
+        stage_count: 2,
+        estimated_total_frames: 194,
+        job_id: "job-1",
+      },
+      { type: "stage_start", stage_idx: 0, job_id: "job-1" },
+      {
+        type: "denoise_step",
+        stage_idx: 0,
+        step: 1,
+        total: 4,
+        job_id: "job-1",
+      },
+      {
+        type: "stage_done",
+        stage_idx: 0,
+        frames_emitted: 97,
+        job_id: "job-1",
+      },
+      { type: "stitching", total_frames: 194, job_id: "job-1" },
+    ];
+
+    expect(events.every((event) => event.job_id === "job-1")).toBe(true);
+  });
+});

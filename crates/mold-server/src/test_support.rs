@@ -5,6 +5,12 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+#[cfg(test)]
+pub fn env_lock() -> &'static std::sync::Mutex<()> {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &ENV_LOCK
+}
+
 pub struct TestResponse {
     pub status: StatusCode,
     pub body: String,
