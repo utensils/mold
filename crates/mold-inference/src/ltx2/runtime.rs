@@ -1,5 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
+pub use crate::audio::NativeAudioTrack;
+
 use anyhow::{Context, Result};
 use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::VarBuilder;
@@ -85,13 +87,6 @@ pub struct NativeRenderedVideo {
     pub has_audio: bool,
     pub audio_sample_rate: Option<u32>,
     pub audio_channels: Option<u32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NativeAudioTrack {
-    pub interleaved_samples: Vec<f32>,
-    pub sample_rate: u32,
-    pub channels: u16,
 }
 
 #[derive(Debug)]
