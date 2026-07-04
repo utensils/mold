@@ -1,4 +1,8 @@
 use crate::chain::{ChainProgressEvent, ChainRequest, ChainResponse, SseChainCompleteEvent};
+use crate::chain_job::{
+    ChainJobDetail, ChainJobListing, ChainJobSummary, CreateChainJobResponse, GcOutcome,
+    RetakeRequest,
+};
 use crate::error::MoldError;
 use crate::types::{
     ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse, ImageData,
@@ -512,6 +516,48 @@ impl MoldClient {
         }
 
         anyhow::bail!("chain SSE stream ended without complete event")
+    }
+
+    pub async fn create_chain_job(&self, _req: &ChainRequest) -> Result<CreateChainJobResponse> {
+        todo!("TODO(BR55 Phase 6): implement typed POST /api/chain-jobs client method")
+    }
+
+    pub async fn list_chain_jobs(&self) -> Result<ChainJobListing> {
+        todo!("TODO(BR55 Phase 6): implement typed GET /api/chain-jobs client method")
+    }
+
+    pub async fn get_chain_job(&self, _id: &str) -> Result<ChainJobDetail> {
+        todo!("TODO(BR55 Phase 6): implement typed GET /api/chain-jobs/{{id}} client method")
+    }
+
+    pub async fn resume_chain_job(&self, _id: &str) -> Result<ChainJobSummary> {
+        todo!(
+            "TODO(BR55 Phase 6): implement typed POST /api/chain-jobs/{{id}}/resume client method"
+        )
+    }
+
+    pub async fn retake_chain_job(
+        &self,
+        _id: &str,
+        _req: &RetakeRequest,
+    ) -> Result<ChainJobSummary> {
+        todo!(
+            "TODO(BR55 Phase 6): implement typed POST /api/chain-jobs/{{id}}/retake client method"
+        )
+    }
+
+    pub async fn cancel_chain_job(&self, _id: &str) -> Result<ChainJobSummary> {
+        todo!(
+            "TODO(BR55 Phase 6): implement typed POST /api/chain-jobs/{{id}}/cancel client method"
+        )
+    }
+
+    pub async fn delete_chain_job(&self, _id: &str) -> Result<()> {
+        todo!("TODO(BR55 Phase 6): implement typed DELETE /api/chain-jobs/{{id}} client method")
+    }
+
+    pub async fn gc_chain_jobs(&self) -> Result<GcOutcome> {
+        todo!("TODO(BR55 Phase 6): implement typed POST /api/chain-jobs/gc client method")
     }
 
     /// Ask the server to pull (download) a model. Blocks until the download

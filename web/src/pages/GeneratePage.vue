@@ -501,6 +501,8 @@ function onSubmitScript(script: ChainScriptToml) {
     motionTail: script.chain.motion_tail_frames,
     stageCount: stages.length,
   };
+  // TODO(BR55 Phase 6): Replace Script mode stream.submit legacy chain call with createChainJob and useChainJobStream running-card wiring.
+  // TODO(BR55 Phase 6): Keep useGenerateStream chain branch serving auto-promoted single-clip-to-chain legacy shim path unchanged.
   stream.submit(req, decision);
 }
 

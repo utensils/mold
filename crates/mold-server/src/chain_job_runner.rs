@@ -12,7 +12,7 @@ use image::{ImageEncoder, RgbImage};
 use mold_core::chain::{ChainRequest, ChainStage, TransitionMode};
 use mold_core::chain_job::{
     effective_stage_seed, settled, ChainJobEvent, ChainJobManifest, ChainJobState, FinalizeRecord,
-    JobDirLayout, RetakeAmendment, RetakeMode, RetakeRequest, StageState,
+    GcOutcome, JobDirLayout, RetakeAmendment, RetakeMode, RetakeRequest, StageState,
 };
 use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
 use mold_db::chain_jobs::{self, ChainJobRow, ChainJobStageRow};
@@ -32,17 +32,36 @@ use crate::state::QueueHandle;
 const EVENT_BUS_CAPACITY: usize = 256;
 const DEFAULT_FADE_FRAMES: u32 = 8;
 const AUDIO_SIDECAR_MAGIC: &[u8; 8] = b"MOLDPCM1";
+pub const EPHEMERAL_GRACE_SECS: u64 = 900;
 
 pub struct ChainJobRunnerHandle {
     kick_tx: tokio::sync::mpsc::UnboundedSender<()>,
     cancel: Arc<CancelRegistry>,
     events: Arc<JobEventBus>,
     job_locks: Arc<JobMutationLocks>,
+    #[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
+    claims: Arc<EphemeralClaims>,
 }
 
 pub struct CancelRegistry {
     known: Mutex<HashSet<String>>,
     cancelled: Mutex<HashSet<String>>,
+}
+
+/// RAII claim. Held by the SHIM'S WORKER TASK (pinned P0 note 2 — never only
+/// by the SSE stream future) across create→settle→read→delete. Drop = sync
+/// release (std Mutex, matching Run 2 registry conventions). GC never sweeps
+/// an ephemeral with a live claim.
+#[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
+pub struct EphemeralClaimGuard {
+    job_id: String,
+    claims: Arc<EphemeralClaims>,
+}
+
+#[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
+#[derive(Default)]
+pub struct EphemeralClaims {
+    claimed: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 pub struct JobEventBus {
@@ -67,8 +86,42 @@ pub struct RunnerDeps {
     pub events: Arc<JobEventBus>,
     pub cancel: Arc<CancelRegistry>,
     pub job_locks: Arc<JobMutationLocks>,
+    #[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
+    pub claims: Arc<EphemeralClaims>,
     pub output_dir: Option<PathBuf>,
 }
+
+#[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
+pub(crate) struct CreateJobParams {
+    pub id: String,
+    pub ephemeral: bool,
+    pub request: ChainRequest,
+}
+
+pub enum RunnerCmd {
+    Kick,
+    Gc {
+        reply: tokio::sync::oneshot::Sender<std::result::Result<GcOutcome, String>>,
+    },
+}
+
+// GC scheduling + trigger pin: the DAILY TICK lives inside run_loop via
+// tokio::time::interval; the HTTP route NEVER runs a pass itself — it asks
+// the runner. The kick channel widens to a command channel:
+//   enum RunnerCmd { Kick, Gc { reply: tokio::sync::oneshot::Sender<Result<GcOutcome, String>> } }
+//   ChainJobRunnerHandle::kick() sends RunnerCmd::Kick;
+//   pub async fn request_gc(&self) -> Result<GcOutcome> sends RunnerCmd::Gc
+//   and awaits the reply. Single executor preserved (run_loop owns every
+//   pass). SERVICING PIN: run_loop drains the command channel NON-BLOCKINGLY
+//   (try_recv loop) at the top of each outer iteration — i.e. between jobs —
+//   so a Gc reply (and the daily tick, polled at the same points) waits at
+//   most ONE job's runtime, never the whole queue. STATED RESIDUAL: under a
+//   long-running multi-stage job, POST /api/chain-jobs/gc and `mold jobs gc`
+//   block up to that one job's duration; accepted for v1 (GC is not
+//   latency-sensitive; the daily tick absorbs routine cleanup).
+//   ttl_days is read by the RUNNER from the settings DB
+//   (CHAIN_JOBS_ARTIFACT_TTL_DAYS, default 7) at each pass.
+// resume handler behavior add: ephemeral job → 409 CHAIN_JOB_EPHEMERAL.
 
 pub trait StageExecutor: Send + Sync {
     fn render_stage(
@@ -149,6 +202,26 @@ impl CancelRegistry {
 impl Default for CancelRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl EphemeralClaims {
+    /// RAII claim; guard held by the SHIM WORKER TASK across
+    /// create→settle→read→delete (P0 note 2). Sync-only Drop.
+    #[allow(unused_variables, reason = "Phase 3 placeholder — removed in Phase 6")]
+    pub fn claim(self: &Arc<Self>, job_id: &str) -> EphemeralClaimGuard {
+        todo!("TODO(BR55 Phase 6): claim ephemeral chain jobs for shim-owned create-settle-read-delete")
+    }
+
+    #[allow(unused_variables, reason = "Phase 3 placeholder — removed in Phase 6")]
+    pub fn is_claimed(&self, job_id: &str) -> bool {
+        todo!("TODO(BR55 Phase 6): check whether an ephemeral chain job has a live shim claim")
+    }
+}
+
+impl Drop for EphemeralClaimGuard {
+    fn drop(&mut self) {
+        todo!("TODO(BR55 Phase 6): synchronously release the ephemeral chain job claim")
     }
 }
 
@@ -289,6 +362,7 @@ impl ChainJobRunnerHandle {
             cancel: Arc::new(CancelRegistry::new()),
             events: Arc::new(JobEventBus::new()),
             job_locks: Arc::new(JobMutationLocks::new()),
+            claims: Arc::new(EphemeralClaims::default()),
         }
     }
 
@@ -312,6 +386,10 @@ impl ChainJobRunnerHandle {
 
     pub fn remove_job_lock(&self, job_id: &str) {
         self.job_locks.remove(job_id);
+    }
+
+    pub async fn request_gc(&self) -> anyhow::Result<GcOutcome> {
+        todo!("TODO(BR55 Phase 6): send RunnerCmd::Gc and await the runner-owned GC pass")
     }
 
     pub fn cleanup_deleted(&self, job_id: &str) {
@@ -349,6 +427,7 @@ pub fn spawn_runner(deps: RunnerDeps) -> ChainJobRunnerHandle {
     let cancel = deps.cancel.clone();
     let events = deps.events.clone();
     let job_locks = deps.job_locks.clone();
+    let claims = deps.claims.clone();
     let deps = Arc::new(deps);
     tokio::spawn(run_loop(deps, kick_rx));
     ChainJobRunnerHandle {
@@ -356,7 +435,28 @@ pub fn spawn_runner(deps: RunnerDeps) -> ChainJobRunnerHandle {
         cancel,
         events,
         job_locks,
+        claims,
     }
+}
+
+/// Factored creation entry (P1 pin): called by routes_chain_jobs.rs
+/// create_chain_job (generated id, ephemeral=false) AND the shims
+/// (pre-generated claimed id, ephemeral=true). VALIDATION SPLIT PIN: the
+/// async CALLERS perform family validation (validate_and_normalize_chain_
+/// family is async + &AppState), normalise(), and the non-Mp4 422 gate
+/// (ApiError::validation) BEFORE calling this. This fn is sync
+/// storage-only: job dir + manifest + rows; anyhow errors = internal 500.
+#[allow(
+    dead_code,
+    unused_variables,
+    reason = "Phase 3 placeholder — removed in Phase 6"
+)]
+pub(crate) fn create_job_with_params(
+    db: &MetadataDb,
+    jobs_root: &Path,
+    params: CreateJobParams,
+) -> anyhow::Result<ChainJobRow> {
+    todo!("TODO(BR55 Phase 6): factor durable chain job storage creation for public jobs and ephemeral shims")
 }
 
 /// Spec section 7 steps 1-2: flip running->interrupted; repair rows from
@@ -446,6 +546,38 @@ pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(u
     }
 
     Ok((flipped, repaired))
+}
+
+/// One GC pass (daily tick + POST /api/chain-jobs/gc). Orphan predicate per
+/// P0 rev3: ephemeral && state != running && !is_claimed, settled gated by
+/// EPHEMERAL_GRACE_SECS; non-ephemeral completed jobs older than
+/// chain.jobs_artifact_ttl_days lose stages/ artifact dirs only (final/ +
+/// manifest + rows retained). EVERY delete goes through the guarded-delete
+/// discipline: per-job mutation lock + state-predicated row ops (inv 17 /
+/// P0 note 1). Sweep of an ephemeral removes dir + row (+ bus entry).
+#[allow(
+    dead_code,
+    unused_variables,
+    reason = "Phase 3 placeholder — removed in Phase 6"
+)]
+pub(crate) fn run_gc_pass(
+    deps: &RunnerDeps,
+    ttl_days: i64,
+    now_ms: i64,
+) -> anyhow::Result<GcOutcome> {
+    todo!("TODO(BR55 Phase 6): run runner-owned chain job GC with guarded deletes")
+}
+
+/// Startup sweep (unconditional on claims — none survive restart): all
+/// non-running ephemerals removed. Ordering pin: lib.rs calls
+/// startup_reconcile → THIS → spawn_runner, strictly sequential.
+#[allow(
+    dead_code,
+    unused_variables,
+    reason = "Phase 3 placeholder — removed in Phase 6"
+)]
+pub(crate) fn startup_gc_sweep(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<GcOutcome> {
+    todo!("TODO(BR55 Phase 6): sweep non-running ephemeral chain jobs during startup before spawning runner")
 }
 
 async fn run_loop(deps: Arc<RunnerDeps>, mut kick_rx: tokio::sync::mpsc::UnboundedReceiver<()>) {
@@ -2274,6 +2406,7 @@ mod tests {
             events: Arc::new(JobEventBus::new()),
             cancel: Arc::new(CancelRegistry::new()),
             job_locks: Arc::new(JobMutationLocks::new()),
+            claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
         }
     }
@@ -2454,6 +2587,7 @@ mod tests {
             events: Arc::new(JobEventBus::new()),
             cancel: Arc::new(CancelRegistry::new()),
             job_locks: Arc::new(JobMutationLocks::new()),
+            claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
         };
 
@@ -2535,6 +2669,7 @@ mod tests {
             cancel: Arc::new(CancelRegistry::new()),
             events: Arc::new(JobEventBus::new()),
             job_locks: Arc::new(JobMutationLocks::new()),
+            claims: Arc::new(EphemeralClaims::default()),
         };
 
         let mut rx = handle
@@ -3145,6 +3280,7 @@ mod tests {
             events: Arc::new(JobEventBus::new()),
             cancel,
             job_locks: Arc::new(JobMutationLocks::new()),
+            claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
         };
 
@@ -3323,4 +3459,12 @@ mod tests {
             Some("stages/000/segment.mp4")
         );
     }
+
+    // TODO(BR55 Phase 6): Add GC orphan predicate coverage for ephemeral jobs where state != running and no live claim.
+    // TODO(BR55 Phase 6): Add GC coverage for EPHEMERAL_GRACE_SECS settled-unclaimed sweep grace on daily passes.
+    // TODO(BR55 Phase 6): Add non-ephemeral TTL coverage proving completed jobs prune stages/ only while retaining final/ manifest and rows.
+    // TODO(BR55 Phase 6): Add TTL exemption coverage for failed interrupted and cancelled non-ephemeral jobs.
+    // TODO(BR55 Phase 6): Add ephemeral-overrides coverage proving failed interrupted and cancelled ephemerals are swept despite TTL exemptions.
+    // TODO(BR55 Phase 6): Add cancel-then-retake coverage proving GC and ephemeral claim logic do not affect durable retake flows.
+    // TODO(BR55 Phase 6): Add RunnerCmd servicing coverage proving GC requests are drained between jobs and wait at most one job runtime.
 }

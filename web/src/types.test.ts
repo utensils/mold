@@ -39,3 +39,6 @@ describe("mediaKind", () => {
     expect(mediaKind(null, "mystery")).toBe("image");
   });
 });
+
+// TODO(BR55 Phase 6): Add vitest mirrors for one ChainJobEvent serde-tag fixture per Rust variant.
+// TODO(BR55 Phase 6): Add type-level fixture coverage proving legacy ChainProgressEvent accepts optional job_id on every progress object.

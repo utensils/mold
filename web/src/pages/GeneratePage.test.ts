@@ -241,3 +241,6 @@ function pageStubs() {
     DetailDrawer: { template: "<div />" },
   };
 }
+
+// TODO(BR55 Phase 6): Add GeneratePage Script mode test proving onSubmitScript calls createChainJob instead of legacy stream.submit.
+// TODO(BR55 Phase 6): Add GeneratePage running-card test proving useChainJobStream wires the submitted chain job detail.

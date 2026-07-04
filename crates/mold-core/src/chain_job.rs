@@ -582,6 +582,13 @@ pub struct RetakeRequest {
     pub prompt: Option<String>,
 }
 
+/// Result shape for GC passes; also the JSON body of POST /api/chain-jobs/gc.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GcOutcome {
+    pub swept_ephemeral_jobs: usize,
+    pub pruned_artifact_dirs: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[expect(
     clippy::large_enum_variant,
@@ -1035,4 +1042,6 @@ request_json = "{}"
         assert!(layout.boundary_in_dir(7).is_dir());
         assert!(layout.boundary_out_dir(7).is_dir());
     }
+
+    // TODO(BR55 Phase 6): Add one serde-tag fixture per ChainJobEvent variant and assert Rust serialization against web vitest mirrors.
 }

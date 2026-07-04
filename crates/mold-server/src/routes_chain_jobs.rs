@@ -12,7 +12,7 @@ use futures_core::Stream;
 use mold_core::chain::{ChainRequest, ChainScript};
 use mold_core::chain_job::{
     settled, ChainJobDetail, ChainJobEvent, ChainJobListing, ChainJobManifest, ChainJobStageDetail,
-    ChainJobState, ChainJobSummary, CreateChainJobResponse, JobDirLayout, RetakeRequest,
+    ChainJobState, ChainJobSummary, CreateChainJobResponse, GcOutcome, JobDirLayout, RetakeRequest,
     StageState,
 };
 use mold_db::chain_jobs::{self, ChainJobRow, ChainJobStageRow};
@@ -29,6 +29,7 @@ const CHAIN_JOB_NOT_FOUND: &str = "CHAIN_JOB_NOT_FOUND";
 const CHAIN_JOB_RUNNING: &str = "CHAIN_JOB_RUNNING";
 const CHAIN_JOB_NOT_RESUMABLE: &str = "CHAIN_JOB_NOT_RESUMABLE";
 const RETAKE_SPLICE_REQUIRES_CUT_OR_FADE: &str = "RETAKE_SPLICE_REQUIRES_CUT_OR_FADE";
+pub const CHAIN_JOB_EPHEMERAL: &str = "CHAIN_JOB_EPHEMERAL";
 
 /// 202. Validates ChainRequest::normalise + chain_limits caps + family
 /// chain-capability + audio gate. 503 CHAIN_JOBS_UNAVAILABLE when DB
@@ -45,6 +46,7 @@ pub async fn create_chain_job(
     State(state): State<AppState>,
     Json(mut req): Json<ChainRequest>,
 ) -> Result<(StatusCode, Json<CreateChainJobResponse>), ApiError> {
+    // TODO(BR55 Phase 6): Replace inline storage creation with chain_job_runner::create_job_with_params after validation and normalise.
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     crate::routes_chain::validate_and_normalize_chain_family(&state, &mut req).await?;
@@ -206,6 +208,7 @@ pub async fn resume_chain_job(
     let row = chain_jobs::get_job(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
+    // TODO(BR55 Phase 6): Reject resume of ephemeral jobs with 409 CHAIN_JOB_EPHEMERAL before resumability checks.
     if ![
         ChainJobState::Interrupted,
         ChainJobState::Failed,
@@ -406,6 +409,13 @@ pub async fn delete_chain_job(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[allow(unused_variables, reason = "Phase 3 placeholder — removed in Phase 6")]
+pub async fn gc_chain_jobs(State(state): State<AppState>) -> Result<Json<GcOutcome>, ApiError> {
+    todo!(
+        "TODO(BR55 Phase 6): delegate POST /api/chain-jobs/gc to ChainJobRunnerHandle::request_gc"
+    )
+}
+
 /// image/jpeg; 404 job/stage/preview missing.
 #[utoipa::path(
     get,
@@ -604,3 +614,7 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
+
+// TODO(BR55 Phase 6): Add resume-chain-job test for ephemeral job 409 CHAIN_JOB_EPHEMERAL.
+// TODO(BR55 Phase 6): Add gc-chain-jobs route test proving POST /api/chain-jobs/gc delegates to runner request_gc.
+// TODO(BR55 Phase 6): Add create-chain-job test proving public job creation passes ephemeral=false through create_job_with_params.

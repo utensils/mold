@@ -1,6 +1,10 @@
 import type {
+  ChainJobDetail,
+  ChainJobListing,
+  ChainJobSummary,
   ChainProgressEvent,
   ChainRequestWire,
+  CreateChainJobResponse,
   ExpandRequestWire,
   ExpandResponseWire,
   GalleryImage,
@@ -14,6 +18,7 @@ import type {
   SseCompleteEvent,
   SseProgressEvent,
   SseUpscaleCompleteEvent,
+  RetakeRequest,
   UpscaleRequestWire,
   QueueEntry,
   QueueListing,
@@ -260,6 +265,49 @@ export async function generateChainStream(
     handlers,
     silentCloseMessage: "stream closed before completion",
   });
+}
+
+export function createChainJob(
+  _req: ChainRequestWire,
+): Promise<CreateChainJobResponse> {
+  throw new Error("TODO(BR55 Phase 6): implement createChainJob API helper");
+}
+
+export function listChainJobs(): Promise<ChainJobListing> {
+  throw new Error("TODO(BR55 Phase 6): implement listChainJobs API helper");
+}
+
+export function getChainJob(_id: string): Promise<ChainJobDetail> {
+  throw new Error("TODO(BR55 Phase 6): implement getChainJob API helper");
+}
+
+export function resumeChainJob(_id: string): Promise<ChainJobSummary> {
+  throw new Error("TODO(BR55 Phase 6): implement resumeChainJob API helper");
+}
+
+export function retakeChainJob(
+  _id: string,
+  _req: RetakeRequest,
+): Promise<ChainJobSummary> {
+  throw new Error("TODO(BR55 Phase 6): implement retakeChainJob API helper");
+}
+
+export function cancelChainJob(_id: string): Promise<ChainJobSummary> {
+  throw new Error("TODO(BR55 Phase 6): implement cancelChainJob API helper");
+}
+
+export function deleteChainJob(_id: string): Promise<void> {
+  throw new Error("TODO(BR55 Phase 6): implement deleteChainJob API helper");
+}
+
+export function chainJobEventsUrl(_id: string): string {
+  throw new Error("TODO(BR55 Phase 6): implement chainJobEventsUrl API helper");
+}
+
+export function chainJobStagePreviewUrl(_id: string, _idx: number): string {
+  throw new Error(
+    "TODO(BR55 Phase 6): implement chainJobStagePreviewUrl API helper",
+  );
 }
 
 // ─── Downloads UI (Agent A) ───────────────────────────────────────────────────

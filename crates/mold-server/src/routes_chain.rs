@@ -28,10 +28,13 @@ use base64::Engine as _;
 use mold_core::chain::{
     ChainProgressEvent, ChainRequest, ChainResponse, ChainScript, SseChainCompleteEvent,
 };
+use mold_core::chain_job::{ChainJobEvent, ChainJobState};
 use mold_core::{OutputFormat, OutputMetadata, VideoData};
+use mold_db::MetadataDb;
 use sha2::{Digest, Sha256};
 use tokio_stream::StreamExt as _;
 
+use crate::chain_job_runner::{ChainJobRunnerHandle, EphemeralClaimGuard};
 use crate::gpu_pool::{ActiveGeneration, GpuWorker};
 use crate::gpu_worker;
 use crate::model_cache::CachedEngine;
@@ -70,6 +73,79 @@ fn chain_sse_event(msg: ChainSseMessage) -> SseEvent {
             .event("error")
             .data(serde_json::json!({ "message": message }).to_string()),
     }
+}
+
+/// Create + claim an ephemeral job for a sync request. Async (performs the
+/// validation-split's async half: family validation + normalise); rewrites
+/// output_format→Mp4 (P1 binding), remembers the original for the response.
+#[allow(
+    dead_code,
+    unused_variables,
+    reason = "Phase 3 placeholder — removed in Phase 6"
+)]
+async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, ApiError> {
+    todo!("TODO(BR55 Phase 6): create claimed ephemeral chain job for legacy shim request")
+}
+
+#[allow(dead_code, reason = "Phase 3 placeholder — removed in Phase 6")]
+struct ShimJob {
+    job_id: String,
+    original_format: OutputFormat,
+    guard: EphemeralClaimGuard,
+}
+
+/// Subscribe FIRST (subscribe requires &MetadataDb — R2 signature), then
+/// settlement is observed as: StateChanged(settled) event ∪ (closed/lagged
+/// receiver → DB re-read of state+error — subscribe_for_job hands settled
+/// jobs a closed receiver by design). Timeout-free because the R2 terminal
+/// contract guarantees settlement AND the closed-receiver branch covers
+/// publish_then_remove racing the subscribe.
+#[allow(
+    dead_code,
+    unused_variables,
+    reason = "Phase 3 placeholder — removed in Phase 6"
+)]
+async fn shim_wait_settled(
+    handle: &ChainJobRunnerHandle,
+    db: &MetadataDb,
+    job_id: &str,
+) -> Result<(ChainJobState, Option<String>), ApiError> {
+    todo!("TODO(BR55 Phase 6): wait for durable chain job settlement for legacy shim response")
+}
+
+/// Build the legacy ChainResponse from the settled job. MP4 PASSTHROUGH
+/// PIN: original_format == Mp4 → response bytes are final/ MP4 VERBATIM
+/// (preserves the AAC track finalize muxed; no redundant re-encode); frames
+/// are decoded ONLY for thumbnail + gif_preview. Non-Mp4 → decode
+/// (decode_video_frames_from_path) + transcode via encode_chain_output
+/// (format field reports ACTUAL bytes, incl. the Webp→Apng fallback).
+/// generation_time_ms = Σ stage rows, script echo. THEN delete job dir +
+/// row (read-then-delete; single requester owns the claim).
+#[allow(
+    dead_code,
+    unused_variables,
+    reason = "Phase 3 placeholder — removed in Phase 6"
+)]
+fn shim_build_response_and_cleanup(
+    state: &AppState,
+    shim: ShimJob,
+) -> Result<ChainResponse, ApiError> {
+    todo!("TODO(BR55 Phase 6): build legacy ChainResponse from settled ephemeral job and delete it")
+}
+
+/// Legacy event mapping for the streaming shim: ChainJobEvent → Option of
+/// legacy-shaped progress JSON with the ADDITIVE job_id field injected
+/// (serialize ChainProgressEvent to Value, insert "job_id" — P1 rev2
+/// mechanism). Snapshot → synthesized chain_start; StageStart/DenoiseStep/
+/// StageDone map 1:1; Finalizing → stitching; Yielded/Finalized/
+/// StateChanged(non-settled) → None.
+#[allow(
+    dead_code,
+    unused_variables,
+    reason = "Phase 3 placeholder — removed in Phase 6"
+)]
+fn map_job_event_to_legacy(ev: &ChainJobEvent, job_id: &str) -> Option<serde_json::Value> {
+    todo!("TODO(BR55 Phase 6): map durable chain job events to legacy chain progress JSON with job_id")
 }
 
 /// Encode chain frames into bytes for the requested output format. Returns
@@ -431,6 +507,7 @@ async fn run_chain_pooled(
     req: ChainRequest,
     progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
 ) -> Result<(ChainResponse, u64), ChainRunError> {
+    // TODO(BR55 Phase 6): Delete run_chain_pooled when legacy generate-chain handlers are fully replaced by durable job shims.
     // ── Worker selection ────────────────────────────────────────────
     let worker = select_worker_for_chain(state, &req)?;
 
@@ -692,6 +769,7 @@ async fn run_chain_legacy(
     req: ChainRequest,
     progress_cb: Option<Box<dyn FnMut(ChainProgressEvent) + Send>>,
 ) -> Result<(ChainResponse, u64), ChainRunError> {
+    // TODO(BR55 Phase 6): Delete run_chain_legacy when legacy generate-chain handlers are fully replaced by durable job shims.
     // Serialize concurrent chain requests. The chain handler deliberately
     // takes the engine out of `model_cache` for the full multi-minute run
     // (see below) — without this lock a second chain request arriving
@@ -701,6 +779,7 @@ async fn run_chain_legacy(
     // Holding for the whole chain is intentional: single-clip requests
     // keep flowing through the normal generation queue; only chains wait
     // on each other.
+    // TODO(BR55 Phase 6): Delete state.chain_lock chain serialization when the legacy chain path is orphaned.
     let _chain_guard = state.chain_lock.lock().await;
 
     // Ensure the model is loaded. Progress forwarding is not plumbed yet —
@@ -964,6 +1043,7 @@ pub async fn generate_chain(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
+    // TODO(BR55 Phase 6): Replace generate_chain internals with shim_start_job, shim_wait_settled, and shim_build_response_and_cleanup.
     // Family fixups (motion_tail clamp) must run BEFORE `normalise()`
     // because normalise enforces `motion_tail < frames_per_stage` and would
     // reject ltx-video's default 17-frame tail when stages are short.
@@ -1020,6 +1100,7 @@ pub async fn generate_chain_stream(
     State(state): State<AppState>,
     Json(req): Json<ChainRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    // TODO(BR55 Phase 6): Replace generate_chain_stream internals with ephemeral job shim stream using map_job_event_to_legacy.
     // Family fixups (motion_tail clamp) must run BEFORE `normalise()`
     // because normalise enforces `motion_tail < frames_per_stage` and would
     // reject ltx-video's default 17-frame tail when stages are short.
@@ -1507,4 +1588,9 @@ mod tests {
             "ActiveGenerationGuard must clear on panic"
         );
     }
+
+    // TODO(BR55 Phase 6): Add legacy shim equivalence test for non-MP4 structural ChainResponse fields.
+    // TODO(BR55 Phase 6): Add legacy shim MP4-passthrough-audio test proving final MP4 bytes preserve muxed AAC without re-encode.
+    // TODO(BR55 Phase 6): Add validation-split test proving shim callers perform family validation normalise and non-MP4 job API rejection before create_job_with_params.
+    // TODO(BR55 Phase 6): Add legacy progress mapping test proving job_id is injected into every progress JSON object without a new event name.
 }

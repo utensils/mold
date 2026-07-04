@@ -273,6 +273,7 @@ pub async fn run_server(
             "chain job startup reconcile complete"
         );
 
+        // TODO(BR55 Phase 6): Call chain_job_runner::startup_gc_sweep strictly between startup_reconcile and spawn_runner.
         let config_snapshot = state.config.read().await.clone();
         let output_dir = if config_snapshot.is_output_disabled() {
             None
@@ -293,6 +294,7 @@ pub async fn run_server(
             events: std::sync::Arc::new(chain_job_runner::JobEventBus::new()),
             cancel: std::sync::Arc::new(chain_job_runner::CancelRegistry::new()),
             job_locks: std::sync::Arc::new(chain_job_runner::JobMutationLocks::new()),
+            claims: std::sync::Arc::new(chain_job_runner::EphemeralClaims::default()),
             output_dir,
         };
         state.chain_jobs = Some(std::sync::Arc::new(chain_job_runner::spawn_runner(deps)));

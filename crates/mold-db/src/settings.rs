@@ -52,6 +52,10 @@ pub const GENERATE_EMBED_METADATA: &str = "generate.embed_metadata";
 pub const GENERATE_T5_VARIANT: &str = "generate.t5_variant";
 pub const GENERATE_QWEN3_VARIANT: &str = "generate.qwen3_variant";
 
+// Chain jobs — durable chain-job retention settings.
+pub const CHAIN_JOBS_ARTIFACT_TTL_DAYS: &str = "chain.jobs_artifact_ttl_days";
+pub const CHAIN_JOBS_ARTIFACT_TTL_DEFAULT: i64 = 7;
+
 // Config — migration sentinel for the one-shot `config.toml → DB` pass.
 pub const CONFIG_MIGRATED_FROM_TOML: &str = "config.migrated_from_toml";
 

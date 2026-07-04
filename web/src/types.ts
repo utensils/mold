@@ -362,16 +362,23 @@ export type ChainProgressEvent =
       type: "chain_start";
       stage_count: number;
       estimated_total_frames: number;
+      job_id?: string;
     }
-  | { type: "stage_start"; stage_idx: number }
+  | { type: "stage_start"; stage_idx: number; job_id?: string }
   | {
       type: "denoise_step";
       stage_idx: number;
       step: number;
       total: number;
+      job_id?: string;
     }
-  | { type: "stage_done"; stage_idx: number; frames_emitted: number }
-  | { type: "stitching"; total_frames: number };
+  | {
+      type: "stage_done";
+      stage_idx: number;
+      frames_emitted: number;
+      job_id?: string;
+    }
+  | { type: "stitching"; total_frames: number; job_id?: string };
 
 export interface SseChainCompleteEvent {
   video: string; // base64
@@ -389,6 +396,100 @@ export interface SseChainCompleteEvent {
   stage_count: number;
   gpu?: number | null;
   generation_time_ms?: number | null;
+}
+
+export interface ChainJobSummary {
+  id: string;
+  state: ChainJobState;
+  model: string;
+  stage_count: number;
+  current_stage: number;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+  error: string | null;
+  ephemeral: boolean;
+}
+
+export type ChainJobState =
+  | "queued"
+  | "running"
+  | "interrupted"
+  | "failed"
+  | "completed"
+  | "cancelled";
+
+export type StageState = "pending" | "running" | "completed" | "failed";
+
+export interface ChainJobStageDetail {
+  idx: number;
+  state: StageState;
+  seed: string;
+  frames_emitted: number | null;
+  generation_time_ms: number | null;
+  has_preview: boolean;
+  error: string | null;
+}
+
+export interface FinalizeRecord {
+  output: string;
+  at_unix_ms: number;
+  stage_seeds: string[];
+}
+
+export interface RetakeAmendment {
+  stage_idx: number;
+  mode: "cascade" | "splice";
+  old_seed: string;
+  new_seed: string;
+  old_prompt: string | null;
+  new_prompt: string | null;
+  at_unix_ms: number;
+}
+
+// script is a NEW wire-exact mirror (NOT lib/chainToml.ts's ChainScriptToml):
+// Rust ChainScript serializes stages under the key "stage"
+// (#[serde(rename = "stage")], chain.rs:236) — mirror pins that name.
+export interface ChainScriptWire {
+  schema: string;
+  chain: Record<string, unknown>;
+  stage: ChainStageWire[];
+}
+
+export interface ChainJobDetail extends ChainJobSummary {
+  stages: ChainJobStageDetail[];
+  finalizes: FinalizeRecord[];
+  retakes: RetakeAmendment[];
+  script: ChainScriptWire;
+}
+
+export interface ChainJobListing {
+  jobs: ChainJobSummary[];
+}
+
+export interface CreateChainJobResponse {
+  job_id: string;
+}
+
+export type ChainJobEvent =
+  | { type: "snapshot"; job: ChainJobDetail }
+  | { type: "stage_start"; stage_idx: number }
+  | { type: "denoise_step"; stage_idx: number; step: number; total: number }
+  | {
+      type: "stage_done";
+      stage_idx: number;
+      frames_emitted: number;
+      has_preview: boolean;
+    }
+  | { type: "yielded"; pending_small_jobs: number }
+  | { type: "finalizing"; total_frames: number }
+  | { type: "finalized"; output: string; take: number }
+  | { type: "state_changed"; state: ChainJobState; error: string | null };
+
+export interface RetakeRequest {
+  stage_idx: number;
+  mode: "cascade" | "splice";
+  seed_offset?: string;
+  prompt?: string;
 }
 
 export interface ExpandRequestWire {

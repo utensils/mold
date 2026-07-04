@@ -445,6 +445,48 @@ Examples:
     },
 }
 
+#[derive(clap::Subcommand)]
+pub enum JobsAction {
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Resume {
+        id: String,
+    },
+    Retake {
+        id: String,
+        #[arg(long)]
+        stage: u32,
+        #[arg(long, value_enum, default_value = "cascade")]
+        mode: RetakeModeArg,
+        #[arg(long)]
+        seed_offset: Option<u64>,
+        #[arg(long)]
+        prompt: Option<String>,
+    },
+    Cancel {
+        id: String,
+    },
+    Delete {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    Gc,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+pub enum RetakeModeArg {
+    Cascade,
+    Splice,
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
@@ -846,6 +888,12 @@ Examples:
     Chain {
         #[command(subcommand)]
         action: ChainSub,
+    },
+
+    /// Manage durable chained video jobs
+    Jobs {
+        #[command(subcommand)]
+        action: JobsAction,
     },
 
     /// Download model weights via the running server, or locally if no server is reachable
@@ -1628,6 +1676,10 @@ async fn run() -> anyhow::Result<()> {
         Commands::Chain { action } => match action {
             ChainSub::Validate { path } => commands::chain_validate::run(&path).await?,
         },
+        Commands::Jobs { action } => {
+            let config = mold_core::Config::load_or_default();
+            commands::jobs::run(action, &config).await?;
+        }
         Commands::Pull { model, skip_verify } => {
             let opts = mold_core::download::PullOptions { skip_verify };
             if model.starts_with("hf:") || model.starts_with("cv:") {
