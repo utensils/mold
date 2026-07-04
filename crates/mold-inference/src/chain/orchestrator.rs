@@ -318,6 +318,8 @@ fn estimate_stitched_frames(req: &ChainRequest) -> u32 {
         .sum()
 }
 
+// TODO(BR55 Phase 6): delegate to mold_core::chain_job::effective_stage_seed
+// (shared helper) — keep the doc comment, replace the body.
 fn derive_stage_seed(base_seed: u64, _idx: usize, stage: &ChainStage) -> u64 {
     // Keep the seed stable across stages by default. An earlier revision
     // XORed `(idx as u64) << 32` into each stage's seed so the initial

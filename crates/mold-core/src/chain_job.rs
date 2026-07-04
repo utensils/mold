@@ -38,7 +38,7 @@ pub const PREVIEW_FILE: &str = "preview.jpg";
 // ── State enums (canonical here; mold-db imports them) ────────────────
 
 /// Job lifecycle state, stored as snake_case TEXT in `chain_jobs.state`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChainJobState {
     Queued,
@@ -50,7 +50,7 @@ pub enum ChainJobState {
 }
 
 /// Per-stage state, stored as snake_case TEXT in `chain_job_stages.state`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StageState {
     Pending,
@@ -60,7 +60,7 @@ pub enum StageState {
 }
 
 /// Retake mode (spec §8): cascade re-renders N..end, splice re-renders N only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RetakeMode {
     Cascade,
@@ -185,7 +185,7 @@ pub struct StageStatus {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RetakeAmendment {
     pub stage_idx: u32,
     pub mode: RetakeMode,
@@ -199,7 +199,7 @@ pub struct RetakeAmendment {
     pub at_unix_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct FinalizeRecord {
     /// Relative path under `final/`, e.g. `final/output-1.mp4`.
     pub output: String,
@@ -230,6 +230,7 @@ impl ChainJobManifest {
                 state: StageState::Pending,
                 seed: stage
                     .seed_offset
+                    // TODO(BR55 Phase 6): delegate to effective_stage_seed (shared helper).
                     .map_or(base_seed, |offset| base_seed ^ offset),
                 frames_emitted: None,
                 generation_time_ms: None,
@@ -509,6 +510,124 @@ mod u64_vec_as_strings {
                     .map_err(|_| D::Error::custom("expected u64 encoded as a decimal string"))
             })
             .collect()
+    }
+}
+
+// ── Chain-job API wire types (BR55 Phase 3 placeholders) ──────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainJobSummary {
+    pub id: String,
+    pub state: ChainJobState,
+    pub model: String,
+    pub stage_count: u32,
+    pub current_stage: u32,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+    pub error: Option<String>,
+    pub ephemeral: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainJobStageDetail {
+    pub idx: u32,
+    pub state: StageState,
+    #[serde(with = "u64_as_string")]
+    pub seed: u64,
+    pub frames_emitted: Option<u32>,
+    pub generation_time_ms: Option<u64>,
+    pub has_preview: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainJobDetail {
+    #[serde(flatten)]
+    pub summary: ChainJobSummary,
+    pub stages: Vec<ChainJobStageDetail>,
+    pub finalizes: Vec<FinalizeRecord>,
+    pub retakes: Vec<RetakeAmendment>,
+    /// EFFECTIVE script (original request + retake amendments applied);
+    /// provenance stays in `retakes`.
+    pub script: crate::chain::ChainScript,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainJobListing {
+    pub jobs: Vec<ChainJobSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CreateChainJobResponse {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RetakeRequest {
+    pub stage_idx: u32,
+    pub mode: RetakeMode,
+    #[serde(default, with = "u64_opt_as_string")]
+    pub seed_offset: Option<u64>,
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[allow(clippy::large_enum_variant)] // Phase 3 placeholder — removed in Phase 6
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChainJobEvent {
+    Snapshot {
+        job: ChainJobDetail,
+    },
+    StageStart {
+        stage_idx: u32,
+    },
+    DenoiseStep {
+        stage_idx: u32,
+        step: u32,
+        total: u32,
+    },
+    StageDone {
+        stage_idx: u32,
+        frames_emitted: u32,
+        has_preview: bool,
+    },
+    Yielded {
+        pending_small_jobs: usize,
+    },
+    Finalizing {
+        total_frames: u32,
+    },
+    Finalized {
+        output: String,
+        take: u32,
+    },
+    StateChanged {
+        state: ChainJobState,
+        error: Option<String>,
+    },
+}
+
+pub fn effective_stage_seed(_base_seed: u64, _seed_offset: Option<u64>) -> u64 {
+    // TODO(BR55 Phase 6): base_seed ^ offset when Some, else base_seed. This
+    // IS the shared helper — derive_stage_seed (orchestrator.rs) and the
+    // inline computation in ChainJobManifest::new below must DELEGATE here.
+    todo!()
+}
+
+mod u64_opt_as_string {
+    // TODO(BR55 Phase 6): serialize optional u64 seeds as optional decimal strings.
+    pub fn serialize<S: serde::Serializer>(
+        _v: &Option<u64>,
+        _s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        todo!()
+    }
+
+    // TODO(BR55 Phase 6): deserialize optional decimal seed strings into optional u64 values.
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        _d: D,
+    ) -> std::result::Result<Option<u64>, D::Error> {
+        todo!()
     }
 }
 

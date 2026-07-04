@@ -1595,6 +1595,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
             catalog_live_cache: mold_catalog::live::LiveCache::new(
@@ -1655,6 +1656,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
             catalog_live_cache: mold_catalog::live::LiveCache::new(
@@ -1918,6 +1920,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
             catalog_live_cache: mold_catalog::live::LiveCache::new(

@@ -1110,6 +1110,21 @@ pub fn run_chain_blocking<T, E>(
     }
 }
 
+/// Run a blocking chain-job stage operation on a specific GPU worker.
+///
+/// Lock scope is exactly one stage render; callers reacquire for each stage
+/// so the durable chain-job runner can yield between stages.
+pub fn run_stage_blocking<T, E>(
+    _worker: &GpuWorker,
+    _model_name: &str,
+    _config: &mold_core::Config,
+    _hint: Option<crate::model_manager::ActivationHint>,
+    _with_engine: impl FnOnce(&mut dyn mold_inference::InferenceEngine) -> Result<T, E>,
+) -> ChainPrep<T, E> {
+    // TODO(BR55 Phase 6): run one stage under the worker model-load lock and restore the engine.
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

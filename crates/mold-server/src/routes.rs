@@ -149,6 +149,17 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 use crate::queue::clean_error_message;
 
+// TODO(BR55 Phase 6): register chain-job routes and utoipa paths without calling placeholder handlers.
+// - POST /api/chain-jobs -> crate::routes_chain_jobs::create_chain_job
+// - GET /api/chain-jobs -> crate::routes_chain_jobs::list_chain_jobs
+// - GET /api/chain-jobs/:id -> crate::routes_chain_jobs::get_chain_job
+// - GET /api/chain-jobs/:id/events -> crate::routes_chain_jobs::chain_job_events
+// - POST /api/chain-jobs/:id/resume -> crate::routes_chain_jobs::resume_chain_job
+// - POST /api/chain-jobs/:id/retake -> crate::routes_chain_jobs::retake_chain_job
+// - POST /api/chain-jobs/:id/cancel -> crate::routes_chain_jobs::cancel_chain_job
+// - DELETE /api/chain-jobs/:id -> crate::routes_chain_jobs::delete_chain_job
+// - GET /api/chain-jobs/:id/stages/:idx/preview -> crate::routes_chain_jobs::chain_job_stage_preview
+
 #[derive(OpenApi)]
 #[openapi(
     paths(

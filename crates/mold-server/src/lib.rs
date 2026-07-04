@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod catalog_api;
+pub mod chain_job_runner;
 pub mod chain_limits;
 pub mod test_support;
 // Agent A (downloads)
@@ -19,6 +20,7 @@ pub mod request_id;
 pub mod resources;
 pub mod routes;
 pub mod routes_chain;
+pub mod routes_chain_jobs;
 mod signals;
 pub mod state;
 pub mod web_ui;
@@ -249,6 +251,9 @@ pub async fn run_server(
             );
         }
     }
+
+    // TODO(BR55 Phase 6): run chain_job_runner::startup_reconcile in spawn_blocking after metadata DB opens and before serving.
+    // TODO(BR55 Phase 6): call chain_job_runner::spawn_runner only after startup_reconcile completes and store the handle on AppState.
 
     // Spawn the generation queue worker — processes jobs sequentially (single GPU).
     // Spawn queue worker: use multi-GPU dispatcher if GPUs are available,

@@ -319,6 +319,11 @@ pub(crate) fn decode_video_frames(input_video: &Path) -> Result<(ProbeMetadata, 
     Ok((video.metadata, video.frames))
 }
 
+pub fn decode_video_frames_from_path(_input: &Path) -> Result<(ProbeMetadata, Vec<RgbImage>)> {
+    // TODO(BR55 Phase 6): expose decode_video_frames for chain-job finalize and re-blend flows.
+    todo!()
+}
+
 #[allow(dead_code)]
 fn video_only_track_config(video: &VideoTrackInfo) -> TrackConfig {
     TrackConfig {

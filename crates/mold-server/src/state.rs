@@ -171,6 +171,9 @@ pub struct AppState {
     /// when MOLD_HOME could not be resolved — callers must fall back to the
     /// filesystem walk in `routes::scan_gallery_dir`.
     pub metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    /// Durable chain-job runner handle. `None` when DB-backed chain jobs are
+    /// unavailable; chain-job API handlers return 503 in that state.
+    pub chain_jobs: Option<Arc<crate::chain_job_runner::ChainJobRunnerHandle>>,
     // ── Downloads UI (Agent A) ──────────────────────────────────────────────
     /// Single-writer download queue.
     pub downloads: Arc<DownloadQueue>,
@@ -319,6 +322,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
             catalog_live_cache: default_live_cache(),
@@ -350,6 +354,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
             catalog_live_cache: default_live_cache(),
@@ -396,6 +401,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
             catalog_live_cache: default_live_cache(),
@@ -429,6 +435,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
             catalog_live_cache: default_live_cache(),
@@ -462,6 +469,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
             catalog_live_cache: default_live_cache(),
