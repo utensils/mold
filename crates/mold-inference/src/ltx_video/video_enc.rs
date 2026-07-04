@@ -142,43 +142,110 @@ pub fn encode_webp(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
     Ok(webp_data.to_vec())
 }
 
-/// Encode a sequence of RGB frames into an MP4 (H.264/AVC) video.
-///
-/// Uses OpenH264 for H.264 encoding with a minimal QuickTime-compatible MP4 muxer.
-/// Produces `ftyp[isom,iso2,avc1,mp41] + moov + mdat` (faststart layout).
+/// Split Annex B byte stream (00 00 00 01 or 00 00 01 delimited) into NAL units.
 #[cfg(feature = "mp4")]
-pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
-    use openh264::encoder::{EncoderConfig, FrameRate, VuiConfig};
-    use openh264::formats::{RgbSliceU8, YUVBuffer};
+fn split_annex_b_nals(data: &[u8]) -> Vec<&[u8]> {
+    let mut nals = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        // Find start code (00 00 00 01 or 00 00 01)
+        let sc_len = if i + 4 <= data.len() && data[i..i + 4] == [0, 0, 0, 1] {
+            4
+        } else if i + 3 <= data.len() && data[i..i + 3] == [0, 0, 1] {
+            3
+        } else {
+            i += 1;
+            continue;
+        };
+        let nal_start = i + sc_len;
+        // Find next start code or end
+        let mut nal_end = data.len();
+        let mut j = nal_start;
+        while j + 3 <= data.len() {
+            if data[j..j + 3] == [0, 0, 1]
+                || (j + 4 <= data.len() && data[j..j + 4] == [0, 0, 0, 1])
+            {
+                // Trim trailing zeros that are part of the start code
+                nal_end = j;
+                while nal_end > nal_start && data[nal_end - 1] == 0 {
+                    nal_end -= 1;
+                }
+                break;
+            }
+            j += 1;
+        }
+        if nal_start < nal_end {
+            nals.push(&data[nal_start..nal_end]);
+        }
+        i = if j < data.len() { j } else { data.len() };
+    }
+    nals
+}
 
-    anyhow::ensure!(!frames.is_empty(), "no frames to encode");
+/// Incremental MP4 encoder: push frames one at a time, mux on `finish()`.
+///
+/// Peak memory is the encoded H.264 samples (~100× smaller than raw RGB),
+/// not the frame set — this is what lets chain finalize stream arbitrarily
+/// long videos through a bounded window. `encode_mp4` is a thin wrapper
+/// over this type; the two produce byte-identical output for the same
+/// frames (asserted by `stream_encoder_matches_slice_encoder_byte_for_byte`).
+#[cfg(feature = "mp4")]
+pub struct Mp4StreamEncoder {
+    encoder: openh264::encoder::Encoder,
+    samples: Vec<(Vec<u8>, bool)>,
+    sps: Option<Vec<u8>>,
+    pps: Option<Vec<u8>>,
+    width: u32,
+    height: u32,
+    fps: u32,
+}
 
-    let (width, height) = (frames[0].width(), frames[0].height());
+#[cfg(feature = "mp4")]
+impl Mp4StreamEncoder {
+    pub fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
+        use openh264::encoder::{EncoderConfig, FrameRate, VuiConfig};
 
-    let config = EncoderConfig::new()
-        .max_frame_rate(FrameRate::from_hz(fps as f32))
-        .bitrate(openh264::encoder::BitRate::from_bps(10_000_000))
-        .rate_control_mode(openh264::encoder::RateControlMode::Quality)
-        .profile(openh264::encoder::Profile::High)
-        .vui(VuiConfig::bt601()); // BT.601 limited range — matches YUVBuffer::from_rgb_source() conversion
+        let config = EncoderConfig::new()
+            .max_frame_rate(FrameRate::from_hz(fps as f32))
+            .bitrate(openh264::encoder::BitRate::from_bps(10_000_000))
+            .rate_control_mode(openh264::encoder::RateControlMode::Quality)
+            .profile(openh264::encoder::Profile::High)
+            .vui(VuiConfig::bt601()); // BT.601 limited range — matches YUVBuffer::from_rgb_source()
 
-    let api = openh264::OpenH264API::from_source();
-    let mut h264 = openh264::encoder::Encoder::with_api_config(api, config)
-        .context("failed to create H.264 encoder")?;
+        let api = openh264::OpenH264API::from_source();
+        let encoder = openh264::encoder::Encoder::with_api_config(api, config)
+            .context("failed to create H.264 encoder")?;
+        Ok(Self {
+            encoder,
+            samples: Vec::new(),
+            sps: None,
+            pps: None,
+            width,
+            height,
+            fps,
+        })
+    }
 
-    // Encode all frames, collecting NAL units and keyframe flags
-    let mut samples: Vec<(Vec<u8>, bool)> = Vec::with_capacity(frames.len());
-    let mut sps: Option<Vec<u8>> = None;
-    let mut pps: Option<Vec<u8>> = None;
+    pub fn push(&mut self, frame: &RgbImage) -> Result<()> {
+        use openh264::formats::{RgbSliceU8, YUVBuffer};
 
-    for frame in frames {
-        let rgb = RgbSliceU8::new(frame.as_raw(), (width as usize, height as usize));
+        anyhow::ensure!(
+            frame.width() == self.width && frame.height() == self.height,
+            "frame is {}x{} but encoder expects {}x{}",
+            frame.width(),
+            frame.height(),
+            self.width,
+            self.height,
+        );
+
+        let rgb = RgbSliceU8::new(frame.as_raw(), (self.width as usize, self.height as usize));
         let yuv = YUVBuffer::from_rgb_source(rgb);
-        let bitstream = h264.encode(&yuv).context("failed to encode H.264 frame")?;
+        let bitstream = self
+            .encoder
+            .encode(&yuv)
+            .context("failed to encode H.264 frame")?;
         let is_key = matches!(bitstream.frame_type(), openh264::encoder::FrameType::IDR);
 
-        // Parse Annex B byte stream into NALs, extract SPS/PPS, convert rest to
-        // length-prefixed format for MP4.
         let annex_b = bitstream.to_vec();
         let mut frame_nals = Vec::new();
         for nal in split_annex_b_nals(&annex_b) {
@@ -187,8 +254,8 @@ pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
             }
             let nal_type = nal[0] & 0x1F;
             match nal_type {
-                7 => sps = Some(nal.to_vec()),
-                8 => pps = Some(nal.to_vec()),
+                7 => self.sps = Some(nal.to_vec()),
+                8 => self.pps = Some(nal.to_vec()),
                 _ => {
                     let len = nal.len() as u32;
                     frame_nals.extend_from_slice(&len.to_be_bytes());
@@ -197,54 +264,32 @@ pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
             }
         }
         if !frame_nals.is_empty() {
-            samples.push((frame_nals, is_key));
+            self.samples.push((frame_nals, is_key));
         }
+        Ok(())
     }
 
-    let sps = sps.context("H.264 encoder produced no SPS")?;
-    let pps = pps.context("H.264 encoder produced no PPS")?;
-
-    /// Split Annex B byte stream (00 00 00 01 or 00 00 01 delimited) into NAL units.
-    fn split_annex_b_nals(data: &[u8]) -> Vec<&[u8]> {
-        let mut nals = Vec::new();
-        let mut i = 0;
-        while i < data.len() {
-            // Find start code (00 00 00 01 or 00 00 01)
-            let sc_len = if i + 4 <= data.len() && data[i..i + 4] == [0, 0, 0, 1] {
-                4
-            } else if i + 3 <= data.len() && data[i..i + 3] == [0, 0, 1] {
-                3
-            } else {
-                i += 1;
-                continue;
-            };
-            let nal_start = i + sc_len;
-            // Find next start code or end
-            let mut nal_end = data.len();
-            let mut j = nal_start;
-            while j + 3 <= data.len() {
-                if data[j..j + 3] == [0, 0, 1]
-                    || (j + 4 <= data.len() && data[j..j + 4] == [0, 0, 0, 1])
-                {
-                    // Trim trailing zeros that are part of the start code
-                    nal_end = j;
-                    while nal_end > nal_start && data[nal_end - 1] == 0 {
-                        nal_end -= 1;
-                    }
-                    break;
-                }
-                j += 1;
-            }
-            if nal_start < nal_end {
-                nals.push(&data[nal_start..nal_end]);
-            }
-            i = if j < data.len() { j } else { data.len() };
-        }
-        nals
+    pub fn finish(self) -> Result<Vec<u8>> {
+        anyhow::ensure!(!self.samples.is_empty(), "no frames to encode");
+        let sps = self.sps.context("H.264 encoder produced no SPS")?;
+        let pps = self.pps.context("H.264 encoder produced no PPS")?;
+        mp4_mux::write_mp4(&self.samples, &sps, &pps, self.width, self.height, self.fps)
     }
+}
 
-    // Build QuickTime-compatible MP4: ftyp + moov + mdat (faststart)
-    mp4_mux::write_mp4(&samples, &sps, &pps, width, height, fps)
+/// Encode a sequence of RGB frames into an MP4 (H.264/AVC) video.
+///
+/// Uses OpenH264 for H.264 encoding with a minimal QuickTime-compatible MP4 muxer.
+/// Produces `ftyp[isom,iso2,avc1,mp41] + moov + mdat` (faststart layout).
+#[cfg(feature = "mp4")]
+pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
+    anyhow::ensure!(!frames.is_empty(), "no frames to encode");
+    let (width, height) = (frames[0].width(), frames[0].height());
+    let mut enc = Mp4StreamEncoder::new(width, height, fps)?;
+    for frame in frames {
+        enc.push(frame)?;
+    }
+    enc.finish()
 }
 
 /// Minimal MP4 muxer producing QuickTime/macOS-compatible output.
@@ -681,6 +726,65 @@ mod tests {
             data.len() > 50_000,
             "MP4 768x512 output too small: {} bytes (expected >50KB)",
             data.len()
+        );
+    }
+
+    #[cfg(feature = "mp4")]
+    fn gradient_frames(n: u32, w: u32, h: u32) -> Vec<RgbImage> {
+        (0..n)
+            .map(|i| {
+                RgbImage::from_fn(w, h, |x, y| {
+                    image::Rgb([
+                        (x * 3 + i * 11) as u8,
+                        (y * 5 + i * 7) as u8,
+                        (i * 29) as u8,
+                    ])
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    #[cfg(feature = "mp4")]
+    fn stream_encoder_matches_slice_encoder_byte_for_byte() {
+        // encode_mp4 must be a pure wrapper over Mp4StreamEncoder: same frames
+        // in, identical MP4 bytes out. openh264's software encoder is
+        // deterministic for identical input + config, so byte equality holds.
+        let frames = gradient_frames(8, 64, 48);
+        let via_slice = encode_mp4(&frames, 24).expect("slice encode");
+
+        let mut enc = Mp4StreamEncoder::new(64, 48, 24).expect("create");
+        for f in &frames {
+            enc.push(f).expect("push");
+        }
+        let via_stream = enc.finish().expect("finish");
+
+        assert_eq!(
+            via_slice, via_stream,
+            "wrapper and stream outputs must be identical"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "mp4")]
+    fn stream_encoder_finish_with_no_frames_errors() {
+        let enc = Mp4StreamEncoder::new(64, 48, 24).expect("create");
+        let err = enc.finish().expect_err("zero frames must fail");
+        assert!(
+            format!("{err:#}").contains("no frames"),
+            "error must say no frames were pushed, got: {err:#}",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "mp4")]
+    fn stream_encoder_rejects_mismatched_frame_dimensions() {
+        let mut enc = Mp4StreamEncoder::new(64, 48, 24).expect("create");
+        let wrong = RgbImage::from_pixel(32, 32, image::Rgb([0, 0, 0]));
+        let err = enc.push(&wrong).expect_err("dim mismatch must fail");
+        assert!(
+            format!("{err:#}").contains("64x48"),
+            "error must name the expected dimensions, got: {err:#}",
         );
     }
 
