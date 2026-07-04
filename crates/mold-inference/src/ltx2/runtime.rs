@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
-pub use crate::audio::NativeAudioTrack;
+use crate::audio::NativeAudioTrack;
 
 use anyhow::{Context, Result};
 use candle_core::{DType, IndexOp, Tensor};
@@ -355,7 +355,7 @@ pub struct Ltx2RuntimeSession {
     /// Optional slot wired into `render_real_distilled_av` so
     /// `Ltx2Engine::render_chain_stage` can snapshot the pre-VAE-decode
     /// final latents and forward them to the next chain stage as a
-    /// [`super::chain::ChainTail`]. `None` outside chain flow.
+    /// [`crate::chain::ChainTail`]. `None` outside chain flow.
     pub(crate) tail_capture: Option<std::sync::Arc<std::sync::Mutex<Option<Tensor>>>>,
     /// GPU ordinal inherited from `Ltx2Engine`. Used for the deferred CUDA
     /// device creation in `prepare()` and for post-OOM context reset.

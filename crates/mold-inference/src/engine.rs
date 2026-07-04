@@ -41,9 +41,9 @@ pub trait InferenceEngine: Send + Sync {
     /// distilled overrides this in v1.
     ///
     /// Callers (the server chain route) invoke this once per stage to drive
-    /// [`crate::ltx2::Ltx2ChainOrchestrator::run`]; engines that don't support
+    /// [`crate::chain::ChainOrchestrator::run`]; engines that don't support
     /// chaining return `None` and the caller responds with 422.
-    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::ltx2::ChainStageRenderer> {
+    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
         None
     }
 }

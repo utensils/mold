@@ -870,7 +870,7 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
         Some(&self.base.paths)
     }
 
-    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::ltx2::ChainStageRenderer> {
+    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
         Some(self)
     }
 }
@@ -887,14 +887,14 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
 // to LtxVideoEngine and feed the carry tail's last frame as `source_image`
 // with strength~0.7.
 
-impl crate::ltx2::ChainStageRenderer for LtxVideoEngine {
+impl crate::chain::ChainStageRenderer for LtxVideoEngine {
     fn render_stage(
         &mut self,
         stage_req: &GenerateRequest,
-        _carry: Option<&crate::ltx2::ChainTail>,
+        _carry: Option<&crate::chain::ChainTail>,
         motion_tail_pixel_frames: u32,
-        _stage_progress: Option<&mut dyn FnMut(crate::ltx2::StageProgressEvent)>,
-    ) -> Result<crate::ltx2::StageOutcome> {
+        _stage_progress: Option<&mut dyn FnMut(crate::chain::StageProgressEvent)>,
+    ) -> Result<crate::chain::StageOutcome> {
         let start = Instant::now();
         let frames = self.render_chain_frames_internal(stage_req)?;
         let generation_time_ms = start.elapsed().as_millis() as u64;
@@ -914,9 +914,9 @@ impl crate::ltx2::ChainStageRenderer for LtxVideoEngine {
             .cloned()
             .collect();
 
-        Ok(crate::ltx2::StageOutcome {
+        Ok(crate::chain::StageOutcome {
             frames,
-            tail: crate::ltx2::ChainTail {
+            tail: crate::chain::ChainTail {
                 frames: tail_frames.len() as u32,
                 tail_rgb_frames: tail_frames,
             },

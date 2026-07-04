@@ -11,8 +11,8 @@
 use image::RgbImage;
 use mold_core::TransitionMode;
 
+use crate::audio::NativeAudioTrack;
 use crate::ltx2::media::fade_boundary;
-use crate::ltx2::runtime::NativeAudioTrack;
 
 pub struct StitchPlan {
     pub clips: Vec<Vec<RgbImage>>,

@@ -3,6 +3,7 @@ pub mod attention;
 pub mod audio;
 mod cache;
 pub(crate) mod cfg_plus_ddim;
+pub mod chain;
 pub mod controlnet;
 pub mod device;
 mod encoders;

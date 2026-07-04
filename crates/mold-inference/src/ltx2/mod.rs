@@ -17,9 +17,5 @@ pub(crate) mod single_file;
 pub mod stitch;
 mod text;
 
-pub use chain::{
-    extract_tail_latents, tail_latent_frame_count, ChainOrchestratorError, ChainRunOutput,
-    ChainStageRenderer, ChainTail, Ltx2ChainOrchestrator, StageOutcome, StageProgressEvent,
-};
+pub use chain::{extract_tail_latents, tail_latent_frame_count};
 pub use pipeline::Ltx2Engine;
-pub use runtime::NativeAudioTrack;
