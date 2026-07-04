@@ -20,7 +20,7 @@ pub struct ChainLimits {
     /// Whether this model's family has an audio decode path. The SPA reads
     /// this to decide whether to show the chain-level "Generate audio"
     /// toggle; the chain endpoint refuses `enable_audio: true` upstream
-    /// when this is false. Single source of truth: `family_supports_audio`.
+    /// when this is false. Single source of truth: `mold_inference::chain::capability_for_family`.
     pub supports_audio: bool,
 }
 

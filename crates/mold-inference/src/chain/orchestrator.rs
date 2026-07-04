@@ -1,14 +1,16 @@
 //! Chain orchestration and carryover primitives.
 //!
-//! Server-side chained video generation stitches multiple per-clip renders
-//! into a single output. To avoid a VAE decode → RGB → VAE encode round-trip
-//! between clips (which loses information and doubles VAE cost), the tail of
-//! each clip is carried across as latent-space tokens and threaded into the
-//! next clip's conditioning directly.
+//! Chained video generation renders a multi-stage request as a sequence of
+//! per-clip renders and stitches them into one output. To avoid boundary
+//! artifacts, the tail of each clip is carried across as decoded RGB frames
+//! ([`ChainTail`]) and re-encoded into the next clip's conditioning by the
+//! model family's renderer.
 //!
-//! This module owns the data types and shape math for that handoff. The
-//! orchestrator and the `Ltx2Engine::generate_with_carryover` entry point
-//! land in sibling commits.
+//! This module owns the model-agnostic pieces: the per-stage render loop
+//! ([`ChainOrchestrator`]), the renderer abstraction
+//! ([`ChainStageRenderer`]), and the carryover payload. Family-specific
+//! shape math (e.g. the LTX-2 VAE's latent-frame ratio) lives with the
+//! family, in `crate::ltx2`.
 
 use anyhow::{bail, Result};
 use image::RgbImage;
@@ -29,7 +31,7 @@ use crate::audio::NativeAudioTrack;
 ///
 /// The VAE encode cost on the receiving side is negligible (≈tens of ms for
 /// 17 frames at 704×1216), and it's paid inside a VAE load that's already
-/// needed for the source-image anchor path (see pipeline.rs).
+/// needed for the source-image anchor path (see the `crate::ltx2` pipeline).
 #[derive(Debug, Clone)]
 pub struct ChainTail {
     /// Number of *pixel* frames this tail represents (not latent frames).
@@ -116,8 +118,8 @@ pub struct StageOutcome {
     pub generation_time_ms: u64,
 }
 
-/// Abstraction over "render one chain stage". Production uses the LTX-2
-/// engine impl (lands in Phase 1d); tests inject a fake implementation
+/// Abstraction over "render one chain stage". Production impls: `Ltx2Engine`
+/// (latent handoff) and `LtxVideoEngine` (independent-clip fallback); tests inject a fake implementation
 /// that fabricates deterministic frames and a synthetic [`ChainTail`]
 /// without loading candle weights.
 pub trait ChainStageRenderer {

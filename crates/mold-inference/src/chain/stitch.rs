@@ -494,7 +494,7 @@ mod tests {
         let tail = vec![solid(2, 2, [200, 0, 0]); 4];
         let head = vec![solid(2, 2, [0, 200, 0]); 4];
         let blended = fade_boundary(&tail, &head, 4);
-        // alpha[0] = 0/4 = 0 -> pure tail
+        // alpha[0] = 0/4 = 0 → pure tail
         let p = blended[0].get_pixel(0, 0);
         assert_eq!(p.0, [200, 0, 0]);
     }
@@ -504,7 +504,7 @@ mod tests {
         let tail = vec![solid(2, 2, [200, 0, 0]); 4];
         let head = vec![solid(2, 2, [0, 200, 0]); 4];
         let blended = fade_boundary(&tail, &head, 4);
-        // alpha[3] = 3/4 = 0.75 -> 0.25*tail + 0.75*head = [50, 150, 0]
+        // alpha[3] = 3/4 = 0.75 → 0.25*tail + 0.75*head = [50, 150, 0]
         let p = blended[3].get_pixel(0, 0);
         assert!((p.0[0] as i32 - 50).abs() <= 2, "R was {}", p.0[0]);
         assert!((p.0[1] as i32 - 150).abs() <= 2, "G was {}", p.0[1]);
