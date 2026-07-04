@@ -4,59 +4,59 @@ When running `mold serve`, you get a REST API for remote image generation.
 
 ## Endpoints
 
-| Method   | Path                                | Description                                                                                                       |
-| -------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `POST`   | `/api/generate`                     | Generate images from prompt                                                                                       |
-| `POST`   | `/api/generate/stream`              | Generate with SSE progress streaming                                                                              |
-| `POST`   | `/api/generate/estimate`            | Estimate request-sensitive peak memory for a generation request                                                   |
-| `POST`   | `/api/generate/chain`               | Chained video generation (LTX-2)                                                                                  |
-| `POST`   | `/api/generate/chain/stream`        | Chained video with SSE progress                                                                                   |
-| `POST`   | `/api/chain-jobs`                   | Create a durable async chain job                                                                                  |
-| `GET`    | `/api/chain-jobs`                   | List durable chain jobs                                                                                           |
-| `GET`    | `/api/chain-jobs/:id`               | Get durable chain-job detail                                                                                      |
-| `GET`    | `/api/chain-jobs/:id/events`        | Durable chain-job SSE events                                                                                      |
-| `POST`   | `/api/chain-jobs/:id/resume`        | Resume a failed, interrupted, or cancelled chain job                                                              |
-| `POST`   | `/api/chain-jobs/:id/retake`        | Retake one chain-job stage                                                                                        |
-| `POST`   | `/api/chain-jobs/:id/cancel`        | Cancel a queued or running chain job                                                                              |
-| `DELETE` | `/api/chain-jobs/:id`               | Delete a non-running chain job                                                                                    |
-| `GET`    | `/api/chain-jobs/:id/stages/:idx/preview` | Fetch a stage preview JPEG                                                                                  |
-| `POST`   | `/api/expand`                       | Expand a prompt using LLM                                                                                         |
-| `GET`    | `/api/models`                       | List available models                                                                                             |
-| `GET`    | `/api/models/:model/components`     | List required model component readiness and paths                                                                 |
-| `GET`    | `/api/loras`                        | List installed LoRAs, optionally filtered by `?model=` compatibility                                              |
-| `POST`   | `/api/models/load`                  | Load/swap the active model                                                                                        |
-| `POST`   | `/api/models/pull`                  | Pull/download a model                                                                                             |
-| `DELETE` | `/api/models/unload`                | Unload model to free GPU memory                                                                                   |
-| `GET`    | `/api/gallery`                      | List saved images                                                                                                 |
-| `GET`    | `/api/gallery/image/:name`          | Fetch a saved image                                                                                               |
-| `DELETE` | `/api/gallery/image/:name`          | Delete a saved image                                                                                              |
-| `GET`    | `/api/gallery/thumbnail/:name`      | Fetch a cached thumbnail                                                                                          |
-| `GET`    | `/api/gallery/preview/:name`        | Fetch a cached GIF preview for video gallery rows                                                                 |
-| `GET`    | `/api/downloads`                    | List active, queued, failed, and completed downloads                                                              |
-| `POST`   | `/api/downloads`                    | Queue a manifest model download                                                                                   |
-| `DELETE` | `/api/downloads/:id`                | Cancel a queued or active download                                                                                |
-| `GET`    | `/api/downloads/stream`             | Download queue updates as SSE                                                                                     |
-| `GET`    | `/api/catalog/families`             | Live catalog family/kind metadata                                                                                 |
-| `GET`    | `/api/catalog/search`               | Search the live HF/Civitai catalog                                                                                |
-| `GET`    | `/api/catalog/installed`            | List installed catalog entries and LoRAs                                                                          |
-| `GET`    | `/api/catalog/:id`                  | Resolve one `hf:` or `cv:` catalog entry                                                                          |
-| `POST`   | `/api/catalog/:id/download`         | Queue a catalog entry plus missing companions                                                                     |
-| `POST`   | `/api/upscale`                      | Upscale image with Real-ESRGAN                                                                                    |
-| `POST`   | `/api/upscale/stream`               | Upscale with SSE tile progress                                                                                    |
-| `GET`    | `/api/resources`                    | Latest RAM/GPU resource snapshot                                                                                  |
-| `GET`    | `/api/resources/stream`             | Resource snapshots as SSE                                                                                         |
-| `GET`    | `/api/queue`                        | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
-| `PATCH`  | `/api/queue/:id`                    | Update the preferred GPU lane for a queued job                                                                    |
-| `GET`    | `/api/capabilities`                 | Feature capabilities (gallery delete, chain limits, …)                                                            |
-| `GET`    | `/api/capabilities/chain-limits`    | Chain-generation request limits                                                                                   |
-| `PUT`    | `/api/config/model/:name/placement` | Save model-specific device placement defaults                                                                     |
-| `DELETE` | `/api/config/model/:name/placement` | Clear model-specific device placement defaults                                                                    |
-| `POST`   | `/api/shutdown`                     | Trigger graceful server shutdown                                                                                  |
-| `GET`    | `/api/status`                       | Server health + status                                                                                            |
-| `GET`    | `/health`                           | Simple 200 OK health check                                                                                        |
-| `GET`    | `/api/openapi.json`                 | OpenAPI spec                                                                                                      |
-| `GET`    | `/api/docs`                         | Interactive API docs (Scalar)                                                                                     |
-| `GET`    | `/metrics`                          | Prometheus metrics (feature-gated)                                                                                |
+| Method   | Path                                      | Description                                                                                                       |
+| -------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `POST`   | `/api/generate`                           | Generate images from prompt                                                                                       |
+| `POST`   | `/api/generate/stream`                    | Generate with SSE progress streaming                                                                              |
+| `POST`   | `/api/generate/estimate`                  | Estimate request-sensitive peak memory for a generation request                                                   |
+| `POST`   | `/api/generate/chain`                     | Chained video generation (LTX-2)                                                                                  |
+| `POST`   | `/api/generate/chain/stream`              | Chained video with SSE progress                                                                                   |
+| `POST`   | `/api/chain-jobs`                         | Create a durable async chain job                                                                                  |
+| `GET`    | `/api/chain-jobs`                         | List durable chain jobs                                                                                           |
+| `GET`    | `/api/chain-jobs/:id`                     | Get durable chain-job detail                                                                                      |
+| `GET`    | `/api/chain-jobs/:id/events`              | Durable chain-job SSE events                                                                                      |
+| `POST`   | `/api/chain-jobs/:id/resume`              | Resume a failed, interrupted, or cancelled chain job                                                              |
+| `POST`   | `/api/chain-jobs/:id/retake`              | Retake one chain-job stage                                                                                        |
+| `POST`   | `/api/chain-jobs/:id/cancel`              | Cancel a queued or running chain job                                                                              |
+| `DELETE` | `/api/chain-jobs/:id`                     | Delete a non-running chain job                                                                                    |
+| `GET`    | `/api/chain-jobs/:id/stages/:idx/preview` | Fetch a stage preview JPEG                                                                                        |
+| `POST`   | `/api/expand`                             | Expand a prompt using LLM                                                                                         |
+| `GET`    | `/api/models`                             | List available models                                                                                             |
+| `GET`    | `/api/models/:model/components`           | List required model component readiness and paths                                                                 |
+| `GET`    | `/api/loras`                              | List installed LoRAs, optionally filtered by `?model=` compatibility                                              |
+| `POST`   | `/api/models/load`                        | Load/swap the active model                                                                                        |
+| `POST`   | `/api/models/pull`                        | Pull/download a model                                                                                             |
+| `DELETE` | `/api/models/unload`                      | Unload model to free GPU memory                                                                                   |
+| `GET`    | `/api/gallery`                            | List saved images                                                                                                 |
+| `GET`    | `/api/gallery/image/:name`                | Fetch a saved image                                                                                               |
+| `DELETE` | `/api/gallery/image/:name`                | Delete a saved image                                                                                              |
+| `GET`    | `/api/gallery/thumbnail/:name`            | Fetch a cached thumbnail                                                                                          |
+| `GET`    | `/api/gallery/preview/:name`              | Fetch a cached GIF preview for video gallery rows                                                                 |
+| `GET`    | `/api/downloads`                          | List active, queued, failed, and completed downloads                                                              |
+| `POST`   | `/api/downloads`                          | Queue a manifest model download                                                                                   |
+| `DELETE` | `/api/downloads/:id`                      | Cancel a queued or active download                                                                                |
+| `GET`    | `/api/downloads/stream`                   | Download queue updates as SSE                                                                                     |
+| `GET`    | `/api/catalog/families`                   | Live catalog family/kind metadata                                                                                 |
+| `GET`    | `/api/catalog/search`                     | Search the live HF/Civitai catalog                                                                                |
+| `GET`    | `/api/catalog/installed`                  | List installed catalog entries and LoRAs                                                                          |
+| `GET`    | `/api/catalog/:id`                        | Resolve one `hf:` or `cv:` catalog entry                                                                          |
+| `POST`   | `/api/catalog/:id/download`               | Queue a catalog entry plus missing companions                                                                     |
+| `POST`   | `/api/upscale`                            | Upscale image with Real-ESRGAN                                                                                    |
+| `POST`   | `/api/upscale/stream`                     | Upscale with SSE tile progress                                                                                    |
+| `GET`    | `/api/resources`                          | Latest RAM/GPU resource snapshot                                                                                  |
+| `GET`    | `/api/resources/stream`                   | Resource snapshots as SSE                                                                                         |
+| `GET`    | `/api/queue`                              | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
+| `PATCH`  | `/api/queue/:id`                          | Update the preferred GPU lane for a queued job                                                                    |
+| `GET`    | `/api/capabilities`                       | Feature capabilities (gallery delete, chain limits, …)                                                            |
+| `GET`    | `/api/capabilities/chain-limits`          | Chain-generation request limits                                                                                   |
+| `PUT`    | `/api/config/model/:name/placement`       | Save model-specific device placement defaults                                                                     |
+| `DELETE` | `/api/config/model/:name/placement`       | Clear model-specific device placement defaults                                                                    |
+| `POST`   | `/api/shutdown`                           | Trigger graceful server shutdown                                                                                  |
+| `GET`    | `/api/status`                             | Server health + status                                                                                            |
+| `GET`    | `/health`                                 | Simple 200 OK health check                                                                                        |
+| `GET`    | `/api/openapi.json`                       | OpenAPI spec                                                                                                      |
+| `GET`    | `/api/docs`                               | Interactive API docs (Scalar)                                                                                     |
+| `GET`    | `/metrics`                                | Prometheus metrics (feature-gated)                                                                                |
 
 ## Authentication
 
