@@ -14,7 +14,6 @@ mod preset;
 mod runtime;
 mod sampler;
 pub(crate) mod single_file;
-pub mod stitch;
 mod text;
 
 pub use chain::{extract_tail_latents, tail_latent_frame_count};

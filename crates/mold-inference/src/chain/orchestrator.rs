@@ -943,7 +943,7 @@ mod tests {
             .skip(1)
             .map(|s| s.fade_frames.unwrap_or(8))
             .collect();
-        let plan = crate::ltx2::stitch::StitchPlan {
+        let plan = crate::chain::stitch::StitchPlan {
             clips: out.stage_frames,
             boundaries,
             fade_lens,

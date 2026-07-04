@@ -219,7 +219,7 @@ fn trim_to_total_frames(frames: &mut Vec<image::RgbImage>, total_frames: Option<
 }
 
 /// Assemble per-stage frame clips into a single output buffer using
-/// [`mold_inference::ltx2::stitch::StitchPlan`], honouring per-boundary
+/// [`mold_inference::chain::stitch::StitchPlan`], honouring per-boundary
 /// transition rules (Smooth / Cut / Fade). Returns the stitched frames
 /// and, when any stage produced audio, the corresponding stitched audio
 /// track. Splitting the two return paths in one helper keeps the route
@@ -232,9 +232,9 @@ pub(crate) fn stitch_chain_output(
         Vec<image::RgbImage>,
         Option<mold_inference::chain::NativeAudioTrack>,
     ),
-    mold_inference::ltx2::stitch::StitchError,
+    mold_inference::chain::stitch::StitchError,
 > {
-    use mold_inference::ltx2::stitch::{stitch_audio_clips, StitchPlan};
+    use mold_inference::chain::stitch::{stitch_audio_clips, StitchPlan};
     let boundaries: Vec<_> = req.stages.iter().skip(1).map(|s| s.transition).collect();
     let fade_lens: Vec<_> = req
         .stages

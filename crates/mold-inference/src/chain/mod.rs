@@ -8,6 +8,7 @@
 //! (`tail_latent_frame_count`) deliberately stay with their family.
 
 pub mod orchestrator;
+pub mod stitch;
 
 pub use crate::audio::NativeAudioTrack;
 pub use orchestrator::{

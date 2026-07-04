@@ -401,7 +401,7 @@ async fn run_chain_local(
         };
         let chain_output = orch.run(&req_clone, Some(&mut chain_cb))?;
 
-        use mold_inference::ltx2::stitch::{stitch_audio_clips, StitchPlan};
+        use mold_inference::chain::stitch::{stitch_audio_clips, StitchPlan};
         let boundaries: Vec<_> = req_clone
             .stages
             .iter()
