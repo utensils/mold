@@ -7,10 +7,12 @@
 //! LTX-2 impl lives in `crate::ltx2`. VAE-ratio-specific helpers
 //! (`tail_latent_frame_count`) deliberately stay with their family.
 
+pub mod capability;
 pub mod orchestrator;
 pub mod stitch;
 
 pub use crate::audio::NativeAudioTrack;
+pub use capability::{capability_for_family, CarryoverKind, ChainCapability};
 pub use orchestrator::{
     ChainOrchestrator, ChainOrchestratorError, ChainRunOutput, ChainStageRenderer, ChainTail,
     StageOutcome, StageProgressEvent,
