@@ -1115,14 +1115,15 @@ pub fn run_chain_blocking<T, E>(
 /// Lock scope is exactly one stage render; callers reacquire for each stage
 /// so the durable chain-job runner can yield between stages.
 pub fn run_stage_blocking<T, E>(
-    _worker: &GpuWorker,
-    _model_name: &str,
-    _config: &mold_core::Config,
-    _hint: Option<crate::model_manager::ActivationHint>,
-    _with_engine: impl FnOnce(&mut dyn mold_inference::InferenceEngine) -> Result<T, E>,
+    worker: &GpuWorker,
+    model_name: &str,
+    config: &mold_core::Config,
+    hint: Option<crate::model_manager::ActivationHint>,
+    with_engine: impl FnOnce(&mut dyn mold_inference::InferenceEngine) -> Result<T, E>,
 ) -> ChainPrep<T, E> {
-    // TODO(BR55 Phase 6): run one stage under the worker model-load lock and restore the engine.
-    todo!()
+    // Same take/restore critical section as `run_chain_blocking`; the durable
+    // runner calls this once per stage, so the lock scope is one render call.
+    run_chain_blocking(worker, model_name, config, hint, with_engine)
 }
 
 #[cfg(test)]

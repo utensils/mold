@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - metadata DB schema v11 adds chain_jobs + chain_job_stages tables (groundwork for durable chain jobs).
+- chain-job API endpoints for async durable chain jobs: create, list, detail, events, resume, retake, cancel, delete, and stage preview.
 
 ### Fixed
 

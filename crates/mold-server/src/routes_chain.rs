@@ -888,10 +888,17 @@ async fn run_chain_legacy(
 /// chain generation. Mutates `req.motion_tail_frames` for families that lack
 /// latent context handoff (currently `ltx-video`) so the stitch layer doesn't
 /// trim independent fresh frames at Smooth boundaries.
-async fn validate_and_normalize_chain_family(
+pub(crate) async fn validate_and_normalize_chain_family(
     state: &AppState,
     req: &mut ChainRequest,
 ) -> Result<(), ApiError> {
+    #[cfg(not(feature = "mp4"))]
+    if req.enable_audio == Some(true) {
+        return Err(ApiError::validation(
+            "chain audio requires a mold build with the mp4 feature; rebuild with `--features mp4` or remove `enable_audio: true`",
+        ));
+    }
+
     let config = state.config.read().await;
     let family = config
         .resolved_model_config(&req.model)

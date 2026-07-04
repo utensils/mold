@@ -143,7 +143,6 @@ pub fn encode_webp(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
 }
 
 /// Split Annex B byte stream (00 00 00 01 or 00 00 01 delimited) into NAL units.
-#[cfg(feature = "mp4")]
 fn split_annex_b_nals(data: &[u8]) -> Vec<&[u8]> {
     let mut nals = Vec::new();
     let mut i = 0;
@@ -189,7 +188,6 @@ fn split_annex_b_nals(data: &[u8]) -> Vec<&[u8]> {
 /// long videos through a bounded window. `encode_mp4` is a thin wrapper
 /// over this type; the two produce byte-identical output for the same
 /// frames (asserted by `stream_encoder_matches_slice_encoder_byte_for_byte`).
-#[cfg(feature = "mp4")]
 pub struct Mp4StreamEncoder {
     encoder: openh264::encoder::Encoder,
     samples: Vec<(Vec<u8>, bool)>,
@@ -200,7 +198,6 @@ pub struct Mp4StreamEncoder {
     fps: u32,
 }
 
-#[cfg(feature = "mp4")]
 impl Mp4StreamEncoder {
     pub fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
         use openh264::encoder::{EncoderConfig, FrameRate, VuiConfig};
@@ -281,7 +278,6 @@ impl Mp4StreamEncoder {
 ///
 /// Uses OpenH264 for H.264 encoding with a minimal QuickTime-compatible MP4 muxer.
 /// Produces `ftyp[isom,iso2,avc1,mp41] + moov + mdat` (faststart layout).
-#[cfg(feature = "mp4")]
 pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
     anyhow::ensure!(!frames.is_empty(), "no frames to encode");
     let (width, height) = (frames[0].width(), frames[0].height());
@@ -295,7 +291,6 @@ pub fn encode_mp4(frames: &[RgbImage], fps: u32) -> Result<Vec<u8>> {
 /// Minimal MP4 muxer producing QuickTime/macOS-compatible output.
 ///
 /// Writes ftyp(isom,iso2,avc1,mp41) + moov(mvhd,trak(tkhd,edts,mdia(mdhd,hdlr,minf(vmhd,dinf,stbl)))) + mdat.
-#[cfg(feature = "mp4")]
 mod mp4_mux {
     use anyhow::Result;
 
@@ -352,13 +347,14 @@ mod mp4_mux {
         let compat = if sps.len() > 2 { sps[2] } else { 0xC0 };
         let level_idc = if sps.len() > 3 { sps[3] } else { 0x1E };
 
-        let mut c = Vec::new();
-        c.push(1); // configurationVersion
-        c.push(profile_idc);
-        c.push(compat);
-        c.push(level_idc);
-        c.push(0xFF); // lengthSizeMinusOne = 3 (4-byte NAL lengths)
-        c.push(0xE1); // numOfSequenceParameterSets = 1
+        let mut c = vec![
+            1, // configurationVersion
+            profile_idc,
+            compat,
+            level_idc,
+            0xFF, // lengthSizeMinusOne = 3 (4-byte NAL lengths)
+            0xE1, // numOfSequenceParameterSets = 1
+        ];
         write_u16(&mut c, sps.len() as u16);
         c.extend_from_slice(sps);
         c.push(1); // numOfPictureParameterSets = 1

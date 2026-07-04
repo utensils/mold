@@ -661,6 +661,11 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `POST /api/generate/stream` — SSE progress + base64 complete event
 - `POST /api/generate/chain` — chained arbitrary-length video (LTX-2 distilled); body is `mold_core::chain::ChainRequest` (canonical `stages[]` or auto-expand `prompt`+`total_frames`+`clip_frames`)
 - `POST /api/generate/chain/stream` — same as above, SSE progress with per-stage `denoise_step` events
+- Durable chain jobs:
+  - `POST /api/chain-jobs` · `GET /api/chain-jobs` · `GET /api/chain-jobs/:id`
+  - `GET /api/chain-jobs/:id/events` — SSE snapshot + live job events
+  - `POST /api/chain-jobs/:id/resume` · `POST /api/chain-jobs/:id/retake` · `POST /api/chain-jobs/:id/cancel`
+  - `DELETE /api/chain-jobs/:id` · `GET /api/chain-jobs/:id/stages/:idx/preview`
 - `POST /api/expand` — LLM prompt expansion
 - `GET /api/models` · `GET /api/loras` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
 - `GET /api/gallery` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`

@@ -15,6 +15,7 @@
 use anyhow::{bail, Result};
 use image::RgbImage;
 use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
+use mold_core::chain_job::effective_stage_seed;
 use mold_core::{GenerateRequest, OutputFormat};
 
 use crate::audio::NativeAudioTrack;
@@ -318,8 +319,6 @@ fn estimate_stitched_frames(req: &ChainRequest) -> u32 {
         .sum()
 }
 
-// TODO(BR55 Phase 6): delegate to mold_core::chain_job::effective_stage_seed
-// (shared helper) — keep the doc comment, replace the body.
 fn derive_stage_seed(base_seed: u64, _idx: usize, stage: &ChainStage) -> u64 {
     // Keep the seed stable across stages by default. An earlier revision
     // XORed `(idx as u64) << 32` into each stage's seed so the initial
@@ -330,11 +329,7 @@ fn derive_stage_seed(base_seed: u64, _idx: usize, stage: &ChainStage) -> u64 {
     // same-seed noise in the free region lets the continuation settle on a
     // consistent motion profile. Callers who want per-stage variation
     // supply `stage.seed_offset` explicitly.
-    if let Some(offset) = stage.seed_offset {
-        base_seed ^ offset
-    } else {
-        base_seed
-    }
+    effective_stage_seed(base_seed, stage.seed_offset)
 }
 
 fn build_stage_generate_request(

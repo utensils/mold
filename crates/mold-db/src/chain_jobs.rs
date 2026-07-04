@@ -13,10 +13,15 @@
 
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use mold_core::chain_job::{ChainJobState, StageState};
-use rusqlite::{params, types::Type, OptionalExtension, Row};
+use rusqlite::{
+    params,
+    types::{Type, Value},
+    OptionalExtension, Row,
+};
 
 use crate::db::MetadataDb;
 
@@ -124,6 +129,90 @@ pub fn jobs_in_state(db: &MetadataDb, state: ChainJobState) -> Result<Vec<ChainJ
     })
 }
 
+/// Oldest queued job by `created_at` (FIFO runner contract).
+pub fn next_queued_job(db: &MetadataDb) -> Result<Option<ChainJobRow>> {
+    db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT id, state, model, request_json, job_dir, stage_count,
+                    current_stage, error, created_at, updated_at, finalized_at
+             FROM chain_jobs
+             WHERE state = ?1
+             ORDER BY created_at ASC, id ASC
+             LIMIT 1",
+            params![ChainJobState::Queued.as_str()],
+            row_to_job,
+        )
+        .optional()
+        .map_err(Into::into)
+    })
+}
+
+/// Atomically claim a queued job for execution.
+///
+/// Returns `false` when another caller already moved the row out of `queued`
+/// (or the row disappeared). The predicate is part of the `UPDATE`, so callers
+/// must not pre-check `state` and then perform an unconditional mutation.
+pub fn claim_job(db: &MetadataDb, id: &str) -> Result<bool> {
+    db.with_conn(|conn| {
+        let n = conn.execute(
+            "UPDATE chain_jobs
+             SET state = ?1, updated_at = ?2
+             WHERE id = ?3 AND state = ?4",
+            params![
+                ChainJobState::Running.as_str(),
+                now_ms(),
+                id,
+                ChainJobState::Queued.as_str()
+            ],
+        )?;
+        Ok(n > 0)
+    })
+}
+
+/// Atomically transition a job from any state in `from` to `to`.
+///
+/// Returns `false` on compare-and-swap loss. `from` is intentionally explicit
+/// at every call site so route handlers encode their allowed source states in
+/// the SQL predicate that mutates the row.
+pub fn try_transition(
+    db: &MetadataDb,
+    id: &str,
+    from: &[ChainJobState],
+    to: ChainJobState,
+    error: Option<&str>,
+    updated_at_ms: i64,
+) -> Result<bool> {
+    if from.is_empty() {
+        return Ok(false);
+    }
+
+    db.with_conn(|conn| {
+        let placeholders = (0..from.len())
+            .map(|idx| format!("?{}", idx + 5))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE chain_jobs
+             SET state = ?1, error = ?2, updated_at = ?3
+             WHERE id = ?4 AND state IN ({placeholders})"
+        );
+        let mut values = vec![
+            Value::Text(to.as_str().to_string()),
+            error
+                .map(|error| Value::Text(error.to_string()))
+                .unwrap_or(Value::Null),
+            Value::Integer(updated_at_ms),
+            Value::Text(id.to_string()),
+        ];
+        values.extend(
+            from.iter()
+                .map(|state| Value::Text(state.as_str().to_string())),
+        );
+        let n = conn.execute(&sql, rusqlite::params_from_iter(values))?;
+        Ok(n > 0)
+    })
+}
+
 /// Returns `false` when `id` is unknown (caller decides whether that is
 /// an error). Clears `error` when `error` is `None`.
 pub fn update_job_state(
@@ -139,6 +228,34 @@ pub fn update_job_state(
              SET state = ?1, error = ?2, updated_at = ?3
              WHERE id = ?4",
             params![state.as_str(), error, updated_at_ms, id],
+        )?;
+        Ok(n > 0)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn repair_job_from_manifest(
+    db: &MetadataDb,
+    id: &str,
+    state: ChainJobState,
+    current_stage: u32,
+    error: Option<&str>,
+    updated_at_ms: i64,
+    finalized_at_ms: Option<i64>,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        let n = conn.execute(
+            "UPDATE chain_jobs
+             SET state = ?1, current_stage = ?2, error = ?3, updated_at = ?4, finalized_at = ?5
+             WHERE id = ?6",
+            params![
+                state.as_str(),
+                current_stage as i64,
+                error,
+                updated_at_ms,
+                finalized_at_ms,
+                id
+            ],
         )?;
         Ok(n > 0)
     })
@@ -161,6 +278,28 @@ pub fn set_current_stage(
     })
 }
 
+pub fn set_job_queued(
+    db: &MetadataDb,
+    id: &str,
+    current_stage: u32,
+    updated_at_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        let n = conn.execute(
+            "UPDATE chain_jobs
+             SET state = ?1, current_stage = ?2, error = NULL, updated_at = ?3
+             WHERE id = ?4",
+            params![
+                ChainJobState::Queued.as_str(),
+                current_stage as i64,
+                updated_at_ms,
+                id
+            ],
+        )?;
+        Ok(n > 0)
+    })
+}
+
 /// Sets both `finalized_at` and `updated_at` to `finalized_at_ms`.
 /// Finalization is the update event, so this timestamp equality is intentional.
 pub fn set_finalized_at(db: &MetadataDb, id: &str, finalized_at_ms: i64) -> Result<bool> {
@@ -175,11 +314,80 @@ pub fn set_finalized_at(db: &MetadataDb, id: &str, finalized_at_ms: i64) -> Resu
     })
 }
 
+pub fn reset_stages_from(
+    db: &MetadataDb,
+    job_id: &str,
+    start_stage: u32,
+    updated_at_ms: i64,
+) -> Result<usize> {
+    db.with_conn(|conn| {
+        let n = conn.execute(
+            "UPDATE chain_job_stages
+             SET state = ?1,
+                 frames_emitted = NULL,
+                 generation_time_ms = NULL,
+                 segment_rel_path = NULL,
+                 error = NULL,
+                 updated_at = ?2
+             WHERE job_id = ?3 AND stage_idx >= ?4",
+            params![
+                StageState::Pending.as_str(),
+                updated_at_ms,
+                job_id,
+                start_stage as i64
+            ],
+        )?;
+        Ok(n)
+    })
+}
+
+pub fn reset_one_stage(
+    db: &MetadataDb,
+    job_id: &str,
+    stage_idx: u32,
+    updated_at_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        let n = conn.execute(
+            "UPDATE chain_job_stages
+             SET state = ?1,
+                 frames_emitted = NULL,
+                 generation_time_ms = NULL,
+                 segment_rel_path = NULL,
+                 error = NULL,
+                 updated_at = ?2
+             WHERE job_id = ?3 AND stage_idx = ?4",
+            params![
+                StageState::Pending.as_str(),
+                updated_at_ms,
+                job_id,
+                stage_idx as i64
+            ],
+        )?;
+        Ok(n > 0)
+    })
+}
+
 /// Deletes the job row; stage rows cascade via the v11 foreign key
 /// (`ON DELETE CASCADE` is the contract — see the cascade contract test).
 pub fn delete_job(db: &MetadataDb, id: &str) -> Result<bool> {
     db.with_conn(|conn| {
         let n = conn.execute("DELETE FROM chain_jobs WHERE id = ?1", params![id])?;
+        Ok(n > 0)
+    })
+}
+
+/// Delete a job row only when it is not currently running.
+///
+/// The running-state predicate is part of the `DELETE`, so racing claim/delete
+/// callers cannot remove a row after another caller has made it active.
+pub fn delete_job_not_running(db: &MetadataDb, id: &str) -> Result<bool> {
+    db.with_conn(|conn| {
+        let n = conn.execute(
+            "DELETE FROM chain_jobs
+             WHERE id = ?1 AND state != ?2",
+            params![id, ChainJobState::Running.as_str()],
+        )?;
         Ok(n > 0)
     })
 }
@@ -293,6 +501,16 @@ fn opt_int_to_u64(value: Option<i64>, col: usize) -> rusqlite::Result<Option<u64
         .transpose()
 }
 
+fn now_ms() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +608,16 @@ mod tests {
     #[test]
     fn update_job_state_returns_false_for_unknown_id() {
         let db = db();
+        assert!(!claim_job(&db, "missing").unwrap());
+        assert!(!try_transition(
+            &db,
+            "missing",
+            &[ChainJobState::Queued],
+            ChainJobState::Running,
+            None,
+            3_000,
+        )
+        .unwrap());
         assert!(!update_job_state(
             &db,
             "missing",
@@ -400,6 +628,80 @@ mod tests {
         .unwrap());
         assert!(!set_current_stage(&db, "missing", 1, 3_000).unwrap());
         assert!(!set_finalized_at(&db, "missing", 4_000).unwrap());
+        assert!(!delete_job_not_running(&db, "missing").unwrap());
+    }
+
+    #[test]
+    fn claim_job_only_moves_queued_rows_to_running() {
+        let db = db();
+        let queued = job("01JBR55CLAIM", ChainJobState::Queued, 1_000);
+        let failed = job("01JBR55NOCLAIM", ChainJobState::Failed, 1_000);
+        insert_job(&db, &queued).unwrap();
+        insert_job(&db, &failed).unwrap();
+
+        assert!(claim_job(&db, &queued.id).unwrap());
+        assert!(!claim_job(&db, &queued.id).unwrap());
+        assert!(!claim_job(&db, &failed.id).unwrap());
+
+        let got = get_job(&db, &queued.id).unwrap().unwrap();
+        assert_eq!(got.state, ChainJobState::Running);
+        assert!(got.updated_at_ms >= queued.updated_at_ms);
+        assert_eq!(
+            get_job(&db, &failed.id).unwrap().unwrap().state,
+            ChainJobState::Failed
+        );
+    }
+
+    #[test]
+    fn try_transition_is_state_predicated_and_clears_error() {
+        let db = db();
+        let row = ChainJobRow {
+            error: Some("boom".into()),
+            ..job("01JBR55CAS", ChainJobState::Failed, 1_000)
+        };
+        insert_job(&db, &row).unwrap();
+
+        assert!(!try_transition(
+            &db,
+            &row.id,
+            &[ChainJobState::Interrupted],
+            ChainJobState::Queued,
+            None,
+            2_000,
+        )
+        .unwrap());
+        assert_eq!(
+            get_job(&db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Failed
+        );
+
+        assert!(try_transition(
+            &db,
+            &row.id,
+            &[ChainJobState::Interrupted, ChainJobState::Failed],
+            ChainJobState::Queued,
+            None,
+            3_000,
+        )
+        .unwrap());
+        let got = get_job(&db, &row.id).unwrap().unwrap();
+        assert_eq!(got.state, ChainJobState::Queued);
+        assert_eq!(got.error, None);
+        assert_eq!(got.updated_at_ms, 3_000);
+    }
+
+    #[test]
+    fn delete_job_not_running_refuses_running_rows() {
+        let db = db();
+        let running = job("01JBR55RUNDEL", ChainJobState::Running, 1_000);
+        let failed = job("01JBR55FAILDEL", ChainJobState::Failed, 1_000);
+        insert_job(&db, &running).unwrap();
+        insert_job(&db, &failed).unwrap();
+
+        assert!(!delete_job_not_running(&db, &running.id).unwrap());
+        assert!(get_job(&db, &running.id).unwrap().is_some());
+        assert!(delete_job_not_running(&db, &failed.id).unwrap());
+        assert!(get_job(&db, &failed.id).unwrap().is_none());
     }
 
     #[test]
@@ -478,5 +780,81 @@ mod tests {
         assert!(get_job(&db, &row.id).unwrap().is_none());
         assert!(stages_for_job(&db, &row.id).unwrap().is_empty());
         assert!(!delete_job(&db, &row.id).unwrap());
+    }
+
+    #[test]
+    fn next_queued_job_is_fifo_by_created_at() {
+        let db = db();
+        let running = job("01JBR55RUNNING", ChainJobState::Running, 500);
+        let older = job("01JBR55OLDER", ChainJobState::Queued, 1_000);
+        let newer = job("01JBR55NEWER", ChainJobState::Queued, 2_000);
+        insert_job(&db, &newer).unwrap();
+        insert_job(&db, &running).unwrap();
+        insert_job(&db, &older).unwrap();
+
+        let got = next_queued_job(&db).unwrap().expect("queued job");
+        assert_eq!(got.id, older.id);
+    }
+
+    #[test]
+    fn queued_and_reset_helpers_clear_resumable_state() {
+        let db = db();
+        let row = ChainJobRow {
+            state: ChainJobState::Failed,
+            current_stage: 2,
+            error: Some("boom".into()),
+            ..job("01JBR55RESET", ChainJobState::Failed, 1_000)
+        };
+        insert_job(&db, &row).unwrap();
+        upsert_stage(&db, &stage(&row.id, 0, StageState::Completed, 42)).unwrap();
+        upsert_stage(&db, &stage(&row.id, 1, StageState::Completed, 43)).unwrap();
+        upsert_stage(&db, &stage(&row.id, 2, StageState::Failed, 44)).unwrap();
+
+        assert!(set_job_queued(&db, &row.id, 2, 4_000).unwrap());
+        assert_eq!(reset_stages_from(&db, &row.id, 1, 4_001).unwrap(), 2);
+
+        let got = get_job(&db, &row.id).unwrap().unwrap();
+        assert_eq!(got.state, ChainJobState::Queued);
+        assert_eq!(got.current_stage, 2);
+        assert_eq!(got.error, None);
+
+        let stages = stages_for_job(&db, &row.id).unwrap();
+        assert_eq!(stages[0].state, StageState::Completed);
+        assert_eq!(
+            stages[0].segment_rel_path.as_deref(),
+            Some("stages/000/segment.mp4")
+        );
+        for stage in &stages[1..] {
+            assert_eq!(stage.state, StageState::Pending);
+            assert_eq!(stage.frames_emitted, None);
+            assert_eq!(stage.generation_time_ms, None);
+            assert_eq!(stage.segment_rel_path, None);
+            assert_eq!(stage.error, None);
+        }
+    }
+
+    #[test]
+    fn repair_job_from_manifest_updates_query_index() {
+        let db = db();
+        let row = job("01JBR55REPAIR", ChainJobState::Running, 1_000);
+        insert_job(&db, &row).unwrap();
+
+        assert!(repair_job_from_manifest(
+            &db,
+            &row.id,
+            ChainJobState::Failed,
+            1,
+            Some("manifest says failed"),
+            5_000,
+            Some(4_900),
+        )
+        .unwrap());
+
+        let got = get_job(&db, &row.id).unwrap().unwrap();
+        assert_eq!(got.state, ChainJobState::Failed);
+        assert_eq!(got.current_stage, 1);
+        assert_eq!(got.error.as_deref(), Some("manifest says failed"));
+        assert_eq!(got.updated_at_ms, 5_000);
+        assert_eq!(got.finalized_at_ms, Some(4_900));
     }
 }

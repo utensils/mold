@@ -252,8 +252,51 @@ pub async fn run_server(
         }
     }
 
-    // TODO(BR55 Phase 6): run chain_job_runner::startup_reconcile in spawn_blocking after metadata DB opens and before serving.
-    // TODO(BR55 Phase 6): call chain_job_runner::spawn_runner only after startup_reconcile completes and store the handle on AppState.
+    if state.metadata_db.is_some() {
+        let Some(jobs_root) = Config::mold_dir().map(|dir| dir.join("jobs")) else {
+            anyhow::bail!("metadata DB opened but MOLD_HOME could not be resolved for chain jobs");
+        };
+        std::fs::create_dir_all(&jobs_root)?;
+        let db_arc = state.metadata_db.clone();
+        let reconcile_root = jobs_root.clone();
+        let (flipped, repaired) = tokio::task::spawn_blocking(move || {
+            let Some(db) = db_arc.as_ref().as_ref() else {
+                anyhow::bail!("metadata DB disappeared before chain reconcile");
+            };
+            chain_job_runner::startup_reconcile(db, &reconcile_root)
+        })
+        .await??;
+        tracing::info!(
+            flipped,
+            repaired,
+            jobs_root = %jobs_root.display(),
+            "chain job startup reconcile complete"
+        );
+
+        let config_snapshot = state.config.read().await.clone();
+        let output_dir = if config_snapshot.is_output_disabled() {
+            None
+        } else {
+            Some(config_snapshot.effective_output_dir())
+        };
+        let deps = chain_job_runner::RunnerDeps {
+            db: state.metadata_db.clone(),
+            jobs_root,
+            executor: std::sync::Arc::new(chain_job_runner::ProductionStageExecutor::new(
+                state.gpu_pool.clone(),
+                config_snapshot,
+            )),
+            queue_probe: std::sync::Arc::new(chain_job_runner::ProductionQueueProbe::new(
+                state.queue.clone(),
+                state.gpu_pool.clone(),
+            )),
+            events: std::sync::Arc::new(chain_job_runner::JobEventBus::new()),
+            cancel: std::sync::Arc::new(chain_job_runner::CancelRegistry::new()),
+            job_locks: std::sync::Arc::new(chain_job_runner::JobMutationLocks::new()),
+            output_dir,
+        };
+        state.chain_jobs = Some(std::sync::Arc::new(chain_job_runner::spawn_runner(deps)));
+    }
 
     // Spawn the generation queue worker — processes jobs sequentially (single GPU).
     // Spawn queue worker: use multi-GPU dispatcher if GPUs are available,

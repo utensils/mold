@@ -91,6 +91,14 @@ impl ApiError {
         }
     }
 
+    pub fn with_code(msg: impl Into<String>, code: impl Into<String>, status: StatusCode) -> Self {
+        Self {
+            error: msg.into(),
+            code: code.into(),
+            status,
+        }
+    }
+
     pub fn queue_job_not_found(msg: impl Into<String>) -> Self {
         Self {
             error: msg.into(),
@@ -149,17 +157,6 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 use crate::queue::clean_error_message;
 
-// TODO(BR55 Phase 6): register chain-job routes and utoipa paths without calling placeholder handlers.
-// - POST /api/chain-jobs -> crate::routes_chain_jobs::create_chain_job
-// - GET /api/chain-jobs -> crate::routes_chain_jobs::list_chain_jobs
-// - GET /api/chain-jobs/:id -> crate::routes_chain_jobs::get_chain_job
-// - GET /api/chain-jobs/:id/events -> crate::routes_chain_jobs::chain_job_events
-// - POST /api/chain-jobs/:id/resume -> crate::routes_chain_jobs::resume_chain_job
-// - POST /api/chain-jobs/:id/retake -> crate::routes_chain_jobs::retake_chain_job
-// - POST /api/chain-jobs/:id/cancel -> crate::routes_chain_jobs::cancel_chain_job
-// - DELETE /api/chain-jobs/:id -> crate::routes_chain_jobs::delete_chain_job
-// - GET /api/chain-jobs/:id/stages/:idx/preview -> crate::routes_chain_jobs::chain_job_stage_preview
-
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -178,6 +175,15 @@ use crate::queue::clean_error_message;
         capabilities_chain_limits,
         crate::routes_chain::generate_chain,
         crate::routes_chain::generate_chain_stream,
+        crate::routes_chain_jobs::create_chain_job,
+        crate::routes_chain_jobs::list_chain_jobs,
+        crate::routes_chain_jobs::get_chain_job,
+        crate::routes_chain_jobs::chain_job_events,
+        crate::routes_chain_jobs::resume_chain_job,
+        crate::routes_chain_jobs::retake_chain_job,
+        crate::routes_chain_jobs::cancel_chain_job,
+        crate::routes_chain_jobs::delete_chain_job,
+        crate::routes_chain_jobs::chain_job_stage_preview,
     ),
     components(schemas(
         mold_core::GenerateRequest,
@@ -199,6 +205,18 @@ use crate::queue::clean_error_message;
         mold_core::ChainStage,
         mold_core::ChainProgressEvent,
         mold_core::SseChainCompleteEvent,
+        mold_core::chain_job::ChainJobSummary,
+        mold_core::chain_job::ChainJobStageDetail,
+        mold_core::chain_job::ChainJobDetail,
+        mold_core::chain_job::ChainJobListing,
+        mold_core::chain_job::CreateChainJobResponse,
+        mold_core::chain_job::RetakeRequest,
+        mold_core::chain_job::ChainJobEvent,
+        mold_core::chain_job::FinalizeRecord,
+        mold_core::chain_job::RetakeAmendment,
+        mold_core::chain_job::ChainJobState,
+        mold_core::chain_job::StageState,
+        mold_core::chain_job::RetakeMode,
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,
@@ -211,6 +229,7 @@ use crate::queue::clean_error_message;
         (name = "generation", description = "Image generation"),
         (name = "models", description = "Model management"),
         (name = "server", description = "Server status and health"),
+        (name = "chain-jobs", description = "Durable chained video jobs"),
     ),
     info(
         title = "mold",
@@ -234,6 +253,36 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/generate/chain/stream",
             post(crate::routes_chain::generate_chain_stream),
+        )
+        .route(
+            "/api/chain-jobs",
+            post(crate::routes_chain_jobs::create_chain_job)
+                .get(crate::routes_chain_jobs::list_chain_jobs),
+        )
+        .route(
+            "/api/chain-jobs/:id",
+            get(crate::routes_chain_jobs::get_chain_job)
+                .delete(crate::routes_chain_jobs::delete_chain_job),
+        )
+        .route(
+            "/api/chain-jobs/:id/events",
+            get(crate::routes_chain_jobs::chain_job_events),
+        )
+        .route(
+            "/api/chain-jobs/:id/resume",
+            post(crate::routes_chain_jobs::resume_chain_job),
+        )
+        .route(
+            "/api/chain-jobs/:id/retake",
+            post(crate::routes_chain_jobs::retake_chain_job),
+        )
+        .route(
+            "/api/chain-jobs/:id/cancel",
+            post(crate::routes_chain_jobs::cancel_chain_job),
+        )
+        .route(
+            "/api/chain-jobs/:id/stages/:idx/preview",
+            get(crate::routes_chain_jobs::chain_job_stage_preview),
         )
         .route("/api/expand", post(expand_prompt))
         .route("/api/models", get(list_models))

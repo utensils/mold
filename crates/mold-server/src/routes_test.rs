@@ -9,7 +9,11 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
-    use mold_core::{GenerateRequest, GenerateResponse, ImageData};
+    use mold_core::chain::{ChainRequest, ChainStage, TransitionMode};
+    use mold_core::{
+        chain_job::{ChainJobManifest, ChainJobState, JobDirLayout, RetakeMode, StageState},
+        GenerateRequest, GenerateResponse, ImageData, OutputFormat,
+    };
     use mold_inference::progress::ProgressCallback;
     use mold_inference::InferenceEngine;
     use sha2::{Digest, Sha256};
@@ -277,6 +281,164 @@ mod tests {
             gpu_pool,
             200,
         ))
+    }
+
+    struct MoldHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl MoldHomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let lock = env_lock().lock().unwrap();
+            let previous = std::env::var_os("MOLD_HOME");
+            std::env::set_var("MOLD_HOME", path);
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for MoldHomeGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("MOLD_HOME", value),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    fn app_with_chain_db(db: mold_db::MetadataDb) -> axum::Router {
+        app_with_chain_handle(
+            db,
+            Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests()),
+        )
+    }
+
+    fn app_with_chain_handle(
+        db: mold_db::MetadataDb,
+        handle: Arc<crate::chain_job_runner::ChainJobRunnerHandle>,
+    ) -> axum::Router {
+        let mut state = AppState::for_tests();
+        state.metadata_db = Arc::new(Some(db));
+        state.chain_jobs = Some(handle);
+        app_with_state(state)
+    }
+
+    fn route_chain_stage(prompt: &str, transition: TransitionMode) -> ChainStage {
+        ChainStage {
+            prompt: prompt.into(),
+            frames: 9,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition,
+            fade_frames: Some(2),
+            model: None,
+            loras: vec![],
+            references: vec![],
+        }
+    }
+
+    fn route_chain_request() -> ChainRequest {
+        ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".into(),
+            stages: vec![route_chain_stage("first shot", TransitionMode::Smooth)],
+            motion_tail_frames: 1,
+            width: 64,
+            height: 48,
+            fps: 8,
+            seed: Some(42),
+            steps: 2,
+            guidance: 1.0,
+            strength: 1.0,
+            output_format: OutputFormat::Mp4,
+            placement: None,
+            prompt: None,
+            total_frames: None,
+            clip_frames: None,
+            source_image: None,
+            enable_audio: None,
+        }
+    }
+
+    fn seed_chain_job(
+        db: &mold_db::MetadataDb,
+        mold_home: &std::path::Path,
+        id: &str,
+        state: ChainJobState,
+    ) -> PathBuf {
+        let req = route_chain_request();
+        seed_chain_job_with_request(db, mold_home, id, state, &req)
+    }
+
+    fn seed_chain_job_with_request(
+        db: &mold_db::MetadataDb,
+        mold_home: &std::path::Path,
+        id: &str,
+        state: ChainJobState,
+        req: &ChainRequest,
+    ) -> PathBuf {
+        let job_dir = mold_home.join("jobs").join(id);
+        std::fs::create_dir_all(&job_dir).unwrap();
+        let mut manifest = ChainJobManifest::new(id.to_string(), 1_783_200_000_000, req).unwrap();
+        match state {
+            ChainJobState::Completed => {
+                for stage in &mut manifest.stage_status {
+                    stage.state = StageState::Completed;
+                }
+            }
+            ChainJobState::Running => {
+                manifest.stage_status[0].state = StageState::Running;
+            }
+            _ => {}
+        }
+        manifest.write_atomic(&job_dir).unwrap();
+        let stage_count = req.stages.len() as u32;
+        let current_stage = if state == ChainJobState::Completed {
+            stage_count
+        } else {
+            0
+        };
+
+        let now = 1_783_200_000_000_i64;
+        mold_db::chain_jobs::insert_job(
+            db,
+            &mold_db::chain_jobs::ChainJobRow {
+                id: id.into(),
+                state,
+                model: req.model.clone(),
+                request_json: serde_json::to_string(&req).unwrap(),
+                job_dir: job_dir.clone(),
+                stage_count,
+                current_stage,
+                error: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+                finalized_at_ms: None,
+            },
+        )
+        .unwrap();
+        for stage in &manifest.stage_status {
+            mold_db::chain_jobs::upsert_stage(
+                db,
+                &mold_db::chain_jobs::ChainJobStageRow {
+                    job_id: id.into(),
+                    stage_idx: stage.idx,
+                    state: stage.state,
+                    seed: stage.seed,
+                    frames_emitted: None,
+                    generation_time_ms: None,
+                    segment_rel_path: None,
+                    error: None,
+                    updated_at_ms: now,
+                },
+            )
+            .unwrap();
+        }
+        JobDirLayout::new(job_dir.clone()).ensure_root().unwrap();
+        job_dir
     }
 
     fn gpu_worker_stub(ordinal: usize) -> Arc<crate::gpu_pool::GpuWorker> {
@@ -1957,6 +2119,253 @@ mod tests {
             "snapshot should reflect the loaded model"
         );
         assert!(snapshot.is_loaded, "snapshot should show model as loaded");
+    }
+
+    // ── Durable chain-job route integration tests ──────────────────────────
+
+    #[tokio::test]
+    async fn chain_jobs_route_returns_503_when_runner_unavailable() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/chain-jobs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "CHAIN_JOBS_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn chain_job_detail_returns_404_for_unknown_job() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let app = app_with_chain_db(mold_db::MetadataDb::open_in_memory().unwrap());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/chain-jobs/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "CHAIN_JOB_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn retake_splice_before_smooth_boundary_returns_409_code() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let mut req = route_chain_request();
+        req.stages
+            .push(route_chain_stage("second shot", TransitionMode::Smooth));
+        seed_chain_job_with_request(
+            &db,
+            home.path(),
+            "smooth-retake",
+            ChainJobState::Completed,
+            &req,
+        );
+        let app = app_with_chain_db(db);
+        let body = serde_json::to_string(&mold_core::chain_job::RetakeRequest {
+            stage_idx: 0,
+            mode: RetakeMode::Splice,
+            seed_offset: Some(9),
+            prompt: None,
+        })
+        .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::post("/api/chain-jobs/smooth-retake/retake")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "RETAKE_SPLICE_REQUIRES_CUT_OR_FADE");
+    }
+
+    #[tokio::test]
+    async fn chain_job_events_first_event_is_snapshot() {
+        use futures::StreamExt as _;
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        seed_chain_job(&db, home.path(), "events", ChainJobState::Queued);
+        let app = app_with_chain_db(db);
+
+        let resp = app
+            .oneshot(
+                Request::get("/api/chain-jobs/events/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let mut body = resp.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), body.next())
+            .await
+            .expect("first SSE event should arrive")
+            .expect("SSE body should produce a chunk")
+            .expect("SSE chunk should be readable");
+        let text = String::from_utf8_lossy(&chunk);
+        assert!(
+            text.contains("event: chain_job") && text.contains(r#""type":"snapshot""#),
+            "first SSE chunk must be Snapshot, got: {text}"
+        );
+    }
+
+    #[cfg(not(feature = "mp4"))]
+    #[tokio::test]
+    async fn create_chain_job_rejects_audio_when_mp4_feature_is_disabled() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let app = app_with_chain_db(mold_db::MetadataDb::open_in_memory().unwrap());
+        let mut req = route_chain_request();
+        req.enable_audio = Some(true);
+
+        let resp = app
+            .oneshot(
+                Request::post("/api/chain-jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("mp4 feature")),
+            "expected clear mp4 feature error, got {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_queued_chain_job_returns_202_and_cancelled_summary() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        seed_chain_job(&db, home.path(), "queued", ChainJobState::Queued);
+        let app = app_with_chain_db(db);
+
+        let resp = app
+            .oneshot(
+                Request::post("/api/chain-jobs/queued/cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body = json_body(resp).await;
+        assert_eq!(body["state"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn delete_running_chain_job_returns_409() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        seed_chain_job(&db, home.path(), "running", ChainJobState::Running);
+        let app = app_with_chain_db(db);
+
+        let resp = app
+            .oneshot(
+                Request::delete("/api/chain-jobs/running")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "CHAIN_JOB_RUNNING");
+    }
+
+    #[tokio::test]
+    async fn delete_non_running_chain_job_returns_204_and_removes_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let job_dir = seed_chain_job(&db, home.path(), "failed", ChainJobState::Failed);
+        let app = app_with_chain_db(db);
+
+        let resp = app
+            .oneshot(
+                Request::delete("/api/chain-jobs/failed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(!job_dir.exists(), "delete must remove the durable job dir");
+    }
+
+    #[tokio::test]
+    async fn delete_subscribed_non_running_chain_job_removes_bus_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        seed_chain_job(&db, home.path(), "failed-subscribed", ChainJobState::Failed);
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        let _rx = handle
+            .events_for_tests()
+            .subscribe_persistent_for_tests("failed-subscribed");
+        assert!(handle
+            .events_for_tests()
+            .contains_for_tests("failed-subscribed"));
+        let app = app_with_chain_handle(db, handle.clone());
+
+        let resp = app
+            .oneshot(
+                Request::delete("/api/chain-jobs/failed-subscribed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(!handle
+            .events_for_tests()
+            .contains_for_tests("failed-subscribed"));
+    }
+
+    #[tokio::test]
+    async fn auth_rejects_missing_api_key_on_chain_jobs_route() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/chain-jobs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // ── Auth & Rate Limiting integration tests ──────────────────────────────

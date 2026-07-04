@@ -87,6 +87,20 @@ impl ChainJobState {
     }
 }
 
+/// Settled jobs have reached a durable outcome for this attempt:
+/// completed, failed, or cancelled.
+///
+/// This is deliberately broader than [`ChainJobState::is_terminal`]. Only
+/// `completed` is terminal in the resume/reconcile sense; `failed` and
+/// `cancelled` are settled for cancel/bus cleanup but may be re-queued by
+/// resume or retake.
+pub fn settled(state: ChainJobState) -> bool {
+    matches!(
+        state,
+        ChainJobState::Completed | ChainJobState::Failed | ChainJobState::Cancelled
+    )
+}
+
 impl std::str::FromStr for ChainJobState {
     type Err = MoldError;
 
@@ -228,10 +242,7 @@ impl ChainJobManifest {
             .map(|(idx, stage)| StageStatus {
                 idx: idx as u32,
                 state: StageState::Pending,
-                seed: stage
-                    .seed_offset
-                    // TODO(BR55 Phase 6): delegate to effective_stage_seed (shared helper).
-                    .map_or(base_seed, |offset| base_seed ^ offset),
+                seed: effective_stage_seed(base_seed, stage.seed_offset),
                 frames_emitted: None,
                 generation_time_ms: None,
                 segment: None,
@@ -513,7 +524,7 @@ mod u64_vec_as_strings {
     }
 }
 
-// ── Chain-job API wire types (BR55 Phase 3 placeholders) ──────────────
+// ── Chain-job API wire types ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainJobSummary {
@@ -572,7 +583,10 @@ pub struct RetakeRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[allow(clippy::large_enum_variant)] // Phase 3 placeholder — removed in Phase 6
+#[expect(
+    clippy::large_enum_variant,
+    reason = "approved wire contract keeps Snapshot inline for utoipa/serde shape"
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChainJobEvent {
     Snapshot {
@@ -607,27 +621,33 @@ pub enum ChainJobEvent {
     },
 }
 
-pub fn effective_stage_seed(_base_seed: u64, _seed_offset: Option<u64>) -> u64 {
-    // TODO(BR55 Phase 6): base_seed ^ offset when Some, else base_seed. This
-    // IS the shared helper — derive_stage_seed (orchestrator.rs) and the
-    // inline computation in ChainJobManifest::new below must DELEGATE here.
-    todo!()
+pub fn effective_stage_seed(base_seed: u64, seed_offset: Option<u64>) -> u64 {
+    seed_offset.map_or(base_seed, |offset| base_seed ^ offset)
 }
 
 mod u64_opt_as_string {
-    // TODO(BR55 Phase 6): serialize optional u64 seeds as optional decimal strings.
+    use serde::de::Error as _;
+    use serde::Deserialize;
+
     pub fn serialize<S: serde::Serializer>(
-        _v: &Option<u64>,
-        _s: S,
+        v: &Option<u64>,
+        s: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        todo!()
+        match v {
+            Some(seed) => s.serialize_some(&seed.to_string()),
+            None => s.serialize_none(),
+        }
     }
 
-    // TODO(BR55 Phase 6): deserialize optional decimal seed strings into optional u64 values.
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-        _d: D,
+        d: D,
     ) -> std::result::Result<Option<u64>, D::Error> {
-        todo!()
+        let raw = Option::<String>::deserialize(d)?;
+        raw.map(|s| {
+            s.parse::<u64>()
+                .map_err(|_| D::Error::custom("expected optional u64 encoded as a decimal string"))
+        })
+        .transpose()
     }
 }
 
@@ -724,6 +744,20 @@ mod tests {
     }
 
     #[test]
+    fn settled_states_are_distinct_from_terminal_states() {
+        assert!(!settled(ChainJobState::Queued));
+        assert!(!settled(ChainJobState::Running));
+        assert!(!settled(ChainJobState::Interrupted));
+        assert!(settled(ChainJobState::Failed));
+        assert!(settled(ChainJobState::Completed));
+        assert!(settled(ChainJobState::Cancelled));
+
+        assert!(!ChainJobState::Failed.is_terminal());
+        assert!(ChainJobState::Completed.is_terminal());
+        assert!(!ChainJobState::Cancelled.is_terminal());
+    }
+
+    #[test]
     fn manifest_toml_round_trips_full_range_seeds() {
         let request = sample_request();
         let mut manifest =
@@ -754,6 +788,102 @@ mod tests {
         let round_tripped = ChainJobManifest::from_toml(&toml).unwrap();
         assert_eq!(round_tripped, manifest);
         assert_eq!(round_tripped.request().unwrap(), request);
+    }
+
+    #[test]
+    fn effective_stage_seed_matches_approved_vectors() {
+        assert_eq!(effective_stage_seed(42, None), 42);
+        assert_eq!(effective_stage_seed(42, Some(0)), 42);
+        assert_eq!(effective_stage_seed(42, Some(1)), 43);
+        assert_eq!(
+            effective_stage_seed(0xF0F0_F0F0_F0F0_F0F0, Some(0xFFFF_0000_5555_AAAA)),
+            0x0F0F_F0F0_A5A5_5A5A
+        );
+        assert_eq!(
+            effective_stage_seed(42, Some(u64::MAX - 3)),
+            42 ^ (u64::MAX - 3)
+        );
+    }
+
+    #[test]
+    fn retake_request_seed_offset_round_trips_as_optional_string() {
+        let max = u64::MAX;
+        let json = serde_json::json!({
+            "stage_idx": 7,
+            "mode": "cascade",
+            "seed_offset": max.to_string(),
+            "prompt": "new prompt"
+        });
+
+        let req: RetakeRequest = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(req.seed_offset, Some(max));
+        assert_eq!(
+            serde_json::to_value(&req).unwrap()["seed_offset"],
+            max.to_string()
+        );
+
+        let none_json = serde_json::json!({
+            "stage_idx": 0,
+            "mode": "splice"
+        });
+        let none_req: RetakeRequest = serde_json::from_value(none_json).unwrap();
+        assert_eq!(none_req.seed_offset, None);
+        assert!(serde_json::to_value(&none_req).unwrap()["seed_offset"].is_null());
+    }
+
+    #[test]
+    fn chain_job_event_serde_uses_tagged_snapshot_shape() {
+        let request = sample_request();
+        let manifest =
+            ChainJobManifest::new("01JBR55EVENT".into(), 1_783_200_000_000, &request).unwrap();
+        let detail = ChainJobDetail {
+            summary: ChainJobSummary {
+                id: manifest.job_id.clone(),
+                state: ChainJobState::Queued,
+                model: request.model.clone(),
+                stage_count: request.stages.len() as u32,
+                current_stage: 0,
+                created_at_unix_ms: manifest.created_at_unix_ms,
+                updated_at_unix_ms: manifest.created_at_unix_ms,
+                error: None,
+                ephemeral: false,
+            },
+            stages: manifest
+                .stage_status
+                .iter()
+                .map(|stage| ChainJobStageDetail {
+                    idx: stage.idx,
+                    state: stage.state,
+                    seed: stage.seed,
+                    frames_emitted: stage.frames_emitted,
+                    generation_time_ms: stage.generation_time_ms,
+                    has_preview: false,
+                    error: stage.error.clone(),
+                })
+                .collect(),
+            finalizes: vec![],
+            retakes: vec![],
+            script: crate::chain::ChainScript::from(&request),
+        };
+        let value = serde_json::to_value(ChainJobEvent::Snapshot { job: detail }).unwrap();
+        assert_eq!(value["type"], "snapshot");
+        assert_eq!(value["job"]["id"], "01JBR55EVENT");
+
+        let step = serde_json::to_value(ChainJobEvent::DenoiseStep {
+            stage_idx: 2,
+            step: 3,
+            total: 8,
+        })
+        .unwrap();
+        assert_eq!(
+            step,
+            serde_json::json!({
+                "type": "denoise_step",
+                "stage_idx": 2,
+                "step": 3,
+                "total": 8
+            })
+        );
     }
 
     #[test]

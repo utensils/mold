@@ -11,6 +11,15 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `POST`   | `/api/generate/estimate`            | Estimate request-sensitive peak memory for a generation request                                                   |
 | `POST`   | `/api/generate/chain`               | Chained video generation (LTX-2)                                                                                  |
 | `POST`   | `/api/generate/chain/stream`        | Chained video with SSE progress                                                                                   |
+| `POST`   | `/api/chain-jobs`                   | Create a durable async chain job                                                                                  |
+| `GET`    | `/api/chain-jobs`                   | List durable chain jobs                                                                                           |
+| `GET`    | `/api/chain-jobs/:id`               | Get durable chain-job detail                                                                                      |
+| `GET`    | `/api/chain-jobs/:id/events`        | Durable chain-job SSE events                                                                                      |
+| `POST`   | `/api/chain-jobs/:id/resume`        | Resume a failed, interrupted, or cancelled chain job                                                              |
+| `POST`   | `/api/chain-jobs/:id/retake`        | Retake one chain-job stage                                                                                        |
+| `POST`   | `/api/chain-jobs/:id/cancel`        | Cancel a queued or running chain job                                                                              |
+| `DELETE` | `/api/chain-jobs/:id`               | Delete a non-running chain job                                                                                    |
+| `GET`    | `/api/chain-jobs/:id/stages/:idx/preview` | Fetch a stage preview JPEG                                                                                  |
 | `POST`   | `/api/expand`                       | Expand a prompt using LLM                                                                                         |
 | `GET`    | `/api/models`                       | List available models                                                                                             |
 | `GET`    | `/api/models/:model/components`     | List required model component readiness and paths                                                                 |
@@ -500,6 +509,33 @@ curl -N -X POST http://localhost:7680/api/generate/chain/stream \
     "output_format": "mp4"
   }'
 ```
+
+## `/api/chain-jobs`
+
+Durable async chain jobs persist the request, per-stage state, retakes, and
+final outputs under `MOLD_HOME/jobs/<job_id>` and mirror query state in
+`mold.db`. They use the same `mold_core::chain::ChainRequest` body as
+`/api/generate/chain`, but return immediately with `202 Accepted`:
+
+```json
+{ "job_id": "550e8400-e29b-41d4-a716-446655440000" }
+```
+
+Endpoints:
+
+- `POST /api/chain-jobs` — create a queued job.
+- `GET /api/chain-jobs` — list summaries, newest first.
+- `GET /api/chain-jobs/:id` — detail including stages, retakes, finalizes, and effective script.
+- `GET /api/chain-jobs/:id/events` — SSE stream; first frame is always a snapshot.
+- `POST /api/chain-jobs/:id/resume` — requeue `interrupted`, `failed`, or `cancelled`.
+- `POST /api/chain-jobs/:id/retake` — body is `RetakeRequest` (`stage_idx`, `mode`, optional `seed_offset`, optional `prompt`).
+- `POST /api/chain-jobs/:id/cancel` — queued jobs settle as `cancelled`; running jobs stop at the next boundary/progress check.
+- `DELETE /api/chain-jobs/:id` — remove a non-running job and its job directory.
+- `GET /api/chain-jobs/:id/stages/:idx/preview` — returns `image/jpeg` when that stage has a preview.
+
+Common errors: `503 CHAIN_JOBS_UNAVAILABLE` when the metadata DB is disabled,
+`404 CHAIN_JOB_NOT_FOUND`, and `409 CHAIN_JOB_RUNNING` for mutations that
+cannot safely run while the job is active.
 
 ## `/api/status`
 
