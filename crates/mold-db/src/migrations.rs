@@ -288,6 +288,12 @@ const V10_GENERATION_METADATA_JSON: &str = r#"
 ALTER TABLE generations ADD COLUMN metadata_json TEXT;
 "#;
 
+// TODO(BR55 Phase 6): add V11_CHAIN_JOBS SQL const (chain_jobs +
+// chain_job_stages tables per spec §3.1 — approved Phase 1 DDL with
+// TEXT PRIMARY KEY uuid ids, snake_case TEXT states, i64 bit-cast seeds,
+// ON DELETE CASCADE on chain_job_stages.job_id), register it in
+// MIGRATIONS[] below, and bump SCHEMA_VERSION to 11.
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[

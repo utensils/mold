@@ -106,6 +106,10 @@ impl MetadataDb {
         // `synchronous = NORMAL` is safe for in-memory; journal_mode stays
         // at `memory` which is correct for the `:memory:` backend.
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        // TODO(BR55 Phase 6): apply `foreign_keys = ON` here to match the
+        // file-backed open() path — the v11 chain_job_stages ON DELETE
+        // CASCADE contract test depends on test/prod pragma alignment
+        // (approved Phase 0 decision).
         migrations::apply_pending(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
