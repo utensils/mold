@@ -2,8 +2,8 @@
 //!
 //! Exposes `POST /api/generate/chain` (synchronous) and
 //! `POST /api/generate/chain/stream` (SSE). Both drive
-//! [`mold_inference::ltx2::Ltx2ChainOrchestrator`] through an engine's
-//! [`mold_inference::ltx2::ChainStageRenderer`] view.
+//! [`mold_inference::chain::ChainOrchestrator`] through an engine's
+//! [`mold_inference::chain::ChainStageRenderer`] view.
 //!
 //! Unlike the single-shot generate path (which queues through
 //! [`crate::state::QueueHandle`] to keep small GPU jobs FIFO-fair), chains
@@ -39,7 +39,7 @@ use crate::model_manager;
 use crate::queue::save_video_to_dir;
 use crate::routes::ApiError;
 use crate::state::AppState;
-use mold_inference::ltx2::{ChainOrchestratorError, Ltx2ChainOrchestrator};
+use mold_inference::chain::{ChainOrchestrator, ChainOrchestratorError};
 
 /// Internal wire event used by the chain SSE stream before per-event
 /// serialization. Separate from [`crate::state::SseMessage`] because chain
@@ -86,7 +86,7 @@ fn encode_chain_output(
     frames: &[image::RgbImage],
     fps: u32,
     format: OutputFormat,
-    audio: Option<&mold_inference::ltx2::NativeAudioTrack>,
+    audio: Option<&mold_inference::chain::NativeAudioTrack>,
 ) -> anyhow::Result<(Vec<u8>, OutputFormat, Vec<u8>)> {
     use mold_inference::ltx_video::video_enc;
 
@@ -219,22 +219,22 @@ fn trim_to_total_frames(frames: &mut Vec<image::RgbImage>, total_frames: Option<
 }
 
 /// Assemble per-stage frame clips into a single output buffer using
-/// [`mold_inference::ltx2::stitch::StitchPlan`], honouring per-boundary
+/// [`mold_inference::chain::stitch::StitchPlan`], honouring per-boundary
 /// transition rules (Smooth / Cut / Fade). Returns the stitched frames
 /// and, when any stage produced audio, the corresponding stitched audio
 /// track. Splitting the two return paths in one helper keeps the route
 /// handlers from re-deriving the same boundary/fade slices twice.
 pub(crate) fn stitch_chain_output(
-    chain_output: mold_inference::ltx2::chain::ChainRunOutput,
+    chain_output: mold_inference::chain::ChainRunOutput,
     req: &mold_core::chain::ChainRequest,
 ) -> Result<
     (
         Vec<image::RgbImage>,
-        Option<mold_inference::ltx2::NativeAudioTrack>,
+        Option<mold_inference::chain::NativeAudioTrack>,
     ),
-    mold_inference::ltx2::stitch::StitchError,
+    mold_inference::chain::stitch::StitchError,
 > {
-    use mold_inference::ltx2::stitch::{stitch_audio_clips, StitchPlan};
+    use mold_inference::chain::stitch::{stitch_audio_clips, StitchPlan};
     let boundaries: Vec<_> = req.stages.iter().skip(1).map(|s| s.transition).collect();
     let fade_lens: Vec<_> = req
         .stages
@@ -281,7 +281,7 @@ fn build_video_data(
     frame_count: u32,
     thumbnail: Vec<u8>,
     gif_preview: Vec<u8>,
-    audio: Option<&mold_inference::ltx2::NativeAudioTrack>,
+    audio: Option<&mold_inference::chain::NativeAudioTrack>,
 ) -> VideoData {
     let duration_ms = if req.fps == 0 {
         None
@@ -468,14 +468,14 @@ async fn run_chain_pooled(
             &model_name,
             &config_snapshot,
             chain_hint,
-            move |engine| -> Result<mold_inference::ltx2::ChainRunOutput, ClosureError> {
+            move |engine| -> Result<mold_inference::chain::ChainRunOutput, ClosureError> {
                 let renderer = engine.as_chain_renderer().ok_or_else(|| {
                     ClosureError::Unsupported(format!(
                         "model '{}' does not support chained video generation",
                         req_task.model
                     ))
                 })?;
-                let mut orch = Ltx2ChainOrchestrator::new(renderer);
+                let mut orch = ChainOrchestrator::new(renderer);
                 let run_result = if let Some(cb) = progress_cb.as_deref_mut() {
                     orch.run(&req_task, Some(cb))
                 } else {
@@ -602,7 +602,8 @@ enum ClosureError {
 /// Concrete `ChainPrep` type used by `run_chain_pooled`'s spawn_blocking
 /// task. Names the Result-in-Result-in-Result explicitly so the unwrap
 /// block above can match exhaustively.
-type ChainPooledOutcome = gpu_worker::ChainPrep<mold_inference::ltx2::ChainRunOutput, ClosureError>;
+type ChainPooledOutcome =
+    gpu_worker::ChainPrep<mold_inference::chain::ChainRunOutput, ClosureError>;
 
 /// Pick a `GpuWorker` for this chain. Honours `req.placement` if set,
 /// otherwise delegates to `gpu_pool.select_worker` with the same VRAM
@@ -747,7 +748,7 @@ async fn run_chain_legacy(
             let engine = &mut cached.engine;
             match engine.as_chain_renderer() {
                 Some(renderer) => {
-                    let mut orch = mold_inference::ltx2::Ltx2ChainOrchestrator::new(renderer);
+                    let mut orch = mold_inference::chain::ChainOrchestrator::new(renderer);
                     // The orchestrator expects `Option<&mut dyn FnMut(...)>`
                     // — synthesise that from the optional boxed callback we
                     // moved into this task.
@@ -757,7 +758,7 @@ async fn run_chain_legacy(
                         orch.run(&req_for_task, None)
                     };
                     result.map_err(|e| {
-                        use mold_inference::ltx2::ChainOrchestratorError;
+                        use mold_inference::chain::ChainOrchestratorError;
                         match e {
                             ChainOrchestratorError::StageFailed {
                                 stage_idx,
@@ -1075,10 +1076,10 @@ mod tests {
     use image::{Rgb, RgbImage};
     use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
     use mold_core::{GenerateRequest, GenerateResponse};
-    use mold_inference::device::DiscoveredGpu;
-    use mold_inference::ltx2::{
+    use mold_inference::chain::{
         ChainStageRenderer, ChainTail, NativeAudioTrack, StageOutcome, StageProgressEvent,
     };
+    use mold_inference::device::DiscoveredGpu;
     use mold_inference::shared_pool::SharedPool;
     use mold_inference::InferenceEngine;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1187,7 +1188,7 @@ mod tests {
         }
         fn as_chain_renderer(
             &mut self,
-        ) -> Option<&mut dyn mold_inference::ltx2::ChainStageRenderer> {
+        ) -> Option<&mut dyn mold_inference::chain::ChainStageRenderer> {
             Some(self)
         }
     }

@@ -4,7 +4,7 @@
 //! this module takes over from [`super::generate::run`]: it assembles a
 //! [`ChainRequest`] from the user's CLI args and either submits it to a
 //! running server via [`MoldClient::generate_chain_stream`] or, in `--local`
-//! mode, drives an in-process [`Ltx2ChainOrchestrator`].
+//! mode, drives an in-process [`mold_inference::chain::ChainOrchestrator`].
 //!
 //! Both paths funnel through [`encode_and_save`] so stdout piping, gallery
 //! save, metadata DB writes, and preview behaviour match the single-clip
@@ -393,7 +393,7 @@ async fn run_chain_local(
                 req_clone.model,
             )
         })?;
-        let mut orch = mold_inference::ltx2::Ltx2ChainOrchestrator::new(renderer);
+        let mut orch = mold_inference::chain::ChainOrchestrator::new(renderer);
 
         let tx = tx;
         let mut chain_cb = move |event: ChainProgressEvent| {
@@ -401,7 +401,7 @@ async fn run_chain_local(
         };
         let chain_output = orch.run(&req_clone, Some(&mut chain_cb))?;
 
-        use mold_inference::ltx2::stitch::{stitch_audio_clips, StitchPlan};
+        use mold_inference::chain::stitch::{stitch_audio_clips, StitchPlan};
         let boundaries: Vec<_> = req_clone
             .stages
             .iter()
@@ -480,7 +480,7 @@ fn encode_local_frames(
     frames: &[image::RgbImage],
     fps: u32,
     output_format: OutputFormat,
-    audio: Option<&mold_inference::ltx2::NativeAudioTrack>,
+    audio: Option<&mold_inference::chain::NativeAudioTrack>,
 ) -> Result<VideoData> {
     use mold_inference::ltx_video::video_enc;
 

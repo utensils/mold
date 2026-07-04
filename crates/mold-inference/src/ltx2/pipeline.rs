@@ -11,7 +11,6 @@ use std::time::Instant;
 
 use super::assets;
 use super::backend::Ltx2Backend;
-use super::chain::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
 use super::conditioning::{self, StagedLatent};
 use super::execution;
 use super::lora;
@@ -21,6 +20,7 @@ use super::preset;
 use super::runtime::{Ltx2RuntimeSession, NativeRenderedVideo};
 use super::text::gemma::GemmaAssets;
 use super::text::prompt_encoder::NativePromptEncoder;
+use crate::chain::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
 use crate::engine::{gpu_dtype, rand_seed, InferenceEngine, LoadStrategy};
 use crate::ltx_video::video_enc;
 use crate::progress::ProgressCallback;
@@ -885,7 +885,7 @@ impl InferenceEngine for Ltx2Engine {
         Some(&self.paths)
     }
 
-    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::ltx2::ChainStageRenderer> {
+    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
         Some(self)
     }
 }

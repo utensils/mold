@@ -20,37 +20,21 @@ pub struct ChainLimits {
     /// Whether this model's family has an audio decode path. The SPA reads
     /// this to decide whether to show the chain-level "Generate audio"
     /// toggle; the chain endpoint refuses `enable_audio: true` upstream
-    /// when this is false. Single source of truth: `family_supports_audio`.
+    /// when this is false. Single source of truth: `mold_inference::chain::capability_for_family`.
     pub supports_audio: bool,
 }
 
 /// Per-model-family hardcoded caps. Keyed by the family string returned by
 /// `mold_core::manifest::resolve_family`.
-///
-/// LTX-2 19B (`ltx-2-19b-{dev,distilled}:fp8`) and LTX-2.3 22B
-/// (`ltx-2.3-22b-{dev,distilled}:fp8`) both resolve to the `"ltx2"` family
-/// and therefore share the same per-clip cap and chain-renderer wiring.
 pub fn family_cap(family: &str) -> Option<u32> {
-    match family {
-        // LTX-2 distilled has true latent-handoff chain support via the
-        // engine's `as_chain_renderer()`. Covers both v2 and v2.3.
-        "ltx2" => Some(97),
-        // LTX-Video uses an img2vid fallback: each stage renders independently
-        // and the stitch layer concatenates clips. There's no temporal context
-        // handoff, so subjects can drift between clips, but it lets users
-        // generate videos longer than the per-clip cap.
-        "ltx-video" => Some(97),
-        _ => None,
-    }
+    mold_inference::chain::capability_for_family(family).map(|c| c.frames_per_clip_cap)
 }
 
-/// Whether a chain-capable family also has an audio path. Currently only
-/// LTX-2 / LTX-2.3 (`"ltx2"`) — LTX-Video is video-only and FLUX/SDXL/etc.
-/// don't render video at all. The chain handler rejects requests with
-/// `enable_audio: true` when this returns false, so users get a clear
-/// upfront error instead of silently-dropped audio.
+/// Whether a chain-capable family also has an audio path. The chain handler
+/// rejects requests with `enable_audio: true` when this returns false, so
+/// users get a clear upfront error instead of silently-dropped audio.
 pub fn family_supports_audio(family: &str) -> bool {
-    matches!(family, "ltx2")
+    mold_inference::chain::capability_for_family(family).is_some_and(|c| c.supports_audio)
 }
 
 /// Compute the chain-limits response for a resolved model name.
