@@ -24,13 +24,7 @@ pub fn handle() -> Option<&'static MetadataDb> {
 
 /// Compile-time backend label for rows written from the CLI's local path.
 fn backend_label() -> Option<String> {
-    if cfg!(feature = "cuda") {
-        Some("cuda".into())
-    } else if cfg!(feature = "metal") {
-        Some("metal".into())
-    } else {
-        Some("cpu".into())
-    }
+    Some(mold_inference::compiled_backend_label().to_string())
 }
 
 /// Persist a metadata row for a file the CLI just wrote locally.

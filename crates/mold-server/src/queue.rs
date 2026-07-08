@@ -354,13 +354,7 @@ fn hostname_string() -> Option<String> {
 
 /// Compile-time backend label so DB rows say where the work happened.
 fn current_backend_label() -> Option<String> {
-    if cfg!(feature = "cuda") {
-        Some("cuda".into())
-    } else if cfg!(feature = "metal") {
-        Some("metal".into())
-    } else {
-        Some("cpu".into())
-    }
+    Some(mold_inference::compiled_backend_label().to_string())
 }
 
 /// Build the SSE `complete` wire event from a finished generation response.
