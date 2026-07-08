@@ -17,10 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::db::{delete_with_conn, upsert_with_conn, MetadataDb};
-use crate::metadata_io::{
-    format_from_path, image_header_dims, is_valid_gallery_file, read_embedded,
-    synthesize_from_filename,
-};
+use crate::metadata_io::{format_from_path, is_valid_gallery_file};
 use crate::path::canonical_dir_string;
 use crate::record::{GenerationRecord, RecordSource};
 
@@ -183,23 +180,8 @@ fn build_backfill_record(
     size_bytes: Option<i64>,
 ) -> GenerationRecord {
     let timestamp_secs = mtime_ms.map(|ms| ms / 1000).unwrap_or(0) as u64;
-    let (metadata, synthetic) = match read_embedded(path, format) {
-        Some(m) => (m, false),
-        None => {
-            // Recover real raster dimensions from the file header so the
-            // gallery card renders at the correct aspect ratio even
-            // without embedded mold metadata. Mirrors the same fallback
-            // in `crates/mold-server/src/routes.rs::scan_gallery_dir`.
-            let mut meta = synthesize_from_filename(filename, timestamp_secs);
-            if !matches!(format, mold_core::OutputFormat::Mp4) {
-                if let Some((w, h)) = image_header_dims(path) {
-                    meta.width = w;
-                    meta.height = h;
-                }
-            }
-            (meta, true)
-        }
-    };
+    let (metadata, synthetic) =
+        crate::metadata_io::read_or_synthesize(path, format, filename, timestamp_secs);
     let mut owned_dir = PathBuf::new();
     owned_dir.push(output_dir);
     GenerationRecord {
@@ -256,6 +238,53 @@ mod tests {
         bytes.extend_from_slice(b"isomavc1mp41"); // compat brands
         bytes.resize(8192, 0);
         std::fs::write(path, &bytes).unwrap();
+    }
+
+    /// A GIF whose comment extension carries `mold:parameters` must
+    /// import with real metadata (`metadata_synthetic == false`) — GIF
+    /// comment parsing used to live only in the TUI, so reconcile
+    /// synthesized rows for GIFs that carried full metadata.
+    #[test]
+    fn reconcile_recovers_embedded_gif_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gif_path = tmp.path().join("mold-ltx-video-1700000000000.gif");
+
+        // Encode a real, decodable GIF...
+        let img = ImageBuffer::from_fn(64u32, 64u32, |x, y| {
+            if ((x / 8) + (y / 8)) % 2 == 0 {
+                Rgb([255u8, 64, 32])
+            } else {
+                Rgb([16u8, 200, 240])
+            }
+        });
+        img.save(&gif_path).unwrap();
+
+        // ...then splice a `mold:parameters` comment extension in front of
+        // the trailer byte, the same shape mold's GIF writer produces.
+        let mut bytes = std::fs::read(&gif_path).unwrap();
+        let trailer = bytes.iter().rposition(|&b| b == 0x3B).unwrap();
+        let comment = format!(
+            "mold:parameters {}",
+            r#"{"prompt":"a gif owl","model":"ltx-video","seed":7,"steps":30,"guidance":3.0,"width":64,"height":64,"version":"test"}"#
+        );
+        let mut ext = vec![0x21, 0xFE];
+        for chunk in comment.as_bytes().chunks(255) {
+            ext.push(chunk.len() as u8);
+            ext.extend_from_slice(chunk);
+        }
+        ext.push(0);
+        bytes.splice(trailer..trailer, ext);
+        std::fs::write(&gif_path, &bytes).unwrap();
+
+        let db = MetadataDb::open_in_memory().unwrap();
+        let stats = db.reconcile(tmp.path()).unwrap();
+        assert_eq!(stats.imported, 1, "{stats:?}");
+
+        let rows = db.list(Some(tmp.path())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].metadata_synthetic);
+        assert_eq!(rows[0].metadata.prompt, "a gif owl");
+        assert_eq!(rows[0].metadata.seed, 7);
     }
 
     #[test]
