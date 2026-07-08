@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::db::{delete_with_conn, upsert_with_conn, MetadataDb};
-use crate::metadata_io::{format_from_path, is_valid_gallery_file};
 use crate::path::canonical_dir_string;
 use crate::record::{GenerationRecord, RecordSource};
 
@@ -67,62 +66,51 @@ impl MetadataDb {
             .collect();
 
         let mut to_upsert: Vec<GenerationRecord> = Vec::new();
-        let mut seen_filenames: Vec<String> = Vec::new();
 
-        for entry in walkdir::WalkDir::new(output_dir)
-            .max_depth(1)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(format) = format_from_path(path) else {
-                stats.skipped_unrelated += 1;
-                continue;
-            };
-            let filename = match path.file_name().and_then(|f| f.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
+        for item in crate::scan::scan_output_dir(output_dir) {
+            let file = match item {
+                crate::scan::ScanItem::SkippedUnrelated => {
+                    stats.skipped_unrelated += 1;
+                    continue;
+                }
+                // Invalid files leave any existing row in the map; the
+                // end-of-loop cleanup deletes everything still there
+                // (covers both "file gone" and "file became invalid").
+                crate::scan::ScanItem::SkippedInvalid => {
+                    stats.skipped_invalid += 1;
+                    continue;
+                }
+                crate::scan::ScanItem::Valid(file) => file,
             };
 
-            let fs_meta = entry.metadata().ok();
-            let (mtime_ms, size_bytes) = stat_to_pair(fs_meta.as_ref());
-
-            // Apply the same size/header/solid-black guard rails the
-            // server's filesystem walk uses, so reconciliation never
-            // surfaces aborted writes that the legacy gallery hid.
-            let raw_size = size_bytes.unwrap_or(0).max(0) as u64;
-            if !is_valid_gallery_file(path, format, raw_size) {
-                stats.skipped_invalid += 1;
-                // Leave any existing row in the map; the end-of-loop
-                // cleanup deletes everything still there (covers both
-                // "file gone" and "file became invalid"). This keeps the
-                // DB in sync with what the legacy filesystem walk would
-                // have surfaced.
-                continue;
-            }
-
-            seen_filenames.push(filename.clone());
-
-            // Decide: insert / refresh / keep.
-            match existing_for_dir.remove(&filename) {
-                Some((row_mt, row_sz)) if row_mt == mtime_ms && row_sz == size_bytes => {
+            // Decide: insert / refresh / keep. Metadata is parsed only
+            // for new/changed files — the walker deliberately doesn't.
+            match existing_for_dir.remove(&file.filename) {
+                Some((row_mt, row_sz)) if row_mt == file.mtime_ms && row_sz == file.size_bytes => {
                     stats.kept += 1;
                 }
                 Some(_) => {
                     // Stat changed. Re-read embedded metadata in case the
                     // file was rewritten with new params.
                     let rec = build_backfill_record(
-                        output_dir, &filename, format, path, mtime_ms, size_bytes,
+                        output_dir,
+                        &file.filename,
+                        file.format,
+                        &file.path,
+                        file.mtime_ms,
+                        file.size_bytes,
                     );
                     to_upsert.push(rec);
                     stats.updated += 1;
                 }
                 None => {
                     let rec = build_backfill_record(
-                        output_dir, &filename, format, path, mtime_ms, size_bytes,
+                        output_dir,
+                        &file.filename,
+                        file.format,
+                        &file.path,
+                        file.mtime_ms,
+                        file.size_bytes,
                     );
                     to_upsert.push(rec);
                     stats.imported += 1;
@@ -152,19 +140,6 @@ impl MetadataDb {
 
         Ok(stats)
     }
-}
-
-fn stat_to_pair(meta: Option<&std::fs::Metadata>) -> (Option<i64>, Option<i64>) {
-    let Some(m) = meta else {
-        return (None, None);
-    };
-    let size = Some(m.len() as i64);
-    let mtime = m
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64);
-    (mtime, size)
 }
 
 fn now_ms() -> i64 {
