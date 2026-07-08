@@ -5,7 +5,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context};
 use image::codecs::jpeg::JpegEncoder;
@@ -2421,14 +2420,11 @@ impl Drop for WorkerActiveGenerationGuard {
 }
 
 fn now_ms_u64() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    mold_core::time::now_epoch_ms_u64()
 }
 
 fn now_ms_i64() -> i64 {
-    i64::try_from(now_ms_u64()).unwrap_or(i64::MAX)
+    mold_core::time::now_epoch_ms()
 }
 
 #[cfg(test)]

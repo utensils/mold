@@ -13,7 +13,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::Result;
 
@@ -172,10 +171,7 @@ fn stat_to_pair(meta: Option<&std::fs::Metadata>) -> (Option<i64>, Option<i64>) 
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    mold_core::time::now_epoch_ms()
 }
 
 fn build_backfill_record(

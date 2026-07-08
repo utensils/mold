@@ -8,7 +8,7 @@ use mold_core::{
 use mold_db::{GenerationRecord, MetadataDb, RecordSource};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use crate::gpu_pool::GpuJob;
 use crate::model_manager;
@@ -59,10 +59,7 @@ pub(crate) fn clean_error_message(e: &anyhow::Error) -> String {
 
 fn set_active_generation(state: &AppState, model: &str, prompt: &str) {
     let prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
-    let started_at_unix_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let started_at_unix_ms = mold_core::time::now_epoch_ms_u64();
 
     let mut active = state
         .active_generation
@@ -106,10 +103,7 @@ pub(crate) fn save_image_to_dir(
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
         return;
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let timestamp_ms = now.as_millis() as u64;
+    let timestamp_ms = mold_core::time::now_epoch_ms_u64();
     let ext = img.format.to_string();
     let filename =
         mold_core::default_output_filename(model, timestamp_ms, &ext, batch_size, img.index);
@@ -128,7 +122,7 @@ pub(crate) fn save_image_to_dir(
             img.format,
             meta.clone(),
             RecordSource::Server,
-            now.as_millis() as i64,
+            timestamp_ms as i64,
         );
         rec.stat_from_disk(&path);
         rec.generation_time_ms = generation_time_ms;
@@ -164,10 +158,7 @@ pub(crate) fn save_video_to_dir(
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
         return;
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let ts = now.as_millis() as u64;
+    let ts = mold_core::time::now_epoch_ms_u64();
     let ext = format.extension();
     let filename = mold_core::default_output_filename(model, ts, ext, 1, 0);
     let path = dir.join(&filename);
@@ -185,7 +176,7 @@ pub(crate) fn save_video_to_dir(
             format,
             metadata.clone(),
             RecordSource::Server,
-            now.as_millis() as i64,
+            ts as i64,
         );
         rec.stat_from_disk(&path);
         rec.generation_time_ms = generation_time_ms;

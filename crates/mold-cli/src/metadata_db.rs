@@ -70,10 +70,7 @@ pub fn record_local_save(
         None,
         mold_core::build_info::version_string(),
     );
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    let now_ms = mold_core::time::now_epoch_ms();
     let mut rec = GenerationRecord::from_save(
         output_dir,
         filename,
