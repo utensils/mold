@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Discord img2img no longer distorts landscape/portrait attachments.** When deriving dimensions from a source-image attachment, the bot now uses the same aspect-preserving `fit_to_model_dimensions` helper as the CLI and server instead of independently clamping each axis — a 1920x1080 photo now generates at 1024x576 instead of being squashed to 1024x1024.
+
 ### Changed
 
 - Byte-size formatting is consolidated into shared `mold_core::format` helpers. Two user-visible tweaks: `mold mcp` progress sizes now print decimal-style units ("1.0 GB" instead of "1.0 GiB") and gain a KB tier, and TUI download/weight progress sizes now show one decimal in the M/K tiers (e.g. "123.4M" instead of "123M").
