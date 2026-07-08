@@ -471,10 +471,10 @@ fn apply_local_engine_env_overrides(
     }
 }
 
-/// Encode stitched frames to the requested container. MP4 is feature-gated;
-/// fall back to APNG when the CLI was built without `mp4`. When `audio` is
-/// `Some` and the output format is MP4, the audio is muxed in as an AAC
-/// track via the same path the single-clip pipeline uses.
+/// Encode stitched frames to the requested container via the shared
+/// chain encoder in mold-inference (MP4 feature-gating, APNG fallbacks,
+/// AAC audio mux). Warnings surface on stderr; this wrapper only adds
+/// the CLI-specific `VideoData` assembly and first-frame thumbnail.
 #[cfg(any(feature = "cuda", feature = "metal"))]
 fn encode_local_frames(
     frames: &[image::RgbImage],
@@ -484,72 +484,13 @@ fn encode_local_frames(
 ) -> Result<VideoData> {
     use mold_inference::ltx_video::video_enc;
 
-    let gif_preview = video_enc::encode_gif(frames, fps).unwrap_or_default();
     let thumbnail = video_enc::first_frame_png(frames).unwrap_or_default();
 
-    let (bytes, actual_format) = match output_format {
-        OutputFormat::Mp4 => {
-            #[cfg(feature = "mp4")]
-            {
-                let video_only = video_enc::encode_mp4(frames, fps)?;
-                let muxed = match audio {
-                    Some(track) => mold_inference::ltx2::media::attach_aac_track_to_mp4_bytes(
-                        &video_only,
-                        &track.interleaved_samples,
-                        track.sample_rate,
-                        track.channels,
-                    )?,
-                    None => video_only,
-                };
-                (muxed, OutputFormat::Mp4)
-            }
-            #[cfg(not(feature = "mp4"))]
-            {
-                let _ = audio;
-                crate::output::status!(
-                    "{} MP4 requested but this binary was built without --features mp4; \
-                     falling back to APNG",
-                    theme::prefix_warning(),
-                );
-                (
-                    video_enc::encode_apng(frames, fps, None)?,
-                    OutputFormat::Apng,
-                )
-            }
-        }
-        OutputFormat::Apng => {
-            if audio.is_some() {
-                crate::output::status!(
-                    "{} chain audio dropped: APNG output has no audio track carrier",
-                    theme::prefix_warning(),
-                );
-            }
-            (
-                video_enc::encode_apng(frames, fps, None)?,
-                OutputFormat::Apng,
-            )
-        }
-        OutputFormat::Gif => {
-            if audio.is_some() {
-                crate::output::status!(
-                    "{} chain audio dropped: GIF output has no audio track carrier",
-                    theme::prefix_warning(),
-                );
-            }
-            (video_enc::encode_gif(frames, fps)?, OutputFormat::Gif)
-        }
-        OutputFormat::Webp => {
-            crate::output::status!(
-                "{} WebP chain output not supported locally yet; falling back to APNG",
-                theme::prefix_warning(),
-            );
-            (
-                video_enc::encode_apng(frames, fps, None)?,
-                OutputFormat::Apng,
-            )
-        }
-        other => anyhow::bail!("{other:?} is not a video output format for chain generation"),
-    };
+    let encoded = mold_inference::chain::encode_chain_frames(frames, fps, output_format, audio)?;
+    for warning in &encoded.warnings {
+        crate::output::status!("{} {}", theme::prefix_warning(), warning.message());
+    }
+    let (bytes, actual_format, gif_preview) = (encoded.bytes, encoded.format, encoded.gif_preview);
 
     let width = frames[0].width();
     let height = frames[0].height();

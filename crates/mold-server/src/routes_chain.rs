@@ -423,81 +423,11 @@ fn encode_chain_output(
     format: OutputFormat,
     audio: Option<&mold_inference::chain::NativeAudioTrack>,
 ) -> anyhow::Result<(Vec<u8>, OutputFormat, Vec<u8>)> {
-    use mold_inference::ltx_video::video_enc;
-
-    // Always produce a GIF preview for the gallery UI. Non-fatal.
-    let gif_preview = match video_enc::encode_gif(frames, fps) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("chain gif preview encode failed: {e:#}");
-            Vec::new()
-        }
-    };
-
-    let (bytes, actual_format) = match format {
-        OutputFormat::Mp4 => {
-            #[cfg(feature = "mp4")]
-            {
-                let video_only = video_enc::encode_mp4(frames, fps)?;
-                let muxed = match audio {
-                    Some(track) => mold_inference::ltx2::media::attach_aac_track_to_mp4_bytes(
-                        &video_only,
-                        &track.interleaved_samples,
-                        track.sample_rate,
-                        track.channels,
-                    )?,
-                    None => video_only,
-                };
-                (muxed, OutputFormat::Mp4)
-            }
-            #[cfg(not(feature = "mp4"))]
-            {
-                let _ = audio; // suppress unused-without-mp4 warning
-                tracing::warn!(
-                    "chain requested MP4 but server was built without the `mp4` feature — \
-                     falling back to APNG"
-                );
-                (
-                    video_enc::encode_apng(frames, fps, None)?,
-                    OutputFormat::Apng,
-                )
-            }
-        }
-        OutputFormat::Apng => {
-            if audio.is_some() {
-                tracing::warn!("chain audio dropped: APNG output has no audio track carrier");
-            }
-            (
-                video_enc::encode_apng(frames, fps, None)?,
-                OutputFormat::Apng,
-            )
-        }
-        OutputFormat::Gif => {
-            if audio.is_some() {
-                tracing::warn!("chain audio dropped: GIF output has no audio track carrier");
-            }
-            (video_enc::encode_gif(frames, fps)?, OutputFormat::Gif)
-        }
-        // WebP is always available here because mold-inference's webp
-        // feature would need to gate at the transitive-dep level; for the
-        // chain route v1 we fall back to APNG when WebP is requested so
-        // we don't bind the server crate to another optional dep.
-        OutputFormat::Webp => {
-            if audio.is_some() {
-                tracing::warn!("chain audio dropped: WebP output has no audio track carrier");
-            }
-            tracing::warn!(
-                "chain WebP output is not supported on the server yet — falling back to APNG"
-            );
-            (
-                video_enc::encode_apng(frames, fps, None)?,
-                OutputFormat::Apng,
-            )
-        }
-        other => anyhow::bail!("{other:?} is not a video output format for chain generation"),
-    };
-
-    Ok((bytes, actual_format, gif_preview))
+    let encoded = mold_inference::chain::encode_chain_frames(frames, fps, format, audio)?;
+    for warning in &encoded.warnings {
+        tracing::warn!("{}", warning.message());
+    }
+    Ok((encoded.bytes, encoded.format, encoded.gif_preview))
 }
 
 /// Build the `OutputMetadata` for a stitched chain output. Pulls chain-

@@ -8,11 +8,13 @@
 //! (`tail_latent_frame_count`) deliberately stay with their family.
 
 pub mod capability;
+pub mod encode;
 pub mod orchestrator;
 pub mod stitch;
 
 pub use crate::audio::NativeAudioTrack;
 pub use capability::{capability_for_family, CarryoverKind, ChainCapability};
+pub use encode::{encode_chain_frames, ChainEncodeWarning, EncodedChainVideo};
 pub use orchestrator::{
     ChainOrchestrator, ChainOrchestratorError, ChainRunOutput, ChainStageRenderer, ChainTail,
     StageOutcome, StageProgressEvent,
