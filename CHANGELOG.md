@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Byte-size formatting is consolidated into shared `mold_core::format` helpers. Two user-visible tweaks: `mold mcp` progress sizes now print decimal-style units ("1.0 GB" instead of "1.0 GiB") and gain a KB tier, and TUI download/weight progress sizes now show one decimal in the M/K tiers (e.g. "123.4M" instead of "123M").
+
 ## [0.14.0] - 2026-07-04
 
 ### Added

@@ -10,6 +10,7 @@ pub mod download;
 pub mod error;
 pub mod expand;
 pub mod expand_prompts;
+pub mod format;
 pub mod install_error;
 pub mod lambda;
 pub mod manifest;
