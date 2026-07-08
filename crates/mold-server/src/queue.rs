@@ -333,7 +333,7 @@ fn save_video_preview_gif_to(preview_dir: &std::path::Path, filename: &str, gif_
         );
         return;
     }
-    let preview_path = preview_dir.join(format!("{filename}.preview.gif"));
+    let preview_path = preview_dir.join(mold_core::media_paths::preview_gif_filename(filename));
     if let Err(e) = std::fs::write(&preview_path, gif_bytes) {
         tracing::warn!(
             "failed to write preview gif {}: {e}",

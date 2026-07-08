@@ -62,7 +62,7 @@ pub async fn fetch_and_cache_image(server_url: &str, filename: &str) -> Option<P
 /// collide, and shares the same naming convention the server writes to
 /// (`<filename>.preview.gif`).
 pub fn preview_cache_path(filename: &str) -> PathBuf {
-    image_cache_dir().join(format!("{filename}.preview.gif"))
+    image_cache_dir().join(mold_core::media_paths::preview_gif_filename(filename))
 }
 
 /// Fetch the cached GIF preview for a video gallery entry from the server

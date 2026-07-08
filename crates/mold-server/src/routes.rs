@@ -2334,8 +2334,9 @@ async fn delete_gallery_image(
     let thumb_dir = server_thumbnail_dir();
     let _ = std::fs::remove_file(thumb_dir.join(&clean_name));
     let _ = std::fs::remove_file(thumb_dir.join(format!("{clean_name}.png")));
-    let _ =
-        std::fs::remove_file(server_preview_gif_dir().join(format!("{clean_name}.preview.gif")));
+    let _ = std::fs::remove_file(
+        server_preview_gif_dir().join(mold_core::media_paths::preview_gif_filename(&clean_name)),
+    );
 
     // Drop the matching metadata row if the DB is enabled. Errors here are
     // logged — they don't roll back the disk delete since the file is the
@@ -2513,7 +2514,8 @@ async fn get_gallery_preview(
         )));
     }
 
-    let preview_path = server_preview_gif_dir().join(format!("{clean_name}.preview.gif"));
+    let preview_path =
+        server_preview_gif_dir().join(mold_core::media_paths::preview_gif_filename(&clean_name));
     let meta = match tokio::fs::metadata(&preview_path).await {
         Ok(m) if m.is_file() => m,
         _ => {

@@ -1,5 +1,17 @@
 use std::path::PathBuf;
 
+/// Suffix appended to an output's filename to name its animated GIF
+/// preview sidecar. The server writes `<filename>.preview.gif` into its
+/// preview cache and the TUI reconstructs the same name — one constant
+/// so the two can't drift.
+pub const PREVIEW_GIF_SUFFIX: &str = ".preview.gif";
+
+/// Preview-sidecar filename for a gallery output (e.g.
+/// `mold-ltx2-1234.mp4` → `mold-ltx2-1234.mp4.preview.gif`).
+pub fn preview_gif_filename(filename: &str) -> String {
+    format!("{filename}{PREVIEW_GIF_SUFFIX}")
+}
+
 fn expand_home(path: &str) -> PathBuf {
     if path == "~" {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from(path))
@@ -147,5 +159,13 @@ mod tests {
             resolve_server_media_path(&link.to_string_lossy(), &[root.path().into()]).unwrap_err();
 
         assert!(err.contains("outside"), "got: {err}");
+    }
+
+    #[test]
+    fn preview_gif_filename_appends_suffix() {
+        assert_eq!(
+            preview_gif_filename("mold-ltx2-1234.mp4"),
+            "mold-ltx2-1234.mp4.preview.gif"
+        );
     }
 }
