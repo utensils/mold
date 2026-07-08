@@ -1,5 +1,6 @@
 pub mod build_info;
 pub mod catalog;
+pub mod catalog_wire;
 pub mod chain;
 pub mod chain_job;
 pub mod chain_toml;

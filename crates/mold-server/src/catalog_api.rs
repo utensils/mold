@@ -592,12 +592,12 @@ pub async fn list_installed_catalog(
         wire.push(sidecar_to_wire(sidecar, installed, primary_path));
     }
     let total = wire.len() as i64;
-    Json(serde_json::json!({
-        "entries": wire,
-        "page": 1,
-        "page_size": total,
-        "total": total,
-    }))
+    Json(mold_core::catalog_wire::InstalledCatalogResponse {
+        entries: wire,
+        page: 1,
+        page_size: total,
+        total,
+    })
     .into_response()
 }
 
@@ -832,51 +832,52 @@ fn live_entry_to_wire(
     })
 }
 
-fn sidecar_to_wire(
+pub(crate) fn sidecar_to_wire(
     sc: mold_catalog::sidecar::CatalogSidecar,
     installed: bool,
     primary_path: Option<String>,
-) -> serde_json::Value {
+) -> mold_core::catalog_wire::InstalledCatalogEntry {
     // The sidecar carries fewer fields than a full CatalogEntryWire on
     // purpose — the picker only needs id/name/family/kind/trained_words/
     // primary_path. Empty defaults are returned for fields the SPA
-    // ignores in this code path; this keeps the wire shape uniform with
-    // `/api/catalog/search` so a single TypeScript interface works for
-    // both.
-    serde_json::json!({
-        "id": sc.id,
-        "source": sc.source,
-        "source_id": sc.source_id,
-        "name": sc.name,
-        "author": sc.author,
-        "family": sc.family,
-        "family_role": sc.family_role,
-        "sub_family": sc.sub_family,
-        "modality": sc.modality,
-        "kind": sc.kind,
-        "file_format": "safetensors",
-        "bundling": "single-file",
-        "size_bytes": sc.size_bytes,
-        "download_count": 0,
-        "rating": null,
-        "likes": 0,
-        "nsfw": false,
-        "thumbnail_url": sc.thumbnail_url,
-        "description": null,
-        "license": null,
-        "license_flags": null,
-        "tags": [],
-        "companions": [],
-        "companion_details": [],
-        "download_recipe": { "files": [], "needs_token": null },
-        "engine_phase": sc.engine_phase,
-        "installed": installed,
-        "primary_path": primary_path,
-        "created_at": null,
-        "updated_at": null,
-        "added_at": sc.written_at,
-        "trained_words": sc.trained_words,
-    })
+    // ignores in this code path; the shared wire struct keeps the shape
+    // uniform with `/api/catalog/search` so a single TypeScript
+    // interface works for both, and keeps the client deserializer in
+    // `mold_core::client` from drifting.
+    mold_core::catalog_wire::InstalledCatalogEntry {
+        id: sc.id,
+        source: sc.source,
+        source_id: sc.source_id,
+        name: sc.name,
+        author: sc.author,
+        family: sc.family,
+        family_role: sc.family_role,
+        sub_family: sc.sub_family,
+        modality: sc.modality,
+        kind: sc.kind,
+        file_format: "safetensors".into(),
+        bundling: "single-file".into(),
+        size_bytes: sc.size_bytes,
+        download_count: 0,
+        rating: None,
+        likes: 0,
+        nsfw: false,
+        thumbnail_url: sc.thumbnail_url,
+        description: None,
+        license: None,
+        license_flags: None,
+        tags: Vec::new(),
+        companions: Vec::new(),
+        companion_details: Vec::new(),
+        download_recipe: mold_core::catalog_wire::DownloadRecipeWire::default(),
+        engine_phase: sc.engine_phase,
+        installed,
+        primary_path,
+        created_at: None,
+        updated_at: None,
+        added_at: sc.written_at,
+        trained_words: sc.trained_words,
+    }
 }
 
 #[cfg(test)]
