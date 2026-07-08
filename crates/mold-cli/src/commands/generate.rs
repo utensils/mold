@@ -142,6 +142,53 @@ fn validate_cli_batch_for_family(family: Option<&str>, batch: u32) -> Result<()>
     Ok(())
 }
 
+/// Re-derive request defaults after an auto-pull refreshed the model
+/// config. `cli_*` carry the user's explicit flags — `None` means the
+/// field was defaulted at request-build time and must now track the
+/// refreshed model defaults. Reuses `effective_dimensions`, so img2img
+/// sources are re-fit to the refreshed canvas and qwen-image-edit sizes
+/// from its first edit image.
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+#[allow(clippy::too_many_arguments)]
+fn refit_request_after_pull(
+    req: &mut GenerateRequest,
+    config: &Config,
+    model_cfg: &mold_core::ModelConfig,
+    family: Option<&str>,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
+) -> Result<()> {
+    if cli_width.is_none() && cli_height.is_none() {
+        let (w, h) = effective_dimensions(
+            config,
+            model_cfg,
+            family,
+            None,
+            None,
+            req.source_image.as_deref(),
+            req.edit_images.as_deref(),
+        )?;
+        req.width = w;
+        req.height = h;
+    } else {
+        if cli_width.is_none() {
+            req.width = model_cfg.effective_width(config);
+        }
+        if cli_height.is_none() {
+            req.height = model_cfg.effective_height(config);
+        }
+    }
+    if cli_steps.is_none() {
+        req.steps = model_cfg.effective_steps(config);
+    }
+    if cli_guidance.is_none() {
+        req.guidance = model_cfg.effective_guidance();
+    }
+    Ok(())
+}
+
 #[cfg(any(feature = "cuda", feature = "metal", test))]
 fn apply_local_engine_env_overrides(
     t5_variant_override: Option<&str>,
@@ -1053,36 +1100,17 @@ async fn prepare_local_engine(
         effective_config = &auto_config;
 
         let model_cfg = effective_config.resolved_model_config(&model_name);
-        let new_model_w = model_cfg.effective_width(effective_config);
-        let new_model_h = model_cfg.effective_height(effective_config);
-        if cli_width.is_none() && cli_height.is_none() {
-            if let Some(src_bytes) = &req.source_image {
-                // img2img with auto-pull: fit source to newly-discovered model defaults
-                if let Ok(img) = image::load_from_memory(src_bytes) {
-                    let (w, h) = fit_to_model_dimensions(
-                        img.width(),
-                        img.height(),
-                        new_model_w,
-                        new_model_h,
-                    );
-                    req.width = w;
-                    req.height = h;
-                }
-            }
-        } else {
-            if cli_width.is_none() {
-                req.width = new_model_w;
-            }
-            if cli_height.is_none() {
-                req.height = new_model_h;
-            }
-        }
-        if cli_steps.is_none() {
-            req.steps = model_cfg.effective_steps(effective_config);
-        }
-        if cli_guidance.is_none() {
-            req.guidance = model_cfg.effective_guidance();
-        }
+        let family = resolve_family(&model_name, effective_config);
+        refit_request_after_pull(
+            &mut req,
+            effective_config,
+            &model_cfg,
+            family.as_deref(),
+            cli_width,
+            cli_height,
+            cli_steps,
+            cli_guidance,
+        )?;
         status!(
             "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
             theme::icon_info(),
@@ -1115,36 +1143,17 @@ async fn prepare_local_engine(
         effective_config = &auto_config;
 
         let model_cfg = effective_config.resolved_model_config(&model_name);
-        let new_model_w = model_cfg.effective_width(effective_config);
-        let new_model_h = model_cfg.effective_height(effective_config);
-        if cli_width.is_none() && cli_height.is_none() {
-            if let Some(src_bytes) = &req.source_image {
-                // img2img with auto-pull: fit source to newly-discovered model defaults
-                if let Ok(img) = image::load_from_memory(src_bytes) {
-                    let (w, h) = fit_to_model_dimensions(
-                        img.width(),
-                        img.height(),
-                        new_model_w,
-                        new_model_h,
-                    );
-                    req.width = w;
-                    req.height = h;
-                }
-            }
-        } else {
-            if cli_width.is_none() {
-                req.width = new_model_w;
-            }
-            if cli_height.is_none() {
-                req.height = new_model_h;
-            }
-        }
-        if cli_steps.is_none() {
-            req.steps = model_cfg.effective_steps(effective_config);
-        }
-        if cli_guidance.is_none() {
-            req.guidance = model_cfg.effective_guidance();
-        }
+        let family = resolve_family(&model_name, effective_config);
+        refit_request_after_pull(
+            &mut req,
+            effective_config,
+            &model_cfg,
+            family.as_deref(),
+            cli_width,
+            cli_height,
+            cli_steps,
+            cli_guidance,
+        )?;
         status!(
             "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
             theme::icon_info(),
@@ -2043,6 +2052,96 @@ mod tests {
         assert!(err
             .to_string()
             .contains("requires at least one input image"));
+    }
+
+    fn refit_req(width: u32, height: u32, source_image: Option<Vec<u8>>) -> GenerateRequest {
+        let mut req: GenerateRequest = serde_json::from_str(
+            r#"{
+                "prompt":"p",
+                "model":"flux-dev:q4",
+                "width":0,
+                "height":0,
+                "steps":50,
+                "guidance":1.0
+            }"#,
+        )
+        .unwrap();
+        req.width = width;
+        req.height = height;
+        req.source_image = source_image;
+        req
+    }
+
+    /// After an auto-pull refreshes the model config, an img2img request
+    /// whose dimensions were defaulted must be re-fit to the refreshed
+    /// model canvas (this used to be two copy-pasted blocks inside
+    /// prepare_local_engine).
+    #[test]
+    fn refit_request_after_pull_fits_source_after_autopull() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(1024),
+            default_steps: Some(8),
+            default_guidance: Some(3.5),
+            ..ModelConfig::default()
+        };
+        let source = png_with_dimensions(1280, 704);
+        let mut req = refit_req(512, 512, Some(source));
+
+        refit_request_after_pull(&mut req, &config, &model_cfg, None, None, None, None, None)
+            .unwrap();
+        // Same fit as effective_dimensions: width-limited 1024, 560.
+        assert_eq!((req.width, req.height), (1024, 560));
+        assert_eq!(req.steps, 8);
+        assert_eq!(req.guidance, 3.5);
+    }
+
+    /// Explicit CLI flags always win over refreshed model defaults.
+    #[test]
+    fn refit_keeps_explicit_cli_dims_and_params() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(1024),
+            default_steps: Some(8),
+            default_guidance: Some(3.5),
+            ..ModelConfig::default()
+        };
+        let mut req = refit_req(640, 480, None);
+        req.steps = 12;
+        req.guidance = 7.0;
+
+        refit_request_after_pull(
+            &mut req,
+            &config,
+            &model_cfg,
+            None,
+            Some(640),
+            Some(480),
+            Some(12),
+            Some(7.0),
+        )
+        .unwrap();
+        assert_eq!((req.width, req.height), (640, 480));
+        assert_eq!(req.steps, 12);
+        assert_eq!(req.guidance, 7.0);
+    }
+
+    /// txt2img with defaulted dims re-derives from the refreshed model
+    /// defaults (previously left at the pre-pull values).
+    #[test]
+    fn refit_rederives_txt2img_dims_from_refreshed_defaults() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1216),
+            default_height: Some(704),
+            ..ModelConfig::default()
+        };
+        let mut req = refit_req(1024, 1024, None);
+        refit_request_after_pull(&mut req, &config, &model_cfg, None, None, None, None, None)
+            .unwrap();
+        assert_eq!((req.width, req.height), (1216, 704));
     }
 
     #[test]
