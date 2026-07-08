@@ -92,14 +92,18 @@ pub fn synthesize_model_config(
     resolve_intent(entry.id.as_str(), &intent, config)
 }
 
-/// Top-level installer: if `id` is a catalog ID, look it up via live
-/// HF/Civitai and synthesize a `ModelConfig` into `config.models`
-/// under the same key. Returns `true` when an entry was installed.
+/// Unified catalog-ID injection for the run/generate entry points.
 ///
-/// Caller takes `&mut Config` and re-uses the same instance through
-/// the rest of the run flow so `ModelPaths::resolve(id, config)` finds
-/// the synthesized entry.
-pub async fn install_catalog_model_live(config: &mut Config, id: &str) -> Result<bool> {
+/// If `id` is a catalog ID (`cv:*` / `hf:*`), resolve it — sidecar-first
+/// (already-installed checkpoint, no network) then live HF/Civitai — and
+/// synthesize a `ModelConfig` into `config.models` under the same key so the
+/// downstream `ModelPaths::resolve(id, config)` finds it. Returns `Ok(true)`
+/// when an entry was installed, `Ok(false)` for a non-catalog id (a no-op, so
+/// callers can invoke it unconditionally).
+///
+/// Caller takes `&mut Config` and re-uses the same instance through the rest
+/// of the run flow.
+pub async fn ensure_catalog_model(config: &mut Config, id: &str) -> Result<bool> {
     if !looks_like_catalog_id(id) {
         return Ok(false);
     }
@@ -980,5 +984,78 @@ mod tests {
             primary_path.to_str(),
             "bundled-VAE checkpoint must keep cfg.vae == primary; flux-vae companion is a no-op"
         );
+    }
+
+    // ── ensure_catalog_model unified entry point ─────────────────────────
+
+    #[tokio::test]
+    async fn ensure_catalog_model_is_noop_for_non_catalog_id() {
+        // A bare manifest name (or a prompt) is not a catalog id — this reads
+        // no env and touches no network, so it needs no ENV_LOCK.
+        let mut config = explicit_config("/tmp/mold-test-models");
+        let before = config.models.len();
+        let installed = ensure_catalog_model(&mut config, "flux-dev").await.unwrap();
+        assert!(
+            !installed,
+            "non-catalog id must be a no-op returning Ok(false)"
+        );
+        assert_eq!(config.models.len(), before);
+    }
+
+    // The ENV_LOCK guard is held across the `.await` to keep MOLD_HOME pinned
+    // for the duration of the (sidecar-only, no real I/O) resolution; the tokio
+    // test is single-threaded so this cannot deadlock.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn ensure_catalog_model_installs_from_installed_sidecar_without_network() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_models_dir_env();
+
+        let dir = tempfile::tempdir().unwrap();
+        let _home_guard = pin_mold_home(dir.path());
+        let models_dir = dir.path().to_str().unwrap();
+        let mut config = explicit_config(models_dir);
+        stub_companion_paths(&mut config, models_dir);
+
+        let sidecar_dir = dir.path().join("cv-1075446");
+        let primary_rel = "sdxl/civitai/1075446/realism.safetensors";
+        let primary_path = sidecar_dir.join(primary_rel);
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        std::fs::write(&primary_path, b"ok").unwrap();
+        mold_catalog::sidecar::write_sidecar(
+            &sidecar_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &mold_catalog::sidecar::CatalogSidecar {
+                schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+                id: "cv:1075446".into(),
+                source: "civitai".into(),
+                source_id: "1075446".into(),
+                name: "Realism By Stable Yogi".into(),
+                author: Some("Stable_Yogi".into()),
+                family: "sdxl".into(),
+                family_role: "finetune".into(),
+                sub_family: None,
+                kind: "checkpoint".into(),
+                modality: "image".into(),
+                thumbnail_url: None,
+                size_bytes: Some(2),
+                engine_phase: 2,
+                trained_words: Vec::new(),
+                primary_filename_rel: primary_rel.into(),
+                written_at: 0,
+            },
+        )
+        .unwrap();
+
+        // Sidecar-first resolution succeeds without any live HF/Civitai call.
+        let installed = ensure_catalog_model(&mut config, "cv:1075446")
+            .await
+            .unwrap();
+        assert!(installed, "installed sidecar must resolve to Ok(true)");
+        let synth = config
+            .models
+            .get("cv:1075446")
+            .expect("catalog id must be injected into config.models");
+        assert_eq!(synth.family.as_deref(), Some("sdxl"));
+        assert_eq!(synth.transformer.as_deref(), primary_path.to_str());
     }
 }
