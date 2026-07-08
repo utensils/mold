@@ -611,19 +611,13 @@ fn encode_and_save(
                 None
             }
             Some(path) => Some(path.to_string()),
-            None => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                Some(mold_core::default_output_filename(
-                    &req.model,
-                    timestamp,
-                    video.format.extension(),
-                    1,
-                    0,
-                ))
-            }
+            None => Some(mold_core::default_output_filename(
+                &req.model,
+                mold_core::time::now_epoch_ms_u64(),
+                video.format.extension(),
+                1,
+                0,
+            )),
         };
         if let Some(ref filename) = filename {
             if std::path::Path::new(filename).exists() {
@@ -651,6 +645,7 @@ fn encode_and_save(
                 req.seed.unwrap_or(base_seed),
                 elapsed_ms,
                 video.format,
+                Some((video.width, video.height)),
             );
         }
     }

@@ -229,10 +229,7 @@ fn write_output(
         None // piped, write to stdout
     } else if image_path == "-" {
         // stdin input, generate a default name
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let timestamp = mold_core::time::now_epoch_ms_u64();
         Some(format!("mold-upscaled-{timestamp}.{format}"))
     } else {
         // Derive from input: foo.png -> foo_upscaled.png

@@ -305,6 +305,17 @@ mod tests {
         assert_eq!(m.model, "sdxl");
     }
 
+    /// Every writer (CLI and server) now stamps millisecond timestamps
+    /// into default filenames — 13-digit groups must strip like 10-digit
+    /// ones did.
+    #[test]
+    fn synthesize_handles_millisecond_timestamps() {
+        let m = synthesize_from_filename("mold-flux-dev-q4-1700000000000.png", 1700000000);
+        assert_eq!(m.model, "flux-dev-q4");
+        let batch = synthesize_from_filename("mold-sdxl-1700000000000-2.png", 1700000000);
+        assert_eq!(batch.model, "sdxl");
+    }
+
     #[test]
     fn synthesize_falls_back_to_unknown_for_garbage() {
         let m = synthesize_from_filename("not-a-mold-file.png", 0);

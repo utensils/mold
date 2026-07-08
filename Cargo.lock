@@ -3122,6 +3122,7 @@ name = "mold-ai-db"
 version = "0.14.0"
 dependencies = [
  "anyhow",
+ "hostname",
  "image",
  "mold-ai-core",
  "png 0.17.16",

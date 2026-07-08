@@ -14,6 +14,7 @@ mod metadata_io;
 pub mod migrations;
 mod model_prefs;
 mod path;
+pub mod persist;
 mod prompt_history;
 mod reconcile;
 mod record;

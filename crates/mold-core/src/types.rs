@@ -701,6 +701,14 @@ impl OutputMetadata {
             version: version.into(),
         }
     }
+
+    /// Overwrite the requested dimensions with the actual output raster
+    /// size (post-upscale, post-fit). Gallery rows and embedded metadata
+    /// should describe the file that exists, not the request that made it.
+    pub fn apply_output_dimensions(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

@@ -5,7 +5,7 @@ use base64::Engine as _;
 use mold_core::{
     ImageData, OutputFormat, OutputMetadata, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
 };
-use mold_db::{GenerationRecord, MetadataDb, RecordSource};
+use mold_db::{MetadataDb, RecordSource};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -116,21 +116,19 @@ pub(crate) fn save_image_to_dir(
         }
     }
     if let (Some(db), Some(meta)) = (db, metadata) {
-        let mut rec = GenerationRecord::from_save(
+        mold_db::persist::record_saved_output(
+            db,
             dir,
-            filename,
-            img.format,
-            meta.clone(),
-            RecordSource::Server,
-            timestamp_ms as i64,
+            &filename,
+            &path,
+            &mold_db::persist::OutputRecordParams {
+                format: img.format,
+                metadata: meta,
+                source: RecordSource::Server,
+                generation_time_ms,
+                backend: Some(mold_inference::compiled_backend_label()),
+            },
         );
-        rec.stat_from_disk(&path);
-        rec.generation_time_ms = generation_time_ms;
-        rec.hostname = hostname_string();
-        rec.backend = current_backend_label();
-        if let Err(e) = db.upsert(&rec) {
-            tracing::warn!("metadata DB upsert failed for {}: {e:#}", rec.filename);
-        }
     }
 }
 
@@ -170,21 +168,19 @@ pub(crate) fn save_video_to_dir(
         save_video_preview_gif(&filename, gif_preview);
     }
     if let Some(db) = db {
-        let mut rec = GenerationRecord::from_save(
+        mold_db::persist::record_saved_output(
+            db,
             dir,
-            filename,
-            format,
-            metadata.clone(),
-            RecordSource::Server,
-            ts as i64,
+            &filename,
+            &path,
+            &mold_db::persist::OutputRecordParams {
+                format,
+                metadata,
+                source: RecordSource::Server,
+                generation_time_ms,
+                backend: Some(mold_inference::compiled_backend_label()),
+            },
         );
-        rec.stat_from_disk(&path);
-        rec.generation_time_ms = generation_time_ms;
-        rec.hostname = hostname_string();
-        rec.backend = current_backend_label();
-        if let Err(e) = db.upsert(&rec) {
-            tracing::warn!("metadata DB upsert failed for {}: {e:#}", rec.filename);
-        }
     }
 }
 
@@ -196,8 +192,7 @@ fn requested_post_upscale_model(req: &mold_core::GenerateRequest) -> Option<&str
 }
 
 pub(crate) fn apply_output_dimensions_to_metadata(metadata: &mut OutputMetadata, img: &ImageData) {
-    metadata.width = img.width;
-    metadata.height = img.height;
+    metadata.apply_output_dimensions(img.width, img.height);
 }
 
 pub(crate) fn apply_upscale_response_to_image_generation(
@@ -345,16 +340,6 @@ fn save_video_preview_gif_to(preview_dir: &std::path::Path, filename: &str, gif_
             preview_path.display()
         );
     }
-}
-
-/// Best-effort hostname for the `hostname` DB column. Falls back to `None`.
-fn hostname_string() -> Option<String> {
-    hostname::get().ok().and_then(|s| s.into_string().ok())
-}
-
-/// Compile-time backend label so DB rows say where the work happened.
-fn current_backend_label() -> Option<String> {
-    Some(mold_inference::compiled_backend_label().to_string())
 }
 
 /// Build the SSE `complete` wire event from a finished generation response.

@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
-use mold_db::{GenerationRecord, MetadataDb, RecordSource};
+use mold_db::{MetadataDb, RecordSource};
 
 /// Install the `Config::load_or_default()` post-load hook so every freshly
 /// loaded config is overlaid with DB-backed user preferences, and run the
@@ -31,7 +31,9 @@ fn backend_label() -> Option<String> {
 ///
 /// `saved_path` is the on-disk file (used to derive `output_dir + filename`).
 /// `req` carries prompt / dimensions / lora; `seed_used` and
-/// `generation_time_ms` come from the engine's response.
+/// `generation_time_ms` come from the engine's response. When
+/// `actual_dims` is set, it overwrites the requested dimensions so the
+/// row describes the file that exists (e.g. post-upscale).
 ///
 /// Best-effort: errors are logged and discarded. Returns `false` when the
 /// DB is disabled or open failed, true otherwise.
@@ -41,6 +43,7 @@ pub fn record_local_save(
     seed_used: u64,
     generation_time_ms: u64,
     format: OutputFormat,
+    actual_dims: Option<(u32, u32)>,
 ) -> bool {
     let Some(db) = handle() else {
         return false;
@@ -58,36 +61,35 @@ pub fn record_local_save(
     let Some(output_dir) = abs.parent() else {
         return false;
     };
-    let metadata = OutputMetadata::from_generate_request(
+    let mut metadata = OutputMetadata::from_generate_request(
         req,
         seed_used,
         None,
         mold_core::build_info::version_string(),
     );
-    let now_ms = mold_core::time::now_epoch_ms();
-    let mut rec = GenerationRecord::from_save(
-        output_dir,
-        filename,
-        format,
-        metadata,
-        RecordSource::Cli,
-        now_ms,
-    );
-    rec.stat_from_disk(&abs);
-    rec.generation_time_ms = Some(generation_time_ms as i64);
-    rec.backend = backend_label();
-    rec.hostname = hostname::get().ok().and_then(|s| s.into_string().ok());
-    if let Err(e) = db.upsert(&rec) {
-        tracing::warn!("metadata DB upsert failed for {}: {e:#}", abs.display());
-        return false;
+    if let Some((w, h)) = actual_dims {
+        metadata.apply_output_dimensions(w, h);
     }
-    true
+    mold_db::persist::record_saved_output(
+        db,
+        output_dir,
+        &filename,
+        &abs,
+        &mold_db::persist::OutputRecordParams {
+            format,
+            metadata: &metadata,
+            source: RecordSource::Cli,
+            generation_time_ms: Some(generation_time_ms as i64),
+            backend: backend_label().as_deref(),
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mold_core::{GenerateRequest, OutputFormat};
+    use mold_db::GenerationRecord;
 
     fn req() -> GenerateRequest {
         // GenerateRequest doesn't impl Default — easiest minimal builder is

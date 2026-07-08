@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CLI default output filenames now use millisecond timestamps**, matching what `mold serve` has always written (`mold-<model>-<epoch-ms>.<ext>` instead of `<epoch-secs>`). Scripts that pattern-match on 10-digit timestamps in CLI filenames should accept 13 digits.
+- CLI gallery rows now record the actual output dimensions (post-upscale) instead of the requested ones, matching server behavior.
 - Byte-size formatting is consolidated into shared `mold_core::format` helpers. Two user-visible tweaks: `mold mcp` progress sizes now print decimal-style units ("1.0 GB" instead of "1.0 GiB") and gain a KB tier, and TUI download/weight progress sizes now show one decimal in the M/K tiers (e.g. "123.4M" instead of "123M").
 
 ## [0.14.0] - 2026-07-04

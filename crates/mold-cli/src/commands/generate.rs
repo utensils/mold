@@ -696,19 +696,13 @@ pub async fn run(
                     None
                 }
                 Some(ref path) => Some(path.clone()),
-                None => {
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    Some(default_filename(
-                        model,
-                        timestamp,
-                        video.format.extension(),
-                        1,
-                        0,
-                    ))
-                }
+                None => Some(default_filename(
+                    model,
+                    mold_core::time::now_epoch_ms_u64(),
+                    video.format.extension(),
+                    1,
+                    0,
+                )),
             };
             if let Some(ref filename) = filename {
                 if std::path::Path::new(filename).exists() {
@@ -730,6 +724,7 @@ pub async fn run(
                     response.seed_used,
                     response.generation_time_ms,
                     video.format,
+                    Some((video.width, video.height)),
                 );
             }
             if preview {
@@ -1493,12 +1488,14 @@ fn save_and_preview_image(
                 .into_owned()
         }
         None => {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
             let ext = output_format.to_string();
-            default_filename(model, timestamp, &ext, batch, img.index)
+            default_filename(
+                model,
+                mold_core::time::now_epoch_ms_u64(),
+                &ext,
+                batch,
+                img.index,
+            )
         }
     };
 
@@ -1514,6 +1511,7 @@ fn save_and_preview_image(
             p.seed_used,
             p.generation_time_ms,
             output_format,
+            Some((img.width, img.height)),
         );
     }
     if preview {
