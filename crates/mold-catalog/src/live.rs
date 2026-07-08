@@ -875,6 +875,34 @@ pub async fn fetch_civitai_version(
     })
 }
 
+/// Fetch a single catalog entry by its `cv:` / `hf:` id, dispatching to
+/// the Civitai model-version or HF detail+tree fetcher as appropriate.
+///
+/// Deduplicates the near-identical prefix dispatch that previously lived
+/// in both `mold-cli`'s catalog bridge and `mold-server`'s model manager.
+/// Bases and tokens are passed explicitly so each caller keeps control of
+/// its own upstream endpoints (the server pins a test-overridable Civitai
+/// base; the CLI honors `CIVITAI_BASE` / `HF_BASE` env).
+pub async fn fetch_entry_by_id(
+    id: &str,
+    civitai_base: &str,
+    hf_base: &str,
+    civitai_token: Option<&str>,
+    hf_token: Option<&str>,
+) -> Result<CatalogEntry, LiveSearchError> {
+    if let Some(version_id) = id.strip_prefix("cv:") {
+        fetch_civitai_version(civitai_base, version_id, civitai_token).await
+    } else if let Some(repo_id) = id.strip_prefix("hf:") {
+        fetch_hf_repo(hf_base, repo_id, hf_token).await
+    } else {
+        Err(LiveSearchError::Upstream {
+            host: "catalog",
+            status: 400,
+            body: format!("'{id}' is not a catalog id (expected a cv: or hf: prefix)"),
+        })
+    }
+}
+
 /// HF detail+tree for a single repo, normalized to a [`CatalogEntry`]
 /// with a fully-resolved recipe. Used by both `hf:<repo>` resolution
 /// and the on-click download flow when the search summary's recipe
@@ -935,4 +963,29 @@ pub async fn fetch_hf_repo(
         status: 422,
         body: e.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fetch_entry_by_id_rejects_non_catalog_shape() {
+        // The cv:/hf: dispatch itself is covered end-to-end by the server's
+        // wiremock-backed catalog integration tests; here we only pin the
+        // defensive fallback for a mis-shaped id.
+        let err = fetch_entry_by_id(
+            "flux-dev",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:0",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        match err {
+            LiveSearchError::Upstream { status, .. } => assert_eq!(status, 400),
+            other => panic!("expected Upstream 400 for non-catalog id, got {other:?}"),
+        }
+    }
 }

@@ -15,5 +15,6 @@ pub mod families;
 pub mod hf_seeds;
 pub mod live;
 pub mod normalizer;
+pub mod resolve;
 pub mod sidecar;
 pub mod synthesis;

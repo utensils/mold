@@ -171,6 +171,23 @@ pub fn walk_sidecars(models_dir: &Path) -> Vec<(PathBuf, CatalogSidecar)> {
     out
 }
 
+/// True when a sidecar tagged `kind = "checkpoint"` actually points its
+/// primary file at an auxiliary asset (a text encoder / TE shard) rather
+/// than a real diffusion checkpoint. Stale or mislabeled sidecars like
+/// this must not be surfaced as loadable checkpoints.
+///
+/// The pattern set is the superset of the historical CLI + server guards:
+/// diffusers `text_encoder/` directories, the `te_` shard-name convention,
+/// and the `_txt.` / `-txt.` filename suffixes some Civitai TE files use.
+pub fn primary_looks_like_auxiliary(sidecar: &CatalogSidecar) -> bool {
+    let rel = sidecar.primary_filename_rel.to_ascii_lowercase();
+    rel.contains("/text_encoder/")
+        || rel.contains("text_encoder")
+        || rel.contains("te_")
+        || rel.contains("_txt.")
+        || rel.contains("-txt.")
+}
+
 /// Returns the absolute path to a sidecar's primary file, when that file is
 /// complete enough to trust. `None` indicates the sidecar is stale or the
 /// primary was only partially downloaded — the caller should treat the row as
