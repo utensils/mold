@@ -3209,7 +3209,6 @@ dependencies = [
  "mold-ai-db",
  "mold-ai-inference",
  "nvml-wrapper",
- "png 0.18.1",
  "rust-embed",
  "serde",
  "serde_json",

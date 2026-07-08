@@ -486,4 +486,70 @@ mod tests {
         assert!(synthetic);
         assert_eq!((meta.width, meta.height), (0, 0));
     }
+
+    // ── Gallery validity guards (ported from mold-server/routes.rs when
+    // the duplicated guard implementations were consolidated here) ──────
+
+    #[test]
+    fn min_valid_size_thresholds_are_sensible() {
+        assert!(min_valid_size(OutputFormat::Png) >= 128);
+        assert!(min_valid_size(OutputFormat::Jpeg) >= 128);
+        assert!(min_valid_size(OutputFormat::Apng) >= 128);
+        assert!(min_valid_size(OutputFormat::Webp) >= 128);
+        assert!(min_valid_size(OutputFormat::Gif) <= 512);
+        assert!(min_valid_size(OutputFormat::Mp4) >= 1024);
+    }
+
+    #[test]
+    fn has_ftyp_box_accepts_real_header_and_rejects_garbage() {
+        let td = tempfile::tempdir().unwrap();
+
+        let mut real = Vec::new();
+        real.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        real.extend_from_slice(b"ftyp");
+        real.extend_from_slice(b"isom\x00\x00\x02\x00isomiso2mp41");
+        let real_path = td.path().join("real.mp4");
+        std::fs::write(&real_path, &real).unwrap();
+        assert!(has_ftyp_box(&real_path));
+
+        let fake_path = td.path().join("fake.mp4");
+        std::fs::write(&fake_path, b"this is not an mp4 file at all").unwrap();
+        assert!(!has_ftyp_box(&fake_path));
+
+        let trunc_path = td.path().join("truncated.mp4");
+        std::fs::write(&trunc_path, b"\x00\x00\x00\x20").unwrap();
+        assert!(!has_ftyp_box(&trunc_path));
+
+        assert!(!has_ftyp_box(&td.path().join("nope.mp4")));
+    }
+
+    #[test]
+    fn image_header_dims_returns_real_dimensions() {
+        let td = tempfile::tempdir().unwrap();
+        let p = td.path().join("valid.png");
+        std::fs::write(&p, tiny_png(42, 24)).unwrap();
+        assert_eq!(image_header_dims(&p), Some((42, 24)));
+
+        let stub = td.path().join("stub.png");
+        std::fs::write(&stub, b"\x89PNG\r\n\x1a\n").unwrap();
+        assert!(image_header_dims(&stub).is_none());
+
+        let text = td.path().join("text.png");
+        std::fs::write(&text, b"hello world, not a png").unwrap();
+        assert!(image_header_dims(&text).is_none());
+    }
+
+    #[test]
+    fn probably_solid_black_ignores_large_files() {
+        // Files above the per-format suspect size are trusted without a
+        // full decode. Verify we bail out on size alone.
+        let td = tempfile::tempdir().unwrap();
+        let big_path = td.path().join("big.png");
+        std::fs::write(&big_path, vec![0u8; 20 * 1024]).unwrap();
+        assert!(!is_probably_solid_black(
+            &big_path,
+            OutputFormat::Png,
+            20 * 1024,
+        ));
+    }
 }

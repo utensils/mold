@@ -2682,350 +2682,33 @@ fn thumbnail_warmup_enabled() -> bool {
 /// IDAT CRC). Those fall through to the thumbnail endpoint which serves
 /// the raw bytes as a last resort.
 fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
-    let mut images = Vec::new();
-
-    let walker = walkdir::WalkDir::new(dir).max_depth(1).into_iter();
-    for entry in walker.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase());
-        let format = match ext.as_deref() {
-            Some("png") => Some(mold_core::OutputFormat::Png),
-            Some("jpg") | Some("jpeg") => Some(mold_core::OutputFormat::Jpeg),
-            Some("gif") => Some(mold_core::OutputFormat::Gif),
-            Some("apng") => Some(mold_core::OutputFormat::Apng),
-            Some("webp") => Some(mold_core::OutputFormat::Webp),
-            Some("mp4") => Some(mold_core::OutputFormat::Mp4),
+    let mut images: Vec<mold_core::GalleryImage> = mold_db::scan::scan_output_dir(dir)
+        .filter_map(|item| match item {
+            mold_db::scan::ScanItem::Valid(file) => Some(file),
             _ => None,
-        };
-        let Some(format) = format else { continue };
-
-        let fs_meta = entry.metadata().ok();
-        let timestamp = fs_meta
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let size_bytes = fs_meta.as_ref().map(|m| m.len()).unwrap_or(0);
-
-        // Size floor: anything below this is guaranteed not a real output.
-        if size_bytes < min_valid_size(format) {
-            continue;
-        }
-
-        // Header-level validation (fast, O(1) bytes per file).
-        let header_ok = match format {
-            mold_core::OutputFormat::Mp4 => has_ftyp_box(path),
-            _ => image_header_dims(path).is_some(),
-        };
-        if !header_ok {
-            continue;
-        }
-
-        // Solid-black detection. Only inspect small files where a solid-color
-        // image is plausible (real renderings at any meaningful resolution
-        // weigh tens of KB or more). For those, we decode and sample a 16×16
-        // thumbnail so a failed / empty generation doesn't pollute the feed.
-        if !matches!(format, mold_core::OutputFormat::Mp4)
-            && is_probably_solid_black(path, format, size_bytes)
-        {
-            continue;
-        }
-
-        let filename = path
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        // Try embedded metadata first — PNG text chunks (also covers APNG
-        // since APNG files are valid PNGs) and JPEG COM markers.
-        let embedded = match ext.as_deref() {
-            Some("png") | Some("apng") => read_png_metadata(path),
-            Some("jpg") | Some("jpeg") => read_jpeg_metadata(path),
-            _ => None,
-        };
-
-        let (metadata, synthetic) = match embedded {
-            Some(m) => (m, false),
-            None => {
-                // Synthesize. If the file is a raster whose header decodes,
-                // use its real dimensions so the UI can render the card at
-                // the correct aspect ratio even without mold metadata.
-                let mut meta = synthesize_metadata_from_filename(&filename, timestamp);
-                if !matches!(format, mold_core::OutputFormat::Mp4) {
-                    if let Some((w, h)) = image_header_dims(path) {
-                        meta.width = w;
-                        meta.height = h;
-                    }
-                }
-                (meta, true)
+        })
+        .map(|file| {
+            let timestamp = file.timestamp_secs();
+            let size_bytes = file.size_u64();
+            let (metadata, synthetic) = mold_db::metadata_io::read_or_synthesize(
+                &file.path,
+                file.format,
+                &file.filename,
+                timestamp,
+            );
+            mold_core::GalleryImage {
+                filename: file.filename,
+                metadata,
+                timestamp,
+                format: Some(file.format),
+                size_bytes: Some(size_bytes),
+                metadata_synthetic: synthetic,
             }
-        };
-
-        images.push(mold_core::GalleryImage {
-            filename,
-            metadata,
-            timestamp,
-            format: Some(format),
-            size_bytes: Some(size_bytes),
-            metadata_synthetic: synthetic,
-        });
-    }
+        })
+        .collect();
 
     images.sort_by_key(|img| std::cmp::Reverse(img.timestamp));
     images
-}
-
-/// Minimum on-disk size (in bytes) below which a file is treated as a
-/// corrupt / aborted output and hidden from the gallery listing. The
-/// thresholds are well below any real mold-generated output but above any
-/// parseable-but-empty stub — a 1×1 pixel PNG is ~67 bytes, a real 512×512
-/// PNG is at least tens of KB.
-fn min_valid_size(format: mold_core::OutputFormat) -> u64 {
-    match format {
-        // Raster images: any real mold output is multi-KB. The 256-byte
-        // floor comfortably filters truncated PNG stubs (signature + IHDR
-        // only, ~45 bytes) and similar degenerate cases without touching
-        // legitimate tiny gifs (e.g. a few hundred bytes for a 1-frame GIF).
-        mold_core::OutputFormat::Png
-        | mold_core::OutputFormat::Apng
-        | mold_core::OutputFormat::Jpeg
-        | mold_core::OutputFormat::Webp => 256,
-        mold_core::OutputFormat::Gif => 128,
-        // An mp4 with a single frame and no audio is still many KB.
-        mold_core::OutputFormat::Mp4 => 4096,
-    }
-}
-
-/// Fast "does this decode as an image?" check. Returns the image's
-/// pixel dimensions (width, height) on success. Only reads the header —
-/// typically under 1 KB — so it's safe to call for every file on every
-/// `/api/gallery` request.
-fn image_header_dims(path: &std::path::Path) -> Option<(u32, u32)> {
-    image::ImageReader::open(path)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()
-}
-
-/// Heuristic detector for "solid black" (or near-black) raster images —
-/// typically the artefact of an aborted / NaN-poisoned generation that
-/// wrote an all-zero image tensor. We only even consider images below a
-/// format-specific suspect size (any real content at meaningful resolution
-/// compresses to tens of KB at minimum; a solid-color PNG fits in a few
-/// hundred bytes), then decode and sample a 16×16 thumbnail to check
-/// whether any pixel's max channel exceeds a small threshold.
-fn is_probably_solid_black(
-    path: &std::path::Path,
-    format: mold_core::OutputFormat,
-    size_bytes: u64,
-) -> bool {
-    const SAMPLE_DIM: u32 = 16;
-    // Allow any single channel up to this intensity before we conclude the
-    // file is "real" content. 16 out of 255 is ~6%: enough to accept dark
-    // images that aren't literal black, but tight enough to reject the
-    // artefacts we actually want to filter.
-    const CHANNEL_CEILING: u8 = 16;
-
-    let suspect_threshold: u64 = match format {
-        // PNG / APNG: zlib-compressed raw pixels; 8 KB is comfortably above
-        // any solid-color encoding at 1k-ish resolution.
-        mold_core::OutputFormat::Png | mold_core::OutputFormat::Apng => 8 * 1024,
-        // JPEG compresses solid color to a few hundred bytes; generous ceiling.
-        mold_core::OutputFormat::Jpeg => 4 * 1024,
-        mold_core::OutputFormat::Gif | mold_core::OutputFormat::Webp => 4 * 1024,
-        mold_core::OutputFormat::Mp4 => return false,
-    };
-    if size_bytes > suspect_threshold {
-        return false;
-    }
-
-    let Ok(img) = image::open(path) else {
-        return false;
-    };
-    let thumb = img.thumbnail(SAMPLE_DIM, SAMPLE_DIM).to_rgb8();
-    let mut max_channel: u8 = 0;
-    for pixel in thumb.pixels() {
-        let m = pixel.0[0].max(pixel.0[1]).max(pixel.0[2]);
-        if m > max_channel {
-            max_channel = m;
-        }
-        if max_channel > CHANNEL_CEILING {
-            return false;
-        }
-    }
-    max_channel <= CHANNEL_CEILING
-}
-
-/// Check for the ISO BMFF `ftyp` box at offset 4 of the file. A real mp4
-/// always starts with a top-level `ftyp` box; files that fail this check
-/// are typically truncated writes or wrong-extension text files.
-fn has_ftyp_box(path: &std::path::Path) -> bool {
-    use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut buf = [0u8; 12];
-    if f.read_exact(&mut buf).is_err() {
-        return false;
-    }
-    &buf[4..8] == b"ftyp"
-}
-
-/// Build a best-effort `OutputMetadata` from a filename like
-/// `mold-<model>-<unix>[-<idx>].<ext>`. Fields we can't recover (seed, steps,
-/// guidance, resolution, prompt) are left at zero / empty so the UI can
-/// render them as "unknown". The client reads `metadata_synthetic=true`
-/// from the enclosing `GalleryImage` to treat these as placeholders.
-fn synthesize_metadata_from_filename(filename: &str, timestamp: u64) -> mold_core::OutputMetadata {
-    let stem = std::path::Path::new(filename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-
-    let model = stem
-        .strip_prefix("mold-")
-        .and_then(|rest| {
-            // Trim trailing `-<unix>` and optional `-<idx>` suffixes by
-            // walking back across numeric segments.
-            let mut parts: Vec<&str> = rest.split('-').collect();
-            while parts
-                .last()
-                .map(|p| p.chars().all(|c| c.is_ascii_digit()))
-                .unwrap_or(false)
-                && parts.len() > 1
-            {
-                parts.pop();
-            }
-            if parts.is_empty() {
-                None
-            } else {
-                Some(parts.join("-"))
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    mold_core::OutputMetadata {
-        prompt: String::new(),
-        negative_prompt: None,
-        original_prompt: None,
-        model,
-        seed: 0,
-        steps: 0,
-        guidance: 0.0,
-        width: 0,
-        height: 0,
-        strength: None,
-        scheduler: None,
-        output_format: None,
-        cfg_plus: None,
-        lora: None,
-        lora_scale: None,
-        loras: None,
-        control_model: None,
-        control_scale: None,
-        upscale_model: None,
-        gif_preview: None,
-        enable_audio: None,
-        audio_file_path: None,
-        source_video_path: None,
-        pipeline: None,
-        retake_range: None,
-        spatial_upscale: None,
-        temporal_upscale: None,
-        frames: None,
-        fps: None,
-        version: format!("synthesized@{timestamp}"),
-    }
-}
-
-/// Read OutputMetadata from a PNG file's text chunks.
-fn read_png_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadata> {
-    let file = std::fs::File::open(path).ok()?;
-    let decoder = png::Decoder::new(std::io::BufReader::new(file));
-    let reader = decoder.read_info().ok()?;
-    let info = reader.info();
-
-    for chunk in &info.uncompressed_latin1_text {
-        if chunk.keyword == "mold:parameters" {
-            if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(&chunk.text) {
-                return Some(meta);
-            }
-        }
-    }
-    for chunk in &info.utf8_text {
-        if chunk.keyword == "mold:parameters" {
-            if let Ok(text) = chunk.get_text() {
-                if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(&text) {
-                    return Some(meta);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Read OutputMetadata from a JPEG file's COM marker.
-fn read_jpeg_metadata(path: &std::path::Path) -> Option<mold_core::OutputMetadata> {
-    let data = std::fs::read(path).ok()?;
-    let mut i = 0;
-    while i + 1 < data.len() {
-        if data[i] != 0xFF {
-            i += 1;
-            continue;
-        }
-        let marker = data[i + 1];
-        match marker {
-            // Standalone markers (no length field): SOI, EOI, RST0-7, TEM
-            0xD8 | 0x01 => {
-                i += 2;
-            }
-            0xD9 => break, // EOI — end of image
-            0xD0..=0xD7 => {
-                i += 2; // RST markers
-            }
-            // COM marker — check for mold:parameters
-            0xFE => {
-                if i + 3 >= data.len() {
-                    break;
-                }
-                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-                if len < 2 || i + 2 + len > data.len() {
-                    break;
-                }
-                let comment = &data[i + 4..i + 2 + len];
-                if let Ok(text) = std::str::from_utf8(comment) {
-                    if let Some(json) = text.strip_prefix("mold:parameters ") {
-                        if let Ok(meta) = serde_json::from_str::<mold_core::OutputMetadata>(json) {
-                            return Some(meta);
-                        }
-                    }
-                }
-                i += 2 + len;
-            }
-            // All other markers have a 2-byte length field
-            _ => {
-                if i + 3 >= data.len() {
-                    break;
-                }
-                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-                if len < 2 || i + 2 + len > data.len() {
-                    break;
-                }
-                i += 2 + len;
-            }
-        }
-    }
-    None
 }
 
 // ── /api/config/model/:name/placement (Agent C, model-ui-overhaul §3) ────────
@@ -3552,31 +3235,14 @@ mod tests {
             "application/octet-stream"
         );
     }
-
-    #[test]
-    fn synthesized_metadata_parses_model_from_filename() {
-        let meta = synthesize_metadata_from_filename("mold-flux-dev-q8-1710000000.mp4", 1710000000);
-        // Trailing unix timestamp should be stripped; model tag preserved.
-        assert_eq!(meta.model, "flux-dev-q8");
-        assert_eq!(meta.prompt, "");
-        assert_eq!(meta.seed, 0);
-        assert!(meta.version.starts_with("synthesized@"));
-
-        // Batch suffix (trailing `-<idx>`) also stripped along with timestamp.
-        let meta =
-            synthesize_metadata_from_filename("mold-ltx-video-bf16-1710000030-2.gif", 1710000030);
-        assert_eq!(meta.model, "ltx-video-bf16");
-
-        // Non-mold filename falls back to "unknown".
-        let meta = synthesize_metadata_from_filename("unrelated.png", 0);
-        assert_eq!(meta.model, "unknown");
-    }
-
     // ── Gallery validation ───────────────────────────────────────────────
+    // The guard-rail pure functions live in `mold_db::metadata_io` (with
+    // their own unit tests); these end-to-end scans pin that the server
+    // gallery keeps consuming them correctly.
 
     /// Create a scratch directory unique to this test and delete it on drop.
     /// Using `std::env::temp_dir()` rather than pulling in a `tempfile`
-    /// dev-dep for three tests' worth of fixtures.
+    /// dev-dep for two tests' worth of fixtures.
     struct TempDir(std::path::PathBuf);
     impl TempDir {
         fn new(tag: &str) -> Self {
@@ -3598,7 +3264,7 @@ mod tests {
     /// Encode a noisy PNG in-memory via the `image` crate. The checkerboard
     /// pattern resists zlib compression so the encoded bytes exceed the
     /// gallery size floor — a solid-color PNG of the same dimensions would
-    /// compress to ~80 bytes and be filtered out by `min_valid_size`.
+    /// compress to ~80 bytes and be filtered out by the size guard.
     fn make_png_bytes(width: u32, height: u32) -> Vec<u8> {
         let img = image::RgbImage::from_fn(width, height, |x, y| {
             let n = (x.wrapping_mul(37) ^ y.wrapping_mul(131)) as u8;
@@ -3609,65 +3275,6 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .expect("encode png");
         buf
-    }
-
-    #[test]
-    fn min_valid_size_thresholds_are_sensible() {
-        // Raster formats: high enough to catch every truncated / stub file
-        // we've seen in dev harnesses (largest known bad fixture was ~200 B).
-        assert!(min_valid_size(mold_core::OutputFormat::Png) >= 128);
-        assert!(min_valid_size(mold_core::OutputFormat::Jpeg) >= 128);
-        assert!(min_valid_size(mold_core::OutputFormat::Apng) >= 128);
-        assert!(min_valid_size(mold_core::OutputFormat::Webp) >= 128);
-        // But not so high we filter out legitimate tiny GIFs.
-        assert!(min_valid_size(mold_core::OutputFormat::Gif) <= 512);
-        // MP4: no real rendering is < 1 KB; 4 KB is a comfortable floor.
-        assert!(min_valid_size(mold_core::OutputFormat::Mp4) >= 1024);
-    }
-
-    #[test]
-    fn has_ftyp_box_accepts_real_header_and_rejects_garbage() {
-        let td = TempDir::new("ftyp");
-
-        // Real-ish mp4 header: `\0\0\0\x20 ftypisom ...`
-        let mut real = Vec::new();
-        real.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
-        real.extend_from_slice(b"ftyp");
-        real.extend_from_slice(b"isom\x00\x00\x02\x00isomiso2mp41");
-        let real_path = td.path().join("real.mp4");
-        std::fs::write(&real_path, &real).unwrap();
-        assert!(has_ftyp_box(&real_path));
-
-        // Wrong magic — random text with an mp4 extension.
-        let fake_path = td.path().join("fake.mp4");
-        std::fs::write(&fake_path, b"this is not an mp4 file at all").unwrap();
-        assert!(!has_ftyp_box(&fake_path));
-
-        // Too short (fewer than 12 bytes) — can't contain an ftyp box.
-        let trunc_path = td.path().join("truncated.mp4");
-        std::fs::write(&trunc_path, b"\x00\x00\x00\x20").unwrap();
-        assert!(!has_ftyp_box(&trunc_path));
-
-        // Missing entirely.
-        assert!(!has_ftyp_box(&td.path().join("nope.mp4")));
-    }
-
-    #[test]
-    fn image_header_dims_returns_real_dimensions() {
-        let td = TempDir::new("header");
-        let p = td.path().join("valid.png");
-        std::fs::write(&p, make_png_bytes(42, 24)).unwrap();
-        assert_eq!(image_header_dims(&p), Some((42, 24)));
-
-        // Truncated: PNG signature only, no IHDR.
-        let stub = td.path().join("stub.png");
-        std::fs::write(&stub, b"\x89PNG\r\n\x1a\n").unwrap();
-        assert!(image_header_dims(&stub).is_none());
-
-        // Non-image bytes entirely.
-        let text = td.path().join("text.png");
-        std::fs::write(&text, b"hello world, not a png").unwrap();
-        assert!(image_header_dims(&text).is_none());
     }
 
     #[test]
@@ -3761,23 +3368,6 @@ mod tests {
             "noisy PNG should survive: {names:?}"
         );
     }
-
-    #[test]
-    fn probably_solid_black_ignores_large_files() {
-        // Files above the per-format suspect size are trusted without a full
-        // decode (the check is purely a cheap heuristic to catch NaN /
-        // abort-flavored dev outputs). Verify we bail out on size alone.
-        let td = TempDir::new("bigblack");
-        let big_path = td.path().join("big.png");
-        // Write arbitrary bytes — we never decode because of the size guard.
-        std::fs::write(&big_path, vec![0u8; 20 * 1024]).unwrap();
-        assert!(!is_probably_solid_black(
-            &big_path,
-            mold_core::OutputFormat::Png,
-            20 * 1024,
-        ));
-    }
-
     #[test]
     fn parse_byte_range_handles_common_forms() {
         // `bytes=0-499` — first 500 bytes
