@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The TUI's fallback gallery walk (DB disabled) now matches the server gallery.** It applies the shared size/header/solid-black validity guards (corrupt or aborted outputs no longer show up as broken tiles), recovers embedded GIF metadata, and synthesizes proper model names and real raster dimensions for files without metadata instead of showing the raw file stem.
 - **CLI default output filenames now use millisecond timestamps**, matching what `mold serve` has always written (`mold-<model>-<epoch-ms>.<ext>` instead of `<epoch-secs>`). Scripts that pattern-match on 10-digit timestamps in CLI filenames should accept 13 digits.
 - CLI gallery rows now record the actual output dimensions (post-upscale) instead of the requested ones, matching server behavior.
 - Chain frame encoding is consolidated into a shared `mold-inference` encoder used by both `mold run --local` chains and the server chain routes. Two CLI-side gaps closed: the CLI now warns when chain audio is dropped on a WebP→APNG fallback, and a failed GIF-preview encode now prints a warning instead of being silently swallowed.
