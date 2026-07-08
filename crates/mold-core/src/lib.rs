@@ -17,6 +17,7 @@ pub mod lambda;
 pub mod manifest;
 pub mod media_paths;
 pub mod runpod;
+pub mod safetensors_probe;
 pub mod time;
 pub mod types;
 pub mod validation;

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The FLUX bundled-VAE safetensors header probe (`flux_single_file_bundles_vae`) moved from `mold-inference` into `mold_core::safetensors_probe` so the catalog resolver can share it without depending on candle. The `mold_inference::loader` path is preserved via re-export.
 - **The TUI's fallback gallery walk (DB disabled) now matches the server gallery.** It applies the shared size/header/solid-black validity guards (corrupt or aborted outputs no longer show up as broken tiles), recovers embedded GIF metadata, and synthesizes proper model names and real raster dimensions for files without metadata instead of showing the raw file stem.
 - **CLI default output filenames now use millisecond timestamps**, matching what `mold serve` has always written (`mold-<model>-<epoch-ms>.<ext>` instead of `<epoch-secs>`). Scripts that pattern-match on 10-digit timestamps in CLI filenames should accept 13 digits.
 - CLI gallery rows now record the actual output dimensions (post-upscale) instead of the requested ones, matching server behavior.
