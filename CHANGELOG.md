@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Chain-output gallery metadata is now consistent between CLI and server.** All three chain-metadata builders collapse onto `ChainRequest::stitched_output_metadata`. Two server-side fixes fall out: the recorded `output_format` is the actual post-fallback container (a WebP request that fell back to APNG previously recorded WebP), and `strength` is only recorded when the chain starts from a source image (text-to-video chains previously carried a phantom strength). CLI chain rows additionally gain the `enable_audio` flag.
 - **APNG video outputs now embed the full `mold:parameters` metadata block.** APNG encoding previously wrote only a partial per-field chunk subset, so gallery reconcile could not recover prompt/model/seed from APNG files on import. APNG now shares the still-image PNG chunk writer (and gains `mold:frames`/`mold:fps` chunks alongside the composite JSON block).
 - **Discord img2img no longer distorts landscape/portrait attachments.** When deriving dimensions from a source-image attachment, the bot now uses the same aspect-preserving `fit_to_model_dimensions` helper as the CLI and server instead of independently clamping each axis — a 1920x1080 photo now generates at 1024x576 instead of being squashed to 1024x1024.
 

@@ -14,7 +14,7 @@ use mold_core::chain_job::{
     effective_stage_seed, settled, ChainJobEvent, ChainJobManifest, ChainJobState, FinalizeRecord,
     GcOutcome, JobDirLayout, RetakeAmendment, RetakeMode, RetakeRequest, StageState, STAGES_DIR,
 };
-use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
+use mold_core::{GenerateRequest, OutputFormat};
 use mold_db::chain_jobs::{self, ChainJobRow, ChainJobStageRow};
 use mold_db::{settings, MetadataDb};
 use mold_inference::audio::NativeAudioTrack;
@@ -1541,7 +1541,7 @@ fn finalize_job(
 
     if !manifest.ephemeral {
         if let Some(output_dir) = deps.output_dir.as_ref() {
-            let metadata = output_metadata_for_chain(&effective, frame_count);
+            let metadata = effective.stitched_output_metadata(OutputFormat::Mp4, frame_count);
             save_video_to_dir(
                 output_dir,
                 &video_bytes,
@@ -2330,42 +2330,6 @@ fn read_audio_sidecar(path: &Path) -> anyhow::Result<NativeAudioTrack> {
         sample_rate,
         channels,
     })
-}
-
-fn output_metadata_for_chain(req: &ChainRequest, frame_count: u32) -> OutputMetadata {
-    let first_stage = req.stages.first();
-    OutputMetadata {
-        prompt: first_stage.map(|s| s.prompt.clone()).unwrap_or_default(),
-        negative_prompt: first_stage.and_then(|s| s.negative_prompt.clone()),
-        original_prompt: None,
-        model: req.model.clone(),
-        seed: req.seed.unwrap_or(0),
-        steps: req.steps,
-        guidance: req.guidance,
-        width: req.width,
-        height: req.height,
-        strength: Some(req.strength),
-        scheduler: None,
-        output_format: Some(OutputFormat::Mp4),
-        cfg_plus: None,
-        lora: None,
-        lora_scale: None,
-        loras: None,
-        control_model: None,
-        control_scale: None,
-        upscale_model: None,
-        gif_preview: None,
-        enable_audio: req.enable_audio,
-        audio_file_path: None,
-        source_video_path: None,
-        pipeline: None,
-        retake_range: None,
-        spatial_upscale: None,
-        temporal_upscale: None,
-        frames: Some(frame_count),
-        fps: Some(req.fps),
-        version: mold_core::build_info::version_string().to_string(),
-    }
 }
 
 fn select_worker_for_stage(gpu_pool: &GpuPool, model: &str) -> Option<Arc<GpuWorker>> {

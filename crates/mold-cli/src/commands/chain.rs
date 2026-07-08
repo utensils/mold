@@ -579,7 +579,7 @@ fn encode_and_save(
             // GenerateRequest so the existing record_local_save helper can
             // infer dimensions/seed/steps/etc. without a dedicated chain
             // row schema.
-            let synth = synth_generate_request(req, video);
+            let synth = req.synthetic_generate_request(video.format, video.frames, video.fps);
             crate::metadata_db::record_local_save(
                 std::path::Path::new(filename),
                 &synth,
@@ -614,59 +614,6 @@ fn encode_and_save(
     );
 
     Ok(())
-}
-
-/// Build a synthetic single-clip `GenerateRequest` from a normalised chain
-/// so the gallery metadata DB can record the stitched output with the
-/// existing row schema. Uses `stages[0]` for prompt + source image (the
-/// gallery row only has one prompt field — multi-prompt chains lose the
-/// continuation prompts in the DB, which is acceptable for v1).
-fn synth_generate_request(req: &ChainRequest, video: &VideoData) -> mold_core::GenerateRequest {
-    let first = req
-        .stages
-        .first()
-        .expect("run_chain callers must pass a normalised ChainRequest");
-    mold_core::GenerateRequest {
-        prompt: first.prompt.clone(),
-        negative_prompt: first.negative_prompt.clone(),
-        model: req.model.clone(),
-        width: req.width,
-        height: req.height,
-        steps: req.steps,
-        guidance: req.guidance,
-        seed: req.seed,
-        batch_size: 1,
-        output_format: Some(video.format),
-        embed_metadata: Some(false),
-        scheduler: None,
-        cfg_plus: None,
-        edit_images: None,
-        source_image: first.source_image.clone(),
-        strength: req.strength,
-        mask_image: None,
-        control_image: None,
-        control_model: None,
-        control_scale: 1.0,
-        expand: None,
-        original_prompt: None,
-        lora: None,
-        frames: Some(video.frames),
-        fps: Some(video.fps),
-        upscale_model: None,
-        gif_preview: false,
-        enable_audio: None,
-        audio_file: None,
-        audio_file_path: None,
-        source_video: None,
-        source_video_path: None,
-        keyframes: None,
-        pipeline: None,
-        loras: None,
-        retake_range: None,
-        spatial_upscale: None,
-        temporal_upscale: None,
-        placement: req.placement.clone(),
-    }
 }
 
 /// Per-stage metadata surfaced in the progress-bar label. Built once per
@@ -1176,89 +1123,6 @@ mod tests {
         assert_eq!(make(TransitionMode::Smooth).transition_tag, "smooth");
         assert_eq!(make(TransitionMode::Cut).transition_tag, "cut");
         assert_eq!(make(TransitionMode::Fade).transition_tag, "fade");
-    }
-
-    /// Regression: `run_chain` used to round-trip multi-stage requests
-    /// through `ChainInputs`, which collapsed everything into auto-expand
-    /// form and silently replicated `stages[0].prompt` across every
-    /// continuation. The gallery DB row (built by `synth_generate_request`)
-    /// should now carry the authored stage-0 prompt and source image
-    /// verbatim — and by construction, the caller has already preserved the
-    /// downstream per-stage data in the `ChainRequest` it hands us.
-    #[test]
-    fn synth_generate_request_reads_stages_zero() {
-        use mold_core::chain::{ChainStage, TransitionMode};
-        let req = ChainRequest {
-            model: "ltx-2-19b-distilled:fp8".into(),
-            stages: vec![
-                ChainStage {
-                    prompt: "stage zero prompt".into(),
-                    frames: 97,
-                    source_image: Some(vec![1, 2, 3, 4]),
-                    negative_prompt: Some("no cats".into()),
-                    seed_offset: None,
-                    transition: TransitionMode::Smooth,
-                    fade_frames: None,
-                    model: None,
-                    loras: vec![],
-                    references: vec![],
-                },
-                // A continuation stage with a DIFFERENT prompt and its own
-                // source image — the old lossy code would have dropped both
-                // and replicated stage-0's prompt. We're not asserting the
-                // continuation shows up in the synth row (v1 gallery schema
-                // only has one prompt field) — only that the stage-0 data
-                // isn't overwritten by something smeared from the request.
-                ChainStage {
-                    prompt: "stage one prompt".into(),
-                    frames: 97,
-                    source_image: Some(vec![9, 9, 9]),
-                    negative_prompt: None,
-                    seed_offset: None,
-                    transition: TransitionMode::Cut,
-                    fade_frames: None,
-                    model: None,
-                    loras: vec![],
-                    references: vec![],
-                },
-            ],
-            motion_tail_frames: 17,
-            width: 1216,
-            height: 704,
-            fps: 24,
-            seed: Some(42),
-            steps: 8,
-            guidance: 3.0,
-            strength: 1.0,
-            output_format: OutputFormat::Mp4,
-            placement: None,
-            prompt: None,
-            total_frames: None,
-            clip_frames: None,
-            source_image: None,
-            enable_audio: None,
-        };
-        let video = VideoData {
-            data: vec![],
-            format: OutputFormat::Mp4,
-            width: 1216,
-            height: 704,
-            frames: 190,
-            fps: 24,
-            thumbnail: vec![],
-            gif_preview: vec![],
-            has_audio: false,
-            duration_ms: None,
-            audio_sample_rate: None,
-            audio_channels: None,
-        };
-        let synth = super::synth_generate_request(&req, &video);
-        assert_eq!(synth.prompt, "stage zero prompt");
-        assert_eq!(synth.source_image.as_deref(), Some(&[1, 2, 3, 4][..]));
-        assert_eq!(synth.negative_prompt.as_deref(), Some("no cats"));
-        assert_eq!(synth.model, "ltx-2-19b-distilled:fp8");
-        assert_eq!(synth.seed, Some(42));
-        assert_eq!(synth.frames, Some(190));
     }
 
     /// Round-trip: a TOML-style script parsed into a ChainRequest should

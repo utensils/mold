@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MoldError, Result};
-use crate::types::{DevicePlacement, OutputFormat, VideoData};
+use crate::types::{DevicePlacement, GenerateRequest, OutputFormat, OutputMetadata, VideoData};
 
 /// How the boundary between the previous stage and this stage is rendered.
 ///
@@ -440,6 +440,87 @@ fn default_output_format() -> OutputFormat {
 pub const MAX_CHAIN_STAGES: usize = 16;
 
 impl ChainRequest {
+    /// Build a synthetic single-clip `GenerateRequest` describing the
+    /// stitched output, so gallery rows and embedded metadata can reuse
+    /// the existing single-clip schema. `stages[0]` supplies the prompt,
+    /// negative prompt, and source image (the row only has one prompt
+    /// field — continuation prompts are dropped, acceptable for v1).
+    ///
+    /// Callers must pass a normalised request (`stages` non-empty).
+    /// `actual_format` is the container after encode fallbacks (e.g. a
+    /// WebP request that fell back to APNG records APNG).
+    pub fn synthetic_generate_request(
+        &self,
+        actual_format: OutputFormat,
+        frames: u32,
+        fps: u32,
+    ) -> GenerateRequest {
+        let first = self
+            .stages
+            .first()
+            .expect("synthetic_generate_request requires a normalised ChainRequest");
+        GenerateRequest {
+            prompt: first.prompt.clone(),
+            negative_prompt: first.negative_prompt.clone(),
+            model: self.model.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps,
+            guidance: self.guidance,
+            seed: self.seed,
+            batch_size: 1,
+            output_format: Some(actual_format),
+            embed_metadata: Some(false),
+            scheduler: None,
+            cfg_plus: None,
+            edit_images: None,
+            source_image: first.source_image.clone(),
+            strength: self.strength,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: Some(frames),
+            fps: Some(fps),
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: self.enable_audio,
+            audio_file: None,
+            audio_file_path: None,
+            source_video: None,
+            source_video_path: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: self.placement.clone(),
+        }
+    }
+
+    /// Gallery/PNG metadata for the stitched chain output, derived from
+    /// [`Self::synthetic_generate_request`] via
+    /// `OutputMetadata::from_generate_request` so chain rows can never
+    /// drift from the single-clip metadata semantics (e.g. `strength` is
+    /// only recorded when the chain starts from a source image).
+    pub fn stitched_output_metadata(
+        &self,
+        actual_format: OutputFormat,
+        frame_count: u32,
+    ) -> OutputMetadata {
+        let synth = self.synthetic_generate_request(actual_format, frame_count, self.fps);
+        OutputMetadata::from_generate_request(
+            &synth,
+            self.seed.unwrap_or(0),
+            None,
+            crate::build_info::version_string(),
+        )
+    }
+
     /// Collapse the auto-expand form into a canonical `Vec<ChainStage>` and
     /// validate the result. Called once on the server side immediately after
     /// JSON parsing, before any engine work kicks off.
@@ -1347,5 +1428,112 @@ mod tests {
             (TransitionMode::Fade, 97, Some(8)),
         ]);
         assert_eq!(req.estimated_total_frames(), 283);
+    }
+
+    /// Ported from the CLI's synth_generate_request regression test:
+    /// stage-0 prompt / source image / negative prompt must land in the
+    /// synthetic request verbatim, not smeared from the request level.
+    #[test]
+    fn synthetic_generate_request_reads_stages_zero() {
+        let mut req = auto_expand_request("stage zero prompt", 190, 97, 17, None);
+        req.stages = vec![
+            ChainStage {
+                prompt: "stage zero prompt".into(),
+                frames: 97,
+                source_image: Some(vec![1, 2, 3, 4]),
+                negative_prompt: Some("no cats".into()),
+                seed_offset: None,
+                transition: TransitionMode::Smooth,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            },
+            ChainStage {
+                prompt: "stage one prompt".into(),
+                frames: 97,
+                source_image: Some(vec![9, 9, 9]),
+                negative_prompt: None,
+                seed_offset: None,
+                transition: TransitionMode::Cut,
+                fade_frames: None,
+                model: None,
+                loras: vec![],
+                references: vec![],
+            },
+        ];
+        req.prompt = None;
+        req.total_frames = None;
+        req.clip_frames = None;
+
+        let synth = req.synthetic_generate_request(OutputFormat::Mp4, 190, 24);
+        assert_eq!(synth.prompt, "stage zero prompt");
+        assert_eq!(synth.source_image.as_deref(), Some(&[1, 2, 3, 4][..]));
+        assert_eq!(synth.negative_prompt.as_deref(), Some("no cats"));
+        assert_eq!(synth.model, "ltx-2-19b-distilled:fp8");
+        assert_eq!(synth.seed, Some(42));
+        assert_eq!(synth.frames, Some(190));
+        assert_eq!(synth.enable_audio, None);
+    }
+
+    /// The recorded output_format must be the ACTUAL post-fallback
+    /// container, not the requested one (a WebP request that fell back to
+    /// APNG previously recorded WebP on the server path).
+    #[test]
+    fn stitched_metadata_records_actual_format_after_fallback() {
+        let req = auto_expand_request("p", 190, 97, 17, None)
+            .normalise()
+            .unwrap();
+        let meta = req.stitched_output_metadata(OutputFormat::Apng, 190);
+        assert_eq!(meta.output_format, Some(OutputFormat::Apng));
+        assert_eq!(meta.frames, Some(190));
+        assert_eq!(meta.fps, Some(24));
+    }
+
+    /// `strength` is only meaningful when the chain starts from a source
+    /// image — text-to-video chains must not record a phantom strength
+    /// (the server copies previously wrote Some(strength) unconditionally).
+    #[test]
+    fn stitched_metadata_strength_only_for_img2img_start() {
+        let txt2vid = auto_expand_request("p", 190, 97, 17, None)
+            .normalise()
+            .unwrap();
+        assert_eq!(
+            txt2vid
+                .stitched_output_metadata(OutputFormat::Mp4, 190)
+                .strength,
+            None
+        );
+
+        let img2vid = auto_expand_request("p", 190, 97, 17, Some(vec![1, 2, 3]))
+            .normalise()
+            .unwrap();
+        assert_eq!(
+            img2vid
+                .stitched_output_metadata(OutputFormat::Mp4, 190)
+                .strength,
+            Some(1.0)
+        );
+    }
+
+    /// Field-parity guard: the stitched metadata must agree with a
+    /// hand-derived from_generate_request over the same synthetic request,
+    /// so future OutputMetadata fields can't silently diverge.
+    #[test]
+    fn stitched_metadata_matches_from_generate_request() {
+        let req = auto_expand_request("p", 190, 97, 17, None)
+            .normalise()
+            .unwrap();
+        let synth = req.synthetic_generate_request(OutputFormat::Mp4, 190, req.fps);
+        let expected = OutputMetadata::from_generate_request(
+            &synth,
+            req.seed.unwrap_or(0),
+            None,
+            crate::build_info::version_string(),
+        );
+        assert_eq!(
+            req.stitched_output_metadata(OutputFormat::Mp4, 190),
+            expected
+        );
     }
 }
