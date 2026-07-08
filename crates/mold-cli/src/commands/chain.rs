@@ -302,77 +302,30 @@ async fn run_chain_local(
     eager: bool,
     offload: bool,
 ) -> Result<VideoData> {
-    use mold_core::manifest::find_manifest;
-    use mold_core::ModelPaths;
-    use mold_inference::LoadStrategy;
+    use super::local_engine::{build_local_engine, resolve_or_pull_model, EngineOverrides};
 
     // Normalise so we have expanded stages locally too.
     let req = chain_req.clone().normalise()?;
 
-    // Apply encoder-variant overrides before constructing the engine so the
-    // factory's auto-select picks them up.
-    apply_local_engine_env_overrides(
-        t5_variant_override.as_deref(),
-        qwen3_variant_override.as_deref(),
-        qwen2_variant_override.as_deref(),
-        qwen2_text_encoder_mode_override.as_deref(),
-    );
-
     let model_name = req.model.clone();
 
-    // Ensure the model is pulled + config rows are in place.
-    let (paths, effective_config) = if let Some(p) = ModelPaths::resolve(&model_name, config) {
-        (p, config.clone())
-    } else if find_manifest(&model_name).is_some() {
-        crate::output::status!(
-            "{} Model '{}' not found locally, pulling...",
-            theme::icon_info(),
-            model_name.bold(),
-        );
-        let updated = super::pull::pull_and_configure(
-            &model_name,
-            &mold_core::download::PullOptions::default(),
-        )
-        .await?;
-        let p = ModelPaths::resolve(&model_name, &updated).ok_or_else(|| {
-            anyhow::anyhow!("model '{model_name}' was pulled but paths could not be resolved")
-        })?;
-        (p, updated)
-    } else {
-        anyhow::bail!(
-            "no model paths configured for '{model_name}'. Add [models.{model_name}] \
-             to ~/.mold/config.toml or pull via `mold pull {model_name}`."
-        );
-    };
+    // Ensure the model is pulled + config rows are in place (also runs the
+    // missing-assets repair pull the single-clip path gets).
+    let (paths, effective_config, _pulled) = resolve_or_pull_model(&model_name, config).await?;
 
-    let is_eager = eager || std::env::var("MOLD_EAGER").is_ok_and(|v| v == "1");
-    let load_strategy = if is_eager {
-        LoadStrategy::Eager
-    } else {
-        LoadStrategy::Sequential
-    };
-    if is_eager {
-        std::env::set_var("MOLD_EAGER", "1");
-    }
-    let is_offload = offload || std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
-
-    let gpu_selection = match &gpus {
-        Some(s) => mold_core::types::GpuSelection::parse(s)?,
-        None => effective_config.gpu_selection(),
-    };
-    let discovered = mold_inference::device::discover_gpus();
-    let available = mold_inference::device::filter_gpus(&discovered, &gpu_selection);
-    let gpu_ordinal = mold_inference::device::select_best_gpu(&available)
-        .map(|g| g.ordinal)
-        .unwrap_or(0);
-
-    let mut engine = mold_inference::create_engine(
-        model_name,
+    let mut engine = build_local_engine(
+        &model_name,
         paths,
         &effective_config,
-        load_strategy,
-        gpu_ordinal,
-        is_offload,
+        &EngineOverrides {
+            gpus,
+            t5_variant: t5_variant_override,
+            qwen3_variant: qwen3_variant_override,
+            qwen2_variant: qwen2_variant_override,
+            qwen2_text_encoder_mode: qwen2_text_encoder_mode_override,
+            eager,
+            offload,
+        },
     )?;
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChainProgressEvent>();
@@ -448,27 +401,6 @@ async fn run_chain_local(
     let result = handle.await??;
     let _ = render.await;
     Ok(result)
-}
-
-#[cfg(any(feature = "cuda", feature = "metal"))]
-fn apply_local_engine_env_overrides(
-    t5_variant: Option<&str>,
-    qwen3_variant: Option<&str>,
-    qwen2_variant: Option<&str>,
-    qwen2_text_encoder_mode: Option<&str>,
-) {
-    if let Some(v) = t5_variant {
-        std::env::set_var("MOLD_T5_VARIANT", v);
-    }
-    if let Some(v) = qwen3_variant {
-        std::env::set_var("MOLD_QWEN3_VARIANT", v);
-    }
-    if let Some(v) = qwen2_variant {
-        std::env::set_var("MOLD_QWEN2_VARIANT", v);
-    }
-    if let Some(v) = qwen2_text_encoder_mode {
-        std::env::set_var("MOLD_QWEN2_TEXT_ENCODER_MODE", v);
-    }
 }
 
 /// Encode stitched frames to the requested container via the shared

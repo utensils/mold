@@ -189,27 +189,6 @@ fn refit_request_after_pull(
     Ok(())
 }
 
-#[cfg(any(feature = "cuda", feature = "metal", test))]
-fn apply_local_engine_env_overrides(
-    t5_variant_override: Option<&str>,
-    qwen3_variant_override: Option<&str>,
-    qwen2_variant_override: Option<&str>,
-    qwen2_text_encoder_mode_override: Option<&str>,
-) {
-    if let Some(variant) = t5_variant_override {
-        std::env::set_var("MOLD_T5_VARIANT", variant);
-    }
-    if let Some(variant) = qwen3_variant_override {
-        std::env::set_var("MOLD_QWEN3_VARIANT", variant);
-    }
-    if let Some(variant) = qwen2_variant_override {
-        std::env::set_var("MOLD_QWEN2_VARIANT", variant);
-    }
-    if let Some(mode) = qwen2_text_encoder_mode_override {
-        std::env::set_var("MOLD_QWEN2_TEXT_ENCODER_MODE", mode);
-    }
-}
-
 pub struct Ltx2Options {
     pub frames: Option<u32>,
     pub fps: Option<u32>,
@@ -1071,39 +1050,19 @@ async fn prepare_local_engine(
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
 ) -> Result<(GenerateRequest, Box<dyn mold_inference::InferenceEngine>)> {
-    use mold_core::manifest::find_manifest;
-    use mold_core::{validate_generate_request, ModelPaths};
-    use mold_inference::LoadStrategy;
+    use super::local_engine::{build_local_engine, resolve_or_pull_model, EngineOverrides};
+    use mold_core::validate_generate_request;
 
     let model_name = req.model.clone();
-    let (paths, auto_config);
-    let effective_config: &Config;
     let mut req = req.clone();
-    if config.manifest_model_needs_download(&model_name) {
-        status!(
-            "{} Model '{}' is missing local assets, pulling repair...",
-            theme::icon_info(),
-            model_name.bold(),
-        );
-        let updated_config = super::pull::pull_and_configure(
-            &model_name,
-            &mold_core::download::PullOptions::default(),
-        )
-        .await?;
-        paths = ModelPaths::resolve(&model_name, &updated_config).ok_or_else(|| {
-            anyhow::anyhow!(
-                "model '{}' was pulled but paths could not be resolved",
-                model_name,
-            )
-        })?;
-        auto_config = updated_config;
-        effective_config = &auto_config;
 
+    let (paths, effective_config, pulled) = resolve_or_pull_model(&model_name, config).await?;
+    if pulled {
         let model_cfg = effective_config.resolved_model_config(&model_name);
-        let family = resolve_family(&model_name, effective_config);
+        let family = resolve_family(&model_name, &effective_config);
         refit_request_after_pull(
             &mut req,
-            effective_config,
+            &effective_config,
             &model_cfg,
             family.as_deref(),
             cli_width,
@@ -1118,97 +1077,24 @@ async fn prepare_local_engine(
             req.height,
             req.steps,
             req.guidance,
-        );
-    } else if let Some(p) = ModelPaths::resolve(&model_name, config) {
-        paths = p;
-        effective_config = config;
-    } else if find_manifest(&model_name).is_some() {
-        status!(
-            "{} Model '{}' not found locally, pulling...",
-            theme::icon_info(),
-            model_name.bold(),
-        );
-        let updated_config = super::pull::pull_and_configure(
-            &model_name,
-            &mold_core::download::PullOptions::default(),
-        )
-        .await?;
-        paths = ModelPaths::resolve(&model_name, &updated_config).ok_or_else(|| {
-            anyhow::anyhow!(
-                "model '{}' was pulled but paths could not be resolved",
-                model_name,
-            )
-        })?;
-        auto_config = updated_config;
-        effective_config = &auto_config;
-
-        let model_cfg = effective_config.resolved_model_config(&model_name);
-        let family = resolve_family(&model_name, effective_config);
-        refit_request_after_pull(
-            &mut req,
-            effective_config,
-            &model_cfg,
-            family.as_deref(),
-            cli_width,
-            cli_height,
-            cli_steps,
-            cli_guidance,
-        )?;
-        status!(
-            "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
-            theme::icon_info(),
-            req.width,
-            req.height,
-            req.steps,
-            req.guidance,
-        );
-    } else {
-        anyhow::bail!(
-            "no model paths configured for '{}'. Add [models.{}] to ~/.mold/config.toml \
-             or set MOLD_TRANSFORMER_PATH / MOLD_VAE_PATH / MOLD_T5_PATH / MOLD_CLIP_PATH \
-             / MOLD_T5_TOKENIZER_PATH / MOLD_CLIP_TOKENIZER_PATH env vars.",
-            model_name,
-            model_name,
         );
     }
 
     validate_generate_request(&req).map_err(|e| anyhow::anyhow!(e))?;
 
-    apply_local_engine_env_overrides(
-        t5_variant_override.as_deref(),
-        qwen3_variant_override.as_deref(),
-        qwen2_variant_override.as_deref(),
-        qwen2_text_encoder_mode_override.as_deref(),
-    );
-    let is_eager = eager || std::env::var("MOLD_EAGER").is_ok_and(|v| v == "1");
-    let load_strategy = if is_eager {
-        LoadStrategy::Eager
-    } else {
-        LoadStrategy::Sequential
-    };
-    if is_eager {
-        std::env::set_var("MOLD_EAGER", "1");
-    }
-    let is_offload = offload || std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
-
-    // Select the best GPU from the allowed set (most free VRAM).
-    let gpu_selection = match &gpus {
-        Some(s) => mold_core::types::GpuSelection::parse(s)?,
-        None => config.gpu_selection(),
-    };
-    let discovered = mold_inference::device::discover_gpus();
-    let available = mold_inference::device::filter_gpus(&discovered, &gpu_selection);
-    let gpu_ordinal = mold_inference::device::select_best_gpu(&available)
-        .map(|g| g.ordinal)
-        .unwrap_or(0);
-
-    let engine = mold_inference::create_engine(
-        model_name,
+    let engine = build_local_engine(
+        &model_name,
         paths,
-        effective_config,
-        load_strategy,
-        gpu_ordinal,
-        is_offload,
+        &effective_config,
+        &EngineOverrides {
+            gpus,
+            t5_variant: t5_variant_override,
+            qwen3_variant: qwen3_variant_override,
+            qwen2_variant: qwen2_variant_override,
+            qwen2_text_encoder_mode: qwen2_text_encoder_mode_override,
+            eager,
+            offload,
+        },
     )?;
     Ok((req, engine))
 }
@@ -1801,7 +1687,6 @@ fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::ENV_LOCK;
     use mold_core::ModelConfig;
 
     #[test]
@@ -2178,38 +2063,6 @@ mod tests {
         validate_cli_batch_for_family(Some("qwen-image-edit"), 1).unwrap();
         validate_cli_batch_for_family(Some("flux"), 4).unwrap();
         validate_cli_batch_for_family(None, 4).unwrap();
-    }
-
-    #[test]
-    fn apply_local_engine_env_overrides_sets_qwen2_overrides() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_variant = std::env::var("MOLD_QWEN2_VARIANT").ok();
-        let prior_mode = std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE").ok();
-
-        std::env::remove_var("MOLD_QWEN2_VARIANT");
-        std::env::remove_var("MOLD_QWEN2_TEXT_ENCODER_MODE");
-
-        apply_local_engine_env_overrides(None, None, Some("q6"), Some("cpu-stage"));
-
-        assert_eq!(
-            std::env::var("MOLD_QWEN2_VARIANT").ok().as_deref(),
-            Some("q6")
-        );
-        assert_eq!(
-            std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE")
-                .ok()
-                .as_deref(),
-            Some("cpu-stage")
-        );
-
-        match prior_variant {
-            Some(value) => std::env::set_var("MOLD_QWEN2_VARIANT", value),
-            None => std::env::remove_var("MOLD_QWEN2_VARIANT"),
-        }
-        match prior_mode {
-            Some(value) => std::env::set_var("MOLD_QWEN2_TEXT_ENCODER_MODE", value),
-            None => std::env::remove_var("MOLD_QWEN2_TEXT_ENCODER_MODE"),
-        }
     }
 
     #[test]
