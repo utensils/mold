@@ -16,6 +16,45 @@ pub struct VideoMetadata {
     pub fps: u32,
 }
 
+impl VideoMetadata {
+    /// Canonical form for the shared PNG chunk writer, so APNG output
+    /// carries the same composite `mold:parameters` block still images do.
+    fn to_output_metadata(&self) -> mold_core::OutputMetadata {
+        mold_core::OutputMetadata {
+            prompt: self.prompt.clone(),
+            negative_prompt: None,
+            original_prompt: None,
+            model: self.model.clone(),
+            seed: self.seed,
+            steps: self.steps,
+            guidance: self.guidance,
+            width: self.width,
+            height: self.height,
+            strength: None,
+            scheduler: None,
+            output_format: Some(mold_core::OutputFormat::Apng),
+            cfg_plus: None,
+            lora: None,
+            lora_scale: None,
+            loras: None,
+            control_model: None,
+            control_scale: None,
+            upscale_model: None,
+            gif_preview: None,
+            enable_audio: None,
+            audio_file_path: None,
+            source_video_path: None,
+            pipeline: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            frames: Some(self.frames),
+            fps: Some(self.fps),
+            version: mold_core::build_info::version_string(),
+        }
+    }
+}
+
 /// Encode a sequence of RGB frames into an animated GIF.
 ///
 /// Uses per-frame NeuQuant palette quantization (256 colors).
@@ -83,15 +122,7 @@ pub fn encode_apng(
         encoder.set_frame_delay(1, fps as u16)?;
 
         if let Some(meta) = metadata {
-            encoder.add_itxt_chunk("mold:prompt".to_string(), meta.prompt.clone())?;
-            encoder.add_itxt_chunk("mold:model".to_string(), meta.model.clone())?;
-            encoder.add_text_chunk("mold:seed".to_string(), meta.seed.to_string())?;
-            encoder.add_text_chunk("mold:steps".to_string(), meta.steps.to_string())?;
-            encoder.add_text_chunk("mold:guidance".to_string(), meta.guidance.to_string())?;
-            encoder.add_text_chunk("mold:width".to_string(), meta.width.to_string())?;
-            encoder.add_text_chunk("mold:height".to_string(), meta.height.to_string())?;
-            encoder.add_text_chunk("mold:frames".to_string(), meta.frames.to_string())?;
-            encoder.add_text_chunk("mold:fps".to_string(), meta.fps.to_string())?;
+            crate::image::add_metadata_chunks(&mut encoder, &meta.to_output_metadata())?;
         }
 
         let mut writer = encoder
@@ -674,6 +705,43 @@ mod tests {
     #[test]
     fn apng_empty_frames_rejected() {
         assert!(encode_apng(&[], 24, None).is_err());
+    }
+
+    /// APNG output must carry the same composite `mold:parameters` iTXt
+    /// block still images get — the gallery reconcile path reads it back
+    /// via `read_png_metadata`, so a partial per-field-chunks-only embed
+    /// silently loses prompt/model/seed on import.
+    #[test]
+    fn apng_embeds_full_mold_parameters_block() {
+        let frames = test_frames(64, 64, 2);
+        let meta = VideoMetadata {
+            prompt: "a stoic owl".to_string(),
+            model: "ltx-video".to_string(),
+            seed: 42,
+            steps: 30,
+            guidance: 3.0,
+            width: 64,
+            height: 64,
+            frames: 2,
+            fps: 10,
+        };
+        let data = encode_apng(&frames, 10, Some(&meta)).unwrap();
+
+        let decoder = png::Decoder::new(std::io::Cursor::new(&data));
+        let reader = decoder.read_info().unwrap();
+        let params = reader
+            .info()
+            .utf8_text
+            .iter()
+            .find(|c| c.keyword == "mold:parameters")
+            .expect("mold:parameters iTXt chunk missing from APNG");
+        let parsed: mold_core::OutputMetadata =
+            serde_json::from_str(&params.get_text().unwrap()).unwrap();
+        assert_eq!(parsed.prompt, "a stoic owl");
+        assert_eq!(parsed.model, "ltx-video");
+        assert_eq!(parsed.seed, 42);
+        assert_eq!(parsed.frames, Some(2));
+        assert_eq!(parsed.fps, Some(10));
     }
 
     #[test]
