@@ -7,25 +7,9 @@ use mold_core::manifest::visible_manifests;
 use mold_core::Config;
 use serde_json::json;
 
+use crate::fs_util::dir_stats;
 use crate::theme;
 use crate::ui::format_bytes;
-
-/// Count files and total bytes in a directory (recursive, no symlink following).
-fn dir_stats(path: &Path) -> (u64, u64) {
-    let mut files = 0u64;
-    let mut bytes = 0u64;
-    for entry in walkdir::WalkDir::new(path)
-        .follow_links(false)
-        .into_iter()
-        .flatten()
-    {
-        if entry.file_type().is_file() {
-            files += 1;
-            bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
-        }
-    }
-    (files, bytes)
-}
 
 /// Count only image files in a directory (recursive).
 fn count_images(path: &Path) -> u64 {
