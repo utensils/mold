@@ -402,8 +402,9 @@
                   ${pkgs.darwin.cctools}/bin/install_name_tool \
                     -change "$ref" /usr/lib/libiconv.2.dylib "$app_bin"
                 done
-                # sigtool-backed codesign shim on the darwin stdenv PATH
-                codesign -f -s - "$app_bin"
+                # install_name_tool invalidates the ad-hoc signature; re-sign
+                # with the sigtool codesign shim (sandbox has no Apple codesign).
+                ${pkgs.darwin.sigtool}/bin/codesign -f -s - "$app_bin"
                 if ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" | grep -q "/nix/store"; then
                   echo "mold-desktop still references /nix/store dylibs:" >&2
                   ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" >&2
