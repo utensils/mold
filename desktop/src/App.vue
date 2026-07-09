@@ -5,9 +5,11 @@ import TitleBar from "./components/shell/TitleBar.vue";
 import NavRail from "./components/shell/NavRail.vue";
 import BenchRail from "./components/shell/BenchRail.vue";
 import { resolveShellShortcut } from "./lib/shortcuts";
+import { useConnectionStore } from "./stores/connection";
 
 const router = useRouter();
 const sidebarOpen = ref(true);
+const connection = useConnectionStore();
 
 function onKeydown(e: KeyboardEvent) {
   const action = resolveShellShortcut(e);
@@ -20,6 +22,7 @@ function onKeydown(e: KeyboardEvent) {
 
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
+  void connection.init();
   // The window starts hidden (tauri.conf.json visible:false) to avoid a
   // white flash; reveal it once the shell has mounted. No-op in a browser.
   if ("__TAURI_INTERNALS__" in window) {

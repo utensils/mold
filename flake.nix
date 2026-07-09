@@ -833,7 +833,7 @@
                   ${desktopSetup}
                   cd desktop
                   bun install --frozen-lockfile
-                  cargo tauri dev "$@"
+                  cargo tauri dev --features metal "$@"
                 '';
               }
               {
@@ -849,7 +849,7 @@
                   fi
                   cd desktop
                   bun install --frozen-lockfile
-                  cargo tauri build "$@"
+                  cargo tauri build --features metal "$@"
                 '';
               }
               {

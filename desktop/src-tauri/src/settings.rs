@@ -20,6 +20,8 @@ pub enum ConnectionMode {
 pub struct AppSettings {
     pub mode: ConnectionMode,
     pub remote_url: Option<String>,
+    /// TODO(M6): move to the macOS Keychain via `keyring` (secrets.rs).
+    pub remote_api_key: Option<String>,
     pub last_route: Option<String>,
 }
 
@@ -61,6 +63,7 @@ mod tests {
         let settings = AppSettings {
             mode: ConnectionMode::Remote,
             remote_url: Some("http://studio.local:7680".into()),
+            remote_api_key: Some("k".into()),
             last_route: Some("/gallery".into()),
         };
         save(&path, &settings).unwrap();
