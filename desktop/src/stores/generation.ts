@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { apiFetch, ApiError } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import type { CompleteEvent, GenerateRequest, ProgressEvent } from "../lib/api/types";
 import type { DevelopPhase } from "../lib/develop/grain";
@@ -142,6 +143,8 @@ export const useGenerationStore = defineStore("generation", {
     /** Every job in the current batch (length 1 for a single generation). */
     siblings: [] as Job[],
     abort: null as AbortController | null,
+    /** Set by cancel(): the batch loop stops before starting the next sibling. */
+    cancelRequested: false,
   }),
   actions: {
     /**
@@ -154,12 +157,38 @@ export const useGenerationStore = defineStore("generation", {
       const baseSeed = resolveBaseSeed(req.seed);
       const plans = planBatchRequests(req, size, baseSeed);
       this.resetJobs();
+      this.cancelRequested = false;
       for (const plan of plans) {
+        if (this.cancelRequested) break;
         const job = this.startJob(plan);
         this.siblings.push(job);
         await this.streamJob(job, plan);
       }
       return this.siblings;
+    },
+    /**
+     * Cancel the in-flight generation (⌘.): asks the server to drop the job
+     * from its queue when it hasn't started (DELETE /api/queue/:id — running
+     * jobs answer 409 and are left to finish), aborts the client stream, and
+     * stops remaining batch siblings.
+     */
+    async cancel(): Promise<void> {
+      this.cancelRequested = true;
+      const job = this.active;
+      if (job && job.id && (job.status === "queued" || job.status === "loading")) {
+        try {
+          await apiFetch(`/api/queue/${encodeURIComponent(job.id)}`, { method: "DELETE" });
+        } catch (err) {
+          // 409 = already running: server-side compute continues; 404 = it
+          // already left the queue. Either way the client stops listening.
+          if (!(err instanceof ApiError && (err.status === 409 || err.status === 404))) throw err;
+        }
+      }
+      this.cancelStream();
+      if (job && job.status !== "complete" && job.status !== "error") {
+        job.status = "error";
+        job.error = "Cancelled";
+      }
     },
     /** Single generation — a batch of one. */
     async generate(req: GenerateRequest): Promise<Job> {

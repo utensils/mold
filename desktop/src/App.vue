@@ -7,10 +7,14 @@ import BenchRail from "./components/shell/BenchRail.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import { resolveShellShortcut } from "./lib/shortcuts";
 import { useConnectionStore } from "./stores/connection";
+import { useGenerationStore } from "./stores/generation";
+import { useToastStore } from "./stores/toasts";
 
 const router = useRouter();
 const sidebarOpen = ref(true);
 const connection = useConnectionStore();
+const generation = useGenerationStore();
+const toasts = useToastStore();
 
 function onKeydown(e: KeyboardEvent) {
   const action = resolveShellShortcut(e);
@@ -18,7 +22,13 @@ function onKeydown(e: KeyboardEvent) {
   e.preventDefault();
   if (action.kind === "navigate") void router.push(action.route);
   else if (action.kind === "toggle-sidebar") sidebarOpen.value = !sidebarOpen.value;
-  // command-palette lands with the ⌘K work in M3.
+  else if (action.kind === "cancel-job") {
+    const job = generation.active;
+    if (job && job.status !== "complete" && job.status !== "error") {
+      void generation.cancel().then(() => toasts.push("Cancelled"));
+    }
+  }
+  // command-palette lands with the ⌘K work in a later milestone.
 }
 
 onMounted(async () => {

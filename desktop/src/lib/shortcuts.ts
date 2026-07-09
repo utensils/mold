@@ -14,7 +14,10 @@ export const NAV_ROUTES: Readonly<Record<string, string>> = {
 };
 
 export type ShellAction =
-  { kind: "navigate"; route: string } | { kind: "toggle-sidebar" } | { kind: "command-palette" };
+  | { kind: "navigate"; route: string }
+  | { kind: "toggle-sidebar" }
+  | { kind: "command-palette" }
+  | { kind: "cancel-job" };
 
 export interface KeyLike {
   key: string;
@@ -31,5 +34,6 @@ export function resolveShellShortcut(e: KeyLike): ShellAction | null {
   if (route) return { kind: "navigate", route };
   if (e.key === "\\") return { kind: "toggle-sidebar" };
   if (e.key === "k") return { kind: "command-palette" };
+  if (e.key === ".") return { kind: "cancel-job" };
   return null;
 }

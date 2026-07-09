@@ -25,6 +25,10 @@ describe("resolveShellShortcut", () => {
     expect(resolveShellShortcut(key("k"))).toEqual({ kind: "command-palette" });
   });
 
+  it("maps ⌘. to cancel the focused job", () => {
+    expect(resolveShellShortcut(key("."))).toEqual({ kind: "cancel-job" });
+  });
+
   it("ignores keys without ⌘ or with extra modifiers", () => {
     expect(resolveShellShortcut(key("1", { metaKey: false }))).toBeNull();
     expect(resolveShellShortcut(key("1", { shiftKey: true }))).toBeNull();
