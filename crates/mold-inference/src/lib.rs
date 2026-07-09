@@ -53,3 +53,25 @@ pub use sdxl::SDXLEngine;
 pub use upscaler::{create_upscale_engine, UpscaleEngine};
 pub use wuerstchen::WuerstchenEngine;
 pub use zimage::ZImageEngine;
+
+/// Compile-time acceleration backend label for provenance columns
+/// (gallery DB rows, embedded metadata). Lives here because the
+/// `cuda`/`metal` features are defined on this crate and forwarded by
+/// every binary, so feature unification guarantees one answer per build.
+pub fn compiled_backend_label() -> &'static str {
+    if cfg!(feature = "cuda") {
+        "cuda"
+    } else if cfg!(feature = "metal") {
+        "metal"
+    } else {
+        "cpu"
+    }
+}
+
+#[cfg(test)]
+mod backend_label_tests {
+    #[test]
+    fn backend_label_is_a_known_backend() {
+        assert!(["cuda", "metal", "cpu"].contains(&super::compiled_backend_label()));
+    }
+}

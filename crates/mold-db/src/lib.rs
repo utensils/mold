@@ -10,13 +10,15 @@
 pub mod chain_jobs;
 pub mod config_sync;
 mod db;
-mod metadata_io;
+pub mod metadata_io;
 pub mod migrations;
 mod model_prefs;
 mod path;
+pub mod persist;
 mod prompt_history;
 mod reconcile;
 mod record;
+pub mod scan;
 pub mod settings;
 
 pub use db::MetadataDb;

@@ -142,25 +142,51 @@ fn validate_cli_batch_for_family(family: Option<&str>, batch: u32) -> Result<()>
     Ok(())
 }
 
+/// Re-derive request defaults after an auto-pull refreshed the model
+/// config. `cli_*` carry the user's explicit flags — `None` means the
+/// field was defaulted at request-build time and must now track the
+/// refreshed model defaults. Reuses `effective_dimensions`, so img2img
+/// sources are re-fit to the refreshed canvas and qwen-image-edit sizes
+/// from its first edit image.
 #[cfg(any(feature = "cuda", feature = "metal", test))]
-fn apply_local_engine_env_overrides(
-    t5_variant_override: Option<&str>,
-    qwen3_variant_override: Option<&str>,
-    qwen2_variant_override: Option<&str>,
-    qwen2_text_encoder_mode_override: Option<&str>,
-) {
-    if let Some(variant) = t5_variant_override {
-        std::env::set_var("MOLD_T5_VARIANT", variant);
+#[allow(clippy::too_many_arguments)]
+fn refit_request_after_pull(
+    req: &mut GenerateRequest,
+    config: &Config,
+    model_cfg: &mold_core::ModelConfig,
+    family: Option<&str>,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
+) -> Result<()> {
+    if cli_width.is_none() && cli_height.is_none() {
+        let (w, h) = effective_dimensions(
+            config,
+            model_cfg,
+            family,
+            None,
+            None,
+            req.source_image.as_deref(),
+            req.edit_images.as_deref(),
+        )?;
+        req.width = w;
+        req.height = h;
+    } else {
+        if cli_width.is_none() {
+            req.width = model_cfg.effective_width(config);
+        }
+        if cli_height.is_none() {
+            req.height = model_cfg.effective_height(config);
+        }
     }
-    if let Some(variant) = qwen3_variant_override {
-        std::env::set_var("MOLD_QWEN3_VARIANT", variant);
+    if cli_steps.is_none() {
+        req.steps = model_cfg.effective_steps(config);
     }
-    if let Some(variant) = qwen2_variant_override {
-        std::env::set_var("MOLD_QWEN2_VARIANT", variant);
+    if cli_guidance.is_none() {
+        req.guidance = model_cfg.effective_guidance();
     }
-    if let Some(mode) = qwen2_text_encoder_mode_override {
-        std::env::set_var("MOLD_QWEN2_TEXT_ENCODER_MODE", mode);
-    }
+    Ok(())
 }
 
 pub struct Ltx2Options {
@@ -242,19 +268,13 @@ pub async fn run(
     let ctx = CliContext::new(host.as_deref());
     let mut config = ctx.config().clone();
     // Catalog bridge: when the user passed `cv:<id>` / `hf:<author>/<name>`,
-    // synthesise a `ModelConfig` and inject it into `config.models` so the
-    // downstream `ModelPaths::resolve` and engine factory accept it. This
-    // mirrors what `resolve_run_args` does in the run command — but the
-    // run command and `generate::run` each load their own `Config`
-    // (via `CliContext::new`), so the synthesis must run on this side
-    // too. Best-effort; failures fall through to the standard "unknown
-    // model" path.
-    // For `cv:<id>` / `hf:<repo>` inputs, hit the live HF/Civitai catalog
-    // and inject a synthesized `ModelConfig` into `config.models`. Best-effort;
-    // failures fall through to the standard "unknown model" path.
-    if crate::catalog_bridge::looks_like_catalog_id(model) {
-        let _ = crate::catalog_bridge::install_catalog_model_live(&mut config, model).await;
-    }
+    // resolve it (sidecar-first, then live) and inject the synthesized
+    // `ModelConfig` into `config.models` so the downstream
+    // `ModelPaths::resolve` and engine factory accept it. A no-op for
+    // non-catalog model names. Catalog lookup failures now surface here
+    // rather than being swallowed and re-reported as a generic "unknown
+    // model" downstream.
+    crate::catalog_bridge::ensure_catalog_model(&mut config, model).await?;
     // `--no-metadata` is an opt-out override, so we only pass `Some(false)` when set.
     // Otherwise we defer to env/config/default precedence inside Config.
     let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
@@ -696,19 +716,13 @@ pub async fn run(
                     None
                 }
                 Some(ref path) => Some(path.clone()),
-                None => {
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    Some(default_filename(
-                        model,
-                        timestamp,
-                        video.format.extension(),
-                        1,
-                        0,
-                    ))
-                }
+                None => Some(default_filename(
+                    model,
+                    mold_core::time::now_epoch_ms_u64(),
+                    video.format.extension(),
+                    1,
+                    0,
+                )),
             };
             if let Some(ref filename) = filename {
                 if std::path::Path::new(filename).exists() {
@@ -730,6 +744,7 @@ pub async fn run(
                     response.seed_used,
                     response.generation_time_ms,
                     video.format,
+                    Some((video.width, video.height)),
                 );
             }
             if preview {
@@ -1029,65 +1044,26 @@ async fn prepare_local_engine(
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
 ) -> Result<(GenerateRequest, Box<dyn mold_inference::InferenceEngine>)> {
-    use mold_core::manifest::find_manifest;
-    use mold_core::{validate_generate_request, ModelPaths};
-    use mold_inference::LoadStrategy;
+    use super::local_engine::{build_local_engine, resolve_or_pull_model, EngineOverrides};
+    use mold_core::validate_generate_request;
 
     let model_name = req.model.clone();
-    let (paths, auto_config);
-    let effective_config: &Config;
     let mut req = req.clone();
-    if config.manifest_model_needs_download(&model_name) {
-        status!(
-            "{} Model '{}' is missing local assets, pulling repair...",
-            theme::icon_info(),
-            model_name.bold(),
-        );
-        let updated_config = super::pull::pull_and_configure(
-            &model_name,
-            &mold_core::download::PullOptions::default(),
-        )
-        .await?;
-        paths = ModelPaths::resolve(&model_name, &updated_config).ok_or_else(|| {
-            anyhow::anyhow!(
-                "model '{}' was pulled but paths could not be resolved",
-                model_name,
-            )
-        })?;
-        auto_config = updated_config;
-        effective_config = &auto_config;
 
+    let (paths, effective_config, pulled) = resolve_or_pull_model(&model_name, config).await?;
+    if pulled {
         let model_cfg = effective_config.resolved_model_config(&model_name);
-        let new_model_w = model_cfg.effective_width(effective_config);
-        let new_model_h = model_cfg.effective_height(effective_config);
-        if cli_width.is_none() && cli_height.is_none() {
-            if let Some(src_bytes) = &req.source_image {
-                // img2img with auto-pull: fit source to newly-discovered model defaults
-                if let Ok(img) = image::load_from_memory(src_bytes) {
-                    let (w, h) = fit_to_model_dimensions(
-                        img.width(),
-                        img.height(),
-                        new_model_w,
-                        new_model_h,
-                    );
-                    req.width = w;
-                    req.height = h;
-                }
-            }
-        } else {
-            if cli_width.is_none() {
-                req.width = new_model_w;
-            }
-            if cli_height.is_none() {
-                req.height = new_model_h;
-            }
-        }
-        if cli_steps.is_none() {
-            req.steps = model_cfg.effective_steps(effective_config);
-        }
-        if cli_guidance.is_none() {
-            req.guidance = model_cfg.effective_guidance();
-        }
+        let family = resolve_family(&model_name, &effective_config);
+        refit_request_after_pull(
+            &mut req,
+            &effective_config,
+            &model_cfg,
+            family.as_deref(),
+            cli_width,
+            cli_height,
+            cli_steps,
+            cli_guidance,
+        )?;
         status!(
             "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
             theme::icon_info(),
@@ -1095,116 +1071,24 @@ async fn prepare_local_engine(
             req.height,
             req.steps,
             req.guidance,
-        );
-    } else if let Some(p) = ModelPaths::resolve(&model_name, config) {
-        paths = p;
-        effective_config = config;
-    } else if find_manifest(&model_name).is_some() {
-        status!(
-            "{} Model '{}' not found locally, pulling...",
-            theme::icon_info(),
-            model_name.bold(),
-        );
-        let updated_config = super::pull::pull_and_configure(
-            &model_name,
-            &mold_core::download::PullOptions::default(),
-        )
-        .await?;
-        paths = ModelPaths::resolve(&model_name, &updated_config).ok_or_else(|| {
-            anyhow::anyhow!(
-                "model '{}' was pulled but paths could not be resolved",
-                model_name,
-            )
-        })?;
-        auto_config = updated_config;
-        effective_config = &auto_config;
-
-        let model_cfg = effective_config.resolved_model_config(&model_name);
-        let new_model_w = model_cfg.effective_width(effective_config);
-        let new_model_h = model_cfg.effective_height(effective_config);
-        if cli_width.is_none() && cli_height.is_none() {
-            if let Some(src_bytes) = &req.source_image {
-                // img2img with auto-pull: fit source to newly-discovered model defaults
-                if let Ok(img) = image::load_from_memory(src_bytes) {
-                    let (w, h) = fit_to_model_dimensions(
-                        img.width(),
-                        img.height(),
-                        new_model_w,
-                        new_model_h,
-                    );
-                    req.width = w;
-                    req.height = h;
-                }
-            }
-        } else {
-            if cli_width.is_none() {
-                req.width = new_model_w;
-            }
-            if cli_height.is_none() {
-                req.height = new_model_h;
-            }
-        }
-        if cli_steps.is_none() {
-            req.steps = model_cfg.effective_steps(effective_config);
-        }
-        if cli_guidance.is_none() {
-            req.guidance = model_cfg.effective_guidance();
-        }
-        status!(
-            "{} Updated defaults: {}x{} ({} steps, guidance {:.1})",
-            theme::icon_info(),
-            req.width,
-            req.height,
-            req.steps,
-            req.guidance,
-        );
-    } else {
-        anyhow::bail!(
-            "no model paths configured for '{}'. Add [models.{}] to ~/.mold/config.toml \
-             or set MOLD_TRANSFORMER_PATH / MOLD_VAE_PATH / MOLD_T5_PATH / MOLD_CLIP_PATH \
-             / MOLD_T5_TOKENIZER_PATH / MOLD_CLIP_TOKENIZER_PATH env vars.",
-            model_name,
-            model_name,
         );
     }
 
     validate_generate_request(&req).map_err(|e| anyhow::anyhow!(e))?;
 
-    apply_local_engine_env_overrides(
-        t5_variant_override.as_deref(),
-        qwen3_variant_override.as_deref(),
-        qwen2_variant_override.as_deref(),
-        qwen2_text_encoder_mode_override.as_deref(),
-    );
-    let is_eager = eager || std::env::var("MOLD_EAGER").is_ok_and(|v| v == "1");
-    let load_strategy = if is_eager {
-        LoadStrategy::Eager
-    } else {
-        LoadStrategy::Sequential
-    };
-    if is_eager {
-        std::env::set_var("MOLD_EAGER", "1");
-    }
-    let is_offload = offload || std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
-
-    // Select the best GPU from the allowed set (most free VRAM).
-    let gpu_selection = match &gpus {
-        Some(s) => mold_core::types::GpuSelection::parse(s)?,
-        None => config.gpu_selection(),
-    };
-    let discovered = mold_inference::device::discover_gpus();
-    let available = mold_inference::device::filter_gpus(&discovered, &gpu_selection);
-    let gpu_ordinal = mold_inference::device::select_best_gpu(&available)
-        .map(|g| g.ordinal)
-        .unwrap_or(0);
-
-    let engine = mold_inference::create_engine(
-        model_name,
+    let engine = build_local_engine(
+        &model_name,
         paths,
-        effective_config,
-        load_strategy,
-        gpu_ordinal,
-        is_offload,
+        &effective_config,
+        &EngineOverrides {
+            gpus,
+            t5_variant: t5_variant_override,
+            qwen3_variant: qwen3_variant_override,
+            qwen2_variant: qwen2_variant_override,
+            qwen2_text_encoder_mode: qwen2_text_encoder_mode_override,
+            eager,
+            offload,
+        },
     )?;
     Ok((req, engine))
 }
@@ -1493,12 +1377,14 @@ fn save_and_preview_image(
                 .into_owned()
         }
         None => {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
             let ext = output_format.to_string();
-            default_filename(model, timestamp, &ext, batch, img.index)
+            default_filename(
+                model,
+                mold_core::time::now_epoch_ms_u64(),
+                &ext,
+                batch,
+                img.index,
+            )
         }
     };
 
@@ -1514,6 +1400,7 @@ fn save_and_preview_image(
             p.seed_used,
             p.generation_time_ms,
             output_format,
+            Some((img.width, img.height)),
         );
     }
     if preview {
@@ -1794,7 +1681,6 @@ fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::ENV_LOCK;
     use mold_core::ModelConfig;
 
     #[test]
@@ -2047,6 +1933,96 @@ mod tests {
             .contains("requires at least one input image"));
     }
 
+    fn refit_req(width: u32, height: u32, source_image: Option<Vec<u8>>) -> GenerateRequest {
+        let mut req: GenerateRequest = serde_json::from_str(
+            r#"{
+                "prompt":"p",
+                "model":"flux-dev:q4",
+                "width":0,
+                "height":0,
+                "steps":50,
+                "guidance":1.0
+            }"#,
+        )
+        .unwrap();
+        req.width = width;
+        req.height = height;
+        req.source_image = source_image;
+        req
+    }
+
+    /// After an auto-pull refreshes the model config, an img2img request
+    /// whose dimensions were defaulted must be re-fit to the refreshed
+    /// model canvas (this used to be two copy-pasted blocks inside
+    /// prepare_local_engine).
+    #[test]
+    fn refit_request_after_pull_fits_source_after_autopull() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(1024),
+            default_steps: Some(8),
+            default_guidance: Some(3.5),
+            ..ModelConfig::default()
+        };
+        let source = png_with_dimensions(1280, 704);
+        let mut req = refit_req(512, 512, Some(source));
+
+        refit_request_after_pull(&mut req, &config, &model_cfg, None, None, None, None, None)
+            .unwrap();
+        // Same fit as effective_dimensions: width-limited 1024, 560.
+        assert_eq!((req.width, req.height), (1024, 560));
+        assert_eq!(req.steps, 8);
+        assert_eq!(req.guidance, 3.5);
+    }
+
+    /// Explicit CLI flags always win over refreshed model defaults.
+    #[test]
+    fn refit_keeps_explicit_cli_dims_and_params() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(1024),
+            default_steps: Some(8),
+            default_guidance: Some(3.5),
+            ..ModelConfig::default()
+        };
+        let mut req = refit_req(640, 480, None);
+        req.steps = 12;
+        req.guidance = 7.0;
+
+        refit_request_after_pull(
+            &mut req,
+            &config,
+            &model_cfg,
+            None,
+            Some(640),
+            Some(480),
+            Some(12),
+            Some(7.0),
+        )
+        .unwrap();
+        assert_eq!((req.width, req.height), (640, 480));
+        assert_eq!(req.steps, 12);
+        assert_eq!(req.guidance, 7.0);
+    }
+
+    /// txt2img with defaulted dims re-derives from the refreshed model
+    /// defaults (previously left at the pre-pull values).
+    #[test]
+    fn refit_rederives_txt2img_dims_from_refreshed_defaults() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1216),
+            default_height: Some(704),
+            ..ModelConfig::default()
+        };
+        let mut req = refit_req(1024, 1024, None);
+        refit_request_after_pull(&mut req, &config, &model_cfg, None, None, None, None, None)
+            .unwrap();
+        assert_eq!((req.width, req.height), (1216, 704));
+    }
+
     #[test]
     fn effective_negative_prompt_injects_space_for_qwen_image_edit_cfg() {
         assert_eq!(
@@ -2081,38 +2057,6 @@ mod tests {
         validate_cli_batch_for_family(Some("qwen-image-edit"), 1).unwrap();
         validate_cli_batch_for_family(Some("flux"), 4).unwrap();
         validate_cli_batch_for_family(None, 4).unwrap();
-    }
-
-    #[test]
-    fn apply_local_engine_env_overrides_sets_qwen2_overrides() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_variant = std::env::var("MOLD_QWEN2_VARIANT").ok();
-        let prior_mode = std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE").ok();
-
-        std::env::remove_var("MOLD_QWEN2_VARIANT");
-        std::env::remove_var("MOLD_QWEN2_TEXT_ENCODER_MODE");
-
-        apply_local_engine_env_overrides(None, None, Some("q6"), Some("cpu-stage"));
-
-        assert_eq!(
-            std::env::var("MOLD_QWEN2_VARIANT").ok().as_deref(),
-            Some("q6")
-        );
-        assert_eq!(
-            std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE")
-                .ok()
-                .as_deref(),
-            Some("cpu-stage")
-        );
-
-        match prior_variant {
-            Some(value) => std::env::set_var("MOLD_QWEN2_VARIANT", value),
-            None => std::env::remove_var("MOLD_QWEN2_VARIANT"),
-        }
-        match prior_mode {
-            Some(value) => std::env::set_var("MOLD_QWEN2_TEXT_ENCODER_MODE", value),
-            None => std::env::remove_var("MOLD_QWEN2_TEXT_ENCODER_MODE"),
-        }
     }
 
     #[test]

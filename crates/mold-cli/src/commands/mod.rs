@@ -12,6 +12,7 @@ pub mod info;
 pub mod jobs;
 pub mod lambda;
 pub mod list;
+pub(crate) mod local_engine;
 pub mod mcp;
 pub mod ps;
 pub mod pull;

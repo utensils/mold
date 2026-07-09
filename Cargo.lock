@@ -3122,6 +3122,7 @@ name = "mold-ai-db"
 version = "0.14.0"
 dependencies = [
  "anyhow",
+ "hostname",
  "image",
  "mold-ai-core",
  "png 0.17.16",
@@ -3208,7 +3209,6 @@ dependencies = [
  "mold-ai-db",
  "mold-ai-inference",
  "nvml-wrapper",
- "png 0.18.1",
  "rust-embed",
  "serde",
  "serde_json",
@@ -3243,7 +3243,6 @@ dependencies = [
  "mold-ai-db",
  "mold-ai-inference",
  "open",
- "png 0.18.1",
  "rand 0.8.5",
  "ratatui",
  "ratatui-image",
@@ -3257,7 +3256,6 @@ dependencies = [
  "tui-textarea",
  "unicode-width 0.2.0",
  "ureq",
- "walkdir",
 ]
 
 [[package]]

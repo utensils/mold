@@ -1644,17 +1644,7 @@ fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
 }
 
 fn human_bytes(b: u64) -> String {
-    const K: f64 = 1024.0;
-    let f = b as f64;
-    if f < K {
-        format!("{b}B")
-    } else if f < K * K {
-        format!("{:.1}K", f / K)
-    } else if f < K * K * K {
-        format!("{:.1}M", f / (K * K))
-    } else {
-        format!("{:.1}G", f / (K * K * K))
-    }
+    mold_core::format::human_bytes_compact(b)
 }
 
 fn extension_for_video(fmt: mold_core::OutputFormat) -> &'static str {
@@ -2302,23 +2292,6 @@ mod tests {
             WaitOutcome::Cancelled => {}
             WaitOutcome::Failed(_) => {}
         };
-    }
-
-    #[test]
-    fn human_bytes_picks_the_right_unit_at_each_threshold() {
-        // Sub-KiB → bare bytes.
-        assert_eq!(human_bytes(0), "0B");
-        assert_eq!(human_bytes(1), "1B");
-        assert_eq!(human_bytes(1023), "1023B");
-        // KiB.
-        assert_eq!(human_bytes(1024), "1.0K");
-        assert_eq!(human_bytes(1536), "1.5K");
-        // MiB.
-        assert_eq!(human_bytes(1024 * 1024), "1.0M");
-        assert_eq!(human_bytes(5 * 1024 * 1024), "5.0M");
-        // GiB.
-        assert_eq!(human_bytes(1024u64.pow(3)), "1.0G");
-        assert_eq!(human_bytes(5_368_709_120), "5.0G");
     }
 
     #[test]

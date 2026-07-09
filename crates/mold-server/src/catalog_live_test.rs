@@ -523,3 +523,72 @@ async fn install_catalog_model_returns_network_error_when_civitai_unreachable() 
         "got {err:?}"
     );
 }
+
+/// Pins the exact `/api/catalog/installed` entry wire shape. Written
+/// against the original ad-hoc `serde_json::json!` payload before the
+/// shared `mold_core::catalog_wire::InstalledCatalogEntry` struct took
+/// over serialization — the SPA and older CLIs depend on every key
+/// (including explicit nulls) being present.
+#[test]
+fn sidecar_to_wire_shape_is_pinned() {
+    let sc = CatalogSidecar {
+        schema: 1,
+        id: "cv:99".into(),
+        source: "civitai".into(),
+        source_id: "99".into(),
+        name: "Pinned Lora".into(),
+        author: Some("alice".into()),
+        family: "flux".into(),
+        family_role: "finetune".into(),
+        sub_family: Some("dev".into()),
+        kind: "lora".into(),
+        modality: "image".into(),
+        thumbnail_url: Some("https://example.com/t.png".into()),
+        size_bytes: Some(123_456),
+        engine_phase: 3,
+        trained_words: vec!["trigger".into()],
+        primary_filename_rel: "lora.safetensors".into(),
+        written_at: 1_700_000_000,
+    };
+    let got = serde_json::to_value(crate::catalog_api::sidecar_to_wire(
+        sc,
+        true,
+        Some("/models/cv-99/lora.safetensors".into()),
+    ))
+    .unwrap();
+    let expected = serde_json::json!({
+        "id": "cv:99",
+        "source": "civitai",
+        "source_id": "99",
+        "name": "Pinned Lora",
+        "author": "alice",
+        "family": "flux",
+        "family_role": "finetune",
+        "sub_family": "dev",
+        "modality": "image",
+        "kind": "lora",
+        "file_format": "safetensors",
+        "bundling": "single-file",
+        "size_bytes": 123456,
+        "download_count": 0,
+        "rating": null,
+        "likes": 0,
+        "nsfw": false,
+        "thumbnail_url": "https://example.com/t.png",
+        "description": null,
+        "license": null,
+        "license_flags": null,
+        "tags": [],
+        "companions": [],
+        "companion_details": [],
+        "download_recipe": { "files": [], "needs_token": null },
+        "engine_phase": 3,
+        "installed": true,
+        "primary_path": "/models/cv-99/lora.safetensors",
+        "created_at": null,
+        "updated_at": null,
+        "added_at": 1_700_000_000,
+        "trained_words": ["trigger"],
+    });
+    assert_eq!(got, expected);
+}

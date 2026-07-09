@@ -101,7 +101,7 @@ pub fn preview_gif_path(source: &Path) -> PathBuf {
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| source.to_string_lossy().to_string());
-    preview_dir().join(format!("{key}.preview.gif"))
+    preview_dir().join(mold_core::media_paths::preview_gif_filename(&key))
 }
 
 /// Check if a GIF preview exists for the given source.

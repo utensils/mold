@@ -2,6 +2,7 @@ mod catalog_bridge;
 mod commands;
 mod control;
 mod errors;
+mod fs_util;
 mod metadata_db;
 mod output;
 mod procinfo;

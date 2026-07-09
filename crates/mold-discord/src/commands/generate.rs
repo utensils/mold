@@ -296,18 +296,16 @@ fn resolve_default_model(models: &[mold_core::ModelInfoExtended]) -> String {
 /// abuse.
 const MAX_SOURCE_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Snap `(w, h)` to multiples of 16 (FLUX patch / LTX tile constraint) while
-/// keeping the aspect ratio roughly intact and staying inside `[16, max_dim]`.
-/// Used to derive img2img dimensions from a Discord attachment's reported
+/// Derive img2img dimensions from a Discord attachment's reported
 /// width/height when the user didn't supply explicit values — otherwise the
 /// server would `resize_exact` a landscape photo into a square default.
-pub fn snap_dims_to_multiple_of_16(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
-    let clamp = |v: u32| -> u32 {
-        let capped = v.min(max_dim.max(16));
-        let rounded = ((capped + 8) / 16) * 16;
-        rounded.max(16)
-    };
-    (clamp(w), clamp(h))
+/// Fits the source into the model's default canvas via the shared
+/// aspect-preserving, 16px-aligned helper used by the CLI and server.
+fn fit_attachment_dims(w: u32, h: u32, defaults: Option<&mold_core::ModelDefaults>) -> (u32, u32) {
+    let (model_w, model_h) = defaults
+        .map(|d| (d.default_width, d.default_height))
+        .unwrap_or((1024, 1024));
+    mold_core::fit_to_model_dimensions(w, h, model_w, model_h)
 }
 
 /// Download an attachment and sanity-check that it looks like a PNG or JPEG
@@ -431,10 +429,7 @@ pub async fn generate(
                 source_image.as_ref().and_then(|a| a.height),
             ) {
                 (Some(w), Some(h)) => {
-                    let max_dim = model_defaults
-                        .map(|d| d.default_width.max(d.default_height))
-                        .unwrap_or(1024);
-                    let (sw, sh) = snap_dims_to_multiple_of_16(w, h, max_dim);
+                    let (sw, sh) = fit_attachment_dims(w, h, model_defaults);
                     (Some(sw), Some(sh))
                 }
                 _ => (width, height),
@@ -751,18 +746,32 @@ mod tests {
         );
     }
 
-    // --- snap_dims ---
+    // --- attachment dims ---
+
+    fn defaults_1024() -> mold_core::ModelDefaults {
+        mold_core::ModelDefaults {
+            default_steps: 4,
+            default_guidance: 3.5,
+            default_width: 1024,
+            default_height: 1024,
+            description: String::new(),
+        }
+    }
 
     #[test]
-    fn snap_dims_rounds_to_multiples_of_16() {
-        assert_eq!(snap_dims_to_multiple_of_16(1000, 1000, 1024), (1008, 1008));
-        assert_eq!(snap_dims_to_multiple_of_16(1920, 1080, 1024), (1024, 1024));
-        assert_eq!(snap_dims_to_multiple_of_16(777, 513, 1024), (784, 512));
-        // Under the multiple-of-16 floor
-        assert_eq!(snap_dims_to_multiple_of_16(3, 5, 1024), (16, 16));
-        // Landscape aspect preserved roughly
-        let (w, h) = snap_dims_to_multiple_of_16(800, 600, 1024);
-        assert_eq!((w, h), (800, 608));
+    fn fit_attachment_dims_preserves_aspect_ratio() {
+        let d = defaults_1024();
+        // Landscape photo is no longer squashed to a square.
+        assert_eq!(fit_attachment_dims(1920, 1080, Some(&d)), (1024, 576));
+        // Portrait keeps its orientation.
+        assert_eq!(fit_attachment_dims(1080, 1920, Some(&d)), (576, 1024));
+        // Square source fills the model's native square.
+        assert_eq!(fit_attachment_dims(1000, 1000, Some(&d)), (1024, 1024));
+        // Missing defaults fall back to a 1024x1024 canvas.
+        assert_eq!(fit_attachment_dims(1920, 1080, None), (1024, 576));
+        // Output always lands on the 16px grid.
+        let (w, h) = fit_attachment_dims(777, 513, Some(&d));
+        assert_eq!((w % 16, h % 16), (0, 0));
     }
 
     // --- autocomplete ranking ---

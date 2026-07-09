@@ -209,13 +209,13 @@ impl MoldClient {
             .send()
             .await?
             .error_for_status()?
-            .json::<InstalledCatalogResponse>()
+            .json::<crate::catalog_wire::InstalledCatalogResponse>()
             .await?;
         let family = family.as_deref();
         let mut loras = resp
             .entries
             .into_iter()
-            .filter_map(InstalledCatalogEntry::into_lora_info)
+            .filter_map(installed_entry_into_lora_info)
             .filter(|lora| family.is_none_or(|family| lora.family == family))
             .collect::<Vec<_>>();
         loras.sort_by(|a, b| {
@@ -944,45 +944,24 @@ impl MoldClient {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct InstalledCatalogResponse {
-    entries: Vec<InstalledCatalogEntry>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct InstalledCatalogEntry {
-    id: String,
-    name: String,
-    family: String,
-    author: Option<String>,
-    primary_path: Option<String>,
-    #[serde(default)]
-    trained_words: Vec<String>,
-    size_bytes: Option<u64>,
-    thumbnail_url: Option<String>,
-    added_at: i64,
-    #[serde(default)]
-    installed: bool,
-    kind: String,
-}
-
-impl InstalledCatalogEntry {
-    fn into_lora_info(self) -> Option<LoraInfo> {
-        if self.kind != "lora" || !self.installed {
-            return None;
-        }
-        Some(LoraInfo {
-            id: self.id,
-            name: self.name,
-            family: self.family,
-            author: self.author,
-            path: self.primary_path?,
-            trained_words: self.trained_words,
-            size_bytes: self.size_bytes,
-            thumbnail_url: self.thumbnail_url,
-            added_at: self.added_at,
-        })
+/// Client policy: which installed-catalog entries surface as usable LoRAs.
+fn installed_entry_into_lora_info(
+    entry: crate::catalog_wire::InstalledCatalogEntry,
+) -> Option<LoraInfo> {
+    if entry.kind != "lora" || !entry.installed {
+        return None;
     }
+    Some(LoraInfo {
+        id: entry.id,
+        name: entry.name,
+        family: entry.family,
+        author: entry.author,
+        path: entry.primary_path?,
+        trained_words: entry.trained_words,
+        size_bytes: entry.size_bytes,
+        thumbnail_url: entry.thumbnail_url,
+        added_at: entry.added_at,
+    })
 }
 
 fn should_fallback_loras_endpoint(err: &anyhow::Error) -> bool {

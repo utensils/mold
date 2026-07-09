@@ -7,26 +7,9 @@ use mold_core::manifest::{find_manifest, resolve_model_name, ModelComponent};
 use mold_core::{build_model_catalog, Config, ModelPaths, MoldClient};
 use sha2::{Digest, Sha256};
 
+use crate::fs_util::dir_stats;
 use crate::theme;
 use crate::ui::{col_width, format_disk_size, format_family, format_family_padded};
-
-/// Count files and total bytes in a directory (recursive, no symlink following).
-/// Avoids double-counting symlinked HF cache blobs.
-fn dir_stats(path: &std::path::Path) -> (u64, u64) {
-    let mut files = 0u64;
-    let mut bytes = 0u64;
-    for entry in walkdir::WalkDir::new(path)
-        .follow_links(false)
-        .into_iter()
-        .flatten()
-    {
-        if entry.file_type().is_file() {
-            files += 1;
-            bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
-        }
-    }
-    (files, bytes)
-}
 
 fn compute_sha256(path: &str) -> Result<String> {
     use std::io::Read;

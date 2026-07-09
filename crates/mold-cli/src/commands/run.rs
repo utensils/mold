@@ -49,7 +49,7 @@ fn resolve_run_args(
             return Ok((resolve_model_name(first), prompt));
         }
 
-        // Catalog ID short-circuit: the async pre-pass (`install_catalog_model_live`)
+        // Catalog ID short-circuit: the async pre-pass (`ensure_catalog_model`)
         // already inserted a synthesized ModelConfig into `config.models` for
         // `cv:<id>` / `hf:<author>/<name>` inputs. Catalog IDs are their own
         // canonical name (not run through `resolve_model_name`), since they
@@ -550,12 +550,11 @@ pub async fn run(
     let mut config = Config::load_or_default();
 
     // Async catalog ID pre-pass: if the user typed `cv:<id>` / `hf:<repo>`,
-    // resolve it via live HF/Civitai and inject the synthesized ModelConfig
-    // into config.models before the (sync) resolve_run_args below picks it up.
+    // resolve it (sidecar-first, then live) and inject the synthesized
+    // ModelConfig into config.models before the (sync) resolve_run_args below
+    // picks it up. A no-op for non-catalog first positionals (e.g. a prompt).
     if let Some(first) = model_or_prompt.as_deref() {
-        if crate::catalog_bridge::looks_like_catalog_id(first) {
-            crate::catalog_bridge::install_catalog_model_live(&mut config, first).await?;
-        }
+        crate::catalog_bridge::ensure_catalog_model(&mut config, first).await?;
     }
 
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &mut config)?;

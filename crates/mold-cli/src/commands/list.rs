@@ -21,6 +21,8 @@ fn description_with_gated(desc: &str, model_name: &str) -> String {
     result
 }
 
+/// Fixed-GB padded column with a dimmed "cached" zero state. Presentational
+/// one-off — general flavors live in `mold_core::format`.
 fn format_fetch_size(remaining_bytes: u64) -> String {
     if remaining_bytes == 0 {
         format!("{:>7}", "cached").dimmed().to_string()

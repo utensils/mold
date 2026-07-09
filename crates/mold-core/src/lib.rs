@@ -1,5 +1,6 @@
 pub mod build_info;
 pub mod catalog;
+pub mod catalog_wire;
 pub mod chain;
 pub mod chain_job;
 pub mod chain_toml;
@@ -10,11 +11,14 @@ pub mod download;
 pub mod error;
 pub mod expand;
 pub mod expand_prompts;
+pub mod format;
 pub mod install_error;
 pub mod lambda;
 pub mod manifest;
 pub mod media_paths;
 pub mod runpod;
+pub mod safetensors_probe;
+pub mod time;
 pub mod types;
 pub mod validation;
 

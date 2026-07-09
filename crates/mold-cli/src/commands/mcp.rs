@@ -951,16 +951,7 @@ fn progress_summary(event: &SseProgressEvent) -> String {
 }
 
 fn human_bytes(bytes: u64) -> String {
-    const MIB: f64 = 1024.0 * 1024.0;
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    let bytes = bytes as f64;
-    if bytes >= GIB {
-        format!("{:.1} GiB", bytes / GIB)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes / MIB)
-    } else {
-        format!("{} B", bytes as u64)
-    }
+    mold_core::format::human_bytes(bytes)
 }
 
 fn prompt_preview(prompt: &str) -> String {

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mold run --local` chains now run the missing-assets repair pull.** The local chain path shares the single-clip model resolve/pull preamble, so a model with deleted or corrupted component files is repaired automatically instead of failing at engine load.
+- **Chain-output gallery metadata is now consistent between CLI and server.** All three chain-metadata builders collapse onto `ChainRequest::stitched_output_metadata`. Two server-side fixes fall out: the recorded `output_format` is the actual post-fallback container (a WebP request that fell back to APNG previously recorded WebP), and `strength` is only recorded when the chain starts from a source image (text-to-video chains previously carried a phantom strength). CLI chain rows additionally gain the `enable_audio` flag.
+- **The server's filesystem gallery fallback now reads embedded GIF metadata** (it previously synthesized placeholder rows for GIFs), via the same shared readers reconcile uses.
+- **Gallery reconcile now recovers embedded GIF metadata.** The GIF comment-extension parser previously lived only in the TUI; it is upstreamed into `mold-db`, so DB backfill imports GIFs with their real prompt/model/seed instead of synthesizing placeholder rows.
+- **APNG video outputs now embed the full `mold:parameters` metadata block.** APNG encoding previously wrote only a partial per-field chunk subset, so gallery reconcile could not recover prompt/model/seed from APNG files on import. APNG now shares the still-image PNG chunk writer (and gains `mold:frames`/`mold:fps` chunks alongside the composite JSON block).
+- **Discord img2img no longer distorts landscape/portrait attachments.** When deriving dimensions from a source-image attachment, the bot now uses the same aspect-preserving `fit_to_model_dimensions` helper as the CLI and server instead of independently clamping each axis — a 1920x1080 photo now generates at 1024x576 instead of being squashed to 1024x1024.
+
+### Changed
+
+- **The catalog `cv:`/`hf:` resolver is now a single shared implementation** in `mold-catalog` (`resolve::resolve_intent_to_model_config`), consumed by both `mold run` (CLI) and `mold serve` (server) instead of two hand-maintained copies that had begun to drift. Three behavior alignments fall out: the CLI's redundant single-file-only bail is gone (separated-bundling entries are still rejected, now solely by `synthesize_intent`, matching the server); an unknown family slug now surfaces a typed error instead of the server silently treating it as FLUX; and the stricter `te_`/`_txt.`/`text_encoder` auxiliary-primary guard (previously server-only) is now applied on the CLI side too. When a catalog companion can't be resolved to on-disk paths, the CLI's log-and-continue path now emits a `tracing::warn!` naming the skipped companion.
+- **`mold generate` now surfaces catalog-lookup failures** instead of swallowing them. The `cv:`/`hf:` catalog pre-pass in both `mold run` and `mold generate` is unified behind one `ensure_catalog_model` entry point; `generate` previously ignored its result (`let _ =`), so a failed live lookup was silently re-reported downstream as a generic "unknown model". A failed lookup for a catalog id now returns the specific error.
+- The FLUX bundled-VAE safetensors header probe (`flux_single_file_bundles_vae`) moved from `mold-inference` into `mold_core::safetensors_probe` so the catalog resolver can share it without depending on candle. The `mold_inference::loader` path is preserved via re-export.
+- **The TUI's fallback gallery walk (DB disabled) now matches the server gallery.** It applies the shared size/header/solid-black validity guards (corrupt or aborted outputs no longer show up as broken tiles), recovers embedded GIF metadata, and synthesizes proper model names and real raster dimensions for files without metadata instead of showing the raw file stem.
+- **CLI default output filenames now use millisecond timestamps**, matching what `mold serve` has always written (`mold-<model>-<epoch-ms>.<ext>` instead of `<epoch-secs>`). Scripts that pattern-match on 10-digit timestamps in CLI filenames should accept 13 digits.
+- CLI gallery rows now record the actual output dimensions (post-upscale) instead of the requested ones, matching server behavior.
+- Chain frame encoding is consolidated into a shared `mold-inference` encoder used by both `mold run --local` chains and the server chain routes. Two CLI-side gaps closed: the CLI now warns when chain audio is dropped on a WebP→APNG fallback, and a failed GIF-preview encode now prints a warning instead of being silently swallowed.
+- Byte-size formatting is consolidated into shared `mold_core::format` helpers. Two user-visible tweaks: `mold mcp` progress sizes now print decimal-style units ("1.0 GB" instead of "1.0 GiB") and gain a KB tier, and TUI download/weight progress sizes now show one decimal in the M/K tiers (e.g. "123.4M" instead of "123M").
+
 ## [0.14.0] - 2026-07-04
 
 ### Added

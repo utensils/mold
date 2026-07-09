@@ -10,6 +10,11 @@ use mold_core::{
 #[cfg(test)]
 use mold_inference::device::ActivationFamily;
 
+use mold_catalog::resolve::{
+    installed_intent_from_sidecar, looks_like_catalog_id, resolve_intent_to_model_config,
+    MissingCompanionPolicy, ResolveError, ResolveOptions,
+};
+
 use crate::model_cache::ModelResidency;
 use crate::{routes::ApiError, state::AppState};
 
@@ -46,8 +51,7 @@ pub(crate) fn resolve_installed_catalog_paths_for_worker(
         return Ok(None);
     }
 
-    let Some(intent) =
-        installed_catalog_intent_from_sidecar(&config.resolved_models_dir(), model_name)
+    let Some(intent) = installed_intent_from_sidecar(&config.resolved_models_dir(), model_name)
     else {
         return Ok(None);
     };
@@ -150,13 +154,10 @@ fn loaded_models_across_pool(state: &AppState) -> Vec<String> {
 
 // ── Catalog bridge ───────────────────────────────────────────────────────────
 //
-// Mirrors the logic in `mold-cli/src/catalog_bridge.rs` so the server can
-// resolve `cv:*` model IDs (Civitai single-file checkpoints downloaded via
-// the catalog web UI) without the binary crate as an intermediary.
-
-fn looks_like_catalog_id(id: &str) -> bool {
-    id.starts_with("cv:") || id.starts_with("hf:")
-}
+// The `cv:*` / `hf:*` resolution logic itself lives in the shared
+// `mold_catalog::resolve` module (consumed here and by `mold-cli`); this
+// section keeps only the server-specific orchestration (intent cache, live
+// install, API-error translation).
 
 /// Best-effort family lookup for a catalog (`cv:*` / `hf:*`) model name,
 /// used to feed `validate_generate_request_with_family` so catalog IDs
@@ -180,7 +181,7 @@ pub(crate) async fn catalog_family_for(state: &AppState, model_name: &str) -> Op
     if let Some(family) = config.models.get(model_name).and_then(|m| m.family.clone()) {
         return Some(family);
     }
-    installed_catalog_intent_from_sidecar(&config.resolved_models_dir(), model_name)
+    installed_intent_from_sidecar(&config.resolved_models_dir(), model_name)
         .map(|intent| intent.family)
 }
 
@@ -229,380 +230,26 @@ pub(crate) async fn activation_hint_for_request(
     Some(ActivationHint::from_request(req, &family))
 }
 
-fn copy_catalog_companion(cfg: &mut mold_core::ModelConfig, companion: &str, paths: &ModelPaths) {
-    let to_str = |p: &std::path::PathBuf| p.to_str().map(str::to_owned);
-    match companion {
-        "clip-l" => {
-            cfg.clip_encoder = to_str(&paths.transformer);
-            cfg.clip_tokenizer = paths.clip_tokenizer.as_ref().and_then(to_str);
-        }
-        "clip-g" => {
-            cfg.clip_encoder_2 = to_str(&paths.transformer);
-            cfg.clip_tokenizer_2 = paths
-                .clip_tokenizer
-                .as_ref()
-                .and_then(to_str)
-                .or_else(|| cfg.clip_tokenizer.clone());
-        }
-        "sdxl-vae" | "sd-vae-ft-mse" => {}
-        // Civitai FLUX fine-tune convention is split: some bundle the
-        // VAE in the same .safetensors as the transformer, some are
-        // transformer-only. `synthesize_catalog_config` peeks the
-        // header and clears cfg.vae for the transformer-only case;
-        // here we populate it from the companion's resolved path.
-        // When the bundle DID include a VAE, cfg.vae is already set
-        // to the primary checkpoint and we leave it alone — the
-        // bundled VAE wins, so the guarded arm doesn't fire and the
-        // catch-all (no-op) handles it.
-        "flux-vae" if cfg.vae.is_none() => {
-            cfg.vae = to_str(&paths.transformer);
-        }
-        "ltx-video-vae" | "flux2-vae" => {
-            cfg.vae = to_str(&paths.transformer);
-        }
-        "t5-v1_1-xxl" => {
-            cfg.t5_encoder = to_str(&paths.transformer);
-            cfg.t5_tokenizer = paths.t5_tokenizer.as_ref().and_then(to_str);
-        }
-        "z-image-te" | "flux2-te" | "flux2-te-9b" => {
-            if companion == "z-image-te" && cfg.vae.is_none() {
-                cfg.vae = to_str(&paths.vae);
-            }
-            if companion != "z-image-te" || cfg.text_encoder_files.is_none() {
-                cfg.text_encoder_files = paths
-                    .text_encoder_files
-                    .iter()
-                    .filter_map(to_str)
-                    .collect::<Vec<_>>()
-                    .into();
-            }
-            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_str);
-        }
-        "ltx2-te" => {
-            // Gemma 3 12B for LTX-2. The runtime calls `gemma_root` which
-            // takes the parent directory of `text_encoder_files[0]`, so
-            // populating that vec is sufficient — we don't need a separate
-            // `text_tokenizer` field (the manifest tags every Gemma file
-            // including `tokenizer.json` / `tokenizer.model` as
-            // ModelComponent::TextEncoder, so the tokenizer rides along).
-            cfg.text_encoder_files = paths
-                .text_encoder_files
-                .iter()
-                .filter_map(to_str)
-                .collect::<Vec<_>>()
-                .into();
-        }
-        "qwen-image-runtime" => {
-            cfg.vae = to_str(&paths.vae);
-            cfg.text_encoder_files = paths
-                .text_encoder_files
-                .iter()
-                .filter_map(to_str)
-                .collect::<Vec<_>>()
-                .into();
-            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_str);
-        }
-        "wuerstchen-runtime" => {
-            cfg.vae = to_str(&paths.vae);
-            cfg.decoder = paths.decoder.as_ref().and_then(to_str);
-            cfg.clip_encoder = paths.clip_encoder.as_ref().and_then(to_str);
-            cfg.clip_tokenizer = paths.clip_tokenizer.as_ref().and_then(to_str);
-            cfg.clip_encoder_2 = paths.clip_encoder_2.as_ref().and_then(to_str);
-            cfg.clip_tokenizer_2 = paths.clip_tokenizer_2.as_ref().and_then(to_str);
-        }
-        _ => {}
-    }
-}
-
-/// Errors from the disk-aware resolution stage that turns a pure
-/// `CatalogModelIntent` into a runtime `ModelConfig`.
-///
-/// Intent synthesis is pure; everything that depends on actual disk state
-/// — the FLUX VAE-bundle probe, companion path lookup, file existence —
-/// runs here and surfaces precise errors instead of silent partial state.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ResolveError {
-    /// A required companion's manifest entry isn't in the user's
-    /// `Config.models` map. This is a real config bug — the user hasn't
-    /// installed (or has a broken manifest entry for) a base model the
-    /// catalog entry depends on.
-    #[error(
-        "catalog model '{model}' is missing required component '{companion}'.\n\
-         The manifest entry for '{companion}' is not present in your config — \
-         install the matching base model first."
-    )]
-    CompanionConfigMissing {
-        model: String,
-        companion: &'static str,
-    },
-
-    /// A required companion's file isn't on disk yet. Transient — caller
-    /// hasn't finished `mold pull`-ing this entry. Tells the user
-    /// specifically which component is missing rather than the generic
-    /// "missing required components" pre-fix message.
-    #[error(
-        "catalog model '{model}' is missing required component '{companion}'.\n\
-         The companion file isn't on disk yet. Run `mold pull {model}` to fetch \
-         the primary checkpoint AND its companion files."
-    )]
-    CompanionFileMissing {
-        model: String,
-        companion: &'static str,
-    },
-
-    /// The catalog primary checkpoint is absent or only partially
-    /// downloaded. This is transient and should be repairable by
-    /// `mold pull <catalog-id>`.
-    #[error(
-        "catalog model '{model}' is missing its primary checkpoint.\n\
-         Run `mold pull {model}` to fetch or repair the primary checkpoint."
-    )]
-    PrimaryFileMissing { model: String },
-
-    /// The FLUX bundled-VAE probe couldn't be run (e.g. malformed
-    /// safetensors header). Surfaces the underlying inference-loader
-    /// error so the user can act.
-    #[error("probe of FLUX checkpoint {path} for bundled VAE failed: {source}")]
-    FluxProbeFailed {
-        path: String,
-        #[source]
-        source: anyhow::Error,
-    },
-}
-
-/// All companions emitted by `companions_for` are statically known
-/// names from the registry. We pin the resolution to the same
-/// `&'static str` so error messages can carry it without an allocation
-/// and the match in `copy_catalog_companion` never sees a typo.
-fn known_companion_static(name: &str) -> Option<&'static str> {
-    // The set is closed: any name in `companions_for` outputs maps here.
-    // Adding a new companion to the registry without a match arm here is
-    // a compile-time invitation to update both sides.
-    Some(match name {
-        "clip-l" => "clip-l",
-        "clip-g" => "clip-g",
-        "sdxl-vae" => "sdxl-vae",
-        "sd-vae-ft-mse" => "sd-vae-ft-mse",
-        "flux-vae" => "flux-vae",
-        "flux2-te" => "flux2-te",
-        "flux2-te-9b" => "flux2-te-9b",
-        "flux2-vae" => "flux2-vae",
-        "z-image-te" => "z-image-te",
-        "ltx-video-vae" => "ltx-video-vae",
-        "ltx2-te" => "ltx2-te",
-        "qwen-image-runtime" => "qwen-image-runtime",
-        "wuerstchen-runtime" => "wuerstchen-runtime",
-        "t5-v1_1-xxl" => "t5-v1_1-xxl",
-        _ => return None,
-    })
-}
-
-/// Disk-aware resolution: turn a pure `CatalogModelIntent` into a
-/// `ModelConfig` ready for engine load.
-///
-/// Runs the FLUX bundled-VAE probe (file must be on disk) and walks the
-/// required-companion list, populating the `ModelConfig` fields each
-/// companion contributes. Returns a [`ResolveError`] when a required
-/// companion can't be resolved — never silently returns a partial config.
+/// Server-side disk-aware resolution: turn a pure `CatalogModelIntent` into a
+/// runtime `ModelConfig`. The server fails hard on any missing required
+/// companion so the engine-load retry path can distinguish "still
+/// downloading" from "broken config", and requires the primary present.
+/// The resolution logic itself is the shared `mold_catalog::resolve`
+/// implementation (also consumed by `mold-cli`).
 pub(crate) fn resolve_intent_to_paths(
     model_name: &str,
     intent: &mold_catalog::synthesis::CatalogModelIntent,
     config: &mold_core::Config,
 ) -> Result<mold_core::ModelConfig, ResolveError> {
-    if !catalog_primary_is_complete(model_name, intent, config) {
-        return Err(ResolveError::PrimaryFileMissing {
-            model: model_name.to_string(),
-        });
-    }
-
-    let primary_str = intent
-        .primary_recipe_path
-        .to_str()
-        .expect("synthesize_intent guarantees UTF-8 paths")
-        .to_string();
-
-    let mut cfg = mold_core::ModelConfig {
-        family: Some(intent.family.clone()),
-        ..Default::default()
-    };
-    apply_catalog_runtime_defaults(&mut cfg, intent);
-    cfg.transformer = Some(primary_str.clone());
-
-    // FLUX is the only family with mixed bundling — peek the safetensors
-    // header to decide whether the primary file carries the VAE or
-    // whether the flux-vae companion has to populate cfg.vae.
-    let is_flux = intent.family == "flux";
-    let probe_says_bundled = if is_flux && intent.primary_recipe_path.exists() {
-        Some(
-            mold_inference::loader::flux_single_file_bundles_vae(&intent.primary_recipe_path)
-                .map_err(|e| ResolveError::FluxProbeFailed {
-                    path: intent.primary_recipe_path.display().to_string(),
-                    source: e.into(),
-                })?,
-        )
-    } else if is_flux {
-        // Primary not on disk yet — defer. The flux-vae companion (which
-        // is in the required list for FLUX) must populate cfg.vae below.
-        None
-    } else if mold_catalog::synthesis::family_bundles_vae_unconditionally(flux_family_for_slug(
-        &intent.family,
-    )) {
-        // SDXL / SD1.5 / LTX-2 always bundle the VAE.
-        Some(true)
-    } else {
-        // Flux.2 / Z-Image / LTX-Video always need a separate VAE companion.
-        Some(false)
-    };
-    if probe_says_bundled == Some(true) {
-        cfg.vae = Some(primary_str);
-    }
-    if let Some(vae_recipe_path) = &intent.vae_recipe_path {
-        cfg.vae = Some(
-            vae_recipe_path
-                .to_str()
-                .expect("synthesize_intent guarantees UTF-8 paths")
-                .to_string(),
-        );
-    }
-    if !intent.text_encoder_recipe_paths.is_empty() {
-        cfg.text_encoder_files = Some(
-            intent
-                .text_encoder_recipe_paths
-                .iter()
-                .map(|path| {
-                    path.to_str()
-                        .expect("synthesize_intent guarantees UTF-8 paths")
-                        .to_string()
-                })
-                .collect(),
-        );
-    }
-    // probe_says_bundled == Some(false) ⇒ leave cfg.vae None for the
-    // VAE-companion arm in copy_catalog_companion to fill. None case
-    // (FLUX, file not yet on disk) is the same: the companion fills
-    // cfg.vae if its own file is present, otherwise we surface
-    // CompanionFileMissing below.
-
-    let mut missing_required: Option<&'static str> = None;
-
-    for companion in &intent.companions {
-        let static_name =
-            known_companion_static(&companion.name).expect("companion name in registry");
-        match ModelPaths::resolve(static_name, config) {
-            Some(paths) => copy_catalog_companion(&mut cfg, static_name, &paths),
-            None => {
-                if companion.required {
-                    // Pin the first missing required companion; we keep
-                    // looping so the entire missing set could be logged
-                    // in future iterations, but the first one is what the
-                    // user-facing error reports.
-                    if missing_required.is_none() {
-                        missing_required = Some(static_name);
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(missing) = missing_required {
-        return Err(classify_missing_companion(model_name, missing, config));
-    }
-
-    Ok(cfg)
-}
-
-fn apply_catalog_runtime_defaults(
-    cfg: &mut mold_core::ModelConfig,
-    intent: &mold_catalog::synthesis::CatalogModelIntent,
-) {
-    let defaults = mold_catalog::defaults::runtime_defaults_for_family(
-        &intent.family,
-        intent.sub_family.as_deref(),
-    );
-    cfg.default_width.get_or_insert(defaults.width);
-    cfg.default_height.get_or_insert(defaults.height);
-    cfg.default_steps.get_or_insert(defaults.steps);
-    cfg.default_guidance.get_or_insert(defaults.guidance);
-    if let Some(is_schnell) = defaults.is_schnell {
-        cfg.is_schnell.get_or_insert(is_schnell);
-    }
-}
-
-fn catalog_primary_is_complete(
-    model_name: &str,
-    intent: &mold_catalog::synthesis::CatalogModelIntent,
-    config: &mold_core::Config,
-) -> bool {
-    if !intent.primary_recipe_path.is_file() {
-        return false;
-    }
-    if model_name.starts_with("cv:") {
-        let models_dir = config.resolved_models_dir();
-        let sc_path = mold_catalog::sidecar::civitai_sidecar_path(&models_dir, model_name);
-        if let Ok(sidecar) = mold_catalog::sidecar::read_sidecar(&sc_path) {
-            let Some(sidecar_dir) = sc_path.parent() else {
-                return false;
-            };
-            return mold_catalog::sidecar::primary_path_if_present(sidecar_dir, &sidecar).is_some();
-        }
-    }
-    true
-}
-
-fn flux_family_for_slug(slug: &str) -> mold_catalog::families::Family {
-    use mold_catalog::families::Family;
-    match slug {
-        "flux" => Family::Flux,
-        "flux2" => Family::Flux2,
-        "sd15" => Family::Sd15,
-        "sdxl" => Family::Sdxl,
-        "z-image" => Family::ZImage,
-        "ltx-video" => Family::LtxVideo,
-        "ltx2" => Family::Ltx2,
-        "qwen-image" => Family::QwenImage,
-        "wuerstchen" => Family::Wuerstchen,
-        // Defensive — synthesize_intent only emits known slugs.
-        _ => Family::Flux,
-    }
-}
-
-/// Decide whether a missing companion is "config bug" vs "file not yet
-/// downloaded". The catalog bridge writes companion entries into
-/// `config.models` lazily — if they aren't there at all, that's a
-/// CompanionConfigMissing. If the entry is there but the file the
-/// manifest paths point at doesn't exist, that's CompanionFileMissing
-/// (the user didn't `mold pull` yet).
-fn classify_missing_companion(
-    model_name: &str,
-    companion: &'static str,
-    config: &mold_core::Config,
-) -> ResolveError {
-    if !config.models.contains_key(companion) {
-        ResolveError::CompanionConfigMissing {
-            model: model_name.to_string(),
-            companion,
-        }
-    } else {
-        ResolveError::CompanionFileMissing {
-            model: model_name.to_string(),
-            companion,
-        }
-    }
-}
-
-/// Backwards-compatible wrapper: pure synthesis + disk-aware resolution
-/// in one step. Used only by the in-tree tests that pre-date the
-/// intent / lazy-resolve split — production paths call
-/// `synthesize_intent` + `resolve_intent_to_paths` separately so the
-/// intent can be cached and resolution re-runs as files land.
-#[cfg(test)]
-fn synthesize_catalog_config(
-    entry: &mold_catalog::entry::CatalogEntry,
-    models_dir: &std::path::Path,
-    config: &mold_core::Config,
-) -> anyhow::Result<mold_core::ModelConfig> {
-    let intent = mold_catalog::synthesis::synthesize_intent(entry, models_dir)?;
-    Ok(resolve_intent_to_paths(entry.id.as_str(), &intent, config)?)
+    resolve_intent_to_model_config(
+        model_name,
+        intent,
+        config,
+        ResolveOptions {
+            missing_companions: MissingCompanionPolicy::Fail,
+            require_primary_present: true,
+        },
+    )
 }
 
 /// If `model_name` is a catalog ID and not yet in the intent cache, hit
@@ -633,34 +280,24 @@ pub(crate) async fn install_catalog_model(
     }
 
     let models_dir = state.config.read().await.resolved_models_dir();
-    if let Some(intent) = installed_catalog_intent_from_sidecar(&models_dir, model_name) {
+    if let Some(intent) = installed_intent_from_sidecar(&models_dir, model_name) {
         let mut intents = state.catalog_intents.write().await;
         intents.insert(model_name.to_string(), intent);
         return Ok(());
     }
 
-    // Live single-id lookup. Tokens are picked up from env so
-    // unauthenticated browsing still works.
-    let civitai_base = state.catalog_live_civitai_base.as_str();
-    let entry = if let Some(version_id) = model_name.strip_prefix("cv:") {
-        mold_catalog::live::fetch_civitai_version(
-            civitai_base,
-            version_id,
-            std::env::var("CIVITAI_TOKEN").ok().as_deref(),
-        )
-        .await
-        .map_err(|e| live_error_to_install_error(model_name, &e))?
-    } else if let Some(repo_id) = model_name.strip_prefix("hf:") {
-        mold_catalog::live::fetch_hf_repo(
-            "https://huggingface.co",
-            repo_id,
-            std::env::var("HF_TOKEN").ok().as_deref(),
-        )
-        .await
-        .map_err(|e| live_error_to_install_error(model_name, &e))?
-    } else {
-        return Ok(());
-    };
+    // Live single-id lookup via the shared cv:/hf: dispatcher. Tokens are
+    // picked up from env so unauthenticated browsing still works; the
+    // Civitai base is test-overridable through AppState.
+    let entry = mold_catalog::live::fetch_entry_by_id(
+        model_name,
+        state.catalog_live_civitai_base.as_str(),
+        "https://huggingface.co",
+        std::env::var("CIVITAI_TOKEN").ok().as_deref(),
+        std::env::var("HF_TOKEN").ok().as_deref(),
+    )
+    .await
+    .map_err(|e| live_error_to_install_error(model_name, &e))?;
 
     let intent = mold_catalog::synthesis::synthesize_intent(&entry, &models_dir).map_err(|e| {
         mold_core::InstallError::RecipeMalformed(format!("synthesize intent for {model_name}: {e}"))
@@ -698,55 +335,6 @@ fn write_catalog_sidecar_from_intent(
             "sidecar write failed after live catalog install",
         );
     }
-}
-
-fn installed_catalog_intent_from_sidecar(
-    models_dir: &std::path::Path,
-    model_name: &str,
-) -> Option<mold_catalog::synthesis::CatalogModelIntent> {
-    let (sidecar_dir, sidecar) = mold_catalog::sidecar::walk_sidecars(models_dir)
-        .into_iter()
-        .find(|(_, sidecar)| sidecar.id == model_name)?;
-    if sidecar.kind != "checkpoint" {
-        return None;
-    }
-    if sidecar_primary_looks_like_auxiliary(&sidecar) {
-        return None;
-    }
-    let primary_recipe_path =
-        mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar)?;
-    let family = mold_catalog::families::Family::from_str(&sidecar.family).ok()?;
-    let companions = mold_catalog::companions::companions_for(
-        family,
-        sidecar.sub_family.as_deref(),
-        mold_catalog::entry::Bundling::SingleFile,
-        mold_catalog::entry::Kind::Checkpoint,
-    )
-    .into_iter()
-    .map(|name| mold_catalog::synthesis::CompanionIntent {
-        name,
-        required: true,
-    })
-    .collect();
-
-    Some(mold_catalog::synthesis::CatalogModelIntent {
-        family: sidecar.family,
-        sub_family: sidecar.sub_family,
-        primary_recipe_path,
-        vae_recipe_path: None,
-        text_encoder_recipe_paths: Vec::new(),
-        companions,
-        bundling: mold_catalog::entry::Bundling::SingleFile,
-    })
-}
-
-fn sidecar_primary_looks_like_auxiliary(sidecar: &mold_catalog::sidecar::CatalogSidecar) -> bool {
-    let rel = sidecar.primary_filename_rel.to_ascii_lowercase();
-    rel.contains("/text_encoder/")
-        || rel.contains("text_encoder")
-        || rel.contains("te_")
-        || rel.contains("_txt.")
-        || rel.contains("-txt.")
 }
 
 /// Translate a `LiveSearchError` into the user-facing `InstallError`
@@ -809,10 +397,14 @@ pub(crate) fn install_error_to_api_error(err: &mold_core::InstallError) -> ApiEr
     }
 }
 
-/// Translate `ResolveError` into the user-facing `ApiError`. Both
-/// variants surface as 404 (the model isn't loadable yet) but with
-/// distinct, specific messages so the user can act.
+/// Translate `ResolveError` into the user-facing `ApiError`. The
+/// download-repairable variants surface as 404 (the model isn't loadable
+/// yet) with distinct, specific messages so the user can act; the
+/// never-should-happen `UnknownFamily` surfaces as a 500 internal error.
 pub(crate) fn resolve_error_to_api_error(err: &ResolveError) -> ApiError {
+    if matches!(err, ResolveError::UnknownFamily { .. }) {
+        return ApiError::internal(err.to_string());
+    }
     ApiError::not_found(err.to_string())
 }
 
@@ -832,7 +424,7 @@ fn installed_catalog_models(
         if sidecar.kind != "checkpoint" {
             continue;
         }
-        if sidecar_primary_looks_like_auxiliary(&sidecar) {
+        if mold_catalog::sidecar::primary_looks_like_auxiliary(&sidecar) {
             continue;
         }
         // Skip sidecars whose primary file isn't actually present —
@@ -1799,127 +1391,6 @@ mod tests {
             std::env::set_var("MOLD_OFFLOAD", value);
         }
         OffloadEnvGuard { _lock: lock, prior }
-    }
-
-    #[test]
-    fn installed_catalog_intent_from_sidecar_resolves_downloaded_ltx2_checkpoint() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let install_dir = dir.path().join("cv-2752735");
-        let primary_rel = "ltx2/civitai/2752735/ltx23_full.safetensors";
-        let primary = install_dir.join(primary_rel);
-        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
-        std::fs::write(&primary, b"fake").unwrap();
-        let sidecar = mold_catalog::sidecar::CatalogSidecar {
-            schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
-            id: "cv:2752735".to_string(),
-            source: "civitai".to_string(),
-            source_id: "2752735".to_string(),
-            name: "LTX-2.3".to_string(),
-            author: Some("clueless_engineer".to_string()),
-            family: "ltx2".to_string(),
-            family_role: "finetune".to_string(),
-            sub_family: Some("v2.3".to_string()),
-            kind: "checkpoint".to_string(),
-            modality: "video".to_string(),
-            thumbnail_url: None,
-            size_bytes: Some(4),
-            engine_phase: 5,
-            trained_words: Vec::new(),
-            primary_filename_rel: primary_rel.to_string(),
-            written_at: 0,
-        };
-        mold_catalog::sidecar::write_sidecar(
-            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
-            &sidecar,
-        )
-        .unwrap();
-
-        let intent = installed_catalog_intent_from_sidecar(dir.path(), "cv:2752735")
-            .expect("installed sidecar should synthesize a catalog intent");
-        assert_eq!(intent.family, "ltx2");
-        assert_eq!(intent.primary_recipe_path, primary);
-        assert!(
-            intent.companions.iter().any(|c| c.name == "ltx2-te"),
-            "LTX-2 installed sidecars must still resolve the Gemma companion"
-        );
-    }
-
-    #[test]
-    fn installed_catalog_intent_from_sidecar_rejects_text_encoder_primary() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let install_dir = dir.path().join("cv-2442439");
-        let primary_rel = "z-image/civitai/2442439/zImageTurbo_turbo_txt.safetensors";
-        let primary = install_dir.join(primary_rel);
-        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
-        std::fs::write(&primary, b"fake").unwrap();
-        let sidecar = mold_catalog::sidecar::CatalogSidecar {
-            schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
-            id: "cv:2442439".to_string(),
-            source: "civitai".to_string(),
-            source_id: "2442439".to_string(),
-            name: "Z Image Turbo".to_string(),
-            author: None,
-            family: "z-image".to_string(),
-            family_role: "finetune".to_string(),
-            sub_family: Some("turbo".to_string()),
-            kind: "checkpoint".to_string(),
-            modality: "image".to_string(),
-            thumbnail_url: None,
-            size_bytes: Some(4),
-            engine_phase: 4,
-            trained_words: Vec::new(),
-            primary_filename_rel: primary_rel.to_string(),
-            written_at: 0,
-        };
-        mold_catalog::sidecar::write_sidecar(
-            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
-            &sidecar,
-        )
-        .unwrap();
-
-        assert!(
-            installed_catalog_intent_from_sidecar(dir.path(), "cv:2442439").is_none(),
-            "stale sidecars that point checkpoint primary at a text encoder must be ignored"
-        );
-    }
-
-    #[test]
-    fn installed_catalog_intent_from_sidecar_rejects_te_suffix_primary() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let install_dir = dir.path().join("cv-2597527");
-        let primary_rel = "flux2/civitai/2597527/qwen38BFluxKlein9BTE_38b.safetensors";
-        let primary = install_dir.join(primary_rel);
-        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
-        std::fs::write(&primary, b"fake").unwrap();
-        let sidecar = mold_catalog::sidecar::CatalogSidecar {
-            schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
-            id: "cv:2597527".to_string(),
-            source: "civitai".to_string(),
-            source_id: "2597527".to_string(),
-            name: "Qwen 3 8B Flux Klein 9B TE".to_string(),
-            author: None,
-            family: "flux2".to_string(),
-            family_role: "finetune".to_string(),
-            sub_family: Some("klein-9b".to_string()),
-            kind: "checkpoint".to_string(),
-            modality: "image".to_string(),
-            thumbnail_url: None,
-            size_bytes: Some(4),
-            engine_phase: 5,
-            trained_words: Vec::new(),
-            primary_filename_rel: primary_rel.to_string(),
-            written_at: 0,
-        };
-        mold_catalog::sidecar::write_sidecar(
-            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
-            &sidecar,
-        )
-        .unwrap();
-
-        assert!(
-            installed_catalog_intent_from_sidecar(dir.path(), "cv:2597527").is_none(),
-            "checkpoint sidecars whose primary is a TE asset must be ignored"
-        );
     }
 
     /// Build a `ModelPaths` whose `transformer` and `vae` files exist on disk
@@ -3348,78 +2819,6 @@ mod tests {
         assert_eq!(hint_unknown.family, ActivationFamily::FluxDit);
     }
 
-    // ── FLUX catalog bridge: VAE-bundle probe + flux-vae companion wiring ──
-
-    /// Direct-unit test of `copy_catalog_companion("flux-vae", _)`: when
-    /// `cfg.vae` is unset (transformer-only checkpoint) the handler must
-    /// populate it from the companion's resolved `paths.transformer`.
-    /// The same handler must NOT clobber a bundled-VAE cfg.vae.
-    #[test]
-    fn copy_catalog_companion_flux_vae_populates_when_unset() {
-        let mut cfg = mold_core::ModelConfig {
-            family: Some("flux".into()),
-            transformer: Some("/m/cv-x/flux/civitai/x/unet.safetensors".into()),
-            vae: None,
-            ..Default::default()
-        };
-        let paths = ModelPaths {
-            transformer: PathBuf::from("/m/flux-vae/ae.safetensors"),
-            transformer_shards: Vec::new(),
-            vae: PathBuf::from("/m/flux-vae/ae.safetensors"),
-            spatial_upscaler: None,
-            temporal_upscaler: None,
-            distilled_lora: None,
-            t5_encoder: None,
-            clip_encoder: None,
-            t5_tokenizer: None,
-            clip_tokenizer: None,
-            clip_encoder_2: None,
-            clip_tokenizer_2: None,
-            text_encoder_files: Vec::new(),
-            text_tokenizer: None,
-            decoder: None,
-        };
-        copy_catalog_companion(&mut cfg, "flux-vae", &paths);
-        assert_eq!(
-            cfg.vae.as_deref(),
-            Some("/m/flux-vae/ae.safetensors"),
-            "transformer-only cfg.vae must be populated from the flux-vae companion path"
-        );
-    }
-
-    #[test]
-    fn copy_catalog_companion_flux_vae_does_not_override_bundled() {
-        let mut cfg = mold_core::ModelConfig {
-            family: Some("flux".into()),
-            transformer: Some("/m/cv-x/flux/civitai/x/full.safetensors".into()),
-            vae: Some("/m/cv-x/flux/civitai/x/full.safetensors".into()),
-            ..Default::default()
-        };
-        let paths = ModelPaths {
-            transformer: PathBuf::from("/m/flux-vae/ae.safetensors"),
-            transformer_shards: Vec::new(),
-            vae: PathBuf::from("/m/flux-vae/ae.safetensors"),
-            spatial_upscaler: None,
-            temporal_upscaler: None,
-            distilled_lora: None,
-            t5_encoder: None,
-            clip_encoder: None,
-            t5_tokenizer: None,
-            clip_tokenizer: None,
-            clip_encoder_2: None,
-            clip_tokenizer_2: None,
-            text_encoder_files: Vec::new(),
-            text_tokenizer: None,
-            decoder: None,
-        };
-        copy_catalog_companion(&mut cfg, "flux-vae", &paths);
-        assert_eq!(
-            cfg.vae.as_deref(),
-            Some("/m/cv-x/flux/civitai/x/full.safetensors"),
-            "bundled cfg.vae must survive the flux-vae companion pass"
-        );
-    }
-
     /// Synthesize a minimal safetensors at `path` that lists the given
     /// keys in the JSON header (each as a 1-element F32 tensor sharing the
     /// same 4-byte zero blob). Sufficient for the header-peek probe; no
@@ -3494,195 +2893,6 @@ mod tests {
             updated_at: None,
             added_at: 0,
             trained_words: vec![],
-        }
-    }
-
-    /// Transformer-only FLUX checkpoint: synth must defer cfg.vae and the
-    /// flux-vae companion path must populate it (when present in config).
-    ///
-    /// Sets MOLD_HOME to the tempdir so `ModelPaths::resolve` doesn't walk
-    /// the developer's real `~/.mold/models/.hf-cache/` (which on this
-    /// machine has a real flux-vae shipped from a manifest install).
-    #[test]
-    fn synthesize_catalog_config_uses_flux_vae_companion_when_bundle_lacks_vae() {
-        let dir = tempfile::tempdir().unwrap();
-        let models_dir = dir.path();
-        // SAFETY: env mutation is racy with other tests; this is the only
-        // test in this module that touches MOLD_HOME and the suite serializes
-        // env-var tests by combining them into one #[test].
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
-
-        // Place a transformer-only safetensors fixture at the path that
-        // the recipe-rendering will produce for `cv:994561`.
-        let primary_path = models_dir
-            .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
-        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
-        write_safetensors_with_keys(
-            &primary_path,
-            &[
-                "double_blocks.0.img_attn.proj.weight",
-                "single_blocks.0.linear1.weight",
-                "img_in.weight",
-            ],
-        );
-
-        // Stub flux-vae's manifest config so `ModelPaths::resolve("flux-vae", _)`
-        // returns a path WITHOUT walking the dev machine's real HF cache.
-        let vae_path = models_dir.join("flux-vae/ae.safetensors");
-        std::fs::create_dir_all(vae_path.parent().unwrap()).unwrap();
-        std::fs::File::create(&vae_path).unwrap();
-        let mut config = mold_core::Config {
-            models_dir: models_dir.to_string_lossy().into_owned(),
-            ..Default::default()
-        };
-        config.models.insert(
-            "flux-vae".into(),
-            mold_core::ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(vae_path.to_string_lossy().into_owned()),
-                vae: Some(vae_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-        // Stub clip-l + t5 so their absence doesn't blow up the loop —
-        // they're declared in `companions_for(Family::Flux, _)` and
-        // unresolved entries log a warning rather than failing, but we set
-        // them anyway to verify they don't interfere.
-        config.models.insert(
-            "clip-l".into(),
-            mold_core::ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(format!("{}/clip-l/model.safetensors", models_dir.display())),
-                vae: Some(format!("{}/clip-l/model.safetensors", models_dir.display())),
-                ..Default::default()
-            },
-        );
-        config.models.insert(
-            "t5-v1_1-xxl".into(),
-            mold_core::ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(format!(
-                    "{}/t5-v1_1-xxl/t5xxl_fp16.safetensors",
-                    models_dir.display()
-                )),
-                vae: Some(format!(
-                    "{}/t5-v1_1-xxl/t5xxl_fp16.safetensors",
-                    models_dir.display()
-                )),
-                ..Default::default()
-            },
-        );
-
-        let entry =
-            flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");
-        let synth = synthesize_catalog_config(&entry, models_dir, &config).unwrap();
-
-        // cfg.transformer points at the recipe-rendered primary path.
-        assert_eq!(
-            synth.transformer.as_deref(),
-            primary_path.to_str(),
-            "transformer must point at the on-disk primary checkpoint"
-        );
-        // cfg.vae was populated from the flux-vae companion's resolved
-        // path — NOT from the transformer-only primary.
-        assert_eq!(
-            synth.vae.as_deref(),
-            vae_path.to_str(),
-            "flux-vae companion must populate cfg.vae for transformer-only checkpoints",
-        );
-
-        // Restore env for sibling tests.
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
-    }
-
-    /// Bundled-VAE FLUX checkpoint: synth must keep cfg.vae == primary;
-    /// flux-vae companion is a no-op.
-    #[test]
-    fn synthesize_catalog_config_uses_bundled_vae_when_present() {
-        let dir = tempfile::tempdir().unwrap();
-        let models_dir = dir.path();
-        // SAFETY: env mutation is racy with other tests; this is the
-        // only test in this module that touches MOLD_HOME for the
-        // bundled-VAE flow. Pair with the transformer-only sibling.
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
-
-        let primary_path = models_dir.join("cv-101010/flux/civitai/101010/flux_full.safetensors");
-        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
-        // Bundled-VAE: A1111 prefix on the encoder.
-        write_safetensors_with_keys(
-            &primary_path,
-            &[
-                "model.diffusion_model.double_blocks.0.img_attn.proj.weight",
-                "first_stage_model.encoder.conv_in.weight",
-            ],
-        );
-
-        let vae_path = models_dir.join("flux-vae/ae.safetensors");
-        std::fs::create_dir_all(vae_path.parent().unwrap()).unwrap();
-        std::fs::File::create(&vae_path).unwrap();
-        let mut config = mold_core::Config {
-            models_dir: models_dir.to_string_lossy().into_owned(),
-            ..Default::default()
-        };
-        // Stub all FLUX companions so resolve_intent_to_paths' hard
-        // companion check passes — even with flux-vae present we want to
-        // assert cfg.vae stays at the primary.
-        config.models.insert(
-            "flux-vae".into(),
-            mold_core::ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(vae_path.to_string_lossy().into_owned()),
-                vae: Some(vae_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-        config.models.insert(
-            "clip-l".into(),
-            mold_core::ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(format!("{}/clip-l/model.safetensors", models_dir.display())),
-                vae: Some(format!("{}/clip-l/model.safetensors", models_dir.display())),
-                ..Default::default()
-            },
-        );
-        config.models.insert(
-            "t5-v1_1-xxl".into(),
-            mold_core::ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(format!(
-                    "{}/t5-v1_1-xxl/t5xxl_fp16.safetensors",
-                    models_dir.display()
-                )),
-                vae: Some(format!(
-                    "{}/t5-v1_1-xxl/t5xxl_fp16.safetensors",
-                    models_dir.display()
-                )),
-                ..Default::default()
-            },
-        );
-
-        let entry = flux_unet_only_catalog_entry("101010", "flux_full.safetensors");
-        let synth = synthesize_catalog_config(&entry, models_dir, &config).unwrap();
-
-        assert_eq!(synth.transformer.as_deref(), primary_path.to_str());
-        assert_eq!(
-            synth.vae.as_deref(),
-            primary_path.to_str(),
-            "bundled-VAE checkpoint must keep cfg.vae == primary; flux-vae companion is a no-op",
-        );
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
         }
     }
 

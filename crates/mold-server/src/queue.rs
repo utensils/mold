@@ -5,10 +5,10 @@ use base64::Engine as _;
 use mold_core::{
     ImageData, OutputFormat, OutputMetadata, SseCompleteEvent, SseErrorEvent, SseProgressEvent,
 };
-use mold_db::{GenerationRecord, MetadataDb, RecordSource};
+use mold_db::{MetadataDb, RecordSource};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use crate::gpu_pool::GpuJob;
 use crate::model_manager;
@@ -59,10 +59,7 @@ pub(crate) fn clean_error_message(e: &anyhow::Error) -> String {
 
 fn set_active_generation(state: &AppState, model: &str, prompt: &str) {
     let prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
-    let started_at_unix_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let started_at_unix_ms = mold_core::time::now_epoch_ms_u64();
 
     let mut active = state
         .active_generation
@@ -106,10 +103,7 @@ pub(crate) fn save_image_to_dir(
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
         return;
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let timestamp_ms = now.as_millis() as u64;
+    let timestamp_ms = mold_core::time::now_epoch_ms_u64();
     let ext = img.format.to_string();
     let filename =
         mold_core::default_output_filename(model, timestamp_ms, &ext, batch_size, img.index);
@@ -122,21 +116,19 @@ pub(crate) fn save_image_to_dir(
         }
     }
     if let (Some(db), Some(meta)) = (db, metadata) {
-        let mut rec = GenerationRecord::from_save(
+        mold_db::persist::record_saved_output(
+            db,
             dir,
-            filename,
-            img.format,
-            meta.clone(),
-            RecordSource::Server,
-            now.as_millis() as i64,
+            &filename,
+            &path,
+            &mold_db::persist::OutputRecordParams {
+                format: img.format,
+                metadata: meta,
+                source: RecordSource::Server,
+                generation_time_ms,
+                backend: Some(mold_inference::compiled_backend_label()),
+            },
         );
-        rec.stat_from_disk(&path);
-        rec.generation_time_ms = generation_time_ms;
-        rec.hostname = hostname_string();
-        rec.backend = current_backend_label();
-        if let Err(e) = db.upsert(&rec) {
-            tracing::warn!("metadata DB upsert failed for {}: {e:#}", rec.filename);
-        }
     }
 }
 
@@ -164,10 +156,7 @@ pub(crate) fn save_video_to_dir(
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
         return;
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let ts = now.as_millis() as u64;
+    let ts = mold_core::time::now_epoch_ms_u64();
     let ext = format.extension();
     let filename = mold_core::default_output_filename(model, ts, ext, 1, 0);
     let path = dir.join(&filename);
@@ -179,21 +168,19 @@ pub(crate) fn save_video_to_dir(
         save_video_preview_gif(&filename, gif_preview);
     }
     if let Some(db) = db {
-        let mut rec = GenerationRecord::from_save(
+        mold_db::persist::record_saved_output(
+            db,
             dir,
-            filename,
-            format,
-            metadata.clone(),
-            RecordSource::Server,
-            now.as_millis() as i64,
+            &filename,
+            &path,
+            &mold_db::persist::OutputRecordParams {
+                format,
+                metadata,
+                source: RecordSource::Server,
+                generation_time_ms,
+                backend: Some(mold_inference::compiled_backend_label()),
+            },
         );
-        rec.stat_from_disk(&path);
-        rec.generation_time_ms = generation_time_ms;
-        rec.hostname = hostname_string();
-        rec.backend = current_backend_label();
-        if let Err(e) = db.upsert(&rec) {
-            tracing::warn!("metadata DB upsert failed for {}: {e:#}", rec.filename);
-        }
     }
 }
 
@@ -205,8 +192,7 @@ fn requested_post_upscale_model(req: &mold_core::GenerateRequest) -> Option<&str
 }
 
 pub(crate) fn apply_output_dimensions_to_metadata(metadata: &mut OutputMetadata, img: &ImageData) {
-    metadata.width = img.width;
-    metadata.height = img.height;
+    metadata.apply_output_dimensions(img.width, img.height);
 }
 
 pub(crate) fn apply_upscale_response_to_image_generation(
@@ -347,28 +333,12 @@ fn save_video_preview_gif_to(preview_dir: &std::path::Path, filename: &str, gif_
         );
         return;
     }
-    let preview_path = preview_dir.join(format!("{filename}.preview.gif"));
+    let preview_path = preview_dir.join(mold_core::media_paths::preview_gif_filename(filename));
     if let Err(e) = std::fs::write(&preview_path, gif_bytes) {
         tracing::warn!(
             "failed to write preview gif {}: {e}",
             preview_path.display()
         );
-    }
-}
-
-/// Best-effort hostname for the `hostname` DB column. Falls back to `None`.
-fn hostname_string() -> Option<String> {
-    hostname::get().ok().and_then(|s| s.into_string().ok())
-}
-
-/// Compile-time backend label so DB rows say where the work happened.
-fn current_backend_label() -> Option<String> {
-    if cfg!(feature = "cuda") {
-        Some("cuda".into())
-    } else if cfg!(feature = "metal") {
-        Some("metal".into())
-    } else {
-        Some("cpu".into())
     }
 }
 

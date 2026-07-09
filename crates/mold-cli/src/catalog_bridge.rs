@@ -29,18 +29,19 @@
 use std::path::Path;
 
 use anyhow::Result;
-use mold_catalog::entry::{Bundling, CatalogEntry};
-use mold_core::{Config, ModelConfig, ModelPaths};
+use mold_catalog::entry::CatalogEntry;
+use mold_core::{Config, ModelConfig};
 
 /// True if `input` has the structural shape of a catalog ID
 /// (`cv:<civitai-version-id>` or `hf:<author>/<name>`). Pure shape
 /// check — does not consult any source.
 pub fn looks_like_catalog_id(input: &str) -> bool {
-    input.starts_with("cv:") || input.starts_with("hf:")
+    mold_catalog::resolve::looks_like_catalog_id(input)
 }
 
-/// Live single-id lookup for a catalog ID. Routes by the prefix:
-/// `cv:` → Civitai model-version API, `hf:` → HF detail+tree.
+/// Live single-id lookup for a catalog ID via the shared cv:/hf: dispatcher.
+/// Bases honor `CIVITAI_BASE` / `HF_BASE` env for test overrides; tokens come
+/// from `CIVITAI_TOKEN` / `HF_TOKEN`.
 pub async fn lookup_catalog_entry_live(id: &str) -> Result<CatalogEntry> {
     let civitai_base =
         std::env::var("CIVITAI_BASE").unwrap_or_else(|_| "https://civitai.com".to_string());
@@ -48,295 +49,61 @@ pub async fn lookup_catalog_entry_live(id: &str) -> Result<CatalogEntry> {
     let civitai_token = std::env::var("CIVITAI_TOKEN").ok();
     let hf_token = std::env::var("HF_TOKEN").ok();
 
-    if let Some(version_id) = id.strip_prefix("cv:") {
-        Ok(mold_catalog::live::fetch_civitai_version(
-            &civitai_base,
-            version_id,
-            civitai_token.as_deref(),
-        )
-        .await?)
-    } else if let Some(repo_id) = id.strip_prefix("hf:") {
-        Ok(mold_catalog::live::fetch_hf_repo(&hf_base, repo_id, hf_token.as_deref()).await?)
-    } else {
-        anyhow::bail!("not a catalog id: {id}")
-    }
+    Ok(mold_catalog::live::fetch_entry_by_id(
+        id,
+        &civitai_base,
+        &hf_base,
+        civitai_token.as_deref(),
+        hf_token.as_deref(),
+    )
+    .await?)
+}
+
+/// Resolve a pure catalog intent into a `ModelConfig` using the CLI's policy:
+/// resolution runs right after the download completes, so a missing companion
+/// is logged and skipped (the engine-load surface reports any genuinely
+/// missing field) and the primary-present precheck is left off.
+fn resolve_intent(
+    model_name: &str,
+    intent: &mold_catalog::synthesis::CatalogModelIntent,
+    config: &Config,
+) -> Result<ModelConfig> {
+    mold_catalog::resolve::resolve_intent_to_model_config(
+        model_name,
+        intent,
+        config,
+        mold_catalog::resolve::ResolveOptions {
+            missing_companions: mold_catalog::resolve::MissingCompanionPolicy::WarnAndSkip,
+            require_primary_present: false,
+        },
+    )
+    .map_err(anyhow::Error::from)
 }
 
 /// Synthesize a `ModelConfig` for a catalog entry, mirroring the on-disk
-/// layout that `mold pull <id>` writes to.
-///
-/// For single-file Civitai checkpoints (Bundling::SingleFile) the
-/// resulting `ModelConfig` sets `transformer = vae = primary .safetensors`.
-/// That's the duck-type the inference factory uses to dispatch to the
-/// `from_single_file` constructors (`is_single_file(paths) =
-/// paths.transformer == paths.vae && extension == .safetensors`).
-///
-/// Companion paths (clip-l tokenizer for SD1.5, clip-l + clip-g
-/// tokenizers for SDXL) come from `ModelPaths::resolve("<companion-name>",
-/// config)` so we don't reimplement manifest path rendering. Companions
-/// must already be on disk (the catalog pull flow guarantees this by
-/// pulling them companion-first before the primary).
+/// layout that `mold pull <id>` writes to. Pure intent synthesis
+/// (`mold_catalog::synthesis`) followed by the shared disk-aware resolver.
 pub fn synthesize_model_config(
     entry: &CatalogEntry,
     models_dir: &Path,
     config: &Config,
 ) -> Result<ModelConfig> {
-    // Pure intent — no disk reads. Single source of truth lives in
-    // `mold_catalog::synthesis`; both server and CLI consume it.
     let intent = mold_catalog::synthesis::synthesize_intent(entry, models_dir)?;
-    intent_to_model_config(&intent, config)
+    resolve_intent(entry.id.as_str(), &intent, config)
 }
 
-/// CLI-side disk-aware resolution: turn an intent into a `ModelConfig`.
+/// Unified catalog-ID injection for the run/generate entry points.
 ///
-/// Differs from the server's `resolve_intent_to_paths` only in failure
-/// mode: CLI's pull flow runs this after `pull_and_configure` completes
-/// the download, so missing companions are an unrecoverable bug rather
-/// than a transient. We log + skip rather than hard-erroring to keep
-/// existing CLI behavior; the engine load surface picks up any real
-/// missing field at construction time with a precise message.
-fn intent_to_model_config(
-    intent: &mold_catalog::synthesis::CatalogModelIntent,
-    config: &Config,
-) -> Result<ModelConfig> {
-    let primary_str = intent
-        .primary_recipe_path
-        .to_str()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "synthesized path is not valid UTF-8: {:?}",
-                intent.primary_recipe_path
-            )
-        })?
-        .to_string();
-
-    let mut cfg = ModelConfig {
-        family: Some(intent.family.clone()),
-        ..Default::default()
-    };
-    apply_catalog_runtime_defaults(&mut cfg, intent);
-
-    if !matches!(intent.bundling, Bundling::SingleFile) {
-        anyhow::bail!(
-            "catalog entry has bundling={:?} which is not yet wired into the run bridge \
-             (single-file only)",
-            intent.bundling,
-        );
-    }
-    cfg.transformer = Some(primary_str.clone());
-
-    // FLUX is the only family with mixed bundling — peek the safetensors
-    // header. SDXL/SD1.5/LTX-2 always bundle; Flux.2 / Z-Image / LTX-Video
-    // always need a separate VAE companion.
-    let family = mold_catalog::families::Family::from_str(&intent.family)
-        .map_err(|e| anyhow::anyhow!("intent has unknown family slug: {e}"))?;
-    let bundles = if family == mold_catalog::families::Family::Flux {
-        if intent.primary_recipe_path.exists() {
-            mold_inference::loader::flux_single_file_bundles_vae(&intent.primary_recipe_path)
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "probe FLUX checkpoint {} for bundled VAE: {e}",
-                        intent.primary_recipe_path.display()
-                    )
-                })?
-        } else {
-            false
-        }
-    } else {
-        mold_catalog::synthesis::family_bundles_vae_unconditionally(family)
-    };
-    if bundles {
-        cfg.vae = Some(primary_str);
-    }
-    if let Some(vae_recipe_path) = &intent.vae_recipe_path {
-        cfg.vae = Some(
-            vae_recipe_path
-                .to_str()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "synthesized VAE path is not valid UTF-8: {:?}",
-                        vae_recipe_path
-                    )
-                })?
-                .to_string(),
-        );
-    }
-    if !intent.text_encoder_recipe_paths.is_empty() {
-        cfg.text_encoder_files = Some(
-            intent
-                .text_encoder_recipe_paths
-                .iter()
-                .map(|path| {
-                    path.to_str()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "synthesized text encoder path is not valid UTF-8: {:?}",
-                                path
-                            )
-                        })
-                        .map(str::to_owned)
-                })
-                .collect::<Result<Vec<_>>>()?,
-        );
-    }
-
-    for companion in &intent.companions {
-        if let Some(paths) = ModelPaths::resolve(&companion.name, config) {
-            copy_companion_into_cfg(&mut cfg, &companion.name, &paths);
-        }
-    }
-
-    Ok(cfg)
-}
-
-fn apply_catalog_runtime_defaults(
-    cfg: &mut ModelConfig,
-    intent: &mold_catalog::synthesis::CatalogModelIntent,
-) {
-    let defaults = mold_catalog::defaults::runtime_defaults_for_family(
-        &intent.family,
-        intent.sub_family.as_deref(),
-    );
-    cfg.default_width.get_or_insert(defaults.width);
-    cfg.default_height.get_or_insert(defaults.height);
-    cfg.default_steps.get_or_insert(defaults.steps);
-    cfg.default_guidance.get_or_insert(defaults.guidance);
-    if let Some(is_schnell) = defaults.is_schnell {
-        cfg.is_schnell.get_or_insert(is_schnell);
-    }
-}
-
-fn copy_companion_into_cfg(cfg: &mut ModelConfig, companion_name: &str, paths: &ModelPaths) {
-    let to_string = |p: &std::path::PathBuf| p.to_str().map(str::to_owned);
-    match companion_name {
-        // CLIP-L lives under one manifest. Its `transformer` field is the
-        // weights, `clip_tokenizer` is the tokenizer JSON. Single-file
-        // SD1.5 / SDXL only need the tokenizer (the encoder weights are
-        // baked into the primary safetensors), but we copy both fields so
-        // future engines that DO want the external encoder Just Work.
-        "clip-l" => {
-            cfg.clip_encoder = to_string(&paths.transformer);
-            cfg.clip_tokenizer = paths.clip_tokenizer.as_ref().and_then(to_string);
-        }
-        "clip-g" => {
-            cfg.clip_encoder_2 = to_string(&paths.transformer);
-            // The clip-g companion manifest doesn't ship a tokenizer
-            // entry — OpenCLIP's vocab is byte-identical to OpenAI's
-            // CLIP-L tokenizer, and shipping both would make
-            // `shared/companion/tokenizer.json` collide. Fall back to
-            // clip-l's tokenizer (already populated above when companion
-            // ordering puts clip-l first). The single-file SDXL engine
-            // tokenises clip-l and clip-g prompts independently but uses
-            // the same vocab/merges file for both, so this is correct.
-            cfg.clip_tokenizer_2 = paths
-                .clip_tokenizer
-                .as_ref()
-                .and_then(to_string)
-                .or_else(|| cfg.clip_tokenizer.clone());
-        }
-        "sdxl-vae" | "sd-vae-ft-mse" => {
-            // SDXL/SD1.5 single-file checkpoints reliably embed VAE weights
-            // (`first_stage_model.*` keys), so cfg.vae already points at the
-            // primary checkpoint. Companion is download-only here.
-        }
-        // Civitai FLUX fine-tune convention is split: some bundle the
-        // VAE under `first_stage_model.encoder.*`, some (e.g. cv:994561)
-        // are transformer-only. `synthesize_model_config` peeks the
-        // header and leaves cfg.vae None for the transformer-only case;
-        // populate it from the companion here. Bundled-VAE case: cfg.vae
-        // is already set to the primary checkpoint and the guard skips
-        // this arm so the catch-all (no-op) handles it.
-        "flux-vae" if cfg.vae.is_none() => {
-            cfg.vae = to_string(&paths.transformer);
-        }
-        "ltx-video-vae" => {
-            // LTX-Video Civitai checkpoints are transformer-only. The VAE
-            // companion is a separate file and must override cfg.vae so the
-            // engine's load_vae() finds it (rather than trying to load the
-            // VAE from the transformer safetensors).
-            cfg.vae = to_string(&paths.transformer);
-        }
-        "flux2-vae" => {
-            // Flux.2 single-file Civitai checkpoints are transformer-only —
-            // the Klein VAE (~168 MB) lives in a separate companion file.
-            // Override cfg.vae so the engine's load_vae() reads from the
-            // companion rather than from the transformer safetensors.
-            cfg.vae = to_string(&paths.transformer);
-        }
-        "flux2-te" | "flux2-te-9b" => {
-            // Flux.2 text encoder (Qwen3 4B with 2 shards for Klein-4B,
-            // Qwen3 8B with 4 shards for Klein-9B / FLUX.2-Dev) + Qwen3
-            // tokenizer. Mirrors the z-image-te wiring.
-            cfg.text_encoder_files = paths
-                .text_encoder_files
-                .iter()
-                .filter_map(to_string)
-                .collect::<Vec<_>>()
-                .into();
-            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_string);
-        }
-        "t5-v1_1-xxl" => {
-            cfg.t5_encoder = to_string(&paths.transformer);
-            cfg.t5_tokenizer = paths.t5_tokenizer.as_ref().and_then(to_string);
-        }
-        "z-image-te" => {
-            // Z-Image companions bring the shared VAE plus text-encoder shards.
-            if cfg.vae.is_none() {
-                cfg.vae = to_string(&paths.vae);
-            }
-            if cfg.text_encoder_files.is_none() {
-                cfg.text_encoder_files = paths
-                    .text_encoder_files
-                    .iter()
-                    .filter_map(to_string)
-                    .collect::<Vec<_>>()
-                    .into();
-            }
-            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_string);
-        }
-        "ltx2-te" => {
-            // Gemma 3 12B for LTX-2. The runtime (`gemma_root` in
-            // `ltx2/assets.rs`) only needs the parent directory of the
-            // first text-encoder file, so populating the vec is enough —
-            // tokenizer files are tagged TextEncoder in the manifest and
-            // ride along in the same directory.
-            cfg.text_encoder_files = paths
-                .text_encoder_files
-                .iter()
-                .filter_map(to_string)
-                .collect::<Vec<_>>()
-                .into();
-        }
-        "qwen-image-runtime" => {
-            cfg.vae = to_string(&paths.vae);
-            cfg.text_encoder_files = paths
-                .text_encoder_files
-                .iter()
-                .filter_map(to_string)
-                .collect::<Vec<_>>()
-                .into();
-            cfg.text_tokenizer = paths.text_tokenizer.as_ref().and_then(to_string);
-        }
-        "wuerstchen-runtime" => {
-            cfg.vae = to_string(&paths.vae);
-            cfg.decoder = paths.decoder.as_ref().and_then(to_string);
-            cfg.clip_encoder = paths.clip_encoder.as_ref().and_then(to_string);
-            cfg.clip_tokenizer = paths.clip_tokenizer.as_ref().and_then(to_string);
-            cfg.clip_encoder_2 = paths.clip_encoder_2.as_ref().and_then(to_string);
-            cfg.clip_tokenizer_2 = paths.clip_tokenizer_2.as_ref().and_then(to_string);
-        }
-        _ => {}
-    }
-}
-
-/// Top-level installer: if `id` is a catalog ID, look it up via live
-/// HF/Civitai and synthesize a `ModelConfig` into `config.models`
-/// under the same key. Returns `true` when an entry was installed.
+/// If `id` is a catalog ID (`cv:*` / `hf:*`), resolve it — sidecar-first
+/// (already-installed checkpoint, no network) then live HF/Civitai — and
+/// synthesize a `ModelConfig` into `config.models` under the same key so the
+/// downstream `ModelPaths::resolve(id, config)` finds it. Returns `Ok(true)`
+/// when an entry was installed, `Ok(false)` for a non-catalog id (a no-op, so
+/// callers can invoke it unconditionally).
 ///
-/// Caller takes `&mut Config` and re-uses the same instance through
-/// the rest of the run flow so `ModelPaths::resolve(id, config)` finds
-/// the synthesized entry.
-pub async fn install_catalog_model_live(config: &mut Config, id: &str) -> Result<bool> {
+/// Caller takes `&mut Config` and re-uses the same instance through the rest
+/// of the run flow.
+pub async fn ensure_catalog_model(config: &mut Config, id: &str) -> Result<bool> {
     if !looks_like_catalog_id(id) {
         return Ok(false);
     }
@@ -366,52 +133,10 @@ fn synthesize_model_config_from_installed_sidecar(
     id: &str,
 ) -> Result<Option<ModelConfig>> {
     let models_dir = config.resolved_models_dir();
-    let Some((sidecar_dir, sidecar)) = mold_catalog::sidecar::walk_sidecars(&models_dir)
-        .into_iter()
-        .find(|(_, sidecar)| sidecar.id == id)
-    else {
+    let Some(intent) = mold_catalog::resolve::installed_intent_from_sidecar(&models_dir, id) else {
         return Ok(None);
     };
-    if sidecar.kind != "checkpoint" || sidecar_primary_looks_like_auxiliary(&sidecar) {
-        return Ok(None);
-    }
-    let Some(primary_recipe_path) =
-        mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar)
-    else {
-        return Ok(None);
-    };
-    let family = mold_catalog::families::Family::from_str(&sidecar.family)
-        .map_err(|e| anyhow::anyhow!("sidecar has unknown family slug: {e}"))?;
-    let companions = mold_catalog::companions::companions_for(
-        family,
-        sidecar.sub_family.as_deref(),
-        Bundling::SingleFile,
-        mold_catalog::entry::Kind::Checkpoint,
-    )
-    .into_iter()
-    .map(|name| mold_catalog::synthesis::CompanionIntent {
-        name,
-        required: true,
-    })
-    .collect();
-    let intent = mold_catalog::synthesis::CatalogModelIntent {
-        family: sidecar.family,
-        sub_family: sidecar.sub_family,
-        primary_recipe_path,
-        vae_recipe_path: None,
-        text_encoder_recipe_paths: Vec::new(),
-        companions,
-        bundling: Bundling::SingleFile,
-    };
-    intent_to_model_config(&intent, config).map(Some)
-}
-
-fn sidecar_primary_looks_like_auxiliary(sidecar: &mold_catalog::sidecar::CatalogSidecar) -> bool {
-    let rel = sidecar.primary_filename_rel.to_ascii_lowercase();
-    rel.contains("/text_encoder/")
-        || rel.contains("text_encoder")
-        || rel.contains("_txt.")
-        || rel.contains("-txt.")
+    resolve_intent(id, &intent, config).map(Some)
 }
 
 #[cfg(test)]
@@ -464,7 +189,7 @@ mod tests {
     }
 
     use mold_catalog::entry::{
-        CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind, LicenseFlags, Modality,
+        Bundling, CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind, LicenseFlags, Modality,
         RecipeFile, RecipeFileRole, Source, TokenKind,
     };
     use mold_catalog::families::Family;
@@ -560,45 +285,6 @@ mod tests {
         ] {
             std::env::remove_var(key);
         }
-    }
-
-    #[test]
-    fn zimage_companion_populates_vae_and_text_encoder_paths() {
-        let paths = ModelPaths {
-            transformer: "/models/shared/z-image/text_encoder/model-00001-of-00003.safetensors"
-                .into(),
-            transformer_shards: Vec::new(),
-            vae: "/models/shared/z-image/vae/diffusion_pytorch_model.safetensors".into(),
-            spatial_upscaler: None,
-            temporal_upscaler: None,
-            distilled_lora: None,
-            t5_encoder: None,
-            clip_encoder: None,
-            t5_tokenizer: None,
-            clip_tokenizer: None,
-            clip_encoder_2: None,
-            clip_tokenizer_2: None,
-            text_encoder_files: vec![
-                "/models/shared/z-image/text_encoder/model-00001-of-00003.safetensors".into(),
-                "/models/shared/z-image/text_encoder/model-00002-of-00003.safetensors".into(),
-                "/models/shared/z-image/text_encoder/model-00003-of-00003.safetensors".into(),
-            ],
-            text_tokenizer: Some("/models/shared/z-image/tokenizer/tokenizer.json".into()),
-            decoder: None,
-        };
-        let mut cfg = ModelConfig::default();
-
-        copy_companion_into_cfg(&mut cfg, "z-image-te", &paths);
-
-        assert_eq!(
-            cfg.vae.as_deref(),
-            Some("/models/shared/z-image/vae/diffusion_pytorch_model.safetensors")
-        );
-        assert_eq!(cfg.text_encoder_files.as_ref().unwrap().len(), 3);
-        assert_eq!(
-            cfg.text_tokenizer.as_deref(),
-            Some("/models/shared/z-image/tokenizer/tokenizer.json")
-        );
     }
 
     #[test]
@@ -880,23 +566,24 @@ mod tests {
     }
 
     #[test]
-    fn synthesize_model_config_rejects_separated_bundling() {
+    fn synthesize_model_config_sets_transformer_for_single_file() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_models_dir_env();
 
-        let mut entry = juggernaut_entry();
-        entry.bundling = Bundling::Separated;
-        let config = explicit_config("/tmp/mold-test-models");
-        let err = synthesize_model_config(
-            &entry,
-            std::path::Path::new("/tmp/mold-test-models"),
-            &config,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("single-file"),
-            "should explain the supported bundling, got: {err}",
+        // Single-file SDXL entry with no companions installed: under the
+        // CLI's WarnAndSkip policy the missing companions are logged and
+        // skipped, and the synthesized config still points transformer at
+        // the recipe path (the CLI no longer bails on separated bundling —
+        // that rejection is now solely `synthesize_intent`'s job).
+        let models_dir = "/tmp/mold-test-models";
+        let entry = juggernaut_entry();
+        let config = explicit_config(models_dir);
+        let synth =
+            synthesize_model_config(&entry, std::path::Path::new(models_dir), &config).unwrap();
+        let expected = format!(
+            "{models_dir}/cv-1759168/sdxl/civitai/1759168/juggernautXL_ragnarokBy.safetensors"
         );
+        assert_eq!(synth.transformer.as_deref(), Some(expected.as_str()));
     }
 
     // ── Flux.2 catalog bridge ────────────────────────────────────────────
@@ -1299,71 +986,76 @@ mod tests {
         );
     }
 
-    #[test]
-    fn copy_companion_into_cfg_flux_vae_does_not_override_bundled() {
-        // Direct unit test on copy_companion_into_cfg: when cfg.vae is
-        // already set (bundle case), the flux-vae handler must NOT clobber it.
-        let mut cfg = ModelConfig {
-            family: Some("flux".into()),
-            transformer: Some("/m/cv-x/flux/civitai/x/full.safetensors".into()),
-            vae: Some("/m/cv-x/flux/civitai/x/full.safetensors".into()),
-            ..Default::default()
-        };
-        let paths = ModelPaths {
-            transformer: std::path::PathBuf::from("/m/flux-vae/ae.safetensors"),
-            transformer_shards: Vec::new(),
-            vae: std::path::PathBuf::from("/m/flux-vae/ae.safetensors"),
-            spatial_upscaler: None,
-            temporal_upscaler: None,
-            distilled_lora: None,
-            t5_encoder: None,
-            clip_encoder: None,
-            t5_tokenizer: None,
-            clip_tokenizer: None,
-            clip_encoder_2: None,
-            clip_tokenizer_2: None,
-            text_encoder_files: Vec::new(),
-            text_tokenizer: None,
-            decoder: None,
-        };
-        copy_companion_into_cfg(&mut cfg, "flux-vae", &paths);
-        assert_eq!(
-            cfg.vae.as_deref(),
-            Some("/m/cv-x/flux/civitai/x/full.safetensors"),
-            "bundled cfg.vae must survive the flux-vae companion pass"
+    // ── ensure_catalog_model unified entry point ─────────────────────────
+
+    #[tokio::test]
+    async fn ensure_catalog_model_is_noop_for_non_catalog_id() {
+        // A bare manifest name (or a prompt) is not a catalog id — this reads
+        // no env and touches no network, so it needs no ENV_LOCK.
+        let mut config = explicit_config("/tmp/mold-test-models");
+        let before = config.models.len();
+        let installed = ensure_catalog_model(&mut config, "flux-dev").await.unwrap();
+        assert!(
+            !installed,
+            "non-catalog id must be a no-op returning Ok(false)"
         );
+        assert_eq!(config.models.len(), before);
     }
 
-    #[test]
-    fn copy_companion_into_cfg_flux_vae_populates_when_unset() {
-        let mut cfg = ModelConfig {
-            family: Some("flux".into()),
-            transformer: Some("/m/cv-y/flux/civitai/y/unet.safetensors".into()),
-            vae: None, // transformer-only path
-            ..Default::default()
-        };
-        let paths = ModelPaths {
-            transformer: std::path::PathBuf::from("/m/flux-vae/ae.safetensors"),
-            transformer_shards: Vec::new(),
-            vae: std::path::PathBuf::from("/m/flux-vae/ae.safetensors"),
-            spatial_upscaler: None,
-            temporal_upscaler: None,
-            distilled_lora: None,
-            t5_encoder: None,
-            clip_encoder: None,
-            t5_tokenizer: None,
-            clip_tokenizer: None,
-            clip_encoder_2: None,
-            clip_tokenizer_2: None,
-            text_encoder_files: Vec::new(),
-            text_tokenizer: None,
-            decoder: None,
-        };
-        copy_companion_into_cfg(&mut cfg, "flux-vae", &paths);
-        assert_eq!(
-            cfg.vae.as_deref(),
-            Some("/m/flux-vae/ae.safetensors"),
-            "transformer-only cfg.vae must be populated from the flux-vae companion path"
-        );
+    // The ENV_LOCK guard is held across the `.await` to keep MOLD_HOME pinned
+    // for the duration of the (sidecar-only, no real I/O) resolution; the tokio
+    // test is single-threaded so this cannot deadlock.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn ensure_catalog_model_installs_from_installed_sidecar_without_network() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_models_dir_env();
+
+        let dir = tempfile::tempdir().unwrap();
+        let _home_guard = pin_mold_home(dir.path());
+        let models_dir = dir.path().to_str().unwrap();
+        let mut config = explicit_config(models_dir);
+        stub_companion_paths(&mut config, models_dir);
+
+        let sidecar_dir = dir.path().join("cv-1075446");
+        let primary_rel = "sdxl/civitai/1075446/realism.safetensors";
+        let primary_path = sidecar_dir.join(primary_rel);
+        std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+        std::fs::write(&primary_path, b"ok").unwrap();
+        mold_catalog::sidecar::write_sidecar(
+            &sidecar_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &mold_catalog::sidecar::CatalogSidecar {
+                schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+                id: "cv:1075446".into(),
+                source: "civitai".into(),
+                source_id: "1075446".into(),
+                name: "Realism By Stable Yogi".into(),
+                author: Some("Stable_Yogi".into()),
+                family: "sdxl".into(),
+                family_role: "finetune".into(),
+                sub_family: None,
+                kind: "checkpoint".into(),
+                modality: "image".into(),
+                thumbnail_url: None,
+                size_bytes: Some(2),
+                engine_phase: 2,
+                trained_words: Vec::new(),
+                primary_filename_rel: primary_rel.into(),
+                written_at: 0,
+            },
+        )
+        .unwrap();
+
+        // Sidecar-first resolution succeeds without any live HF/Civitai call.
+        let installed = ensure_catalog_model(&mut config, "cv:1075446")
+            .await
+            .unwrap();
+        assert!(installed, "installed sidecar must resolve to Ok(true)");
+        let synth = config
+            .models
+            .get("cv:1075446")
+            .expect("catalog id must be injected into config.models");
+        assert_eq!(synth.family.as_deref(), Some("sdxl"));
+        assert_eq!(synth.transformer.as_deref(), primary_path.to_str());
     }
 }

@@ -115,19 +115,13 @@ pub(crate) fn print_using_local_inference() {
 /// Human-readable byte size with space before unit (e.g. "7.0 GB").
 /// Used in verbose contexts like `mold rm` confirmation output.
 pub(crate) fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
+    mold_core::format::human_bytes(bytes)
 }
 
 /// Compact byte size without space (e.g. "7.0GB").
-/// Used in dense table columns like `mold list`.
+/// Used in dense table columns like `mold list`. Presentational one-off
+/// (em-dash zero, fixed GB/MB tiers) — general flavors live in
+/// `mold_core::format`.
 pub(crate) fn format_disk_size(bytes: u64) -> String {
     if bytes == 0 {
         "—".to_string()

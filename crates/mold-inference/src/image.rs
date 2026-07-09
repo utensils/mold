@@ -62,6 +62,47 @@ pub(crate) fn encode_image(
     Ok(buf.into_inner())
 }
 
+/// Embed generation metadata as PNG text chunks: per-field tEXt/iTXt for
+/// quick tooling plus the composite `mold:parameters` JSON block the
+/// gallery readers parse back into `OutputMetadata`. Shared by still-PNG
+/// output and APNG video output so the two can't drift.
+pub(crate) fn add_metadata_chunks<W: std::io::Write>(
+    encoder: &mut png::Encoder<W>,
+    metadata: &OutputMetadata,
+) -> Result<()> {
+    encoder.add_itxt_chunk("mold:prompt".to_string(), metadata.prompt.clone())?;
+    encoder.add_itxt_chunk("mold:model".to_string(), metadata.model.clone())?;
+    encoder.add_text_chunk("mold:seed".to_string(), metadata.seed.to_string())?;
+    encoder.add_text_chunk("mold:steps".to_string(), metadata.steps.to_string())?;
+    encoder.add_text_chunk("mold:guidance".to_string(), metadata.guidance.to_string())?;
+    encoder.add_text_chunk("mold:width".to_string(), metadata.width.to_string())?;
+    encoder.add_text_chunk("mold:height".to_string(), metadata.height.to_string())?;
+    if let Some(frames) = metadata.frames {
+        encoder.add_text_chunk("mold:frames".to_string(), frames.to_string())?;
+    }
+    if let Some(fps) = metadata.fps {
+        encoder.add_text_chunk("mold:fps".to_string(), fps.to_string())?;
+    }
+    if let Some(strength) = metadata.strength {
+        encoder.add_text_chunk("mold:strength".to_string(), strength.to_string())?;
+    }
+    if let Some(scheduler) = metadata.scheduler {
+        encoder.add_text_chunk("mold:scheduler".to_string(), scheduler.to_string())?;
+    }
+    if let Some(ref neg) = metadata.negative_prompt {
+        encoder.add_itxt_chunk("mold:negative_prompt".to_string(), neg.clone())?;
+    }
+    if let Some(ref original) = metadata.original_prompt {
+        encoder.add_itxt_chunk("mold:original_prompt".to_string(), original.clone())?;
+    }
+    encoder.add_itxt_chunk("mold:version".to_string(), metadata.version.clone())?;
+    encoder.add_itxt_chunk(
+        "mold:parameters".to_string(),
+        serde_json::to_string(metadata)?,
+    )?;
+    Ok(())
+}
+
 fn write_png(
     rgb_image: &image::RgbImage,
     writer: &mut std::io::Cursor<Vec<u8>>,
@@ -72,30 +113,7 @@ fn write_png(
     encoder.set_depth(png::BitDepth::Eight);
 
     if let Some(metadata) = metadata {
-        encoder.add_itxt_chunk("mold:prompt".to_string(), metadata.prompt.clone())?;
-        encoder.add_itxt_chunk("mold:model".to_string(), metadata.model.clone())?;
-        encoder.add_text_chunk("mold:seed".to_string(), metadata.seed.to_string())?;
-        encoder.add_text_chunk("mold:steps".to_string(), metadata.steps.to_string())?;
-        encoder.add_text_chunk("mold:guidance".to_string(), metadata.guidance.to_string())?;
-        encoder.add_text_chunk("mold:width".to_string(), metadata.width.to_string())?;
-        encoder.add_text_chunk("mold:height".to_string(), metadata.height.to_string())?;
-        if let Some(strength) = metadata.strength {
-            encoder.add_text_chunk("mold:strength".to_string(), strength.to_string())?;
-        }
-        if let Some(scheduler) = metadata.scheduler {
-            encoder.add_text_chunk("mold:scheduler".to_string(), scheduler.to_string())?;
-        }
-        if let Some(ref neg) = metadata.negative_prompt {
-            encoder.add_itxt_chunk("mold:negative_prompt".to_string(), neg.clone())?;
-        }
-        if let Some(ref original) = metadata.original_prompt {
-            encoder.add_itxt_chunk("mold:original_prompt".to_string(), original.clone())?;
-        }
-        encoder.add_itxt_chunk("mold:version".to_string(), metadata.version.clone())?;
-        encoder.add_itxt_chunk(
-            "mold:parameters".to_string(),
-            serde_json::to_string(metadata)?,
-        )?;
+        add_metadata_chunks(&mut encoder, metadata)?;
     }
 
     let mut png_writer = encoder.write_header()?;

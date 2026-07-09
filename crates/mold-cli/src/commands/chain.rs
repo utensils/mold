@@ -302,77 +302,30 @@ async fn run_chain_local(
     eager: bool,
     offload: bool,
 ) -> Result<VideoData> {
-    use mold_core::manifest::find_manifest;
-    use mold_core::ModelPaths;
-    use mold_inference::LoadStrategy;
+    use super::local_engine::{build_local_engine, resolve_or_pull_model, EngineOverrides};
 
     // Normalise so we have expanded stages locally too.
     let req = chain_req.clone().normalise()?;
 
-    // Apply encoder-variant overrides before constructing the engine so the
-    // factory's auto-select picks them up.
-    apply_local_engine_env_overrides(
-        t5_variant_override.as_deref(),
-        qwen3_variant_override.as_deref(),
-        qwen2_variant_override.as_deref(),
-        qwen2_text_encoder_mode_override.as_deref(),
-    );
-
     let model_name = req.model.clone();
 
-    // Ensure the model is pulled + config rows are in place.
-    let (paths, effective_config) = if let Some(p) = ModelPaths::resolve(&model_name, config) {
-        (p, config.clone())
-    } else if find_manifest(&model_name).is_some() {
-        crate::output::status!(
-            "{} Model '{}' not found locally, pulling...",
-            theme::icon_info(),
-            model_name.bold(),
-        );
-        let updated = super::pull::pull_and_configure(
-            &model_name,
-            &mold_core::download::PullOptions::default(),
-        )
-        .await?;
-        let p = ModelPaths::resolve(&model_name, &updated).ok_or_else(|| {
-            anyhow::anyhow!("model '{model_name}' was pulled but paths could not be resolved")
-        })?;
-        (p, updated)
-    } else {
-        anyhow::bail!(
-            "no model paths configured for '{model_name}'. Add [models.{model_name}] \
-             to ~/.mold/config.toml or pull via `mold pull {model_name}`."
-        );
-    };
+    // Ensure the model is pulled + config rows are in place (also runs the
+    // missing-assets repair pull the single-clip path gets).
+    let (paths, effective_config, _pulled) = resolve_or_pull_model(&model_name, config).await?;
 
-    let is_eager = eager || std::env::var("MOLD_EAGER").is_ok_and(|v| v == "1");
-    let load_strategy = if is_eager {
-        LoadStrategy::Eager
-    } else {
-        LoadStrategy::Sequential
-    };
-    if is_eager {
-        std::env::set_var("MOLD_EAGER", "1");
-    }
-    let is_offload = offload || std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
-
-    let gpu_selection = match &gpus {
-        Some(s) => mold_core::types::GpuSelection::parse(s)?,
-        None => effective_config.gpu_selection(),
-    };
-    let discovered = mold_inference::device::discover_gpus();
-    let available = mold_inference::device::filter_gpus(&discovered, &gpu_selection);
-    let gpu_ordinal = mold_inference::device::select_best_gpu(&available)
-        .map(|g| g.ordinal)
-        .unwrap_or(0);
-
-    let mut engine = mold_inference::create_engine(
-        model_name,
+    let mut engine = build_local_engine(
+        &model_name,
         paths,
         &effective_config,
-        load_strategy,
-        gpu_ordinal,
-        is_offload,
+        &EngineOverrides {
+            gpus,
+            t5_variant: t5_variant_override,
+            qwen3_variant: qwen3_variant_override,
+            qwen2_variant: qwen2_variant_override,
+            qwen2_text_encoder_mode: qwen2_text_encoder_mode_override,
+            eager,
+            offload,
+        },
     )?;
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChainProgressEvent>();
@@ -450,31 +403,10 @@ async fn run_chain_local(
     Ok(result)
 }
 
-#[cfg(any(feature = "cuda", feature = "metal"))]
-fn apply_local_engine_env_overrides(
-    t5_variant: Option<&str>,
-    qwen3_variant: Option<&str>,
-    qwen2_variant: Option<&str>,
-    qwen2_text_encoder_mode: Option<&str>,
-) {
-    if let Some(v) = t5_variant {
-        std::env::set_var("MOLD_T5_VARIANT", v);
-    }
-    if let Some(v) = qwen3_variant {
-        std::env::set_var("MOLD_QWEN3_VARIANT", v);
-    }
-    if let Some(v) = qwen2_variant {
-        std::env::set_var("MOLD_QWEN2_VARIANT", v);
-    }
-    if let Some(v) = qwen2_text_encoder_mode {
-        std::env::set_var("MOLD_QWEN2_TEXT_ENCODER_MODE", v);
-    }
-}
-
-/// Encode stitched frames to the requested container. MP4 is feature-gated;
-/// fall back to APNG when the CLI was built without `mp4`. When `audio` is
-/// `Some` and the output format is MP4, the audio is muxed in as an AAC
-/// track via the same path the single-clip pipeline uses.
+/// Encode stitched frames to the requested container via the shared
+/// chain encoder in mold-inference (MP4 feature-gating, APNG fallbacks,
+/// AAC audio mux). Warnings surface on stderr; this wrapper only adds
+/// the CLI-specific `VideoData` assembly and first-frame thumbnail.
 #[cfg(any(feature = "cuda", feature = "metal"))]
 fn encode_local_frames(
     frames: &[image::RgbImage],
@@ -484,72 +416,13 @@ fn encode_local_frames(
 ) -> Result<VideoData> {
     use mold_inference::ltx_video::video_enc;
 
-    let gif_preview = video_enc::encode_gif(frames, fps).unwrap_or_default();
     let thumbnail = video_enc::first_frame_png(frames).unwrap_or_default();
 
-    let (bytes, actual_format) = match output_format {
-        OutputFormat::Mp4 => {
-            #[cfg(feature = "mp4")]
-            {
-                let video_only = video_enc::encode_mp4(frames, fps)?;
-                let muxed = match audio {
-                    Some(track) => mold_inference::ltx2::media::attach_aac_track_to_mp4_bytes(
-                        &video_only,
-                        &track.interleaved_samples,
-                        track.sample_rate,
-                        track.channels,
-                    )?,
-                    None => video_only,
-                };
-                (muxed, OutputFormat::Mp4)
-            }
-            #[cfg(not(feature = "mp4"))]
-            {
-                let _ = audio;
-                crate::output::status!(
-                    "{} MP4 requested but this binary was built without --features mp4; \
-                     falling back to APNG",
-                    theme::prefix_warning(),
-                );
-                (
-                    video_enc::encode_apng(frames, fps, None)?,
-                    OutputFormat::Apng,
-                )
-            }
-        }
-        OutputFormat::Apng => {
-            if audio.is_some() {
-                crate::output::status!(
-                    "{} chain audio dropped: APNG output has no audio track carrier",
-                    theme::prefix_warning(),
-                );
-            }
-            (
-                video_enc::encode_apng(frames, fps, None)?,
-                OutputFormat::Apng,
-            )
-        }
-        OutputFormat::Gif => {
-            if audio.is_some() {
-                crate::output::status!(
-                    "{} chain audio dropped: GIF output has no audio track carrier",
-                    theme::prefix_warning(),
-                );
-            }
-            (video_enc::encode_gif(frames, fps)?, OutputFormat::Gif)
-        }
-        OutputFormat::Webp => {
-            crate::output::status!(
-                "{} WebP chain output not supported locally yet; falling back to APNG",
-                theme::prefix_warning(),
-            );
-            (
-                video_enc::encode_apng(frames, fps, None)?,
-                OutputFormat::Apng,
-            )
-        }
-        other => anyhow::bail!("{other:?} is not a video output format for chain generation"),
-    };
+    let encoded = mold_inference::chain::encode_chain_frames(frames, fps, output_format, audio)?;
+    for warning in &encoded.warnings {
+        crate::output::status!("{} {}", theme::prefix_warning(), warning.message());
+    }
+    let (bytes, actual_format, gif_preview) = (encoded.bytes, encoded.format, encoded.gif_preview);
 
     let width = frames[0].width();
     let height = frames[0].height();
@@ -611,19 +484,13 @@ fn encode_and_save(
                 None
             }
             Some(path) => Some(path.to_string()),
-            None => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                Some(mold_core::default_output_filename(
-                    &req.model,
-                    timestamp,
-                    video.format.extension(),
-                    1,
-                    0,
-                ))
-            }
+            None => Some(mold_core::default_output_filename(
+                &req.model,
+                mold_core::time::now_epoch_ms_u64(),
+                video.format.extension(),
+                1,
+                0,
+            )),
         };
         if let Some(ref filename) = filename {
             if std::path::Path::new(filename).exists() {
@@ -644,13 +511,14 @@ fn encode_and_save(
             // GenerateRequest so the existing record_local_save helper can
             // infer dimensions/seed/steps/etc. without a dedicated chain
             // row schema.
-            let synth = synth_generate_request(req, video);
+            let synth = req.synthetic_generate_request(video.format, video.frames, video.fps);
             crate::metadata_db::record_local_save(
                 std::path::Path::new(filename),
                 &synth,
                 req.seed.unwrap_or(base_seed),
                 elapsed_ms,
                 video.format,
+                Some((video.width, video.height)),
             );
         }
     }
@@ -678,59 +546,6 @@ fn encode_and_save(
     );
 
     Ok(())
-}
-
-/// Build a synthetic single-clip `GenerateRequest` from a normalised chain
-/// so the gallery metadata DB can record the stitched output with the
-/// existing row schema. Uses `stages[0]` for prompt + source image (the
-/// gallery row only has one prompt field — multi-prompt chains lose the
-/// continuation prompts in the DB, which is acceptable for v1).
-fn synth_generate_request(req: &ChainRequest, video: &VideoData) -> mold_core::GenerateRequest {
-    let first = req
-        .stages
-        .first()
-        .expect("run_chain callers must pass a normalised ChainRequest");
-    mold_core::GenerateRequest {
-        prompt: first.prompt.clone(),
-        negative_prompt: first.negative_prompt.clone(),
-        model: req.model.clone(),
-        width: req.width,
-        height: req.height,
-        steps: req.steps,
-        guidance: req.guidance,
-        seed: req.seed,
-        batch_size: 1,
-        output_format: Some(video.format),
-        embed_metadata: Some(false),
-        scheduler: None,
-        cfg_plus: None,
-        edit_images: None,
-        source_image: first.source_image.clone(),
-        strength: req.strength,
-        mask_image: None,
-        control_image: None,
-        control_model: None,
-        control_scale: 1.0,
-        expand: None,
-        original_prompt: None,
-        lora: None,
-        frames: Some(video.frames),
-        fps: Some(video.fps),
-        upscale_model: None,
-        gif_preview: false,
-        enable_audio: None,
-        audio_file: None,
-        audio_file_path: None,
-        source_video: None,
-        source_video_path: None,
-        keyframes: None,
-        pipeline: None,
-        loras: None,
-        retake_range: None,
-        spatial_upscale: None,
-        temporal_upscale: None,
-        placement: req.placement.clone(),
-    }
 }
 
 /// Per-stage metadata surfaced in the progress-bar label. Built once per
@@ -1240,89 +1055,6 @@ mod tests {
         assert_eq!(make(TransitionMode::Smooth).transition_tag, "smooth");
         assert_eq!(make(TransitionMode::Cut).transition_tag, "cut");
         assert_eq!(make(TransitionMode::Fade).transition_tag, "fade");
-    }
-
-    /// Regression: `run_chain` used to round-trip multi-stage requests
-    /// through `ChainInputs`, which collapsed everything into auto-expand
-    /// form and silently replicated `stages[0].prompt` across every
-    /// continuation. The gallery DB row (built by `synth_generate_request`)
-    /// should now carry the authored stage-0 prompt and source image
-    /// verbatim — and by construction, the caller has already preserved the
-    /// downstream per-stage data in the `ChainRequest` it hands us.
-    #[test]
-    fn synth_generate_request_reads_stages_zero() {
-        use mold_core::chain::{ChainStage, TransitionMode};
-        let req = ChainRequest {
-            model: "ltx-2-19b-distilled:fp8".into(),
-            stages: vec![
-                ChainStage {
-                    prompt: "stage zero prompt".into(),
-                    frames: 97,
-                    source_image: Some(vec![1, 2, 3, 4]),
-                    negative_prompt: Some("no cats".into()),
-                    seed_offset: None,
-                    transition: TransitionMode::Smooth,
-                    fade_frames: None,
-                    model: None,
-                    loras: vec![],
-                    references: vec![],
-                },
-                // A continuation stage with a DIFFERENT prompt and its own
-                // source image — the old lossy code would have dropped both
-                // and replicated stage-0's prompt. We're not asserting the
-                // continuation shows up in the synth row (v1 gallery schema
-                // only has one prompt field) — only that the stage-0 data
-                // isn't overwritten by something smeared from the request.
-                ChainStage {
-                    prompt: "stage one prompt".into(),
-                    frames: 97,
-                    source_image: Some(vec![9, 9, 9]),
-                    negative_prompt: None,
-                    seed_offset: None,
-                    transition: TransitionMode::Cut,
-                    fade_frames: None,
-                    model: None,
-                    loras: vec![],
-                    references: vec![],
-                },
-            ],
-            motion_tail_frames: 17,
-            width: 1216,
-            height: 704,
-            fps: 24,
-            seed: Some(42),
-            steps: 8,
-            guidance: 3.0,
-            strength: 1.0,
-            output_format: OutputFormat::Mp4,
-            placement: None,
-            prompt: None,
-            total_frames: None,
-            clip_frames: None,
-            source_image: None,
-            enable_audio: None,
-        };
-        let video = VideoData {
-            data: vec![],
-            format: OutputFormat::Mp4,
-            width: 1216,
-            height: 704,
-            frames: 190,
-            fps: 24,
-            thumbnail: vec![],
-            gif_preview: vec![],
-            has_audio: false,
-            duration_ms: None,
-            audio_sample_rate: None,
-            audio_channels: None,
-        };
-        let synth = super::synth_generate_request(&req, &video);
-        assert_eq!(synth.prompt, "stage zero prompt");
-        assert_eq!(synth.source_image.as_deref(), Some(&[1, 2, 3, 4][..]));
-        assert_eq!(synth.negative_prompt.as_deref(), Some("no cats"));
-        assert_eq!(synth.model, "ltx-2-19b-distilled:fp8");
-        assert_eq!(synth.seed, Some(42));
-        assert_eq!(synth.frames, Some(190));
     }
 
     /// Round-trip: a TOML-style script parsed into a ChainRequest should

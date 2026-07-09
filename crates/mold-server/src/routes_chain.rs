@@ -17,7 +17,7 @@ use mold_core::chain::{
     SseChainCompleteEvent,
 };
 use mold_core::chain_job::{settled, ChainJobEvent, ChainJobState};
-use mold_core::{OutputFormat, OutputMetadata, VideoData};
+use mold_core::{OutputFormat, VideoData};
 use mold_db::MetadataDb;
 use std::convert::Infallible;
 use tokio_stream::StreamExt as _;
@@ -293,7 +293,7 @@ fn shim_build_response_and_cleanup(
         }
     };
     if let Some(dir) = output_dir {
-        let metadata = chain_output_metadata(&req, frame_count);
+        let metadata = req.stitched_output_metadata(actual_format, frame_count);
         save_video_to_dir(
             &dir,
             &bytes,
@@ -423,120 +423,11 @@ fn encode_chain_output(
     format: OutputFormat,
     audio: Option<&mold_inference::chain::NativeAudioTrack>,
 ) -> anyhow::Result<(Vec<u8>, OutputFormat, Vec<u8>)> {
-    use mold_inference::ltx_video::video_enc;
-
-    // Always produce a GIF preview for the gallery UI. Non-fatal.
-    let gif_preview = match video_enc::encode_gif(frames, fps) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("chain gif preview encode failed: {e:#}");
-            Vec::new()
-        }
-    };
-
-    let (bytes, actual_format) = match format {
-        OutputFormat::Mp4 => {
-            #[cfg(feature = "mp4")]
-            {
-                let video_only = video_enc::encode_mp4(frames, fps)?;
-                let muxed = match audio {
-                    Some(track) => mold_inference::ltx2::media::attach_aac_track_to_mp4_bytes(
-                        &video_only,
-                        &track.interleaved_samples,
-                        track.sample_rate,
-                        track.channels,
-                    )?,
-                    None => video_only,
-                };
-                (muxed, OutputFormat::Mp4)
-            }
-            #[cfg(not(feature = "mp4"))]
-            {
-                let _ = audio; // suppress unused-without-mp4 warning
-                tracing::warn!(
-                    "chain requested MP4 but server was built without the `mp4` feature — \
-                     falling back to APNG"
-                );
-                (
-                    video_enc::encode_apng(frames, fps, None)?,
-                    OutputFormat::Apng,
-                )
-            }
-        }
-        OutputFormat::Apng => {
-            if audio.is_some() {
-                tracing::warn!("chain audio dropped: APNG output has no audio track carrier");
-            }
-            (
-                video_enc::encode_apng(frames, fps, None)?,
-                OutputFormat::Apng,
-            )
-        }
-        OutputFormat::Gif => {
-            if audio.is_some() {
-                tracing::warn!("chain audio dropped: GIF output has no audio track carrier");
-            }
-            (video_enc::encode_gif(frames, fps)?, OutputFormat::Gif)
-        }
-        // WebP is always available here because mold-inference's webp
-        // feature would need to gate at the transitive-dep level; for the
-        // chain route v1 we fall back to APNG when WebP is requested so
-        // we don't bind the server crate to another optional dep.
-        OutputFormat::Webp => {
-            if audio.is_some() {
-                tracing::warn!("chain audio dropped: WebP output has no audio track carrier");
-            }
-            tracing::warn!(
-                "chain WebP output is not supported on the server yet — falling back to APNG"
-            );
-            (
-                video_enc::encode_apng(frames, fps, None)?,
-                OutputFormat::Apng,
-            )
-        }
-        other => anyhow::bail!("{other:?} is not a video output format for chain generation"),
-    };
-
-    Ok((bytes, actual_format, gif_preview))
-}
-
-/// Build the `OutputMetadata` for a stitched chain output. Pulls chain-
-/// level parameters (dimensions, seed, steps) from `req` and the prompt /
-/// negative prompt from `stages[0]`.
-fn chain_output_metadata(req: &ChainRequest, frame_count: u32) -> OutputMetadata {
-    let first_stage = req.stages.first();
-    OutputMetadata {
-        prompt: first_stage.map(|s| s.prompt.clone()).unwrap_or_default(),
-        negative_prompt: first_stage.and_then(|s| s.negative_prompt.clone()),
-        original_prompt: None,
-        model: req.model.clone(),
-        seed: req.seed.unwrap_or(0),
-        steps: req.steps,
-        guidance: req.guidance,
-        width: req.width,
-        height: req.height,
-        strength: Some(req.strength),
-        scheduler: None,
-        output_format: Some(req.output_format),
-        cfg_plus: None,
-        lora: None,
-        lora_scale: None,
-        loras: None,
-        control_model: None,
-        control_scale: None,
-        upscale_model: None,
-        gif_preview: None,
-        enable_audio: req.enable_audio,
-        audio_file_path: None,
-        source_video_path: None,
-        pipeline: None,
-        retake_range: None,
-        spatial_upscale: None,
-        temporal_upscale: None,
-        frames: Some(frame_count),
-        fps: Some(req.fps),
-        version: mold_core::build_info::version_string().to_string(),
+    let encoded = mold_inference::chain::encode_chain_frames(frames, fps, format, audio)?;
+    for warning in &encoded.warnings {
+        tracing::warn!("{}", warning.message());
     }
+    Ok((encoded.bytes, encoded.format, encoded.gif_preview))
 }
 
 /// Produce a PNG thumbnail for the chain output — best-effort, returns
