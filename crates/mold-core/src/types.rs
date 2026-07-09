@@ -1896,6 +1896,26 @@ mod tests {
     }
 
     #[test]
+    fn history_listing_serde_roundtrip() {
+        // Wire contract for GET /api/history — `{ "entries": [...] }` with
+        // exactly { prompt, model, used_at } per row.
+        let listing = HistoryListing {
+            entries: vec![HistoryEntry {
+                prompt: "a cat".to_string(),
+                model: "flux-dev:q8".to_string(),
+                used_at: 1_700_000_000_000,
+            }],
+        };
+        let json = serde_json::to_string(&listing).unwrap();
+        assert!(json.contains(r#""prompt":"a cat""#), "got: {json}");
+        assert!(json.contains(r#""used_at":1700000000000"#), "got: {json}");
+        let back: HistoryListing = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.entries[0].model, "flux-dev:q8");
+        assert_eq!(back.entries[0].used_at, 1_700_000_000_000);
+    }
+
+    #[test]
     fn sse_progress_queued_roundtrip() {
         let event = SseProgressEvent::Queued {
             position: 3,
@@ -2702,6 +2722,25 @@ pub struct CatalogCapabilities {
 pub struct ServerCapabilities {
     pub gallery: GalleryCapabilities,
     pub catalog: CatalogCapabilities,
+}
+
+/// One prompt-history row returned by `GET /api/history`. Deliberately a
+/// small wire-facing projection of the richer `prompt_history` DB row —
+/// clients get what they need to re-run a prompt, nothing more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct HistoryEntry {
+    pub prompt: String,
+    pub model: String,
+    /// Unix epoch milliseconds when the prompt was recorded.
+    pub used_at: i64,
+}
+
+/// Whole-history listing returned by `GET /api/history`. Wrapped in a struct
+/// so the response can grow extra fields (totals, paging cursors, …) without
+/// a breaking change — same rationale as `QueueListing`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct HistoryListing {
+    pub entries: Vec<HistoryEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

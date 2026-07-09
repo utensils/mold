@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Queue-cancel and prompt-history server endpoints** (desktop-app surfaces): `DELETE /api/queue/:id` cancels a still-queued generation job (204; 404 unknown id; 409 `QUEUE_JOB_RUNNING` once a worker owns it — the blocking `POST /api/generate` waiter resolves with a 499 `CANCELLED` error and the SSE stream emits a terminal `error` event and closes), and `GET /api/history?query=&limit=` / `DELETE /api/history[?keep=N]` expose the prompt-history DB over HTTP (newest first, substring filtering, limit default 50 / max 500; both return 503 `HISTORY_UNAVAILABLE` under `MOLD_DB_DISABLE=1`).
+
 ### Fixed
 
 - **`mold run --local` chains now run the missing-assets repair pull.** The local chain path shares the single-clip model resolve/pull preamble, so a model with deleted or corrupted component files is repaired automatically instead of failing at engine load.
