@@ -25,6 +25,8 @@ export interface Job {
   error: string | null;
   /** Object URL of the decoded result. */
   resultUrl: string | null;
+  /** Object URL of the latest live latent preview (small PNG, upscaled by CSS). */
+  previewUrl: string | null;
   result: CompleteEvent | null;
 }
 
@@ -43,6 +45,7 @@ export function newJob(req: GenerateRequest): Job {
     stage: null,
     error: null,
     resultUrl: null,
+    previewUrl: null,
     result: null,
   };
 }
@@ -66,6 +69,14 @@ export function applyProgress(job: Job, event: ProgressEvent): Job {
       job.step = event.step;
       job.total = event.total;
       break;
+    case "preview": {
+      job.status = "denoising";
+      job.queuePosition = null;
+      const previous = job.previewUrl;
+      job.previewUrl = base64ToBlobUrl(event.image, "image/png");
+      if (previous) URL.revokeObjectURL(previous);
+      break;
+    }
     default:
       break;
   }
@@ -205,9 +216,13 @@ export const useGenerationStore = defineStore("generation", {
     resetJobs() {
       this.cancelStream();
       if (this.active?.resultUrl) URL.revokeObjectURL(this.active.resultUrl);
+      if (this.active?.previewUrl) URL.revokeObjectURL(this.active.previewUrl);
       for (const s of this.siblings) {
         if (s.resultUrl && s.resultUrl !== this.active?.resultUrl) {
           URL.revokeObjectURL(s.resultUrl);
+        }
+        if (s.previewUrl && s.previewUrl !== this.active?.previewUrl) {
+          URL.revokeObjectURL(s.previewUrl);
         }
       }
       this.siblings = [];
@@ -244,6 +259,10 @@ export const useGenerationStore = defineStore("generation", {
               );
               current.visualSeed = String(complete.seed_used);
               current.status = "complete";
+              if (current.previewUrl) {
+                URL.revokeObjectURL(current.previewUrl);
+                current.previewUrl = null;
+              }
             } else if (event === "error") {
               current.status = "error";
               try {

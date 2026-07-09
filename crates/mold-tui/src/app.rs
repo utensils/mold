@@ -5181,6 +5181,9 @@ impl App {
 
 fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) -> bool {
     match event {
+        // Latent previews are for canvas clients (web SPA / desktop app);
+        // the TUI progress bar already tracks DenoiseStep.
+        SseProgressEvent::Preview { .. } => {}
         SseProgressEvent::StageStart { name } => {
             progress.current_stage = Some(name);
             // Each StageStart counts as a new pipeline step; tracking the

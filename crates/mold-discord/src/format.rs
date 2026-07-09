@@ -35,6 +35,10 @@ pub fn format_progress(event: &SseProgressEvent) -> String {
         SseProgressEvent::CacheHit { resource } => {
             format!("Cache hit: {resource}")
         }
+        // Latent previews are for canvas clients; Discord shows the step bar.
+        SseProgressEvent::Preview { step, total, .. } => {
+            format!("Denoising {step}/{total}")
+        }
         SseProgressEvent::DenoiseStep {
             step,
             total,

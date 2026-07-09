@@ -69,6 +69,7 @@ candle-flash-attn = { version = "0.9.2", optional = true }
 gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
 image = "0.25"
+base64 = "0.22"
 mp4-rs = { package = "mp4", version = "0.14" }
 openh264 = { version = "0.9", features = ["source"] }
 png = "0.18"

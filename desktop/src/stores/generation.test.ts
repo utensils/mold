@@ -108,3 +108,24 @@ describe("job reactivity wiring", () => {
     expect(isReactive(job)).toBe(true);
   });
 });
+
+describe("live latent previews", () => {
+  it("preview events advance to denoising and hold an object URL", () => {
+    const job = newJob(req);
+    applyProgress(job, { type: "preview", image: btoa("fake-png"), step: 1, total: 4 });
+    expect(job.status).toBe("denoising");
+    expect(job.previewUrl).not.toBeNull();
+  });
+
+  it("each preview revokes the previous frame's URL", async () => {
+    const { vi } = await import("vitest");
+    const revoke = vi.spyOn(URL, "revokeObjectURL");
+    const job = newJob(req);
+    applyProgress(job, { type: "preview", image: btoa("a"), step: 1, total: 4 });
+    const first = job.previewUrl;
+    applyProgress(job, { type: "preview", image: btoa("b"), step: 2, total: 4 });
+    expect(revoke).toHaveBeenCalledWith(first);
+    expect(job.previewUrl).not.toBe(first);
+    revoke.mockRestore();
+  });
+});

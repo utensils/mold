@@ -1053,6 +1053,14 @@ pub enum SseProgressEvent {
         total: usize,
         elapsed_ms: u64,
     },
+    /// Live low-fidelity preview of the denoising latent: a base64 PNG at
+    /// latent resolution (~width/8 × height/8) — clients upscale it. Emitted
+    /// throttled between denoise steps; disable with `MOLD_STEP_PREVIEW=0`.
+    Preview {
+        image: String,
+        step: usize,
+        total: usize,
+    },
     /// Download progress for a single file during model pull.
     DownloadProgress {
         filename: String,
@@ -1893,6 +1901,29 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: SseErrorEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back.message, "something failed");
+    }
+
+    #[test]
+    fn preview_event_serde_roundtrip() {
+        // Wire contract for the live denoise preview SSE event: tagged
+        // "preview" with a base64 PNG + step counters.
+        let event = SseProgressEvent::Preview {
+            image: "aGVsbG8=".to_string(),
+            step: 2,
+            total: 4,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"preview""#), "got: {json}");
+        assert!(json.contains(r#""image":"aGVsbG8=""#), "got: {json}");
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SseProgressEvent::Preview {
+                step: 2,
+                total: 4,
+                ..
+            }
+        ));
     }
 
     #[test]

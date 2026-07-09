@@ -261,12 +261,28 @@ onMounted(() => {
               alt=""
               class="absolute inset-0 h-full w-full object-contain transition-opacity duration-500"
             />
+            <!-- Live latent preview: a tiny PNG upscaled by CSS; the blur
+                 tightens as denoising progresses and the grain resolves
+                 over it, so the print literally develops on the canvas. -->
+            <img
+              v-if="job && job.status !== 'complete' && job.previewUrl"
+              :src="job.previewUrl"
+              alt=""
+              class="absolute inset-0 h-full w-full object-cover"
+              :style="{ filter: `blur(${Math.max(2, 14 - 12 * jobProgress(job))}px)` }"
+            />
+            <!-- The grain canvas paints edge-to-edge (temperature wash), so
+                 once previews exist it thins out with progress to reveal
+                 the forming print underneath. -->
             <DevelopCanvas
               v-if="job && job.status !== 'complete'"
               :seed="job.visualSeed"
               :progress="jobProgress(job)"
               :phase="jobPhase(job)"
               class="absolute inset-0"
+              :style="{
+                opacity: job.previewUrl ? String(Math.max(0.18, 1 - jobProgress(job) * 0.9)) : '1',
+              }"
             />
             <div
               v-if="!job"

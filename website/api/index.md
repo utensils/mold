@@ -480,9 +480,18 @@ data: {"type":"stage_start","name":"Loading model weights"}
 event: progress
 data: {"type":"denoise_step","step":1,"total":25,"elapsed_ms":640}
 
+event: progress
+data: {"type":"preview","image":"<base64 PNG>","step":1,"total":25}
+
 event: complete
 data: {"images":[{"data":[137,80,78,71],"format":"png","width":1024,"height":1024,"index":0}],"generation_time_ms":12345,"model":"flux-dev:q4","seed_used":42}
 ```
+
+`preview` events are live latent previews for FLUX.1, Flux.2, and Z-Image:
+a small PNG at latent resolution (~width/8 × height/8) produced by a linear
+latent→RGB projection — no VAE involved, so the cost per step is negligible.
+Emitted at most every ~700 ms plus always on the final step; clients upscale
+and blur it. Disable with `MOLD_STEP_PREVIEW=0` on the server.
 
 Typical terminal usage:
 
