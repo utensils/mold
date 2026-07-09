@@ -1,3 +1,4 @@
+import { reactive } from "vue";
 import { defineStore } from "pinia";
 import { apiFetch, ApiError } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
@@ -213,7 +214,11 @@ export const useGenerationStore = defineStore("generation", {
       this.active = null;
     },
     startJob(req: GenerateRequest): Job {
-      const job = newJob(req);
+      // reactive() here is load-bearing: the SSE handlers below mutate the
+      // returned reference from a closure. A raw object would update the
+      // data without firing Vue's proxy traps — the canvas, edge code, and
+      // job chips would sit frozen at "Queued 0/N" for the whole run.
+      const job = reactive(newJob(req));
       this.active = job;
       return job;
     },

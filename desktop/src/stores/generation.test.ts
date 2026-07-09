@@ -90,3 +90,21 @@ describe("batch sequencing", () => {
     expect(JSON.stringify(req)).toBe(snapshot);
   });
 });
+
+describe("job reactivity wiring", () => {
+  it("startJob returns the exact reference the UI reads via store.active", async () => {
+    // Regression: startJob once returned the raw newJob() object while the
+    // store held Vue's reactive proxy. The SSE closures mutated the raw
+    // object, so no proxy trap ever fired and the canvas sat frozen at
+    // "Queued 0/N" for the whole generation.
+    const { createPinia, setActivePinia } = await import("pinia");
+    const { useGenerationStore } = await import("./generation");
+    setActivePinia(createPinia());
+    const store = useGenerationStore();
+    const job = store.startJob({ ...req });
+    expect(job).toBe(store.active);
+
+    const { isReactive } = await import("vue");
+    expect(isReactive(job)).toBe(true);
+  });
+});
