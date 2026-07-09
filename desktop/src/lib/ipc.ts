@@ -74,4 +74,18 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("app_settings_set", { settings });
   },
+  /** Where the local engine writes gallery files; null on remote hosts. */
+  getOutputDir(): Promise<string | null> {
+    if (!inTauri()) return Promise.resolve(null);
+    return invoke<string | null>("get_output_dir");
+  },
+  revealOutputFile(filename: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("reveal_output_file", { filename });
+  },
+  /** macOS dock badge; null clears it. */
+  setDockBadge(count: number | null): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("set_dock_badge", { count }).catch(() => {});
+  },
 };

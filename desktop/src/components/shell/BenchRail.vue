@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useConnectionStore } from "../../stores/connection";
 import { apiJson } from "../../lib/api/client";
+import { ipc } from "../../lib/ipc";
 import { sseStream } from "../../lib/api/sse";
 import { formatGB, percent, vramLevel } from "../../lib/format";
 import type { ResourceSnapshot, ServerStatus } from "../../lib/api/types";
@@ -40,6 +41,8 @@ async function refreshStatus() {
   if (!conn.ready) return;
   try {
     status.value = await apiJson<ServerStatus>("/api/status");
+    // Dock badge mirrors queue depth (design spec §7); cleared when idle.
+    void ipc.setDockBadge(status.value.queue_depth ?? null);
   } catch {
     /* transient; the SSE stream is the liveness signal */
   }

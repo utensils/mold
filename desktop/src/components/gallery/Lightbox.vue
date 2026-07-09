@@ -3,8 +3,10 @@ import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import AuthedMedia from "./AuthedMedia.vue";
 import { mediaPath } from "../../lib/gallery/media";
+import { ipc } from "../../lib/ipc";
 import { useComposerStore } from "../../stores/composer";
 import { useToastStore } from "../../stores/toasts";
+import { useUiStore } from "../../stores/ui";
 import type { GalleryImage } from "../../lib/api/types";
 
 const props = defineProps<{
@@ -18,6 +20,13 @@ const emit = defineEmits<{ close: []; prev: []; next: []; delete: [] }>();
 const router = useRouter();
 const composer = useComposerStore();
 const toasts = useToastStore();
+const ui = useUiStore();
+
+// ⇧⌘C copies the seed while the lightbox is open.
+watch(
+  () => ui.copySeedTick,
+  () => void copy(String(props.item.metadata.seed)),
+);
 
 const confirmingDelete = ref(false);
 watch(
@@ -62,6 +71,18 @@ function reuseSettings() {
 async function copy(text: string) {
   await navigator.clipboard.writeText(text);
   toasts.push("Copied");
+}
+
+// Reveal in Finder only exists when the engine writes to this disk.
+const canReveal = ref(false);
+void ipc.getOutputDir().then((dir) => (canReveal.value = dir !== null));
+
+async function reveal() {
+  try {
+    await ipc.revealOutputFile(props.item.filename);
+  } catch (err) {
+    toasts.push(String(err), "error");
+  }
 }
 
 function onDelete() {
@@ -157,6 +178,14 @@ function onDelete() {
         @click="reuseSettings"
       >
         Reuse settings
+      </button>
+      <button
+        v-if="canReveal"
+        type="button"
+        class="border-edge mt-2 h-8 w-full rounded-control border text-body text-ink-2 transition-colors duration-100 hover:text-ink"
+        @click="reveal"
+      >
+        Reveal in Finder
       </button>
       <button
         type="button"

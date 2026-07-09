@@ -29,7 +29,24 @@ describe("resolveShellShortcut", () => {
     expect(resolveShellShortcut(key("."))).toEqual({ kind: "cancel-job" });
   });
 
-  it("ignores keys without ⌘ or with extra modifiers", () => {
+  it("maps ⌘N and ⌘R to new generation and randomize seed", () => {
+    expect(resolveShellShortcut(key("n"))).toEqual({ kind: "new-generation" });
+    expect(resolveShellShortcut(key("r"))).toEqual({ kind: "randomize-seed" });
+  });
+
+  it("maps ⇧⌘C to copy seed", () => {
+    expect(resolveShellShortcut(key("c", { shiftKey: true }))).toEqual({ kind: "copy-seed" });
+    expect(resolveShellShortcut(key("C", { shiftKey: true }))).toEqual({ kind: "copy-seed" });
+  });
+
+  it("maps ⌘0 / ⌘+ / ⌘- to gallery zoom", () => {
+    expect(resolveShellShortcut(key("0"))).toEqual({ kind: "gallery-zoom", direction: "reset" });
+    expect(resolveShellShortcut(key("="))).toEqual({ kind: "gallery-zoom", direction: "in" });
+    expect(resolveShellShortcut(key("+"))).toEqual({ kind: "gallery-zoom", direction: "in" });
+    expect(resolveShellShortcut(key("-"))).toEqual({ kind: "gallery-zoom", direction: "out" });
+  });
+
+  it("ignores keys without ⌘ or with disallowed modifiers", () => {
     expect(resolveShellShortcut(key("1", { metaKey: false }))).toBeNull();
     expect(resolveShellShortcut(key("1", { shiftKey: true }))).toBeNull();
     expect(resolveShellShortcut(key("1", { altKey: true }))).toBeNull();

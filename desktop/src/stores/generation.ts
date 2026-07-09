@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { apiFetch, ApiError } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
+import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import type { CompleteEvent, GenerateRequest, ProgressEvent } from "../lib/api/types";
 import type { DevelopPhase } from "../lib/develop/grain";
 
@@ -164,6 +165,10 @@ export const useGenerationStore = defineStore("generation", {
         this.siblings.push(job);
         await this.streamJob(job, plan);
       }
+      // Background notification (foreground already gets a toast from the view).
+      const failed = this.siblings.find((s) => s.status === "error");
+      if (this.siblings.some((s) => s.status === "complete")) notifyGenerated(req.prompt);
+      else if (failed?.error) notifyGenerationFailed(failed.error);
       return this.siblings;
     },
     /**

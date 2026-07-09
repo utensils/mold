@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod connection;
+pub mod menu;
 pub mod server;
 pub mod settings;
 
@@ -18,11 +19,14 @@ pub fn run() {
         config.resolved_log_dir(),
     );
 
-    // Ephemeral per-launch key for the embedded engine. Exported before any
-    // thread exists (mold-server's auth layer reads the env once). Documented
-    // caveat: this shadows a user-set MOLD_API_KEY for this process; remote
-    // hosts get their keys from app settings instead.
-    let local_api_key = uuid::Uuid::new_v4().to_string();
+    // Key for the embedded engine, exported before any thread exists
+    // (mold-server's auth layer reads the env once). A user-set MOLD_API_KEY
+    // is honored — their CLI keeps working against the embedded engine —
+    // otherwise an ephemeral per-launch key locks the loopback port down.
+    let local_api_key = std::env::var("MOLD_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     std::env::set_var("MOLD_API_KEY", &local_api_key);
 
     tauri::Builder::default()
@@ -38,6 +42,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(move |app| {
+            let menu = menu::build(app.handle())?;
+            app.set_menu(menu)?;
             app.manage(commands::SettingsStore::load(app.handle())?);
             app.manage(commands::AppState {
                 conn: tokio::sync::Mutex::new(connection::Conn::Off),
@@ -55,6 +61,9 @@ pub fn run() {
             commands::stop_local_engine,
             commands::set_remote_host,
             commands::test_remote_host,
+            commands::get_output_dir,
+            commands::set_dock_badge,
+            commands::reveal_output_file,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

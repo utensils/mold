@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import DevelopCanvas from "../lib/develop/DevelopCanvas.vue";
-import EmptyState from "../components/shell/EmptyState.vue";
+import StarterCards from "../components/generate/StarterCards.vue";
 import ParamPanel from "../components/generate/ParamPanel.vue";
 import LoraStack from "../components/generate/LoraStack.vue";
 import SourceImageWell from "../components/generate/SourceImageWell.vue";
@@ -14,9 +14,11 @@ import { useGalleryStore } from "../stores/gallery";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
+import { useUiStore } from "../stores/ui";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { applyModelDefaults, buildRequest, newGenerateForm } from "../lib/generateForm";
 import { formatGB } from "../lib/format";
+import { randomSeed } from "../stores/generation";
 import type { ModelEntry } from "../lib/api/types";
 
 const router = useRouter();
@@ -26,6 +28,7 @@ const gallery = useGalleryStore();
 const models = useModelStore();
 const composer = useComposerStore();
 const toasts = useToastStore();
+const ui = useUiStore();
 
 const form = reactive(newGenerateForm());
 const promptEl = ref<HTMLTextAreaElement | null>(null);
@@ -138,30 +141,66 @@ watch(
   { immediate: true },
 );
 
+function applyPrefill() {
+  const prefill = composer.take();
+  if (!prefill) return;
+  form.prompt = prefill.prompt;
+  form.model = prefill.model;
+  form.seed = prefill.seed !== null ? String(prefill.seed) : "";
+  form.width = prefill.width;
+  form.height = prefill.height;
+  form.steps = prefill.steps;
+  form.guidance = prefill.guidance;
+  const m = models.installed.find((x) => x.name === prefill.model);
+  if (m) form.family = m.family;
+  void nextTick(() => promptEl.value?.focus());
+}
+
+// Apply a prefill whenever one arrives (Reuse settings, history, "Generate
+// with <model>"), including one already queued before this view mounted.
+watch(() => composer.prefill, applyPrefill, { immediate: true });
+
+// ⌘N — clear the composer for a fresh generation, keeping the model.
+watch(
+  () => ui.newGenerationTick,
+  () => {
+    form.prompt = "";
+    form.originalPrompt = null;
+    form.negativePrompt = "";
+    form.seed = "";
+    form.sourceImage = null;
+    form.maskImage = null;
+    void nextTick(() => promptEl.value?.focus());
+  },
+);
+
+// ⌘R — randomize the seed.
+watch(
+  () => ui.randomizeSeedTick,
+  () => {
+    form.seed = String(randomSeed());
+  },
+);
+
+// Menu ▸ Generate / Expand Prompt reuse the composer actions.
+watch(
+  () => ui.generateTick,
+  () => void generate(),
+);
+watch(
+  () => ui.expandTick,
+  () => expandControl.value?.expand(),
+);
+
 onMounted(() => {
   promptEl.value?.focus();
-  const prefill = composer.take();
-  if (prefill) {
-    form.prompt = prefill.prompt;
-    form.model = prefill.model;
-    form.seed = prefill.seed !== null ? String(prefill.seed) : "";
-    form.width = prefill.width;
-    form.height = prefill.height;
-    form.steps = prefill.steps;
-    form.guidance = prefill.guidance;
-    const m = models.installed.find((x) => x.name === prefill.model);
-    if (m) form.family = m.family;
-  }
 });
 </script>
 
 <template>
-  <EmptyState
+  <StarterCards
     v-if="conn.ready && !models.loading && models.installed.length === 0"
-    headline="Develop your first print."
-    detail="mold runs models locally on your Mac's GPU. Pull one to start."
-    action="Browse models"
-    @action="router.push('/models')"
+    @browse="router.push('/models')"
   />
 
   <div v-else class="grid h-full grid-cols-[1fr_320px]">

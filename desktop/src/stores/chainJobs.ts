@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { apiFetch, apiJson } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
+import { notifyChainFinished } from "../lib/notify";
 import { useToastStore } from "./toasts";
 import type {
   ChainJobDetail,
@@ -87,12 +88,22 @@ export const useChainJobsStore = defineStore("chainJobs", {
     live: emptyChainJobLive() as ChainJobLive,
     watchingId: null as string | null,
     abort: null as AbortController | null,
+    pollTimer: null as ReturnType<typeof setInterval> | null,
   }),
   actions: {
     async fetchJobs() {
       const listing = await apiJson<ChainJobListing>("/api/chain-jobs");
       // Newest first.
       this.jobs = listing.jobs.sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms);
+      // Chains land from any surface (CLI, web, another machine sharing the
+      // DB) — keep the list honest while anything is in flight.
+      const active = this.jobs.some((j) => j.state === "running" || j.state === "queued");
+      if (active && !this.pollTimer) {
+        this.pollTimer = setInterval(() => void this.fetchJobs(), 10_000);
+      } else if (!active && this.pollTimer) {
+        clearInterval(this.pollTimer);
+        this.pollTimer = null;
+      }
     },
     async create(req: ChainRequest): Promise<string> {
       const res = await apiJson<CreateChainJobResponse>("/api/chain-jobs", {
@@ -136,6 +147,7 @@ export const useChainJobsStore = defineStore("chainJobs", {
         const frames =
           this.live.detail?.stages.reduce((n, s) => n + (s.frames_emitted ?? 0), 0) ?? 0;
         useToastStore().push(`Chain finished · ${frames} frames`);
+        notifyChainFinished(frames);
       } else if (state === "failed") {
         useToastStore().push("Chain failed", "error");
       }

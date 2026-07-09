@@ -17,7 +17,11 @@ export type ShellAction =
   | { kind: "navigate"; route: string }
   | { kind: "toggle-sidebar" }
   | { kind: "command-palette" }
-  | { kind: "cancel-job" };
+  | { kind: "cancel-job" }
+  | { kind: "new-generation" }
+  | { kind: "randomize-seed" }
+  | { kind: "copy-seed" }
+  | { kind: "gallery-zoom"; direction: "reset" | "in" | "out" };
 
 export interface KeyLike {
   key: string;
@@ -27,13 +31,26 @@ export interface KeyLike {
   shiftKey: boolean;
 }
 
-/** Resolve a keydown into a shell-level action, or null if unhandled. */
+/**
+ * Resolve a keydown into a shell-level action, or null if unhandled. Requires
+ * ⌘ and no ctrl/alt. The only ⇧⌘ combo is ⇧⌘C (copy seed); every other action
+ * is plain ⌘. Route-scoped actions (randomize seed, gallery zoom) are resolved
+ * here but gated by the current route in the shell.
+ */
 export function resolveShellShortcut(e: KeyLike): ShellAction | null {
-  if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return null;
+  if (!e.metaKey || e.ctrlKey || e.altKey) return null;
+  if (e.shiftKey) {
+    return e.key === "c" || e.key === "C" ? { kind: "copy-seed" } : null;
+  }
   const route = NAV_ROUTES[e.key];
   if (route) return { kind: "navigate", route };
   if (e.key === "\\") return { kind: "toggle-sidebar" };
   if (e.key === "k") return { kind: "command-palette" };
   if (e.key === ".") return { kind: "cancel-job" };
+  if (e.key === "n") return { kind: "new-generation" };
+  if (e.key === "r") return { kind: "randomize-seed" };
+  if (e.key === "0") return { kind: "gallery-zoom", direction: "reset" };
+  if (e.key === "=" || e.key === "+") return { kind: "gallery-zoom", direction: "in" };
+  if (e.key === "-" || e.key === "_") return { kind: "gallery-zoom", direction: "out" };
   return null;
 }

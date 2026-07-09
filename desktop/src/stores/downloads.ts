@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { apiFetch, apiJson, ApiError } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
+import { notifyPulled } from "../lib/notify";
 import { useModelStore } from "./models";
 import { useToastStore } from "./toasts";
 import type { DownloadEvent, DownloadJob, DownloadsListing } from "../lib/api/types";
@@ -152,6 +153,7 @@ export const useDownloadsStore = defineStore("downloads", {
     },
     onJobComplete(model: string) {
       useToastStore().push(`Pulled ${model}`);
+      notifyPulled(model);
       void useModelStore().fetch();
     },
     /** Enqueue a plain-name model. A 409 means it's already queued/installed. */
