@@ -405,7 +405,8 @@
                 # install_name_tool invalidates the ad-hoc signature; re-sign
                 # with the sigtool codesign shim (sandbox has no Apple codesign).
                 ${pkgs.darwin.sigtool}/bin/codesign -f -s - "$app_bin"
-                if ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" | grep -q "/nix/store"; then
+                # tail +2: otool's header line is the binary's own store path.
+                if ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" | tail -n +2 | grep -q "/nix/store"; then
                   echo "mold-desktop still references /nix/store dylibs:" >&2
                   ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" >&2
                   exit 1
