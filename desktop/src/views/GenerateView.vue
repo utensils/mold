@@ -15,6 +15,7 @@ import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
 import { useUiStore } from "../stores/ui";
+import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { applyModelDefaults, buildRequest, newGenerateForm } from "../lib/generateForm";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCycler";
@@ -31,6 +32,7 @@ const models = useModelStore();
 const composer = useComposerStore();
 const toasts = useToastStore();
 const ui = useUiStore();
+const contextMenu = useContextMenuStore();
 
 const form = reactive(newGenerateForm());
 const promptEl = ref<HTMLTextAreaElement | null>(null);
@@ -39,10 +41,6 @@ const pickerOpen = ref(false);
 
 const job = computed(() => generation.active);
 const siblings = computed(() => generation.siblings);
-const running = computed(
-  () => job.value !== null && job.value.status !== "complete" && job.value.status !== "error",
-);
-
 const caps = computed(() => generationCapabilitiesForFamily(form.family));
 const selectedModel = computed<ModelEntry | null>(
   () => models.installed.find((m) => m.name === form.model) ?? null,
@@ -51,13 +49,9 @@ const selectedModel = computed<ModelEntry | null>(
 /** The request the estimate badge previews — null until a model is chosen. */
 const estimateRequest = computed(() => (form.model ? buildRequest(form) : null));
 
-const buttonLabel = computed(() => {
-  const j = job.value;
-  if (!j || !running.value) return "Generate";
-  if (j.status === "denoising") return `Developing… ${j.step}/${j.total}`;
-  if (j.status === "loading") return j.stage ? `${j.stage}…` : "Loading…";
-  return j.queuePosition && j.queuePosition > 0 ? `Queued #${j.queuePosition}` : "Queued";
-});
+const buttonLabel = computed(() =>
+  generation.pending.length > 0 ? `Generate (+${generation.pending.length} queued)` : "Generate",
+);
 
 const edgeCode = computed(() => {
   const j = job.value;
@@ -81,6 +75,36 @@ function siblingDot(s: Job): string {
   return "text-ink-3"; // ◎ pending
 }
 
+function canvasMenu(): MenuEntry[] {
+  const j = job.value;
+  if (!j) return [];
+  const live = j.status !== "complete" && j.status !== "error";
+  return [
+    {
+      label: "Cancel",
+      danger: true,
+      disabled: !live,
+      action: () => void generation.cancel(j.clientId).then(() => toasts.push("Cancelled")),
+    },
+    { separator: true },
+    {
+      label: "Copy prompt",
+      action: () => void navigator.clipboard.writeText(j.prompt),
+    },
+    {
+      label: "Copy seed",
+      disabled: !j.result,
+      action: () => void navigator.clipboard.writeText(String(j.result?.seed_used ?? "")),
+    },
+    { separator: true },
+    {
+      label: "Show in Gallery",
+      disabled: j.status !== "complete",
+      action: () => void router.push("/gallery"),
+    },
+  ];
+}
+
 function onExpandApply(payload: { expanded: string; original: string }) {
   form.prompt = payload.expanded;
   form.originalPrompt = payload.original;
@@ -96,11 +120,14 @@ function appendPromptWord(word: string) {
 }
 
 async function generate() {
-  if (!form.prompt.trim() || !form.model || running.value) return;
+  if (!form.prompt.trim() || !form.model) return;
   const request = buildRequest(form);
   const batch = caps.value.forcesBatchSizeOne ? 1 : form.batchSize;
-  await generation.generateBatch(request, batch);
-  const done = generation.siblings;
+  // Submitting while another print develops queues server-side; each job
+  // snapshots its own model + params, so tweaking the form afterwards is safe.
+  const { settled } = generation.submitBatch(request, batch);
+  void loadPromptHistory();
+  const done = await settled;
   const ok = done.filter((s) => s.status === "complete").length;
   const failed = done.find((s) => s.status === "error");
   if (ok > 0) {
@@ -108,11 +135,9 @@ async function generate() {
       ok === 1 ? "Generated — saved to Gallery" : `Generated ${ok} prints — saved to Gallery`,
     );
     void gallery.fetch();
-  } else if (failed?.error) {
+  } else if (failed?.error && failed.error !== "Cancelled") {
     toasts.push(failed.error, "error");
   }
-  // The engine just recorded this prompt — put it at the top of ↑ cycling.
-  void loadPromptHistory();
 }
 
 // ↑/↓ cycle recent prompts (shell-history style) when the caret is on the
@@ -246,6 +271,7 @@ onMounted(() => {
           <div
             class="relative w-full overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_18%,transparent)] bg-print-surface"
             :style="{ aspectRatio: `${job?.width ?? form.width} / ${job?.height ?? form.height}` }"
+            @contextmenu="job && contextMenu.open($event, canvasMenu())"
           >
             <video
               v-if="job?.resultUrl && job.result?.video_frames"
@@ -344,11 +370,11 @@ onMounted(() => {
             <button
               type="button"
               class="h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-60"
-              :disabled="running || !form.prompt.trim() || !form.model"
+              :disabled="!form.prompt.trim() || !form.model"
               @click="generate"
             >
               {{ buttonLabel }}
-              <kbd v-if="!running" class="data-mono ml-1 opacity-60">⌘↩</kbd>
+              <kbd class="data-mono ml-1 opacity-60">⌘↩</kbd>
             </button>
           </div>
         </div>

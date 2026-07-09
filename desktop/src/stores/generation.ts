@@ -9,6 +9,10 @@ import type { DevelopPhase } from "../lib/develop/grain";
 export type JobStatus = "queued" | "loading" | "denoising" | "complete" | "error";
 
 export interface Job {
+  /** Client-side identity — stable across the job's life; keys cancel/menus. */
+  clientId: number;
+  /** Groups sibling jobs submitted together as one batch. */
+  batchId: number;
   /** Server-assigned id from the Queued event (empty until it arrives). */
   id: string;
   prompt: string;
@@ -32,6 +36,8 @@ export interface Job {
 
 export function newJob(req: GenerateRequest): Job {
   return {
+    clientId: 0,
+    batchId: 0,
     id: "",
     prompt: req.prompt,
     model: req.model,
@@ -151,82 +157,134 @@ const MIME: Record<string, string> = {
 
 export const useGenerationStore = defineStore("generation", {
   state: () => ({
-    /** The job shown in the Generate canvas — the most recent sibling. */
-    active: null as Job | null,
-    /** Every job in the current batch (length 1 for a single generation). */
-    siblings: [] as Job[],
-    abort: null as AbortController | null,
-    /** Set by cancel(): the batch loop stops before starting the next sibling. */
-    cancelRequested: false,
+    /**
+     * Every job of this session, submission order. The server queue is the
+     * scheduler — each job holds its own SSE stream, so submitting while
+     * another develops simply queues behind it (each job snapshots its own
+     * model + params at submit time).
+     */
+    jobs: [] as Job[],
+    nextClientId: 1,
+    nextBatchId: 1,
   }),
+  getters: {
+    /**
+     * The job the Generate canvas tracks: the most recent actively
+     * developing job, else the most recent queued one, else the most
+     * recent job overall.
+     */
+    active(state): Job | null {
+      const jobs = state.jobs;
+      const latest = (pred: (j: Job) => boolean) => {
+        for (let i = jobs.length - 1; i >= 0; i--) {
+          if (pred(jobs[i]!)) return jobs[i]!;
+        }
+        return null;
+      };
+      return (
+        latest((j) => j.status === "denoising" || j.status === "loading") ??
+        latest((j) => j.status === "queued") ??
+        (jobs.length > 0 ? jobs[jobs.length - 1]! : null)
+      );
+    },
+    /** The active job's batch — drives the sibling dots under the canvas. */
+    siblings(): Job[] {
+      const active = this.active;
+      if (!active) return [];
+      return this.jobs.filter((j) => j.batchId === active.batchId);
+    },
+    /** Jobs still queued or developing, submission order. */
+    pending(state): Job[] {
+      return state.jobs.filter((j) => j.status !== "complete" && j.status !== "error");
+    },
+  },
   actions: {
     /**
-     * Run a batch of `batchSize` generations sequentially (single GPU, one job
-     * at a time). Seeds are `base + i`; the canvas tracks the most recent
-     * sibling. `batchSize <= 1` is exactly the old single-flight path.
+     * Submit a batch: all siblings enter the server queue immediately with
+     * seeds `base + i`, each streaming its own progress. Returns the created
+     * jobs plus a promise resolving when every sibling settles.
      */
-    async generateBatch(req: GenerateRequest, batchSize: number): Promise<Job[]> {
+    submitBatch(req: GenerateRequest, batchSize: number): { jobs: Job[]; settled: Promise<Job[]> } {
       const size = Math.max(1, Math.floor(batchSize));
       const baseSeed = resolveBaseSeed(req.seed);
       const plans = planBatchRequests(req, size, baseSeed);
-      this.resetJobs();
-      this.cancelRequested = false;
-      for (const plan of plans) {
-        if (this.cancelRequested) break;
+      const batchId = this.nextBatchId++;
+      const jobs = plans.map((plan) => {
         const job = this.startJob(plan);
-        this.siblings.push(job);
-        await this.streamJob(job, plan);
-      }
-      // Background notification (foreground already gets a toast from the view).
-      const failed = this.siblings.find((s) => s.status === "error");
-      if (this.siblings.some((s) => s.status === "complete")) notifyGenerated(req.prompt);
-      else if (failed?.error) notifyGenerationFailed(failed.error);
-      return this.siblings;
+        job.batchId = batchId;
+        return job;
+      });
+      const settled = Promise.all(jobs.map((job, i) => this.streamJob(job, plans[i]!))).then(() => {
+        // Background notification (the view toasts in the foreground).
+        const failed = jobs.find((s) => s.status === "error");
+        if (jobs.some((s) => s.status === "complete")) notifyGenerated(req.prompt);
+        else if (failed?.error && failed.error !== "Cancelled") {
+          notifyGenerationFailed(failed.error);
+        }
+        this.prune();
+        return jobs;
+      });
+      return { jobs, settled };
+    },
+    /** Submit and wait for the whole batch (menu Generate, tests). */
+    async generateBatch(req: GenerateRequest, batchSize: number): Promise<Job[]> {
+      return this.submitBatch(req, batchSize).settled;
     },
     /**
-     * Cancel the in-flight generation (⌘.): asks the server to drop the job
-     * from its queue when it hasn't started (DELETE /api/queue/:id — running
-     * jobs answer 409 and are left to finish), aborts the client stream, and
-     * stops remaining batch siblings.
+     * Cancel one job (default: the canvas job). Queued jobs leave the server
+     * queue via DELETE /api/queue/:id (409 = already running: the server
+     * finishes the compute; we stop listening); the stream is aborted either
+     * way and the job is marked cancelled.
      */
-    async cancel(): Promise<void> {
-      this.cancelRequested = true;
-      const job = this.active;
-      if (job && job.id && (job.status === "queued" || job.status === "loading")) {
+    async cancel(clientId?: number): Promise<void> {
+      const job =
+        clientId !== undefined
+          ? (this.jobs.find((j) => j.clientId === clientId) ?? null)
+          : this.active;
+      if (!job || job.status === "complete" || job.status === "error") return;
+      if (job.id) {
         try {
           await apiFetch(`/api/queue/${encodeURIComponent(job.id)}`, { method: "DELETE" });
         } catch (err) {
-          // 409 = already running: server-side compute continues; 404 = it
-          // already left the queue. Either way the client stops listening.
           if (!(err instanceof ApiError && (err.status === 409 || err.status === 404))) throw err;
         }
       }
-      this.cancelStream();
-      if (job && job.status !== "complete" && job.status !== "error") {
+      aborts.get(job.clientId)?.abort();
+      aborts.delete(job.clientId);
+      // The await above may have let the stream finish; only stamp live jobs.
+      const status = job.status as JobStatus;
+      if (status !== "complete" && status !== "error") {
         job.status = "error";
         job.error = "Cancelled";
       }
     },
     /** Single generation — a batch of one. */
     async generate(req: GenerateRequest): Promise<Job> {
-      await this.generateBatch(req, 1);
-      return this.active!;
+      const [job] = await this.generateBatch(req, 1);
+      return job!;
     },
-    /** Revoke every held object URL and clear the batch. */
-    resetJobs() {
-      this.cancelStream();
-      if (this.active?.resultUrl) URL.revokeObjectURL(this.active.resultUrl);
-      if (this.active?.previewUrl) URL.revokeObjectURL(this.active.previewUrl);
-      for (const s of this.siblings) {
-        if (s.resultUrl && s.resultUrl !== this.active?.resultUrl) {
-          URL.revokeObjectURL(s.resultUrl);
-        }
-        if (s.previewUrl && s.previewUrl !== this.active?.previewUrl) {
-          URL.revokeObjectURL(s.previewUrl);
-        }
+    /** Drop finished jobs beyond the most recent few, releasing their URLs. */
+    prune(keep = 12) {
+      const finished = this.jobs.filter((j) => j.status === "complete" || j.status === "error");
+      const excess = finished.length - keep;
+      if (excess <= 0) return;
+      const drop = new Set(finished.slice(0, excess).map((j) => j.clientId));
+      for (const job of this.jobs) {
+        if (!drop.has(job.clientId)) continue;
+        if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
+        if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
       }
-      this.siblings = [];
-      this.active = null;
+      this.jobs = this.jobs.filter((j) => !drop.has(j.clientId));
+    },
+    /** Revoke every held object URL and clear all jobs (teardown/tests). */
+    resetJobs() {
+      for (const job of this.jobs) {
+        aborts.get(job.clientId)?.abort();
+        if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
+        if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
+      }
+      aborts.clear();
+      this.jobs = [];
     },
     startJob(req: GenerateRequest): Job {
       // reactive() here is load-bearing: the SSE handlers below mutate the
@@ -234,12 +292,13 @@ export const useGenerationStore = defineStore("generation", {
       // data without firing Vue's proxy traps — the canvas, edge code, and
       // job chips would sit frozen at "Queued 0/N" for the whole run.
       const job = reactive(newJob(req));
-      this.active = job;
+      job.clientId = this.nextClientId++;
+      this.jobs.push(job);
       return job;
     },
     async streamJob(job: Job, req: GenerateRequest): Promise<void> {
       const abort = new AbortController();
-      this.abort = abort;
+      aborts.set(job.clientId, abort);
       await sseStream("/api/generate/stream", {
         method: "POST",
         body: req,
@@ -283,10 +342,13 @@ export const useGenerationStore = defineStore("generation", {
           }
         },
       });
-    },
-    cancelStream() {
-      this.abort?.abort();
-      this.abort = null;
+      aborts.delete(job.clientId);
     },
   },
 });
+
+/**
+ * Per-job stream handles, outside Pinia state — AbortControllers are
+ * process-local plumbing, not renderable state.
+ */
+const aborts = new Map<number, AbortController>();

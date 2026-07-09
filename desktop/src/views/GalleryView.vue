@@ -11,6 +11,10 @@ import { formatBytes } from "../lib/format";
 import { useConnectionStore } from "../stores/connection";
 import { useGalleryStore } from "../stores/gallery";
 import { useUiStore } from "../stores/ui";
+import { useComposerStore } from "../stores/composer";
+import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
+import { useToastStore } from "../stores/toasts";
+import { ipc } from "../lib/ipc";
 import type { GalleryImage } from "../lib/api/types";
 
 const GAP = 8;
@@ -22,6 +26,64 @@ const router = useRouter();
 const conn = useConnectionStore();
 const gallery = useGalleryStore();
 const ui = useUiStore();
+const composer = useComposerStore();
+const contextMenu = useContextMenuStore();
+const toasts = useToastStore();
+
+// Reveal in Finder only exists when the engine writes to this disk.
+const canReveal = ref(false);
+void ipc.getOutputDir().then((dir) => (canReveal.value = dir !== null));
+
+function tileMenu(item: GalleryImage): MenuEntry[] {
+  const m = item.metadata;
+  return [
+    {
+      label: "Reuse settings",
+      action: () => {
+        composer.set({
+          prompt: m.prompt,
+          model: m.model,
+          seed: m.seed,
+          width: m.width,
+          height: m.height,
+          steps: m.steps,
+          guidance: m.guidance,
+        });
+        void router.push("/generate");
+      },
+    },
+    {
+      label: "Copy prompt",
+      action: () => {
+        void navigator.clipboard.writeText(m.prompt).then(() => toasts.push("Copied"));
+      },
+    },
+    {
+      label: "Copy seed",
+      action: () => {
+        void navigator.clipboard.writeText(String(m.seed)).then(() => toasts.push("Copied"));
+      },
+    },
+    { separator: true },
+    {
+      label: "Reveal in Finder",
+      disabled: !canReveal.value,
+      action: () =>
+        void ipc.revealOutputFile(item.filename).catch((e) => {
+          toasts.push(e instanceof Error ? e.message : String(e), "error");
+        }),
+    },
+    { separator: true },
+    {
+      label: "Delete",
+      danger: true,
+      action: () => {
+        selected.value = item.filename;
+        void removeSelected().then(() => toasts.push("Deleted"));
+      },
+    },
+  ];
+}
 
 const scrollEl = ref<HTMLElement | null>(null);
 const containerWidth = ref(0);
@@ -180,6 +242,10 @@ onUnmounted(() => {
             "
             :style="{ width: `${laid.width}px`, height: `${laid.height}px` }"
             @click="selected = laid.item.filename"
+            @contextmenu="
+              selected = laid.item.filename;
+              contextMenu.open($event, tileMenu(laid.item));
+            "
             @dblclick="
               selected = laid.item.filename;
               lightboxOpen = true;

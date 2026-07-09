@@ -3736,6 +3736,7 @@ name = "mold-ai-inference"
 version = "0.14.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "candle-core-mold",
  "candle-nn-mold",
  "candle-transformers-mold",

@@ -6,6 +6,7 @@ import NavRail from "./components/shell/NavRail.vue";
 import BenchRail from "./components/shell/BenchRail.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
+import ContextMenu from "./components/shell/ContextMenu.vue";
 import { resolveShellShortcut } from "./lib/shortcuts";
 import { useConnectionStore } from "./stores/connection";
 import { useGenerationStore } from "./stores/generation";
@@ -37,7 +38,7 @@ function onKeydown(e: KeyboardEvent) {
     case "cancel-job": {
       const job = generation.active;
       if (job && job.status !== "complete" && job.status !== "error") {
-        void generation.cancel().then(() => toasts.push("Cancelled"));
+        void generation.cancel(job.clientId).then(() => toasts.push("Cancelled"));
       }
       break;
     }
@@ -94,8 +95,21 @@ async function listenForMenu() {
   });
 }
 
+/**
+ * Replace WebKit's default context menu app-wide. Editable fields keep the
+ * native menu (spellcheck, paste); components open the custom menu by
+ * calling useContextMenuStore().open() in their own contextmenu handlers,
+ * which stops propagation before this suppressor runs.
+ */
+function suppressNativeContextMenu(e: Event) {
+  const target = e.target as HTMLElement | null;
+  if (target?.closest("input, textarea, [contenteditable='true']")) return;
+  e.preventDefault();
+}
+
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
+  window.addEventListener("contextmenu", suppressNativeContextMenu);
   void connection.init();
   void listenForMenu();
   // The window starts hidden (tauri.conf.json visible:false) to avoid a
@@ -105,7 +119,10 @@ onMounted(async () => {
     await getCurrentWindow().show();
   }
 });
-onUnmounted(() => window.removeEventListener("keydown", onKeydown));
+onUnmounted(() => {
+  window.removeEventListener("keydown", onKeydown);
+  window.removeEventListener("contextmenu", suppressNativeContextMenu);
+});
 </script>
 
 <template>
@@ -120,5 +137,6 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
     <BenchRail />
     <Toasts />
     <CommandPalette />
+    <ContextMenu />
   </div>
 </template>

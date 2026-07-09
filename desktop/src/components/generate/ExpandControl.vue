@@ -2,6 +2,8 @@
 import { ref } from "vue";
 import { expandPrompt } from "../../lib/api/expand";
 import { ApiError } from "../../lib/api/client";
+import { startCatalogDownload } from "../../lib/api/catalog";
+import { parseMissingExpandModel } from "../../lib/expandErrors";
 import { useToastStore } from "../../stores/toasts";
 
 const props = defineProps<{ prompt: string; family: string }>();
@@ -13,6 +15,20 @@ const emit = defineEmits<{
 const toasts = useToastStore();
 const running = ref(false);
 const lastOriginal = ref<string | null>(null);
+/** Set when the engine says the expansion model isn't installed. */
+const missingModel = ref<string | null>(null);
+
+async function pullExpandModel() {
+  const model = missingModel.value;
+  if (!model) return;
+  try {
+    await startCatalogDownload(model);
+    missingModel.value = null;
+    toasts.push(`Pulling ${model} — watch it land in Models`);
+  } catch (err) {
+    toasts.push(err instanceof ApiError ? err.message : `Couldn't pull ${model}.`, "error");
+  }
+}
 
 async function expand() {
   const original = props.prompt.trim();
@@ -28,10 +44,15 @@ async function expand() {
     lastOriginal.value = original;
     emit("apply", { expanded, original });
   } catch (err) {
-    if (err instanceof ApiError && (err.status === 404 || err.status === 503)) {
-      toasts.push("Expansion model isn't installed.", "error");
+    // Surface the engine's actual message — "generic error" toasts hide
+    // actionable problems like a missing expansion model.
+    const message = err instanceof ApiError ? err.message : null;
+    const missing = message ? parseMissingExpandModel(message) : null;
+    if (missing) {
+      missingModel.value = missing;
+      toasts.push(`The expansion model ${missing} isn't installed.`, "error");
     } else {
-      toasts.push("Couldn't expand the prompt.", "error");
+      toasts.push(message || "Couldn't expand the prompt.", "error");
     }
   } finally {
     running.value = false;
@@ -59,6 +80,14 @@ defineExpose({ expand });
     >
       {{ running ? "Expanding…" : "Expand" }}
       <kbd v-if="!running" class="data-mono ml-1 opacity-60">⌘E</kbd>
+    </button>
+    <button
+      v-if="missingModel"
+      type="button"
+      class="h-7 rounded-control border border-safelight px-2 text-body text-safelight hover:brightness-110"
+      @click="pullExpandModel"
+    >
+      Pull {{ missingModel }}
     </button>
     <button
       v-if="lastOriginal !== null"

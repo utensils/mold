@@ -7,6 +7,7 @@ import { useConnectionStore } from "../stores/connection";
 import { useComposerStore } from "../stores/composer";
 import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
+import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { applyModelDefaults, newGenerateForm } from "../lib/generateForm";
 
 const router = useRouter();
@@ -14,6 +15,19 @@ const conn = useConnectionStore();
 const composer = useComposerStore();
 const models = useModelStore();
 const toasts = useToastStore();
+const contextMenu = useContextMenuStore();
+
+function rowMenu(entry: HistoryEntry): MenuEntry[] {
+  return [
+    { label: "Use prompt", action: () => use(entry) },
+    {
+      label: "Copy prompt",
+      action: () => {
+        void navigator.clipboard.writeText(entry.prompt).then(() => toasts.push("Copied"));
+      },
+    },
+  ];
+}
 
 const entries = ref<HistoryEntry[]>([]);
 const query = ref("");
@@ -136,6 +150,7 @@ const timeOf = (e: HistoryEntry) =>
           type="button"
           class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bench"
           @click="use(entry)"
+          @contextmenu="contextMenu.open($event, rowMenu(entry))"
         >
           <span class="min-w-0 flex-1 truncate text-body text-ink" :title="entry.prompt">
             {{ entry.prompt }}
