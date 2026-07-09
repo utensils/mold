@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useConnectionStore } from "../../stores/connection";
+import { useToastStore } from "../../stores/toasts";
 import { apiJson } from "../../lib/api/client";
 import { ipc } from "../../lib/ipc";
 import { sseStream } from "../../lib/api/sse";
@@ -37,14 +38,29 @@ const engineChip = computed(() => {
   }
 });
 
+let statusFailures = 0;
+
 async function refreshStatus() {
   if (!conn.ready) return;
   try {
     status.value = await apiJson<ServerStatus>("/api/status");
+    statusFailures = 0;
     // Dock badge mirrors queue depth (design spec §7); cleared when idle.
     void ipc.setDockBadge(status.value.queue_depth ?? null);
   } catch {
-    /* transient; the SSE stream is the liveness signal */
+    // Two consecutive failures = the engine is gone, not a blip. For the
+    // built-in engine, restart it (the backend detects the dead thread);
+    // remote hosts surface the error chip instead.
+    statusFailures += 1;
+    if (statusFailures >= 2 && (conn.mode === "local" || conn.mode === "external")) {
+      statusFailures = 0;
+      status.value = null;
+      await conn.useLocal();
+      if (conn.ready) {
+        useToastStore().push("Engine restarted");
+        startTelemetry();
+      }
+    }
   }
 }
 

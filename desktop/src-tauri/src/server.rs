@@ -22,6 +22,13 @@ impl EngineHandle {
         format!("http://127.0.0.1:{}", self.port)
     }
 
+    /// False once the engine thread has exited (crash, shutdown, or panic) —
+    /// the connection state machine restarts a dead engine instead of
+    /// handing out a base URL nothing listens on.
+    pub fn is_alive(&self) -> bool {
+        self.thread.as_ref().is_some_and(|t| !t.is_finished())
+    }
+
     /// Join the engine thread after shutdown has been requested over HTTP.
     pub fn join(mut self, timeout: Duration) {
         if let Some(thread) = self.thread.take() {

@@ -46,6 +46,9 @@ async fn engine_boots_authenticates_and_shuts_down() {
         .unwrap();
     assert!(authorized.status().is_success());
 
+    // Liveness tracks the engine thread: alive while serving…
+    assert!(engine.is_alive());
+
     // Graceful shutdown over loopback.
     let shutdown = client
         .post(format!("{base}/api/shutdown"))
@@ -54,5 +57,13 @@ async fn engine_boots_authenticates_and_shuts_down() {
         .await
         .unwrap();
     assert!(shutdown.status().is_success());
+
+    // …and reported dead once the thread exits, so the connection state
+    // machine knows to restart instead of handing out a dead base URL.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while engine.is_alive() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!engine.is_alive(), "engine thread did not exit");
     engine.join(Duration::from_secs(10));
 }

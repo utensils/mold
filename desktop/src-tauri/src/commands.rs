@@ -116,8 +116,18 @@ pub async fn start_local_engine(
     state: tauri::State<'_, AppState>,
 ) -> Result<ConnectionInfo, String> {
     let mut conn = state.conn.lock().await;
-    if matches!(&*conn, Conn::Local(_) | Conn::External { .. }) {
-        return Ok(conn.info(&state.local_api_key));
+    match &*conn {
+        // A dead engine thread (crash or shutdown) falls through to a
+        // fresh start instead of returning a base URL nothing answers.
+        Conn::Local(engine) if engine.is_alive() => {
+            return Ok(conn.info(&state.local_api_key));
+        }
+        Conn::Local(_) => {
+            tracing::warn!("embedded engine thread is gone; restarting");
+            *conn = Conn::Off;
+        }
+        Conn::External { .. } => return Ok(conn.info(&state.local_api_key)),
+        _ => {}
     }
 
     let well_known = format!("http://127.0.0.1:{}", server::WELL_KNOWN_PORT);
