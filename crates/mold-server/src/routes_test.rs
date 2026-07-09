@@ -683,6 +683,200 @@ mod tests {
         assert_eq!(body["code"], "QUEUE_JOB_RUNNING");
     }
 
+    // ── DELETE /api/models/:model ────────────────────────────────────────────
+
+    /// All clean storage paths for a manifest model under `models_dir`.
+    fn manifest_clean_paths(models_dir: &std::path::Path, model: &str) -> Vec<std::path::PathBuf> {
+        let manifest = mold_core::manifest::find_manifest(model).unwrap();
+        manifest
+            .files
+            .iter()
+            .map(|file| models_dir.join(mold_core::manifest::storage_path(manifest, file)))
+            .collect()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn delete_model_removes_exclusively_owned_files() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("delete-model-solo");
+        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::delete("/api/models/flux-schnell:q8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+
+        // No other model references anything — every file is exclusively
+        // owned, nothing is kept, and real bytes were freed.
+        let removed = body["removed"].as_array().expect("removed array");
+        assert!(!removed.is_empty(), "expected removed files: {body}");
+        assert_eq!(body["kept"], serde_json::json!([]));
+        assert!(
+            body["freed_bytes"].as_u64().unwrap() > 0,
+            "freed_bytes must be > 0: {body}"
+        );
+
+        for path in manifest_clean_paths(&models_dir, "flux-schnell:q8") {
+            assert!(
+                !path.exists(),
+                "exclusively-owned file must be deleted: {}",
+                path.display()
+            );
+        }
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn delete_model_keeps_components_shared_with_another_model() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let models_dir = test_models_dir("delete-model-shared");
+        // flux-schnell:q8 and flux-dev:q8 share VAE/T5/CLIP under shared/.
+        populate_manifest_files(&models_dir, "flux-schnell:q8");
+        populate_manifest_files(&models_dir, "flux-dev:q8");
+        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
+
+        let schnell_paths = manifest_clean_paths(&models_dir, "flux-schnell:q8");
+        let dev_paths: std::collections::HashSet<_> =
+            manifest_clean_paths(&models_dir, "flux-dev:q8")
+                .into_iter()
+                .collect();
+        let shared: Vec<_> = schnell_paths
+            .iter()
+            .filter(|p| dev_paths.contains(*p))
+            .collect();
+        let unique: Vec<_> = schnell_paths
+            .iter()
+            .filter(|p| !dev_paths.contains(*p))
+            .collect();
+        assert!(
+            !shared.is_empty() && !unique.is_empty(),
+            "test premise: the two models must share some files and own others"
+        );
+
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::delete("/api/models/flux-schnell:q8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+
+        // Exclusive files (the transformer) are gone; shared components stay.
+        for path in &unique {
+            assert!(
+                !path.exists(),
+                "exclusive file must be deleted: {}",
+                path.display()
+            );
+        }
+        for path in &shared {
+            assert!(
+                path.exists(),
+                "shared component must survive: {}",
+                path.display()
+            );
+        }
+
+        // The kept list reports every shared component with the surviving
+        // referencing model.
+        let kept = body["kept"].as_array().expect("kept array");
+        assert_eq!(kept.len(), shared.len(), "kept must cover shared: {body}");
+        for entry in kept {
+            let used_by: Vec<&str> = entry["used_by"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            assert!(
+                used_by.contains(&"flux-dev:q8"),
+                "kept entry must name the surviving model: {entry}"
+            );
+            let component = entry["component"].as_str().unwrap();
+            assert!(
+                shared.iter().any(|p| p.to_string_lossy() == component),
+                "kept component must be a shared path: {entry}"
+            );
+        }
+
+        // The removed list must not contain any shared path.
+        let removed: Vec<&str> = body["removed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for path in &shared {
+            assert!(
+                !removed.contains(&path.to_string_lossy().as_ref()),
+                "shared path must not be reported as removed: {}",
+                path.display()
+            );
+        }
+
+        // The sibling model is untouched.
+        for path in &dev_paths {
+            assert!(
+                path.exists(),
+                "sibling model file must survive: {}",
+                path.display()
+            );
+        }
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(models_dir);
+    }
+
+    #[tokio::test]
+    async fn delete_model_unknown_returns_404_unknown_model() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::delete("/api/models/definitely-not-a-model")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "UNKNOWN_MODEL");
+    }
+
+    #[tokio::test]
+    async fn delete_model_gpu_resident_returns_409_model_loaded() {
+        // MockEngine::ready() is GPU-resident in the cache as "mock-model" —
+        // deletion must be refused until the model is unloaded.
+        let app = app_with_state(AppState::with_engine(MockEngine::ready()));
+        let resp = app
+            .oneshot(
+                Request::delete("/api/models/mock-model")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "MODEL_LOADED");
+    }
+
     #[tokio::test]
     async fn delete_queue_cancels_queued_job_with_204_and_removes_it() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
