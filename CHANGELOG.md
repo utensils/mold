@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`DELETE /api/models/:model` — model removal over HTTP** (previously CLI-only via `mold rm`): deletes only files exclusively owned by the model, keeps components still referenced by other downloaded models (shared T5/CLIP/Qwen encoders, VAEs), and cleans up the hardlinked hf-hub cache blobs so freed bytes are real. Responds `200` with `{ removed, kept: [{ component, used_by }], freed_bytes }`; `404 UNKNOWN_MODEL` when not installed; `409 MODEL_LOADED` while the model is GPU-resident (unload first). The ref-counting core moved to `mold_core::removal` and is now shared by `mold rm` and the server.
+
 ### Fixed
 
 - **`mold run --local` chains now run the missing-assets repair pull.** The local chain path shares the single-clip model resolve/pull preamble, so a model with deleted or corrupted component files is repaired automatically instead of failing at engine load.
