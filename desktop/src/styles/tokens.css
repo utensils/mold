@@ -1,0 +1,82 @@
+/*
+ * Safelight — mold desktop design tokens.
+ *
+ * The app is a digital darkroom. State color encodes development stage:
+ *   Halide (cold)    = queued / latent
+ *   Safelight (warm) = running / active / primary
+ *   Rebate (paper)   = done / developed / text
+ *   Stop             = failed / destructive
+ *
+ * Chrome inverts in light mode ("lights on"); media surfaces never invert —
+ * prints are always viewed on Bath (see --color-print-surface).
+ */
+@import "tailwindcss";
+
+@theme {
+  /* Color */
+  --color-bath: var(--bath);
+  --color-bench: var(--bench);
+  --color-rebate: var(--rebate);
+  --color-halide: var(--halide);
+  --color-safelight: var(--safelight);
+  --color-stop: var(--stop);
+  --color-ink: var(--rebate);
+  --color-ink-2: color-mix(in srgb, var(--rebate) 62%, transparent);
+  --color-ink-3: color-mix(in srgb, var(--rebate) 40%, transparent);
+  --color-edge: color-mix(in srgb, var(--rebate) 8%, transparent);
+  /* Media surfaces never invert. */
+  --color-print-surface: #141110;
+
+  /* Type */
+  --font-display: "Bricolage Grotesque", system-ui, sans-serif;
+  --font-body: "Schibsted Grotesk", system-ui, sans-serif;
+  --font-utility: "Martian Mono", ui-monospace, monospace;
+
+  /* Type scale (the only sizes): display 34/22/18, body 15/13/11, utility 12/10.5 */
+  --text-display-lg: 2.125rem;
+  --text-display: 1.375rem;
+  --text-display-sm: 1.125rem;
+  --text-body-lg: 0.9375rem;
+  --text-body: 0.8125rem;
+  --text-caption: 0.6875rem;
+  --text-data: 0.75rem;
+  --text-edge-code: 0.65625rem;
+
+  /* Radius: chrome 6 / controls 4 / media 2. Prints have near-square corners. */
+  --radius-chrome: 6px;
+  --radius-control: 4px;
+  --radius-media: 2px;
+
+  /* Elevation (flat-first) */
+  --shadow-raised: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+:root {
+  --bath: #141110;
+  --bench: #211b16;
+  --rebate: #efe7da;
+  --halide: #93a7b0;
+  --safelight: #f08a24;
+  --stop: #c94f3d;
+  color-scheme: dark;
+}
+
+/* "Lights on": chrome inverts to warm paper; accents darken for AA contrast. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bath: #f2ebde;
+    --bench: #fbf6ec;
+    --rebate: #231d18;
+    --halide: #5c737e;
+    --safelight: #c96a0a;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bath: #f2ebde;
+  --bench: #fbf6ec;
+  --rebate: #231d18;
+  --halide: #5c737e;
+  --safelight: #c96a0a;
+  color-scheme: light;
+}

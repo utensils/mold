@@ -181,6 +181,20 @@
             ./scripts/ensure-web-dist.sh
           '';
 
+          # Tauri desktop app (desktop/): its cargo root is excluded from the
+          # workspace, so every command targets its manifest explicitly. On
+          # Darwin the Apple linker must be used — the Nix linker breaks
+          # objc2/system-framework linking and produces Team-ID-rejected
+          # binaries (pattern proven in the Aethon project).
+          desktopSetup = ''
+            export SCCACHE_DIR="''${MOLD_SCCACHE_DIR:-$PWD/.cache/sccache}"
+          ''
+          + lib.optionalString isDarwin ''
+            export CC=/usr/bin/cc
+            export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/cc
+            export RUSTC_LINKER=/usr/bin/cc
+          '';
+
           assertMoldRunpathScriptFor =
             {
               ccLib,
@@ -476,6 +490,8 @@
               pkgs.ffmpeg
               pkgs.imagemagick
               pkgs.bun
+              pkgs.bun2nix
+              pkgs.cargo-tauri
               pkgs.nodePackages.prettier
               pkgs.tmux
               pkgs.runpodctl
@@ -806,6 +822,84 @@
                     exit 1
                   fi
                   cargo run -p mold-ai-inference --features dev-bins --bin ltx2_review -- "$@"
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-dev";
+                help = "run the Tauri desktop app with hot reload (Vite on :1430)";
+                command = ''
+                  set -euo pipefail
+                  ${desktopSetup}
+                  cd desktop
+                  bun install --frozen-lockfile
+                  cargo tauri dev "$@"
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-build";
+                help = "build the Mold.app bundle (signed if .secrets/signing.env exists)";
+                command = ''
+                  set -euo pipefail
+                  ${desktopSetup}
+                  if [ -f .secrets/signing.env ]; then
+                    # shellcheck disable=SC1091
+                    source .secrets/signing.env
+                  fi
+                  cd desktop
+                  bun install --frozen-lockfile
+                  cargo tauri build "$@"
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-check";
+                help = "desktop CI gate: rustfmt, clippy -D warnings, vue-tsc, prettier";
+                command = ''
+                  set -euo pipefail
+                  ${desktopSetup}
+                  cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
+                  cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+                  cd desktop
+                  bun install --frozen-lockfile
+                  bunx vue-tsc -b
+                  bun run fmt:check
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-test";
+                help = "desktop tests: cargo test (CPU) + vitest";
+                command = ''
+                  set -euo pipefail
+                  ${desktopSetup}
+                  cargo test --manifest-path desktop/src-tauri/Cargo.toml "$@"
+                  cd desktop
+                  bun install --frozen-lockfile
+                  bun run test
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-ui";
+                help = "frontend-only Vite dev server (pair with a running `serve`)";
+                command = ''
+                  set -euo pipefail
+                  cd desktop
+                  bun install --frozen-lockfile
+                  bun run dev "$@"
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-bun-lock";
+                help = "regenerate desktop/bun.nix from bun.lock (bun2nix)";
+                command = ''
+                  set -euo pipefail
+                  cd desktop
+                  bun install
+                  bun2nix -o bun.nix
                 '';
               }
               {

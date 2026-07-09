@@ -1,0 +1,107 @@
+@import "./tokens.css";
+
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("../assets/fonts/bricolage-grotesque/BricolageGrotesque-VF.ttf")
+    format("truetype-variations");
+  font-weight: 200 800;
+  font-stretch: 75% 100%;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Schibsted Grotesk";
+  src: url("../assets/fonts/schibsted-grotesk/SchibstedGrotesk-VF.ttf")
+    format("truetype-variations");
+  font-weight: 400 900;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Martian Mono";
+  src: url("../assets/fonts/martian-mono/MartianMono-VF.ttf") format("truetype-variations");
+  font-weight: 100 800;
+  font-stretch: 75% 112.5%;
+  font-display: block;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bath);
+  color: var(--rebate);
+  font-family: var(--font-body);
+  font-size: var(--text-body);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+/* Text the user composes or reads as content is selectable. */
+input,
+textarea,
+[data-selectable] {
+  user-select: text;
+  cursor: auto;
+}
+
+:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--safelight) 35%, transparent);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--rebate) 14%, transparent);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--rebate) 24%, transparent);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Utility type roles */
+.edge-code {
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  font-stretch: 87.5%;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--rebate) 50%, transparent);
+  white-space: nowrap;
+}
+
+.data-mono {
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

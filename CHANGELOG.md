@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Experimental Tauri 2 desktop app** (`desktop/`, branch `experiment/desktop`): native macOS-first interface with its own "Safelight" design language. The Rust crate is its own cargo root (excluded from the workspace) and will embed `mold-ai-server` in-process on Metal. New devshell commands: `desktop-dev`, `desktop-build`, `desktop-check`, `desktop-test`, `desktop-ui`, `desktop-bun-lock`; new CI workflow `.github/workflows/desktop.yml`. See `desktop/docs/`.
+
 ### Fixed
 
 - **`mold run --local` chains now run the missing-assets repair pull.** The local chain path shares the single-clip model resolve/pull preamble, so a model with deleted or corrupted component files is repaired automatically instead of failing at engine load.
