@@ -833,6 +833,21 @@ services.mold.discord = {
 };
 ```
 
+## Desktop App
+
+An experimental native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/` on the `experiment/desktop` branch. It embeds `mold serve` in-process on Metal, auto-detects a running server on `localhost:7680`, and can point at a remote host. It covers the generation workspace (live "Develop" progress), gallery, model/catalog pulls, the chains editing bench, prompt history, and provenance-tagged settings, with a ⌘K command palette.
+
+Devshell commands (run inside `nix develop`):
+
+```bash
+desktop-dev        # Tauri app with hot reload (Vite on :1430)
+desktop-build      # build the Mold.app bundle
+desktop-check      # CI gate: rustfmt, clippy, vue-tsc, prettier
+desktop-test       # cargo test + vitest
+desktop-ui         # frontend-only Vite server (pair with a running `serve`)
+desktop-bun-lock   # regenerate desktop/bun.nix from bun.lock
+```
+
 ## Updating This Skill
 
 This skill is maintained in the mold repository on GitHub. To pull the latest version:
