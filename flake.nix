@@ -391,6 +391,27 @@
               fi
             '';
 
+            # A signed/notarized bundle must not load /nix/store dylibs
+            # (dyld Team-ID rejection); libiconv links in via stdenv — point
+            # it at the system copy and re-sign ad hoc.
+            postFixup = ''
+              app_bin="$out/Applications/Mold.app/Contents/MacOS/mold-desktop"
+              if [ -f "$app_bin" ]; then
+                for ref in $(${pkgs.darwin.cctools}/bin/otool -L "$app_bin" \
+                  | awk '/\/nix\/store\/.*libiconv/ {print $1}'); do
+                  ${pkgs.darwin.cctools}/bin/install_name_tool \
+                    -change "$ref" /usr/lib/libiconv.2.dylib "$app_bin"
+                done
+                # sigtool-backed codesign shim on the darwin stdenv PATH
+                codesign -f -s - "$app_bin"
+                if ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" | grep -q "/nix/store"; then
+                  echo "mold-desktop still references /nix/store dylibs:" >&2
+                  ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" >&2
+                  exit 1
+                fi
+              fi
+            '';
+
             meta = with lib; {
               description = "Mold — native desktop app for local AI image/video generation";
               homepage = "https://github.com/utensils/mold";
