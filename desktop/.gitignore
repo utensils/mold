@@ -4,3 +4,6 @@ dist
 src-tauri/target
 src-tauri/gen/schemas
 tsconfig.tsbuildinfo
+# Root .gitignore excludes *.png globally (generated images); icons are source assets.
+!icon-master.png
+!src-tauri/icons/*.png
