@@ -23,3 +23,21 @@ export function unloadModel(model: string): Promise<Response> {
 export function fetchModelComponents(model: string): Promise<ModelComponentsResponse> {
   return apiJson<ModelComponentsResponse>(`/api/models/${encodeURIComponent(model)}/components`);
 }
+
+export interface KeptComponent {
+  component: string;
+  used_by: string[];
+}
+
+export interface ModelRemovalResponse {
+  removed: string[];
+  kept: KeptComponent[];
+  freed_bytes: number;
+}
+
+/** Remove a model from disk. Shared components stay while referenced. */
+export function removeModel(model: string): Promise<ModelRemovalResponse> {
+  return apiJson<ModelRemovalResponse>(`/api/models/${encodeURIComponent(model)}`, {
+    method: "DELETE",
+  });
+}

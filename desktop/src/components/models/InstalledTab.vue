@@ -3,7 +3,8 @@ import { computed, reactive, ref } from "vue";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 import { groupInstalledModels, modelDiskBytes, quantTag } from "../../lib/models";
-import { fetchModelComponents, loadModel, unloadModel } from "../../lib/api/models";
+import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../../lib/api/models";
+import { ApiError } from "../../lib/api/client";
 import { formatGB, percent } from "../../lib/format";
 import type { ModelComponentStatus, ModelEntry } from "../../lib/api/types";
 
@@ -29,6 +30,36 @@ const sections = computed<[string, ModelEntry[]][]>(() => [
 const expanded = reactive<Record<string, boolean>>({});
 const components = reactive<Record<string, ModelComponentStatus[] | "loading" | "error">>({});
 const busy = ref<string | null>(null);
+const confirmingRemove = ref<string | null>(null);
+
+async function remove(m: ModelEntry) {
+  if (confirmingRemove.value !== m.name) {
+    confirmingRemove.value = m.name;
+    return;
+  }
+  confirmingRemove.value = null;
+  busy.value = m.name;
+  try {
+    const result = await removeModel(m.name);
+    const kept = result.kept.length;
+    toasts.push(
+      kept > 0
+        ? `Removed ${m.name} — freed ${formatGB(result.freed_bytes)}, kept ${kept} shared component${kept === 1 ? "" : "s"}`
+        : `Removed ${m.name} — freed ${formatGB(result.freed_bytes)}`,
+    );
+    await models.fetch();
+  } catch (err) {
+    // 409 MODEL_LOADED → tell the user the one concrete fix.
+    toasts.push(
+      err instanceof ApiError && err.status === 409
+        ? `${m.name} is on the GPU. Unload it first.`
+        : String(err),
+      "error",
+    );
+  } finally {
+    busy.value = null;
+  }
+}
 
 async function toggleInfo(m: ModelEntry) {
   expanded[m.name] = !expanded[m.name];
@@ -153,7 +184,20 @@ function componentList(name: string): ModelComponentStatus[] {
               >
                 Info
               </button>
-              <!-- TODO(M4+): Delete/uninstall once the server endpoint lands. -->
+              <button
+                type="button"
+                class="h-7 rounded-control border px-2 text-caption transition-colors duration-100"
+                :class="
+                  confirmingRemove === m.name
+                    ? 'border-stop bg-stop font-semibold text-[#141110]'
+                    : 'border-edge text-ink-2 hover:text-stop'
+                "
+                :disabled="busy === m.name"
+                @blur="confirmingRemove = null"
+                @click="remove(m)"
+              >
+                {{ confirmingRemove === m.name ? "Remove from disk?" : "✕" }}
+              </button>
             </div>
           </div>
 
