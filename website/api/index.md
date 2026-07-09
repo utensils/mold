@@ -28,6 +28,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `POST`   | `/api/models/load`                        | Load/swap the active model                                                                                        |
 | `POST`   | `/api/models/pull`                        | Pull/download a model                                                                                             |
 | `DELETE` | `/api/models/unload`                      | Unload model to free GPU memory                                                                                   |
+| `DELETE` | `/api/models/:model`                      | Remove a downloaded model (keeps components shared with other models)                                             |
 | `GET`    | `/api/gallery`                            | List saved images                                                                                                 |
 | `GET`    | `/api/gallery/image/:name`                | Fetch a saved image                                                                                               |
 | `DELETE` | `/api/gallery/image/:name`                | Delete a saved image                                                                                              |
@@ -292,6 +293,38 @@ with a path back to the model catalog.
 ```bash
 curl "http://localhost:7680/api/models/flux-dev:q8/components"
 ```
+
+## `DELETE /api/models/:model`
+
+`DELETE /api/models/:model` removes a downloaded model — the HTTP counterpart
+of `mold rm`. Several models share components (T5/CLIP/Qwen encoders, VAEs)
+under the models directory, so removal ref-counts every file across all
+installed models and deletes only files exclusively owned by the target;
+shared components still referenced by another downloaded model are kept.
+Hardlinked hf-hub cache blobs are cleaned up too, so `freed_bytes` reflects
+real disk savings.
+
+```bash
+curl -X DELETE http://localhost:7680/api/models/flux-schnell:q8
+```
+
+```json
+{
+  "removed": ["/models/flux-schnell-q8/flux1-schnell-Q8_0.gguf"],
+  "kept": [
+    {
+      "component": "/models/shared/flux/ae.safetensors",
+      "used_by": ["flux-dev:q8"]
+    }
+  ],
+  "freed_bytes": 12726374912
+}
+```
+
+Returns `404` (`UNKNOWN_MODEL`) when the model isn't installed, and `409`
+(`MODEL_LOADED`) while the model is GPU-resident — unload it first via
+`DELETE /api/models/unload`. This is a destructive endpoint; pair with
+`MOLD_API_KEY` when the server is exposed beyond localhost.
 
 ## `/api/queue`
 
