@@ -8,7 +8,7 @@ import {
   isLtx2FrameCount,
   snapFrames,
 } from "./chain";
-import { chainFormToScript, newChainForm, newStage } from "./chainForm";
+import { chainFormToScript, newChainForm, newStage, tomlToChainForm } from "./chainForm";
 import type { ChainStage, TransitionMode } from "./api/types";
 
 describe("frame-count validation", () => {
@@ -136,5 +136,62 @@ describe("chainToToml", () => {
     form.stages = [newStage('a "quoted"\nprompt')];
     const toml = chainToToml(chainFormToScript(form));
     expect(toml).toContain('prompt = "a \\"quoted\\"\\nprompt"');
+  });
+});
+
+describe("tomlToChainForm", () => {
+  it("round-trips a form through chainToToml back to itself", () => {
+    const form = newChainForm();
+    form.model = "ltx-2-19b-distilled:fp8";
+    form.width = 1216;
+    form.height = 704;
+    form.fps = 24;
+    form.seed = "42";
+    form.steps = 8;
+    form.motionTailFrames = 17;
+    form.enableAudio = true;
+    form.stages = [
+      { ...newStage('dawn over the "sea"'), frames: 97 },
+      { ...newStage("a storm rolls in"), transition: "fade", fadeFrames: 12, frames: 49 },
+    ];
+
+    const parsed = tomlToChainForm(chainToToml(chainFormToScript(form)));
+    expect(parsed).toEqual(form);
+  });
+
+  it("accepts a document with no schema key and coerces stage 0 to smooth", () => {
+    const toml = [
+      "[chain]",
+      'model = "ltx2:fp8"',
+      "width = 704",
+      "height = 416",
+      "fps = 24",
+      "steps = 8",
+      "guidance = 3.0",
+      "strength = 1.0",
+      "motion_tail_frames = 17",
+      'output_format = "mp4"',
+      "",
+      "[[stage]]",
+      'prompt = "a bird"',
+      "frames = 33",
+      'transition = "cut"',
+    ].join("\n");
+    const form = tomlToChainForm(toml);
+    expect(form.model).toBe("ltx2:fp8");
+    expect(form.stages).toHaveLength(1);
+    expect(form.stages[0]!.transition).toBe("smooth");
+    expect(form.seed).toBe("");
+    expect(form.enableAudio).toBe(false);
+  });
+
+  it("rejects a foreign schema", () => {
+    expect(() => tomlToChainForm('schema = "mold.chain.v2"\n[chain]\nmodel = "x"')).toThrow(
+      /mold\.chain\.v1/,
+    );
+  });
+
+  it("throws on malformed TOML", () => {
+    expect(() => tomlToChainForm("this is not = = toml")).toThrow();
   });
 });

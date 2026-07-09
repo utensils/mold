@@ -361,6 +361,25 @@ export interface CatalogDownloadResponse {
   companion_jobs: { name: string; job_id: string }[];
 }
 
+// ── Config (mold config surface) ───────────────────────────────────────────
+
+/** Where a config value currently resolves from (highest precedence wins). */
+export type ConfigSource = "db" | "file" | "env" | "default";
+
+/** One row from `GET /api/config`. Value shape drifts; kept as a scalar union. */
+export interface ConfigRow {
+  key: string;
+  value: string | number | boolean | null;
+  source: ConfigSource;
+  profile?: string | null;
+}
+
+/** `GET /api/config/profiles`. */
+export interface ConfigProfiles {
+  profiles: string[];
+  active: string;
+}
+
 // ── Chains (mold.chain.v1 + durable chain jobs) ────────────────────────────
 
 /** Boundary style between the previous stage and this one. */

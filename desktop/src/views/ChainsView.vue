@@ -17,7 +17,13 @@ import {
   estimatedTotalFrames,
   isLtx2FrameCount,
 } from "../lib/chain";
-import { chainFormToRequest, chainFormToScript, newChainForm, newStage } from "../lib/chainForm";
+import {
+  chainFormToRequest,
+  chainFormToScript,
+  newChainForm,
+  newStage,
+  tomlToChainForm,
+} from "../lib/chainForm";
 import { fetchChainLimits } from "../lib/api/chains";
 import { apiJson } from "../lib/api/client";
 import { randomSeed } from "../stores/generation";
@@ -34,6 +40,7 @@ const limits = ref<ChainLimits | null>(null);
 const backend = ref<string | null>(null);
 const showToml = ref(false);
 const rendering = ref(false);
+const tomlInput = ref<HTMLInputElement | null>(null);
 
 const videoModels = computed<ModelEntry[]>(() =>
   models.installed.filter((m) => isVideoFamily(m.family)),
@@ -114,6 +121,29 @@ function moveStage(i: number, delta: number) {
 }
 function randomizeSeed() {
   form.seed = String(randomSeed());
+}
+
+function openToml() {
+  tomlInput.value?.click();
+}
+
+async function onTomlFile(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0];
+  (e.target as HTMLInputElement).value = ""; // allow re-picking the same file
+  if (!file) return;
+  try {
+    const parsed = tomlToChainForm(await file.text());
+    Object.assign(form, parsed);
+    if (parsed.model && videoModels.value.some((m) => m.name === parsed.model)) {
+      void loadLimits(parsed.model);
+    } else if (parsed.model) {
+      limits.value = null;
+      toasts.push(`Pull ${parsed.model} first`);
+    }
+    toasts.push(`Loaded ${file.name}`);
+  } catch (err) {
+    toasts.push(err instanceof Error ? err.message : String(err), "error");
+  }
 }
 
 function exportToml() {
@@ -301,6 +331,20 @@ onMounted(() => {
     <div class="border-edge flex flex-wrap items-center gap-3 border-t border-b bg-bench px-4 py-2">
       <span class="edge-code" :class="fit.ok ? 'text-halide' : 'text-stop'">{{ fit.text }}</span>
       <div class="ml-auto flex items-center gap-2">
+        <input
+          ref="tomlInput"
+          type="file"
+          accept=".toml,text/plain"
+          class="hidden"
+          @change="onTomlFile"
+        />
+        <button
+          type="button"
+          class="border-edge h-8 rounded-control border px-3 text-body text-ink-2 hover:text-ink"
+          @click="openToml"
+        >
+          Open .toml…
+        </button>
         <button
           type="button"
           class="border-edge h-8 rounded-control border px-3 text-body text-ink-2 hover:text-ink"

@@ -1,0 +1,82 @@
+<script setup lang="ts">
+import { computed, ref, watch } from "vue";
+import { isRowLocked, provenance } from "../../lib/config";
+import type { ConfigRow } from "../../lib/api/types";
+
+const props = defineProps<{ row: ConfigRow }>();
+const emit = defineEmits<{
+  (e: "save", value: ConfigRow["value"]): void;
+  (e: "reset"): void;
+}>();
+
+const locked = computed(() => isRowLocked(props.row));
+const tag = computed(() => provenance(props.row.source));
+const isBool = computed(() => typeof props.row.value === "boolean");
+const isNumber = computed(() => typeof props.row.value === "number");
+
+// The MOLD_* env var that shadows this key, by mold's naming convention.
+const envVar = computed(() => `MOLD_${props.row.key.toUpperCase().replace(/\./g, "_")}`);
+
+const draft = ref(props.row.value);
+watch(
+  () => props.row.value,
+  (v) => (draft.value = v),
+);
+
+function commitText(e: Event) {
+  const raw = (e.target as HTMLInputElement).value;
+  emit("save", isNumber.value ? Number(raw) : raw);
+}
+function commitBool(e: Event) {
+  emit("save", (e.target as HTMLInputElement).checked);
+}
+</script>
+
+<template>
+  <div class="border-edge flex items-center gap-3 border-b py-2 last:border-b-0">
+    <div class="min-w-0 flex-1">
+      <div class="data-mono truncate text-body text-ink" :title="row.key">{{ row.key }}</div>
+      <div v-if="locked" class="text-caption text-ink-3">
+        Set by {{ envVar }} in your environment — unset it to edit here.
+      </div>
+    </div>
+
+    <!-- editor -->
+    <label v-if="isBool" class="flex items-center">
+      <input
+        type="checkbox"
+        :checked="!!draft"
+        :disabled="locked"
+        class="accent-[var(--safelight)] disabled:opacity-50"
+        @change="commitBool"
+      />
+    </label>
+    <input
+      v-else
+      :value="draft ?? ''"
+      :type="isNumber ? 'number' : 'text'"
+      :disabled="locked"
+      data-selectable
+      class="border-edge data-mono h-7 w-48 rounded-control border bg-bath px-1.5 text-ink disabled:opacity-50"
+      @keydown.enter="commitText"
+      @blur="commitText"
+    />
+
+    <!-- provenance tag -->
+    <span class="edge-code w-14 shrink-0 text-right" :title="tag.label">
+      {{ tag.glyph }} {{ tag.label }}
+    </span>
+
+    <!-- reset (db rows only) -->
+    <button
+      v-if="row.source === 'db'"
+      type="button"
+      class="w-12 shrink-0 text-caption text-ink-3 hover:text-ink"
+      title="Reset to its default"
+      @click="emit('reset')"
+    >
+      Reset
+    </button>
+    <span v-else class="w-12 shrink-0" />
+  </div>
+</template>
