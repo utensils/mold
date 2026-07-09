@@ -77,7 +77,10 @@ function tick() {
     Math.abs(current.amplitude - t.amplitude) < 0.004 &&
     Math.abs(current.cell - t.cell) < 0.1 &&
     Math.abs(current.warmth - t.warmth) < 0.004;
-  if (!settled || props.phase === "developing") raf = requestAnimationFrame(tick);
+  // Stop the loop once eased to the target — params only move on real
+  // denoise events, and a 60fps multiply-composite redraw while the GPU is
+  // saturated with diffusion starves the WebKit compositor (visible flicker).
+  if (!settled) raf = requestAnimationFrame(tick);
   else raf = 0;
 }
 
