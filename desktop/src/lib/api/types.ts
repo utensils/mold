@@ -231,3 +231,128 @@ export interface GalleryImage {
   size_bytes?: number | null;
   metadata_synthetic?: boolean;
 }
+
+// ── Model components ──────────────────────────────────────────────────────
+
+/** One component of an installed model (mirrors mold-core `ModelComponentStatus`). */
+export interface ModelComponentStatus {
+  kind: string;
+  name: string;
+  present: boolean;
+  path?: string | null;
+  repair_model?: string | null;
+}
+
+/** `GET /api/models/:model/components` — mirrors `ModelComponentsResponse`. */
+export interface ModelComponentsResponse {
+  model: string;
+  components: ModelComponentStatus[];
+}
+
+// ── Downloads ─────────────────────────────────────────────────────────────
+
+export type DownloadJobStatus = "queued" | "active" | "completed" | "failed" | "cancelled";
+
+/** Download queue entry (mirrors mold-core `DownloadJob`). */
+export interface DownloadJob {
+  id: string;
+  model: string;
+  catalog_id?: string | null;
+  status: DownloadJobStatus;
+  files_done: number;
+  files_total: number;
+  bytes_done: number;
+  bytes_total: number;
+  current_file?: string | null;
+  started_at?: number | null;
+  completed_at?: number | null;
+  error?: string | null;
+}
+
+/** `GET /api/downloads` — mirrors mold-core `DownloadsListing`. */
+export interface DownloadsListing {
+  active?: DownloadJob | null;
+  queued: DownloadJob[];
+  history: DownloadJob[];
+}
+
+/**
+ * SSE `download` frames (internally tagged, `type` discriminant). The first
+ * frame to a new subscriber is always `snapshot`. Mirrors mold-core
+ * `DownloadEvent`.
+ */
+export type DownloadEvent =
+  | { type: "snapshot"; listing: DownloadsListing }
+  | { type: "enqueued"; id: string; model: string; position: number }
+  | { type: "dequeued"; id: string }
+  | { type: "started"; id: string; files_total: number; bytes_total: number }
+  | {
+      type: "progress";
+      id: string;
+      files_done: number;
+      bytes_done: number;
+      current_file?: string | null;
+    }
+  | { type: "file_done"; id: string; filename: string }
+  | { type: "job_done"; id: string; model: string }
+  | { type: "job_failed"; id: string; error: string }
+  | { type: "job_cancelled"; id: string }
+  | { type: "catalog_ready"; id: string; ok: boolean };
+
+/** `POST /api/downloads` — mirrors `CreateDownloadResponse`. */
+export interface CreateDownloadResponse {
+  id: string;
+  position: number;
+}
+
+// ── Catalog ───────────────────────────────────────────────────────────────
+
+/** One companion (shared component) attached to a catalog entry. */
+export interface CatalogCompanionDetail {
+  name: string;
+  kind?: string;
+  repo?: string;
+  size_bytes?: number | null;
+}
+
+/**
+ * Minimal subset of a `GET /api/catalog/search` entry the desktop renders.
+ * `size_bytes` is the primary weights; `companion_details[].size_bytes` are the
+ * shared components. The endpoint does not report which companions are already
+ * on disk, so "fetch" is the full weights-plus-companions download (see
+ * `lib/catalog.ts`).
+ */
+export interface CatalogEntry {
+  id: string;
+  source: string;
+  name: string;
+  author?: string | null;
+  family: string;
+  kind: string;
+  size_bytes?: number | null;
+  nsfw: boolean;
+  installed: boolean;
+  thumbnail_url?: string | null;
+  trained_words?: string[];
+  companions?: string[];
+  companion_details?: CatalogCompanionDetail[];
+}
+
+/** `GET /api/catalog/search` response envelope. */
+export interface CatalogSearchResponse {
+  entries: CatalogEntry[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+/** One family from `GET /api/catalog/families`. */
+export interface CatalogFamily {
+  family: string;
+}
+
+/** `POST /api/catalog/:id/download` response. */
+export interface CatalogDownloadResponse {
+  primary_job_id?: string | null;
+  companion_jobs: { name: string; job_id: string }[];
+}

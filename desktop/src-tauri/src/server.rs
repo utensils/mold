@@ -73,14 +73,22 @@ pub fn start_engine(
                 .thread_name("mold-engine-worker")
                 .build()
                 .expect("engine tokio runtime");
-            if let Err(e) = rt.block_on(mold_server::run_server(
+            match rt.block_on(mold_server::run_server(
                 "127.0.0.1",
                 port,
                 dir,
                 gpu_selection,
                 size,
             )) {
-                tracing::error!("embedded mold engine exited: {e:#}");
+                Ok(()) => {
+                    // Also to stderr: the file subscriber may not be active.
+                    eprintln!("embedded mold engine stopped (clean shutdown)");
+                    tracing::info!("embedded mold engine stopped");
+                }
+                Err(e) => {
+                    eprintln!("embedded mold engine exited with error: {e:#}");
+                    tracing::error!("embedded mold engine exited: {e:#}");
+                }
             }
         })?;
     Ok(EngineHandle {
