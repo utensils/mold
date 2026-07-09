@@ -898,6 +898,7 @@ fn job_summary_json(job: &AsyncGenerationJob) -> Value {
 
 fn progress_summary(event: &SseProgressEvent) -> String {
     match event {
+        SseProgressEvent::Preview { step, total, .. } => format!("denoise preview {step}/{total}"),
         SseProgressEvent::StageStart { name } => format!("stage started: {name}"),
         SseProgressEvent::StageDone { name, elapsed_ms } => {
             format!("stage done: {name} in {:.1}s", *elapsed_ms as f64 / 1000.0)

@@ -23,6 +23,13 @@ pub enum ProgressEvent {
         bytes_total: u64,
         component: String,
     },
+    /// A low-fidelity live preview of the denoising latent (small PNG at
+    /// latent resolution; clients upscale). Arc keeps Clone cheap.
+    Preview {
+        image_png: std::sync::Arc<Vec<u8>>,
+        step: usize,
+        total: usize,
+    },
 }
 
 /// Callback type for receiving progress events.
@@ -115,6 +122,18 @@ impl From<ProgressEvent> for mold_core::SseProgressEvent {
                 bytes_loaded,
                 bytes_total,
                 component,
+            },
+            ProgressEvent::Preview {
+                image_png,
+                step,
+                total,
+            } => mold_core::SseProgressEvent::Preview {
+                image: {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.encode(image_png.as_slice())
+                },
+                step,
+                total,
             },
         }
     }

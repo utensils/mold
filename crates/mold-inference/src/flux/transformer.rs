@@ -41,6 +41,7 @@ impl FluxTransformer {
         guidance: f64,
         progress: &ProgressReporter,
         inpaint_ctx: Option<&InpaintContext>,
+        preview: Option<&crate::latent_preview::LatentPreviewer>,
     ) -> Result<Tensor> {
         let b_sz = img.dim(0)?;
         let dev = img.device();
@@ -93,7 +94,7 @@ impl FluxTransformer {
                     Some(&guidance_tensor),
                 )?,
             };
-            img = (img + pred * (t_prev - t_curr))?;
+            img = (img + &pred * (t_prev - t_curr))?;
 
             // Inpainting: blend preserved regions back at current noise level
             if let Some(ctx) = inpaint_ctx {
@@ -105,6 +106,19 @@ impl FluxTransformer {
                 total: total_steps,
                 elapsed: step_start.elapsed(),
             });
+            if let Some(previewer) = preview {
+                if previewer.due(step + 1, total_steps) {
+                    // Preview the predicted clean image (flow matching:
+                    // x0 = x_t - t*v), not the still-noisy working latent —
+                    // composition is visible from the first step.
+                    match &img - &(&pred * *t_prev)? {
+                        Ok(x0_est) => {
+                            previewer.maybe_emit(progress, &x0_est, step + 1, total_steps)
+                        }
+                        Err(e) => tracing::warn!("skipping denoise preview: {e}"),
+                    }
+                }
+            }
         }
         Ok(img)
     }

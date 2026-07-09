@@ -721,6 +721,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_RESERVE_VRAM_MB`      | 400 (Linux), 600 (Win), 0 (macOS) | OS / cuBLAS workspace reserve subtracted from `free_vram_bytes` before any budget decision. `0` disables |
 | `MOLD_KEEP_TE_RAM`          | unset                   | Set `1` to park text encoders on CPU between requests instead of dropping them (FP16/BF16 only; GGUF falls through to drop+reload). Disabled on Metal. |
 | `MOLD_LORA_BYPASS`          | `auto`                  | FLUX LoRA application path: `auto` (bypass when LoRAs present, covers offload AND GGUF/quantized via `quantized_transformer.rs`), `on` (always bypass), `off` (legacy merge / `gguf_lora_var_builder`) |
+| `MOLD_STEP_PREVIEW`         | `1`                     | Live denoise previews on `/api/generate/stream` (`preview` SSE events, FLUX.1/Flux.2/Z-Image): latent-resolution PNG per step from the x0 estimate via linear latent→RGB. `0` disables. |
 | `MOLD_VAE_TILED`            | `auto`                  | Tiled VAE decode for FLUX/FLUX2/SDXL/SD3: `auto` (retry on OOM), `force` (always tile), `off` (disable). Saves VRAM when transformer + LoRAs are still resident. |
 | `MOLD_LONG_PROMPTS`         | unset                   | Set `1` to enable ComfyUI-style chunked CLIP encoding (75-token windows; pooled outputs averaged into FLUX's 768-dim `vector_in`). Default off — pre-Tier-2 truncation at 77 preserved. |
 | `MOLD_ATTN`                 | `math`                  | Attention backend: `math` (hand-rolled SDP, default) or `flash` (candle-flash-attn v2; needs `--features cuda,flash-attn` + `RUSTFLAGS='--cfg mold_flash_attn_real'` — falls back to math otherwise) |
@@ -831,6 +832,21 @@ services.mold.discord = {
   package = inputs.mold.packages.${system}.mold-discord;
   tokenFile = config.age.secrets.discord-token.path;
 };
+```
+
+## Desktop App
+
+An experimental native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/` on the `experiment/desktop` branch. It embeds `mold serve` in-process on Metal, auto-detects a running server on `localhost:7680`, and can point at a remote host. It covers the generation workspace (live "Develop" progress), gallery, model/catalog pulls, the chains editing bench, prompt history, and provenance-tagged settings, with a ⌘K command palette.
+
+Devshell commands (run inside `nix develop`):
+
+```bash
+desktop-dev        # Tauri app with hot reload (Vite on :1430)
+desktop-build      # build the Mold.app bundle
+desktop-check      # CI gate: rustfmt, clippy, vue-tsc, prettier
+desktop-test       # cargo test + vitest
+desktop-ui         # frontend-only Vite server (pair with a running `serve`)
+desktop-bun-lock   # regenerate desktop/bun.nix from bun.lock
 ```
 
 ## Updating This Skill

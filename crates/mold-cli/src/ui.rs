@@ -243,6 +243,9 @@ pub(crate) async fn render_progress(
     let mut download_bars: HashMap<usize, (ProgressBar, SmoothedRate)> = HashMap::new();
     while let Some(event) = rx.recv().await {
         match event {
+            // Latent previews are for canvas clients; the terminal keeps
+            // its step progress bar.
+            SseProgressEvent::Preview { .. } => {}
             SseProgressEvent::StageStart { name } => {
                 if let Some(db) = denoise_bar.take() {
                     db.finish_and_clear();

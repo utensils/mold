@@ -1339,6 +1339,7 @@ impl ZImageEngine {
         let denoise_label = format!("Denoising ({} steps)", num_steps);
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
+        let previewer = crate::latent_preview::LatentPreviewer::zimage();
 
         for step in 0..num_steps {
             let step_start = Instant::now();
@@ -1394,6 +1395,20 @@ impl ZImageEngine {
                 total: num_steps,
                 elapsed: step_start.elapsed(),
             });
+            if previewer.due(step + 1, num_steps) {
+                // Preview the predicted clean image (x0 = x_t - sigma*v),
+                // not the still-noisy working latent.
+                let sigma_next = scheduler.sigmas[step + 1];
+                match latents
+                    .squeeze(2)
+                    .and_then(|x| &x - &(&noise_pred_4d * sigma_next)?)
+                {
+                    Ok(x0_est) => {
+                        previewer.maybe_emit(&self.base.progress, &x0_est, step + 1, num_steps)
+                    }
+                    Err(e) => tracing::warn!("skipping denoise preview: {e}"),
+                }
+            }
         }
 
         self.base
@@ -1717,6 +1732,7 @@ impl ZImageEngine {
         let denoise_label = format!("Denoising ({} steps)", num_steps);
         progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
+        let previewer = crate::latent_preview::LatentPreviewer::zimage();
 
         // Scope the transformer borrow so it can be dropped before VAE decode
         {
@@ -1790,6 +1806,16 @@ impl ZImageEngine {
                     total: num_steps,
                     elapsed: step_start.elapsed(),
                 });
+                if previewer.due(step + 1, num_steps) {
+                    let sigma_next = scheduler.sigmas[step + 1];
+                    match latents
+                        .squeeze(2)
+                        .and_then(|x| &x - &(&noise_pred_4d * sigma_next)?)
+                    {
+                        Ok(x0_est) => previewer.maybe_emit(progress, &x0_est, step + 1, num_steps),
+                        Err(e) => tracing::warn!("skipping denoise preview: {e}"),
+                    }
+                }
             }
         }
 

@@ -525,6 +525,35 @@ async fn prepare_generation(
     Ok((output_dir, dim_warning, preferred_gpu))
 }
 
+/// Record an accepted generation prompt into prompt history (best-effort;
+/// no-op when the metadata DB is disabled). Consecutive identical rows are
+/// collapsed so batch siblings and retries don't spam duplicates. Records
+/// what the user actually typed — callers capture the prompt before
+/// `prepare_generation` runs prompt expansion.
+fn record_prompt_history(state: &AppState, prompt: &str, negative: Option<&str>, model: &str) {
+    let Some(db) = state.metadata_db.as_ref().as_ref() else {
+        return;
+    };
+    let history = mold_db::PromptHistory::new(db);
+    if let Ok(rows) = history.recent(1) {
+        if rows.first().is_some_and(|latest| {
+            latest.prompt == prompt
+                && latest.model == model
+                && latest.negative.as_deref() == negative
+        }) {
+            return;
+        }
+    }
+    if let Err(e) = history.push(&mold_db::HistoryEntry {
+        prompt: prompt.to_string(),
+        negative: negative.map(str::to_string),
+        model: model.to_string(),
+        created_at_ms: 0, // stamped with now() by push()
+    }) {
+        tracing::warn!("failed to record prompt history: {e:#}");
+    }
+}
+
 pub(crate) async fn resolve_server_local_media_paths(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
@@ -624,7 +653,15 @@ async fn generate(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Capture before prepare_generation: prompt expansion mutates req.prompt,
+    // and history should hold what the user typed.
+    let typed = (
+        req.prompt.clone(),
+        req.negative_prompt.clone(),
+        req.model.clone(),
+    );
     let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
+    record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
 
     tracing::info!(
         model = %req.model,
@@ -1349,7 +1386,15 @@ async fn generate_stream(
     State(state): State<AppState>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    // Capture before prepare_generation: prompt expansion mutates req.prompt,
+    // and history should hold what the user typed.
+    let typed = (
+        req.prompt.clone(),
+        req.negative_prompt.clone(),
+        req.model.clone(),
+    );
     let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
+    record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
 
     tracing::info!(
         model = %req.model,

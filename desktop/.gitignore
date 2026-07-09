@@ -1,0 +1,11 @@
+node_modules
+dist
+.DS_Store
+src-tauri/target
+src-tauri/gen/schemas
+tsconfig.tsbuildinfo
+# Root .gitignore excludes *.png globally (generated images); icons are source assets.
+# icon-master.png is the icon source of truth: website/public/logo-transparent.png
+# centered on a transparent 1024 canvas. Regenerate: cargo tauri icon icon-master.png
+!icon-master.png
+!src-tauri/icons/*.png

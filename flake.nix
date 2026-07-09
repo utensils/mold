@@ -181,6 +181,20 @@
             ./scripts/ensure-web-dist.sh
           '';
 
+          # Tauri desktop app (desktop/): its cargo root is excluded from the
+          # workspace, so every command targets its manifest explicitly. On
+          # Darwin the Apple linker must be used — the Nix linker breaks
+          # objc2/system-framework linking and produces Team-ID-rejected
+          # binaries (pattern proven in the Aethon project).
+          desktopSetup = ''
+            export SCCACHE_DIR="''${MOLD_SCCACHE_DIR:-$PWD/.cache/sccache}"
+          ''
+          + lib.optionalString isDarwin ''
+            export CC=/usr/bin/cc
+            export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/cc
+            export RUSTC_LINKER=/usr/bin/cc
+          '';
+
           assertMoldRunpathScriptFor =
             {
               ccLib,
@@ -298,6 +312,117 @@
             '';
           };
 
+          # Desktop app frontend (Vue SPA under desktop/), built like mold-web.
+          mold-desktop-web = pkgs.stdenv.mkDerivation {
+            pname = "mold-desktop-web";
+            version = "0.1.0";
+            src = ./desktop;
+            nativeBuildInputs = [ pkgs.bun2nix.hook ];
+            bunDeps = pkgs.bun2nix.fetchBunDeps {
+              bunNix = ./desktop/bun.nix;
+            };
+            bunInstallFlags = [
+              "--linker=isolated"
+              "--backend=symlink"
+            ];
+            dontRunLifecycleScripts = true;
+            buildPhase = ''
+              runHook preBuild
+              bun run build
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              cp -R dist/. $out/
+              runHook postInstall
+            '';
+          };
+
+          # Tauri desktop app (aarch64-darwin, experimental branch).
+          # Aethon recipe: rustPlatform + cargo-tauri.hook, own Cargo.lock,
+          # NO nix build inputs on Darwin (system libiconv → no /nix/store
+          # dyld leaks in the bundle), unsigned; the prebuilt SPA is staged
+          # so tauri's beforeBuildCommand becomes a no-op.
+          mold-desktop = pkgs.rustPlatform.buildRustPackage {
+            pname = "mold-desktop";
+            version = "0.1.0";
+            src = craneLib.path ./.;
+            cargoRoot = "desktop/src-tauri";
+            buildAndTestSubdir = "desktop/src-tauri";
+            cargoLock.lockFile = ./desktop/src-tauri/Cargo.lock;
+            buildFeatures = [ "metal" ];
+
+            MOLD_GIT_SHA = gitShortRev;
+            MOLD_BUILD_DATE = gitDate;
+            # The embedded engine serves the regular web SPA to browsers.
+            MOLD_WEB_DIST = "${mold-web}";
+
+            nativeBuildInputs = [
+              pkgs.cargo-tauri.hook
+              pkgs.pkg-config
+              pkgs.nasm
+              pkgs.makeBinaryWrapper
+            ];
+            buildInputs = [
+              pkgs.openssl
+              pkgs.libwebp
+            ];
+
+            postPatch = ''
+              mkdir -p desktop/dist
+              cp -R ${mold-desktop-web}/. desktop/dist/
+              ${pkgs.jq}/bin/jq '.build.beforeBuildCommand = ""' \
+                desktop/src-tauri/tauri.conf.json > tauri.conf.tmp
+              mv tauri.conf.tmp desktop/src-tauri/tauri.conf.json
+            '';
+
+            tauriBuildFlags = [
+              "--bundles"
+              "app"
+            ];
+            doCheck = false;
+
+            postInstall = ''
+              if [ -d "$out/Applications/Mold.app" ]; then
+                mkdir -p $out/bin
+                makeBinaryWrapper "$out/Applications/Mold.app/Contents/MacOS/mold-desktop" \
+                  $out/bin/mold-desktop
+              fi
+            '';
+
+            # A signed/notarized bundle must not load /nix/store dylibs
+            # (dyld Team-ID rejection); libiconv links in via stdenv — point
+            # it at the system copy and re-sign ad hoc.
+            postFixup = ''
+              app_bin="$out/Applications/Mold.app/Contents/MacOS/mold-desktop"
+              if [ -f "$app_bin" ]; then
+                for ref in $(${pkgs.darwin.cctools}/bin/otool -L "$app_bin" \
+                  | awk '/\/nix\/store\/.*libiconv/ {print $1}'); do
+                  ${pkgs.darwin.cctools}/bin/install_name_tool \
+                    -change "$ref" /usr/lib/libiconv.2.dylib "$app_bin"
+                done
+                # install_name_tool invalidates the ad-hoc signature; re-sign
+                # with the sigtool codesign shim (sandbox has no Apple codesign).
+                ${pkgs.darwin.sigtool}/bin/codesign -f -s - "$app_bin"
+                # tail +2: otool's header line is the binary's own store path.
+                if ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" | tail -n +2 | grep -q "/nix/store"; then
+                  echo "mold-desktop still references /nix/store dylibs:" >&2
+                  ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" >&2
+                  exit 1
+                fi
+              fi
+            '';
+
+            meta = with lib; {
+              description = "Mold — native desktop app for local AI image/video generation";
+              homepage = "https://github.com/utensils/mold";
+              license = licenses.mit;
+              mainProgram = "mold-desktop";
+              platforms = [ "aarch64-darwin" ];
+            };
+          };
+
           # Build a mold package for a given CUDA compute capability.
           # `MOLD_WEB_DIST` is read by `crates/mold-server/build.rs`, which
           # stages the SPA into a directory that `rust-embed` bakes into the
@@ -389,6 +514,11 @@
           }
           // lib.optionalAttrs isLinux {
             mold-sm120 = mkMold "120"; # Blackwell (RTX 50-series)
+          }
+          # Experimental Tauri desktop app — deliberately NOT in `checks`
+          # (flake check is the CI gate; this stays opt-in until merge-ready).
+          // lib.optionalAttrs isDarwin {
+            inherit mold-desktop mold-desktop-web;
           };
 
           checks = {
@@ -476,6 +606,8 @@
               pkgs.ffmpeg
               pkgs.imagemagick
               pkgs.bun
+              pkgs.bun2nix
+              pkgs.cargo-tauri
               pkgs.nodePackages.prettier
               pkgs.tmux
               pkgs.runpodctl
@@ -806,6 +938,84 @@
                     exit 1
                   fi
                   cargo run -p mold-ai-inference --features dev-bins --bin ltx2_review -- "$@"
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-dev";
+                help = "run the Tauri desktop app with hot reload (Vite on :1430)";
+                command = ''
+                  set -euo pipefail
+                  ${desktopSetup}
+                  cd desktop
+                  bun install --frozen-lockfile
+                  cargo tauri dev --features metal "$@"
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-build";
+                help = "build the Mold.app bundle (signed if .secrets/signing.env exists)";
+                command = ''
+                  set -euo pipefail
+                  ${desktopSetup}
+                  if [ -f .secrets/signing.env ]; then
+                    # shellcheck disable=SC1091
+                    source .secrets/signing.env
+                  fi
+                  cd desktop
+                  bun install --frozen-lockfile
+                  cargo tauri build --features metal "$@"
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-check";
+                help = "desktop CI gate: rustfmt, clippy -D warnings, vue-tsc, prettier";
+                command = ''
+                  set -euo pipefail
+                  ${desktopSetup}
+                  cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
+                  cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+                  cd desktop
+                  bun install --frozen-lockfile
+                  bunx vue-tsc -b
+                  bun run fmt:check
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-test";
+                help = "desktop tests: cargo test (CPU) + vitest";
+                command = ''
+                  set -euo pipefail
+                  ${desktopSetup}
+                  cargo test --manifest-path desktop/src-tauri/Cargo.toml "$@"
+                  cd desktop
+                  bun install --frozen-lockfile
+                  bun run test
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-ui";
+                help = "frontend-only Vite dev server (pair with a running `serve`)";
+                command = ''
+                  set -euo pipefail
+                  cd desktop
+                  bun install --frozen-lockfile
+                  bun run dev "$@"
+                '';
+              }
+              {
+                category = "desktop";
+                name = "desktop-bun-lock";
+                help = "regenerate desktop/bun.nix from bun.lock (bun2nix)";
+                command = ''
+                  set -euo pipefail
+                  cd desktop
+                  bun install
+                  bun2nix -o bun.nix
                 '';
               }
               {

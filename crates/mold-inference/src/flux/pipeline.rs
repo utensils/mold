@@ -2150,6 +2150,7 @@ impl FluxEngine {
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
+        let previewer = crate::latent_preview::LatentPreviewer::flux1(height, width);
         let img = flux_model.denoise(
             &state.img,
             &state.img_ids,
@@ -2160,6 +2161,7 @@ impl FluxEngine {
             req.guidance,
             &self.base.progress,
             inpaint_ctx.as_ref(),
+            Some(&previewer),
         )?;
 
         let img = flux::sampling::unpack(&img, height, width)?;
@@ -2778,6 +2780,9 @@ impl FluxEngine {
                 req.guidance,
                 progress,
                 inpaint_ctx.as_ref(),
+                Some(&crate::latent_preview::LatentPreviewer::flux1(
+                    height, width,
+                )),
             )?;
 
         // 7. Unpack latent to spatial

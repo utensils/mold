@@ -1,0 +1,53 @@
+name: Desktop
+
+# CI for the experimental Tauri desktop app (desktop/). The root ci.yml is
+# untouched by this surface: desktop/src-tauri is excluded from the cargo
+# workspace, so --workspace gates never see it.
+on:
+  push:
+    branches: [experiment/desktop]
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "flake.nix"
+      - "Cargo.toml"
+      - ".github/workflows/desktop.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  desktop-frontend:
+    name: Frontend (typecheck, tests, format)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run fmt:check
+      - run: bunx vue-tsc -b
+      - run: bun run test
+      - run: bun run build
+
+  desktop-rust:
+    name: Rust (fmt, clippy, test, bundle)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - run: bun install --frozen-lockfile
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      # CPU-only: the metal feature is deliberately off in CI.
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Bundle proof (unsigned .app)
+        run: bunx tauri build --bundles app --ci

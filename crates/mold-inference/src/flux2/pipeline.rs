@@ -1241,6 +1241,7 @@ impl Flux2Engine {
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
 
+        let previewer = crate::latent_preview::LatentPreviewer::flux2(height, width);
         let img = transformer.denoise(
             &state.img,
             &state.img_ids,
@@ -1251,6 +1252,7 @@ impl Flux2Engine {
             req.guidance,
             &self.base.progress,
             inpaint_ctx.as_ref(),
+            Some(&previewer),
         )?;
 
         let img = sampling::unpack(&img, height, width)?;
@@ -1555,6 +1557,7 @@ impl Flux2Engine {
             .transformer
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("transformer not loaded"))?;
+        let previewer = crate::latent_preview::LatentPreviewer::flux2(height, width);
         let img = transformer.denoise(
             &state.img,
             &state.img_ids,
@@ -1565,6 +1568,7 @@ impl Flux2Engine {
             req.guidance,
             progress,
             inpaint_ctx.as_ref(),
+            Some(&previewer),
         )?;
 
         // 6. Unpack latent to spatial

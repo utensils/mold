@@ -9,6 +9,10 @@ members = [
     "crates/mold-tui",
     "crates/mold-catalog",
 ]
+# The Tauri desktop app is its own cargo root: its dependency tree (wry/objc2)
+# must stay out of this workspace's lockfile, MSRV surface, and `--workspace`
+# CI gates. See desktop/docs/architecture.md.
+exclude = ["desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]
