@@ -1265,6 +1265,145 @@ mod tests {
         assert_eq!(body["code"], "HISTORY_UNAVAILABLE");
     }
 
+    /// Engine+queue state (no worker) with an in-memory metadata DB — the
+    /// setup for asserting that accepting a generation records history. The
+    /// queue receiver is returned so the caller keeps the channel open.
+    fn generating_app_with_history_db() -> (
+        axum::Router,
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+    ) {
+        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        (app_with_state(state.clone()), state, rx)
+    }
+
+    async fn history_prompts(app: &axum::Router) -> Vec<String> {
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/history").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        json_body(resp).await["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["prompt"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn generate_stream_records_prompt_history_on_accept() {
+        let (app, _state, _rx) = generating_app_with_history_db();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("a cat in history", 512, 512)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        if status != StatusCode::OK {
+            let body = json_body(resp).await;
+            panic!("generate/stream answered {status}: {body}");
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/history").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let entries = body["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "accepted generation must land in history");
+        assert_eq!(entries[0]["prompt"], "a cat in history");
+        assert_eq!(entries[0]["model"], "mock-model");
+        assert!(
+            entries[0]["used_at"].as_i64().unwrap() > 0,
+            "used_at must be stamped"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_stream_dedupes_consecutive_identical_prompts() {
+        let (app, _state, _rx) = generating_app_with_history_db();
+
+        for _ in 0..3 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::post("/api/generate/stream")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("same prompt", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("different prompt", 512, 512)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Batch siblings / retries collapse to one row; a new prompt appends.
+        assert_eq!(
+            history_prompts(&app).await,
+            vec!["different prompt".to_string(), "same prompt".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn blocking_generate_records_prompt_history_on_accept() {
+        // No queue worker: submit, verify the history row exists while the
+        // job is still queued, then cancel to resolve the blocked request.
+        let (app, state, _rx) = generating_app_with_history_db();
+
+        let gen_app = app.clone();
+        let gen_task = tokio::spawn(async move {
+            gen_app
+                .oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("blocking prompt", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        let id = wait_for_registered_job(&state).await;
+        assert_eq!(
+            history_prompts(&app).await,
+            vec!["blocking prompt".to_string()],
+            "history records at accept time, not completion"
+        );
+
+        let resp = app
+            .oneshot(
+                Request::delete(format!("/api/queue/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let _ = tokio::time::timeout(Duration::from_secs(5), gen_task).await;
+    }
+
     // ── /api/config ──────────────────────────────────────────────────────────
 
     /// State + router backed by an in-memory metadata DB. Returns the shared

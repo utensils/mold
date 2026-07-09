@@ -422,7 +422,13 @@ closes.
 
 `GET /api/history` returns recent prompt history from the metadata DB, newest
 first. `?query=` filters by case-insensitive prompt substring; `?limit=`
-bounds the row count (default 50, max 500).
+bounds the row count (default 50, max 500). `used_at` is Unix epoch
+milliseconds.
+
+The server records history automatically: every accepted `POST /api/generate`
+or `POST /api/generate/stream` appends the typed prompt (before prompt
+expansion), negative prompt, and model. Consecutive identical rows are
+collapsed, so batch siblings and retries produce a single entry.
 
 ```bash
 curl "http://localhost:7680/api/history?query=sunset&limit=10"

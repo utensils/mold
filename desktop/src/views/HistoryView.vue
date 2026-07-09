@@ -79,7 +79,7 @@ async function clearAll() {
 }
 
 const timeOf = (e: HistoryEntry) =>
-  new Date(e.used_at * 1000).toLocaleTimeString(undefined, {
+  new Date(e.used_at).toLocaleTimeString(undefined, {
     hour: "2-digit",
     minute: "2-digit",
   });

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { groupByDay, type HistoryEntry } from "./history";
 
-const at = (iso: string): number => new Date(iso).getTime() / 1000;
+// used_at is epoch milliseconds on the wire (mold_core::HistoryEntry).
+const at = (iso: string): number => new Date(iso).getTime();
 const entry = (prompt: string, iso: string): HistoryEntry => ({
   prompt,
   model: "flux2-klein:q4",

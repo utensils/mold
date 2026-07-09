@@ -3,7 +3,7 @@ import { apiFetch, apiJson } from "./client";
 export interface HistoryEntry {
   prompt: string;
   model: string;
-  /** Unix seconds. */
+  /** Unix epoch milliseconds (mold_core::HistoryEntry::used_at). */
   used_at: number;
 }
 
@@ -30,7 +30,7 @@ export function groupByDay(
   const yesterday = dayKey(new Date(now.getTime() - 86_400_000));
   const groups: Array<{ label: string; entries: HistoryEntry[] }> = [];
   for (const entry of entries) {
-    const date = new Date(entry.used_at * 1000);
+    const date = new Date(entry.used_at);
     const key = dayKey(date);
     const label =
       key === today

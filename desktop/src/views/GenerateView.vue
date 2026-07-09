@@ -17,6 +17,8 @@ import { useToastStore } from "../stores/toasts";
 import { useUiStore } from "../stores/ui";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { applyModelDefaults, buildRequest, newGenerateForm } from "../lib/generateForm";
+import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCycler";
+import { fetchHistory } from "../lib/api/history";
 import { formatGB } from "../lib/format";
 import { randomSeed } from "../stores/generation";
 import type { ModelEntry } from "../lib/api/types";
@@ -109,6 +111,30 @@ async function generate() {
   } else if (failed?.error) {
     toasts.push(failed.error, "error");
   }
+  // The engine just recorded this prompt — put it at the top of ↑ cycling.
+  void loadPromptHistory();
+}
+
+// ↑/↓ cycle recent prompts (shell-history style) when the caret is on the
+// composer's first/last line, so multi-line editing keeps native arrows.
+const cycler = new PromptCycler();
+
+async function loadPromptHistory() {
+  try {
+    cycler.setEntries((await fetchHistory("", 100)).map((e) => e.prompt));
+  } catch {
+    // No history API (older engine / DB off) — arrows just move the caret.
+  }
+}
+
+function cycleHistory(direction: "prev" | "next") {
+  const replacement = direction === "prev" ? cycler.prev(form.prompt) : cycler.next();
+  if (replacement === null) return;
+  form.prompt = replacement;
+  void nextTick(() => {
+    const el = promptEl.value;
+    el?.setSelectionRange(el.value.length, el.value.length);
+  });
 }
 
 function onComposerKeydown(e: KeyboardEvent) {
@@ -118,6 +144,12 @@ function onComposerKeydown(e: KeyboardEvent) {
   } else if ((e.key === "e" || e.key === "E") && e.metaKey) {
     e.preventDefault();
     expandControl.value?.expand();
+  } else if (e.key === "ArrowUp" && promptEl.value && caretOnFirstLine(promptEl.value)) {
+    e.preventDefault();
+    cycleHistory("prev");
+  } else if (e.key === "ArrowDown" && promptEl.value && caretOnLastLine(promptEl.value)) {
+    e.preventDefault();
+    cycleHistory("next");
   }
 }
 
@@ -136,7 +168,10 @@ watch(
 watch(
   () => conn.ready,
   (ready) => {
-    if (ready) void models.fetch();
+    if (ready) {
+      void models.fetch();
+      void loadPromptHistory();
+    }
   },
   { immediate: true },
 );
@@ -278,6 +313,7 @@ onMounted(() => {
           placeholder="Describe the print — a lighthouse at dusk, kodak portra…"
           class="w-full resize-none bg-transparent text-body-lg text-ink outline-none placeholder:text-ink-3"
           @keydown="onComposerKeydown"
+          @input="cycler.reset()"
         />
         <div class="mt-2 flex items-center justify-between gap-2">
           <ExpandControl
