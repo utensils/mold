@@ -18,6 +18,7 @@
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Notify;
 
 /// Wire-facing job state. Mirrors the actual lifecycle:
 ///
@@ -69,10 +70,23 @@ struct EntryInternal {
     started_at_unix_ms: u64,
     gpu: Option<usize>,
     target_gpu: Option<usize>,
+    /// Cancellation signal for `DELETE /api/queue/:id`. The submitting
+    /// handler holds the clone returned by `register*()` and selects on
+    /// `notified()` alongside the job's result channel; `cancel_queued`
+    /// fires `notify_one()` so the permit survives even when the cancel
+    /// lands before the waiter starts awaiting.
+    cancel: Arc<Notify>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetGpuUpdateError {
+    NotFound,
+    AlreadyRunning,
+}
+
+/// Why a `DELETE /api/queue/:id` cancel attempt was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuedJobCancelError {
     NotFound,
     AlreadyRunning,
 }
@@ -96,21 +110,29 @@ impl JobRegistry {
     }
 
     /// Insert a freshly-submitted job at the tail in `Queued` state.
-    pub fn register(&self, id: impl Into<String>, model: impl Into<String>) {
-        self.register_with_target_gpu(id, model, None);
+    /// Returns the job's cancellation signal — see `register_with_target_gpu`.
+    pub fn register(&self, id: impl Into<String>, model: impl Into<String>) -> Arc<Notify> {
+        self.register_with_target_gpu(id, model, None)
     }
 
     /// Insert a freshly-submitted job with an optional queued lane target.
+    ///
+    /// Returns the job's cancellation signal. The submitting handler must
+    /// hold it and select on `notified()` alongside the result channel —
+    /// `cancel_queued` resolves it when `DELETE /api/queue/:id` removes the
+    /// entry. Callers that never wait (tests poking the registry directly)
+    /// can drop the handle.
     pub fn register_with_target_gpu(
         &self,
         id: impl Into<String>,
         model: impl Into<String>,
         target_gpu: Option<usize>,
-    ) {
+    ) -> Arc<Notify> {
         let started_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
+        let cancel = Arc::new(Notify::new());
         let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
         entries.push(EntryInternal {
             id: id.into(),
@@ -119,7 +141,31 @@ impl JobRegistry {
             started_at_unix_ms,
             gpu: None,
             target_gpu,
+            cancel: cancel.clone(),
         });
+        cancel
+    }
+
+    /// Cancel a still-queued job: remove its entry and fire the cancel
+    /// signal returned by `register*()` so the waiting request future
+    /// resolves with a cancellation error. Running jobs are not cancelable
+    /// — the GPU worker owns them and there is no safe preemption point.
+    ///
+    /// The state check and removal happen under the same write lock that
+    /// `mark_running` takes, so a job can never be both cancelled and
+    /// promoted. (A worker that already dequeued the job before the cancel
+    /// landed will observe the closed result channel and skip it.)
+    pub fn cancel_queued(&self, id: &str) -> Result<(), QueuedJobCancelError> {
+        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let Some(pos) = entries.iter().position(|e| e.id == id) else {
+            return Err(QueuedJobCancelError::NotFound);
+        };
+        if entries[pos].state == JobLifecycle::Running {
+            return Err(QueuedJobCancelError::AlreadyRunning);
+        }
+        let entry = entries.remove(pos);
+        entry.cancel.notify_one();
+        Ok(())
     }
 
     /// Promote a registry entry from `Queued` to `Running`. No-op if `id`
@@ -302,6 +348,48 @@ mod tests {
         reg.remove("");
         reg.remove("never-existed");
         assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn cancel_queued_removes_the_entry() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.register("b", "sdxl:q8");
+        reg.cancel_queued("a").unwrap();
+        let snap = reg.snapshot();
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.entries[0].id, "b");
+        assert_eq!(snap.entries[0].position, 0);
+    }
+
+    #[test]
+    fn cancel_queued_rejects_running_jobs_and_keeps_the_entry() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.mark_running("a", Some(0));
+        let err = reg.cancel_queued("a").unwrap_err();
+        assert_eq!(err, QueuedJobCancelError::AlreadyRunning);
+        assert_eq!(reg.len(), 1, "running entry must survive a cancel attempt");
+    }
+
+    #[test]
+    fn cancel_queued_unknown_id_is_not_found() {
+        let reg = JobRegistry::new();
+        let err = reg.cancel_queued("never-existed").unwrap_err();
+        assert_eq!(err, QueuedJobCancelError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn cancel_queued_signals_the_registered_waiter() {
+        // The handle returned by register() must resolve `notified()` even
+        // when the cancel fires before the waiter starts awaiting — Notify
+        // stores the permit from notify_one().
+        let reg = JobRegistry::new();
+        let cancel = reg.register("a", "flux-dev:fp16");
+        reg.cancel_queued("a").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancel.notified())
+            .await
+            .expect("cancel signal must resolve the waiter");
     }
 
     #[test]
