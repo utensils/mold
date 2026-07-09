@@ -878,6 +878,394 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_queue_cancels_queued_job_with_204_and_removes_it() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+
+        let app = app_with_state(state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::delete("/api/queue/aaaa")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = app
+            .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body["entries"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn delete_queue_unknown_id_returns_404() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(
+                Request::delete("/api/queue/not-here")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "QUEUE_JOB_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_queue_running_job_returns_409() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        state.job_registry.mark_running("aaaa", Some(0));
+
+        let app = app_with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::delete("/api/queue/aaaa")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "QUEUE_JOB_RUNNING");
+        assert_eq!(
+            state.job_registry.len(),
+            1,
+            "running job must survive the cancel attempt"
+        );
+    }
+
+    /// Poll the registry until the submitted job shows up (the generate
+    /// handler registers before submit, so this resolves almost instantly).
+    async fn wait_for_registered_job(state: &AppState) -> String {
+        for _ in 0..500 {
+            if let Some(entry) = state.job_registry.snapshot().entries.first() {
+                return entry.id.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("job never appeared in the registry");
+    }
+
+    #[tokio::test]
+    async fn delete_queue_resolves_blocking_generate_with_cancelled_error() {
+        // No queue worker is spawned — the submitted job sits queued in the
+        // channel exactly like a job stuck behind a long-running generation.
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let app = app_with_state(state.clone());
+
+        let gen_app = app.clone();
+        let gen_task = tokio::spawn(async move {
+            gen_app
+                .oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("a cat", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        let id = wait_for_registered_job(&state).await;
+        let resp = app
+            .oneshot(
+                Request::delete(format!("/api/queue/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let gen_resp = tokio::time::timeout(Duration::from_secs(5), gen_task)
+            .await
+            .expect("blocking generate must resolve after cancel")
+            .unwrap();
+        assert_eq!(gen_resp.status().as_u16(), 499);
+        let body = json_body(gen_resp).await;
+        assert_eq!(body["code"], "CANCELLED");
+    }
+
+    #[tokio::test]
+    async fn delete_queue_emits_sse_error_and_closes_the_stream() {
+        // No queue worker — the streaming job stays queued until cancelled.
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let app = app_with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("a cat", 512, 512)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let id = wait_for_registered_job(&state).await;
+        let del = app
+            .oneshot(
+                Request::delete(format!("/api/queue/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+        // The stream must emit an `error` event and then CLOSE — to_bytes
+        // only returns once the body stream terminates, so the timeout is
+        // the regression guard against a stream that stays open after
+        // cancellation.
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(5),
+            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+        )
+        .await
+        .expect("SSE stream must close after cancel")
+        .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("event: error"), "missing error event: {text}");
+        assert!(text.contains("cancelled"), "missing cancel message: {text}");
+    }
+
+    // ── /api/history ─────────────────────────────────────────────────────────
+
+    fn history_entry(prompt: &str, model: &str, ts: i64) -> mold_db::HistoryEntry {
+        mold_db::HistoryEntry {
+            prompt: prompt.into(),
+            negative: None,
+            model: model.into(),
+            created_at_ms: ts,
+        }
+    }
+
+    /// State + router backed by an in-memory metadata DB. Returns the shared
+    /// DB handle so tests can seed/inspect prompt history around requests.
+    fn app_with_history_db() -> (axum::Router, Arc<Option<mold_db::MetadataDb>>) {
+        let mut state = AppState::for_tests();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        state.metadata_db = db.clone();
+        (app_with_state(state), db)
+    }
+
+    fn seed_history(db: &Arc<Option<mold_db::MetadataDb>>, entries: &[(&str, &str, i64)]) {
+        let db = db.as_ref().as_ref().expect("test DB present");
+        let history = mold_db::PromptHistory::new(db);
+        for (prompt, model, ts) in entries {
+            history.push(&history_entry(prompt, model, *ts)).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn history_returns_recent_entries_newest_first() {
+        let (app, db) = app_with_history_db();
+        seed_history(
+            &db,
+            &[
+                ("first", "flux-dev:q4", 1_000),
+                ("second", "flux-dev:q4", 2_000),
+                ("third", "sdxl:fp16", 3_000),
+            ],
+        );
+
+        let resp = app
+            .oneshot(Request::get("/api/history").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let entries = body["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries[0],
+            serde_json::json!({
+                "prompt": "third",
+                "model": "sdxl:fp16",
+                "used_at": 3_000,
+            })
+        );
+        assert_eq!(entries[2]["prompt"], "first");
+    }
+
+    #[tokio::test]
+    async fn history_query_filters_by_substring() {
+        let (app, db) = app_with_history_db();
+        seed_history(
+            &db,
+            &[
+                ("A Sunny Day", "m", 1),
+                ("cloudy morning", "m", 2),
+                ("SUNSET over sea", "m", 3),
+            ],
+        );
+
+        let resp = app
+            .oneshot(
+                Request::get("/api/history?query=sun")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let prompts: Vec<&str> = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["prompt"].as_str().unwrap())
+            .collect();
+        assert_eq!(prompts, vec!["SUNSET over sea", "A Sunny Day"]);
+    }
+
+    #[tokio::test]
+    async fn history_limit_defaults_to_50_and_caps_at_500() {
+        let (app, db) = app_with_history_db();
+        let rows: Vec<(String, &str, i64)> = (0..510)
+            .map(|i| (format!("p{i}"), "m", (i as i64 + 1) * 10))
+            .collect();
+        {
+            let db = db.as_ref().as_ref().unwrap();
+            let history = mold_db::PromptHistory::new(db);
+            for (prompt, model, ts) in &rows {
+                history.push(&history_entry(prompt, model, *ts)).unwrap();
+            }
+        }
+
+        // Default limit is 50.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/history").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body["entries"].as_array().unwrap().len(), 50);
+
+        // Explicit limits are honored…
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/api/history?limit=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body["entries"].as_array().unwrap().len(), 2);
+
+        // …but capped at 500.
+        let resp = app
+            .oneshot(
+                Request::get("/api/history?limit=10000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body["entries"].as_array().unwrap().len(), 500);
+    }
+
+    #[tokio::test]
+    async fn history_returns_503_when_db_disabled() {
+        // AppState::for_tests() has metadata_db = None — same state the
+        // server boots into under MOLD_DB_DISABLE=1.
+        let app = app_with_state(AppState::for_tests());
+        let resp = app
+            .oneshot(Request::get("/api/history").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "HISTORY_UNAVAILABLE");
+        assert!(body["error"].as_str().unwrap().contains("metadata DB"));
+    }
+
+    #[tokio::test]
+    async fn delete_history_clears_all_and_returns_204() {
+        let (app, db) = app_with_history_db();
+        seed_history(&db, &[("a", "m", 1), ("b", "m", 2)]);
+
+        let resp = app
+            .clone()
+            .oneshot(Request::delete("/api/history").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = app
+            .oneshot(Request::get("/api/history").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body["entries"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn delete_history_keep_trims_to_most_recent_n() {
+        let (app, db) = app_with_history_db();
+        seed_history(
+            &db,
+            &[
+                ("p0", "m", 100),
+                ("p1", "m", 200),
+                ("p2", "m", 300),
+                ("p3", "m", 400),
+            ],
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::delete("/api/history?keep=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = app
+            .oneshot(Request::get("/api/history").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        let prompts: Vec<&str> = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["prompt"].as_str().unwrap())
+            .collect();
+        assert_eq!(prompts, vec!["p3", "p2"]);
+    }
+
+    #[tokio::test]
+    async fn delete_history_returns_503_when_db_disabled() {
+        let app = app_with_state(AppState::for_tests());
+        let resp = app
+            .oneshot(Request::delete("/api/history").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "HISTORY_UNAVAILABLE");
+    }
+
+    #[tokio::test]
     async fn status_when_no_model() {
         let app = app_empty();
         let resp = app

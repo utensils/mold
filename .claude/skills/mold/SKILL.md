@@ -692,6 +692,8 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `GET /api/gallery` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`
 - `POST /api/upscale` · `POST /api/upscale/stream`
 - `GET /api/queue` — authoritative server-side job listing for SPA reconciliation (queued + running jobs with UUIDv4 ids)
+- `DELETE /api/queue/:id` — cancel a still-queued generation job (204; 404 unknown; 409 once running)
+- `GET /api/history?query=&limit=` · `DELETE /api/history[?keep=N]` — prompt history (newest first, substring filter, limit ≤ 500; 503 when the metadata DB is disabled)
 - `GET /api/status` · `GET /health` · `GET /api/capabilities`
 
 ### Prometheus Metrics

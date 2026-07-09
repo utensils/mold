@@ -49,6 +49,9 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `GET`    | `/api/resources/stream`                   | Resource snapshots as SSE                                                                                         |
 | `GET`    | `/api/queue`                              | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
 | `PATCH`  | `/api/queue/:id`                          | Update the preferred GPU lane for a queued job                                                                    |
+| `DELETE` | `/api/queue/:id`                          | Cancel a still-queued generation job                                                                              |
+| `GET`    | `/api/history`                            | Prompt history, newest first (`?query=` substring filter, `?limit=` up to 500)                                    |
+| `DELETE` | `/api/history`                            | Clear prompt history (`?keep=N` trims to the most recent N)                                                       |
 | `GET`    | `/api/capabilities`                       | Feature capabilities (gallery delete, chain limits, …)                                                            |
 | `GET`    | `/api/capabilities/chain-limits`          | Chain-generation request limits                                                                                   |
 | `PUT`    | `/api/config/model/:name/placement`       | Save model-specific device placement defaults                                                                     |
@@ -339,6 +342,51 @@ curl -X PATCH http://localhost:7680/api/queue/00000000-0000-0000-0000-0000000000
 
 Set `target_gpu` to `null` to return the queued job to automatic placement.
 Already-running jobs reject lane changes.
+
+Use `DELETE /api/queue/:id` to cancel a job that is still queued:
+
+```bash
+curl -X DELETE http://localhost:7680/api/queue/00000000-0000-0000-0000-000000000000
+```
+
+Returns `204 No Content` on success, `404` for unknown ids, and `409`
+(`QUEUE_JOB_RUNNING`) once a GPU worker owns the job — only queued jobs are
+cancelable. The waiting client observes the cancellation immediately: a
+blocking `POST /api/generate` resolves with a `499` `CANCELLED` error, and a
+`POST /api/generate/stream` connection receives a terminal `error` event and
+closes.
+
+## `/api/history`
+
+`GET /api/history` returns recent prompt history from the metadata DB, newest
+first. `?query=` filters by case-insensitive prompt substring; `?limit=`
+bounds the row count (default 50, max 500).
+
+```bash
+curl "http://localhost:7680/api/history?query=sunset&limit=10"
+```
+
+```json
+{
+  "entries": [
+    {
+      "prompt": "sunset over sea",
+      "model": "flux-dev:q8",
+      "used_at": 1700000000000
+    }
+  ]
+}
+```
+
+`DELETE /api/history` clears the history (`204 No Content`). Pass `?keep=N`
+to trim to the most recent N entries instead:
+
+```bash
+curl -X DELETE "http://localhost:7680/api/history?keep=100"
+```
+
+Both endpoints return `503` (`HISTORY_UNAVAILABLE`) when the metadata DB is
+disabled (`MOLD_DB_DISABLE=1`).
 
 ## `/api/loras`
 
