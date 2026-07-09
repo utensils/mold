@@ -21,6 +21,7 @@ pub mod resources;
 pub mod routes;
 pub mod routes_chain;
 pub mod routes_chain_jobs;
+pub mod routes_config;
 mod signals;
 pub mod state;
 pub mod web_ui;

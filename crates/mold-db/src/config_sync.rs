@@ -496,6 +496,99 @@ fn global_hook(cfg: &mut Config) {
     }
 }
 
+// ── Shared `config set` / `config reset` persistence (CLI + server) ─────────
+//
+// The key registry and typed get/set live in `mold_core::config_keys`; the
+// DB-surface persistence for those keys lives here so `mold config set` and
+// the server's `PUT /api/config/:key` route through one implementation.
+
+/// Persist a DB-surface **global** key (`expand.*` or a flat generation
+/// default) after the caller mutated `config` via
+/// `mold_core::config_keys::set_value`.
+pub fn persist_config_key(db: &MetadataDb, config: &Config, key: &str) -> Result<()> {
+    // expand.* is written as a whole blob so env-var precedence and
+    // families stay coherent with the load path.
+    if key.starts_with("expand.") {
+        save_expand_to_db(db, &config.expand)?;
+        return Ok(());
+    }
+    // All the global generation defaults ride one writer — cheap and
+    // keeps the two halves of a `--width --height` pair consistent.
+    save_generate_globals_to_db(db, config)?;
+    Ok(())
+}
+
+/// Persist a DB-surface `models.<name>.<field>` key after the caller
+/// mutated `config`. Resolves the model name to canonical form so
+/// `flux-dev` and `flux-dev:q4` share one `model_prefs` row, and
+/// load-merge-saves so TUI-owned fields (seed mode, batch, last prompt)
+/// survive. Assignments are unconditional so setting a field to `none`
+/// clears the stored value instead of leaving it to be rehydrated.
+pub fn persist_model_field(db: &MetadataDb, config: &Config, key: &str) -> Result<()> {
+    let (model_name, _, _) = mold_core::config_keys::parse_model_key(key)?;
+    let mc = config
+        .models
+        .get(model_name)
+        .ok_or_else(|| anyhow::anyhow!("no model '{model_name}' in config after set"))?;
+    let canonical = mold_core::manifest::resolve_model_name(model_name);
+    let mut prefs = ModelPrefs::load(db, &canonical)?.unwrap_or_default();
+    prefs.width = mc.default_width;
+    prefs.height = mc.default_height;
+    prefs.steps = mc.default_steps;
+    prefs.guidance = mc.default_guidance;
+    prefs.scheduler = mc.scheduler.map(|s| s.to_string());
+    prefs.lora_path = mc.lora.clone();
+    prefs.lora_scale = mc.lora_scale;
+    prefs.last_negative = mc.negative_prompt.clone();
+    prefs.save(db, &canonical)?;
+    Ok(())
+}
+
+/// Drop the DB row backing a global DB-surface key (scoped to `profile`)
+/// so the next read falls back to config.toml / env / compiled default.
+pub fn reset_global_key(db: &MetadataDb, profile: &str, key: &str) -> Result<()> {
+    let s = Settings::for_profile(db, profile);
+    // Map user-facing keys to their DB-side counterparts. Most are
+    // 1:1, but the global generate.* keys live under explicit row names.
+    let db_key = match key {
+        "default_width" => keys::GENERATE_DEFAULT_WIDTH,
+        "default_height" => keys::GENERATE_DEFAULT_HEIGHT,
+        "default_steps" => keys::GENERATE_DEFAULT_STEPS,
+        "embed_metadata" => keys::GENERATE_EMBED_METADATA,
+        "default_negative_prompt" => keys::GENERATE_DEFAULT_NEGATIVE_PROMPT,
+        "t5_variant" => keys::GENERATE_T5_VARIANT,
+        "qwen3_variant" => keys::GENERATE_QWEN3_VARIANT,
+        _ => key,
+    };
+    s.delete(db_key)?;
+    Ok(())
+}
+
+/// Null the matching `model_prefs` field for a `models.<name>.<field>`
+/// key (scoped to `profile`). Missing rows are a no-op success; unrelated
+/// fields are preserved.
+pub fn reset_model_field(db: &MetadataDb, profile: &str, key: &str) -> Result<()> {
+    let (model_name, field, _) = mold_core::config_keys::parse_model_key(key)?;
+    let canonical = mold_core::manifest::resolve_model_name(model_name);
+    let Some(mut prefs) = ModelPrefs::load_in(db, profile, &canonical)? else {
+        // No row to begin with — treat as a no-op success.
+        return Ok(());
+    };
+    match field {
+        "default_steps" => prefs.steps = None,
+        "default_guidance" => prefs.guidance = None,
+        "default_width" => prefs.width = None,
+        "default_height" => prefs.height = None,
+        "scheduler" => prefs.scheduler = None,
+        "negative_prompt" => prefs.last_negative = None,
+        "lora" => prefs.lora_path = None,
+        "lora_scale" => prefs.lora_scale = None,
+        other => anyhow::bail!("unsupported per-model reset field: {other}"),
+    }
+    prefs.save_in(db, profile, &canonical)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
