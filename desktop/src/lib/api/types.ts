@@ -68,10 +68,64 @@ export interface ModelEntry {
 
 export type OutputFormat = "png" | "jpeg" | "webp" | "gif" | "apng" | "mp4";
 
-/** Subset of mold-core GenerateRequest the desktop sends today (grows in M3+). */
+/** Scheduler override for UNet families (SD1.5, SDXL). Mirrors mold-core's
+ * kebab-case enum; only these string variants are surfaced in the desktop UI. */
+export type Scheduler = "default" | "ddim" | "euler-ancestral" | "unipc";
+
+/** One entry in a LoRA stack. `path` is the server-side safetensors path
+ * (`LoraInfo.path`); `scale` is 0–2, 1 = full strength. Mirrors mold-core
+ * `LoraWeight`. */
+export interface LoraWeight {
+  path: string;
+  scale: number;
+}
+
+/** Installed LoRA adapter (`GET /api/loras`). Mirrors mold-core `LoraInfo`. */
+export interface LoraInfo {
+  id: string;
+  name: string;
+  family: string;
+  author?: string | null;
+  path: string;
+  trained_words: string[];
+  size_bytes?: number | null;
+  thumbnail_url?: string | null;
+  added_at: number;
+}
+
+/** `POST /api/expand` — mirrors mold-core `ExpandRequest`. */
+export interface ExpandRequest {
+  prompt: string;
+  model_family?: string;
+  variations?: number;
+}
+
+/** `POST /api/expand` — mirrors mold-core `ExpandResponse`. */
+export interface ExpandResponse {
+  original: string;
+  expanded: string[];
+}
+
+/** `POST /api/generate/estimate` — mirrors mold-core `GenerationMemoryEstimate`. */
+export interface GenerationMemoryEstimate {
+  model: string;
+  peak_memory_bytes: number;
+  activation_memory_bytes: number;
+  available_memory_bytes?: number | null;
+  load_strategy: string;
+  fits_available_memory?: boolean | null;
+}
+
+/**
+ * Subset of mold-core GenerateRequest the desktop sends.
+ *
+ * Wire note: mold-core serializes every image field as a base64 STRING in
+ * JSON (no `data:` prefix), so `source_image` / `mask_image` / `control_image`
+ * are typed as `string` here, not bytes.
+ */
 export interface GenerateRequest {
   prompt: string;
-  negative_prompt?: string;
+  negative_prompt?: string | null;
   model: string;
   width: number;
   height: number;
@@ -80,6 +134,21 @@ export interface GenerateRequest {
   seed?: number;
   batch_size?: number;
   output_format?: OutputFormat;
+  scheduler?: Scheduler;
+  cfg_plus?: boolean;
+  /** img2img source, base64 (no data-URI prefix). */
+  source_image?: string | null;
+  strength?: number;
+  /** Inpaint mask, base64. */
+  mask_image?: string;
+  /** ControlNet conditioning image, base64. */
+  control_image?: string;
+  control_model?: string;
+  control_scale?: number;
+  loras?: LoraWeight[];
+  lora?: LoraWeight;
+  expand?: boolean;
+  original_prompt?: string;
 }
 
 /** serde tag = "type", snake_case — /api/generate/stream `progress` events. */

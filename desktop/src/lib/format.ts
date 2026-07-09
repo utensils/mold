@@ -3,6 +3,14 @@ export function formatGB(bytes: number): string {
   return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 }
 
+/** Adaptive decimal units for totals that may be small (gallery sizes). */
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1_000_000_000) return formatGB(bytes);
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
 export type MeterLevel = "ok" | "critical";
 
 /** VRAM meter turns Stop-red past 92% (design spec §3, the Bench rail). */

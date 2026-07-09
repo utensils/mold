@@ -1,14 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import DevelopCanvas from "../lib/develop/DevelopCanvas.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
+import ParamPanel from "../components/generate/ParamPanel.vue";
+import LoraStack from "../components/generate/LoraStack.vue";
+import SourceImageWell from "../components/generate/SourceImageWell.vue";
+import EstimateBadge from "../components/generate/EstimateBadge.vue";
+import ExpandControl from "../components/generate/ExpandControl.vue";
 import { useConnectionStore } from "../stores/connection";
-import { useGenerationStore, jobPhase, jobProgress } from "../stores/generation";
+import { useGenerationStore, jobPhase, jobProgress, type Job } from "../stores/generation";
 import { useGalleryStore } from "../stores/gallery";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
+import { generationCapabilitiesForFamily } from "../lib/capabilities";
+import { applyModelDefaults, buildRequest, newGenerateForm } from "../lib/generateForm";
 import { formatGB } from "../lib/format";
 import type { ModelEntry } from "../lib/api/types";
 
@@ -20,24 +27,24 @@ const models = useModelStore();
 const composer = useComposerStore();
 const toasts = useToastStore();
 
-const prompt = ref("");
+const form = reactive(newGenerateForm());
 const promptEl = ref<HTMLTextAreaElement | null>(null);
-const model = ref<string>("");
-const width = ref(1024);
-const height = ref(1024);
-const steps = ref(4);
-const guidance = ref(3.5);
-const seed = ref<string>("");
+const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
 const pickerOpen = ref(false);
 
 const job = computed(() => generation.active);
+const siblings = computed(() => generation.siblings);
 const running = computed(
   () => job.value !== null && job.value.status !== "complete" && job.value.status !== "error",
 );
 
+const caps = computed(() => generationCapabilitiesForFamily(form.family));
 const selectedModel = computed<ModelEntry | null>(
-  () => models.installed.find((m) => m.name === model.value) ?? null,
+  () => models.installed.find((m) => m.name === form.model) ?? null,
 );
+
+/** The request the estimate badge previews — null until a model is chosen. */
+const estimateRequest = computed(() => (form.model ? buildRequest(form) : null));
 
 const buttonLabel = computed(() => {
   const j = job.value;
@@ -58,48 +65,46 @@ const edgeCode = computed(() => {
   return [name, s, stepPart, size, time].filter(Boolean).join("  ");
 });
 
-function applyModelDefaults(m: ModelEntry) {
-  width.value = m.default_width;
-  height.value = m.default_height;
-  steps.value = m.default_steps;
-  guidance.value = m.default_guidance;
-}
-
 function pickModel(m: ModelEntry) {
-  model.value = m.name;
-  applyModelDefaults(m);
+  applyModelDefaults(form, m);
   pickerOpen.value = false;
 }
 
-function randomizeSeed() {
-  seed.value = String(Math.floor(Math.random() * 0xffffffff));
+function siblingDot(s: Job): string {
+  if (s.status === "complete") return "text-ink"; // ◉ developed
+  if (s.status === "error") return "text-stop";
+  return "text-ink-3"; // ◎ pending
 }
 
-function swapSize() {
-  [width.value, height.value] = [height.value, width.value];
+function onExpandApply(payload: { expanded: string; original: string }) {
+  form.prompt = payload.expanded;
+  form.originalPrompt = payload.original;
 }
-
-const snap16 = (v: number) => Math.max(64, Math.round(v / 16) * 16);
+function onExpandRestore(original: string) {
+  form.prompt = original;
+  form.originalPrompt = null;
+}
+function appendPromptWord(word: string) {
+  const trimmed = word.trim();
+  if (!trimmed) return;
+  form.prompt = form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed;
+}
 
 async function generate() {
-  if (!prompt.value.trim() || !model.value || running.value) return;
-  const parsedSeed = seed.value.trim() === "" ? undefined : Number(seed.value);
-  const request = {
-    prompt: prompt.value.trim(),
-    model: model.value,
-    width: snap16(width.value),
-    height: snap16(height.value),
-    steps: steps.value,
-    guidance: guidance.value,
-    ...(parsedSeed !== undefined && Number.isFinite(parsedSeed) ? { seed: parsedSeed } : {}),
-  };
-  await generation.generate(request);
-  const j = generation.active;
-  if (j?.status === "complete") {
-    toasts.push("Generated — saved to Gallery");
+  if (!form.prompt.trim() || !form.model || running.value) return;
+  const request = buildRequest(form);
+  const batch = caps.value.forcesBatchSizeOne ? 1 : form.batchSize;
+  await generation.generateBatch(request, batch);
+  const done = generation.siblings;
+  const ok = done.filter((s) => s.status === "complete").length;
+  const failed = done.find((s) => s.status === "error");
+  if (ok > 0) {
+    toasts.push(
+      ok === 1 ? "Generated — saved to Gallery" : `Generated ${ok} prints — saved to Gallery`,
+    );
     void gallery.fetch();
-  } else if (j?.status === "error" && j.error) {
-    toasts.push(j.error, "error");
+  } else if (failed?.error) {
+    toasts.push(failed.error, "error");
   }
 }
 
@@ -107,16 +112,18 @@ function onComposerKeydown(e: KeyboardEvent) {
   if (e.key === "Enter" && e.metaKey) {
     e.preventDefault();
     void generate();
+  } else if ((e.key === "e" || e.key === "E") && e.metaKey) {
+    e.preventDefault();
+    expandControl.value?.expand();
   }
 }
 
 watch(
   () => models.installed,
   (installed) => {
-    if (!model.value && installed.length > 0) {
+    if (!form.model && installed.length > 0) {
       const preferred = installed.find((m) => m.family === "flux") ?? installed[0]!;
-      model.value = preferred.name;
-      applyModelDefaults(preferred);
+      applyModelDefaults(form, preferred);
     }
   },
   { immediate: true },
@@ -135,13 +142,15 @@ onMounted(() => {
   promptEl.value?.focus();
   const prefill = composer.take();
   if (prefill) {
-    prompt.value = prefill.prompt;
-    model.value = prefill.model;
-    seed.value = prefill.seed !== null ? String(prefill.seed) : "";
-    width.value = prefill.width;
-    height.value = prefill.height;
-    steps.value = prefill.steps;
-    guidance.value = prefill.guidance;
+    form.prompt = prefill.prompt;
+    form.model = prefill.model;
+    form.seed = prefill.seed !== null ? String(prefill.seed) : "";
+    form.width = prefill.width;
+    form.height = prefill.height;
+    form.steps = prefill.steps;
+    form.guidance = prefill.guidance;
+    const m = models.installed.find((x) => x.name === prefill.model);
+    if (m) form.family = m.family;
   }
 });
 </script>
@@ -155,14 +164,14 @@ onMounted(() => {
     @action="router.push('/models')"
   />
 
-  <div v-else class="grid h-full grid-cols-[1fr_300px]">
+  <div v-else class="grid h-full grid-cols-[1fr_320px]">
     <!-- Canvas + composer -->
     <div class="flex min-w-0 flex-col p-6">
       <div class="flex min-h-0 flex-1 items-center justify-center">
         <div class="flex max-h-full flex-col" style="width: min(100%, 62vh)">
           <div
             class="relative w-full overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_18%,transparent)] bg-print-surface"
-            :style="{ aspectRatio: `${job?.width ?? width} / ${job?.height ?? height}` }"
+            :style="{ aspectRatio: `${job?.width ?? form.width} / ${job?.height ?? form.height}` }"
           >
             <video
               v-if="job?.resultUrl && job.result?.video_frames"
@@ -199,9 +208,24 @@ onMounted(() => {
             </div>
           </div>
           <div v-if="job" class="edge-code mt-2 truncate" :title="edgeCode">{{ edgeCode }}</div>
-          <p v-if="job?.status === 'error'" class="mt-2 text-caption text-stop">
-            {{ job.error }}
-          </p>
+
+          <!-- Batch dots -->
+          <div v-if="siblings.length > 1" class="mt-2 flex items-center gap-1.5">
+            <span
+              v-for="(s, i) in siblings"
+              :key="i"
+              class="data-mono text-body"
+              :class="siblingDot(s)"
+              :title="`${i + 1} of ${siblings.length}`"
+            >
+              {{ s.status === "complete" ? "◉" : s.status === "error" ? "◉" : "◎" }}
+            </span>
+            <span class="edge-code ml-1">
+              {{ siblings.filter((s) => s.status === "complete").length }} of {{ siblings.length }}
+            </span>
+          </div>
+
+          <p v-if="job?.status === 'error'" class="mt-2 text-caption text-stop">{{ job.error }}</p>
         </div>
       </div>
 
@@ -209,24 +233,33 @@ onMounted(() => {
       <div class="border-edge mt-4 rounded-chrome border bg-bench p-3">
         <textarea
           ref="promptEl"
-          v-model="prompt"
+          v-model="form.prompt"
           data-selectable
           rows="2"
           placeholder="Describe the print — a lighthouse at dusk, kodak portra…"
           class="w-full resize-none bg-transparent text-body-lg text-ink outline-none placeholder:text-ink-3"
           @keydown="onComposerKeydown"
         />
-        <div class="mt-2 flex items-center justify-between">
-          <span class="edge-code">{{ model || "no model" }}</span>
-          <button
-            type="button"
-            class="h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-60"
-            :disabled="running || !prompt.trim() || !model"
-            @click="generate"
-          >
-            {{ buttonLabel }}
-            <kbd v-if="!running" class="data-mono ml-1 opacity-60">⌘↩</kbd>
-          </button>
+        <div class="mt-2 flex items-center justify-between gap-2">
+          <ExpandControl
+            ref="expandControl"
+            :prompt="form.prompt"
+            :family="form.family"
+            @apply="onExpandApply"
+            @restore="onExpandRestore"
+          />
+          <div class="flex items-center gap-3">
+            <EstimateBadge :request="estimateRequest" />
+            <button
+              type="button"
+              class="h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-60"
+              :disabled="running || !form.prompt.trim() || !form.model"
+              @click="generate"
+            >
+              {{ buttonLabel }}
+              <kbd v-if="!running" class="data-mono ml-1 opacity-60">⌘↩</kbd>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -234,7 +267,7 @@ onMounted(() => {
     <!-- Inspector -->
     <aside class="border-edge overflow-y-auto border-l bg-bench p-4">
       <div class="mb-2 flex items-center gap-2">
-        <span class="edge-code">MODEL</span>
+        <span class="edge-code">Model</span>
         <div class="border-edge h-px flex-1 border-t" />
       </div>
       <div class="relative">
@@ -272,82 +305,14 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="mt-5 mb-2 flex items-center gap-2">
-        <span class="edge-code">PRINT</span>
-        <div class="border-edge h-px flex-1 border-t" />
-      </div>
-
-      <label class="text-caption text-ink-2">Size</label>
-      <div class="mt-1 flex items-center gap-1.5">
-        <input
-          v-model.number="width"
-          type="number"
-          step="16"
-          min="64"
-          class="border-edge data-mono h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
-        />
-        <button
-          type="button"
-          class="text-ink-3 hover:text-ink"
-          title="Swap width and height"
-          @click="swapSize"
-        >
-          ⇄
-        </button>
-        <input
-          v-model.number="height"
-          type="number"
-          step="16"
-          min="64"
-          class="border-edge data-mono h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
-        />
-      </div>
-
-      <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
-        Steps <span class="data-mono text-ink">{{ steps }}</span>
-      </label>
-      <input
-        v-model.number="steps"
-        type="range"
-        min="1"
-        max="60"
-        class="mt-1 w-full accent-[var(--safelight)]"
+      <ParamPanel :form="form" class="mt-5" />
+      <SourceImageWell :form="form" />
+      <LoraStack
+        v-if="caps.supportsLora"
+        :form="form"
+        :model="form.model"
+        @append-word="appendPromptWord"
       />
-
-      <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
-        Guidance <span class="data-mono text-ink">{{ guidance.toFixed(1) }}</span>
-      </label>
-      <input
-        v-model.number="guidance"
-        type="range"
-        min="0"
-        max="12"
-        step="0.1"
-        class="mt-1 w-full accent-[var(--safelight)]"
-      />
-
-      <label class="mt-3 text-caption text-ink-2">Seed</label>
-      <div class="mt-1 flex items-center gap-1.5">
-        <input
-          v-model="seed"
-          data-selectable
-          type="text"
-          inputmode="numeric"
-          placeholder="Random"
-          class="border-edge data-mono h-7 w-full rounded-control border bg-bath px-1.5 text-ink placeholder:text-ink-3"
-        />
-        <button
-          type="button"
-          class="text-ink-3 hover:text-ink"
-          title="Randomize seed"
-          @click="randomizeSeed"
-        >
-          ⟳
-        </button>
-      </div>
-      <p class="mt-4 text-caption text-ink-3">
-        The full per-family parameter panel (LoRAs, img2img, expand) arrives next milestone.
-      </p>
     </aside>
   </div>
 </template>

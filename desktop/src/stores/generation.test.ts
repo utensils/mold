@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { applyProgress, jobPhase, jobProgress, newJob } from "./generation";
+import {
+  applyProgress,
+  jobPhase,
+  jobProgress,
+  newJob,
+  planBatchRequests,
+  resolveBaseSeed,
+} from "./generation";
 
 const req = {
   prompt: "a lighthouse at dusk",
@@ -52,5 +59,34 @@ describe("generation SSE reducer", () => {
     const job = newJob(req);
     expect(job.total).toBe(4);
     expect(jobProgress(job)).toBe(0);
+  });
+});
+
+describe("batch sequencing", () => {
+  it("resolves an explicit finite seed and only draws random for none", () => {
+    expect(resolveBaseSeed(42, () => 999)).toBe(42);
+    expect(resolveBaseSeed(0, () => 999)).toBe(0);
+    expect(resolveBaseSeed(undefined, () => 999)).toBe(999);
+    expect(resolveBaseSeed(Number.NaN, () => 999)).toBe(999);
+  });
+
+  it("expands to base+i sibling seeds, each forced to batch_size 1", () => {
+    const plans = planBatchRequests(req, 4, 100);
+    expect(plans.map((p) => p.seed)).toEqual([100, 101, 102, 103]);
+    expect(plans.every((p) => p.batch_size === 1)).toBe(true);
+    // The rest of the request is carried through unchanged.
+    expect(plans[0]!.prompt).toBe(req.prompt);
+    expect(plans[0]!.model).toBe(req.model);
+  });
+
+  it("clamps sub-1 and fractional batch sizes to at least one job", () => {
+    expect(planBatchRequests(req, 0, 5)).toHaveLength(1);
+    expect(planBatchRequests(req, 2.9, 5).map((p) => p.seed)).toEqual([5, 6]);
+  });
+
+  it("does not mutate the source request", () => {
+    const snapshot = JSON.stringify(req);
+    planBatchRequests(req, 3, 7);
+    expect(JSON.stringify(req)).toBe(snapshot);
   });
 });

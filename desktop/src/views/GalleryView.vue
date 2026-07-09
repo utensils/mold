@@ -7,7 +7,7 @@ import Lightbox from "../components/gallery/Lightbox.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
 import { thumbnailPath } from "../lib/gallery/media";
-import { formatGB } from "../lib/format";
+import { formatBytes } from "../lib/format";
 import { useConnectionStore } from "../stores/connection";
 import { useGalleryStore } from "../stores/gallery";
 import type { GalleryImage } from "../lib/api/types";
@@ -126,7 +126,7 @@ onUnmounted(() => {
         Gallery
       </span>
       <span class="data-mono text-caption text-ink-3">
-        {{ gallery.items.length }} prints · {{ formatGB(totalBytes) }}
+        {{ gallery.items.length }} prints · {{ formatBytes(totalBytes) }}
       </span>
       <span v-if="gallery.error" class="ml-auto text-caption text-stop">{{ gallery.error }}</span>
     </header>

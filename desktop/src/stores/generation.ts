@@ -93,6 +93,39 @@ export function base64ToBlobUrl(b64: string, mime: string): string {
   return URL.createObjectURL(new Blob([bytes], { type: mime }));
 }
 
+/** Random 32-bit seed — small enough to stay an exact integer after `+ i`. */
+export function randomSeed(): number {
+  return Math.floor(Math.random() * 0xffffffff);
+}
+
+/**
+ * Resolve the base seed for a batch: an explicit finite seed is honored,
+ * otherwise a fresh random base is drawn so the run is reproducible from the
+ * first sibling. Pure given `rng`.
+ */
+export function resolveBaseSeed(seed: number | undefined, rng: () => number = randomSeed): number {
+  return seed !== undefined && Number.isFinite(seed) ? seed : rng();
+}
+
+/**
+ * Expand one request into `batchSize` sibling requests with seeds
+ * `baseSeed + i`, each forced to `batch_size: 1` (the client drives the
+ * sequence, one job per server call). Pure — the seed decision lives here so
+ * it can be tested without the store or the network.
+ */
+export function planBatchRequests(
+  req: GenerateRequest,
+  batchSize: number,
+  baseSeed: number,
+): GenerateRequest[] {
+  const size = Math.max(1, Math.floor(batchSize));
+  return Array.from({ length: size }, (_, i) => ({
+    ...req,
+    seed: baseSeed + i,
+    batch_size: 1,
+  }));
+}
+
 const MIME: Record<string, string> = {
   png: "image/png",
   jpeg: "image/jpeg",
@@ -104,27 +137,62 @@ const MIME: Record<string, string> = {
 
 export const useGenerationStore = defineStore("generation", {
   state: () => ({
-    /** The job shown in the Generate canvas (single-flight for now; batch in M3). */
+    /** The job shown in the Generate canvas — the most recent sibling. */
     active: null as Job | null,
+    /** Every job in the current batch (length 1 for a single generation). */
+    siblings: [] as Job[],
     abort: null as AbortController | null,
   }),
   actions: {
+    /**
+     * Run a batch of `batchSize` generations sequentially (single GPU, one job
+     * at a time). Seeds are `base + i`; the canvas tracks the most recent
+     * sibling. `batchSize <= 1` is exactly the old single-flight path.
+     */
+    async generateBatch(req: GenerateRequest, batchSize: number): Promise<Job[]> {
+      const size = Math.max(1, Math.floor(batchSize));
+      const baseSeed = resolveBaseSeed(req.seed);
+      const plans = planBatchRequests(req, size, baseSeed);
+      this.resetJobs();
+      for (const plan of plans) {
+        const job = this.startJob(plan);
+        this.siblings.push(job);
+        await this.streamJob(job, plan);
+      }
+      return this.siblings;
+    },
+    /** Single generation — a batch of one. */
     async generate(req: GenerateRequest): Promise<Job> {
+      await this.generateBatch(req, 1);
+      return this.active!;
+    },
+    /** Revoke every held object URL and clear the batch. */
+    resetJobs() {
       this.cancelStream();
       if (this.active?.resultUrl) URL.revokeObjectURL(this.active.resultUrl);
+      for (const s of this.siblings) {
+        if (s.resultUrl && s.resultUrl !== this.active?.resultUrl) {
+          URL.revokeObjectURL(s.resultUrl);
+        }
+      }
+      this.siblings = [];
+      this.active = null;
+    },
+    startJob(req: GenerateRequest): Job {
       const job = newJob(req);
       this.active = job;
+      return job;
+    },
+    async streamJob(job: Job, req: GenerateRequest): Promise<void> {
       const abort = new AbortController();
       this.abort = abort;
-
       await sseStream("/api/generate/stream", {
         method: "POST",
         body: req,
         signal: abort.signal,
         retry: false,
         onEvent: (event, data) => {
-          const current = this.active;
-          if (!current) return;
+          const current = job;
           try {
             if (event === "progress") {
               applyProgress(current, JSON.parse(data) as ProgressEvent);
@@ -151,15 +219,12 @@ export const useGenerationStore = defineStore("generation", {
           }
         },
         onClose: (err) => {
-          const current = this.active;
-          if (!current) return;
-          if (err && current.status !== "complete" && current.status !== "error") {
-            current.status = "error";
-            current.error = err.message;
+          if (err && job.status !== "complete" && job.status !== "error") {
+            job.status = "error";
+            job.error = err.message;
           }
         },
       });
-      return job;
     },
     cancelStream() {
       this.abort?.abort();
