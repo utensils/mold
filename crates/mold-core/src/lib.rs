@@ -17,6 +17,7 @@ pub mod install_error;
 pub mod lambda;
 pub mod manifest;
 pub mod media_paths;
+pub mod removal;
 pub mod runpod;
 pub mod safetensors_probe;
 pub mod time;

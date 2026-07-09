@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`DELETE /api/models/:model` — model removal over HTTP** (previously CLI-only via `mold rm`): deletes only files exclusively owned by the model, keeps components still referenced by other downloaded models (shared T5/CLIP/Qwen encoders, VAEs), and cleans up the hardlinked hf-hub cache blobs so freed bytes are real. Responds `200` with `{ removed, kept: [{ component, used_by }], freed_bytes }`; `404 UNKNOWN_MODEL` when not installed; `409 MODEL_LOADED` while the model is GPU-resident (unload first). The ref-counting core moved to `mold_core::removal` and is now shared by `mold rm` and the server.
+
+### Added
+
 - **`/api/config` — the `mold config` verbs over HTTP** (desktop-app surface): `GET /api/config` lists every effective config row as `{ key, value, source, env_var? }` (source `db`/`file`/`env`, mirroring `mold config list --json`; env rows name the overriding variable); `GET/PUT/DELETE /api/config/:key` mirror `config get`/`set`/`reset` with the same key registry, validation, and DB-vs-TOML routing (PUT rejects env-overridden keys with `403 ENV_OVERRIDDEN`, DELETE resets DB-backed keys and reports the fallback value); `GET /api/config/profiles` + `PUT /api/config/profile` list and switch the active settings profile. All DB-requiring operations return `503 CONFIG_UNAVAILABLE` under `MOLD_DB_DISABLE=1`. The key registry and typed get/set moved to `mold_core::config_keys` and the settings persistence to `mold_db::config_sync`, shared verbatim by the CLI.
 
 ### Fixed

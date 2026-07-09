@@ -11,36 +11,11 @@ use mold_core::Config;
 use crate::theme;
 use crate::ui::format_bytes;
 
+// NOTE: `file_size` and `build_ref_counts` moved to `mold_core::removal`
+// so the server's `DELETE /api/models/:model` shares the same ref-counting
+// core as `mold rm` and `mold clean`.
+
 pub const STALE_PULL_MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
-
-/// Get file size, returning 0 if the file doesn't exist or can't be read.
-pub fn file_size(path: &str) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-}
-
-/// Build a map of file_path -> list of model names that reference it.
-pub fn build_ref_counts(config: &Config) -> HashMap<String, Vec<String>> {
-    let mut refs: HashMap<String, Vec<String>> = HashMap::new();
-    for (model_name, model_config) in &config.models {
-        for path in model_config.all_file_paths() {
-            refs.entry(path).or_default().push(model_name.clone());
-        }
-    }
-    // Include manifest-backed downloaded models that have no config entry.
-    // Without this, shared components (VAE, encoders) referenced by another
-    // manifest-only install would be deleted when removing a model.
-    for manifest in known_manifests() {
-        if config.models.contains_key(&manifest.name) {
-            continue; // already counted above
-        }
-        if config.manifest_model_is_downloaded(&manifest.name) {
-            for path in config.model_config(&manifest.name).all_file_paths() {
-                refs.entry(path).or_default().push(manifest.name.clone());
-            }
-        }
-    }
-    refs
-}
 
 /// Collect all file paths still referenced by remaining models.
 ///

@@ -180,6 +180,7 @@ use crate::queue::clean_error_message;
         load_model,
         pull_model_endpoint,
         unload_model,
+        delete_model,
         server_status,
         list_queue,
         patch_queue_job,
@@ -243,6 +244,8 @@ use crate::queue::clean_error_message;
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,
+        mold_core::ModelRemovalResponse,
+        mold_core::KeptComponent,
         QueuePatchRequest,
         mold_core::HistoryEntry,
         mold_core::HistoryListing,
@@ -320,6 +323,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/expand", post(expand_prompt))
         .route("/api/models", get(list_models))
+        .route("/api/models/:model", delete(delete_model))
         .route("/api/models/:model/components", get(model_components))
         .route("/api/loras", get(crate::catalog_api::list_loras))
         .route("/api/models/load", post(load_model))
@@ -1851,6 +1855,140 @@ async fn unload_model(
 
     // Legacy single-GPU path.
     Ok((StatusCode::OK, model_manager::unload_model(&state).await))
+}
+
+// ── DELETE /api/models/:model ─────────────────────────────────────────────────
+
+/// True when an engine for `canonical` is currently GPU-resident (or mid-
+/// generation) anywhere on this server — the single-GPU cache, any pool
+/// worker's cache, or an active-generation snapshot on either path.
+async fn model_is_gpu_resident(state: &AppState, canonical: &str) -> bool {
+    {
+        let cache = state.model_cache.lock().await;
+        if cache.active_model() == Some(canonical) {
+            return true;
+        }
+    }
+    if state
+        .active_generation
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|g| g.model == canonical)
+    {
+        return true;
+    }
+    for worker in &state.gpu_pool.workers {
+        if let Ok(active) = worker.active_generation.read() {
+            if active.as_ref().is_some_and(|g| g.model == canonical) {
+                return true;
+            }
+        }
+        if let Ok(cache) = worker.model_cache.lock() {
+            if cache.active_model() == Some(canonical) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Remove a downloaded model's files — the HTTP counterpart of `mold rm`.
+///
+/// Ref-counts every file path across all installed models and deletes only
+/// paths exclusively owned by this model; components still referenced by
+/// another downloaded model (shared T5/CLIP/Qwen encoders, VAEs) are kept
+/// and reported in `kept` with the surviving referents. hf-hub cache blobs
+/// hardlinked to the deleted clean paths are removed too, so `freed_bytes`
+/// reflects real disk savings.
+#[utoipa::path(
+    delete,
+    path = "/api/models/{model}",
+    tag = "models",
+    params(("model" = String, Path, description = "Model name (e.g. flux-schnell:q8)")),
+    responses(
+        (status = 200, description = "Model removed", body = mold_core::ModelRemovalResponse),
+        (status = 404, description = "Model not installed"),
+        (status = 409, description = "Model is currently loaded — unload it first"),
+    )
+)]
+async fn delete_model(
+    State(state): State<AppState>,
+    Path(model): Path<String>,
+) -> Result<Json<mold_core::ModelRemovalResponse>, ApiError> {
+    let canonical = mold_core::manifest::resolve_model_name(&model);
+
+    // Refuse while the model is GPU-resident — there is no safe way to pull
+    // files out from under a loaded engine. Check the raw input too: engines
+    // register under their own model_name, which for non-manifest models may
+    // not round-trip through resolve_model_name. (Best-effort check: a load
+    // that races past it just keeps working off its already-open mmaps.)
+    if model_is_gpu_resident(&state, &canonical).await
+        || (model != canonical && model_is_gpu_resident(&state, &model).await)
+    {
+        return Err(ApiError::with_code(
+            format!(
+                "model '{canonical}' is currently loaded; unload it first (DELETE /api/models/unload)"
+            ),
+            "MODEL_LOADED",
+            StatusCode::CONFLICT,
+        ));
+    }
+
+    // Hold the config write lock across plan + delete so a concurrent pull
+    // or placement write can't interleave with the removal.
+    let mut config = state.config.write().await;
+    let in_config = config.models.contains_key(&canonical);
+    if !in_config && !config.manifest_model_is_downloaded(&canonical) {
+        return Err(ApiError::with_code(
+            format!("model '{canonical}' is not installed"),
+            "UNKNOWN_MODEL",
+            StatusCode::NOT_FOUND,
+        ));
+    }
+
+    tracing::info!(model = %canonical, "model removal requested");
+    let plan = mold_core::removal::plan_removal(&config, &canonical);
+    let outcome = mold_core::removal::execute_removal(&config, &plan);
+    for warning in &outcome.warnings {
+        tracing::warn!(model = %canonical, "model removal: {warning}");
+    }
+
+    mold_core::download::remove_pulling_marker(&canonical);
+    if in_config {
+        config.remove_model(&canonical);
+        if let Err(e) = config.save() {
+            tracing::warn!("failed to persist model removal to config.toml: {e}");
+        }
+    }
+    drop(config);
+
+    // Evict any parked (non-GPU-resident) engine so a later request can't
+    // reactivate an engine whose files are gone.
+    {
+        let mut cache = state.model_cache.lock().await;
+        let _ = cache.remove(&canonical);
+    }
+    for worker in &state.gpu_pool.workers {
+        if let Ok(mut cache) = worker.model_cache.lock() {
+            let _ = cache.remove(&canonical);
+        }
+    }
+
+    let kept = plan
+        .shared_files
+        .iter()
+        .map(|(path, used_by)| mold_core::KeptComponent {
+            component: path.clone(),
+            used_by: used_by.clone(),
+        })
+        .collect();
+
+    Ok(Json(mold_core::ModelRemovalResponse {
+        removed: outcome.removed,
+        kept,
+        freed_bytes: outcome.freed_bytes,
+    }))
 }
 
 // ── /api/status ───────────────────────────────────────────────────────────────

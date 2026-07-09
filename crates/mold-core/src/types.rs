@@ -1960,6 +1960,28 @@ mod tests {
     }
 
     #[test]
+    fn model_removal_response_serde_roundtrip() {
+        // Wire contract for DELETE /api/models/:model — removed paths,
+        // kept shared components with their surviving referents, and the
+        // bytes actually freed on disk.
+        let resp = ModelRemovalResponse {
+            removed: vec!["/models/flux-schnell-q8/transformer.gguf".to_string()],
+            kept: vec![KeptComponent {
+                component: "/models/shared/flux/ae.safetensors".to_string(),
+                used_by: vec!["flux-dev:q8".to_string()],
+            }],
+            freed_bytes: 12_345,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""freed_bytes":12345"#), "got: {json}");
+        assert!(json.contains(r#""used_by":["flux-dev:q8"]"#), "got: {json}");
+        let back: ModelRemovalResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.removed.len(), 1);
+        assert_eq!(back.kept[0].used_by, vec!["flux-dev:q8".to_string()]);
+        assert_eq!(back.freed_bytes, 12_345);
+    }
+
+    #[test]
     fn sse_progress_queued_roundtrip() {
         let event = SseProgressEvent::Queued {
             position: 3,
@@ -2824,6 +2846,28 @@ pub struct HistoryEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct HistoryListing {
     pub entries: Vec<HistoryEntry>,
+}
+
+/// One shared component kept on disk by `DELETE /api/models/:model`
+/// because other downloaded models still reference it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct KeptComponent {
+    /// Absolute path of the kept file.
+    pub component: String,
+    /// Models (other than the removed one) that still reference it.
+    pub used_by: Vec<String>,
+}
+
+/// Response of `DELETE /api/models/:model` — what was deleted, what was
+/// kept for other models, and how many bytes were actually freed on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ModelRemovalResponse {
+    /// Absolute paths of the files that were deleted.
+    pub removed: Vec<String>,
+    /// Shared components kept because another model still uses them.
+    pub kept: Vec<KeptComponent>,
+    /// Bytes freed on disk (hf-cache hardlinks accounted for).
+    pub freed_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
