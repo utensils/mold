@@ -115,6 +115,18 @@ impl ApiError {
         }
     }
 
+    /// Job cancelled while queued. 499 is the de-facto "client closed
+    /// request" status (nginx); we reuse it for "request cancelled before
+    /// the server did any work" so clients can distinguish cancellation
+    /// from real inference failures.
+    pub fn cancelled(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "CANCELLED".to_string(),
+            status: StatusCode::from_u16(499).expect("499 is a valid status code"),
+        }
+    }
+
     pub fn insufficient_memory(msg: impl Into<String>) -> Self {
         Self {
             error: msg.into(),
@@ -171,6 +183,9 @@ use crate::queue::clean_error_message;
         server_status,
         list_queue,
         patch_queue_job,
+        cancel_queue_job,
+        list_history,
+        delete_history,
         crate::routes_config::list_config,
         crate::routes_config::get_config_key,
         crate::routes_config::put_config_key,
@@ -229,6 +244,8 @@ use crate::queue::clean_error_message;
         LoadModelBody,
         UnloadRequest,
         QueuePatchRequest,
+        mold_core::HistoryEntry,
+        mold_core::HistoryListing,
         mold_core::ConfigEntry,
         mold_core::ConfigListing,
         mold_core::ConfigProfiles,
@@ -346,7 +363,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/status", get(server_status))
         .route("/api/queue", get(list_queue))
-        .route("/api/queue/:id", patch(patch_queue_job))
+        .route(
+            "/api/queue/:id",
+            patch(patch_queue_job).delete(cancel_queue_job),
+        )
+        .route("/api/history", get(list_history).delete(delete_history))
         .route("/api/capabilities", get(server_capabilities))
         .route(
             "/api/capabilities/chain-limits",
@@ -623,7 +644,7 @@ async fn generate(
     // SSE clients. Cleanup happens unconditionally on every terminal
     // path (drop guard in `gpu_worker::process_job`).
     let job_id = uuid::Uuid::new_v4().to_string();
-    state
+    let cancel = state
         .job_registry
         .register_with_target_gpu(&job_id, &req.model, preferred_gpu);
     let job = GenerationJob {
@@ -641,10 +662,19 @@ async fn generate(
         .inspect_err(|_| state.job_registry.remove(&job_id))
         .map_err(submit_error_to_api)?;
 
-    // Wait for the queue worker to process the job
-    let result = result_rx
-        .await
-        .map_err(|_| ApiError::internal("generation queue worker dropped the job"))?;
+    // Wait for the queue worker to process the job — or for
+    // `DELETE /api/queue/:id` to cancel it while it's still queued.
+    // Returning here drops `result_rx`, so the worker's is_closed()
+    // check skips the job when it eventually reaches the head.
+    let result = tokio::select! {
+        result = result_rx => result
+            .map_err(|_| ApiError::internal("generation queue worker dropped the job"))?,
+        _ = cancel.notified() => {
+            return Err(ApiError::cancelled(format!(
+                "generation job {job_id} was cancelled while queued"
+            )));
+        }
+    };
 
     match result {
         Ok(job_result) => {
@@ -1337,7 +1367,7 @@ async fn generate_stream(
     // Assign a server-side ID and register before submit so the entry is
     // visible to /api/queue from the moment we accept the request.
     let job_id = uuid::Uuid::new_v4().to_string();
-    state
+    let cancel = state
         .job_registry
         .register_with_target_gpu(&job_id, &req.model, preferred_gpu);
     let job = GenerationJob {
@@ -1364,15 +1394,37 @@ async fn generate_stream(
 
     // Hold `tx` alive in a background task until the job completes, so the SSE
     // stream never closes prematurely even if the queue worker hasn't received
-    // the job yet.
+    // the job yet. A `DELETE /api/queue/:id` cancel resolves the select's
+    // second arm: emit a terminal error event, then drop both channel ends —
+    // dropping `result_rx` closes the job's result channel, which is what
+    // makes the queue worker/dispatcher skip the job when it dequeues it.
     tokio::spawn(async move {
-        let _ = result_rx.await;
+        tokio::select! {
+            _ = result_rx => {}
+            _ = cancel.notified() => {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: "cancelled".to_string(),
+                }));
+            }
+        }
         drop(tx); // closes the SSE stream
     });
 
-    // Build SSE stream from the channel receiver.
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
-        .map(|msg| Ok::<_, Infallible>(sse_message_to_event(msg)));
+    // Build SSE stream from the channel receiver. Error events are terminal
+    // on this endpoint (the worker always follows them by resolving the
+    // job), so end the stream right after one — a cancelled job's queued
+    // `GenerationJob` still holds a sender clone, and without the explicit
+    // break the stream would stay open until the worker drained it.
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(msg) = rx.recv().await {
+            let is_error = matches!(msg, SseMessage::Error(_));
+            yield Ok::<_, Infallible>(sse_message_to_event(msg));
+            if is_error {
+                break;
+            }
+        }
+    };
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -1976,6 +2028,141 @@ async fn patch_queue_job(
         .entry(&id)
         .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} not found")))?;
     Ok(Json(entry))
+}
+
+/// Cancel a still-queued generation job. Only queued jobs are cancelable —
+/// once a GPU worker owns the job there is no safe preemption point, so
+/// running jobs return 409. The waiting client observes the cancellation as
+/// a 499 `CANCELLED` error (blocking `POST /api/generate`) or a terminal
+/// SSE `error` event (`POST /api/generate/stream`).
+#[utoipa::path(
+    delete,
+    path = "/api/queue/{id}",
+    tag = "queue",
+    params(("id" = String, Path, description = "Queue job id")),
+    responses(
+        (status = 204, description = "Queued job cancelled"),
+        (status = 404, description = "Queue job not found"),
+        (status = 409, description = "Queue job is already running"),
+    )
+)]
+async fn cancel_queue_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.job_registry.cancel_queued(&id).map_err(|e| match e {
+        crate::job_registry::QueuedJobCancelError::NotFound => {
+            ApiError::queue_job_not_found(format!("queue job {id} not found"))
+        }
+        crate::job_registry::QueuedJobCancelError::AlreadyRunning => ApiError::queue_job_running(
+            format!("queue job {id} is already running; only queued jobs can be cancelled"),
+        ),
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── /api/history ─────────────────────────────────────────────────────────────
+
+/// Default number of history rows returned when `limit` is omitted.
+const HISTORY_DEFAULT_LIMIT: usize = 50;
+/// Hard cap on `limit` — matches the legacy 500-entry history bound.
+const HISTORY_MAX_LIMIT: usize = 500;
+
+/// 503 error code when the metadata DB is disabled (`MOLD_DB_DISABLE=1`).
+const HISTORY_UNAVAILABLE: &str = "HISTORY_UNAVAILABLE";
+
+fn history_db(state: &AppState) -> Result<&mold_db::MetadataDb, ApiError> {
+    state.metadata_db.as_ref().as_ref().ok_or_else(|| {
+        ApiError::with_code(
+            "prompt history is unavailable because the metadata DB is disabled",
+            HISTORY_UNAVAILABLE,
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoryListQuery {
+    /// Case-insensitive substring filter over the prompt text.
+    query: Option<String>,
+    /// Max rows to return (default 50, capped at 500).
+    limit: Option<usize>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/history",
+    tag = "server",
+    params(
+        ("query" = Option<String>, Query, description = "Substring filter over prompt text (case-insensitive)"),
+        ("limit" = Option<usize>, Query, description = "Max rows to return (default 50, max 500)"),
+    ),
+    responses(
+        (status = 200, description = "Prompt history, newest first", body = mold_core::HistoryListing),
+        (status = 503, description = "Metadata DB disabled"),
+    )
+)]
+async fn list_history(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HistoryListQuery>,
+) -> Result<Json<mold_core::HistoryListing>, ApiError> {
+    let db = history_db(&state)?;
+    let limit = params
+        .limit
+        .unwrap_or(HISTORY_DEFAULT_LIMIT)
+        .min(HISTORY_MAX_LIMIT);
+    let history = mold_db::PromptHistory::new(db);
+    let rows = match params
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+    {
+        Some(query) => history.search(query, limit),
+        None => history.recent(limit),
+    }
+    .map_err(|e| ApiError::internal(format!("failed to read prompt history: {e:#}")))?;
+    let entries = rows
+        .into_iter()
+        .map(|e| mold_core::HistoryEntry {
+            prompt: e.prompt,
+            model: e.model,
+            used_at: e.created_at_ms,
+        })
+        .collect();
+    Ok(Json(mold_core::HistoryListing { entries }))
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoryDeleteQuery {
+    /// When present, trim to the most recent N entries instead of clearing.
+    keep: Option<usize>,
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/history",
+    tag = "server",
+    params(
+        ("keep" = Option<usize>, Query, description = "Keep only the most recent N entries instead of clearing everything"),
+    ),
+    responses(
+        (status = 204, description = "Prompt history cleared (or trimmed)"),
+        (status = 503, description = "Metadata DB disabled"),
+    )
+)]
+async fn delete_history(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HistoryDeleteQuery>,
+) -> Result<StatusCode, ApiError> {
+    let db = history_db(&state)?;
+    let history = mold_db::PromptHistory::new(db);
+    match params.keep {
+        Some(keep) => history.trim_to(keep),
+        None => history.clear(),
+    }
+    .map_err(|e| ApiError::internal(format!("failed to clear prompt history: {e:#}")))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── /api/capabilities ────────────────────────────────────────────────────────
