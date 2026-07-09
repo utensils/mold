@@ -5,5 +5,5 @@ src-tauri/target
 src-tauri/gen/schemas
 tsconfig.tsbuildinfo
 # Root .gitignore excludes *.png globally (generated images); icons are source assets.
-!icon-master.png
+# icon-master.svg is the icon source of truth (regenerate: cargo tauri icon icon-master.svg).
 !src-tauri/icons/*.png
