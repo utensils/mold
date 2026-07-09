@@ -312,6 +312,94 @@
             '';
           };
 
+          # Desktop app frontend (Vue SPA under desktop/), built like mold-web.
+          mold-desktop-web = pkgs.stdenv.mkDerivation {
+            pname = "mold-desktop-web";
+            version = "0.1.0";
+            src = ./desktop;
+            nativeBuildInputs = [ pkgs.bun2nix.hook ];
+            bunDeps = pkgs.bun2nix.fetchBunDeps {
+              bunNix = ./desktop/bun.nix;
+            };
+            bunInstallFlags = [
+              "--linker=isolated"
+              "--backend=symlink"
+            ];
+            dontRunLifecycleScripts = true;
+            buildPhase = ''
+              runHook preBuild
+              bun run build
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              cp -R dist/. $out/
+              runHook postInstall
+            '';
+          };
+
+          # Tauri desktop app (aarch64-darwin, experimental branch).
+          # Aethon recipe: rustPlatform + cargo-tauri.hook, own Cargo.lock,
+          # NO nix build inputs on Darwin (system libiconv → no /nix/store
+          # dyld leaks in the bundle), unsigned; the prebuilt SPA is staged
+          # so tauri's beforeBuildCommand becomes a no-op.
+          mold-desktop = pkgs.rustPlatform.buildRustPackage {
+            pname = "mold-desktop";
+            version = "0.1.0";
+            src = craneLib.path ./.;
+            cargoRoot = "desktop/src-tauri";
+            buildAndTestSubdir = "desktop/src-tauri";
+            cargoLock.lockFile = ./desktop/src-tauri/Cargo.lock;
+            buildFeatures = [ "metal" ];
+
+            MOLD_GIT_SHA = gitShortRev;
+            MOLD_BUILD_DATE = gitDate;
+            # The embedded engine serves the regular web SPA to browsers.
+            MOLD_WEB_DIST = "${mold-web}";
+
+            nativeBuildInputs = [
+              pkgs.cargo-tauri.hook
+              pkgs.pkg-config
+              pkgs.nasm
+              pkgs.makeBinaryWrapper
+            ];
+            buildInputs = [
+              pkgs.openssl
+              pkgs.libwebp
+            ];
+
+            postPatch = ''
+              mkdir -p desktop/dist
+              cp -R ${mold-desktop-web}/. desktop/dist/
+              ${pkgs.jq}/bin/jq '.build.beforeBuildCommand = ""' \
+                desktop/src-tauri/tauri.conf.json > tauri.conf.tmp
+              mv tauri.conf.tmp desktop/src-tauri/tauri.conf.json
+            '';
+
+            tauriBuildFlags = [
+              "--bundles"
+              "app"
+            ];
+            doCheck = false;
+
+            postInstall = ''
+              if [ -d "$out/Applications/Mold.app" ]; then
+                mkdir -p $out/bin
+                makeBinaryWrapper "$out/Applications/Mold.app/Contents/MacOS/mold-desktop" \
+                  $out/bin/mold-desktop
+              fi
+            '';
+
+            meta = with lib; {
+              description = "Mold — native desktop app for local AI image/video generation";
+              homepage = "https://github.com/utensils/mold";
+              license = licenses.mit;
+              mainProgram = "mold-desktop";
+              platforms = [ "aarch64-darwin" ];
+            };
+          };
+
           # Build a mold package for a given CUDA compute capability.
           # `MOLD_WEB_DIST` is read by `crates/mold-server/build.rs`, which
           # stages the SPA into a directory that `rust-embed` bakes into the
@@ -403,6 +491,11 @@
           }
           // lib.optionalAttrs isLinux {
             mold-sm120 = mkMold "120"; # Blackwell (RTX 50-series)
+          }
+          # Experimental Tauri desktop app — deliberately NOT in `checks`
+          # (flake check is the CI gate; this stays opt-in until merge-ready).
+          // lib.optionalAttrs isDarwin {
+            inherit mold-desktop mold-desktop-web;
           };
 
           checks = {
