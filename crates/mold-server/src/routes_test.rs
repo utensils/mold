@@ -877,6 +877,405 @@ mod tests {
         assert_eq!(body["code"], "MODEL_LOADED");
     }
 
+    // ── /api/config ──────────────────────────────────────────────────────────
+
+    /// State + router backed by an in-memory metadata DB. Returns the shared
+    /// DB handle so tests can seed/inspect settings rows around requests.
+    fn app_with_settings_db() -> (axum::Router, Arc<Option<mold_db::MetadataDb>>) {
+        let mut state = AppState::for_tests();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        state.metadata_db = db.clone();
+        (app_with_state(state), db)
+    }
+
+    async fn put_json(app: &axum::Router, uri: &str, body: &str) -> axum::http::Response<Body> {
+        app.clone()
+            .oneshot(
+                Request::put(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn config_list_reports_values_with_sources() {
+        let (app, _db) = app_with_settings_db();
+        let resp = app
+            .oneshot(Request::get("/api/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["profile"], "default");
+        let entries = body["entries"].as_array().expect("entries array");
+        assert!(!entries.is_empty());
+
+        let find = |key: &str| {
+            entries
+                .iter()
+                .find(|e| e["key"] == key)
+                .unwrap_or_else(|| panic!("missing entry for {key}"))
+                .clone()
+        };
+        // Bootstrap keys live in config.toml.
+        assert_eq!(find("models_dir")["source"], "file");
+        // User-preference keys live in the settings DB (post-#265 routing).
+        assert_eq!(find("expand.enabled")["source"], "db");
+        assert_eq!(find("default_steps")["source"], "db");
+        // Values are typed JSON, mirroring `mold config list --json`.
+        assert_eq!(
+            find("server_port")["value"],
+            serde_json::json!(mold_core::Config::default().server_port)
+        );
+        assert!(find("embed_metadata")["value"].is_boolean());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn config_list_marks_env_overridden_keys() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("MOLD_EXPAND").ok();
+        std::env::set_var("MOLD_EXPAND", "1");
+
+        let (app, _db) = app_with_settings_db();
+        let resp = app
+            .oneshot(Request::get("/api/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        let entry = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["key"] == "expand.enabled")
+            .expect("expand.enabled entry")
+            .clone();
+        assert_eq!(entry["source"], "env");
+        // env rows name the variable so UIs can say "Set by MOLD_EXPAND in
+        // your environment" without guessing the mapping.
+        assert_eq!(entry["env_var"], "MOLD_EXPAND");
+
+        match prev {
+            Some(v) => std::env::set_var("MOLD_EXPAND", v),
+            None => std::env::remove_var("MOLD_EXPAND"),
+        }
+    }
+
+    #[tokio::test]
+    async fn config_get_key_returns_value_and_source() {
+        let (app, _db) = app_with_settings_db();
+        let resp = app
+            .oneshot(
+                Request::get("/api/config/server_port")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["key"], "server_port");
+        assert_eq!(
+            body["value"],
+            serde_json::json!(mold_core::Config::default().server_port)
+        );
+        assert_eq!(body["source"], "file");
+    }
+
+    #[tokio::test]
+    async fn config_get_unknown_key_returns_404() {
+        let (app, _db) = app_with_settings_db();
+        let resp = app
+            .oneshot(
+                Request::get("/api/config/definitely.not.a.key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "UNKNOWN_CONFIG_KEY");
+    }
+
+    #[tokio::test]
+    async fn config_put_db_key_persists_to_settings_db() {
+        let (app, db) = app_with_settings_db();
+        let resp = put_json(&app, "/api/config/default_steps", r#"{"value":12}"#).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["key"], "default_steps");
+        assert_eq!(body["value"], serde_json::json!(12));
+        assert_eq!(body["source"], "db");
+
+        // The row landed in the settings DB under the active profile…
+        let handle = db.as_ref().as_ref().unwrap();
+        let s = mold_db::Settings::for_profile(handle, "default");
+        assert_eq!(
+            s.get_int(mold_db::settings::GENERATE_DEFAULT_STEPS)
+                .unwrap(),
+            Some(12)
+        );
+
+        // …and the running server's config reflects it immediately.
+        let resp = app
+            .oneshot(
+                Request::get("/api/config/default_steps")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body["value"], serde_json::json!(12));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn config_put_file_key_persists_to_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(tmp.path());
+
+        // File-surface keys need no DB at all.
+        let app = app_with_state(AppState::for_tests());
+        let resp = put_json(&app, "/api/config/server_port", r#"{"value":8123}"#).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["source"], "file");
+        assert_eq!(body["value"], serde_json::json!(8123));
+
+        let written = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+        assert!(
+            written.contains("server_port = 8123"),
+            "config.toml must carry the new value: {written}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn config_put_env_overridden_key_returns_403() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("MOLD_EXPAND").ok();
+        std::env::set_var("MOLD_EXPAND", "1");
+
+        let (app, _db) = app_with_settings_db();
+        let resp = put_json(&app, "/api/config/expand.enabled", r#"{"value":false}"#).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "ENV_OVERRIDDEN");
+        assert!(
+            body["error"].as_str().unwrap().contains("MOLD_EXPAND"),
+            "error must name the env var: {body}"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("MOLD_EXPAND", v),
+            None => std::env::remove_var("MOLD_EXPAND"),
+        }
+    }
+
+    #[tokio::test]
+    async fn config_put_unknown_key_returns_422() {
+        let (app, _db) = app_with_settings_db();
+        let resp = put_json(&app, "/api/config/definitely.not.a.key", r#"{"value":1}"#).await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "UNKNOWN_CONFIG_KEY");
+    }
+
+    #[tokio::test]
+    async fn config_put_invalid_value_returns_422() {
+        let (app, _db) = app_with_settings_db();
+        let resp = put_json(
+            &app,
+            "/api/config/server_port",
+            r#"{"value":"not-a-number"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn config_put_db_key_returns_503_when_db_disabled() {
+        // default_steps routes to the settings DB — with the DB disabled the
+        // write must fail loudly, mirroring history/chain-jobs.
+        let app = app_with_state(AppState::for_tests());
+        let resp = put_json(&app, "/api/config/default_steps", r#"{"value":12}"#).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "CONFIG_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn config_delete_resets_db_key_and_reports_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(tmp.path());
+        let (app, db) = app_with_settings_db();
+
+        // Seed an override, then reset it.
+        let resp = put_json(&app, "/api/config/default_steps", r#"{"value":12}"#).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::delete("/api/config/default_steps")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["key"], "default_steps");
+        // The response reports the fallback value now that the row is gone.
+        assert_eq!(
+            body["value"],
+            serde_json::json!(mold_core::Config::default().default_steps)
+        );
+        assert_eq!(body["source"], "default");
+
+        // Row really dropped.
+        let handle = db.as_ref().as_ref().unwrap();
+        let s = mold_db::Settings::for_profile(handle, "default");
+        assert_eq!(
+            s.get_int(mold_db::settings::GENERATE_DEFAULT_STEPS)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn config_delete_file_key_returns_422() {
+        let (app, _db) = app_with_settings_db();
+        let resp = app
+            .oneshot(
+                Request::delete("/api/config/models_dir")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "FILE_BACKED_KEY");
+        assert!(body["error"].as_str().unwrap().contains("config.toml"));
+    }
+
+    #[tokio::test]
+    async fn config_delete_returns_503_when_db_disabled() {
+        let app = app_with_state(AppState::for_tests());
+        let resp = app
+            .oneshot(
+                Request::delete("/api/config/default_steps")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "CONFIG_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn config_profiles_lists_known_profiles_and_active() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("MOLD_PROFILE").ok();
+        std::env::remove_var("MOLD_PROFILE");
+
+        let (app, db) = app_with_settings_db();
+        // Seed a row under a second profile so it shows up in the listing.
+        {
+            let handle = db.as_ref().as_ref().unwrap();
+            mold_db::Settings::for_profile(handle, "dev")
+                .set_str("tui.theme", "nord")
+                .unwrap();
+        }
+        let resp = app
+            .oneshot(
+                Request::get("/api/config/profiles")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["active"], "default");
+        let profiles: Vec<&str> = body["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(profiles.contains(&"default"), "got: {profiles:?}");
+        assert!(profiles.contains(&"dev"), "got: {profiles:?}");
+
+        match prev {
+            Some(v) => std::env::set_var("MOLD_PROFILE", v),
+            None => std::env::remove_var("MOLD_PROFILE"),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn config_put_profile_switches_active_profile() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("MOLD_PROFILE").ok();
+        std::env::remove_var("MOLD_PROFILE");
+
+        let (app, db) = app_with_settings_db();
+        let resp = put_json(&app, "/api/config/profile", r#"{"name":"dev"}"#).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["active"], "dev");
+
+        // The switch is persisted as the profile.active meta-row under the
+        // bootstrap-safe "default" profile.
+        let handle = db.as_ref().as_ref().unwrap();
+        let stored = mold_db::Settings::for_profile(handle, "default")
+            .get_str(mold_db::settings::ACTIVE_PROFILE)
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("dev"));
+
+        // Empty names are rejected.
+        let resp = put_json(&app, "/api/config/profile", r#"{"name":"  "}"#).await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        match prev {
+            Some(v) => std::env::set_var("MOLD_PROFILE", v),
+            None => std::env::remove_var("MOLD_PROFILE"),
+        }
+    }
+
+    #[tokio::test]
+    async fn config_profiles_return_503_when_db_disabled() {
+        let app = app_with_state(AppState::for_tests());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/api/config/profiles")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "CONFIG_UNAVAILABLE");
+
+        let resp = put_json(&app, "/api/config/profile", r#"{"name":"dev"}"#).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     #[tokio::test]
     async fn delete_queue_cancels_queued_job_with_204_and_removes_it() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());

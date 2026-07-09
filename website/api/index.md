@@ -54,6 +54,12 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `DELETE` | `/api/history`                            | Clear prompt history (`?keep=N` trims to the most recent N)                                                       |
 | `GET`    | `/api/capabilities`                       | Feature capabilities (gallery delete, chain limits, …)                                                            |
 | `GET`    | `/api/capabilities/chain-limits`          | Chain-generation request limits                                                                                   |
+| `GET`    | `/api/config`                             | List every effective config row with its source (`db`/`file`/`env`)                                               |
+| `GET`    | `/api/config/:key`                        | Read one config key (value + owning source)                                                                       |
+| `PUT`    | `/api/config/:key`                        | Set a config key, routed by surface like `mold config set`                                                        |
+| `DELETE` | `/api/config/:key`                        | Reset a DB-backed key like `mold config reset`                                                                    |
+| `GET`    | `/api/config/profiles`                    | List settings profiles and the active one                                                                         |
+| `PUT`    | `/api/config/profile`                     | Switch the active settings profile                                                                                |
 | `PUT`    | `/api/config/model/:name/placement`       | Save model-specific device placement defaults                                                                     |
 | `DELETE` | `/api/config/model/:name/placement`       | Clear model-specific device placement defaults                                                                    |
 | `POST`   | `/api/shutdown`                           | Trigger graceful server shutdown                                                                                  |
@@ -325,6 +331,62 @@ Returns `404` (`UNKNOWN_MODEL`) when the model isn't installed, and `409`
 (`MODEL_LOADED`) while the model is GPU-resident — unload it first via
 `DELETE /api/models/unload`. This is a destructive endpoint; pair with
 `MOLD_API_KEY` when the server is exposed beyond localhost.
+
+## `/api/config`
+
+The HTTP counterpart of the `mold config` CLI verbs. Config values live in
+two stores — `config.toml` for bootstrap/paths/credentials and the settings
+DB for user preferences — with `MOLD_*` environment variables overriding
+both at runtime. Every row carries a `source` tag saying which surface owns
+it; rows with `source: "env"` also carry the overriding variable name.
+
+`GET /api/config` lists every effective row (like `mold config list --json`):
+
+```json
+{
+  "profile": "default",
+  "entries": [
+    { "key": "models_dir", "value": "~/.mold/models", "source": "file" },
+    { "key": "expand.enabled", "value": false, "source": "db" },
+    {
+      "key": "embed_metadata",
+      "value": true,
+      "source": "env",
+      "env_var": "MOLD_EMBED_METADATA"
+    }
+  ]
+}
+```
+
+`GET /api/config/:key` reads one row. `PUT /api/config/:key` sets it,
+routed by surface exactly like `mold config set` — DB-backed keys
+(`expand.*`, generation defaults, `models.<name>.<pref>`) land in the
+settings DB for the active profile, file keys rewrite `config.toml`:
+
+```bash
+curl -X PUT http://localhost:7680/api/config/default_steps \
+  -H "Content-Type: application/json" -d '{"value": 12}'
+```
+
+Env-overridden keys reject writes with `403` (`ENV_OVERRIDDEN`) naming the
+variable to unset; unknown keys and out-of-range values return `422`.
+
+`DELETE /api/config/:key` resets a DB-backed key like `mold config reset`
+(drops the row for the active profile) and responds with the fallback value
+(`source: "default"`). File-backed keys return `422` (`FILE_BACKED_KEY`) —
+edit those via `PUT` instead.
+
+`GET /api/config/profiles` lists settings profiles and the active one;
+`PUT /api/config/profile` with `{"name":"dev"}` switches the stored active
+profile (a `MOLD_PROFILE` env var still wins at runtime):
+
+```bash
+curl -X PUT http://localhost:7680/api/config/profile \
+  -H "Content-Type: application/json" -d '{"name":"dev"}'
+```
+
+DB-requiring operations return `503` (`CONFIG_UNAVAILABLE`) when the
+metadata DB is disabled (`MOLD_DB_DISABLE=1`).
 
 ## `/api/queue`
 

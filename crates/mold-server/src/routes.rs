@@ -187,6 +187,12 @@ use crate::queue::clean_error_message;
         cancel_queue_job,
         list_history,
         delete_history,
+        crate::routes_config::list_config,
+        crate::routes_config::get_config_key,
+        crate::routes_config::put_config_key,
+        crate::routes_config::delete_config_key,
+        crate::routes_config::list_config_profiles,
+        crate::routes_config::put_config_profile,
         health,
         capabilities_chain_limits,
         crate::routes_chain::generate_chain,
@@ -243,6 +249,11 @@ use crate::queue::clean_error_message;
         QueuePatchRequest,
         mold_core::HistoryEntry,
         mold_core::HistoryListing,
+        mold_core::ConfigEntry,
+        mold_core::ConfigListing,
+        mold_core::ConfigProfiles,
+        crate::routes_config::ConfigSetRequest,
+        crate::routes_config::ProfileSetRequest,
         crate::job_registry::JobEntry,
         crate::job_registry::QueueListing,
         crate::chain_limits::ChainLimits,
@@ -367,6 +378,22 @@ pub fn create_router(state: AppState) -> Router {
             get(capabilities_chain_limits),
         )
         .route("/api/shutdown", post(shutdown_server))
+        // ─── /api/config — HTTP counterpart of the `mold config` verbs ────
+        .route("/api/config", get(crate::routes_config::list_config))
+        .route(
+            "/api/config/profiles",
+            get(crate::routes_config::list_config_profiles),
+        )
+        .route(
+            "/api/config/profile",
+            axum::routing::put(crate::routes_config::put_config_profile),
+        )
+        .route(
+            "/api/config/:key",
+            get(crate::routes_config::get_config_key)
+                .put(crate::routes_config::put_config_key)
+                .delete(crate::routes_config::delete_config_key),
+        )
         // Agent C (model-ui-overhaul §3): placement persistence.
         .route(
             "/api/config/model/:name/placement",

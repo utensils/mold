@@ -1896,6 +1896,50 @@ mod tests {
     }
 
     #[test]
+    fn config_wire_types_serde_roundtrip() {
+        // Wire contract for the /api/config surface — typed JSON values with
+        // a source tag mirroring `mold config list --json`.
+        let listing = ConfigListing {
+            profile: Some("default".to_string()),
+            entries: vec![ConfigEntry {
+                key: "server_port".to_string(),
+                value: serde_json::json!(7680),
+                source: "file".to_string(),
+                env_var: None,
+            }],
+        };
+        let json = serde_json::to_string(&listing).unwrap();
+        assert!(json.contains(r#""source":"file""#), "got: {json}");
+        assert!(json.contains(r#""value":7680"#), "got: {json}");
+        // env_var is omitted from the wire unless the source is "env".
+        assert!(!json.contains("env_var"), "got: {json}");
+        let back: ConfigListing = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries[0].key, "server_port");
+        assert_eq!(back.profile.as_deref(), Some("default"));
+
+        let env_entry = ConfigEntry {
+            key: "embed_metadata".to_string(),
+            value: serde_json::json!(true),
+            source: "env".to_string(),
+            env_var: Some("MOLD_EMBED_METADATA".to_string()),
+        };
+        let json = serde_json::to_string(&env_entry).unwrap();
+        assert!(
+            json.contains(r#""env_var":"MOLD_EMBED_METADATA""#),
+            "got: {json}"
+        );
+
+        let profiles = ConfigProfiles {
+            active: "dev".to_string(),
+            profiles: vec!["default".to_string(), "dev".to_string()],
+        };
+        let json = serde_json::to_string(&profiles).unwrap();
+        let back: ConfigProfiles = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.active, "dev");
+        assert_eq!(back.profiles.len(), 2);
+    }
+
+    #[test]
     fn history_listing_serde_roundtrip() {
         // Wire contract for GET /api/history — `{ "entries": [...] }` with
         // exactly { prompt, model, used_at } per row.
@@ -2744,6 +2788,45 @@ pub struct CatalogCapabilities {
 pub struct ServerCapabilities {
     pub gallery: GalleryCapabilities,
     pub catalog: CatalogCapabilities,
+}
+
+/// One effective config row returned by the `/api/config` surface. Mirrors
+/// a `mold config list --json` entry: a typed JSON value plus the source
+/// tag that says which store owns it.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ConfigEntry {
+    pub key: String,
+    /// Typed JSON value (string/number/bool/null), same encoding as
+    /// `mold config list --json`.
+    #[schema(value_type = Object)]
+    pub value: serde_json::Value,
+    /// `"db"` (settings/model_prefs tables), `"file"` (config.toml),
+    /// `"env"` (overridden by an environment variable at runtime), or
+    /// `"default"` (compiled default after a reset).
+    pub source: String,
+    /// The environment variable overriding this key — present only when
+    /// `source == "env"` so UIs can say "Set by <var> in your environment"
+    /// without guessing the key-to-variable mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_var: Option<String>,
+}
+
+/// Whole-config listing returned by `GET /api/config`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ConfigListing {
+    /// Active settings profile, `null` when the metadata DB is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    pub entries: Vec<ConfigEntry>,
+}
+
+/// Profile listing returned by `GET /api/config/profiles`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ConfigProfiles {
+    /// The currently active profile (env `MOLD_PROFILE` wins over the
+    /// stored `profile.active` row).
+    pub active: String,
+    pub profiles: Vec<String>,
 }
 
 /// One prompt-history row returned by `GET /api/history`. Deliberately a
