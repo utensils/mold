@@ -6,7 +6,7 @@ import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import type { CompleteEvent, GenerateRequest, ProgressEvent } from "../lib/api/types";
 import type { DevelopPhase } from "../lib/develop/grain";
 
-export type JobStatus = "queued" | "loading" | "denoising" | "complete" | "error";
+export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
 
 export interface Job {
   /** Client-side identity — stable across the job's life; keys cancel/menus. */
@@ -66,8 +66,17 @@ export function applyProgress(job: Job, event: ProgressEvent): Job {
       break;
     case "weight_load":
     case "stage_start":
-      if (job.status !== "denoising") job.status = "loading";
-      job.stage = event.type === "stage_start" ? event.name : "Loading weights";
+      // Stages after the denoise loop (transformer drop, VAE decode, encode)
+      // are the fixer bath: the steps read N/N but the print isn't done.
+      if (job.status === "denoising" || job.status === "finishing") {
+        if (event.type === "stage_start") {
+          job.status = "finishing";
+          job.stage = event.name;
+        }
+      } else {
+        job.status = "loading";
+        job.stage = event.type === "stage_start" ? event.name : "Loading weights";
+      }
       break;
     case "denoise_step":
       job.status = "denoising";
@@ -96,6 +105,7 @@ export function jobPhase(job: Job): DevelopPhase {
     case "error":
       return "stopped";
     case "denoising":
+    case "finishing":
       return "developing";
     default:
       return "latent";
@@ -103,7 +113,7 @@ export function jobPhase(job: Job): DevelopPhase {
 }
 
 export function jobProgress(job: Job): number {
-  if (job.status === "complete") return 1;
+  if (job.status === "complete" || job.status === "finishing") return 1;
   if (job.total <= 0) return 0;
   return job.step / job.total;
 }
@@ -182,7 +192,9 @@ export const useGenerationStore = defineStore("generation", {
         return null;
       };
       return (
-        latest((j) => j.status === "denoising" || j.status === "loading") ??
+        latest(
+          (j) => j.status === "denoising" || j.status === "finishing" || j.status === "loading",
+        ) ??
         latest((j) => j.status === "queued") ??
         (jobs.length > 0 ? jobs[jobs.length - 1]! : null)
       );

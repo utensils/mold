@@ -9,6 +9,7 @@ import { useConnectionStore } from "../../stores/connection";
 import { useToastStore } from "../../stores/toasts";
 import { matchCommands, type Matchable } from "../../lib/palette";
 import { fetchHistory, type HistoryEntry } from "../../lib/api/history";
+import { loadModel, unloadModel } from "../../lib/api/models";
 import { newGenerateForm, applyModelDefaults } from "../../lib/generateForm";
 
 interface Command extends Matchable {
@@ -97,17 +98,59 @@ const staticCommands = computed<Command[]>(() => {
       keywords: ["engine", "server"],
       run: () => go("/settings"),
     },
+    {
+      id: "act-engine-restart",
+      title: "Restart engine",
+      keywords: ["engine", "reload", "reboot"],
+      run: () => {
+        void conn
+          .stopEngine()
+          .then(() => conn.useLocal())
+          .then(() => toasts.push("Engine restarted"));
+        close();
+      },
+    },
+    {
+      id: "act-copy-seed",
+      title: "Copy last seed",
+      keywords: ["seed", "clipboard"],
+      run: () => {
+        ui.copySeed();
+        close();
+      },
+    },
   ];
-  if (
-    generation.active &&
-    generation.active.status !== "complete" &&
-    generation.active.status !== "error"
-  ) {
+  if (generation.pending.length > 0) {
     cmds.push({
       id: "act-cancel",
       title: "Cancel job",
       run: () => {
         void generation.cancel().then(() => toasts.push("Cancelled"));
+        close();
+      },
+    });
+  }
+  if (generation.pending.length > 1) {
+    cmds.push({
+      id: "act-cancel-all",
+      title: `Cancel all ${generation.pending.length} jobs`,
+      keywords: ["queue", "stop"],
+      run: () => {
+        const ids = generation.pending.map((j) => j.clientId);
+        void Promise.all(ids.map((id) => generation.cancel(id))).then(() =>
+          toasts.push("Cancelled all jobs"),
+        );
+        close();
+      },
+    });
+  }
+  if (generation.jobs.some((j) => j.status === "complete" || j.status === "error")) {
+    cmds.push({
+      id: "act-clear-finished",
+      title: "Clear finished jobs",
+      keywords: ["jobs", "queue"],
+      run: () => {
+        generation.prune(0);
         close();
       },
     });
@@ -120,6 +163,36 @@ const staticCommands = computed<Command[]>(() => {
       keywords: [m.family, "model"],
       run: () => prefillModel(m.name),
     });
+    if (m.is_loaded) {
+      cmds.push({
+        id: `unload-${m.name}`,
+        title: `Unload ${m.name}`,
+        subtitle: "free VRAM",
+        keywords: ["unload", "model", "vram", m.family],
+        run: () => {
+          void unloadModel(m.name)
+            .then(() => models.fetch())
+            .then(() => toasts.push(`Unloaded ${m.name}`))
+            .catch(() => toasts.push(`Couldn't unload ${m.name}.`, "error"));
+          close();
+        },
+      });
+    } else {
+      cmds.push({
+        id: `load-${m.name}`,
+        title: `Load ${m.name}`,
+        subtitle: "warm up on GPU",
+        keywords: ["load", "model", "warm", m.family],
+        run: () => {
+          toasts.push(`Loading ${m.name}…`);
+          void loadModel(m.name)
+            .then(() => models.fetch())
+            .then(() => toasts.push(`Loaded ${m.name}`))
+            .catch(() => toasts.push(`Couldn't load ${m.name}.`, "error"));
+          close();
+        },
+      });
+    }
   }
   return cmds;
 });

@@ -317,10 +317,11 @@ onMounted(() => {
               The print develops here
             </div>
             <div
-              v-if="job && job.status === 'denoising'"
+              v-if="job && (job.status === 'denoising' || job.status === 'finishing')"
               class="edge-code absolute bottom-2 left-3"
             >
-              {{ job.step }}/{{ job.total }}
+              <template v-if="job.status === 'denoising'">{{ job.step }}/{{ job.total }}</template>
+              <template v-else>Fixing — {{ job.stage ?? "finishing" }}…</template>
             </div>
           </div>
           <div v-if="job" class="edge-code mt-2 truncate" :title="edgeCode">{{ edgeCode }}</div>
@@ -374,7 +375,7 @@ onMounted(() => {
               @click="generate"
             >
               {{ buttonLabel }}
-              <kbd class="data-mono ml-1 opacity-60">⌘↩</kbd>
+              <kbd class="kbd-hint ml-1.5 opacity-70">⌘↩</kbd>
             </button>
           </div>
         </div>

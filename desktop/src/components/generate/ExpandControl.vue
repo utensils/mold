@@ -79,7 +79,7 @@ defineExpose({ expand });
       @click="expand"
     >
       {{ running ? "Expanding…" : "Expand" }}
-      <kbd v-if="!running" class="data-mono ml-1 opacity-60">⌘E</kbd>
+      <kbd v-if="!running" class="kbd-hint ml-1 opacity-70">⌘E</kbd>
     </button>
     <button
       v-if="missingModel"

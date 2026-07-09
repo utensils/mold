@@ -96,6 +96,13 @@ textarea,
   font-variant-numeric: tabular-nums;
 }
 
+/* Shortcut glyphs (⌘↩, ⌘E, ⌘1…) — body-sized so the symbols stay legible. */
+.kbd-hint {
+  font-family: var(--font-utility);
+  font-size: var(--text-body);
+  letter-spacing: 0.04em;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

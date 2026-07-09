@@ -40,12 +40,25 @@ describe("generation SSE reducer", () => {
     expect(job.queuePosition).toBeNull();
   });
 
-  it("a late stage_start does not regress denoising status", () => {
+  it("post-denoise stages become 'finishing', never regress to loading", () => {
+    // After the last denoise step the engine drops the transformer, loads
+    // the VAE, and decodes — steps read 4/4 but the print isn't done. Those
+    // trailing stage events are the fixer bath.
     const job = newJob(req);
-    applyProgress(job, { type: "denoise_step", step: 1, total: 4, elapsed_ms: 1 });
-    applyProgress(job, { type: "stage_start", name: "vae" });
-    expect(job.status).toBe("denoising");
-    expect(job.stage).toBe("vae");
+    applyProgress(job, { type: "denoise_step", step: 4, total: 4, elapsed_ms: 1 });
+    applyProgress(job, { type: "stage_start", name: "VAE decode" });
+    expect(job.status).toBe("finishing");
+    expect(job.stage).toBe("VAE decode");
+    expect(jobPhase(job)).toBe("developing");
+    expect(jobProgress(job)).toBe(1);
+    // weight_load during finishing must not flip it back to loading either.
+    applyProgress(job, {
+      type: "weight_load",
+      bytes_loaded: 1,
+      bytes_total: 2,
+      component: "vae",
+    });
+    expect(job.status).toBe("finishing");
   });
 
   it("uses the requested seed for the grain, or a stable stand-in", () => {

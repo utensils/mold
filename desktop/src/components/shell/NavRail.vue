@@ -36,6 +36,8 @@ function statusCode(job: Job): string {
   switch (job.status) {
     case "denoising":
       return `${job.step}/${job.total}`;
+    case "finishing":
+      return "FIXING";
     case "loading":
       return "LOADING";
     case "queued":
@@ -98,7 +100,7 @@ function jobMenu(job: Job): MenuEntry[] {
     >
       <span class="font-medium">{{ d.label }}</span>
       <kbd
-        class="data-mono text-ink-3 opacity-0 transition-opacity duration-100 group-hover:opacity-100"
+        class="kbd-hint text-ink-3 opacity-0 transition-opacity duration-100 group-hover:opacity-100"
       >
         {{ d.key }}
       </kbd>
@@ -160,7 +162,7 @@ function jobMenu(job: Job): MenuEntry[] {
       active-class="!text-ink bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)]"
     >
       <span class="font-medium">Settings</span>
-      <kbd class="data-mono text-ink-3">⌘,</kbd>
+      <kbd class="kbd-hint text-ink-3">⌘,</kbd>
     </RouterLink>
   </nav>
 </template>
