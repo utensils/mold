@@ -691,6 +691,8 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `GET /api/gallery` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`
 - `POST /api/upscale` · `POST /api/upscale/stream`
 - `GET /api/queue` — authoritative server-side job listing for SPA reconciliation (queued + running jobs with UUIDv4 ids)
+- `GET /api/config` · `GET/PUT/DELETE /api/config/:key` — the `mold config` verbs over HTTP: rows are `{ key, value, source: db|file|env, env_var? }`; PUT routes by surface like `config set` (403 on env-overridden keys), DELETE resets DB-backed keys like `config reset`
+- `GET /api/config/profiles` · `PUT /api/config/profile` — list/switch the active settings profile (503 when the metadata DB is disabled)
 - `GET /api/status` · `GET /health` · `GET /api/capabilities`
 
 ### Prometheus Metrics

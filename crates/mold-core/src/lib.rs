@@ -6,6 +6,7 @@ pub mod chain_job;
 pub mod chain_toml;
 pub mod client;
 pub mod config;
+pub mod config_keys;
 pub mod control;
 pub mod download;
 pub mod error;

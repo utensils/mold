@@ -278,6 +278,32 @@ impl<'a> Settings<'a> {
     }
 }
 
+/// Every profile with at least one settings row, plus [`DEFAULT_PROFILE`]
+/// (always listed even when empty). Sorted ascending.
+pub fn list_profiles(db: &MetadataDb) -> Result<Vec<String>> {
+    let mut profiles: Vec<String> = db.with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT DISTINCT profile FROM settings ORDER BY profile")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    })?;
+    if !profiles.iter().any(|p| p == DEFAULT_PROFILE) {
+        profiles.push(DEFAULT_PROFILE.to_string());
+        profiles.sort();
+    }
+    Ok(profiles)
+}
+
+/// Persist the active profile as the `profile.active` meta-row (always
+/// stored under [`DEFAULT_PROFILE`] so the bootstrap read can find it).
+/// Note `MOLD_PROFILE` still wins over this at runtime.
+pub fn set_active_profile(db: &MetadataDb, name: &str) -> Result<()> {
+    Settings::for_profile(db, DEFAULT_PROFILE).set_str(ACTIVE_PROFILE, name)
+}
+
 /// Resolve the active profile for this process. Priority:
 /// 1. `MOLD_PROFILE` env var (if set and non-empty)
 /// 2. The `profile.active` setting row under profile `"default"`
