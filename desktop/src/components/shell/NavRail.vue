@@ -1,5 +1,9 @@
 <script setup lang="ts">
 import { RouterLink } from "vue-router";
+import DevelopCanvas from "../../lib/develop/DevelopCanvas.vue";
+import { useGenerationStore, jobPhase, jobProgress } from "../../stores/generation";
+
+const generation = useGenerationStore();
 
 const destinations = [
   { route: "/generate", label: "Generate", key: "⌘1" },
@@ -31,8 +35,33 @@ const destinations = [
       <span class="edge-code">JOBS</span>
       <div class="border-edge h-px flex-1 border-t" />
     </div>
-    <!-- Live Develop chips for in-flight jobs land in M2. -->
-    <p class="mx-4 text-caption text-ink-3">Nothing developing</p>
+    <RouterLink
+      v-if="generation.active"
+      to="/generate"
+      class="mx-2 flex items-center gap-2 rounded-control px-2 py-1.5 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
+    >
+      <div
+        class="h-8 w-8 shrink-0 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_14%,transparent)] bg-print-surface"
+      >
+        <DevelopCanvas
+          :seed="generation.active.visualSeed"
+          :progress="jobProgress(generation.active)"
+          :phase="jobPhase(generation.active)"
+        />
+      </div>
+      <div class="min-w-0">
+        <div class="truncate text-caption text-ink-2">{{ generation.active.model }}</div>
+        <div class="edge-code">
+          <template v-if="generation.active.status === 'denoising'">
+            {{ generation.active.step }}/{{ generation.active.total }}
+          </template>
+          <template v-else-if="generation.active.status === 'complete'">FIXED</template>
+          <template v-else-if="generation.active.status === 'error'">STOPPED</template>
+          <template v-else>LATENT</template>
+        </div>
+      </div>
+    </RouterLink>
+    <p v-else class="mx-4 text-caption text-ink-3">Nothing developing</p>
 
     <div class="flex-1" />
 

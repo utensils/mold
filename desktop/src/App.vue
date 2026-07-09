@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import TitleBar from "./components/shell/TitleBar.vue";
 import NavRail from "./components/shell/NavRail.vue";
 import BenchRail from "./components/shell/BenchRail.vue";
+import Toasts from "./components/shell/Toasts.vue";
 import { resolveShellShortcut } from "./lib/shortcuts";
 import { useConnectionStore } from "./stores/connection";
 
@@ -43,5 +44,6 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
       </main>
     </div>
     <BenchRail />
+    <Toasts />
   </div>
 </template>
