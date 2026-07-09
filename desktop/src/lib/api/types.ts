@@ -149,6 +149,10 @@ export interface GenerateRequest {
   lora?: LoraWeight;
   expand?: boolean;
   original_prompt?: string;
+  // Video families (ltx-video / ltx2). Frame count must be 8n+1.
+  frames?: number;
+  fps?: number;
+  enable_audio?: boolean;
 }
 
 /** serde tag = "type", snake_case — /api/generate/stream `progress` events. */
@@ -356,3 +360,156 @@ export interface CatalogDownloadResponse {
   primary_job_id?: string | null;
   companion_jobs: { name: string; job_id: string }[];
 }
+
+// ── Chains (mold.chain.v1 + durable chain jobs) ────────────────────────────
+
+/** Boundary style between the previous stage and this one. */
+export type TransitionMode = "smooth" | "cut" | "fade";
+
+/** One rendered clip in a chain (mirrors mold-core `ChainStage`). */
+export interface ChainStage {
+  prompt: string;
+  frames: number;
+  /** Starting image, base64 (no data-URI prefix); v1 only honors it on stage 0. */
+  source_image?: string | null;
+  negative_prompt?: string | null;
+  seed_offset?: number | null;
+  transition?: TransitionMode;
+  /** Crossfade length when `transition === "fade"`. */
+  fade_frames?: number | null;
+}
+
+/**
+ * Canonical chain request posted to `POST /api/chain-jobs` (mirrors mold-core
+ * `ChainRequest`, canonical form only — note the key is `stages`).
+ */
+export interface ChainRequest {
+  model: string;
+  stages: ChainStage[];
+  motion_tail_frames?: number;
+  width: number;
+  height: number;
+  fps?: number;
+  seed?: number | null;
+  steps: number;
+  guidance: number;
+  strength?: number;
+  output_format?: OutputFormat;
+  enable_audio?: boolean | null;
+}
+
+/** `[chain]` table of a `mold.chain.v1` script (mirrors `ChainScriptChain`). */
+export interface ChainScriptChain {
+  model: string;
+  width: number;
+  height: number;
+  fps: number;
+  seed?: number | null;
+  steps: number;
+  guidance: number;
+  strength: number;
+  motion_tail_frames: number;
+  output_format: OutputFormat;
+  enable_audio?: boolean | null;
+}
+
+/**
+ * `mold.chain.v1` script (mirrors `ChainScript`). On the JSON wire the stages
+ * array key is `stage` (serde rename), matching the TOML `[[stage]]` tables.
+ */
+export interface ChainScript {
+  schema: string;
+  chain: ChainScriptChain;
+  stage: ChainStage[];
+}
+
+/** `GET /api/capabilities/chain-limits?model=` (mirrors `ChainLimits`). */
+export interface ChainLimits {
+  model: string;
+  frames_per_clip_cap: number;
+  frames_per_clip_recommended: number;
+  max_stages: number;
+  max_total_frames: number;
+  fade_frames_max: number;
+  transition_modes: string[];
+  quantization_family: string;
+  supports_audio: boolean;
+}
+
+export type ChainJobState =
+  "queued" | "running" | "interrupted" | "failed" | "completed" | "cancelled";
+
+export type StageState = "pending" | "running" | "completed" | "failed";
+
+export type RetakeMode = "cascade" | "splice";
+
+export interface ChainJobSummary {
+  id: string;
+  state: ChainJobState;
+  model: string;
+  stage_count: number;
+  current_stage: number;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+  error?: string | null;
+  ephemeral: boolean;
+}
+
+export interface ChainJobStageDetail {
+  idx: number;
+  state: StageState;
+  /** u64 effective seed, serialized as a decimal string. */
+  seed: string;
+  frames_emitted?: number | null;
+  generation_time_ms?: number | null;
+  has_preview: boolean;
+  error?: string | null;
+}
+
+/** `GET /api/chain-jobs/:id` — `ChainJobSummary` flattened + stages/script. */
+export interface ChainJobDetail extends ChainJobSummary {
+  stages: ChainJobStageDetail[];
+  finalizes: { output: string; at_unix_ms: number; stage_seeds: string[] }[];
+  retakes: unknown[];
+  script: ChainScript;
+}
+
+/** `GET /api/chain-jobs`. */
+export interface ChainJobListing {
+  jobs: ChainJobSummary[];
+}
+
+/** `POST /api/chain-jobs` (202). */
+export interface CreateChainJobResponse {
+  job_id: string;
+}
+
+/** `POST /api/chain-jobs/:id/retake` body (mirrors `RetakeRequest`). */
+export interface RetakeRequest {
+  stage_idx: number;
+  mode: RetakeMode;
+  /** u64 seed offset as a decimal string. */
+  seed_offset?: string;
+  prompt?: string;
+}
+
+/** `POST /api/chain-jobs/gc`. */
+export interface GcOutcome {
+  swept_ephemeral_jobs: number;
+  pruned_artifact_dirs: number;
+}
+
+/**
+ * SSE `chain_job` frames from `GET /api/chain-jobs/:id/events` (internally
+ * tagged snake_case; first frame is always `snapshot`). Mirrors mold-core
+ * `ChainJobEvent`.
+ */
+export type ChainJobEvent =
+  | { type: "snapshot"; job: ChainJobDetail }
+  | { type: "stage_start"; stage_idx: number }
+  | { type: "denoise_step"; stage_idx: number; step: number; total: number }
+  | { type: "stage_done"; stage_idx: number; frames_emitted: number; has_preview: boolean }
+  | { type: "yielded"; pending_small_jobs: number }
+  | { type: "finalizing"; total_frames: number }
+  | { type: "finalized"; output: string; take: number }
+  | { type: "state_changed"; state: ChainJobState; error?: string | null };

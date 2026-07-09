@@ -2,12 +2,18 @@
 import { computed } from "vue";
 import type { GenerateForm } from "../../lib/generateForm";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../../lib/capabilities";
+import { frames8n1Error, snapFrames } from "../../lib/chain";
 import { randomSeed } from "../../stores/generation";
 
 const props = defineProps<{ form: GenerateForm }>();
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const formats = computed(() => outputFormatsForFamily(props.form.family));
+const framesError = computed(() => frames8n1Error(props.form.frames));
+
+function snapFramesField() {
+  props.form.frames = snapFrames(props.form.frames);
+}
 
 const snap16 = (v: number) => Math.max(64, Math.round(v / 16) * 16);
 
@@ -181,6 +187,43 @@ const schedulerLabel: Record<string, string> = {
         ▸
       </button>
     </div>
+
+    <!-- Video params (ltx families) -->
+    <template v-if="caps.supportsVideo">
+      <div class="mt-5 mb-2 flex items-center gap-2">
+        <span class="edge-code">Video</span>
+        <div class="border-edge h-px flex-1 border-t" />
+      </div>
+
+      <label class="text-caption text-ink-2">Frames</label>
+      <input
+        v-model.number="form.frames"
+        type="number"
+        step="8"
+        min="1"
+        class="border-edge data-mono mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
+        :class="framesError ? 'border-stop' : ''"
+        @change="snapFramesField"
+      />
+      <p v-if="framesError" class="mt-1 text-caption text-stop">{{ framesError }}</p>
+
+      <label class="mt-3 text-caption text-ink-2">FPS</label>
+      <input
+        v-model.number="form.fps"
+        type="number"
+        min="1"
+        max="60"
+        class="border-edge data-mono mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
+      />
+
+      <label
+        v-if="caps.supportsAudio"
+        class="mt-3 flex cursor-pointer items-center justify-between text-caption text-ink-2"
+      >
+        Generate audio
+        <input v-model="form.enableAudio" type="checkbox" class="accent-[var(--safelight)]" />
+      </label>
+    </template>
 
     <!-- Output format -->
     <label class="mt-3 text-caption text-ink-2">Format</label>

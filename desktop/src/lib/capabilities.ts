@@ -151,6 +151,11 @@ export function pruneRequestForFamily(req: GenerateRequest, family: string): Gen
     delete next.loras;
     delete next.lora;
   }
+  if (!caps.supportsVideo) {
+    delete next.frames;
+    delete next.fps;
+  }
+  if (!caps.supportsAudio) delete next.enable_audio;
 
   // Keep the output format valid for the family (png stays out of video, etc.).
   const formats = outputFormatsForFamily(family);

@@ -45,6 +45,10 @@ export interface GenerateForm {
   controlModel: string;
   controlScale: number;
   loras: FormLora[];
+  // Video families (ltx-video / ltx2).
+  frames: number;
+  fps: number;
+  enableAudio: boolean;
 }
 
 export function newGenerateForm(): GenerateForm {
@@ -70,6 +74,9 @@ export function newGenerateForm(): GenerateForm {
     controlModel: "",
     controlScale: 1.0,
     loras: [],
+    frames: 97,
+    fps: 24,
+    enableAudio: false,
   };
 }
 
@@ -103,6 +110,7 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
     form.controlImage = null;
     form.controlModel = "";
   }
+  if (!caps.supportsAudio) form.enableAudio = false;
 }
 
 /**
@@ -150,6 +158,12 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   }
 
   if (caps.supportsLora && loras.length) req.loras = loras;
+
+  if (caps.supportsVideo) {
+    req.frames = form.frames;
+    req.fps = form.fps;
+    if (caps.supportsAudio) req.enable_audio = form.enableAudio;
+  }
 
   return pruneRequestForFamily(req, form.family);
 }

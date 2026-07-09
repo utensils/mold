@@ -1,0 +1,172 @@
+import { defineStore } from "pinia";
+import { apiFetch, apiJson } from "../lib/api/client";
+import { sseStream } from "../lib/api/sse";
+import { useToastStore } from "./toasts";
+import type {
+  ChainJobDetail,
+  ChainJobEvent,
+  ChainJobListing,
+  ChainJobStageDetail,
+  ChainJobSummary,
+  ChainRequest,
+  CreateChainJobResponse,
+  GcOutcome,
+  RetakeRequest,
+  StageState,
+} from "../lib/api/types";
+
+/** Live view of the job currently being watched: its detail plus per-stage
+ * denoise progress and which stage is active. */
+export interface ChainJobLive {
+  detail: ChainJobDetail | null;
+  progress: Record<number, { step: number; total: number }>;
+  activeStage: number | null;
+}
+
+export function emptyChainJobLive(): ChainJobLive {
+  return { detail: null, progress: {}, activeStage: null };
+}
+
+function firstRunningStage(job: ChainJobDetail): number | null {
+  const running = job.stages.find((s) => s.state === "running");
+  return running ? running.idx : null;
+}
+
+function withStageState(
+  detail: ChainJobDetail | null,
+  idx: number,
+  state: StageState,
+  hasPreview?: boolean,
+): ChainJobDetail | null {
+  if (!detail) return detail;
+  const stages = detail.stages.map((s): ChainJobStageDetail =>
+    s.idx === idx ? { ...s, state, has_preview: hasPreview ?? s.has_preview } : s,
+  );
+  return { ...detail, stages };
+}
+
+/**
+ * Pure chain-job event reducer. First frame is a `snapshot` (full detail);
+ * deltas advance the active stage's state and denoise progress. Exported for
+ * tests.
+ */
+export function applyChainJobEvent(state: ChainJobLive, ev: ChainJobEvent): ChainJobLive {
+  switch (ev.type) {
+    case "snapshot":
+      return { detail: ev.job, progress: {}, activeStage: firstRunningStage(ev.job) };
+    case "stage_start":
+      return {
+        ...state,
+        activeStage: ev.stage_idx,
+        detail: withStageState(state.detail, ev.stage_idx, "running"),
+      };
+    case "denoise_step":
+      return {
+        ...state,
+        progress: { ...state.progress, [ev.stage_idx]: { step: ev.step, total: ev.total } },
+      };
+    case "stage_done":
+      return {
+        ...state,
+        activeStage: state.activeStage === ev.stage_idx ? null : state.activeStage,
+        detail: withStageState(state.detail, ev.stage_idx, "completed", ev.has_preview),
+      };
+    case "state_changed":
+      return {
+        ...state,
+        detail: state.detail ? { ...state.detail, state: ev.state, error: ev.error ?? null } : null,
+      };
+    default:
+      return state;
+  }
+}
+
+export const useChainJobsStore = defineStore("chainJobs", {
+  state: () => ({
+    jobs: [] as ChainJobSummary[],
+    live: emptyChainJobLive() as ChainJobLive,
+    watchingId: null as string | null,
+    abort: null as AbortController | null,
+  }),
+  actions: {
+    async fetchJobs() {
+      const listing = await apiJson<ChainJobListing>("/api/chain-jobs");
+      // Newest first.
+      this.jobs = listing.jobs.sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms);
+    },
+    async create(req: ChainRequest): Promise<string> {
+      const res = await apiJson<CreateChainJobResponse>("/api/chain-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      });
+      await this.fetchJobs();
+      this.watch(res.job_id);
+      return res.job_id;
+    },
+    /** Subscribe to one job's event stream, replacing any prior watch. */
+    watch(id: string) {
+      this.unwatch();
+      this.watchingId = id;
+      this.live = emptyChainJobLive();
+      const abort = new AbortController();
+      this.abort = abort;
+      void sseStream(`/api/chain-jobs/${encodeURIComponent(id)}/events`, {
+        signal: abort.signal,
+        retry: true,
+        onEvent: (_event, data) => {
+          try {
+            const ev = JSON.parse(data) as ChainJobEvent;
+            this.live = applyChainJobEvent(this.live, ev);
+            if (ev.type === "state_changed") this.onStateChanged(ev.state, ev.error ?? null);
+          } catch {
+            /* skip malformed frame */
+          }
+        },
+      });
+    },
+    unwatch() {
+      this.abort?.abort();
+      this.abort = null;
+      this.watchingId = null;
+    },
+    onStateChanged(state: ChainJobSummary["state"], _error: string | null) {
+      void this.fetchJobs();
+      if (state === "completed") {
+        const frames =
+          this.live.detail?.stages.reduce((n, s) => n + (s.frames_emitted ?? 0), 0) ?? 0;
+        useToastStore().push(`Chain finished · ${frames} frames`);
+      } else if (state === "failed") {
+        useToastStore().push("Chain failed", "error");
+      }
+    },
+    async resume(id: string) {
+      await apiFetch(`/api/chain-jobs/${encodeURIComponent(id)}/resume`, { method: "POST" });
+      await this.fetchJobs();
+      this.watch(id);
+    },
+    async cancel(id: string) {
+      await apiFetch(`/api/chain-jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+      await this.fetchJobs();
+    },
+    async remove(id: string) {
+      await apiFetch(`/api/chain-jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (this.watchingId === id) this.unwatch();
+      this.jobs = this.jobs.filter((j) => j.id !== id);
+    },
+    async retake(id: string, req: RetakeRequest) {
+      await apiFetch(`/api/chain-jobs/${encodeURIComponent(id)}/retake`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      });
+      await this.fetchJobs();
+      this.watch(id);
+    },
+    async gc(): Promise<GcOutcome> {
+      const outcome = await apiJson<GcOutcome>("/api/chain-jobs/gc", { method: "POST" });
+      await this.fetchJobs();
+      return outcome;
+    },
+  },
+});
