@@ -24,8 +24,20 @@ pub enum Theme {
     Light,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeFamily {
+    #[default]
+    Safelight,
+    Mold,
+}
+
 fn default_true() -> bool {
     true
+}
+
+fn legacy_theme_family() -> ThemeFamily {
+    ThemeFamily::Safelight
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +52,8 @@ pub struct AppSettings {
     /// Environment applied to the embedded engine at start (Performance knobs).
     pub engine_env: std::collections::HashMap<String, String>,
     pub theme: Theme,
+    #[serde(default = "legacy_theme_family")]
+    pub theme_family: ThemeFamily,
     #[serde(default = "default_true")]
     pub notifications: bool,
     #[serde(default = "default_true")]
@@ -56,6 +70,7 @@ impl Default for AppSettings {
             last_route: None,
             engine_env: Default::default(),
             theme: Theme::default(),
+            theme_family: ThemeFamily::Mold,
             notifications: true,
             dock_badge: true,
             restore_last_route: false,
@@ -107,6 +122,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             theme: Theme::Light,
+            theme_family: ThemeFamily::Mold,
             notifications: false,
             dock_badge: true,
             restore_last_route: true,
@@ -126,6 +142,7 @@ mod tests {
         assert!(loaded.notifications);
         assert!(loaded.dock_badge);
         assert_eq!(loaded.theme, Theme::System);
+        assert_eq!(loaded.theme_family, ThemeFamily::Safelight);
         assert!(loaded.engine_env.is_empty());
     }
 
@@ -134,6 +151,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(&path_in(&dir)), AppSettings::default());
         assert_eq!(AppSettings::default().mode, ConnectionMode::Local);
+        assert_eq!(AppSettings::default().theme, Theme::System);
+        assert_eq!(AppSettings::default().theme_family, ThemeFamily::Mold);
     }
 
     #[test]
@@ -149,7 +168,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
         std::fs::write(&path, r#"{"mode":"local","futureField":42}"#).unwrap();
-        assert_eq!(load(&path), AppSettings::default());
+        let mut expected = AppSettings::default();
+        expected.theme_family = ThemeFamily::Safelight;
+        assert_eq!(load(&path), expected);
     }
 
     #[test]

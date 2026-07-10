@@ -30,6 +30,7 @@ web/.vite/
 web/*.tsbuildinfo
 .DS_Store
 .env
+.secrets/
 *.jpeg
 *.jpg
 *.png

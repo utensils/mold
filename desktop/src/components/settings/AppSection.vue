@@ -3,7 +3,7 @@ import SettingRow from "./SettingRow.vue";
 import SelectControl from "./SelectControl.vue";
 import ToggleControl from "./ToggleControl.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
-import type { Theme } from "../../lib/ipc";
+import type { Theme, ThemeFamily } from "../../lib/ipc";
 
 const prefs = useAppPrefsStore();
 
@@ -12,13 +12,29 @@ const THEMES = [
   { value: "dark", label: "Dark" },
   { value: "light", label: "Light" },
 ];
+
+const THEME_FAMILIES = [
+  { value: "safelight", label: "Safelight" },
+  { value: "mold", label: "Mold" },
+];
 </script>
 
 <template>
   <div>
     <SettingRow
+      label="Theme"
+      help="Safelight is the original darkroom palette. Mold matches the cyan and magenta identity used by the website and logo."
+    >
+      <SelectControl
+        :model-value="prefs.themeFamily"
+        :options="THEME_FAMILIES"
+        aria-label="Theme"
+        @commit="(v) => prefs.update({ themeFamily: v as ThemeFamily })"
+      />
+    </SettingRow>
+    <SettingRow
       label="Appearance"
-      help="Lights on or off. Prints and previews never invert — media stays true either way."
+      help="Follow macOS or keep the selected theme light or dark. Prints and previews never invert."
     >
       <SelectControl
         :model-value="prefs.theme"

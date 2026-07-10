@@ -11,6 +11,7 @@ export interface ConnectionInfo {
 }
 
 export type Theme = "system" | "dark" | "light";
+export type ThemeFamily = "safelight" | "mold";
 
 export interface AppSettings {
   mode: "local" | "remote" | "off";
@@ -20,6 +21,8 @@ export interface AppSettings {
   /** Env applied to the embedded engine at start (Performance knobs). */
   engineEnv: Record<string, string>;
   theme: Theme;
+  /** Visual palette. Appearance remains independent so every family supports system/dark/light. */
+  themeFamily: ThemeFamily;
   notifications: boolean;
   dockBadge: boolean;
   restoreLastRoute: boolean;
@@ -64,6 +67,7 @@ const browserFallbackSettings = (): AppSettings => ({
   lastRoute: null,
   engineEnv: {},
   theme: "system",
+  themeFamily: "mold",
   notifications: true,
   dockBadge: true,
   restoreLastRoute: false,

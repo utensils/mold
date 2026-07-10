@@ -13,7 +13,7 @@ const ui = useUiStore();
   >
     <span
       data-tauri-drag-region
-      class="font-display text-display-sm font-bold tracking-[0.08em] text-ink-2 select-none"
+      class="brand-wordmark font-display text-display-sm font-bold tracking-[0.08em] text-ink-2 select-none"
       style="font-stretch: 90%"
     >
       MOLD

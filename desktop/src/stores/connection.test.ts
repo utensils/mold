@@ -28,6 +28,7 @@ const defaults = {
   lastRoute: null,
   engineEnv: {},
   theme: "system" as const,
+  themeFamily: "safelight" as const,
   notifications: true,
   dockBadge: true,
   restoreLastRoute: false,

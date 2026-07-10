@@ -7,6 +7,7 @@ import { apiJson } from "../../lib/api/client";
 import { ipc } from "../../lib/ipc";
 import { sseStream } from "../../lib/api/sse";
 import { formatGB, percent, vramLevel } from "../../lib/format";
+import { shouldRestartEmbeddedEngine } from "../../lib/connectionRecovery";
 import type { ResourceSnapshot, ServerStatus } from "../../lib/api/types";
 
 const conn = useConnectionStore();
@@ -53,7 +54,7 @@ async function refreshStatus() {
     // built-in engine, restart it (the backend detects the dead thread);
     // remote hosts surface the error chip instead.
     statusFailures += 1;
-    if (statusFailures >= 2 && (conn.mode === "local" || conn.mode === "external")) {
+    if (shouldRestartEmbeddedEngine(conn.mode, statusFailures)) {
       statusFailures = 0;
       status.value = null;
       await conn.useLocal();
