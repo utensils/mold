@@ -122,6 +122,13 @@ jobs:
       - name: Build, sign, notarize, and staple
         run: bunx tauri build --features metal --bundles app,dmg --ci
 
+      - name: Notarize and staple DMG
+        working-directory: .
+        run: |
+          set -euo pipefail
+          dmg=$(find desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)
+          scripts/notarize-desktop-dmg.sh "$dmg"
+
       - name: Verify distribution
         working-directory: .
         run: |

@@ -120,7 +120,10 @@ wire types as the CLI and web UI:
   `localhost:7680`.
 - **Remote host** — point it at a remote GPU box (e.g. a Linux CUDA machine for
   LTX-2), configured in Settings → Engine, with the API key stored in the macOS
-  Keychain.
+  Keychain. A bare hostname is enough: `hal9000` expands to
+  `http://hal9000:7680`. The network list uses the operating system's native
+  DNS-SD browser on macOS, so advertised `_mold._tcp` services share the same
+  cache and interface handling as Finder and `dns-sd`.
 
 ## Development
 

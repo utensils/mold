@@ -5,6 +5,7 @@
   "build": {
     "beforeDevCommand": "bun run dev",
     "beforeBuildCommand": "bun run build",
+    "beforeBundleCommand": "../scripts/fix-desktop-macos-linkage.sh",
     "devUrl": "http://localhost:1430",
     "frontendDist": "../dist"
   },

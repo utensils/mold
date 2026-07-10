@@ -13,6 +13,7 @@ const toasts = useToastStore();
 
 const remoteUrl = ref("");
 const remoteKey = ref("");
+const remoteUrlInput = ref<HTMLInputElement | null>(null);
 const remoteKeyInput = ref<HTMLInputElement | null>(null);
 const testResult = ref<HostTest | null>(null);
 const testing = ref(false);
@@ -104,6 +105,15 @@ async function useLocal() {
   switching.value = false;
 }
 
+async function selectRemote() {
+  if (!remoteUrl.value.trim()) {
+    await nextTick();
+    remoteUrlInput.value?.focus();
+    return;
+  }
+  await useRemote();
+}
+
 async function restartEngine() {
   await conn.stopEngine();
   await conn.useLocal();
@@ -115,25 +125,39 @@ async function restartEngine() {
 <template>
   <div class="max-w-2xl">
     <div class="border-edge rounded-chrome border bg-bench p-4">
-      <div class="flex items-center gap-6">
-        <label class="flex items-center gap-2 text-body">
-          <input
-            type="radio"
-            :checked="conn.mode === 'local' || conn.mode === 'external'"
-            class="accent-[var(--safelight)]"
-            @change="useLocal"
-          />
-          Built-in (this Mac)
-        </label>
-        <label class="flex items-center gap-2 text-body">
-          <input
-            type="radio"
-            :checked="conn.mode === 'remote'"
-            class="accent-[var(--safelight)]"
-            @change="useRemote"
-          />
-          Remote server
-        </label>
+      <div class="flex items-center gap-3">
+        <div
+          class="border-edge flex rounded-control border bg-bath p-0.5"
+          role="radiogroup"
+          aria-label="Engine"
+        >
+          <button
+            type="button"
+            role="radio"
+            :aria-checked="conn.mode === 'local' || conn.mode === 'external'"
+            class="rounded-control px-3 py-1.5 text-body transition-colors"
+            :class="
+              conn.mode === 'local' || conn.mode === 'external'
+                ? 'bg-bench text-ink shadow-sm'
+                : 'text-ink-2 hover:text-ink'
+            "
+            @click="useLocal"
+          >
+            Built-in (this Mac)
+          </button>
+          <button
+            type="button"
+            role="radio"
+            :aria-checked="conn.mode === 'remote'"
+            class="rounded-control px-3 py-1.5 text-body transition-colors"
+            :class="
+              conn.mode === 'remote' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'
+            "
+            @click="selectRemote"
+          >
+            Remote server
+          </button>
+        </div>
         <span class="data-mono ml-auto text-caption text-ink-3">{{ conn.baseUrl ?? "—" }}</span>
         <button
           v-if="conn.mode === 'local'"
@@ -151,10 +175,11 @@ async function restartEngine() {
         <div class="mt-1 flex gap-2">
           <input
             id="remote-host"
+            ref="remoteUrlInput"
             v-model="remoteUrl"
             data-selectable
             type="text"
-            placeholder="http://studio.local:7680"
+            placeholder="hal9000"
             class="border-edge data-mono h-8 flex-1 rounded-control border bg-bath px-2 text-ink placeholder:text-ink-3"
           />
           <button

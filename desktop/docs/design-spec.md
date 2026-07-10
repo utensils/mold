@@ -107,6 +107,11 @@ Native macOS single window, `titleBarStyle: Overlay`, `hiddenTitle: true`, traff
 
 ### 4.1 Generate — the enlarger
 
+**Composer visibility is invariant.** The preview fits both the width and the
+height of the canvas region for every output aspect ratio. Portrait or extreme
+custom dimensions may shrink the print, but may never push the prompt composer
+or Generate action outside the window.
+
 Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector** (right, 320px, resizable).
 
 ```

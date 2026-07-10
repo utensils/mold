@@ -993,6 +993,7 @@
                   cd ..
                   app="desktop/src-tauri/target/release/bundle/macos/Mold.app"
                   dmg=$(find desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)
+                  scripts/notarize-desktop-dmg.sh "$dmg"
                   scripts/verify-desktop-release.sh "$app" "$dmg"
                 '';
               }
