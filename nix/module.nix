@@ -201,7 +201,22 @@ in
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Whether to open the firewall port for the mold server.";
+      description = "Whether to open the firewall port for the mold server. When mdns is enabled this also opens UDP 5353 for mDNS/DNS-SD queries.";
+    };
+
+    mdns = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Advertise the server on the local network as a `_mold._tcp` mDNS/DNS-SD
+        service so clients (`mold server discover`, the desktop app) can find it
+        automatically. Only takes effect when the server binds a non-loopback
+        address; requires a package built with the `mdns` cargo feature (the
+        flake's default packages are). Set to false to set MOLD_MDNS=0 and stay
+        silent on the LAN. Note: mold runs its own mDNS responder — hosts also
+        running Avahi share UDP 5353 via SO_REUSEPORT, which works but means
+        both daemons answer their own registrations.
+      '';
     };
 
     discord = {
@@ -329,6 +344,9 @@ in
       // lib.optionalAttrs (cfg.queueSize != null) {
         MOLD_QUEUE_SIZE = toString cfg.queueSize;
       }
+      // lib.optionalAttrs (!cfg.mdns) {
+        MOLD_MDNS = "0";
+      }
       // lib.optionalAttrs (cfg.rateLimit != null) {
         MOLD_RATE_LIMIT = cfg.rateLimit;
       }
@@ -401,6 +419,7 @@ in
     };
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
+    networking.firewall.allowedUDPPorts = lib.mkIf (cfg.openFirewall && cfg.mdns) [ 5353 ];
 
     # ── Discord bot service ─────────────────────────────────────────────
     systemd.services.mold-discord = lib.mkIf discordCfg.enable {

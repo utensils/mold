@@ -66,6 +66,7 @@ works for SPA hot-iteration without recompiling Rust.
     bindAddress = "0.0.0.0";
     logLevel = "info";         # trace, debug, info, warn, error
     openFirewall = false;      # set true to allow LAN access
+    # mdns = true;             # advertise _mold._tcp on the LAN (set false for MOLD_MDNS=0)
 
     # Directories
     homeDir = "/var/lib/mold";           # MOLD_HOME
@@ -133,7 +134,8 @@ works for SPA hot-iteration without recompiling Rust.
 | `modelsDir`        | string      | `homeDir + /models` | Model storage directory                                              |
 | `logLevel`         | enum        | `"info"`            | Log level (trace/debug/info/warn/error)                              |
 | `corsOrigin`       | null/string | `null`              | CORS origin restriction (null = permissive)                          |
-| `openFirewall`     | bool        | `false`             | Open firewall port                                                   |
+| `openFirewall`     | bool        | `false`             | Open firewall port (also UDP 5353 when `mdns` is on)                 |
+| `mdns`             | bool        | `true`              | Advertise `_mold._tcp` on the LAN; `false` sets `MOLD_MDNS=0`        |
 | `defaultModel`     | null/string | `null`              | Default model name                                                   |
 | `gpus`             | null/string | `null`              | Which GPUs to use: `"0,1"` or `"all"` (null = every visible GPU)     |
 | `queueSize`        | null/int    | `null`              | Max queued generation jobs (null = default 200)                      |
