@@ -33,8 +33,10 @@ export const useSettingsConfigStore = defineStore("settingsConfig", {
         this.rows = await fetchConfig();
         this.available = true;
       } catch (err) {
-        this.available = false;
-        void err;
+        // Only a 404 means the engine predates the config API. Transient
+        // network/auth failures keep the previous knowledge (or stay
+        // undetermined) so settings aren't hidden by a blip.
+        if (err instanceof ApiError && err.status === 404) this.available = false;
       }
       try {
         const p = await fetchProfiles();

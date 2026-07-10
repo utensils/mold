@@ -41,7 +41,9 @@ const asBool = computed(() => row.value?.value === true || row.value?.value === 
 const asText = computed(() => (row.value?.value == null ? "" : String(row.value.value)));
 const asNumber = computed(() => {
   const v = row.value?.value;
-  return typeof v === "number" ? v : v != null && v !== "" ? Number(v) : null;
+  const n = typeof v === "number" ? v : v != null && v !== "" ? Number(v) : null;
+  // A non-numeric string from the engine must not feed NaN into inputs.
+  return n !== null && Number.isFinite(n) ? n : null;
 });
 </script>
 

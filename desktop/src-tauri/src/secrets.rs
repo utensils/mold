@@ -104,6 +104,12 @@ impl SecretStore {
         }
         let tmp = self.fallback_path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&map)?)?;
+        // Plaintext fallback: owner-only, whatever the umask says.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
         std::fs::rename(&tmp, &self.fallback_path)?;
         *self.cache.lock().expect("secrets cache") = Some(map);
         Ok(())

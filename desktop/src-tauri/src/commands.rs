@@ -55,10 +55,10 @@ fn apply_engine_environment(
         }
     }
     for (secret, env) in [("hf-token", "HF_TOKEN"), ("civitai-token", "CIVITAI_TOKEN")] {
-        if let Ok(Some(v)) = secrets.get(secret) {
-            if !v.is_empty() {
-                std::env::set_var(env, v);
-            }
+        match secrets.get(secret) {
+            Ok(Some(v)) if !v.is_empty() => std::env::set_var(env, v),
+            // Cleared/missing tokens must not linger across engine restarts.
+            _ => std::env::remove_var(env),
         }
     }
 }
@@ -392,6 +392,11 @@ mod tests {
         env.remove("MOLD_VAE_TILED");
         apply_engine_environment(&env, &secrets);
         assert!(std::env::var("MOLD_VAE_TILED").is_err());
-        std::env::remove_var("HF_TOKEN");
+
+        // Clearing the secret clears the token env on the next engine start —
+        // stale credentials must not linger across restarts.
+        secrets.clear("hf-token").unwrap();
+        apply_engine_environment(&env, &secrets);
+        assert!(std::env::var("HF_TOKEN").is_err());
     }
 }
