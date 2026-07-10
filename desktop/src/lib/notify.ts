@@ -4,6 +4,7 @@
  * unfocused. In a plain browser (no Tauri) these are all no-ops.
  */
 import { inTauri } from "./ipc";
+import { useAppPrefsStore } from "../stores/appPrefs";
 
 let permissionResolved = false;
 let granted = false;
@@ -26,6 +27,11 @@ export function appIsBackground(): boolean {
 
 async function notify(title: string, body?: string): Promise<void> {
   if (!appIsBackground()) return;
+  try {
+    if (!useAppPrefsStore().notifications) return;
+  } catch {
+    /* store not ready (early boot) — default on */
+  }
   if (!(await ensurePermission())) return;
   const { sendNotification } = await import("@tauri-apps/plugin-notification");
   sendNotification(body != null ? { title, body } : { title });

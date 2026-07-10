@@ -39,9 +39,16 @@ surface powers it, so anything the app does maps to a documented endpoint.
   fits/duration forecast against `/api/capabilities/chain-limits`, TOML
   import/export, and a durable jobs list with resume, cancel, and retake.
 - **History** — a fast, searchable list of past prompts; ↩ refills the composer.
-- **Settings** — every configuration row carries a provenance tag (⌂ db /
-  ⛁ file / ⚿ env / default) over `/api/config`; environment-overridden rows are
-  locked with the variable that owns them. Includes profile switching.
+- **Settings** — a full preferences bench with a section rail and
+  cross-section search: Engine (connection, native folder pickers for the
+  models/output directories), Performance (the `MOLD_*` engine knobs as real
+  controls, applied on engine restart), Generation defaults, a Prompt
+  expansion form, Accounts & tokens (Hugging Face / Civitai keys in the macOS
+  Keychain, exported to the engine as `HF_TOKEN`/`CIVITAI_TOKEN`), Appearance
+  (System/Dark/Light — media never inverts), Profiles (switch or create), and
+  Advanced — every remaining `/api/config` row with its provenance tag (⌂ db /
+  ⛁ file / ⚿ env); environment-overridden rows are locked with the variable
+  that owns them.
 - **Command palette** — **⌘K** for navigation, actions, model search, and
   prompt-history search in one field.
 - **Native macOS** — menu bar, keyboard shortcuts, and background notifications

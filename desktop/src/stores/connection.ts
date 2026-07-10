@@ -27,9 +27,15 @@ export const useConnectionStore = defineStore("connection", {
       this.error = null;
       try {
         const settings = await ipc.appSettingsGet();
+        // Remote key: Keychain first, legacy settings.json field as fallback
+        // for files written before secrets landed.
+        const remoteKey =
+          settings.mode === "remote"
+            ? ((await ipc.secretGet("remote-api-key")) ?? settings.remoteApiKey)
+            : null;
         this.info =
           settings.mode === "remote" && settings.remoteUrl
-            ? await ipc.setRemoteHost(settings.remoteUrl, settings.remoteApiKey)
+            ? await ipc.setRemoteHost(settings.remoteUrl, remoteKey)
             : await ipc.startLocalEngine();
         this.status = "ready";
       } catch (err) {

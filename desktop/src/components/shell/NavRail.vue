@@ -2,7 +2,13 @@
 import { computed } from "vue";
 import { RouterLink, useRouter } from "vue-router";
 import DevelopCanvas from "../../lib/develop/DevelopCanvas.vue";
-import { useGenerationStore, jobPhase, jobProgress, type Job } from "../../stores/generation";
+import {
+  useGenerationStore,
+  jobPhase,
+  jobProgress,
+  railOrder,
+  type Job,
+} from "../../stores/generation";
 import { useComposerStore } from "../../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { useToastStore } from "../../stores/toasts";
@@ -24,7 +30,9 @@ const destinations = [
 /** Queue order: every live job first (submission order), then the freshest
  *  finished prints — the rail is a working queue, not a full history. */
 const railJobs = computed<Job[]>(() => {
-  const live = generation.jobs.filter((j) => j.status !== "complete" && j.status !== "error");
+  const live = railOrder(
+    generation.jobs.filter((j) => j.status !== "complete" && j.status !== "error"),
+  );
   const done = generation.jobs
     .filter((j) => j.status === "complete" || j.status === "error")
     .slice(-3)

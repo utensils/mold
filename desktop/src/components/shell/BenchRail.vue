@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useConnectionStore } from "../../stores/connection";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useToastStore } from "../../stores/toasts";
 import { apiJson } from "../../lib/api/client";
 import { ipc } from "../../lib/ipc";
@@ -46,7 +47,7 @@ async function refreshStatus() {
     status.value = await apiJson<ServerStatus>("/api/status");
     statusFailures = 0;
     // Dock badge mirrors queue depth (design spec §7); cleared when idle.
-    void ipc.setDockBadge(status.value.queue_depth ?? null);
+    void ipc.setDockBadge(useAppPrefsStore().dockBadge ? (status.value.queue_depth ?? null) : null);
   } catch {
     // Two consecutive failures = the engine is gone, not a blip. For the
     // built-in engine, restart it (the backend detects the dead thread);

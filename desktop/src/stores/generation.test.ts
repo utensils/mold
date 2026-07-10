@@ -6,6 +6,8 @@ import {
   newJob,
   planBatchRequests,
   resolveBaseSeed,
+  type Job,
+  type JobStatus,
 } from "./generation";
 
 const req = {
@@ -140,5 +142,33 @@ describe("live latent previews", () => {
     expect(revoke).toHaveBeenCalledWith(first);
     expect(job.previewUrl).not.toBe(first);
     revoke.mockRestore();
+  });
+});
+
+describe("railOrder", () => {
+  const job = (clientId: number, status: JobStatus, queuePosition: number | null): Job => ({
+    ...newJob(req),
+    clientId,
+    status,
+    queuePosition,
+  });
+
+  it("shows developing first, then the server's queue order — not submission order", async () => {
+    const { railOrder } = await import("./generation");
+    // Concurrent batch submissions raced: job 1 landed at position #3,
+    // job 3 at #1. The rail must show the engine's actual run order.
+    const jobs = [
+      job(1, "queued", 3),
+      job(2, "queued", 2),
+      job(3, "queued", 1),
+      job(4, "denoising", null),
+    ];
+    expect(railOrder(jobs).map((j) => j.clientId)).toEqual([4, 3, 2, 1]);
+  });
+
+  it("positionless queued jobs sink below positioned ones, stable by clientId", async () => {
+    const { railOrder } = await import("./generation");
+    const jobs = [job(5, "queued", null), job(6, "queued", 1), job(7, "loading", null)];
+    expect(railOrder(jobs).map((j) => j.clientId)).toEqual([7, 6, 5]);
   });
 });

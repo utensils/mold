@@ -27,6 +27,40 @@ pub struct AppState {
     /// Ephemeral per-launch key for the embedded engine; exported as
     /// MOLD_API_KEY at startup so only this app can drive the loopback server.
     pub local_api_key: String,
+    pub secrets: crate::secrets::SecretStore,
+}
+
+/// Env knobs the Settings Performance section may set on the embedded
+/// engine. Applied (or removed when unset) right before the engine thread
+/// spawns — restart the engine to apply changes.
+pub const ENGINE_ENV_KEYS: &[&str] = &[
+    "MOLD_STEP_PREVIEW",
+    "MOLD_KEEP_TE_RAM",
+    "MOLD_VAE_TILED",
+    "MOLD_OFFLOAD",
+    "MOLD_ATTN",
+    "MOLD_QUEUE_SIZE",
+];
+
+/// Apply the Performance env knobs plus HF/Civitai tokens to this process's
+/// environment so the embedded engine (and its downloads) see them.
+fn apply_engine_environment(
+    engine_env: &std::collections::HashMap<String, String>,
+    secrets: &crate::secrets::SecretStore,
+) {
+    for key in ENGINE_ENV_KEYS {
+        match engine_env.get(*key).map(String::as_str) {
+            Some(v) if !v.is_empty() => std::env::set_var(key, v),
+            _ => std::env::remove_var(key),
+        }
+    }
+    for (secret, env) in [("hf-token", "HF_TOKEN"), ("civitai-token", "CIVITAI_TOKEN")] {
+        match secrets.get(secret) {
+            Ok(Some(v)) if !v.is_empty() => std::env::set_var(env, v),
+            // Cleared/missing tokens must not linger across engine restarts.
+            _ => std::env::remove_var(env),
+        }
+    }
 }
 
 #[tauri::command]
@@ -114,6 +148,7 @@ pub async fn reveal_output_file(
 #[tauri::command]
 pub async fn start_local_engine(
     state: tauri::State<'_, AppState>,
+    store: tauri::State<'_, SettingsStore>,
 ) -> Result<ConnectionInfo, String> {
     let mut conn = state.conn.lock().await;
     match &*conn {
@@ -142,6 +177,15 @@ pub async fn start_local_engine(
     let config = mold_core::Config::load_or_default();
     let models_dir = config.resolved_models_dir();
     let gpu_selection = config.gpu_selection();
+    apply_engine_environment(
+        &store
+            .current
+            .lock()
+            .expect("settings mutex")
+            .engine_env
+            .clone(),
+        &state.secrets,
+    );
     let engine = server::start_engine(models_dir, gpu_selection).map_err(|e| format!("{e:#}"))?;
     let base_url = engine.base_url();
     if !server::wait_healthy(&base_url, Duration::from_secs(30)).await {
@@ -271,13 +315,88 @@ pub async fn set_remote_host(
         api_key: api_key.clone(),
     };
 
+    // The key lives in the Keychain; the legacy plaintext slot is wiped so
+    // old settings.json files converge on first save.
+    match api_key.as_deref().filter(|k| !k.is_empty()) {
+        Some(key) => state
+            .secrets
+            .set("remote-api-key", key)
+            .map_err(|e| e.to_string())?,
+        None => state
+            .secrets
+            .clear("remote-api-key")
+            .map_err(|e| e.to_string())?,
+    }
     let updated = {
         let mut current = store.current.lock().expect("settings mutex");
         current.mode = ConnectionMode::Remote;
         current.remote_url = Some(url);
-        current.remote_api_key = api_key;
+        current.remote_api_key = None;
         current.clone()
     };
     settings::save(&store.path, &updated).map_err(|e| e.to_string())?;
     Ok(conn.info(&state.local_api_key))
+}
+
+/// Open the engine's log directory in Finder.
+#[tauri::command]
+pub fn open_logs_dir(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = mold_core::Config::load_or_default().resolved_log_dir();
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn secret_get(
+    state: tauri::State<'_, AppState>,
+    name: String,
+) -> Result<Option<String>, String> {
+    state.secrets.get(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn secret_set(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    value: String,
+) -> Result<(), String> {
+    state.secrets.set(&name, &value).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn secret_clear(state: tauri::State<'_, AppState>, name: String) -> Result<(), String> {
+    state.secrets.clear(&name).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_environment_sets_and_clears_knobs_and_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = crate::secrets::SecretStore::file_only(dir.path().to_path_buf());
+        secrets.set("hf-token", "hf_test_token").unwrap();
+
+        let mut env = std::collections::HashMap::new();
+        env.insert("MOLD_VAE_TILED".to_string(), "force".to_string());
+        env.insert("MOLD_STEP_PREVIEW".to_string(), String::new()); // empty = unset
+        apply_engine_environment(&env, &secrets);
+        assert_eq!(std::env::var("MOLD_VAE_TILED").as_deref(), Ok("force"));
+        assert!(std::env::var("MOLD_STEP_PREVIEW").is_err());
+        assert_eq!(std::env::var("HF_TOKEN").as_deref(), Ok("hf_test_token"));
+
+        // Removing the knob from the map clears the variable on next apply.
+        env.remove("MOLD_VAE_TILED");
+        apply_engine_environment(&env, &secrets);
+        assert!(std::env::var("MOLD_VAE_TILED").is_err());
+
+        // Clearing the secret clears the token env on the next engine start —
+        // stale credentials must not linger across restarts.
+        secrets.clear("hf-token").unwrap();
+        apply_engine_environment(&env, &secrets);
+        assert!(std::env::var("HF_TOKEN").is_err());
+    }
 }

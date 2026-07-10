@@ -15,14 +15,52 @@ pub enum ConnectionMode {
     Off,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Theme {
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub mode: ConnectionMode,
     pub remote_url: Option<String>,
-    /// TODO(M6): move to the macOS Keychain via `keyring` (secrets.rs).
+    /// Legacy plaintext slot — new saves go to the Keychain (secrets.rs);
+    /// kept for reading old settings.json files.
     pub remote_api_key: Option<String>,
     pub last_route: Option<String>,
+    /// Environment applied to the embedded engine at start (Performance knobs).
+    pub engine_env: std::collections::HashMap<String, String>,
+    pub theme: Theme,
+    #[serde(default = "default_true")]
+    pub notifications: bool,
+    #[serde(default = "default_true")]
+    pub dock_badge: bool,
+    pub restore_last_route: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            mode: ConnectionMode::default(),
+            remote_url: None,
+            remote_api_key: None,
+            last_route: None,
+            engine_env: Default::default(),
+            theme: Theme::default(),
+            notifications: true,
+            dock_badge: true,
+            restore_last_route: false,
+        }
+    }
 }
 
 /// Load settings from `path`. A missing or unreadable file yields defaults —
@@ -65,9 +103,30 @@ mod tests {
             remote_url: Some("http://studio.local:7680".into()),
             remote_api_key: Some("k".into()),
             last_route: Some("/gallery".into()),
+            engine_env: [("MOLD_VAE_TILED".to_string(), "force".to_string())]
+                .into_iter()
+                .collect(),
+            theme: Theme::Light,
+            notifications: false,
+            dock_badge: true,
+            restore_last_route: true,
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path), settings);
+    }
+
+    #[test]
+    fn legacy_settings_json_gets_pref_defaults() {
+        // Files written before the prefs existed must load with notifications
+        // and the dock badge ON, not silently disabled.
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(&path, r#"{"mode":"local","lastRoute":"/generate"}"#).unwrap();
+        let loaded = load(&path);
+        assert!(loaded.notifications);
+        assert!(loaded.dock_badge);
+        assert_eq!(loaded.theme, Theme::System);
+        assert!(loaded.engine_env.is_empty());
     }
 
     #[test]
