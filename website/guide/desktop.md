@@ -71,6 +71,43 @@ surface powers it, so anything the app does maps to a documented endpoint.
 | ⇧⌘C          | Copy seed (lightbox)                    |
 | ⌘0 / ⌘+ / ⌘− | Gallery thumbnail zoom reset / in / out |
 
+## Generation templates
+
+Save the current Generate form as a named, recallable preset. Open the
+**Templates** panel below the LoRA stack, give the current settings a name, and
+it is stored as a template you can load, rename, or delete later. Loading a
+template restores every parameter — model, prompt, dimensions, steps, guidance,
+scheduler, LoRA stack, and the rest — in one click.
+
+Templates capture _parameters_, not media: source, mask, and control images
+(and LTX-2 source video / keyframes) are referenced but never stored, so after
+loading a template that used them the app reminds you to re-select the files.
+If the template's model isn't installed you still get its settings, with a
+prompt to pull the model.
+
+Templates are stored locally, per machine (in the app's own storage), and are
+never shared with the browser SPA or synced to the server — they travel with
+the Mac you saved them on.
+
+## Device placement
+
+**Settings → Advanced → Device placement** saves a per-model default for _where_
+a model's components run. Pick an installed model, then set its **Text
+encoders** — the Tier-1 group knob covering T5, CLIP, and Qwen encoders — to
+**Auto**, **CPU**, or a specific **GPU**. For Tier-2 families (FLUX, Flux.2,
+Z-Image, Qwen-Image) an **Advanced** disclosure exposes per-component overrides
+for the transformer, VAE, and each text encoder; any encoder can also be left to
+follow the group knob.
+
+**Save as default** persists the choice for that model and **Clear** removes it.
+Placement is applied the next time the model loads, so save it before you
+generate. GPU choices come from the connected engine's live device list.
+
+This is the desktop surface for the same mechanism the CLI's `--device-*` flags
+and `MOLD_PLACE_*` variables drive — see
+[Configuration → Per-component device placement](./configuration.md#per-component-device-placement)
+for the full component list and semantics.
+
 ## How it connects
 
 The app talks to a `mold-ai-server` over localhost HTTP + SSE using the same

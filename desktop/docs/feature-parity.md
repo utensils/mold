@@ -49,6 +49,8 @@ Every surface builds this one struct; the desktop app should model it 1:1. Defau
 
 CLI-only extras layered on top: `--clip-frames`, `--motion-tail` (chain tuning), `--frames-per-clip` (multi-prompt sugar), `--lora-scale`, `--camera-control` (LTX-2 camera LoRA presets: dolly-in/-left/-out/-right, jib-down/-up, static), text-encoder variant flags (§6), `--eager`, `--offload`.
 
+Desktop parity: `source_image` / `mask_image` are surfaced by `SourceImageWell.vue` — a **Choose from gallery…** picker (`ImagePickerModal.vue`, upload or authed gallery thumbnails) plus an **Edit mask…** brush/erase canvas (`MaskEditorModal.vue`, invert / clear / undo-redo cap 20 → white-on-transparent PNG). The LTX-2 advanced fields (`pipeline`, `spatial_upscale`, `temporal_upscale`, `retake_range`, `source_video`, `keyframes`) are surfaced by an "LTX-2 pipeline" disclosure in `ParamPanel.vue` (ltx2 family only, gated by `capabilities.supportsAdvancedVideo`; kebab-case enum values, nulls omitted, pruned on family change). Keyframe frame indices follow the web SPA (0-based, +24 suggestion) — not the 8n+1 total-frame-count constraint.
+
 `GenerateResponse`: `images[]` (`{data,width,height,index}`), optional `video` (`{data,format,width,height,frames,fps,thumbnail,gif_preview}`), `generation_time_ms`, `model`, `seed_used`, `gpu` (ordinal, multi-GPU).
 
 ---
@@ -150,7 +152,7 @@ CLI-only extras layered on top: `--clip-frames`, `--motion-tail` (chain tuning),
 
 **Text-encoder quantization variants** (auto-fallback to largest that fits): `--t5-variant` (auto/fp16/q8/q6/q5/q4/q3), `--qwen3-variant` (Z-Image: auto/bf16/q8/q6/iq4/q3), `--qwen2-variant` (Qwen-Image: auto/bf16/q8..q2), `--qwen2-text-encoder-mode` (auto/gpu/cpu-stage/cpu). Env `MOLD_*_VARIANT`.
 
-**Perf**: `--offload` / `MOLD_OFFLOAD=1` (FLUX block-level CPU↔GPU streaming: ~24GB→2–4GB, 3–5× slower, auto under pressure), `--eager` (keep all components loaded), `--gpus` / `MOLD_GPUS` (ordinal selection). Tier-1 knobs: `MOLD_KEEP_TE_RAM`, `MOLD_LORA_BYPASS`, `MOLD_VAE_TILED`, `MOLD_ATTN` (+ `MOLD_ATTN_CHUNK`), plus many LTX-2/flux debug/tuning envs. Web `PlacementPanel.vue` surfaces placement UI.
+**Perf**: `--offload` / `MOLD_OFFLOAD=1` (FLUX block-level CPU↔GPU streaming: ~24GB→2–4GB, 3–5× slower, auto under pressure), `--eager` (keep all components loaded), `--gpus` / `MOLD_GPUS` (ordinal selection). Tier-1 knobs: `MOLD_KEEP_TE_RAM`, `MOLD_LORA_BYPASS`, `MOLD_VAE_TILED`, `MOLD_ATTN` (+ `MOLD_ATTN_CHUNK`), plus many LTX-2/flux debug/tuning envs. Web `PlacementPanel.vue` surfaces placement UI; desktop `PlacementSection.vue` (Settings → Advanced) saves per-model placement defaults via `PUT`/`DELETE /api/config/model/:name/placement`.
 
 ---
 
@@ -190,7 +192,7 @@ CLI-only extras layered on top: `--clip-frames`, `--motion-tail` (chain tuning),
 - SQLite `settings` (KV, profile-scoped) + `model_prefs` (per-resolved-model params, profile-scoped). Known keys: `tui.theme/last_model/last_prompt/last_negative/negative_collapsed/view_mode/gallery_columns`, `expand.*` (enabled/temperature/top_p/max_tokens/thinking/system_prompt/batch_prompt/backend/model/api_model/families_json), `generate.default_width/height/steps/default_negative_prompt/embed_metadata/t5_variant/qwen3_variant`, `chain.jobs_artifact_ttl_days`, `profile.active`.
 - `MOLD_*` env (highest precedence) — ~120 vars.
 
-**CLI** (`mold config`): `list [--json]` (tags rows `[db]`/`[file]`/`[env]`), `get <key> [--raw]`, `set <key> <val>` (routes by prefix — `expand.*`→DB, `models_dir`→TOML; `none` clears), `path`, `edit` ($EDITOR), `where <key>` (which surface owns it), `reset <key>|--all [--yes]` (drop DB key → fall back). `--profile <name>` global override. Multi-profile keyed on `(profile,key)`; resolves `MOLD_PROFILE`→`settings.profile.active`→`default`. One-shot idempotent config.toml→DB migration on first boot. Web `PreferencesModal.vue`, `GenerationTemplatesPanel.vue` (saved param presets).
+**CLI** (`mold config`): `list [--json]` (tags rows `[db]`/`[file]`/`[env]`), `get <key> [--raw]`, `set <key> <val>` (routes by prefix — `expand.*`→DB, `models_dir`→TOML; `none` clears), `path`, `edit` ($EDITOR), `where <key>` (which surface owns it), `reset <key>|--all [--yes]` (drop DB key → fall back). `--profile <name>` global override. Multi-profile keyed on `(profile,key)`; resolves `MOLD_PROFILE`→`settings.profile.active`→`default`. One-shot idempotent config.toml→DB migration on first boot. Web `PreferencesModal.vue`, `GenerationTemplatesPanel.vue` (saved param presets); desktop `TemplatesPanel.vue` (parity — `localStorage` key `mold.desktop.generation.templates.v1`, base64 media stripped on save).
 
 **Metadata DB**: `MOLD_HOME/mold.db` (`MOLD_DB_PATH` override, `MOLD_DB_DISABLE=1`). Tables: `generations`, `settings`, `model_prefs`, `prompt_history`, `chain_jobs`. Forward-only migrations.
 

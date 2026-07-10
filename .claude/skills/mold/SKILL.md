@@ -666,6 +666,12 @@ mold server stop                     # Graceful shutdown (HTTP → SIGTERM → S
 mold ps                              # Check server status
 mold unload                          # Free GPU memory
 
+# LAN auto-discovery (mDNS/DNS-SD, `mdns` feature — on in release builds)
+mold server discover                 # Browse the network for advertised mold servers (table)
+mold server discover --json          # Machine-readable list
+mold server discover --probe         # Add a /health latency column
+mold serve --no-mdns                 # Don't advertise this server (also MOLD_MDNS=0)
+
 # Connect from another machine
 MOLD_HOST=http://gpu-host:7680 mold run "a cat"
 

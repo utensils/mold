@@ -112,6 +112,8 @@ resolver = "2"
 
 **Capabilities file** (`capabilities/default.json`): main window; permissions: `core:default`, `dialog:default`, `opener:default` (+ `opener:allow-reveal-item-in-dir`), `notification:default`, `clipboard-manager:allow-write-text`, `window-state:default`, `process:allow-restart`. No fs scope needed (Rust commands own file IO).
 
+**LAN discovery** (Settings → Engine "On your network"): the `discover_servers{timeout_ms?}` IPC command runs `mold_server::mdns::discover` (the `mdns` feature is enabled on the embedded `mold-ai-server` dep) inside `spawn_blocking`, then maps each hit to a camelCase `DiscoveredHost {name, url, host, port, version, authRequired, isThisMachine}`. `isThisMachine` is computed by intersecting the advertised addresses with the machine's own interface addresses (`if-addrs`), falling back to a hostname-prefix match — so the app's own embedded/local server is flagged rather than offered as a remote. The frontend wraps it as `ipc.discoverServers()` (browser fallback `[]`); pure sort/dedupe/label helpers live in `lib/discovery.ts`. Because the app is not sandboxed, no multicast entitlement is needed, but macOS 15 still gates the browse behind Local Network permission — `src-tauri/Info.plist` supplies `NSLocalNetworkUsageDescription` and `NSBonjourServices = ["_mold._tcp"]` (a browse silently returns nothing without the latter). `Entitlements.plist` is unchanged.
+
 **Icons:** new icon set generated via `cargo tauri icon` from a 1024px master (new artwork, not the web favicon).
 
 ## 5. Dev workflow & Nix devshell

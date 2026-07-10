@@ -132,15 +132,16 @@ Environment variables take precedence over config file values.
 
 ### Core
 
-| Variable             | Default                            | Description                         |
-| -------------------- | ---------------------------------- | ----------------------------------- |
-| `MOLD_HOME`          | `~/.mold`                          | Base directory for config and cache |
-| `MOLD_DEFAULT_MODEL` | `flux2-klein:q8`                   | Default model name                  |
-| `MOLD_HOST`          | `http://localhost:7680`            | Remote server URL                   |
-| `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`                | Model storage directory             |
-| `MOLD_PORT`          | `7680`                             | Server port                         |
-| `LAMBDA_API_KEY`     | unset                              | Overrides `lambda.api_key`          |
-| `MOLD_LOG`           | `info` (serve) / `warn` (cli, tui) | Log level                           |
+| Variable             | Default                            | Description                                                                                                     |
+| -------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `MOLD_HOME`          | `~/.mold`                          | Base directory for config and cache                                                                             |
+| `MOLD_DEFAULT_MODEL` | `flux2-klein:q8`                   | Default model name                                                                                              |
+| `MOLD_HOST`          | `http://localhost:7680`            | Remote server URL                                                                                               |
+| `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`                | Model storage directory                                                                                         |
+| `MOLD_PORT`          | `7680`                             | Server port                                                                                                     |
+| `MOLD_MDNS`          | `1` (on)                           | Set `0`/`false` to stop `mold serve` advertising itself on the LAN via mDNS (requires the `mdns` build feature) |
+| `LAMBDA_API_KEY`     | unset                              | Overrides `lambda.api_key`                                                                                      |
+| `MOLD_LOG`           | `info` (serve) / `warn` (cli, tui) | Log level                                                                                                       |
 
 ### Generation
 
