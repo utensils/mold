@@ -171,6 +171,7 @@ pub async fn run_start(
     bind: &str,
     models_dir: Option<String>,
     log_file: bool,
+    #[cfg(feature = "mdns")] no_mdns: bool,
 ) -> Result<()> {
     // Check for existing managed server
     if let Some(srv) = read_pid_file() {
@@ -190,6 +191,10 @@ pub async fn run_start(
     }
     if log_file {
         args.push("--log-file".to_string());
+    }
+    #[cfg(feature = "mdns")]
+    if no_mdns {
+        args.push("--no-mdns".to_string());
     }
 
     let mut cmd = std::process::Command::new(&exe);
@@ -369,6 +374,138 @@ pub async fn run_stop() -> Result<()> {
     Ok(())
 }
 
+// ── mDNS discovery ───────────────────────────────────────────────────────────
+
+/// One row of the discovery table: a discovered server plus optional probe
+/// latency in milliseconds (`None` when `--probe` is off or the probe failed).
+#[cfg(feature = "mdns")]
+pub struct DiscoverRow {
+    pub server: mold_server::mdns::DiscoveredServer,
+    pub latency_ms: Option<u64>,
+}
+
+/// Render the discovery results as an aligned table. Pure so it is unit-tested
+/// without touching the network. `show_latency` adds the LATENCY column.
+#[cfg(feature = "mdns")]
+pub fn render_table(rows: &[DiscoverRow], show_latency: bool) -> String {
+    use std::fmt::Write as _;
+
+    if rows.is_empty() {
+        return "No mold servers found on the local network.".to_string();
+    }
+
+    let mut headers = vec!["NAME", "URL", "VERSION", "AUTH", "GPU"];
+    if show_latency {
+        headers.push("LATENCY");
+    }
+
+    // Build each row's cells as owned strings.
+    let mut cells: Vec<Vec<String>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let s = &row.server;
+        let mut cols = vec![
+            s.name.clone(),
+            s.url.clone(),
+            s.version.clone().unwrap_or_else(|| "?".to_string()),
+            if s.auth_required { "key" } else { "-" }.to_string(),
+            s.txt.get("gpu").cloned().unwrap_or_else(|| "-".to_string()),
+        ];
+        if show_latency {
+            cols.push(match row.latency_ms {
+                Some(ms) => format!("{ms}ms"),
+                None => "-".to_string(),
+            });
+        }
+        cells.push(cols);
+    }
+
+    // Column widths = max of header and any cell.
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for cols in &cells {
+        for (i, c) in cols.iter().enumerate() {
+            widths[i] = widths[i].max(c.chars().count());
+        }
+    }
+
+    let mut out = String::new();
+    for (i, h) in headers.iter().enumerate() {
+        let pad = widths[i] - h.len();
+        let _ = write!(out, "{h}{}", " ".repeat(pad));
+        if i + 1 < headers.len() {
+            out.push_str("  ");
+        }
+    }
+    out.push('\n');
+    for cols in &cells {
+        for (i, c) in cols.iter().enumerate() {
+            let pad = widths[i] - c.chars().count();
+            let _ = write!(out, "{c}{}", " ".repeat(pad));
+            if i + 1 < cols.len() {
+                out.push_str("  ");
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `mold server discover` — browse the LAN for `_mold._tcp` advertisements.
+#[cfg(feature = "mdns")]
+pub async fn run_discover(timeout_secs: u64, json: bool, probe: bool) -> Result<()> {
+    let timeout = std::time::Duration::from_secs(timeout_secs.max(1));
+    // The mdns browse is blocking; keep the async runtime free while it runs.
+    let servers =
+        tokio::task::spawn_blocking(move || mold_server::mdns::discover(timeout)).await??;
+
+    // Optionally probe each server's /health for a rough latency signal.
+    let mut rows: Vec<DiscoverRow> = Vec::with_capacity(servers.len());
+    for server in servers {
+        let latency_ms = if probe {
+            probe_latency_ms(&server.url).await
+        } else {
+            None
+        };
+        rows.push(DiscoverRow { server, latency_ms });
+    }
+
+    if json {
+        let payload: Vec<&mold_server::mdns::DiscoveredServer> =
+            rows.iter().map(|r| &r.server).collect();
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    print!("{}", render_table(&rows, probe));
+
+    if let Some(first) = rows.first() {
+        println!();
+        println!("Connect: export MOLD_HOST={}", first.server.url);
+    }
+    Ok(())
+}
+
+/// Best-effort latency probe: time a GET to `/health`, falling back to
+/// `/api/status` (a 401 there still confirms a mold server). Caps at ~2s.
+#[cfg(feature = "mdns")]
+async fn probe_latency_ms(base_url: &str) -> Option<u64> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()?;
+    let start = std::time::Instant::now();
+    // /health is auth-exempt; if it 404s on an old build, /api/status confirms
+    // mold even behind auth (401 is a positive signal).
+    for path in ["/health", "/api/status"] {
+        if let Ok(resp) = client.get(format!("{base_url}{path}")).send().await {
+            let ok = resp.status().is_success() || resp.status().as_u16() == 401;
+            if ok {
+                return Some(start.elapsed().as_millis() as u64);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,5 +609,112 @@ mod tests {
     fn is_mold_serve_process_bogus_pid() {
         // A non-existent PID should not be a mold serve process
         assert!(!is_mold_serve_process(999_999_999));
+    }
+
+    #[cfg(feature = "mdns")]
+    mod discover {
+        use super::*;
+        use mold_server::mdns::DiscoveredServer;
+        use std::collections::BTreeMap;
+
+        fn sample(name: &str, url: &str, version: Option<&str>, auth: bool) -> DiscoveredServer {
+            let mut txt = BTreeMap::new();
+            txt.insert("gpu".to_string(), "1xRTX 4090".to_string());
+            DiscoveredServer {
+                name: name.to_string(),
+                host: "192.168.1.10".to_string(),
+                addresses: vec!["192.168.1.10".to_string()],
+                port: 7680,
+                url: url.to_string(),
+                version: version.map(String::from),
+                auth_required: auth,
+                txt,
+            }
+        }
+
+        #[test]
+        fn empty_result_message() {
+            assert_eq!(
+                render_table(&[], false),
+                "No mold servers found on the local network."
+            );
+        }
+
+        #[test]
+        fn table_has_header_and_aligned_columns() {
+            let rows = vec![
+                DiscoverRow {
+                    server: sample(
+                        "hal9000-7680",
+                        "http://192.168.1.10:7680",
+                        Some("0.14.0"),
+                        true,
+                    ),
+                    latency_ms: None,
+                },
+                DiscoverRow {
+                    server: sample(
+                        "box-7681",
+                        "http://192.168.1.11:7681",
+                        Some("0.14.0"),
+                        false,
+                    ),
+                    latency_ms: None,
+                },
+            ];
+            let out = render_table(&rows, false);
+            let lines: Vec<&str> = out.lines().collect();
+            assert!(lines[0].starts_with("NAME"));
+            assert!(lines[0].contains("AUTH"));
+            assert!(lines[0].contains("GPU"));
+            assert!(!lines[0].contains("LATENCY"));
+            // AUTH badge: "key" when required, "-" otherwise.
+            assert!(lines[1].contains("key"));
+            assert!(lines[2].contains(" - "));
+            // Columns line up: NAME column width matches the longest name.
+            assert!(lines[1].starts_with("hal9000-7680"));
+        }
+
+        #[test]
+        fn table_latency_column_when_probing() {
+            let rows = vec![DiscoverRow {
+                server: sample(
+                    "hal9000-7680",
+                    "http://192.168.1.10:7680",
+                    Some("0.14.0"),
+                    false,
+                ),
+                latency_ms: Some(12),
+            }];
+            let out = render_table(&rows, true);
+            assert!(out.lines().next().unwrap().contains("LATENCY"));
+            assert!(out.contains("12ms"));
+        }
+
+        #[test]
+        fn table_missing_version_renders_placeholder() {
+            let rows = vec![DiscoverRow {
+                server: sample("box-7680", "http://192.168.1.11:7680", None, false),
+                latency_ms: None,
+            }];
+            let out = render_table(&rows, false);
+            assert!(out.contains('?'));
+        }
+
+        #[test]
+        fn json_shape_is_array_of_servers() {
+            let servers = vec![sample(
+                "hal9000-7680",
+                "http://192.168.1.10:7680",
+                Some("0.14.0"),
+                true,
+            )];
+            let json = serde_json::to_string(&servers).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert!(parsed.is_array());
+            assert_eq!(parsed[0]["name"], "hal9000-7680");
+            assert_eq!(parsed[0]["auth_required"], true);
+            assert_eq!(parsed[0]["url"], "http://192.168.1.10:7680");
+        }
     }
 }

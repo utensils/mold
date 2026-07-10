@@ -151,14 +151,14 @@
           # Full shipping feature set used for release builds and feature coverage.
           releaseFeatures =
             if gpuFeature != "" then
-              "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics"
+              "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics,mdns"
             else
-              "preview,discord,expand,tui,webp,mp4,metrics";
+              "preview,discord,expand,tui,webp,mp4,metrics,mdns";
 
           # Shell completion generation only needs CLI shape, not GPU linkage.
           # Keep this CUDA-free so Linux sandbox builds can generate completion
           # scripts without loading the host-only NVIDIA driver library.
-          completionFeatures = "preview,discord,expand,tui,webp,mp4,metrics";
+          completionFeatures = "preview,discord,expand,tui,webp,mp4,metrics,mdns";
 
           # Devshell defaults compile the full shipping feature set so that
           # `mold tui`, `mold discord`, WebP/MP4 output, Prometheus metrics,
@@ -804,7 +804,7 @@
                   cargo check --workspace
                   cargo clippy --workspace --all-targets -- -D warnings
                   cargo test --workspace
-                  cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4
+                  cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
                 '';
               }
               {

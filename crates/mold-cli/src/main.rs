@@ -426,9 +426,34 @@ Examples:
         /// Enable rotated file logging to ~/.mold/logs/
         #[arg(long, default_value_t = true)]
         log_file: bool,
+        /// Disable mDNS/DNS-SD advertising on the local network
+        #[cfg(feature = "mdns")]
+        #[arg(long)]
+        no_mdns: bool,
     },
     /// Show status of the managed server
     Status,
+    /// Discover mold servers advertised on the local network via mDNS
+    #[cfg(feature = "mdns")]
+    #[command(after_long_help = "\
+Examples:
+  mold server discover                 Browse for ~3s and print a table
+  mold server discover --json          Machine-readable output
+  mold server discover --probe         Also measure /health latency
+
+Advertising is on by default when the server is built with the `mdns` feature;
+disable it per-server with `mold serve --no-mdns` or `MOLD_MDNS=0`.")]
+    Discover {
+        /// Seconds to browse the network before reporting
+        #[arg(long, default_value_t = 3)]
+        timeout_secs: u64,
+        /// Emit JSON instead of a table
+        #[arg(long)]
+        json: bool,
+        /// Probe each server's /health + /api/status and report latency
+        #[arg(long)]
+        probe: bool,
+    },
     /// Stop the managed server
     Stop,
 }
@@ -853,6 +878,11 @@ environment before starting mold serve.")]
         #[cfg(feature = "discord")]
         #[arg(long)]
         discord: bool,
+
+        /// Disable mDNS/DNS-SD advertising on the local network
+        #[cfg(feature = "mdns")]
+        #[arg(long)]
+        no_mdns: bool,
     },
 
     /// Start a stdio MCP server for LM Studio and other MCP hosts
@@ -870,13 +900,14 @@ and whose args are [\"mcp\", \"--host\", \"http://localhost:7680\"]. Run
         host: Option<String>,
     },
 
-    /// Manage a background mold server daemon (start, stop, status)
+    /// Manage a background mold server daemon (start, stop, status, discover)
     #[command(after_long_help = "\
 Examples:
   mold server start              Start background server on port 7680
   mold server start --port 8080  Custom port
   mold server status             Check if server is running
-  mold server stop               Stop the server")]
+  mold server stop               Stop the server
+  mold server discover           Find mold servers on the local network (mDNS)")]
     Server {
         #[command(subcommand)]
         action: ServerAction,
@@ -1645,12 +1676,21 @@ async fn run() -> anyhow::Result<()> {
             queue_size,
             #[cfg(feature = "discord")]
             discord,
+            #[cfg(feature = "mdns")]
+            no_mdns,
             ..
         } => {
             #[cfg(feature = "discord")]
             let discord_enabled = discord;
             #[cfg(not(feature = "discord"))]
             let discord_enabled = false;
+
+            // Opt out of advertising before the server reads MOLD_MDNS.
+            #[cfg(feature = "mdns")]
+            if no_mdns {
+                // SAFETY: set on the main thread before run_server spawns tasks.
+                unsafe { std::env::set_var("MOLD_MDNS", "0") };
+            }
 
             commands::serve::run(port, &bind, models_dir, gpus, queue_size, discord_enabled)
                 .await?;
@@ -1664,14 +1704,32 @@ async fn run() -> anyhow::Result<()> {
                 bind,
                 models_dir,
                 log_file,
+                #[cfg(feature = "mdns")]
+                no_mdns,
             } => {
-                commands::server::run_start(port, &bind, models_dir, log_file).await?;
+                commands::server::run_start(
+                    port,
+                    &bind,
+                    models_dir,
+                    log_file,
+                    #[cfg(feature = "mdns")]
+                    no_mdns,
+                )
+                .await?;
             }
             ServerAction::Status => {
                 commands::server::run_status().await?;
             }
             ServerAction::Stop => {
                 commands::server::run_stop().await?;
+            }
+            #[cfg(feature = "mdns")]
+            ServerAction::Discover {
+                timeout_secs,
+                json,
+                probe,
+            } => {
+                commands::server::run_discover(timeout_secs, json, probe).await?;
             }
         },
         Commands::Chain { action } => match action {

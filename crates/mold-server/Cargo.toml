@@ -27,6 +27,7 @@ metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]
 metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
+mdns = ["dep:mdns-sd"]
 nvml = ["dep:nvml-wrapper"]
 # Exposes test helpers (TestApp, etc.) for integration tests.
 test-support = []
@@ -67,6 +68,7 @@ subtle = "2"
 hostname = "0.4"
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", optional = true, default-features = false }
+mdns-sd = { version = "0.20", optional = true }
 rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path"] }
 mime_guess = "2"
 nvml-wrapper = { version = "0.10", optional = true }
