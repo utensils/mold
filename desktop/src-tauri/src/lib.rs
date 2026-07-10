@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod connection;
 pub mod menu;
+pub mod runpod;
 pub mod secrets;
 pub mod server;
 pub mod settings;
@@ -72,6 +73,12 @@ pub fn run() {
             commands::secret_get,
             commands::secret_set,
             commands::secret_clear,
+            runpod::runpod_overview,
+            runpod::runpod_create,
+            runpod::runpod_start,
+            runpod::runpod_stop,
+            runpod::runpod_delete,
+            runpod::runpod_logs,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

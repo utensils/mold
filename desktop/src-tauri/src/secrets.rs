@@ -10,7 +10,12 @@ use std::sync::Mutex;
 const SERVICE: &str = "com.utensils.mold";
 
 /// Secrets the webview may read/write. Anything else is rejected.
-pub const ALLOWED: &[&str] = &["hf-token", "civitai-token", "remote-api-key"];
+pub const ALLOWED: &[&str] = &[
+    "hf-token",
+    "civitai-token",
+    "remote-api-key",
+    "runpod-api-key",
+];
 
 pub struct SecretStore {
     /// Try the OS keychain first; on any error fall back to the file store.

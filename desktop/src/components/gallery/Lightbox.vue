@@ -7,6 +7,8 @@ import { ipc } from "../../lib/ipc";
 import { useComposerStore } from "../../stores/composer";
 import { useToastStore } from "../../stores/toasts";
 import { useUiStore } from "../../stores/ui";
+import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
+import { copyImageBytesToClipboard } from "../../lib/clipboard";
 import type { GalleryImage } from "../../lib/api/types";
 
 const props = defineProps<{
@@ -21,6 +23,7 @@ const router = useRouter();
 const composer = useComposerStore();
 const toasts = useToastStore();
 const ui = useUiStore();
+const contextMenu = useContextMenuStore();
 
 // ⇧⌘C copies the seed while the lightbox is open.
 watch(
@@ -83,6 +86,25 @@ async function copy(text: string) {
   toasts.push("Copied");
 }
 
+async function copyImage() {
+  try {
+    await copyImageBytesToClipboard(mediaPath(props.item.filename));
+    toasts.push("Image copied");
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+function imageMenu(): MenuEntry[] {
+  return [
+    { label: "Copy image", disabled: props.video, action: () => void copyImage() },
+    { label: "Copy prompt", action: () => void copy(meta.value.prompt) },
+    { label: "Copy seed", action: () => void copy(String(meta.value.seed)) },
+    { separator: true },
+    { label: "Reveal in Finder", disabled: !canReveal.value, action: () => void reveal() },
+  ];
+}
+
 // Reveal in Finder only exists when the engine writes to this disk.
 const canReveal = ref(false);
 void ipc.getOutputDir().then((dir) => (canReveal.value = dir !== null));
@@ -125,7 +147,9 @@ function onDelete() {
     </button>
     <div class="m-6 flex min-w-0 flex-1 flex-col">
       <div
+        data-test="lightbox-media"
         class="relative min-h-0 flex-1 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_18%,transparent)] bg-print-surface"
+        @contextmenu="contextMenu.open($event, imageMenu())"
       >
         <AuthedMedia
           :path="mediaPath(item.filename)"

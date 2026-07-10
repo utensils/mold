@@ -72,6 +72,12 @@ const staticCommands = computed<Command[]>(() => {
     { id: "nav-chains", title: "Go to Chains", run: () => go("/chains") },
     { id: "nav-models", title: "Go to Models", run: () => go("/models") },
     { id: "nav-history", title: "Go to History", run: () => go("/history") },
+    {
+      id: "nav-runpod",
+      title: "Manage RunPod GPUs",
+      keywords: ["cloud", "gpu", "instance"],
+      run: () => go("/runpod"),
+    },
     { id: "nav-settings", title: "Go to Settings", run: () => go("/settings") },
     {
       id: "act-new",

@@ -6,7 +6,7 @@ import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
-import { thumbnailPath } from "../lib/gallery/media";
+import { mediaPath, thumbnailPath } from "../lib/gallery/media";
 import { formatBytes } from "../lib/format";
 import { useConnectionStore } from "../stores/connection";
 import { useGalleryStore } from "../stores/gallery";
@@ -15,6 +15,7 @@ import { useComposerStore } from "../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
 import { ipc } from "../lib/ipc";
+import { copyImageBytesToClipboard } from "../lib/clipboard";
 import type { GalleryImage } from "../lib/api/types";
 
 const GAP = 8;
@@ -63,6 +64,11 @@ function tileMenu(item: GalleryImage): MenuEntry[] {
       action: () => {
         void navigator.clipboard.writeText(String(m.seed)).then(() => toasts.push("Copied"));
       },
+    },
+    {
+      label: "Copy image",
+      disabled: isVideo(item),
+      action: () => void copyImage(item),
     },
     { separator: true },
     {
@@ -135,6 +141,15 @@ const selectedItem = computed<GalleryImage | null>(
 
 const isVideo = (i: GalleryImage) =>
   i.format === "mp4" || i.filename.endsWith(".mp4") || !!i.metadata.video_frames;
+
+async function copyImage(item: GalleryImage) {
+  try {
+    await copyImageBytesToClipboard(mediaPath(item.filename));
+    toasts.push("Image copied");
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  }
+}
 
 function moveSelection(delta: number) {
   if (gallery.items.length === 0) return;

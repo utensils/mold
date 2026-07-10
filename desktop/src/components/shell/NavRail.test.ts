@@ -9,7 +9,7 @@ const stub = { template: "<div />" };
 function makeRouter(): Router {
   return createRouter({
     history: createMemoryHistory(),
-    routes: ["/generate", "/gallery", "/chains", "/models", "/history", "/settings"].map(
+    routes: ["/generate", "/gallery", "/chains", "/models", "/history", "/runpod", "/settings"].map(
       (path) => ({
         path,
         component: stub,

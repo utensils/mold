@@ -656,6 +656,12 @@ pub fn image_tag_for_gpu(display_name: &str) -> &'static str {
     let d = display_name.to_lowercase();
     if d.contains("5090") || d.contains("blackwell") || d.contains("b200") {
         "latest-sm120"
+    } else if d.contains("h100")
+        || d.contains("h200")
+        || d.contains("gh200")
+        || d.contains("hopper")
+    {
+        "latest-sm90"
     } else if d.contains("a100") || d.contains("3090") || d.contains("a40") || d.contains("ampere")
     {
         "latest-sm80"
@@ -689,6 +695,8 @@ mod tests {
         assert_eq!(image_tag_for_gpu("A100 80GB"), "latest-sm80");
         assert_eq!(image_tag_for_gpu("A100 PCIe"), "latest-sm80");
         assert_eq!(image_tag_for_gpu("RTX 3090"), "latest-sm80");
+        assert_eq!(image_tag_for_gpu("H100 SXM"), "latest-sm90");
+        assert_eq!(image_tag_for_gpu("H200 SXM"), "latest-sm90");
     }
 
     #[test]

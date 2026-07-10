@@ -179,6 +179,7 @@ Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector
 - **Video:** `<video>` against `/api/gallery/image/:filename` (Range/206 gives free scrubbing); fps/frames/audio badge in the edge code.
 - **Delete flow:** ⌫ or Delete button → inline confirm on the button itself ("Delete print?" → **Delete** / Esc), never a modal for one item; multi-delete uses a sheet listing count. Toast: **"Deleted 3 prints"** (no undo offered — the API is destructive; the confirm carries the weight).
 - **Drag-out:** any tile or the lightbox image drags to Finder/other apps as the real file (Tauri drag-out with the on-disk path; remote engines download to a temp file first, cursor shows a progress badge).
+- **Clipboard:** right-clicking a still image offers **Copy image** and writes the full-resolution bitmap to the macOS clipboard. The same action is available on the completed Generate canvas; videos keep metadata-copy actions but disable bitmap copy.
 
 ### 4.3 Models — the chemistry shelf
 
@@ -259,6 +260,10 @@ Flat, fast, keyboard-first list over `prompt_history` (recent/search). ↩ Use f
 - Remote API key lives in the **macOS Keychain**, never in config files.
 
 ---
+
+### 4.7 RunPod — the remote bench
+
+The RunPod workspace keeps provisioning in the app: Keychain-backed API setup, balance and active hourly spend, GPU stock, cloud/datacenter/storage choices, live pod status, logs, lifecycle controls, and **Use in Mold** to connect the engine to `https://<pod>-7680.proxy.runpod.net`. Poll status every ten seconds while the screen is open. Destructive delete uses an inline two-step confirmation. Keys entered in the app go to Keychain, while existing CLI environment/config credentials continue to work and are identified as externally managed.
 
 ## 5. States
 

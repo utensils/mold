@@ -1,0 +1,508 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { podProxyUrl, type RunPodCreateInput, type RunPodPod } from "../lib/runpod";
+import { ipc, inTauri } from "../lib/ipc";
+import { useConnectionStore } from "../stores/connection";
+import { useRunPodStore } from "../stores/runpod";
+import { useToastStore } from "../stores/toasts";
+
+const runpod = useRunPodStore();
+const connection = useConnectionStore();
+const toasts = useToastStore();
+const apiKey = ref("");
+const savingKey = ref(false);
+const expandedLogs = ref<string | null>(null);
+const logs = ref("");
+const loadingLogs = ref(false);
+const confirmingDelete = ref<string | null>(null);
+let poll: ReturnType<typeof setInterval> | null = null;
+
+const form = reactive<RunPodCreateInput>({
+  name: null,
+  gpuTypeId: "",
+  gpuDisplayName: "",
+  cloudType: "SECURE",
+  datacenterId: null,
+  containerDiskGb: 30,
+  volumeGb: 80,
+  networkVolumeId: null,
+  model: null,
+  includeHfToken: false,
+});
+
+const selectedGpu = computed(() =>
+  runpod.gpus.find((gpu) => (gpu.id ?? gpu.gpuId) === form.gpuTypeId),
+);
+
+const datacenters = computed(() => {
+  if (!selectedGpu.value) return runpod.overview.datacenters;
+  return runpod.overview.datacenters.filter((dc) =>
+    dc.gpuAvailability.some(
+      (gpu) => gpu.displayName === selectedGpu.value?.displayName && gpu.stockStatus !== "None",
+    ),
+  );
+});
+
+watch(
+  () => runpod.gpus,
+  (gpus) => {
+    if (form.gpuTypeId || gpus.length === 0) return;
+    const first = gpus.find((gpu) => gpu.available) ?? gpus[0]!;
+    form.gpuTypeId = first.id ?? first.gpuId ?? "";
+    form.gpuDisplayName = first.displayName;
+  },
+  { immediate: true },
+);
+
+watch(selectedGpu, (gpu) => {
+  if (gpu) form.gpuDisplayName = gpu.displayName;
+  if (form.datacenterId && !datacenters.value.some((dc) => dc.id === form.datacenterId)) {
+    form.datacenterId = null;
+  }
+});
+
+const money = (value: number) =>
+  new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(value);
+
+function uptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function connectKey() {
+  savingKey.value = true;
+  try {
+    await runpod.saveApiKey(apiKey.value);
+    apiKey.value = "";
+    toasts.push("RunPod connected");
+  } catch (error) {
+    toasts.push(errorMessage(error), "error");
+  } finally {
+    savingKey.value = false;
+  }
+}
+
+async function launch() {
+  try {
+    await runpod.create({ ...form });
+    toasts.push("GPU instance requested");
+  } catch (error) {
+    toasts.push(errorMessage(error), "error");
+  }
+}
+
+async function act(action: "start" | "stop" | "delete", pod: RunPodPod) {
+  if (action === "delete" && confirmingDelete.value !== pod.id) {
+    confirmingDelete.value = pod.id;
+    return;
+  }
+  confirmingDelete.value = null;
+  try {
+    await runpod.act(action, pod.id);
+    toasts.push(
+      `${action === "delete" ? "Deleted" : action === "start" ? "Started" : "Stopped"} ${pod.name ?? pod.id}`,
+    );
+  } catch (error) {
+    toasts.push(errorMessage(error), "error");
+  }
+}
+
+async function useInMold(pod: RunPodPod) {
+  try {
+    await connection.useRemote(podProxyUrl(pod.id), null);
+    toasts.push(`Connected to ${pod.name ?? pod.id}`);
+  } catch (error) {
+    toasts.push(`The instance is still starting: ${errorMessage(error)}`, "error");
+  }
+}
+
+async function showLogs(pod: RunPodPod) {
+  if (expandedLogs.value === pod.id) {
+    expandedLogs.value = null;
+    return;
+  }
+  expandedLogs.value = pod.id;
+  loadingLogs.value = true;
+  logs.value = "";
+  try {
+    logs.value = await ipc.runpodLogs(pod.id);
+  } catch (error) {
+    logs.value = errorMessage(error);
+  } finally {
+    loadingLogs.value = false;
+  }
+}
+
+async function openConsole() {
+  const url = "https://www.runpod.io/console/pods";
+  if (inTauri()) {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+  } else {
+    window.open(url, "_blank", "noopener");
+  }
+}
+
+onMounted(() => {
+  void runpod.load();
+  poll = setInterval(() => {
+    if (runpod.overview.configured && !runpod.mutating) void runpod.load();
+  }, 10_000);
+});
+onBeforeUnmount(() => {
+  if (poll) clearInterval(poll);
+});
+</script>
+
+<template>
+  <div class="flex h-full min-h-0 flex-col">
+    <header class="border-edge flex h-11 shrink-0 items-center gap-3 border-b px-4">
+      <span class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
+        RunPod
+      </span>
+      <span v-if="runpod.overview.account" class="text-caption text-ink-3">
+        {{ runpod.overview.account.email }}
+      </span>
+      <div class="ml-auto flex items-center gap-2">
+        <span v-if="runpod.overview.account" class="data-mono text-caption text-ink-2">
+          {{ money(runpod.overview.account.spendPerHour) }}/hr active ·
+          {{ money(runpod.overview.account.balance) }} balance
+        </span>
+        <button
+          type="button"
+          class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+          :disabled="runpod.loading"
+          @click="runpod.load()"
+        >
+          {{ runpod.loading ? "Refreshing…" : "Refresh" }}
+        </button>
+        <button
+          type="button"
+          class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+          @click="openConsole"
+        >
+          RunPod console ↗
+        </button>
+      </div>
+    </header>
+
+    <div
+      v-if="runpod.loaded && !runpod.overview.configured"
+      class="flex flex-1 items-center justify-center p-8"
+    >
+      <section class="border-edge w-full max-w-lg rounded-chrome border bg-bench p-6">
+        <h1 class="font-display text-display-md font-bold text-ink" style="font-stretch: 90%">
+          Add cloud GPUs to your bench
+        </h1>
+        <p class="mt-2 max-w-md text-body text-ink-2">
+          Paste a RunPod API key to launch, stop, and connect to Mold instances from this app. The
+          key is stored in the macOS Keychain.
+        </p>
+        <label class="mt-5 block text-caption font-medium text-ink" for="runpod-api-key">
+          RunPod API key
+        </label>
+        <div class="mt-1 flex gap-2">
+          <input
+            id="runpod-api-key"
+            v-model="apiKey"
+            data-selectable
+            type="password"
+            autocomplete="off"
+            placeholder="rpa_…"
+            class="border-edge data-mono h-9 min-w-0 flex-1 rounded-control border bg-bath px-2.5 text-ink placeholder:text-ink-3"
+            @keydown.enter="connectKey"
+          />
+          <button
+            type="button"
+            class="h-9 rounded-control bg-safelight px-4 text-body font-semibold text-[#141110] hover:brightness-105 disabled:opacity-50"
+            :disabled="savingKey || !apiKey.trim()"
+            @click="connectKey"
+          >
+            {{ savingKey ? "Checking…" : "Connect RunPod" }}
+          </button>
+        </div>
+        <p v-if="runpod.error" class="mt-2 text-caption text-stop">{{ runpod.error }}</p>
+      </section>
+    </div>
+
+    <div v-else-if="!runpod.loaded" class="flex flex-1 items-center justify-center">
+      <span class="edge-code">LOADING RUNPOD</span>
+    </div>
+
+    <div v-else class="grid min-h-0 flex-1 grid-cols-[340px_1fr] overflow-hidden">
+      <aside class="border-edge min-h-0 overflow-y-auto border-r bg-bench p-4">
+        <div class="flex items-center justify-between">
+          <h2 class="text-body-lg font-semibold text-ink">Launch an instance</h2>
+          <span class="edge-code">MOLD SERVE</span>
+        </div>
+
+        <label class="mt-4 block text-caption text-ink-3" for="runpod-gpu">GPU</label>
+        <select
+          id="runpod-gpu"
+          v-model="form.gpuTypeId"
+          class="border-edge mt-1 h-9 w-full rounded-control border bg-bath px-2 text-body text-ink"
+        >
+          <option
+            v-for="gpu in runpod.gpus"
+            :key="gpu.id ?? gpu.displayName"
+            :value="gpu.id ?? gpu.gpuId"
+            :disabled="!gpu.available"
+          >
+            {{ gpu.displayName }} · {{ gpu.memoryInGb }} GB · {{ gpu.stockStatus ?? "No stock" }}
+          </option>
+        </select>
+
+        <span class="mt-4 block text-caption text-ink-3">Cloud</span>
+        <div
+          class="border-edge mt-1 flex rounded-control border bg-bath p-0.5"
+          role="group"
+          aria-label="RunPod cloud type"
+        >
+          <button
+            v-for="cloud in ['SECURE', 'COMMUNITY'] as const"
+            :key="cloud"
+            type="button"
+            class="flex-1 rounded-control px-2 py-1.5 text-body transition-colors"
+            :class="
+              form.cloudType === cloud
+                ? 'bg-safelight font-semibold text-[#141110]'
+                : 'text-ink-2 hover:text-ink'
+            "
+            @click="form.cloudType = cloud"
+          >
+            {{ cloud === "SECURE" ? "Secure" : "Community" }}
+          </button>
+        </div>
+
+        <label class="mt-4 block text-caption text-ink-3" for="runpod-dc">Datacenter</label>
+        <select
+          id="runpod-dc"
+          v-model="form.datacenterId"
+          class="border-edge mt-1 h-9 w-full rounded-control border bg-bath px-2 text-body text-ink"
+        >
+          <option :value="null">Automatic (best stock)</option>
+          <option v-for="dc in datacenters" :key="dc.id" :value="dc.id">
+            {{ dc.name || dc.id }}{{ dc.location ? ` · ${dc.location}` : "" }}
+          </option>
+        </select>
+
+        <label class="mt-4 block text-caption text-ink-3" for="runpod-model"
+          >Default model (optional)</label
+        >
+        <input
+          id="runpod-model"
+          v-model="form.model"
+          data-selectable
+          type="text"
+          placeholder="flux-dev:q8"
+          class="border-edge data-mono mt-1 h-9 w-full rounded-control border bg-bath px-2 text-ink placeholder:text-ink-3"
+        />
+
+        <div class="mt-4 grid grid-cols-2 gap-2">
+          <label class="text-caption text-ink-3">
+            Container disk
+            <span
+              class="border-edge mt-1 flex h-9 items-center rounded-control border bg-bath px-2"
+            >
+              <input
+                v-model.number="form.containerDiskGb"
+                data-selectable
+                type="number"
+                min="10"
+                max="1000"
+                class="data-mono min-w-0 flex-1 bg-transparent text-ink outline-none"
+              />
+              <span>GB</span>
+            </span>
+          </label>
+          <label class="text-caption text-ink-3">
+            Workspace
+            <span
+              class="border-edge mt-1 flex h-9 items-center rounded-control border bg-bath px-2"
+            >
+              <input
+                v-model.number="form.volumeGb"
+                data-selectable
+                type="number"
+                min="0"
+                max="10000"
+                class="data-mono min-w-0 flex-1 bg-transparent text-ink outline-none"
+              />
+              <span>GB</span>
+            </span>
+          </label>
+        </div>
+
+        <label
+          v-if="runpod.overview.networkVolumes.length"
+          class="mt-4 block text-caption text-ink-3"
+          for="runpod-volume"
+          >Network volume</label
+        >
+        <select
+          v-if="runpod.overview.networkVolumes.length"
+          id="runpod-volume"
+          v-model="form.networkVolumeId"
+          class="border-edge mt-1 h-9 w-full rounded-control border bg-bath px-2 text-body text-ink"
+        >
+          <option :value="null">None</option>
+          <option
+            v-for="volume in runpod.overview.networkVolumes"
+            :key="volume.id"
+            :value="volume.id"
+          >
+            {{ volume.name }} · {{ volume.size }} GB · {{ volume.dataCenterId }}
+          </option>
+        </select>
+
+        <label class="mt-4 flex items-start gap-2 text-caption text-ink-2">
+          <input v-model="form.includeHfToken" type="checkbox" class="mt-0.5 accent-safelight" />
+          Pass the saved Hugging Face token for gated model downloads
+        </label>
+
+        <button
+          type="button"
+          class="mt-5 h-9 w-full rounded-control bg-safelight text-body font-semibold text-[#141110] hover:brightness-105 active:translate-y-px disabled:opacity-50"
+          :disabled="!form.gpuTypeId || runpod.mutating === 'create'"
+          @click="launch"
+        >
+          {{ runpod.mutating === "create" ? "Requesting GPU…" : "Launch GPU instance" }}
+        </button>
+        <p class="mt-2 text-caption text-ink-3">
+          Uses the Mold CUDA image matched to the selected GPU and exposes the server on port 7680.
+        </p>
+        <button
+          v-if="runpod.overview.credentialSource === 'keychain'"
+          type="button"
+          class="mt-5 text-caption text-ink-3 hover:text-stop"
+          @click="runpod.disconnect()"
+        >
+          Remove desktop RunPod key
+        </button>
+        <p v-else class="mt-5 text-caption text-ink-3">
+          Credential provided by
+          {{
+            runpod.overview.credentialSource === "environment"
+              ? "RUNPOD_API_KEY"
+              : "runpod.api_key"
+          }}.
+        </p>
+      </aside>
+
+      <main class="min-h-0 overflow-y-auto p-4">
+        <div class="flex items-baseline justify-between">
+          <div>
+            <h2 class="text-body-lg font-semibold text-ink">Your instances</h2>
+            <p class="text-caption text-ink-3">Status refreshes every 10 seconds.</p>
+          </div>
+          <span class="data-mono text-caption text-ink-2"
+            >{{ runpod.runningPods.length }} running · {{ runpod.overview.pods.length }} total</span
+          >
+        </div>
+
+        <div
+          v-if="runpod.overview.pods.length === 0"
+          class="border-edge mt-4 rounded-chrome border p-8 text-center"
+        >
+          <p class="text-body font-medium text-ink">No RunPod instances</p>
+          <p class="mt-1 text-caption text-ink-3">
+            Choose a GPU and launch your first Mold server.
+          </p>
+        </div>
+
+        <div v-else class="border-edge mt-4 overflow-hidden rounded-chrome border">
+          <article
+            v-for="(pod, index) in runpod.overview.pods"
+            :key="pod.id"
+            :class="index ? 'border-edge border-t' : ''"
+            class="bg-bath p-3"
+          >
+            <div class="flex items-center gap-3">
+              <span
+                class="h-2 w-2 rounded-full"
+                :class="pod.desiredStatus === 'RUNNING' ? 'bg-halide' : 'bg-ink-3'"
+                aria-hidden="true"
+              />
+              <div class="min-w-0 flex-1">
+                <div class="flex items-baseline gap-2">
+                  <span class="truncate text-body font-semibold text-ink">{{
+                    pod.name ?? pod.id
+                  }}</span>
+                  <span
+                    class="edge-code"
+                    :class="pod.desiredStatus === 'RUNNING' ? 'text-halide' : ''"
+                    >{{ pod.desiredStatus || "UNKNOWN" }}</span
+                  >
+                </div>
+                <p class="data-mono truncate text-caption text-ink-3">
+                  {{ pod.machine?.gpuDisplayName ?? "GPU pending" }} ·
+                  {{ pod.machine?.location ?? "Placement pending" }} ·
+                  {{ money(pod.costPerHr) }}/hr<span v-if="pod.uptimeSeconds">
+                    · {{ uptime(pod.uptimeSeconds) }}</span
+                  >
+                </p>
+              </div>
+              <button
+                v-if="pod.desiredStatus === 'RUNNING'"
+                type="button"
+                class="h-7 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] hover:brightness-105"
+                @click="useInMold(pod)"
+              >
+                Use in Mold
+              </button>
+              <button
+                v-if="pod.desiredStatus === 'RUNNING'"
+                type="button"
+                class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+                :disabled="runpod.mutating === `stop:${pod.id}`"
+                @click="act('stop', pod)"
+              >
+                Stop
+              </button>
+              <button
+                v-else
+                type="button"
+                class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+                :disabled="runpod.mutating === `start:${pod.id}`"
+                @click="act('start', pod)"
+              >
+                Start
+              </button>
+              <button
+                type="button"
+                class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+                @click="showLogs(pod)"
+              >
+                {{ expandedLogs === pod.id ? "Hide logs" : "Logs" }}
+              </button>
+              <button
+                type="button"
+                class="h-7 rounded-control px-2 text-body"
+                :class="
+                  confirmingDelete === pod.id
+                    ? 'bg-stop font-semibold text-[#141110]'
+                    : 'text-ink-3 hover:text-stop'
+                "
+                @blur="confirmingDelete = null"
+                @click="act('delete', pod)"
+              >
+                {{ confirmingDelete === pod.id ? "Delete instance?" : "Delete" }}
+              </button>
+            </div>
+            <pre
+              v-if="expandedLogs === pod.id"
+              data-selectable
+              class="border-edge data-mono mt-3 max-h-64 overflow-auto rounded-control border bg-bench p-3 text-caption text-ink-2"
+              >{{ loadingLogs ? "Loading logs…" : logs || "No logs returned." }}</pre>
+          </article>
+        </div>
+      </main>
+    </div>
+  </div>
+</template>

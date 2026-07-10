@@ -15,6 +15,7 @@ import { useGalleryStore } from "../stores/gallery";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
+import { copyBase64ImageToClipboard } from "../lib/clipboard";
 import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
@@ -134,6 +135,19 @@ function canvasMenu(): MenuEntry[] {
       label: "Copy seed",
       disabled: !j.result,
       action: () => void navigator.clipboard.writeText(String(j.result?.seed_used ?? "")),
+    },
+    {
+      label: "Copy image",
+      disabled: !j.result || !!j.result.video_frames,
+      action: () => {
+        if (!j.result) return;
+        const mime = j.result.format === "jpeg" ? "image/jpeg" : `image/${j.result.format}`;
+        void copyBase64ImageToClipboard(j.result.image, mime)
+          .then(() => toasts.push("Image copied"))
+          .catch((error) =>
+            toasts.push(error instanceof Error ? error.message : String(error), "error"),
+          );
+      },
     },
     { separator: true },
     {

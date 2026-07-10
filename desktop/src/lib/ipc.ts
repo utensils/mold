@@ -1,3 +1,5 @@
+import type { RunPodCreateInput, RunPodOverview, RunPodPod } from "./runpod";
+
 /**
  * Typed wrappers around Tauri IPC. In a plain browser (`bun run dev` /
  * desktop-ui against a running `mold serve`) there is no Tauri runtime, so
@@ -126,6 +128,41 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("open_logs_dir");
   },
+  runpodOverview(): Promise<RunPodOverview> {
+    if (!inTauri()) {
+      return Promise.resolve({
+        configured: false,
+        credentialSource: null,
+        account: null,
+        pods: [],
+        gpus: [],
+        datacenters: [],
+        networkVolumes: [],
+      });
+    }
+    return invoke<RunPodOverview>("runpod_overview");
+  },
+  runpodCreate(input: RunPodCreateInput): Promise<RunPodPod> {
+    if (!inTauri())
+      return Promise.reject(new Error("RunPod provisioning requires the desktop app."));
+    return invoke<RunPodPod>("runpod_create", { input });
+  },
+  runpodStart(id: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("runpod_start", { id });
+  },
+  runpodStop(id: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("runpod_stop", { id });
+  },
+  runpodDelete(id: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("runpod_delete", { id });
+  },
+  runpodLogs(id: string): Promise<string> {
+    if (!inTauri()) return Promise.resolve("");
+    return invoke<string>("runpod_logs", { id });
+  },
   /** Keychain-backed secrets (file fallback in dev). Names are allowlisted. */
   secretGet(name: SecretName): Promise<string | null> {
     if (!inTauri()) return Promise.resolve(null);
@@ -148,4 +185,4 @@ export const ipc = {
   },
 };
 
-export type SecretName = "hf-token" | "civitai-token" | "remote-api-key";
+export type SecretName = "hf-token" | "civitai-token" | "remote-api-key" | "runpod-api-key";
