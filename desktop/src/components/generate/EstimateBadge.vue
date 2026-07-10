@@ -55,6 +55,8 @@ onUnmounted(() => {
   <p
     v-if="visible"
     class="edge-code"
+    role="status"
+    aria-live="polite"
     :class="{
       'text-halide': fit === 'fits' || fit === 'unknown',
       'text-safelight': fit === 'tight',

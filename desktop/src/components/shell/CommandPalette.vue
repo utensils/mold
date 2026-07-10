@@ -32,6 +32,13 @@ const selected = ref(0);
 const inputEl = ref<HTMLInputElement | null>(null);
 const history = ref<HistoryEntry[]>([]);
 let debounce: ReturnType<typeof setTimeout> | null = null;
+// The element focused before the palette opened, so we can hand focus back on
+// close (keyboard users don't get dumped at the top of the document).
+let restoreFocusEl: HTMLElement | null = null;
+
+const activeOptionId = computed(() =>
+  results.value.length > 0 ? `cmd-palette-option-${selected.value}` : undefined,
+);
 
 function close() {
   ui.closePalette();
@@ -229,6 +236,7 @@ watch(
   () => ui.paletteOpen,
   (open) => {
     if (open) {
+      restoreFocusEl = document.activeElement as HTMLElement | null;
       query.value = "";
       selected.value = 0;
       history.value = [];
@@ -236,6 +244,10 @@ watch(
         .then((entries) => (history.value = entries))
         .catch(() => {});
       void nextTick(() => inputEl.value?.focus());
+    } else {
+      // Return focus to whatever launched the palette.
+      restoreFocusEl?.focus?.();
+      restoreFocusEl = null;
     }
   },
 );
@@ -273,6 +285,9 @@ function onKeydown(e: KeyboardEvent) {
   >
     <div
       class="border-edge h-fit w-[36rem] max-w-[90vw] overflow-hidden rounded-chrome border bg-bench shadow-raised"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Command palette"
     >
       <input
         ref="inputEl"
@@ -281,14 +296,23 @@ function onKeydown(e: KeyboardEvent) {
         type="text"
         placeholder="Search or run a command…"
         class="border-edge w-full border-b bg-transparent px-4 py-3 text-body-lg text-ink outline-none placeholder:text-ink-3"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded="true"
+        aria-controls="cmd-palette-listbox"
+        :aria-activedescendant="activeOptionId"
+        aria-label="Search or run a command"
         @keydown="onKeydown"
       />
-      <div class="max-h-80 overflow-y-auto py-1">
+      <div id="cmd-palette-listbox" class="max-h-80 overflow-y-auto py-1" role="listbox">
         <p v-if="results.length === 0" class="px-4 py-3 text-caption text-ink-3">No matches.</p>
         <button
           v-for="(cmd, i) in results"
+          :id="`cmd-palette-option-${i}`"
           :key="cmd.id"
           type="button"
+          role="option"
+          :aria-selected="i === selected"
           class="flex w-full items-center gap-3 px-4 py-2 text-left"
           :class="i === selected ? 'bg-bath' : 'hover:bg-bath'"
           @mouseenter="selected = i"

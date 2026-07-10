@@ -143,7 +143,7 @@ onMounted(async () => {
       <div
         v-for="entry in entries"
         :key="entry.id"
-        class="border-edge flex flex-col gap-1.5 rounded-chrome border bg-bath p-3"
+        class="border-edge flex flex-col gap-1.5 rounded-chrome border bg-bath p-3 transition-colors duration-100 hover:bg-bench"
       >
         <div class="flex items-start justify-between gap-2">
           <span class="truncate text-body text-ink" :title="entry.name">{{ entry.name }}</span>
@@ -169,7 +169,7 @@ onMounted(async () => {
           <button
             v-else
             type="button"
-            class="border-edge h-7 rounded-control border px-2.5 text-caption text-safelight transition-colors duration-100 hover:border-safelight disabled:opacity-50"
+            class="border-edge h-7 rounded-control border px-2.5 text-caption text-safelight transition-colors duration-100 hover:border-safelight active:translate-y-px disabled:opacity-50"
             :disabled="pulling.has(entry.id)"
             @click="pull(entry)"
           >

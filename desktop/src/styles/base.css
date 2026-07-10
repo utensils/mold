@@ -103,6 +103,42 @@ textarea,
   letter-spacing: 0.04em;
 }
 
+/* Loading shimmer for developing thumbnails — a slow safelight sweep over the
+   bench tone, evoking grain forming under the enlarger. The universal
+   reduced-motion block below freezes the sweep to a flat bench fill. */
+.grain-shimmer {
+  background-color: var(--bench);
+  background-image: linear-gradient(
+    100deg,
+    transparent 30%,
+    color-mix(in srgb, var(--safelight) 9%, transparent) 50%,
+    transparent 70%
+  );
+  background-size: 220% 100%;
+  animation: grain-shimmer 1.6s ease-in-out infinite;
+}
+@keyframes grain-shimmer {
+  from {
+    background-position: 220% 0;
+  }
+  to {
+    background-position: -220% 0;
+  }
+}
+
+/* Visually hidden, still read by assistive tech (e.g. connection-dot labels). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -24,8 +24,9 @@ function stepFade(delta: number) {
   <div class="flex flex-col items-center justify-center gap-1 px-1">
     <button
       type="button"
-      class="flex h-16 w-8 items-center justify-center rounded-control hover:bg-bench"
+      class="flex h-16 w-8 items-center justify-center rounded-control transition-colors duration-100 hover:bg-bench active:translate-y-px"
       :title="`Transition: ${stage.transition} — click to cycle`"
+      :aria-label="`Transition: ${stage.transition}. Click to cycle.`"
       @click="cycle"
     >
       <!-- smooth: unbroken strip · cut: hard diagonal · fade: gradient wedge -->
@@ -49,9 +50,23 @@ function stepFade(delta: number) {
     </button>
     <span class="edge-code">{{ label }}</span>
     <div v-if="stage.transition === 'fade'" class="flex items-center gap-0.5">
-      <button type="button" class="text-ink-3 hover:text-ink" @click="stepFade(-1)">◂</button>
+      <button
+        type="button"
+        class="text-ink-3 hover:text-ink active:translate-y-px"
+        aria-label="Fewer fade frames"
+        @click="stepFade(-1)"
+      >
+        ◂
+      </button>
       <span class="data-mono text-caption text-ink">{{ stage.fadeFrames }}</span>
-      <button type="button" class="text-ink-3 hover:text-ink" @click="stepFade(1)">▸</button>
+      <button
+        type="button"
+        class="text-ink-3 hover:text-ink active:translate-y-px"
+        aria-label="More fade frames"
+        @click="stepFade(1)"
+      >
+        ▸
+      </button>
     </div>
   </div>
 </template>

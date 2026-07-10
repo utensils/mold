@@ -43,6 +43,7 @@ defineEmits<{ (e: "reset"): void }>();
         type="button"
         class="h-7 rounded-control px-1.5 text-caption text-ink-3 hover:text-stop"
         title="Reset to default"
+        aria-label="Reset to default"
         @click="$emit('reset')"
       >
         ↺

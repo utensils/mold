@@ -104,13 +104,19 @@ onUnmounted(stopTelemetry);
 </script>
 
 <template>
-  <footer class="border-edge flex items-center gap-4 border-t bg-bath px-3">
+  <footer
+    class="border-edge flex items-center gap-4 border-t bg-bath px-3"
+    role="complementary"
+    aria-label="Engine and resource status"
+  >
     <span
       class="data-mono"
       :class="conn.status === 'error' ? 'text-stop' : conn.ready ? 'text-ink-2' : 'text-ink-3'"
       :title="conn.error ?? conn.baseUrl ?? undefined"
+      role="status"
+      aria-live="polite"
     >
-      {{ engineChip }}
+      <span class="sr-only">Engine status: </span>{{ engineChip }}
     </span>
 
     <template v-if="gpu">

@@ -55,7 +55,7 @@ async function restartEngine() {
         <span class="text-body text-ink">Knobs changed — restart the engine to apply.</span>
         <button
           type="button"
-          class="ml-auto h-7 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] disabled:opacity-50"
+          class="ml-auto h-7 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
           :disabled="restarting"
           @click="restartEngine"
         >
@@ -76,12 +76,14 @@ async function restartEngine() {
           :min="knob.min"
           :max="knob.max"
           placeholder="200"
+          :aria-label="knob.label"
           @commit="(v) => setKnob(knob.key, v === null ? '' : String(v))"
         />
         <SelectControl
           v-else
           :model-value="valueOf(knob.key)"
           :options="knob.options ?? []"
+          :aria-label="knob.label"
           @commit="(v) => setKnob(knob.key, v)"
         />
       </SettingRow>

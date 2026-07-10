@@ -94,6 +94,7 @@ defineExpose({ expand });
       type="button"
       class="h-7 rounded-control px-1 text-body text-halide hover:text-ink"
       title="Restore original prompt"
+      aria-label="Restore original prompt"
       @click="undo"
     >
       ↩

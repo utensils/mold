@@ -7,6 +7,8 @@ const props = defineProps<{
   max: number;
   step: number;
   disabled?: boolean | undefined;
+  /** Accessible name — the slider has no visible <label> associated with it. */
+  ariaLabel?: string | undefined;
 }>();
 const emit = defineEmits<{ (e: "commit", value: number): void }>();
 
@@ -27,6 +29,7 @@ watch(
       :max="max"
       :step="step"
       :disabled="disabled"
+      :aria-label="ariaLabel"
       class="w-36 accent-[var(--safelight)] disabled:opacity-40"
       @input="live = Number(($event.target as HTMLInputElement).value)"
       @change="emit('commit', live)"

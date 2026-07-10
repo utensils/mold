@@ -6,6 +6,8 @@ const props = defineProps<{
   step?: number | undefined;
   placeholder?: string | undefined;
   disabled?: boolean | undefined;
+  /** Accessible name — the control has no visible <label> associated with it. */
+  ariaLabel?: string | undefined;
 }>();
 const emit = defineEmits<{ (e: "commit", value: number | null): void }>();
 
@@ -30,6 +32,7 @@ function commit(e: Event) {
     :step="step"
     :placeholder="placeholder"
     :disabled="disabled"
+    :aria-label="ariaLabel"
     data-selectable
     class="border-edge data-mono h-7 w-28 rounded-control border bg-bath px-2 text-ink placeholder:text-ink-3 disabled:opacity-40"
     @change="commit"

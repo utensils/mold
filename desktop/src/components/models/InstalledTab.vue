@@ -132,12 +132,16 @@ function componentList(name: string): ModelComponentStatus[] {
         </div>
 
         <div v-for="m in list" :key="m.name" class="mb-1.5">
-          <div class="flex items-center gap-2">
+          <div
+            class="-mx-1 flex items-center gap-2 rounded-control px-1 transition-colors duration-100 hover:bg-bath"
+          >
             <!-- residency -->
             <span
               class="h-1.5 w-1.5 shrink-0 rounded-full"
               :class="m.is_loaded ? 'bg-safelight' : 'bg-transparent'"
+              role="img"
               :title="m.is_loaded ? 'On GPU' : 'Cold'"
+              :aria-label="m.is_loaded ? 'On GPU' : 'Cold'"
             />
             <span class="truncate text-body text-ink" :title="m.name">{{ m.name }}</span>
             <span
@@ -149,7 +153,7 @@ function componentList(name: string): ModelComponentStatus[] {
 
             <!-- disk usage bar -->
             <div class="ml-auto flex w-40 items-center gap-2">
-              <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-bath">
+              <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-bath" aria-hidden="true">
                 <div class="h-full bg-halide" :style="{ width: barWidth(m) }" />
               </div>
               <span class="data-mono w-16 shrink-0 text-right text-ink-3">
@@ -162,7 +166,7 @@ function componentList(name: string): ModelComponentStatus[] {
               <button
                 v-if="!m.is_loaded"
                 type="button"
-                class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink disabled:opacity-40"
+                class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink active:translate-y-px disabled:opacity-40"
                 :disabled="busy === m.name"
                 @click="load(m)"
               >
@@ -171,7 +175,7 @@ function componentList(name: string): ModelComponentStatus[] {
               <button
                 v-else
                 type="button"
-                class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink disabled:opacity-40"
+                class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink active:translate-y-px disabled:opacity-40"
                 :disabled="busy === m.name"
                 @click="unload(m)"
               >
@@ -179,14 +183,14 @@ function componentList(name: string): ModelComponentStatus[] {
               </button>
               <button
                 type="button"
-                class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink"
+                class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink active:translate-y-px"
                 @click="toggleInfo(m)"
               >
                 Info
               </button>
               <button
                 type="button"
-                class="h-7 rounded-control border px-2 text-caption transition-colors duration-100"
+                class="h-7 rounded-control border px-2 text-caption transition-colors duration-100 active:translate-y-px"
                 :class="
                   confirmingRemove === m.name
                     ? 'border-stop bg-stop font-semibold text-[#141110]'
@@ -216,7 +220,9 @@ function componentList(name: string): ModelComponentStatus[] {
               <span
                 class="h-1.5 w-1.5 shrink-0 rounded-full"
                 :class="c.present ? 'bg-halide' : 'bg-stop'"
+                role="img"
                 :title="c.present ? 'Present' : 'Missing'"
+                :aria-label="c.present ? 'Present' : 'Missing'"
               />
               <span class="text-caption text-ink-2">{{ c.name }}</span>
               <span class="edge-code ml-auto">{{ c.kind }}</span>
