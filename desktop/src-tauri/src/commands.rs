@@ -295,6 +295,79 @@ pub async fn test_remote_host(url: String, api_key: Option<String>) -> Result<Ho
     Ok(probe_host(&url, api_key.as_deref()).await)
 }
 
+/// A mold server discovered on the LAN via mDNS, shaped for the frontend.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredHost {
+    pub name: String,
+    pub url: String,
+    pub host: String,
+    pub port: u16,
+    pub version: Option<String>,
+    pub auth_required: bool,
+    /// True when the advertisement resolves to one of this machine's own
+    /// interface addresses (or its hostname) — i.e. our embedded/local server.
+    pub is_this_machine: bool,
+}
+
+/// Whether any of a discovered server's addresses (or hostname) belong to this
+/// machine. Pure over its inputs so it is unit-testable without a live network.
+fn host_is_this_machine(
+    addresses: &[String],
+    server_name: &str,
+    local_addrs: &[std::net::IpAddr],
+    local_hostname: &str,
+) -> bool {
+    let addr_match = addresses.iter().any(|a| {
+        a.parse::<std::net::IpAddr>()
+            .map(|ip| local_addrs.contains(&ip))
+            .unwrap_or(false)
+    });
+    if addr_match {
+        return true;
+    }
+    // Fall back to a hostname prefix match (instance names are `<host>-<port>`).
+    let short = local_hostname.split('.').next().unwrap_or(local_hostname);
+    !short.is_empty() && server_name.starts_with(short)
+}
+
+/// Browse the local network for advertised mold servers.
+#[tauri::command]
+pub async fn discover_servers(timeout_ms: Option<u64>) -> Result<Vec<DiscoveredHost>, String> {
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(3000).clamp(500, 10_000));
+
+    let servers =
+        tauri::async_runtime::spawn_blocking(move || mold_server::mdns::discover(timeout))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?;
+
+    let local_addrs: Vec<std::net::IpAddr> = if_addrs::get_if_addrs()
+        .map(|ifs| ifs.into_iter().map(|i| i.ip()).collect())
+        .unwrap_or_default();
+    let local_hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_default();
+
+    Ok(servers
+        .into_iter()
+        .map(|s| {
+            let is_this_machine =
+                host_is_this_machine(&s.addresses, &s.name, &local_addrs, &local_hostname);
+            DiscoveredHost {
+                name: s.name,
+                url: s.url,
+                host: s.host,
+                port: s.port,
+                version: s.version,
+                auth_required: s.auth_required,
+                is_this_machine,
+            }
+        })
+        .collect())
+}
+
 /// Switch to a remote host (validates first) and persist it in app settings.
 #[tauri::command]
 pub async fn set_remote_host(
@@ -398,5 +471,58 @@ mod tests {
         secrets.clear("hf-token").unwrap();
         apply_engine_environment(&env, &secrets);
         assert!(std::env::var("HF_TOKEN").is_err());
+    }
+
+    #[test]
+    fn discovered_host_serializes_camel_case() {
+        let host = DiscoveredHost {
+            name: "hal9000-7680".into(),
+            url: "http://192.168.1.10:7680".into(),
+            host: "192.168.1.10".into(),
+            port: 7680,
+            version: Some("0.14.0".into()),
+            auth_required: true,
+            is_this_machine: false,
+        };
+        let json = serde_json::to_value(&host).unwrap();
+        assert_eq!(json["authRequired"], true);
+        assert_eq!(json["isThisMachine"], false);
+        assert_eq!(json["url"], "http://192.168.1.10:7680");
+        // Snake-case keys must not leak through.
+        assert!(json.get("auth_required").is_none());
+        assert!(json.get("is_this_machine").is_none());
+    }
+
+    #[test]
+    fn host_is_this_machine_matches_local_address() {
+        let local: Vec<std::net::IpAddr> = vec!["192.168.1.10".parse().unwrap()];
+        assert!(host_is_this_machine(
+            &["192.168.1.10".into()],
+            "somehost-7680",
+            &local,
+            "unrelated"
+        ));
+        assert!(!host_is_this_machine(
+            &["192.168.1.99".into()],
+            "somehost-7680",
+            &local,
+            "unrelated"
+        ));
+    }
+
+    #[test]
+    fn host_is_this_machine_matches_hostname_prefix() {
+        assert!(host_is_this_machine(
+            &["10.0.0.5".into()],
+            "hal9000-7680",
+            &[],
+            "hal9000.local"
+        ));
+        assert!(!host_is_this_machine(
+            &["10.0.0.5".into()],
+            "box-7680",
+            &[],
+            "hal9000.local"
+        ));
     }
 }

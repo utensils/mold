@@ -31,6 +31,17 @@ export interface HostTest {
   error: string | null;
 }
 
+/** A mold server discovered on the local network via mDNS. */
+export interface DiscoveredHost {
+  name: string;
+  url: string;
+  host: string;
+  port: number;
+  version: string | null;
+  authRequired: boolean;
+  isThisMachine: boolean;
+}
+
 export const inTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -78,6 +89,11 @@ export const ipc = {
   testRemoteHost(url: string, apiKey: string | null): Promise<HostTest> {
     if (!inTauri()) return Promise.resolve({ ok: true, version: null, error: null });
     return invoke<HostTest>("test_remote_host", { url, apiKey });
+  },
+  /** Browse the LAN for advertised mold servers; empty in a plain browser. */
+  discoverServers(timeoutMs?: number): Promise<DiscoveredHost[]> {
+    if (!inTauri()) return Promise.resolve([]);
+    return invoke<DiscoveredHost[]>("discover_servers", { timeoutMs });
   },
   appSettingsGet(): Promise<AppSettings> {
     if (!inTauri()) return Promise.resolve(browserFallbackSettings());
