@@ -11,6 +11,7 @@ vi.mock("../lib/ipc", () => ({
       lastRoute: "/gallery",
       engineEnv: { MOLD_VAE_TILED: "force" },
       theme: "dark",
+      themeFamily: "mold",
       notifications: false,
       dockBadge: true,
       restoreLastRoute: true,
@@ -20,13 +21,22 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import { ipc } from "../lib/ipc";
-import { resolveThemeAttribute, useAppPrefsStore } from "./appPrefs";
+import { resolveThemeAttributes, useAppPrefsStore } from "./appPrefs";
 
-describe("resolveThemeAttribute", () => {
-  it("maps explicit themes and lets system remove the attribute", () => {
-    expect(resolveThemeAttribute("dark")).toBe("dark");
-    expect(resolveThemeAttribute("light")).toBe("light");
-    expect(resolveThemeAttribute("system")).toBeNull();
+describe("resolveThemeAttributes", () => {
+  it("maps appearance and family onto independent root attributes", () => {
+    expect(resolveThemeAttributes("dark", "mold")).toEqual({
+      appearance: "dark",
+      family: "mold",
+    });
+    expect(resolveThemeAttributes("light", "safelight")).toEqual({
+      appearance: "light",
+      family: "safelight",
+    });
+    expect(resolveThemeAttributes("system", "mold")).toEqual({
+      appearance: null,
+      family: "mold",
+    });
   });
 });
 
@@ -34,15 +44,35 @@ describe("appPrefs store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     delete document.documentElement.dataset.theme;
+    delete document.documentElement.dataset.themeFamily;
+  });
+
+  it("defaults a fresh store to Mold with system appearance", () => {
+    const prefs = useAppPrefsStore();
+    expect(prefs.themeFamily).toBe("mold");
+    expect(prefs.theme).toBe("system");
   });
 
   it("init loads settings and stamps the theme on the root element", async () => {
     const prefs = useAppPrefsStore();
     await prefs.init();
     expect(prefs.theme).toBe("dark");
+    expect(prefs.themeFamily).toBe("mold");
     expect(prefs.notifications).toBe(false);
     expect(prefs.engineEnv).toEqual({ MOLD_VAE_TILED: "force" });
     expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(document.documentElement.dataset.themeFamily).toBe("mold");
+  });
+
+  it("switches theme family without changing appearance", async () => {
+    const prefs = useAppPrefsStore();
+    await prefs.init();
+    await prefs.update({ themeFamily: "safelight" });
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(document.documentElement.dataset.themeFamily).toBe("safelight");
+    expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ theme: "dark", themeFamily: "safelight" }),
+    );
   });
 
   it("update persists and re-applies the theme; system clears the attribute", async () => {

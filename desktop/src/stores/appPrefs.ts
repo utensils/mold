@@ -1,20 +1,27 @@
 import { defineStore } from "pinia";
-import { ipc, type AppSettings, type Theme } from "../lib/ipc";
+import { ipc, type AppSettings, type Theme, type ThemeFamily } from "../lib/ipc";
 
 /**
  * Resolve what `data-theme` should be on the root element. Pure — exported
  * for tests. `null` means "remove the attribute and let the system media
  * query drive the palette".
  */
-export function resolveThemeAttribute(theme: Theme): "light" | "dark" | null {
-  return theme === "system" ? null : theme;
+export function resolveThemeAttributes(
+  theme: Theme,
+  family: ThemeFamily,
+): { appearance: "light" | "dark" | null; family: ThemeFamily } {
+  return {
+    appearance: theme === "system" ? null : theme,
+    family,
+  };
 }
 
-function applyTheme(theme: Theme) {
-  const attr = resolveThemeAttribute(theme);
+function applyTheme(theme: Theme, family: ThemeFamily) {
+  const attrs = resolveThemeAttributes(theme, family);
   const root = document.documentElement;
-  if (attr === null) delete root.dataset.theme;
-  else root.dataset.theme = attr;
+  if (attrs.appearance === null) delete root.dataset.theme;
+  else root.dataset.theme = attrs.appearance;
+  root.dataset.themeFamily = attrs.family;
 }
 
 /**
@@ -28,6 +35,7 @@ export const useAppPrefsStore = defineStore("appPrefs", {
   }),
   getters: {
     theme: (s): Theme => s.settings?.theme ?? "system",
+    themeFamily: (s): ThemeFamily => s.settings?.themeFamily ?? "mold",
     notifications: (s) => s.settings?.notifications ?? true,
     dockBadge: (s) => s.settings?.dockBadge ?? true,
     restoreLastRoute: (s) => s.settings?.restoreLastRoute ?? false,
@@ -36,13 +44,13 @@ export const useAppPrefsStore = defineStore("appPrefs", {
   actions: {
     async init(): Promise<AppSettings> {
       this.settings = await ipc.appSettingsGet();
-      applyTheme(this.settings.theme);
+      applyTheme(this.settings.theme, this.settings.themeFamily);
       return this.settings;
     },
     async update(patch: Partial<AppSettings>): Promise<void> {
       const current = this.settings ?? (await ipc.appSettingsGet());
       this.settings = { ...current, ...patch };
-      applyTheme(this.settings.theme);
+      applyTheme(this.settings.theme, this.settings.themeFamily);
       await ipc.appSettingsSet(this.settings);
     },
     /** Remember the route for restore-on-launch without churning the theme. */

@@ -80,3 +80,38 @@
   --safelight: #c96a0a;
   color-scheme: light;
 }
+
+/* Mold — the website/logo family. The cyan-to-magenta identity is translated
+ * into two solid semantic colors: cyan remains latent/reference, while
+ * magenta marks active/selected work. Generated media keeps its fixed surface. */
+:root[data-theme-family="mold"] {
+  --bath: #12101d;
+  --bench: #201b30;
+  --rebate: #f5efff;
+  --halide: #67e8f9;
+  --safelight: #e879f9;
+  --stop: #fb7185;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme-family="mold"]:not([data-theme="dark"]) {
+    --bath: #f7f5fa;
+    --bench: #ffffff;
+    --rebate: #25182d;
+    --halide: #0e7490;
+    --safelight: #a21caf;
+    --stop: #b4233b;
+    color-scheme: light;
+  }
+}
+
+:root[data-theme-family="mold"][data-theme="light"] {
+  --bath: #f7f5fa;
+  --bench: #ffffff;
+  --rebate: #25182d;
+  --halide: #0e7490;
+  --safelight: #a21caf;
+  --stop: #b4233b;
+  color-scheme: light;
+}

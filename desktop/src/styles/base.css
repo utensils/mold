@@ -103,6 +103,23 @@ textarea,
   letter-spacing: 0.04em;
 }
 
+/* The website theme gets a compact two-color brand signature without using
+   gradient text. It is decorative only; the MOLD label stays unchanged. */
+:root[data-theme-family="mold"] .brand-wordmark {
+  color: var(--safelight);
+}
+
+:root[data-theme-family="mold"] .brand-wordmark::after {
+  content: "";
+  display: inline-block;
+  width: 0.28em;
+  height: 0.28em;
+  margin-left: 0.34em;
+  background: var(--halide);
+  border-radius: 1px;
+  vertical-align: 0.18em;
+}
+
 /* Loading shimmer for developing thumbnails — a slow safelight sweep over the
    bench tone, evoking grain forming under the enlarger. The universal
    reduced-motion block below freezes the sweep to a flat bench fill. */

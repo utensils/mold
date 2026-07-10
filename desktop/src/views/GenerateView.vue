@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import DevelopCanvas from "../lib/develop/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
@@ -25,6 +25,7 @@ import { fetchHistory } from "../lib/api/history";
 import { formatGB } from "../lib/format";
 import { randomSeed } from "../stores/generation";
 import type { ModelEntry } from "../lib/api/types";
+import { fitAspectRatio } from "../lib/fitAspectRatio";
 
 const router = useRouter();
 const conn = useConnectionStore();
@@ -38,6 +39,8 @@ const contextMenu = useContextMenuStore();
 
 const form = reactive(newGenerateForm());
 const promptEl = ref<HTMLTextAreaElement | null>(null);
+const previewRegion = ref<HTMLDivElement | null>(null);
+const previewFrameSize = ref({ width: 0, height: 0 });
 const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
 const pickerOpen = ref(false);
 
@@ -54,6 +57,28 @@ const estimateRequest = computed(() => (form.model ? buildRequest(form) : null))
 const buttonLabel = computed(() =>
   generation.pending.length > 0 ? `Generate (+${generation.pending.length} queued)` : "Generate",
 );
+
+const previewWidth = computed(() => job.value?.width ?? form.width);
+const previewHeight = computed(() => job.value?.height ?? form.height);
+const previewFrameStyle = computed(() => ({
+  aspectRatio: `${previewWidth.value} / ${previewHeight.value}`,
+  width: `${previewFrameSize.value.width}px`,
+  height: `${previewFrameSize.value.height}px`,
+}));
+
+let previewResizeObserver: ResizeObserver | null = null;
+
+function resizePreview(width?: number, height?: number) {
+  const rect = previewRegion.value?.getBoundingClientRect();
+  previewFrameSize.value = fitAspectRatio(
+    width ?? rect?.width ?? 0,
+    height ?? rect?.height ?? 0,
+    previewWidth.value,
+    previewHeight.value,
+  );
+}
+
+watch([previewWidth, previewHeight], () => resizePreview());
 
 const edgeCode = computed(() => {
   const j = job.value;
@@ -268,7 +293,16 @@ watch(
 
 onMounted(() => {
   promptEl.value?.focus();
+  if (previewRegion.value && typeof ResizeObserver !== "undefined") {
+    previewResizeObserver = new ResizeObserver(([entry]) => {
+      if (entry) resizePreview(entry.contentRect.width, entry.contentRect.height);
+    });
+    previewResizeObserver.observe(previewRegion.value);
+  }
+  resizePreview();
 });
+
+onBeforeUnmount(() => previewResizeObserver?.disconnect());
 </script>
 
 <template>
@@ -277,14 +311,23 @@ onMounted(() => {
     @browse="router.push('/models')"
   />
 
-  <div v-else class="grid h-full grid-cols-[1fr_320px]">
+  <div
+    v-else
+    data-test="generate-layout"
+    class="grid h-full min-h-0 grid-cols-[1fr_320px] overflow-hidden"
+  >
     <!-- Canvas + composer -->
-    <div class="flex min-w-0 flex-col p-6">
-      <div class="flex min-h-0 flex-1 items-center justify-center">
-        <div class="flex max-h-full flex-col" style="width: min(100%, 62vh)">
+    <div data-test="generate-workbench" class="flex min-h-0 min-w-0 flex-col overflow-hidden p-6">
+      <div class="flex min-h-0 flex-1 flex-col">
+        <div
+          ref="previewRegion"
+          data-test="preview-region"
+          class="flex min-h-0 flex-1 items-center justify-center overflow-hidden"
+        >
           <div
             class="relative w-full overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_18%,transparent)] bg-print-surface"
-            :style="{ aspectRatio: `${job?.width ?? form.width} / ${job?.height ?? form.height}` }"
+            data-test="preview-frame"
+            :style="previewFrameStyle"
             @contextmenu="job && contextMenu.open($event, canvasMenu())"
           >
             <video
@@ -338,31 +381,33 @@ onMounted(() => {
               <template v-else>Fixing — {{ job.stage ?? "finishing" }}…</template>
             </div>
           </div>
-          <div v-if="job" class="edge-code mt-2 truncate" :title="edgeCode">{{ edgeCode }}</div>
-
-          <!-- Batch dots -->
-          <div v-if="siblings.length > 1" class="mt-2 flex items-center gap-1.5">
-            <span
-              v-for="(s, i) in siblings"
-              :key="i"
-              class="data-mono text-body"
-              :class="siblingDot(s)"
-              :title="`${i + 1} of ${siblings.length}`"
-            >
-              {{ s.status === "complete" ? "◉" : s.status === "error" ? "◉" : "◎" }}
-            </span>
-            <span class="edge-code ml-1">
-              {{ siblings.filter((s) => s.status === "complete").length }} of {{ siblings.length }}
-            </span>
-          </div>
-
-          <p v-if="job?.status === 'error'" class="mt-2 text-caption text-stop">{{ job.error }}</p>
         </div>
+
+        <div v-if="job" class="edge-code mt-2 truncate" :title="edgeCode">{{ edgeCode }}</div>
+
+        <!-- Batch dots -->
+        <div v-if="siblings.length > 1" class="mt-2 flex items-center gap-1.5">
+          <span
+            v-for="(s, i) in siblings"
+            :key="i"
+            class="data-mono text-body"
+            :class="siblingDot(s)"
+            :title="`${i + 1} of ${siblings.length}`"
+          >
+            {{ s.status === "complete" ? "◉" : s.status === "error" ? "◉" : "◎" }}
+          </span>
+          <span class="edge-code ml-1">
+            {{ siblings.filter((s) => s.status === "complete").length }} of {{ siblings.length }}
+          </span>
+        </div>
+
+        <p v-if="job?.status === 'error'" class="mt-2 text-caption text-stop">{{ job.error }}</p>
       </div>
 
       <!-- Composer -->
       <div
-        class="mt-4 rounded-chrome border border-edge bg-bench p-3 transition-colors duration-100 focus-within:border-safelight"
+        data-test="generate-composer"
+        class="mt-4 shrink-0 rounded-chrome border border-edge bg-bench p-3 transition-colors duration-100 focus-within:border-safelight"
       >
         <textarea
           ref="promptEl"

@@ -56,18 +56,28 @@ impl Conn {
     }
 }
 
-/// Normalize a user-entered host: default scheme, strip trailing slashes.
+/// Normalize a user-entered host: default scheme/port, strip trailing slashes.
 pub fn normalize_host_url(input: &str) -> Result<String, String> {
     let trimmed = input.trim().trim_end_matches('/');
     if trimmed.is_empty() {
-        return Err("Enter a host, like http://studio.local:7680".into());
+        return Err("Enter a host, like hal9000".into());
     }
-    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+    let has_explicit_scheme = trimmed.starts_with("http://") || trimmed.starts_with("https://");
+    let with_scheme = if has_explicit_scheme {
         trimmed.to_string()
     } else {
         format!("http://{trimmed}")
     };
-    Ok(with_scheme)
+    let mut url =
+        reqwest::Url::parse(&with_scheme).map_err(|_| "Enter a valid host.".to_string())?;
+    if url.host_str().is_none() {
+        return Err("Enter a valid host.".into());
+    }
+    if !has_explicit_scheme && url.port().is_none() {
+        url.set_port(Some(7680))
+            .map_err(|_| "Enter a valid host.".to_string())?;
+    }
+    Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
 #[cfg(test)]
@@ -94,6 +104,10 @@ mod tests {
     #[test]
     fn normalizes_host_urls() {
         assert_eq!(
+            normalize_host_url("hal9000").unwrap(),
+            "http://hal9000:7680"
+        );
+        assert_eq!(
             normalize_host_url("studio.local:7680").unwrap(),
             "http://studio.local:7680"
         );
@@ -104,6 +118,10 @@ mod tests {
         assert_eq!(
             normalize_host_url("https://mold.example.com/").unwrap(),
             "https://mold.example.com"
+        );
+        assert_eq!(
+            normalize_host_url("http://mold.example.com/").unwrap(),
+            "http://mold.example.com"
         );
         assert!(normalize_host_url("   ").is_err());
     }

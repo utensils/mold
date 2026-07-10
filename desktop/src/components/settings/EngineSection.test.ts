@@ -3,6 +3,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import EngineSection from "./EngineSection.vue";
 import type { DiscoveredHost } from "../../lib/ipc";
+import { useConnectionStore } from "../../stores/connection";
 
 const discoverServers = vi.fn<() => Promise<DiscoveredHost[]>>();
 const testRemoteHost = vi.fn().mockResolvedValue({ ok: true, version: "0.14.0", error: null });
@@ -47,6 +48,24 @@ beforeEach(() => {
 });
 
 describe("EngineSection discovery", () => {
+  it("renders exactly one selected engine mode", async () => {
+    discoverServers.mockResolvedValue([]);
+    const wrapper = await mountSection();
+    const connection = useConnectionStore();
+    connection.info = { mode: "external", baseUrl: "http://127.0.0.1:7680", apiKey: null };
+    await wrapper.vm.$nextTick();
+
+    const group = wrapper.get('[role="group"][aria-label="Engine"]');
+    const choices = group.findAll('[data-test="engine-mode-choice"]');
+    expect(choices).toHaveLength(2);
+    expect(choices.map((choice) => choice.attributes("aria-pressed"))).toEqual(["true", "false"]);
+    expect(choices.map((choice) => choice.attributes("tabindex"))).toEqual([undefined, undefined]);
+
+    connection.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
+    await wrapper.vm.$nextTick();
+    expect(choices.map((choice) => choice.attributes("aria-pressed"))).toEqual(["false", "true"]);
+  });
+
   it("auto-scans on mount and renders discovered hosts", async () => {
     discoverServers.mockResolvedValue([
       host({ name: "hal9000-7680", isThisMachine: true }),

@@ -125,7 +125,9 @@ onMounted(async () => {
   // white flash; reveal it once the shell has mounted. No-op in a browser.
   if ("__TAURI_INTERNALS__" in window) {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().show();
+    const appWindow = getCurrentWindow();
+    await appWindow.maximize();
+    await appWindow.show();
   }
 });
 onUnmounted(() => {

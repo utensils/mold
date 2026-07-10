@@ -29,6 +29,8 @@
 
 **Light variant policy ("Lights on"):** chrome inverts to warm paper — Bath→`#F2EBDE`, Bench→`#FBF6EC`, Rebate→`#231D18`; Safelight darkens to `#C96A0A` for AA contrast; Halide darkens to `#5C737E`. **Media surfaces never invert**: the generate canvas, gallery tiles, lightbox, and chain filmstrip always sit on Bath — like a print-viewing booth in a lit office. Follows system appearance by default; overridable in Settings.
 
+**Theme families:** **Mold** is the fresh-install default and translates the website/logo identity into product semantics without using gradients as UI decoration: cyan (`#67E8F9` dark / `#0E7490` light) is Halide for queued, latent, and reference states; magenta (`#E879F9` dark / `#A21CAF` light) is Safelight for active, selected, and focus states. Its dark surfaces are violet-black (`#12101D` / `#201B30`) and its light surfaces are neutral lavender-white (`#F7F5FA` / `#FFFFFF`). Safelight remains available as the original darkroom palette, and existing settings written before theme families migrate to Safelight instead of changing unexpectedly. Users choose a family and System/Dark/Light appearance independently; new users start on System. Generated media continues to use the fixed print surface in both families.
+
 **Why this isn't an AI default:** it is dark but not near-black-plus-one-acid-accent — the base is warm brown-black, there are _two_ functional hues with opposing semantic temperatures plus paper-white as a third material, and nothing is neon. No cream+serif+terracotta (dark-first, grotesque display). No broadsheet hairlines (borders are soft 8% paper, radii exist, density is workbench not newspaper). And it is explicitly not the repo's own SPA (no indigo, no Inter, no glass, no gradient wash).
 
 ### 2.2 Typography — 3 roles, all OFL variable fonts, bundled in-app
@@ -104,6 +106,11 @@ Native macOS single window, `titleBarStyle: Overlay`, `hiddenTitle: true`, traff
 ## 4. Screen-by-screen specification
 
 ### 4.1 Generate — the enlarger
+
+**Composer visibility is invariant.** The preview fits both the width and the
+height of the canvas region for every output aspect ratio. Portrait or extreme
+custom dimensions may shrink the print, but may never push the prompt composer
+or Generate action outside the window.
 
 Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector** (right, 320px, resizable).
 

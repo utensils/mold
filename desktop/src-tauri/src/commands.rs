@@ -338,10 +338,67 @@ fn host_is_this_machine(
 }
 
 /// Browse the local network for advertised mold servers.
+#[cfg(target_os = "macos")]
+async fn discover_servers_native(
+    timeout: Duration,
+) -> Result<Vec<mold_server::mdns::DiscoveredServer>, String> {
+    use mdns_sd_discovery::{BrowseEvent, ServiceBrowserBuilder};
+
+    let mut builder = ServiceBrowserBuilder::new();
+    builder.service_type("_mold._tcp");
+    let mut browser = builder.browse().await.map_err(|e| e.to_string())?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut found = std::collections::BTreeMap::new();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, browser.recv()).await {
+            Ok(Some(Ok(BrowseEvent::Found(service)))) => {
+                let fullname = format!("{}.{}", service.name, mold_server::mdns::SERVICE_TYPE);
+                let txt = service
+                    .txt_records
+                    .into_iter()
+                    .map(|record| {
+                        let value = record
+                            .value
+                            .map(|value| String::from_utf8_lossy(&value).into_owned())
+                            .unwrap_or_default();
+                        (record.key, value)
+                    })
+                    .collect();
+                let server = mold_server::mdns::from_service_parts(
+                    &fullname,
+                    &service.host_name,
+                    service.port,
+                    service.addresses,
+                    txt,
+                );
+                found.insert(service.name, server);
+            }
+            Ok(Some(Ok(BrowseEvent::Removed(service)))) => {
+                found.remove(&service.name);
+            }
+            Ok(Some(Err(error))) => {
+                tracing::debug!(%error, "native DNS-SD service resolution failed");
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    Ok(found.into_values().collect())
+}
+
 #[tauri::command]
 pub async fn discover_servers(timeout_ms: Option<u64>) -> Result<Vec<DiscoveredHost>, String> {
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(3000).clamp(500, 10_000));
 
+    #[cfg(target_os = "macos")]
+    let servers = discover_servers_native(timeout).await?;
+
+    #[cfg(not(target_os = "macos"))]
     let servers =
         tauri::async_runtime::spawn_blocking(move || mold_server::mdns::discover(timeout))
             .await

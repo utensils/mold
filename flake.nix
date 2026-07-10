@@ -970,6 +970,35 @@
               }
               {
                 category = "desktop";
+                name = "desktop-release";
+                help = "build, notarize, staple, and verify the Mold app + DMG";
+                command = ''
+                  set -euo pipefail
+                  ${desktopSetup}
+                  if [ ! -f .secrets/signing.env ]; then
+                    echo "missing .secrets/signing.env (see website/guide/desktop.md)" >&2
+                    exit 1
+                  fi
+                  # shellcheck disable=SC1091
+                  source .secrets/signing.env
+                  for name in APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH; do
+                    if [ -z "''${!name:-}" ]; then
+                      echo "missing $name in .secrets/signing.env" >&2
+                      exit 1
+                    fi
+                  done
+                  cd desktop
+                  bun install --frozen-lockfile
+                  cargo tauri build --features metal --bundles app,dmg "$@"
+                  cd ..
+                  app="desktop/src-tauri/target/release/bundle/macos/Mold.app"
+                  dmg=$(find desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)
+                  scripts/notarize-desktop-dmg.sh "$dmg"
+                  scripts/verify-desktop-release.sh "$app" "$dmg"
+                '';
+              }
+              {
+                category = "desktop";
                 name = "desktop-check";
                 help = "desktop CI gate: rustfmt, clippy -D warnings, vue-tsc, prettier";
                 command = ''

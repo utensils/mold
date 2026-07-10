@@ -51,6 +51,11 @@ mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", v
   "mdns",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Use Apple's native DNS-SD stack for desktop discovery. Raw multicast sockets
+# can miss services that mDNSResponder already has in its shared cache.
+mdns-sd-discovery = "0.2.0"
+
 [dev-dependencies]
 tempfile = "3"
 

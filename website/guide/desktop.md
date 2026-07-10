@@ -45,7 +45,8 @@ surface powers it, so anything the app does maps to a documented endpoint.
   controls, applied on engine restart), Generation defaults, a Prompt
   expansion form, Accounts & tokens (Hugging Face / Civitai keys in the macOS
   Keychain, exported to the engine as `HF_TOKEN`/`CIVITAI_TOKEN`), Appearance
-  (System/Dark/Light — media never inverts), Profiles (switch or create), and
+  (the website-aligned Mold palette by default or the original Safelight,
+  each with System/Dark/Light; media never inverts), Profiles (switch or create), and
   Advanced — every remaining `/api/config` row with its provenance tag (⌂ db /
   ⛁ file / ⚿ env); environment-overridden rows are locked with the variable
   that owns them.
@@ -119,7 +120,10 @@ wire types as the CLI and web UI:
   `localhost:7680`.
 - **Remote host** — point it at a remote GPU box (e.g. a Linux CUDA machine for
   LTX-2), configured in Settings → Engine, with the API key stored in the macOS
-  Keychain.
+  Keychain. A bare hostname is enough: `hal9000` expands to
+  `http://hal9000:7680`. The network list uses the operating system's native
+  DNS-SD browser on macOS, so advertised `_mold._tcp` services share the same
+  cache and interface handling as Finder and `dns-sd`.
 
 ## Development
 
@@ -129,6 +133,7 @@ toolchain):
 ```bash
 desktop-dev        # Tauri app with hot reload (Vite on :1430)
 desktop-build      # build the Mold.app bundle
+desktop-release    # signed + notarized + stapled app and DMG, then verify
 desktop-check      # CI gate: rustfmt, clippy, vue-tsc, prettier
 desktop-test       # cargo test (CPU) + vitest
 desktop-ui         # frontend-only Vite server (pair with a running `serve`)
@@ -138,3 +143,18 @@ desktop-bun-lock   # regenerate desktop/bun.nix from bun.lock
 The Rust crate under `desktop/src-tauri` is its own cargo root (excluded from
 the workspace); the frontend lives in `desktop/src`. CI runs the `desktop-check`
 and `desktop-test` gates via `.github/workflows/desktop.yml`.
+
+## Signed distribution
+
+`desktop-release` is the release-grade local path. It requires
+`.secrets/signing.env` (gitignored) with `APPLE_SIGNING_IDENTITY` and App Store
+Connect API credentials (`APPLE_API_ISSUER`, `APPLE_API_KEY`, and
+`APPLE_API_KEY_PATH`). The command builds the Metal-enabled app and DMG, waits
+for Apple notarization, staples the ticket, then verifies the hardened-runtime
+signature, entitlements, Gatekeeper acceptance, and staple on both artifacts.
+
+The Desktop GitHub Actions workflow runs the same signed distribution job on
+`v*` tags and manual dispatch. Repository secrets hold the exported Developer
+ID certificate and App Store Connect key; the private key is written only to
+the runner's temporary directory and the temporary signing keychain is removed
+even if the build fails.

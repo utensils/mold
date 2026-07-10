@@ -5,6 +5,7 @@
   "build": {
     "beforeDevCommand": "bun run dev",
     "beforeBuildCommand": "bun run build",
+    "beforeBundleCommand": "../scripts/fix-desktop-macos-linkage.sh",
     "devUrl": "http://localhost:1430",
     "frontendDist": "../dist"
   },
@@ -17,6 +18,8 @@
         "minWidth": 1080,
         "minHeight": 700,
         "center": true,
+        "maximized": true,
+        "fullscreen": false,
         "visible": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
