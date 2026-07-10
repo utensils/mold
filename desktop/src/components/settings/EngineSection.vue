@@ -128,13 +128,13 @@ async function restartEngine() {
       <div class="flex items-center gap-3">
         <div
           class="border-edge flex rounded-control border bg-bath p-0.5"
-          role="radiogroup"
+          role="group"
           aria-label="Engine"
         >
           <button
             type="button"
-            role="radio"
-            :aria-checked="conn.mode === 'local' || conn.mode === 'external'"
+            data-test="engine-mode-choice"
+            :aria-pressed="conn.mode === 'local' || conn.mode === 'external'"
             class="rounded-control px-3 py-1.5 text-body transition-colors"
             :class="
               conn.mode === 'local' || conn.mode === 'external'
@@ -147,8 +147,8 @@ async function restartEngine() {
           </button>
           <button
             type="button"
-            role="radio"
-            :aria-checked="conn.mode === 'remote'"
+            data-test="engine-mode-choice"
+            :aria-pressed="conn.mode === 'remote'"
             class="rounded-control px-3 py-1.5 text-body transition-colors"
             :class="
               conn.mode === 'remote' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'

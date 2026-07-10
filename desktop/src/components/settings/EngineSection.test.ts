@@ -55,13 +55,15 @@ describe("EngineSection discovery", () => {
     connection.info = { mode: "external", baseUrl: "http://127.0.0.1:7680", apiKey: null };
     await wrapper.vm.$nextTick();
 
-    const choices = wrapper.findAll('[role="radio"]');
+    const group = wrapper.get('[role="group"][aria-label="Engine"]');
+    const choices = group.findAll('[data-test="engine-mode-choice"]');
     expect(choices).toHaveLength(2);
-    expect(choices.map((choice) => choice.attributes("aria-checked"))).toEqual(["true", "false"]);
+    expect(choices.map((choice) => choice.attributes("aria-pressed"))).toEqual(["true", "false"]);
+    expect(choices.map((choice) => choice.attributes("tabindex"))).toEqual([undefined, undefined]);
 
     connection.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
     await wrapper.vm.$nextTick();
-    expect(choices.map((choice) => choice.attributes("aria-checked"))).toEqual(["false", "true"]);
+    expect(choices.map((choice) => choice.attributes("aria-pressed"))).toEqual(["false", "true"]);
   });
 
   it("auto-scans on mount and renders discovered hosts", async () => {

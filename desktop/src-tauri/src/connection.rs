@@ -62,7 +62,8 @@ pub fn normalize_host_url(input: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Err("Enter a host, like hal9000".into());
     }
-    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+    let has_explicit_scheme = trimmed.starts_with("http://") || trimmed.starts_with("https://");
+    let with_scheme = if has_explicit_scheme {
         trimmed.to_string()
     } else {
         format!("http://{trimmed}")
@@ -72,7 +73,7 @@ pub fn normalize_host_url(input: &str) -> Result<String, String> {
     if url.host_str().is_none() {
         return Err("Enter a valid host.".into());
     }
-    if url.port().is_none() {
+    if !has_explicit_scheme && url.port().is_none() {
         url.set_port(Some(7680))
             .map_err(|_| "Enter a valid host.".to_string())?;
     }
@@ -116,7 +117,11 @@ mod tests {
         );
         assert_eq!(
             normalize_host_url("https://mold.example.com/").unwrap(),
-            "https://mold.example.com:7680"
+            "https://mold.example.com"
+        );
+        assert_eq!(
+            normalize_host_url("http://mold.example.com/").unwrap(),
+            "http://mold.example.com"
         );
         assert!(normalize_host_url("   ").is_err());
     }
