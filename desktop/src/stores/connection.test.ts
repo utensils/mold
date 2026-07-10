@@ -32,6 +32,7 @@ const defaults = {
   notifications: true,
   dockBadge: true,
   restoreLastRoute: false,
+  runpodIncludeHfToken: false,
 };
 
 beforeEach(() => {

@@ -59,6 +59,7 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub dock_badge: bool,
     pub restore_last_route: bool,
+    pub runpod_include_hf_token: bool,
 }
 
 impl Default for AppSettings {
@@ -74,6 +75,7 @@ impl Default for AppSettings {
             notifications: true,
             dock_badge: true,
             restore_last_route: false,
+            runpod_include_hf_token: false,
         }
     }
 }
@@ -126,6 +128,7 @@ mod tests {
             notifications: false,
             dock_badge: true,
             restore_last_route: true,
+            runpod_include_hf_token: true,
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path), settings);
@@ -144,6 +147,7 @@ mod tests {
         assert_eq!(loaded.theme, Theme::System);
         assert_eq!(loaded.theme_family, ThemeFamily::Safelight);
         assert!(loaded.engine_env.is_empty());
+        assert!(!loaded.runpod_include_hf_token);
     }
 
     #[test]

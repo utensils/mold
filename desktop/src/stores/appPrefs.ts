@@ -39,6 +39,7 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     notifications: (s) => s.settings?.notifications ?? true,
     dockBadge: (s) => s.settings?.dockBadge ?? true,
     restoreLastRoute: (s) => s.settings?.restoreLastRoute ?? false,
+    runpodIncludeHfToken: (s) => s.settings?.runpodIncludeHfToken ?? false,
     engineEnv: (s): Record<string, string> => s.settings?.engineEnv ?? {},
   },
   actions: {

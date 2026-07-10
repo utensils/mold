@@ -1,19 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { podProxyUrl, type RunPodCreateInput, type RunPodPod } from "../lib/runpod";
-import { ipc, inTauri } from "../lib/ipc";
+import { inTauri } from "../lib/ipc";
 import { useConnectionStore } from "../stores/connection";
+import { useAppPrefsStore } from "../stores/appPrefs";
 import { useRunPodStore } from "../stores/runpod";
 import { useToastStore } from "../stores/toasts";
 
 const runpod = useRunPodStore();
+const prefs = useAppPrefsStore();
 const connection = useConnectionStore();
 const toasts = useToastStore();
 const apiKey = ref("");
 const savingKey = ref(false);
-const expandedLogs = ref<string | null>(null);
-const logs = ref("");
-const loadingLogs = ref(false);
 const confirmingDelete = ref<string | null>(null);
 let poll: ReturnType<typeof setInterval> | null = null;
 
@@ -60,6 +59,23 @@ watch(selectedGpu, (gpu) => {
     form.datacenterId = null;
   }
 });
+
+watch(
+  () => prefs.settings?.runpodIncludeHfToken,
+  (include) => {
+    if (include !== undefined) form.includeHfToken = include;
+  },
+  { immediate: true },
+);
+
+watch(
+  () => form.includeHfToken,
+  (include) => {
+    if (prefs.settings && include !== prefs.runpodIncludeHfToken) {
+      void prefs.update({ runpodIncludeHfToken: include });
+    }
+  },
+);
 
 const money = (value: number) =>
   new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(value);
@@ -122,23 +138,6 @@ async function useInMold(pod: RunPodPod) {
   }
 }
 
-async function showLogs(pod: RunPodPod) {
-  if (expandedLogs.value === pod.id) {
-    expandedLogs.value = null;
-    return;
-  }
-  expandedLogs.value = pod.id;
-  loadingLogs.value = true;
-  logs.value = "";
-  try {
-    logs.value = await ipc.runpodLogs(pod.id);
-  } catch (error) {
-    logs.value = errorMessage(error);
-  } finally {
-    loadingLogs.value = false;
-  }
-}
-
 async function openConsole() {
   const url = "https://www.runpod.io/console/pods";
   if (inTauri()) {
@@ -176,11 +175,11 @@ onBeforeUnmount(() => {
         </span>
         <button
           type="button"
-          class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
-          :disabled="runpod.loading"
+          aria-label="Refresh RunPod status"
+          class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
           @click="runpod.load()"
         >
-          {{ runpod.loading ? "Refreshing…" : "Refresh" }}
+          Refresh
         </button>
         <button
           type="button"
@@ -396,6 +395,28 @@ onBeforeUnmount(() => {
       </aside>
 
       <main class="min-h-0 overflow-y-auto p-4">
+        <section
+          v-if="runpod.operationError"
+          role="alert"
+          class="border-stop/40 mb-4 rounded-chrome border bg-stop/10 p-3"
+        >
+          <div class="flex items-start gap-3">
+            <div class="min-w-0 flex-1">
+              <p class="text-body font-semibold text-stop">RunPod couldn’t complete the request</p>
+              <pre
+                data-selectable
+                class="data-mono mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words text-caption text-ink-2"
+                >{{ runpod.operationError }}</pre>
+            </div>
+            <button
+              type="button"
+              class="text-caption text-ink-2 hover:text-ink"
+              @click="runpod.clearOperationError()"
+            >
+              Dismiss
+            </button>
+          </div>
+        </section>
         <div class="flex items-baseline justify-between">
           <div>
             <h2 class="text-body-lg font-semibold text-ink">Your instances</h2>
@@ -477,9 +498,9 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
-                @click="showLogs(pod)"
+                @click="openConsole"
               >
-                {{ expandedLogs === pod.id ? "Hide logs" : "Logs" }}
+                View logs ↗
               </button>
               <button
                 type="button"
@@ -495,11 +516,6 @@ onBeforeUnmount(() => {
                 {{ confirmingDelete === pod.id ? "Delete instance?" : "Delete" }}
               </button>
             </div>
-            <pre
-              v-if="expandedLogs === pod.id"
-              data-selectable
-              class="border-edge data-mono mt-3 max-h-64 overflow-auto rounded-control border bg-bench p-3 text-caption text-ink-2"
-              >{{ loadingLogs ? "Loading logs…" : logs || "No logs returned." }}</pre>
           </article>
         </div>
       </main>

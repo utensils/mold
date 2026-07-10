@@ -13,6 +13,7 @@ export const useRunPodStore = defineStore("runpod", {
     loading: false,
     mutating: null as string | null,
     error: null as string | null,
+    operationError: null as string | null,
     loaded: false,
   }),
   getters: {
@@ -53,25 +54,34 @@ export const useRunPodStore = defineStore("runpod", {
     },
     async create(input: RunPodCreateInput) {
       this.mutating = "create";
-      this.error = null;
+      this.operationError = null;
       try {
         await ipc.runpodCreate(input);
         await this.load();
+      } catch (error) {
+        this.operationError = error instanceof Error ? error.message : String(error);
+        throw error;
       } finally {
         this.mutating = null;
       }
     },
     async act(action: "start" | "stop" | "delete", id: string) {
       this.mutating = `${action}:${id}`;
-      this.error = null;
+      this.operationError = null;
       try {
         if (action === "start") await ipc.runpodStart(id);
         else if (action === "stop") await ipc.runpodStop(id);
         else await ipc.runpodDelete(id);
         await this.load();
+      } catch (error) {
+        this.operationError = error instanceof Error ? error.message : String(error);
+        throw error;
       } finally {
         this.mutating = null;
       }
+    },
+    clearOperationError() {
+      this.operationError = null;
     },
   },
 });

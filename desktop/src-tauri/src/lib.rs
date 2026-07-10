@@ -78,7 +78,6 @@ pub fn run() {
             runpod::runpod_start,
             runpod::runpod_stop,
             runpod::runpod_delete,
-            runpod::runpod_logs,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

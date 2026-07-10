@@ -3,8 +3,11 @@ use mold_core::runpod::{
     DEFAULT_ENDPOINT,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
 
 use crate::commands::AppState;
+
+static SUPPORTED_POD_GPU_IDS: OnceCell<std::collections::HashSet<String>> = OnceCell::const_new();
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,18 +62,30 @@ pub struct RunPodCreateInput {
 
 fn client(state: &AppState) -> Result<Option<(RunPodClient, &'static str)>, String> {
     let config = mold_core::Config::load_or_default();
+    let environment = std::env::var("RUNPOD_API_KEY")
+        .ok()
+        .filter(|key| !key.is_empty());
+    if let Some(key) = environment {
+        return Ok(Some((
+            RunPodClient::new(
+                config
+                    .runpod
+                    .endpoint
+                    .as_deref()
+                    .unwrap_or(DEFAULT_ENDPOINT),
+                key,
+            ),
+            "environment",
+        )));
+    }
     let keychain = state
         .secrets
         .get("runpod-api-key")
         .map_err(|e| e.to_string())?
         .filter(|key| !key.is_empty());
-    let environment = std::env::var("RUNPOD_API_KEY")
-        .ok()
-        .filter(|key| !key.is_empty());
     let configured = config.runpod.api_key.clone().filter(|key| !key.is_empty());
     let Some((key, source)) = keychain
         .map(|key| (key, "keychain"))
-        .or_else(|| environment.map(|key| (key, "environment")))
         .or_else(|| configured.map(|key| (key, "config")))
     else {
         return Ok(None);
@@ -153,14 +168,21 @@ pub async fn runpod_overview(state: tauri::State<'_, AppState>) -> Result<RunPod
         return Ok(RunPodOverview::unconfigured());
     };
 
-    let (user, pods, gpus, datacenters, network_volumes) = tokio::try_join!(
+    let (user, pods, mut gpus, datacenters, network_volumes, supported_gpu_ids) = tokio::try_join!(
         client.user(),
         client.list_pods(),
         client.gpu_types(),
         client.datacenters(),
         client.network_volumes(),
+        SUPPORTED_POD_GPU_IDS.get_or_try_init(|| client.supported_pod_gpu_type_ids()),
     )
     .map_err(|e| format!("{e:#}"))?;
+    gpus.retain(|gpu| {
+        gpu.id
+            .as_deref()
+            .or_else(|| (!gpu.gpu_id.is_empty()).then_some(gpu.gpu_id.as_str()))
+            .is_some_and(|id| supported_gpu_ids.contains(id))
+    });
 
     Ok(RunPodOverview {
         configured: true,
@@ -184,7 +206,11 @@ pub async fn runpod_create(
     input: RunPodCreateInput,
 ) -> Result<Pod, String> {
     let (client, _) = client(&state)?.ok_or_else(|| "Add a RunPod API key first.".to_string())?;
-    let hf_token = state.secrets.get("hf-token").map_err(|e| e.to_string())?;
+    let hf_token = if input.include_hf_token {
+        state.secrets.get("hf-token").map_err(|e| e.to_string())?
+    } else {
+        None
+    };
     let request = build_request(input, hf_token)?;
     client
         .create_pod(&request)
@@ -208,12 +234,6 @@ pub async fn runpod_stop(state: tauri::State<'_, AppState>, id: String) -> Resul
 pub async fn runpod_delete(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let (client, _) = client(&state)?.ok_or_else(|| "Add a RunPod API key first.".to_string())?;
     client.delete_pod(&id).await.map_err(|e| format!("{e:#}"))
-}
-
-#[tauri::command]
-pub async fn runpod_logs(state: tauri::State<'_, AppState>, id: String) -> Result<String, String> {
-    let (client, _) = client(&state)?.ok_or_else(|| "Add a RunPod API key first.".to_string())?;
-    client.pod_logs(&id).await.map_err(|e| format!("{e:#}"))
 }
 
 #[cfg(test)]

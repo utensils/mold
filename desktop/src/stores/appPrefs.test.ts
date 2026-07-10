@@ -15,6 +15,7 @@ vi.mock("../lib/ipc", () => ({
       notifications: false,
       dockBadge: true,
       restoreLastRoute: true,
+      runpodIncludeHfToken: true,
     }),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
   },
@@ -60,8 +61,18 @@ describe("appPrefs store", () => {
     expect(prefs.themeFamily).toBe("mold");
     expect(prefs.notifications).toBe(false);
     expect(prefs.engineEnv).toEqual({ MOLD_VAE_TILED: "force" });
+    expect(prefs.runpodIncludeHfToken).toBe(true);
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.dataset.themeFamily).toBe("mold");
+  });
+
+  it("persists the RunPod Hugging Face token preference", async () => {
+    const prefs = useAppPrefsStore();
+    await prefs.init();
+    await prefs.update({ runpodIncludeHfToken: false });
+    expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ runpodIncludeHfToken: false }),
+    );
   });
 
   it("switches theme family without changing appearance", async () => {

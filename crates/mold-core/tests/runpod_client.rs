@@ -115,10 +115,7 @@ async fn create_no_stock_maps_to_runpod_no_stock() {
     };
     let err = client.create_pod(&req).await.unwrap_err();
     let me = mold_error(&err);
-    assert!(matches!(
-        me,
-        MoldError::RunPod(_) | MoldError::RunPodNoStock(_)
-    ));
+    assert!(matches!(me, MoldError::RunPodNoStock(_)));
     assert!(format!("{me}").to_lowercase().contains("does not have"));
 }
 

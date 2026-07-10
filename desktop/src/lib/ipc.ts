@@ -28,6 +28,7 @@ export interface AppSettings {
   notifications: boolean;
   dockBadge: boolean;
   restoreLastRoute: boolean;
+  runpodIncludeHfToken: boolean;
 }
 
 export interface HostTest {
@@ -73,6 +74,7 @@ const browserFallbackSettings = (): AppSettings => ({
   notifications: true,
   dockBadge: true,
   restoreLastRoute: false,
+  runpodIncludeHfToken: false,
 });
 
 export const ipc = {
@@ -158,10 +160,6 @@ export const ipc = {
   runpodDelete(id: string): Promise<void> {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("runpod_delete", { id });
-  },
-  runpodLogs(id: string): Promise<string> {
-    if (!inTauri()) return Promise.resolve("");
-    return invoke<string>("runpod_logs", { id });
   },
   /** Keychain-backed secrets (file fallback in dev). Names are allowlisted. */
   secretGet(name: SecretName): Promise<string | null> {

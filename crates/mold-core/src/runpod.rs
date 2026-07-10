@@ -8,6 +8,7 @@ use crate::error::MoldError;
 use anyhow::Result;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 
@@ -578,15 +579,24 @@ impl RunPodClient {
     }
 
     pub async fn list_pods(&self) -> Result<Vec<Pod>> {
-        self.get_json("/pods").await
+        self.get_json("/pods?includeMachine=true").await
     }
 
     pub async fn get_pod(&self, id: &str) -> Result<Pod> {
-        self.get_json(&format!("/pods/{id}")).await
+        self.get_json(&format!("/pods/{id}?includeMachine=true"))
+            .await
     }
 
     pub async fn create_pod(&self, req: &CreatePodRequest) -> Result<Pod> {
         self.post_json("/pods", req).await
+    }
+
+    /// GPU IDs accepted by the REST Pod create endpoint. RunPod's GraphQL
+    /// inventory can advertise GPUs before the REST create schema accepts
+    /// them, so launchers must intersect inventory with this live contract.
+    pub async fn supported_pod_gpu_type_ids(&self) -> Result<HashSet<String>> {
+        let spec: serde_json::Value = self.get_json("/openapi.json").await?;
+        parse_pod_gpu_type_ids(&spec)
     }
 
     pub async fn stop_pod(&self, id: &str) -> Result<()> {
@@ -622,8 +632,14 @@ async fn http_error(path: &str, status: StatusCode, resp: reqwest::Response) -> 
         StatusCode::NOT_FOUND => {
             MoldError::RunPodNotFound(format!("RunPod {path} {status}: {msg}"))
         }
-        StatusCode::CONFLICT | StatusCode::SERVICE_UNAVAILABLE
-            if msg.to_lowercase().contains("does not have the resources") =>
+        StatusCode::CONFLICT
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::INTERNAL_SERVER_ERROR
+            if {
+                let lower = msg.to_lowercase();
+                lower.contains("does not have the resources")
+                    || lower.contains("no instances currently available")
+            } =>
         {
             MoldError::RunPodNoStock(format!("RunPod {path} {status}: {msg}"))
         }
@@ -640,6 +656,18 @@ fn stock_rank(s: &str) -> u8 {
     }
 }
 
+fn parse_pod_gpu_type_ids(spec: &serde_json::Value) -> Result<HashSet<String>> {
+    let values = spec
+        .pointer("/components/schemas/PodCreateInput/properties/gpuTypeIds/items/enum")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| MoldError::RunPod("OpenAPI schema is missing Pod GPU types".into()))?;
+    Ok(values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect())
+}
+
 fn truncate_for_error(s: &str) -> String {
     const MAX: usize = 400;
     let s = s.trim();
@@ -654,7 +682,8 @@ fn truncate_for_error(s: &str) -> String {
 /// `ghcr.io/utensils/mold` image tag.
 pub fn image_tag_for_gpu(display_name: &str) -> &'static str {
     let d = display_name.to_lowercase();
-    if d.contains("5090") || d.contains("blackwell") || d.contains("b200") {
+    if d.contains("5090") || d.contains("rtx pro") || d.contains("blackwell") || d.contains("b200")
+    {
         "latest-sm120"
     } else if d.contains("h100")
         || d.contains("h200")
@@ -692,11 +721,28 @@ mod tests {
         assert_eq!(image_tag_for_gpu("L40S"), "latest");
         assert_eq!(image_tag_for_gpu("RTX 5090"), "latest-sm120");
         assert_eq!(image_tag_for_gpu("NVIDIA GeForce RTX 5090"), "latest-sm120");
+        assert_eq!(image_tag_for_gpu("RTX PRO 4500"), "latest-sm120");
         assert_eq!(image_tag_for_gpu("A100 80GB"), "latest-sm80");
         assert_eq!(image_tag_for_gpu("A100 PCIe"), "latest-sm80");
         assert_eq!(image_tag_for_gpu("RTX 3090"), "latest-sm80");
         assert_eq!(image_tag_for_gpu("H100 SXM"), "latest-sm90");
         assert_eq!(image_tag_for_gpu("H200 SXM"), "latest-sm90");
+    }
+
+    #[test]
+    fn parses_rest_pod_gpu_ids_from_openapi() {
+        let spec = serde_json::json!({
+            "components": { "schemas": { "PodCreateInput": { "properties": {
+                "gpuTypeIds": { "items": { "enum": ["NVIDIA GeForce RTX 5090", "NVIDIA L40S"] } }
+            } } } }
+        });
+        assert_eq!(
+            parse_pod_gpu_type_ids(&spec).unwrap(),
+            ["NVIDIA GeForce RTX 5090", "NVIDIA L40S"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
     }
 
     #[test]
