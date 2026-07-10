@@ -72,6 +72,39 @@ export type OutputFormat = "png" | "jpeg" | "webp" | "gif" | "apng" | "mp4";
  * kebab-case enum; only these string variants are surfaced in the desktop UI. */
 export type Scheduler = "default" | "ddim" | "euler-ancestral" | "unipc";
 
+// ── LTX-2 advanced video (mold-core `Ltx2*`, kebab-case on the wire) ────────
+
+/** Explicit LTX-2 pipeline mode. Mirrors mold-core `Ltx2PipelineMode`. */
+export type Ltx2PipelineMode =
+  | "one-stage"
+  | "two-stage"
+  | "two-stage-hq"
+  | "distilled"
+  | "ic-lora"
+  | "keyframe"
+  | "a2vid"
+  | "retake";
+
+/** Spatial latent upscale factor. Mirrors mold-core `Ltx2SpatialUpscale`
+ * (`X1_5` → `"x1-5"`, `X2` → `"x2"`). */
+export type Ltx2SpatialUpscale = "x1-5" | "x2";
+
+/** Temporal latent upscale factor. Mirrors mold-core `Ltx2TemporalUpscale`. */
+export type Ltx2TemporalUpscale = "x2";
+
+/** Retake / partial-regeneration time window. Mirrors mold-core `TimeRange`. */
+export interface TimeRange {
+  start_seconds: number;
+  end_seconds: number;
+}
+
+/** One keyframe conditioning image on the wire — mirrors mold-core
+ * `KeyframeCondition`, whose `image` field serializes as a base64 STRING. */
+export interface KeyframeConditionWire {
+  frame: number;
+  image: string;
+}
+
 /** One entry in a LoRA stack. `path` is the server-side safetensors path
  * (`LoraInfo.path`); `scale` is 0–2, 1 = full strength. Mirrors mold-core
  * `LoraWeight`. */
@@ -153,6 +186,14 @@ export interface GenerateRequest {
   frames?: number;
   fps?: number;
   enable_audio?: boolean;
+  // LTX-2 advanced video (ltx2 only). Omitted → engine auto-selects.
+  /** Source video for video-to-video / retake, base64 (no data-URI prefix). */
+  source_video?: string;
+  keyframes?: KeyframeConditionWire[];
+  pipeline?: Ltx2PipelineMode;
+  retake_range?: TimeRange;
+  spatial_upscale?: Ltx2SpatialUpscale;
+  temporal_upscale?: Ltx2TemporalUpscale;
 }
 
 /** serde tag = "type", snake_case — /api/generate/stream `progress` events. */

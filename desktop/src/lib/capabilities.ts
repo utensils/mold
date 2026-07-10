@@ -31,6 +31,9 @@ export interface GenerationCapabilities {
   sourceImageMode: SourceImageMode;
   supportsMask: boolean;
   forcesBatchSizeOne: boolean;
+  /** LTX-2 only — the pipeline/keyframe/upscale/retake surface. `ltx-video`
+   * is a plain video family and does NOT get these. */
+  supportsAdvancedVideo: boolean;
 }
 
 const SCHEDULER_OPTIONS: Scheduler[] = ["default", "ddim", "euler-ancestral", "unipc"];
@@ -51,6 +54,8 @@ const SCHEDULER_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5", "sd
 const CFG_PLUS_FAMILIES = new Set(["sd3", "sd3.5"]);
 const VIDEO_FAMILIES = new Set(["ltx-video", "ltx2", "ltx-2"]);
 const AUDIO_FAMILIES = new Set(["ltx2", "ltx-2"]);
+/** LTX-2 only — the advanced pipeline/keyframe/upscale/retake surface. */
+const ADVANCED_VIDEO_FAMILIES = new Set(["ltx2", "ltx-2"]);
 const CONTROLNET_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5"]);
 
 /** Mirrors web `LORA_CAPABLE_FAMILIES`. */
@@ -89,7 +94,14 @@ export function generationCapabilitiesForFamily(family: string): GenerationCapab
     sourceImageMode: qwenEdit ? "qwen-edit" : "single",
     supportsMask: !qwenEdit && !supportsVideo,
     forcesBatchSizeOne: qwenEdit,
+    supportsAdvancedVideo: ADVANCED_VIDEO_FAMILIES.has(normalized),
   };
+}
+
+/** LTX-2 advanced video gate: pipeline mode, keyframes, spatial/temporal
+ * upscale, retake range, and source video. `ltx-video` returns false. */
+export function supportsAdvancedVideo(family: string): boolean {
+  return generationCapabilitiesForFamily(family).supportsAdvancedVideo;
 }
 
 export function schedulerOptionsForFamily(family: string): Scheduler[] {
@@ -156,6 +168,14 @@ export function pruneRequestForFamily(req: GenerateRequest, family: string): Gen
     delete next.fps;
   }
   if (!caps.supportsAudio) delete next.enable_audio;
+  if (!caps.supportsAdvancedVideo) {
+    delete next.source_video;
+    delete next.keyframes;
+    delete next.pipeline;
+    delete next.retake_range;
+    delete next.spatial_upscale;
+    delete next.temporal_upscale;
+  }
 
   // Keep the output format valid for the family (png stays out of video, etc.).
   const formats = outputFormatsForFamily(family);

@@ -1,15 +1,89 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { GenerateForm } from "../../lib/generateForm";
+import { computed, ref } from "vue";
+import type { GenerateForm, PickedImage } from "../../lib/generateForm";
+import type {
+  Ltx2PipelineMode,
+  Ltx2SpatialUpscale,
+  Ltx2TemporalUpscale,
+} from "../../lib/api/types";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../../lib/capabilities";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
+import { fileToBase64 } from "../../lib/image";
 import { randomSeed } from "../../stores/generation";
+import ImagePickerModal from "./ImagePickerModal.vue";
 
 const props = defineProps<{ form: GenerateForm }>();
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const formats = computed(() => outputFormatsForFamily(props.form.family));
 const framesError = computed(() => frames8n1Error(props.form.frames));
+
+// ── LTX-2 advanced video (ltx2 only) ──────────────────────────────────────
+const advancedOpen = ref(false);
+const keyframePickerOpen = ref(false);
+
+const pipelineOptions: Ltx2PipelineMode[] = [
+  "one-stage",
+  "two-stage",
+  "two-stage-hq",
+  "distilled",
+  "ic-lora",
+  "keyframe",
+  "a2vid",
+  "retake",
+];
+const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
+const temporalOptions: Ltx2TemporalUpscale[] = ["x2"];
+
+function setPipeline(v: string) {
+  props.form.pipeline = (v || null) as Ltx2PipelineMode | null;
+  if (props.form.pipeline !== "retake") props.form.retakeRange = null;
+}
+function setSpatial(v: string) {
+  props.form.spatialUpscale = (v || null) as Ltx2SpatialUpscale | null;
+}
+function setTemporal(v: string) {
+  props.form.temporalUpscale = (v || null) as Ltx2TemporalUpscale | null;
+}
+
+function setRetake(edge: "start" | "end", raw: string) {
+  const value = Number(raw) || 0;
+  const current = props.form.retakeRange ?? { start_seconds: 0, end_seconds: 1 };
+  props.form.retakeRange =
+    edge === "start" ? { ...current, start_seconds: value } : { ...current, end_seconds: value };
+}
+
+/** Suggest the next keyframe index: +24 from the last, mirroring the web SPA
+ * (keyframe frames are frame indices, not the 8n+1 total-count constraint). */
+function suggestKeyframeFrame(): number {
+  const last = props.form.keyframes.at(-1);
+  return last ? last.frame + 24 : 0;
+}
+function onKeyframePick(picked: PickedImage[]) {
+  const first = picked[0];
+  if (!first) return;
+  props.form.keyframes = [...props.form.keyframes, { frame: suggestKeyframeFrame(), image: first }];
+}
+function updateKeyframeFrame(index: number, raw: string) {
+  const frame = Math.max(0, Math.round(Number(raw) || 0));
+  const next = props.form.keyframes.slice();
+  const item = next[index];
+  if (!item) return;
+  next[index] = { ...item, frame };
+  props.form.keyframes = next;
+}
+function removeKeyframe(index: number) {
+  props.form.keyframes = props.form.keyframes.filter((_, i) => i !== index);
+}
+
+async function setSourceVideo(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0];
+  if (!file) return;
+  props.form.sourceVideo = { filename: file.name, base64: await fileToBase64(file) };
+}
+function clearSourceVideo() {
+  props.form.sourceVideo = null;
+}
 
 function snapFramesField() {
   props.form.frames = snapFrames(props.form.frames);
@@ -57,6 +131,7 @@ const schedulerLabel: Record<string, string> = {
         type="number"
         step="16"
         min="64"
+        aria-label="Width"
         class="border-edge data-mono h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
         @change="snapWidth"
       />
@@ -64,6 +139,7 @@ const schedulerLabel: Record<string, string> = {
         type="button"
         class="text-ink-3 hover:text-ink"
         title="Swap width and height"
+        aria-label="Swap width and height"
         @click="swapSize"
       >
         ⇄
@@ -73,6 +149,7 @@ const schedulerLabel: Record<string, string> = {
         type="number"
         step="16"
         min="64"
+        aria-label="Height"
         class="border-edge data-mono h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
         @change="snapHeight"
       />
@@ -130,6 +207,7 @@ const schedulerLabel: Record<string, string> = {
         type="button"
         class="text-ink-3 hover:text-ink"
         title="Randomize seed"
+        aria-label="Randomize seed"
         @click="randomize"
       >
         ⟳
@@ -201,6 +279,8 @@ const schedulerLabel: Record<string, string> = {
         type="number"
         step="8"
         min="1"
+        aria-label="Frames"
+        :aria-invalid="framesError ? 'true' : undefined"
         class="border-edge data-mono mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
         :class="framesError ? 'border-stop' : ''"
         @change="snapFramesField"
@@ -213,6 +293,7 @@ const schedulerLabel: Record<string, string> = {
         type="number"
         min="1"
         max="60"
+        aria-label="Frames per second"
         class="border-edge data-mono mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
       />
 
@@ -223,6 +304,161 @@ const schedulerLabel: Record<string, string> = {
         Generate audio
         <input v-model="form.enableAudio" type="checkbox" class="accent-[var(--safelight)]" />
       </label>
+    </template>
+
+    <!-- LTX-2 pipeline (ltx2 only) -->
+    <template v-if="caps.supportsAdvancedVideo">
+      <button
+        type="button"
+        class="mt-5 mb-2 flex w-full items-center gap-2 text-left"
+        data-test="ltx2-disclosure"
+        :aria-expanded="advancedOpen"
+        @click="advancedOpen = !advancedOpen"
+      >
+        <span class="edge-code">{{ advancedOpen ? "▾" : "▸" }} LTX-2 pipeline</span>
+        <div class="border-edge h-px flex-1 border-t" />
+      </button>
+
+      <div v-if="advancedOpen">
+        <label class="text-caption text-ink-2">Pipeline</label>
+        <select
+          :value="form.pipeline ?? ''"
+          aria-label="LTX-2 pipeline mode"
+          class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+          data-test="ltx2-pipeline"
+          @change="setPipeline(($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">Auto</option>
+          <option v-for="opt in pipelineOptions" :key="opt" :value="opt">{{ opt }}</option>
+        </select>
+
+        <div class="mt-3 grid grid-cols-2 gap-1.5">
+          <div>
+            <label class="text-caption text-ink-2">Spatial</label>
+            <select
+              :value="form.spatialUpscale ?? ''"
+              aria-label="Spatial upscale"
+              class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+              data-test="ltx2-spatial"
+              @change="setSpatial(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">Native</option>
+              <option v-for="v in spatialOptions" :key="v" :value="v">{{ v }}</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-caption text-ink-2">Temporal</label>
+            <select
+              :value="form.temporalUpscale ?? ''"
+              aria-label="Temporal upscale"
+              class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+              data-test="ltx2-temporal"
+              @change="setTemporal(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">Native</option>
+              <option v-for="v in temporalOptions" :key="v" :value="v">{{ v }}</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Retake window (retake pipeline only) -->
+        <template v-if="form.pipeline === 'retake'">
+          <label class="mt-3 text-caption text-ink-2">Retake range (seconds)</label>
+          <div class="mt-1 grid grid-cols-2 gap-1.5">
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              :value="form.retakeRange?.start_seconds ?? ''"
+              placeholder="start"
+              aria-label="Retake start (seconds)"
+              class="border-edge data-mono h-7 w-full rounded-control border bg-bath px-1.5 text-ink placeholder:text-ink-3"
+              data-test="ltx2-retake-start"
+              @input="setRetake('start', ($event.target as HTMLInputElement).value)"
+            />
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              :value="form.retakeRange?.end_seconds ?? ''"
+              placeholder="end"
+              aria-label="Retake end (seconds)"
+              class="border-edge data-mono h-7 w-full rounded-control border bg-bath px-1.5 text-ink placeholder:text-ink-3"
+              data-test="ltx2-retake-end"
+              @input="setRetake('end', ($event.target as HTMLInputElement).value)"
+            />
+          </div>
+        </template>
+
+        <!-- Source video -->
+        <label class="mt-3 text-caption text-ink-2">Source video</label>
+        <div v-if="form.sourceVideo" class="mt-1 flex items-center justify-between gap-2">
+          <span class="data-mono truncate text-caption text-ink" :title="form.sourceVideo.filename">
+            {{ form.sourceVideo.filename }}
+          </span>
+          <button
+            type="button"
+            class="text-caption text-ink-3 hover:text-stop"
+            @click="clearSourceVideo"
+          >
+            clear
+          </button>
+        </div>
+        <input
+          v-else
+          type="file"
+          accept="video/*"
+          aria-label="Source video"
+          class="mt-1 block w-full text-caption text-ink-3"
+          data-test="ltx2-source-video"
+          @change="setSourceVideo"
+        />
+
+        <!-- Keyframes -->
+        <div class="mt-3 flex items-center justify-between">
+          <label class="text-caption text-ink-2">Keyframes</label>
+          <button
+            type="button"
+            class="text-caption text-safelight underline-offset-2 hover:underline"
+            data-test="ltx2-add-keyframe"
+            @click="keyframePickerOpen = true"
+          >
+            Add…
+          </button>
+        </div>
+        <div
+          v-for="(keyframe, index) in form.keyframes"
+          :key="`${keyframe.image.filename}-${index}`"
+          class="border-edge mt-1 grid grid-cols-[4rem_1fr_auto] items-center gap-2 rounded-control border bg-bath p-1.5"
+        >
+          <input
+            type="number"
+            min="0"
+            :value="keyframe.frame"
+            :aria-label="`Keyframe ${index + 1} frame`"
+            class="border-edge data-mono h-6 w-full rounded-control border bg-bench px-1 text-caption text-ink"
+            :data-test="`ltx2-keyframe-frame-${index}`"
+            @input="updateKeyframeFrame(index, ($event.target as HTMLInputElement).value)"
+          />
+          <span class="truncate text-caption text-ink-2">{{ keyframe.image.filename }}</span>
+          <button
+            type="button"
+            class="text-ink-3 hover:text-stop"
+            :aria-label="`Remove keyframe ${index + 1}`"
+            @click="removeKeyframe(index)"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      <ImagePickerModal
+        :open="keyframePickerOpen"
+        title="Keyframe image"
+        :multiple="false"
+        @pick="onKeyframePick"
+        @close="keyframePickerOpen = false"
+      />
     </template>
 
     <!-- Output format -->

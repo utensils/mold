@@ -4,7 +4,18 @@
  * (`capabilities.ts`) decides which fields survive; this module only holds the
  * editable shape and the model-default / request-assembly plumbing.
  */
-import type { GenerateRequest, LoraWeight, ModelEntry, OutputFormat, Scheduler } from "./api/types";
+import type {
+  GenerateRequest,
+  KeyframeConditionWire,
+  LoraWeight,
+  Ltx2PipelineMode,
+  Ltx2SpatialUpscale,
+  Ltx2TemporalUpscale,
+  ModelEntry,
+  OutputFormat,
+  Scheduler,
+  TimeRange,
+} from "./api/types";
 import {
   defaultOutputFormat,
   generationCapabilitiesForFamily,
@@ -18,6 +29,19 @@ export interface FormLora {
   name: string;
   scale: number;
   trainedWords: string[];
+}
+
+/** An image picked via {@link ImagePickerModal} (upload or gallery). `base64`
+ * has no data-URI prefix; `filename` is display/keyframe metadata only. */
+export interface PickedImage {
+  filename: string;
+  base64: string;
+}
+
+/** One LTX-2 keyframe: a conditioning image pinned to a frame index. */
+export interface FormKeyframe {
+  frame: number;
+  image: PickedImage;
 }
 
 export interface GenerateForm {
@@ -49,6 +73,14 @@ export interface GenerateForm {
   frames: number;
   fps: number;
   enableAudio: boolean;
+  // LTX-2 advanced video (ltx2 only). All optional-safe: null / [] defaults so
+  // a partial stored form (template snapshot) still hydrates cleanly.
+  sourceVideo: PickedImage | null;
+  keyframes: FormKeyframe[];
+  pipeline: Ltx2PipelineMode | null;
+  retakeRange: TimeRange | null;
+  spatialUpscale: Ltx2SpatialUpscale | null;
+  temporalUpscale: Ltx2TemporalUpscale | null;
 }
 
 export function newGenerateForm(): GenerateForm {
@@ -77,6 +109,12 @@ export function newGenerateForm(): GenerateForm {
     frames: 97,
     fps: 24,
     enableAudio: false,
+    sourceVideo: null,
+    keyframes: [],
+    pipeline: null,
+    retakeRange: null,
+    spatialUpscale: null,
+    temporalUpscale: null,
   };
 }
 
@@ -111,6 +149,14 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
     form.controlModel = "";
   }
   if (!caps.supportsAudio) form.enableAudio = false;
+  if (!caps.supportsAdvancedVideo) {
+    form.sourceVideo = null;
+    form.keyframes = [];
+    form.pipeline = null;
+    form.retakeRange = null;
+    form.spatialUpscale = null;
+    form.temporalUpscale = null;
+  }
 }
 
 /**
@@ -163,6 +209,20 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     req.frames = form.frames;
     req.fps = form.fps;
     if (caps.supportsAudio) req.enable_audio = form.enableAudio;
+  }
+
+  if (caps.supportsAdvancedVideo) {
+    if (form.sourceVideo) req.source_video = form.sourceVideo.base64;
+    if (form.keyframes.length) {
+      req.keyframes = form.keyframes.map<KeyframeConditionWire>((k) => ({
+        frame: k.frame,
+        image: k.image.base64,
+      }));
+    }
+    if (form.pipeline) req.pipeline = form.pipeline;
+    if (form.retakeRange) req.retake_range = form.retakeRange;
+    if (form.spatialUpscale) req.spatial_upscale = form.spatialUpscale;
+    if (form.temporalUpscale) req.temporal_upscale = form.temporalUpscale;
   }
 
   return pruneRequestForFamily(req, form.family);
