@@ -70,7 +70,7 @@ build() {
   # Together they make AUR chroot builds fully reproducible.
   cargo build --release --frozen --offline \
     -p mold-ai \
-    --features cuda,preview,expand,tui,webp,mp4,metrics
+    --features cuda,preview,expand,tui,webp,mp4,metrics,mdns
 }
 
 package() {

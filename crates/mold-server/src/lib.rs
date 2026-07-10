@@ -522,7 +522,7 @@ pub async fn run_server(
                 &mdns_gpu_summary,
                 queue_size,
             );
-            match mdns::register(bound_port, txt) {
+            match mdns::register(bind, bound_port, txt) {
                 Ok(guard) => Some(guard),
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"), "mDNS advertising disabled");

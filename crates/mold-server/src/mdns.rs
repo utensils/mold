@@ -28,6 +28,12 @@ pub const SERVICE_TYPE: &str = "_mold._tcp.local.";
 /// headroom for the `-{port}` suffix so the sanitised host never overflows.
 const MAX_INSTANCE_BYTES: usize = 63;
 
+/// Whether an address is an IPv6 link-local (`fe80::/10`). These carry a zone
+/// id that mdns-sd drops, so they can't be used verbatim in a URL.
+fn is_ipv6_link_local(ip: &IpAddr) -> bool {
+    matches!(ip, IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80)
+}
+
 /// Handle that keeps an advertisement alive. Dropping it (or calling
 /// [`MdnsGuard::shutdown`]) unregisters the service and stops the daemon so the
 /// server disappears from the network promptly on shutdown.
@@ -55,8 +61,8 @@ impl MdnsGuard {
 pub struct DiscoveredServer {
     /// Instance label without the service-type suffix (e.g. `hal9000-7680`).
     pub name: String,
-    /// Best host to connect to — the preferred IPv4 address when present,
-    /// otherwise an IPv6 address, otherwise the advertised hostname.
+    /// Best host to connect to — a routable IPv4 when present, else a routable
+    /// (non-link-local) IPv6, else the advertised `.local` hostname.
     pub host: String,
     /// Every resolved address, IPv4 first, as strings.
     pub addresses: Vec<String>,
@@ -109,6 +115,39 @@ pub fn is_advertisable(bind: &str, _port: u16) -> bool {
         // A hostname (e.g. "localhost") — treat literal loopback names as
         // non-advertisable, anything else as advertisable.
         Err(_) => !host.eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// How a server's addresses should be announced, decided from its bind address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Advertised {
+    /// Wildcard or hostname bind — let `enable_addr_auto` announce every
+    /// interface address (loopback is disabled separately).
+    Auto,
+    /// A concrete non-loopback bind — announce only this address, so discovery
+    /// can never hand out an interface the listener isn't actually bound on.
+    Fixed(IpAddr),
+}
+
+/// Decide how to advertise given the server's `--bind` address.
+///
+/// A wildcard bind (`0.0.0.0` / `::` / empty) fans out to every interface via
+/// auto-addressing. A specific non-loopback IP is advertised verbatim so a
+/// multi-homed host (LAN + VPN NIC) never announces an address the listener
+/// isn't serving on. Loopback and hostname binds fall back to `Auto` (loopback
+/// is already excluded by [`is_advertisable`] and the interface disable).
+pub fn advertise_addr(bind: &str) -> Advertised {
+    let host = bind.trim();
+    if host.is_empty() || matches!(host, "0.0.0.0" | "::" | "[::]") {
+        return Advertised::Auto;
+    }
+    match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+    {
+        Ok(ip) if !ip.is_loopback() => Advertised::Fixed(ip),
+        _ => Advertised::Auto,
     }
 }
 
@@ -217,14 +256,15 @@ pub fn from_service_parts(
 
     let txt_map: BTreeMap<String, String> = txt.into_iter().collect();
 
-    let first_v4 = addresses.iter().find(|ip| ip.is_ipv4());
-    let host = if let Some(ip) = first_v4 {
+    // Connect-host preference: routable IPv4, then routable (non-link-local)
+    // IPv6, then the advertised `.local` hostname. mdns-sd strips the zone id
+    // from scoped IPv6, so a bare `[fe80::…]` URL is unroutable — we keep such
+    // addresses in the list but never build a URL from them; the `.local`
+    // hostname resolves via mDNS on the client instead.
+    let host = if let Some(ip) = addresses.iter().find(|ip| ip.is_ipv4()) {
         ip.to_string()
-    } else if let Some(ip) = addresses.first() {
-        match ip {
-            IpAddr::V6(_) => format!("[{ip}]"),
-            IpAddr::V4(_) => ip.to_string(),
-        }
+    } else if let Some(ip) = addresses.iter().find(|ip| !is_ipv6_link_local(ip)) {
+        format!("[{ip}]")
     } else {
         hostname.trim_end_matches('.').to_string()
     };
@@ -243,10 +283,11 @@ pub fn from_service_parts(
 
 /// Register a mold advertisement on the local network.
 ///
-/// `txt` is the output of [`build_txt_records`]. The service binds to all
-/// interface addresses via `enable_addr_auto`, so a wildcard server bind still
-/// advertises the machine's real LAN addresses.
-pub fn register(port: u16, txt: Vec<(String, String)>) -> Result<MdnsGuard> {
+/// `txt` is the output of [`build_txt_records`]. A wildcard `bind` advertises
+/// every non-loopback interface (via `enable_addr_auto`); a concrete
+/// non-loopback `bind` advertises only that address so a multi-homed host never
+/// announces an interface the listener isn't serving on ([`advertise_addr`]).
+pub fn register(bind: &str, port: u16, txt: Vec<(String, String)>) -> Result<MdnsGuard> {
     let daemon = ServiceDaemon::new().context("failed to start mDNS daemon")?;
 
     // Never announce on loopback interfaces. `enable_addr_auto` otherwise
@@ -262,7 +303,7 @@ pub fn register(port: u16, txt: Vec<(String, String)>) -> Result<MdnsGuard> {
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "mold".to_string());
     let instance = instance_name(&raw_host, port);
-    // `enable_addr_auto` requires a hostname ending in `.local.`.
+    // The advertised hostname must end in `.local.`.
     let host_label = {
         let base = raw_host.split('.').next().unwrap_or("mold");
         let base = if base.is_empty() { "mold" } else { base };
@@ -271,16 +312,26 @@ pub fn register(port: u16, txt: Vec<(String, String)>) -> Result<MdnsGuard> {
 
     let props: Vec<(&str, &str)> = txt.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
+    // A specific-IP bind is announced verbatim; a wildcard/hostname bind uses
+    // auto-addressing over every (non-loopback) interface.
+    let fixed_addr = match advertise_addr(bind) {
+        Advertised::Fixed(ip) => Some(ip.to_string()),
+        Advertised::Auto => None,
+    };
     let service = ServiceInfo::new(
         SERVICE_TYPE,
         &instance,
         &host_label,
-        "", // addresses filled in by enable_addr_auto
+        fixed_addr.as_deref().unwrap_or(""),
         port,
         &props[..],
     )
-    .context("failed to build mDNS service info")?
-    .enable_addr_auto();
+    .context("failed to build mDNS service info")?;
+    let service = if fixed_addr.is_some() {
+        service
+    } else {
+        service.enable_addr_auto()
+    };
 
     let fullname = service.get_fullname().to_string();
     daemon
@@ -357,6 +408,36 @@ mod tests {
         assert!(is_advertisable("192.168.1.10", 7680));
         assert!(is_advertisable("10.0.0.5", 7680));
         assert!(is_advertisable("hal9000", 7680));
+    }
+
+    #[test]
+    fn advertise_addr_wildcard_is_auto() {
+        assert_eq!(advertise_addr("0.0.0.0"), Advertised::Auto);
+        assert_eq!(advertise_addr("::"), Advertised::Auto);
+        assert_eq!(advertise_addr("[::]"), Advertised::Auto);
+        assert_eq!(advertise_addr(""), Advertised::Auto);
+        // A hostname bind can't be resolved to one address here — auto.
+        assert_eq!(advertise_addr("hal9000"), Advertised::Auto);
+    }
+
+    #[test]
+    fn advertise_addr_specific_ip_is_fixed() {
+        assert_eq!(
+            advertise_addr("192.168.1.5"),
+            Advertised::Fixed(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)))
+        );
+        assert_eq!(
+            advertise_addr("[fe80::1]"),
+            Advertised::Fixed(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)))
+        );
+    }
+
+    #[test]
+    fn advertise_addr_loopback_falls_back_to_auto() {
+        // Loopback binds are filtered by is_advertisable before register, but
+        // guard against a stray call handing us a self-pointing address.
+        assert_eq!(advertise_addr("127.0.0.1"), Advertised::Auto);
+        assert_eq!(advertise_addr("::1"), Advertised::Auto);
     }
 
     #[test]
@@ -480,8 +561,10 @@ mod tests {
     }
 
     #[test]
-    fn from_service_parts_ipv6_only_brackets_url() {
-        let v6 = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+    fn from_service_parts_routable_ipv6_only_brackets_url() {
+        // A global-unicast IPv6 (2001:db8::/32 doc range) has no scope id, so
+        // it is safe to use verbatim in a bracketed URL.
+        let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
         let s = from_service_parts(
             "box._mold._tcp.local.",
             "box.local.",
@@ -489,9 +572,41 @@ mod tests {
             vec![v6],
             vec![],
         );
-        assert_eq!(s.url, "http://[fe80::1]:8080");
+        assert_eq!(s.url, "http://[2001:db8::1]:8080");
         assert!(!s.auth_required);
         assert!(s.version.is_none());
+    }
+
+    #[test]
+    fn from_service_parts_link_local_v6_only_uses_hostname() {
+        // Link-local IPv6 loses its zone id → unroutable as a bare URL. Fall
+        // back to the mDNS `.local` hostname, but keep the address in the list.
+        let ll = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+        let s = from_service_parts(
+            "box._mold._tcp.local.",
+            "box.local.",
+            8080,
+            vec![ll],
+            vec![],
+        );
+        assert_eq!(s.url, "http://box.local:8080");
+        assert_eq!(s.host, "box.local");
+        assert_eq!(s.addresses, vec!["fe80::1".to_string()]);
+    }
+
+    #[test]
+    fn from_service_parts_ipv4_beats_link_local_v6() {
+        let ll = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+        let v4 = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+        let s = from_service_parts(
+            "box-7680._mold._tcp.local.",
+            "box.local.",
+            7680,
+            vec![ll, v4],
+            vec![],
+        );
+        assert_eq!(s.url, "http://192.168.1.5:7680");
+        assert_eq!(s.host, "192.168.1.5");
     }
 
     #[test]
@@ -510,7 +625,7 @@ mod tests {
     #[ignore]
     fn register_then_discover_roundtrip() {
         let txt = build_txt_records("9.9.9", "deadbee", false, "cpu", 42);
-        let guard = register(0, txt).expect("register");
+        let guard = register("0.0.0.0", 0, txt).expect("register");
         // Give the responder a moment, then browse.
         let found = discover(Duration::from_secs(3)).expect("discover");
         guard.shutdown();
