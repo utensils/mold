@@ -60,6 +60,8 @@ crates/
 
 **MSRV**: 1.85.
 
+**Desktop app** (`desktop/`): Tauri 2 macOS app (Vue 3 + TS, "Safelight" design language), package `mold-desktop` — its own cargo root, `exclude`d from the workspace. Embeds `mold-ai-server` in-process (`metal` cargo feature, off by default so CI is CPU-only) or connects to a running `mold serve` on :7680 / a remote host — one HTTP+SSE wire contract for all three. Devshell: `desktop-dev` / `desktop-build` / `desktop-check` / `desktop-test` / `desktop-ui` / `desktop-bun-lock`; CI: `.github/workflows/desktop.yml`. Its version tracks the workspace version (single source: `desktop/src-tauri/Cargo.toml` — bump it during release prep; `tauri.conf.json` has no version field on purpose). Gotcha: the tauri dev watcher does not rebuild on `crates/` changes — relaunch `desktop-dev` to pick up engine changes. In Vue stores, `reactive()`-wrap any object mutated from SSE/closure callbacks (raw-object mutations bypass proxy traps and freeze the UI).
+
 **Feature flags** (`mold-cli`): `cuda`, `metal`, `preview`, `discord`, `expand`, `tui`, `metrics`, `webp`, `mp4`. GPU features forward through to `mold-inference`. H.264 decode is baseline for LTX-2 source ingest; `mp4` only gates AAC mux.
 
 ## Non-obvious architectural patterns
