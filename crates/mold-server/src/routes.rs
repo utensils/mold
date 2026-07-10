@@ -397,7 +397,9 @@ pub fn create_router(state: AppState) -> Router {
         // Agent C (model-ui-overhaul §3): placement persistence.
         .route(
             "/api/config/model/:name/placement",
-            axum::routing::put(put_model_placement).delete(delete_model_placement),
+            get(get_model_placement)
+                .put(put_model_placement)
+                .delete(delete_model_placement),
         )
         .route("/health", get(health))
         .with_state(state)
@@ -3109,6 +3111,24 @@ fn scan_gallery_dir(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
 }
 
 // ── /api/config/model/:name/placement (Agent C, model-ui-overhaul §3) ────────
+
+/// Read the saved per-model placement default so an editor can hydrate its
+/// controls before letting the user edit-and-save (without which a save
+/// silently clobbers the persisted placement with defaults). Returns the raw
+/// persisted value — not the env-overlaid `resolved_placement` — so a `404`
+/// faithfully means "nothing saved for this model".
+async fn get_model_placement(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<mold_core::types::DevicePlacement>, ApiError> {
+    let cfg = state.config.read().await;
+    match cfg.models.get(&name).and_then(|mc| mc.placement.clone()) {
+        Some(placement) => Ok(Json(placement)),
+        None => Err(ApiError::not_found(format!(
+            "no placement saved for model '{name}'"
+        ))),
+    }
+}
 
 async fn put_model_placement(
     State(state): State<AppState>,

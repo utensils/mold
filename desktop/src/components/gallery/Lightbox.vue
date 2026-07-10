@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import AuthedMedia from "./AuthedMedia.vue";
 import { mediaPath } from "../../lib/gallery/media";
@@ -33,6 +33,16 @@ watch(
   () => props.item.filename,
   () => (confirmingDelete.value = false),
 );
+
+// Focus the close button on open and hand focus back to the opener on teardown,
+// so the lightbox is keyboard-operable and doesn't strand focus when dismissed.
+const closeBtn = ref<HTMLButtonElement | null>(null);
+let restoreFocusEl: HTMLElement | null = null;
+onMounted(() => {
+  restoreFocusEl = document.activeElement as HTMLElement | null;
+  closeBtn.value?.focus();
+});
+onBeforeUnmount(() => restoreFocusEl?.focus?.());
 
 const meta = computed(() => props.item.metadata);
 
@@ -96,8 +106,15 @@ function onDelete() {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-40 flex bg-black/70" @click.self="emit('close')">
+  <div
+    class="fixed inset-0 z-40 flex bg-black/70"
+    role="dialog"
+    aria-modal="true"
+    :aria-label="`Print ${index + 1} of ${count}`"
+    @click.self="emit('close')"
+  >
     <button
+      ref="closeBtn"
       type="button"
       class="absolute top-4 left-4 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/55 text-body-lg text-rebate transition-colors duration-100 hover:bg-black/80"
       title="Close (Esc)"

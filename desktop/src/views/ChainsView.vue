@@ -272,6 +272,7 @@ onMounted(() => {
             type="button"
             class="text-ink-3 hover:text-ink"
             title="Randomize"
+            aria-label="Randomize seed"
             @click="randomizeSeed"
           >
             ⟳

@@ -132,15 +132,16 @@ Environment variables take precedence over config file values.
 
 ### Core
 
-| Variable             | Default                            | Description                         |
-| -------------------- | ---------------------------------- | ----------------------------------- |
-| `MOLD_HOME`          | `~/.mold`                          | Base directory for config and cache |
-| `MOLD_DEFAULT_MODEL` | `flux2-klein:q8`                   | Default model name                  |
-| `MOLD_HOST`          | `http://localhost:7680`            | Remote server URL                   |
-| `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`                | Model storage directory             |
-| `MOLD_PORT`          | `7680`                             | Server port                         |
-| `LAMBDA_API_KEY`     | unset                              | Overrides `lambda.api_key`          |
-| `MOLD_LOG`           | `info` (serve) / `warn` (cli, tui) | Log level                           |
+| Variable             | Default                            | Description                                                                                                     |
+| -------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `MOLD_HOME`          | `~/.mold`                          | Base directory for config and cache                                                                             |
+| `MOLD_DEFAULT_MODEL` | `flux2-klein:q8`                   | Default model name                                                                                              |
+| `MOLD_HOST`          | `http://localhost:7680`            | Remote server URL                                                                                               |
+| `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`                | Model storage directory                                                                                         |
+| `MOLD_PORT`          | `7680`                             | Server port                                                                                                     |
+| `MOLD_MDNS`          | `1` (on)                           | Set `0`/`false` to stop `mold serve` advertising itself on the LAN via mDNS (requires the `mdns` build feature) |
+| `LAMBDA_API_KEY`     | unset                              | Overrides `lambda.api_key`                                                                                      |
+| `MOLD_LOG`           | `info` (serve) / `warn` (cli, tui) | Log level                                                                                                       |
 
 ### Generation
 
@@ -307,9 +308,11 @@ specific ordinal.
 Precedence (highest wins): CLI flag (`--device-text-encoders`, `--device-vae`, …)
 → env var → `[models."name:tag".placement]` TOML block → engine auto.
 
-The web UI's **Placement** panel, the `PUT /api/config/model/:name/placement`
-route, and `mold run --device-*` flags all write/read the same shape, so any
-surface can drive it.
+The web UI's **Placement** panel, the desktop app's **Settings → Advanced**
+placement editor, the `GET`/`PUT`/`DELETE /api/config/model/:name/placement`
+routes (read a saved default, save one, clear one — `GET` returns `404` when
+none is saved), and `mold run --device-*` flags all write/read the same shape,
+so any surface can drive it.
 
 Tier 2 per-component controls are intentionally gated: families other than
 FLUX, Flux.2, Z-Image, and Qwen-Image only honor Tier 1 (`MOLD_PLACE_TEXT_ENCODERS`)

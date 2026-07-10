@@ -42,5 +42,5 @@ onMounted(load);
   <div v-else-if="failed" class="flex h-full w-full items-center justify-center bg-bench">
     <span class="edge-code">UNREADABLE</span>
   </div>
-  <div v-else class="h-full w-full animate-pulse bg-bench" />
+  <div v-else class="grain-shimmer h-full w-full" />
 </template>

@@ -53,6 +53,8 @@ onUnmounted(() => {
       class="border-edge fixed z-50 rounded-chrome border bg-bench py-1 shadow-[0_8px_28px_rgba(0,0,0,0.5)]"
       :style="{ left: `${menu.x}px`, top: `${menu.y}px`, width: `${MENU_WIDTH}px` }"
       role="menu"
+      aria-orientation="vertical"
+      aria-label="Context menu"
     >
       <template v-for="(entry, i) in menu.entries" :key="i">
         <div v-if="isSeparator(entry)" class="border-edge mx-2 my-1 border-t" role="separator" />
@@ -60,6 +62,7 @@ onUnmounted(() => {
           v-else
           type="button"
           role="menuitem"
+          :aria-disabled="entry.disabled || undefined"
           class="flex h-[26px] w-full items-center px-3 text-left text-body transition-colors duration-75"
           :class="[
             entry.disabled

@@ -59,8 +59,9 @@ async function runGc() {
       <div class="border-edge h-px flex-1 border-t" />
       <button
         type="button"
-        class="edge-code text-ink-3 hover:text-ink"
+        class="edge-code text-ink-3 hover:text-ink active:translate-y-px"
         title="Garbage-collect"
+        aria-label="Garbage-collect finished jobs"
         @click="runGc"
       >
         GC
@@ -72,7 +73,7 @@ async function runGc() {
     <div
       v-for="job in chains.jobs"
       :key="job.id"
-      class="border-edge flex flex-col gap-1 border-b py-2 last:border-b-0"
+      class="border-edge -mx-1 flex flex-col gap-1 rounded-control border-b px-1 py-2 transition-colors duration-100 last:border-b-0 hover:bg-bath"
     >
       <div class="flex items-center gap-2">
         <span class="edge-code uppercase" :class="STATE_CLASS[job.state]">{{ job.state }}</span>
@@ -87,7 +88,7 @@ async function runGc() {
       <div class="flex flex-wrap items-center gap-1">
         <button
           type="button"
-          class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink"
+          class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink active:translate-y-px"
           @click="chains.watch(job.id)"
         >
           Watch
@@ -95,7 +96,7 @@ async function runGc() {
         <button
           v-if="resumable(job.state)"
           type="button"
-          class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink"
+          class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink active:translate-y-px"
           @click="chains.resume(job.id)"
         >
           Resume
@@ -103,7 +104,7 @@ async function runGc() {
         <button
           v-if="cancellable(job.state)"
           type="button"
-          class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-stop"
+          class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-stop active:translate-y-px"
           @click="chains.cancel(job.id)"
         >
           Cancel
@@ -111,14 +112,14 @@ async function runGc() {
         <button
           v-if="job.state === 'completed'"
           type="button"
-          class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink"
+          class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink active:translate-y-px"
           @click="openRetake(job)"
         >
           Retake
         </button>
         <button
           type="button"
-          class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-stop"
+          class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-stop active:translate-y-px"
           @click="chains.remove(job.id)"
         >
           Delete

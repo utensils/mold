@@ -4264,6 +4264,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_model_placement_returns_saved_value() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("MOLD_HOME", tmp.path());
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new(),
+        });
+        let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
+        let app = crate::routes::create_router(state);
+
+        let body = serde_json::json!({
+            "text_encoders": { "kind": "cpu" },
+            "advanced": {
+                "transformer": { "kind": "gpu", "ordinal": 1 },
+                "vae": { "kind": "auto" },
+                "t5": { "kind": "cpu" }
+            }
+        });
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/model/flux-dev%3Aq4/placement")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+
+        // The editor hydrates from this read; it must echo what was saved.
+        let get = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/config/model/flux-dev%3Aq4/placement")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        let got = json_body(get).await;
+        assert_eq!(got["text_encoders"]["kind"], "cpu");
+        assert_eq!(got["advanced"]["transformer"]["kind"], "gpu");
+        assert_eq!(got["advanced"]["transformer"]["ordinal"], 1);
+        assert_eq!(got["advanced"]["t5"]["kind"], "cpu");
+        std::env::remove_var("MOLD_HOME");
+    }
+
+    #[tokio::test]
+    async fn get_model_placement_returns_404_when_none_saved() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/config/model/flux-dev%3Aq4/placement")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn generate_rejects_gpu_outside_worker_pool() {
         let app = app_with_worker_pool(MockEngine::ready(), &[1]);
         let body = serde_json::json!({

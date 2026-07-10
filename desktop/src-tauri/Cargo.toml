@@ -33,6 +33,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 tracing = "0.1"
+# Local interface enumeration so discovered servers can be flagged "This Mac".
+if-addrs = "0.15"
+hostname = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = [
@@ -45,6 +48,7 @@ mold-db = { path = "../../crates/mold-db", package = "mold-ai-db", version = "0.
 mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.14.0", features = [
   "expand",
   "mp4",
+  "mdns",
 ] }
 
 [dev-dependencies]

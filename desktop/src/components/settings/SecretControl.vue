@@ -51,7 +51,7 @@ async function clear() {
       />
       <button
         type="button"
-        class="h-7 rounded-control bg-safelight px-2.5 text-body font-semibold text-[#141110] disabled:opacity-50"
+        class="h-7 rounded-control bg-safelight px-2.5 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
         :disabled="!draft.trim()"
         @click="save"
       >
@@ -74,6 +74,7 @@ async function clear() {
         type="button"
         class="h-7 rounded-control px-1.5 text-caption text-ink-3 hover:text-stop"
         title="Remove"
+        aria-label="Remove secret"
         @click="clear"
       >
         ↺

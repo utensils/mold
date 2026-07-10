@@ -104,7 +104,7 @@ jobs:
       - name: Test
         run: cargo test --workspace
       - name: Check with all optional features
-        run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4
+        run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
 
   coverage:
     runs-on: ubuntu-latest

@@ -64,6 +64,7 @@ pub fn run() {
             commands::stop_local_engine,
             commands::set_remote_host,
             commands::test_remote_host,
+            commands::discover_servers,
             commands::get_output_dir,
             commands::set_dock_badge,
             commands::reveal_output_file,

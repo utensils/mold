@@ -41,6 +41,21 @@ const progressValue = computed(() => {
 });
 const framesError = computed(() => frames8n1Error(props.stage.frames));
 
+// Accessible name for the develop/preview cell — its state is otherwise
+// conveyed only by the grain color (temperature semantics).
+const developAria = computed(() => {
+  const base = `Stage ${props.index + 1}`;
+  const state = props.jobStage?.state;
+  if (state === "completed") return `${base}: completed`;
+  if (state === "failed") return `${base}: failed`;
+  if (state === "running") {
+    return props.progress
+      ? `${base}: developing, step ${props.progress.step} of ${props.progress.total}`
+      : `${base}: developing`;
+  }
+  return `${base}: not started`;
+});
+
 // Load the stage's JPEG preview once the job reports it exists.
 watch(
   () => [props.jobId, props.jobStage?.has_preview] as const,
@@ -73,6 +88,8 @@ function snapFramesField() {
     <!-- 96px Develop grain / preview -->
     <div
       class="relative h-24 w-full overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_18%,transparent)] bg-print-surface"
+      role="img"
+      :aria-label="developAria"
     >
       <img
         v-if="previewUrl"
@@ -106,18 +123,20 @@ function snapFramesField() {
       <div class="flex items-center gap-1">
         <button
           type="button"
-          class="text-ink-3 hover:text-ink disabled:opacity-30"
+          class="text-ink-3 hover:text-ink active:translate-y-px disabled:opacity-30"
           :disabled="!canMoveLeft"
           title="Move left"
+          aria-label="Move stage left"
           @click="emit('move-left')"
         >
           ◂
         </button>
         <button
           type="button"
-          class="text-ink-3 hover:text-ink disabled:opacity-30"
+          class="text-ink-3 hover:text-ink active:translate-y-px disabled:opacity-30"
           :disabled="!canMoveRight"
           title="Move right"
+          aria-label="Move stage right"
           @click="emit('move-right')"
         >
           ▸
@@ -125,9 +144,10 @@ function snapFramesField() {
       </div>
       <button
         type="button"
-        class="text-ink-3 hover:text-stop disabled:opacity-30"
+        class="text-ink-3 hover:text-stop active:translate-y-px disabled:opacity-30"
         :disabled="!canRemove"
         title="Remove stage"
+        aria-label="Remove stage"
         @click="emit('remove')"
       >
         ✕

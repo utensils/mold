@@ -23,6 +23,7 @@ const THEMES = [
       <SelectControl
         :model-value="prefs.theme"
         :options="THEMES"
+        aria-label="Appearance"
         @commit="(v) => prefs.update({ theme: v as Theme })"
       />
     </SettingRow>
@@ -32,18 +33,21 @@ const THEMES = [
     >
       <ToggleControl
         :model-value="prefs.notifications"
+        aria-label="Notifications"
         @commit="(v) => prefs.update({ notifications: v })"
       />
     </SettingRow>
     <SettingRow label="Dock badge" help="Show the queue depth on the Dock icon.">
       <ToggleControl
         :model-value="prefs.dockBadge"
+        aria-label="Dock badge"
         @commit="(v) => prefs.update({ dockBadge: v })"
       />
     </SettingRow>
     <SettingRow label="Reopen last view" help="Launch into the view you left instead of Generate.">
       <ToggleControl
         :model-value="prefs.restoreLastRoute"
+        aria-label="Reopen last view"
         @commit="(v) => prefs.update({ restoreLastRoute: v })"
       />
     </SettingRow>

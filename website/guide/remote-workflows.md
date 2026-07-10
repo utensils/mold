@@ -22,6 +22,29 @@ export MOLD_HOST=http://gpu-host:7680
 mold run "a cinematic portrait"
 ```
 
+## Finding Servers on Your Network
+
+If you don't know the GPU host's address, let mold find it. Builds with the
+`mdns` feature (release binaries and the Nix package) advertise every
+`mold serve` on the local network via mDNS/DNS-SD, and `mold server discover`
+browses for them:
+
+```bash
+mold server discover
+# NAME          URL                       VERSION  AUTH  GPU
+# hal9000-7680  http://192.168.1.10:7680  0.14.0   -     1xNVIDIA GeForce RTX 4090
+#
+# Connect: export MOLD_HOST=http://192.168.1.10:7680
+```
+
+Add `--probe` for a `/health` latency column, `--json` for machine-readable
+output, or `--timeout-secs N` to browse longer on a busy network. The desktop
+app shows the same list under Settings → Engine with a one-click **Use** button.
+
+Advertising is on by default; a server can opt out with `mold serve --no-mdns`
+or `MOLD_MDNS=0` (for example on a shared or untrusted LAN). Loopback-only binds
+(`--bind 127.0.0.1`) are never advertised.
+
 ## Recommended Pattern
 
 1. `mold pull` models on the GPU host, not from every client machine.

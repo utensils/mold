@@ -98,7 +98,7 @@ function jobMenu(job: Job): MenuEntry[] {
 </script>
 
 <template>
-  <nav class="border-edge flex w-[208px] flex-col border-r bg-bench pt-2 pb-2">
+  <nav class="border-edge flex w-[208px] flex-col border-r bg-bench pt-2 pb-2" aria-label="Primary">
     <RouterLink
       v-for="d in destinations"
       :key="d.route"

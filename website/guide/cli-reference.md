@@ -121,22 +121,44 @@ mold expand <PROMPT> [OPTIONS]
 Start the HTTP inference server.
 
 ```bash
-mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-size N] [--log-format json|text] [--log-file] [--discord]
+mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-size N] [--log-format json|text] [--log-file] [--discord] [--no-mdns]
 ```
 
-| Flag                  | Description                                                  |
-| --------------------- | ------------------------------------------------------------ |
-| `--port <N>`          | Port, defaults to `7680` or `MOLD_PORT`                      |
-| `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                          |
-| `--models-dir <PATH>` | Override the models directory                                |
-| `--gpus <SPEC>`       | GPU ordinals (`0,1`) or `all`; defaults to every visible GPU |
-| `--queue-size <N>`    | Max queued jobs; overflow returns HTTP 503 + `Retry-After`   |
-| `--log-format <FMT>`  | `json` or `text`                                             |
-| `--log-file`          | Enable rotated logs under `~/.mold/logs/`                    |
-| `--discord`           | Start the built-in Discord bot in the same process           |
+| Flag                  | Description                                                                |
+| --------------------- | -------------------------------------------------------------------------- |
+| `--port <N>`          | Port, defaults to `7680` or `MOLD_PORT`                                    |
+| `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                                        |
+| `--models-dir <PATH>` | Override the models directory                                              |
+| `--gpus <SPEC>`       | GPU ordinals (`0,1`) or `all`; defaults to every visible GPU               |
+| `--queue-size <N>`    | Max queued jobs; overflow returns HTTP 503 + `Retry-After`                 |
+| `--log-format <FMT>`  | `json` or `text`                                                           |
+| `--log-file`          | Enable rotated logs under `~/.mold/logs/`                                  |
+| `--discord`           | Start the built-in Discord bot in the same process                         |
+| `--no-mdns`           | Don't advertise this server on the LAN (`mdns` builds; also `MOLD_MDNS=0`) |
 
 `GET /api/status` returns `gpus[]` with per-worker state and
 `queue_depth`/`queue_capacity` for queue health.
+
+## `mold server discover`
+
+Browse the local network (mDNS/DNS-SD, `_mold._tcp`) for running `mold serve`
+instances that advertise themselves. Available in builds compiled with the
+`mdns` feature (included in release binaries and the Nix package).
+
+```bash
+mold server discover [--timeout-secs N] [--json] [--probe]
+```
+
+| Flag                 | Description                                                   |
+| -------------------- | ------------------------------------------------------------- |
+| `--timeout-secs <N>` | How long to browse before reporting (default `3`)             |
+| `--json`             | Emit the raw list of discovered servers as JSON               |
+| `--probe`            | Also time each server's `/health` and show a `LATENCY` column |
+
+The table lists NAME, URL, VERSION, AUTH (whether an API key is required), and a
+GPU summary, followed by a `export MOLD_HOST=…` hint for the first result.
+Advertising is on by default when a server is built with the `mdns` feature;
+disable it per-server with `mold serve --no-mdns` or `MOLD_MDNS=0`.
 
 ## `mold mcp`
 
@@ -277,6 +299,7 @@ Common subcommands are `doctor`, `availability`, `deploy`, `status`, `logs`,
 | `mold stats [--json]`                             | Show disk usage for models, output, logs, and shared components |
 | `mold clean [--force] [--older-than DURATION]`    | Remove stale downloads, orphaned files, and old outputs         |
 | `mold server start/status/stop`                   | Manage a background server daemon                               |
+| `mold server discover`                            | Find mold servers advertised on the local network (mDNS)        |
 | `mold rm <MODELS...> [--force]`                   | Remove downloaded models                                        |
 | `mold ps`                                         | Show server status or local mold processes                      |
 | `mold unload`                                     | Unload the current server model                                 |

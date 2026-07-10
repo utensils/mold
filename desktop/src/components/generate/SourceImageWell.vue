@@ -1,14 +1,27 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { GenerateForm } from "../../lib/generateForm";
+import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { base64ToDataUrl, fileToBase64 } from "../../lib/image";
 import { useToastStore } from "../../stores/toasts";
+import ImagePickerModal from "./ImagePickerModal.vue";
+import MaskEditorModal from "./MaskEditorModal.vue";
 
 const props = defineProps<{ form: GenerateForm }>();
 const toasts = useToastStore();
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
+
+const pickerOpen = ref(false);
+const maskOpen = ref(false);
+
+function onSourcePicked(picked: PickedImage[]) {
+  const first = picked[0];
+  if (first) props.form.sourceImage = first.base64;
+}
+function onMaskApplied(mask: string) {
+  props.form.maskImage = mask;
+}
 
 type Slot = "source" | "mask" | "control";
 const dragOver = ref<Slot | null>(null);
@@ -92,11 +105,20 @@ function clearSlot(slot: Slot) {
           type="button"
           class="border-edge absolute top-1 right-1 h-5 w-5 rounded-control border bg-bath text-ink-2 hover:text-stop"
           title="Clear source"
+          aria-label="Clear source image"
           @click="clearSlot('source')"
         >
           ✕
         </button>
       </div>
+      <button
+        type="button"
+        class="mt-2 text-caption text-ink-3 underline-offset-2 hover:text-ink hover:underline"
+        data-test="source-choose-gallery"
+        @click="pickerOpen = true"
+      >
+        Choose from gallery…
+      </button>
     </div>
 
     <!-- Strength -->
@@ -116,7 +138,17 @@ function clearSlot(slot: Slot) {
 
     <!-- Mask well (inpaint families) -->
     <template v-if="caps.supportsMask && form.sourceImage">
-      <label class="mt-3 text-caption text-ink-2">Mask</label>
+      <div class="mt-3 flex items-center justify-between">
+        <label class="text-caption text-ink-2">Mask</label>
+        <button
+          type="button"
+          class="text-caption text-safelight underline-offset-2 hover:underline"
+          data-test="source-edit-mask"
+          @click="maskOpen = true"
+        >
+          Edit mask…
+        </button>
+      </div>
       <input
         :ref="(el) => (inputEls.mask = el as HTMLInputElement | null)"
         type="file"
@@ -150,6 +182,7 @@ function clearSlot(slot: Slot) {
             type="button"
             class="border-edge absolute top-1 right-1 h-5 w-5 rounded-control border bg-bath text-ink-2 hover:text-stop"
             title="Clear mask"
+            aria-label="Clear mask image"
             @click="clearSlot('mask')"
           >
             ✕
@@ -194,6 +227,7 @@ function clearSlot(slot: Slot) {
             type="button"
             class="border-edge absolute top-1 right-1 h-5 w-5 rounded-control border bg-bath text-ink-2 hover:text-stop"
             title="Clear control image"
+            aria-label="Clear control image"
             @click="clearSlot('control')"
           >
             ✕
@@ -222,5 +256,19 @@ function clearSlot(slot: Slot) {
         />
       </template>
     </template>
+
+    <ImagePickerModal
+      :open="pickerOpen"
+      :multiple="false"
+      @pick="onSourcePicked"
+      @close="pickerOpen = false"
+    />
+    <MaskEditorModal
+      :open="maskOpen"
+      :source="form.sourceImage"
+      :initial-mask="form.maskImage"
+      @apply="onMaskApplied"
+      @close="maskOpen = false"
+    />
   </div>
 </template>

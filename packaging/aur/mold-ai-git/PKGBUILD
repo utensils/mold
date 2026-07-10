@@ -73,7 +73,7 @@ build() {
   #   --offline refuses any network IO during build
   cargo build --release --frozen --offline \
     -p mold-ai \
-    --features cuda,preview,expand,tui,webp,mp4,metrics
+    --features cuda,preview,expand,tui,webp,mp4,metrics,mdns
 }
 
 package() {

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Local network access is required to discover mold servers advertised on
+      the LAN over mDNS/DNS-SD. macOS 15+ prompts the user the first time the
+      app browses; NSBonjourServices must enumerate every service type the app
+      resolves or the browse silently returns nothing.
+    -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Mold uses your local network to discover mold servers running on nearby machines.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_mold._tcp</string>
+    </array>
+</dict>
+</plist>

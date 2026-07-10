@@ -63,6 +63,7 @@ const asNumber = computed(() => {
       v-if="schema.editor === 'toggle'"
       :model-value="asBool"
       :disabled="locked"
+      :aria-label="schema.label"
       @commit="save"
     />
     <SelectControl
@@ -70,6 +71,7 @@ const asNumber = computed(() => {
       :model-value="asText"
       :options="options ?? schema.options ?? []"
       :disabled="locked"
+      :aria-label="schema.label"
       @commit="(v) => save(v === '' ? null : v)"
     />
     <SliderControl
@@ -79,6 +81,7 @@ const asNumber = computed(() => {
       :max="schema.max ?? 1"
       :step="schema.step ?? 0.01"
       :disabled="locked"
+      :aria-label="schema.label"
       @commit="save"
     />
     <NumberControl
@@ -88,6 +91,7 @@ const asNumber = computed(() => {
       :max="schema.max"
       :step="schema.step"
       :disabled="locked"
+      :aria-label="schema.label"
       @commit="save"
     />
     <PathControl
@@ -102,6 +106,7 @@ const asNumber = computed(() => {
       :model-value="asText"
       wide
       :disabled="locked"
+      :aria-label="schema.label"
       @commit="(v) => save(v === '' ? null : v)"
     />
   </SettingRow>

@@ -4,6 +4,7 @@ import {
   outputFormatsForFamily,
   pruneRequestForFamily,
   schedulerOptionsForFamily,
+  supportsAdvancedVideo,
 } from "./capabilities";
 import type { GenerateRequest } from "./api/types";
 
@@ -146,5 +147,56 @@ describe("pruneRequestForFamily", () => {
     const snapshot = JSON.stringify(full);
     pruneRequestForFamily(full, "flux");
     expect(JSON.stringify(full)).toBe(snapshot);
+  });
+
+  it("strips LTX-2 advanced video fields for non-ltx2 families", () => {
+    const advanced: GenerateRequest = {
+      ...full,
+      source_video: "VVVV",
+      keyframes: [{ frame: 0, image: "KKKK" }],
+      pipeline: "two-stage",
+      retake_range: { start_seconds: 0, end_seconds: 1 },
+      spatial_upscale: "x2",
+      temporal_upscale: "x2",
+    };
+    // ltx-video is a video family but NOT ltx2 → advanced fields are pruned.
+    const pruned = pruneRequestForFamily(advanced, "ltx-video");
+    expect(pruned.source_video).toBeUndefined();
+    expect(pruned.keyframes).toBeUndefined();
+    expect(pruned.pipeline).toBeUndefined();
+    expect(pruned.retake_range).toBeUndefined();
+    expect(pruned.spatial_upscale).toBeUndefined();
+    expect(pruned.temporal_upscale).toBeUndefined();
+    // flux (still image) also prunes them.
+    expect(pruneRequestForFamily(advanced, "flux").pipeline).toBeUndefined();
+  });
+
+  it("keeps LTX-2 advanced video fields for ltx2", () => {
+    const advanced: GenerateRequest = {
+      ...full,
+      source_video: "VVVV",
+      keyframes: [{ frame: 8, image: "KKKK" }],
+      pipeline: "keyframe",
+      spatial_upscale: "x1-5",
+      temporal_upscale: "x2",
+    };
+    const pruned = pruneRequestForFamily(advanced, "ltx2");
+    expect(pruned.source_video).toBe("VVVV");
+    expect(pruned.keyframes).toEqual([{ frame: 8, image: "KKKK" }]);
+    expect(pruned.pipeline).toBe("keyframe");
+    expect(pruned.spatial_upscale).toBe("x1-5");
+  });
+});
+
+describe("supportsAdvancedVideo", () => {
+  it("is true only for ltx2 (not plain ltx-video)", () => {
+    for (const f of ["ltx2", "ltx-2", "LTX2"]) {
+      expect(supportsAdvancedVideo(f)).toBe(true);
+      expect(generationCapabilitiesForFamily(f).supportsAdvancedVideo).toBe(true);
+    }
+    for (const f of ["ltx-video", "flux", "sdxl", "z-image"]) {
+      expect(supportsAdvancedVideo(f)).toBe(false);
+      expect(generationCapabilitiesForFamily(f).supportsAdvancedVideo).toBe(false);
+    }
   });
 });

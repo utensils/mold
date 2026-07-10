@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import ConfigSettingRow from "./ConfigSettingRow.vue";
-import { ipc, type HostTest } from "../../lib/ipc";
+import { ipc, type DiscoveredHost, type HostTest } from "../../lib/ipc";
+import { addressLabel, prepareHosts, versionLabel } from "../../lib/discovery";
 import { useConnectionStore } from "../../stores/connection";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
@@ -12,18 +13,64 @@ const toasts = useToastStore();
 
 const remoteUrl = ref("");
 const remoteKey = ref("");
+const remoteKeyInput = ref<HTMLInputElement | null>(null);
 const testResult = ref<HostTest | null>(null);
 const testing = ref(false);
 const switching = ref(false);
 const switchError = ref<string | null>(null);
 const restarting = computed(() => conn.status === "starting");
 
+// LAN discovery ("On your network").
+const discovered = ref<DiscoveredHost[]>([]);
+const scanning = ref(false);
+const scanError = ref<string | null>(null);
+// Set when a scan was auto-triggered by a failed remote connection, so the
+// list can explain why it appeared.
+const afterFailure = ref(false);
+
+async function scan() {
+  scanning.value = true;
+  scanError.value = null;
+  try {
+    discovered.value = prepareHosts(await ipc.discoverServers());
+  } catch (err) {
+    scanError.value = String(err);
+    discovered.value = [];
+  } finally {
+    scanning.value = false;
+  }
+}
+
 onMounted(async () => {
   const settings = await ipc.appSettingsGet();
   remoteUrl.value = settings.remoteUrl ?? "";
   // Keychain first; legacy settings.json field for files written before S4.
   remoteKey.value = (await ipc.secretGet("remote-api-key")) ?? settings.remoteApiKey ?? "";
+  void scan();
 });
+
+// When a remote connection drops (server moved, laptop roamed), re-scan so the
+// user can re-select the same server at its new address without hunting.
+watch(
+  () => conn.status,
+  (status) => {
+    if (status === "error" && conn.mode === "remote") {
+      afterFailure.value = true;
+      void scan();
+    }
+  },
+);
+
+/** Pick a discovered host: fill the form, prompt for a key if needed, test. */
+async function useDiscovered(host: DiscoveredHost) {
+  remoteUrl.value = host.url;
+  if (host.authRequired && !remoteKey.value) {
+    await nextTick();
+    remoteKeyInput.value?.focus();
+    return;
+  }
+  await testConnection();
+}
 
 async function testConnection() {
   testing.value = true;
@@ -126,6 +173,7 @@ async function restartEngine() {
         </label>
         <input
           id="remote-key"
+          ref="remoteKeyInput"
           v-model="remoteKey"
           data-selectable
           type="password"
@@ -155,6 +203,56 @@ async function restartEngine() {
             Use this host
           </button>
           <span v-if="switchError" class="text-caption text-stop">{{ switchError }}</span>
+        </div>
+
+        <div class="border-edge mt-4 border-t pt-4">
+          <div class="flex items-center gap-2">
+            <span class="text-caption text-ink-2">On your network</span>
+            <button
+              type="button"
+              class="border-edge ml-auto h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+              :disabled="scanning"
+              @click="scan"
+            >
+              {{ scanning ? "Scanning…" : "Scan again" }}
+            </button>
+          </div>
+
+          <p v-if="afterFailure && conn.status === 'error'" class="mt-2 text-caption text-ink-3">
+            Your server may have moved — found these on the network.
+          </p>
+
+          <p v-if="scanError" class="mt-2 text-caption text-stop">{{ scanError }}</p>
+
+          <ul v-if="discovered.length" class="mt-2 space-y-1.5">
+            <li
+              v-for="host in discovered"
+              :key="host.url"
+              class="border-edge flex items-center gap-3 rounded-control border bg-bath px-3 py-2"
+            >
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="truncate text-body text-ink">{{ host.name }}</span>
+                  <span v-if="host.isThisMachine" class="edge-code">THIS MAC</span>
+                  <span v-if="host.authRequired" class="edge-code">KEY</span>
+                </div>
+                <div class="data-mono mt-0.5 truncate text-caption text-ink-3">
+                  {{ addressLabel(host) }} · {{ versionLabel(host) }}
+                </div>
+              </div>
+              <button
+                type="button"
+                class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+                @click="useDiscovered(host)"
+              >
+                Use
+              </button>
+            </li>
+          </ul>
+
+          <p v-else-if="!scanning && !scanError" class="mt-2 text-caption text-ink-3">
+            No mold servers found on your network.
+          </p>
         </div>
       </div>
     </div>

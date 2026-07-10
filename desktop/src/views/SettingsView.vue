@@ -72,7 +72,10 @@ const componentFor: Record<SectionId, unknown> = {
 <template>
   <div class="flex h-full min-h-0">
     <!-- Section rail -->
-    <nav class="border-edge flex w-44 shrink-0 flex-col gap-0.5 border-r bg-bench px-2 py-3">
+    <nav
+      class="border-edge flex w-44 shrink-0 flex-col gap-0.5 border-r bg-bench px-2 py-3"
+      aria-label="Settings sections"
+    >
       <span
         class="font-display px-2 pb-2 text-display-sm font-bold text-ink"
         style="font-stretch: 90%"
@@ -83,7 +86,8 @@ const componentFor: Record<SectionId, unknown> = {
         v-for="s in SECTIONS"
         :key="s.id"
         type="button"
-        class="h-7 rounded-control px-2.5 text-left text-body"
+        :aria-current="section === s.id && !searching ? 'page' : undefined"
+        class="h-7 rounded-control px-2.5 text-left text-body transition-colors duration-100"
         :class="
           section === s.id && !searching
             ? 'bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)] text-ink'
@@ -109,6 +113,7 @@ const componentFor: Record<SectionId, unknown> = {
           v-model="query"
           data-selectable
           type="search"
+          aria-label="Search settings"
           placeholder="Search settings…"
           class="border-edge ml-auto h-7 w-64 rounded-control border bg-bench px-2 text-body text-ink placeholder:text-ink-3"
         />

@@ -9,6 +9,8 @@ pub mod gpu_pool;
 pub mod gpu_worker;
 pub mod job_registry;
 pub mod logging;
+#[cfg(feature = "mdns")]
+pub mod mdns;
 mod memory_preflight;
 #[cfg(feature = "metrics")]
 pub mod metrics;
@@ -131,6 +133,18 @@ pub async fn run_server(
     if selected.is_empty() {
         info!("no GPUs discovered — server will operate in CPU/pull-only mode");
     }
+
+    // Concise GPU summary for the mDNS TXT record (e.g. "2xNVIDIA GeForce RTX
+    // 4090", or "cpu" when GPU-less). Computed here while `gpu_pool` is fresh.
+    #[cfg(feature = "mdns")]
+    let mdns_gpu_summary = {
+        let names: Vec<String> = gpu_pool
+            .gpu_status()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        mdns::gpu_summary(&names)
+    };
 
     // ── Create generation queue ────────────────────────────────────────────
     let (job_tx, job_rx) = tokio::sync::mpsc::channel(queue_size.max(1));
@@ -399,6 +413,10 @@ pub async fn run_server(
 
     // Load optional auth and rate-limit configuration from env vars.
     let auth_state = auth::load_api_keys()?;
+    // Capture whether auth is required before `auth_state` is moved into the
+    // router below — surfaced in the mDNS TXT `auth` flag.
+    #[cfg(feature = "mdns")]
+    let mdns_auth_required = auth_state.is_some();
     let rl_config = rate_limit::load_rate_limit_config()?;
 
     let cors = build_cors_layer()?;
@@ -487,6 +505,36 @@ pub async fn run_server(
     info!(%addr, %version, "starting mold server");
 
     let listener = TcpListener::bind(addr).await?;
+
+    // ── mDNS/DNS-SD advertising ─────────────────────────────────────────────
+    // Advertise this server as `_mold._tcp.local.` so desktop clients and
+    // `mold server discover` find it without a configured host. Uses the real
+    // bound port (supports `--port 0`), skips loopback binds, and honours the
+    // MOLD_MDNS env toggle. The guard unregisters on the shutdown path below.
+    #[cfg(feature = "mdns")]
+    let mdns_guard = {
+        let bound_port = listener.local_addr()?.port();
+        if mdns::enabled_from_env() && mdns::is_advertisable(bind, bound_port) {
+            let txt = mdns::build_txt_records(
+                mold_core::build_info::VERSION,
+                mold_core::build_info::GIT_SHA,
+                mdns_auth_required,
+                &mdns_gpu_summary,
+                queue_size,
+            );
+            match mdns::register(bind, bound_port, txt) {
+                Ok(guard) => Some(guard),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "mDNS advertising disabled");
+                    None
+                }
+            }
+        } else {
+            tracing::debug!("mDNS advertising skipped (disabled or loopback bind)");
+            None
+        }
+    };
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -501,6 +549,10 @@ pub async fn run_server(
     // driver's `wait_for_work` arm returns, then abort the JoinHandle to ensure
     // the task is cleaned up on the same shutdown path as the HTTP server.
     // Matches the aggregator handle pattern from commit 5e43886.
+    #[cfg(feature = "mdns")]
+    if let Some(guard) = mdns_guard {
+        guard.shutdown();
+    }
     downloads_shutdown.cancel();
     downloads_driver.abort();
     idle_evict_handle.abort();

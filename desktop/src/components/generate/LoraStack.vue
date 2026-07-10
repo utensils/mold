@@ -66,6 +66,7 @@ watch(
           type="button"
           class="text-ink-3 hover:text-stop"
           title="Remove LoRA"
+          aria-label="Remove LoRA"
           @click="removeLora(i)"
         >
           ✕
