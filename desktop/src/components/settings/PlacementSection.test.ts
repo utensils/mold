@@ -7,9 +7,11 @@ import type { ModelEntry } from "../../lib/api/types";
 
 const putModelPlacement = vi.fn().mockResolvedValue(undefined);
 const deleteModelPlacement = vi.fn().mockResolvedValue(undefined);
+const getModelPlacement = vi.fn().mockResolvedValue(null);
 vi.mock("../../lib/api/placement", () => ({
   putModelPlacement: (...a: unknown[]) => putModelPlacement(...a),
   deleteModelPlacement: (...a: unknown[]) => deleteModelPlacement(...a),
+  getModelPlacement: (...a: unknown[]) => getModelPlacement(...a),
 }));
 
 const apiJson = vi.fn((path: string) => {
@@ -58,6 +60,8 @@ async function mountWithModels(models: ModelEntry[]) {
 beforeEach(() => {
   putModelPlacement.mockClear();
   deleteModelPlacement.mockClear();
+  getModelPlacement.mockReset();
+  getModelPlacement.mockResolvedValue(null);
   apiJson.mockClear();
 });
 
@@ -112,5 +116,64 @@ describe("PlacementSection", () => {
     const wrapper = await mountWithModels([]);
     expect(wrapper.text()).toContain("No installed models");
     expect(wrapper.find('[data-test="placement-model"]').exists()).toBe(false);
+  });
+
+  it("hydrates the editor from the saved placement on model select", async () => {
+    getModelPlacement.mockResolvedValue({
+      text_encoders: { kind: "gpu", ordinal: 1 },
+      advanced: {
+        transformer: { kind: "cpu" },
+        vae: { kind: "auto" },
+        clip_l: null,
+        clip_g: null,
+        t5: { kind: "gpu", ordinal: 0 },
+        qwen: null,
+      },
+    });
+    const wrapper = await mountWithModels([model("flux-dev:q4", "flux")]);
+    expect(getModelPlacement).toHaveBeenCalledWith("flux-dev:q4");
+
+    // Tier-1 knob reflects the saved value...
+    const te = wrapper.find('[data-test="placement-text-encoders"]').element as HTMLSelectElement;
+    expect(te.value).toBe("gpu:1");
+    // ...and the advanced disclosure auto-opens with the saved per-component values.
+    expect(wrapper.find('[data-test="placement-advanced"]').exists()).toBe(true);
+    expect((wrapper.find("#placement-transformer").element as HTMLSelectElement).value).toBe("cpu");
+    expect((wrapper.find("#placement-t5").element as HTMLSelectElement).value).toBe("gpu:0");
+  });
+
+  it("falls back to Auto defaults when nothing is saved (404 → null)", async () => {
+    getModelPlacement.mockResolvedValue(null);
+    const wrapper = await mountWithModels([model("flux-dev:q4", "flux")]);
+    const te = wrapper.find('[data-test="placement-text-encoders"]').element as HTMLSelectElement;
+    expect(te.value).toBe("auto");
+    // Disclosure stays collapsed when there's no saved advanced block.
+    expect(wrapper.find('[data-test="placement-advanced"]').exists()).toBe(false);
+  });
+
+  it("Save round-trips the loaded placement plus a subsequent edit", async () => {
+    getModelPlacement.mockResolvedValue({
+      text_encoders: { kind: "cpu" },
+      advanced: {
+        transformer: { kind: "gpu", ordinal: 1 },
+        vae: { kind: "auto" },
+        clip_l: null,
+        clip_g: null,
+        t5: null,
+        qwen: null,
+      },
+    });
+    const wrapper = await mountWithModels([model("flux-dev:q4", "flux")]);
+    // Edit one field; the rest of the loaded placement must survive.
+    await wrapper.find("#placement-vae").setValue("cpu");
+    await wrapper.find('[data-test="placement-save"]').trigger("click");
+    await flushPromises();
+
+    expect(putModelPlacement).toHaveBeenCalledTimes(1);
+    const [name, placement] = putModelPlacement.mock.calls[0]!;
+    expect(name).toBe("flux-dev:q4");
+    expect(placement.text_encoders).toEqual({ kind: "cpu" });
+    expect(placement.advanced.transformer).toEqual({ kind: "gpu", ordinal: 1 });
+    expect(placement.advanced.vae).toEqual({ kind: "cpu" });
   });
 });

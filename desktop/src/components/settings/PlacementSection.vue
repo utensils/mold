@@ -2,7 +2,11 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { apiJson } from "../../lib/api/client";
-import { deleteModelPlacement, putModelPlacement } from "../../lib/api/placement";
+import {
+  deleteModelPlacement,
+  getModelPlacement,
+  putModelPlacement,
+} from "../../lib/api/placement";
 import {
   defaultPlacement,
   optionToRef,
@@ -63,11 +67,30 @@ watch(
   { immediate: true },
 );
 
-// Reset the in-progress edit whenever the target model changes.
-watch(selectedModel, () => {
-  placement.value = defaultPlacement();
-  showAdvanced.value = false;
-});
+// Hydrate the editor from the saved default whenever the target changes, so a
+// subsequent Save edits the persisted placement instead of clobbering it with
+// Auto defaults. Falls back to defaults when nothing is saved (404 → null).
+let hydrateToken = 0;
+watch(
+  selectedModel,
+  async (model) => {
+    showAdvanced.value = false;
+    placement.value = defaultPlacement();
+    if (!model) return;
+    const token = ++hydrateToken;
+    try {
+      const saved = await getModelPlacement(model);
+      if (token !== hydrateToken) return; // selection changed mid-flight
+      if (saved) {
+        placement.value = saved;
+        if (saved.advanced) showAdvanced.value = true;
+      }
+    } catch (err) {
+      if (token === hydrateToken) toasts.push(String(err), "error");
+    }
+  },
+  { immediate: true },
+);
 
 const textEncodersValue = computed(() => refToOption(placement.value.text_encoders));
 function onTextEncoders(opt: string) {
