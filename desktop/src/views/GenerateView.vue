@@ -5,6 +5,7 @@ import DevelopCanvas from "../lib/develop/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
 import ParamPanel from "../components/generate/ParamPanel.vue";
 import LoraStack from "../components/generate/LoraStack.vue";
+import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
 import SourceImageWell from "../components/generate/SourceImageWell.vue";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
@@ -18,6 +19,7 @@ import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { applyModelDefaults, buildRequest, newGenerateForm } from "../lib/generateForm";
+import type { GenerationTemplate } from "../lib/generationTemplates";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCycler";
 import { fetchHistory } from "../lib/api/history";
 import { formatGB } from "../lib/format";
@@ -67,6 +69,18 @@ const edgeCode = computed(() => {
 function pickModel(m: ModelEntry) {
   applyModelDefaults(form, m);
   pickerOpen.value = false;
+}
+
+function loadTemplate(template: GenerationTemplate) {
+  // Base64 media was stripped on save; buildRequest's pruneRequestForFamily
+  // still guards anything the (possibly different) family can't use.
+  Object.assign(form, template.form);
+  if (form.model && !models.installed.some((m) => m.name === form.model)) {
+    toasts.push(`Model "${form.model}" isn't installed — settings applied anyway.`);
+  }
+  if (template.mediaReferences.length > 0) {
+    toasts.push(`Re-add media: ${template.mediaReferences.join(", ")}.`);
+  }
 }
 
 function siblingDot(s: Job): string {
@@ -347,12 +361,15 @@ onMounted(() => {
       </div>
 
       <!-- Composer -->
-      <div class="border-edge mt-4 rounded-chrome border bg-bench p-3">
+      <div
+        class="mt-4 rounded-chrome border border-edge bg-bench p-3 transition-colors duration-100 focus-within:border-safelight"
+      >
         <textarea
           ref="promptEl"
           v-model="form.prompt"
           data-selectable
           rows="2"
+          aria-label="Prompt"
           placeholder="Describe the print — a lighthouse at dusk, kodak portra…"
           class="w-full resize-none bg-transparent text-body-lg text-ink outline-none placeholder:text-ink-3"
           @keydown="onComposerKeydown"
@@ -431,6 +448,7 @@ onMounted(() => {
         :model="form.model"
         @append-word="appendPromptWord"
       />
+      <TemplatesPanel :form="form" @load="loadTemplate" />
     </aside>
   </div>
 </template>
