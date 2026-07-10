@@ -308,9 +308,11 @@ specific ordinal.
 Precedence (highest wins): CLI flag (`--device-text-encoders`, `--device-vae`, …)
 → env var → `[models."name:tag".placement]` TOML block → engine auto.
 
-The web UI's **Placement** panel, the `PUT /api/config/model/:name/placement`
-route, and `mold run --device-*` flags all write/read the same shape, so any
-surface can drive it.
+The web UI's **Placement** panel, the desktop app's **Settings → Advanced**
+placement editor, the `GET`/`PUT`/`DELETE /api/config/model/:name/placement`
+routes (read a saved default, save one, clear one — `GET` returns `404` when
+none is saved), and `mold run --device-*` flags all write/read the same shape,
+so any surface can drive it.
 
 Tier 2 per-component controls are intentionally gated: families other than
 FLUX, Flux.2, Z-Image, and Qwen-Image only honor Tier 1 (`MOLD_PLACE_TEXT_ENCODERS`)
