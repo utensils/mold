@@ -75,6 +75,26 @@ describe("ImagePickerModal", () => {
     expect(wrapper.emitted("close")).toBeTruthy();
   });
 
+  it("rejects non-PNG/JPEG uploads with an error instead of emitting", async () => {
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    const input = bodyGet<HTMLInputElement>("[data-test='picker-upload-input']");
+    expect(input.attributes("accept")).toBe("image/png,image/jpeg");
+
+    const webp = new File(["x"], "anim.webp", { type: "image/webp" });
+    Object.defineProperty(input.element, "files", { value: [webp] });
+    await input.trigger("change");
+    await flushPromises();
+
+    expect(wrapper.emitted("pick")).toBeFalsy();
+    const err = bodyGet<HTMLElement>("[data-test='picker-upload-error']");
+    expect(err.text()).toContain("Only PNG or JPEG");
+  });
+
   it("does not render when closed", () => {
     mount(ImagePickerModal, { props: { open: false }, attachTo: document.body });
     expect(document.body.querySelector("[data-test='picker-tab-gallery']")).toBeNull();

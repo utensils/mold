@@ -138,12 +138,12 @@ pub async fn run_server(
     // 4090", or "cpu" when GPU-less). Computed here while `gpu_pool` is fresh.
     #[cfg(feature = "mdns")]
     let mdns_gpu_summary = {
-        let statuses = gpu_pool.gpu_status();
-        if let Some(first) = statuses.first() {
-            format!("{}x{}", statuses.len(), first.name)
-        } else {
-            "cpu".to_string()
-        }
+        let names: Vec<String> = gpu_pool
+            .gpu_status()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        mdns::gpu_summary(&names)
     };
 
     // ── Create generation queue ────────────────────────────────────────────

@@ -15,10 +15,11 @@ const toasts = useToastStore();
       leave-active-class="transition duration-150"
       leave-to-class="opacity-0"
     >
-      <div
+      <button
         v-for="toast in toasts.items"
         :key="toast.id"
-        class="border-edge pointer-events-auto cursor-default rounded-chrome border bg-bench px-3 py-2 text-body shadow-raised"
+        type="button"
+        class="border-edge pointer-events-auto rounded-chrome border bg-bench px-3 py-2 text-left text-body shadow-raised"
         :class="toast.kind === 'error' ? 'text-stop' : 'text-ink'"
         :role="toast.kind === 'error' ? 'alert' : 'status'"
         :aria-live="toast.kind === 'error' ? 'assertive' : 'polite'"
@@ -26,7 +27,7 @@ const toasts = useToastStore();
         @click="toasts.dismiss(toast.id)"
       >
         {{ toast.message }}
-      </div>
+      </button>
     </TransitionGroup>
   </div>
 </template>

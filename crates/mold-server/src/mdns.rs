@@ -186,6 +186,21 @@ pub fn instance_name(hostname: &str, port: u16) -> String {
     format!("{trimmed}{suffix}")
 }
 
+/// Concise GPU summary for the `gpu` TXT record.
+///
+/// `[]` → `"cpu"`; homogeneous names → `"<n>x<name>"`; mixed names → a generic
+/// `"<n> GPUs"` so a 1xA100 + 1x4090 host isn't advertised as `2xA100`.
+pub fn gpu_summary(names: &[String]) -> String {
+    match names {
+        [] => "cpu".to_string(),
+        [only] => format!("1x{only}"),
+        [first, rest @ ..] if rest.iter().all(|n| n == first) => {
+            format!("{}x{first}", names.len())
+        }
+        _ => format!("{} GPUs", names.len()),
+    }
+}
+
 /// Assemble the TXT records advertised alongside the service.
 ///
 /// Keys: `version`, `sha`, `auth` (`1`/`0`), `gpu`, `queue`, `proto`. Values are
@@ -461,6 +476,18 @@ mod tests {
         assert!(name.len() <= MAX_INSTANCE_BYTES, "got {} bytes", name.len());
         assert!(name.ends_with("-7680"));
         assert!(!name.contains("--"));
+    }
+
+    #[test]
+    fn gpu_summary_shapes() {
+        assert_eq!(gpu_summary(&[]), "cpu");
+        assert_eq!(gpu_summary(&["RTX 4090".into()]), "1xRTX 4090");
+        assert_eq!(
+            gpu_summary(&["RTX 4090".into(), "RTX 4090".into()]),
+            "2xRTX 4090"
+        );
+        // Mixed GPUs fall back to a generic count instead of the first name.
+        assert_eq!(gpu_summary(&["A100".into(), "RTX 4090".into()]), "2 GPUs");
     }
 
     #[test]

@@ -64,7 +64,17 @@ watch(
 );
 
 async function ingestFiles(files: File[]) {
-  const images = files.filter((f) => f.type.startsWith("image/"));
+  // Same constraint as the gallery tab: the engine only accepts PNG/JPEG for
+  // source_image / mask / keyframes — filter by MIME with a filename fallback.
+  const images = files.filter(
+    (f) =>
+      f.type === "image/png" || f.type === "image/jpeg" || (!f.type && isStillImageFile(f.name)),
+  );
+  if (files.length && !images.length) {
+    error.value = "Only PNG or JPEG images can be used here.";
+    return;
+  }
+  error.value = null;
   const selected = props.multiple ? images : images.slice(0, 1);
   if (!selected.length) return;
   const picked = await Promise.all(
@@ -162,16 +172,19 @@ async function pickFromGallery(item: GalleryImage) {
             @dragleave="dragOver = false"
             @drop.prevent="onDrop"
           >
-            <span>Drop an image here or click to browse</span>
+            <span>Drop a PNG or JPEG here or click to browse</span>
             <input
               type="file"
-              accept="image/*"
+              accept="image/png,image/jpeg"
               :multiple="multiple"
               class="hidden"
               data-test="picker-upload-input"
               @change="onFiles"
             />
           </label>
+          <p v-if="error" class="mt-2 text-caption text-stop" data-test="picker-upload-error">
+            {{ error }}
+          </p>
         </div>
 
         <div v-else class="mt-4 flex-1 overflow-y-auto">

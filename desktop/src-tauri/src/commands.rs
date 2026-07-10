@@ -326,9 +326,15 @@ fn host_is_this_machine(
     if addr_match {
         return true;
     }
-    // Fall back to a hostname prefix match (instance names are `<host>-<port>`).
+    // Fall back to a hostname match (instance names are `<host>-<port>`).
+    // Require the `-` delimiter so local host `box` doesn't claim `box2-7680`.
     let short = local_hostname.split('.').next().unwrap_or(local_hostname);
-    !short.is_empty() && server_name.starts_with(short)
+    if short.is_empty() {
+        return false;
+    }
+    let short = short.to_ascii_lowercase();
+    let name = server_name.to_ascii_lowercase();
+    name == short || name.starts_with(&format!("{short}-"))
 }
 
 /// Browse the local network for advertised mold servers.
@@ -521,6 +527,31 @@ mod tests {
         assert!(!host_is_this_machine(
             &["10.0.0.5".into()],
             "box-7680",
+            &[],
+            "hal9000.local"
+        ));
+    }
+
+    #[test]
+    fn host_is_this_machine_requires_delimiter_and_ignores_case() {
+        // `box` must not claim `box2-7680` (shared prefix, different host).
+        assert!(!host_is_this_machine(
+            &["10.0.0.5".into()],
+            "box2-7680",
+            &[],
+            "box.local"
+        ));
+        // Case-insensitive match on the short hostname.
+        assert!(host_is_this_machine(
+            &["10.0.0.5".into()],
+            "hal9000-7680",
+            &[],
+            "HAL9000.local"
+        ));
+        // Bare instance name equal to the short hostname still matches.
+        assert!(host_is_this_machine(
+            &["10.0.0.5".into()],
+            "hal9000",
             &[],
             "hal9000.local"
         ));
