@@ -311,9 +311,13 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
     @browse="router.push('/models')"
   />
 
-  <div v-else class="grid h-full grid-cols-[1fr_320px]">
+  <div
+    v-else
+    data-test="generate-layout"
+    class="grid h-full min-h-0 grid-cols-[1fr_320px] overflow-hidden"
+  >
     <!-- Canvas + composer -->
-    <div class="flex min-w-0 flex-col p-6">
+    <div data-test="generate-workbench" class="flex min-h-0 min-w-0 flex-col overflow-hidden p-6">
       <div class="flex min-h-0 flex-1 flex-col">
         <div
           ref="previewRegion"
@@ -402,7 +406,8 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
 
       <!-- Composer -->
       <div
-        class="mt-4 rounded-chrome border border-edge bg-bench p-3 transition-colors duration-100 focus-within:border-safelight"
+        data-test="generate-composer"
+        class="mt-4 shrink-0 rounded-chrome border border-edge bg-bench p-3 transition-colors duration-100 focus-within:border-safelight"
       >
         <textarea
           ref="promptEl"
