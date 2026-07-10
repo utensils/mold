@@ -140,7 +140,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: mold-desktop-${{ github.ref_name }}
+          name: mold-desktop-${{ github.run_id }}
           path: |
             desktop/Mold.app.zip
             desktop/src-tauri/target/release/bundle/dmg/*.dmg
