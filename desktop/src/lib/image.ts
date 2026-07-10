@@ -7,6 +7,12 @@
  * so large images don't round-trip through the WebView.
  */
 export function fileToBase64(file: File): Promise<string> {
+  return blobToBase64(file);
+}
+
+/** Read any `Blob` (e.g. a `fetch().blob()` of an authed gallery image) to
+ * base64 with no data-URI prefix — the shape mold-core expects on the wire. */
+export function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -15,7 +21,7 @@ export function fileToBase64(file: File): Promise<string> {
       resolve(comma >= 0 ? result.slice(comma + 1) : result);
     };
     reader.onerror = () => reject(reader.error ?? new Error("Could not read the file"));
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
 }
 
