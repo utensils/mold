@@ -97,6 +97,15 @@ function onDelete() {
 
 <template>
   <div class="fixed inset-0 z-40 flex bg-black/70" @click.self="emit('close')">
+    <button
+      type="button"
+      class="absolute top-4 left-4 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/55 text-body-lg text-rebate transition-colors duration-100 hover:bg-black/80"
+      title="Close (Esc)"
+      aria-label="Close"
+      @click="emit('close')"
+    >
+      ✕
+    </button>
     <div class="m-6 flex min-w-0 flex-1 flex-col">
       <div
         class="relative min-h-0 flex-1 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_18%,transparent)] bg-print-surface"
