@@ -168,8 +168,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
         std::fs::write(&path, r#"{"mode":"local","futureField":42}"#).unwrap();
-        let mut expected = AppSettings::default();
-        expected.theme_family = ThemeFamily::Safelight;
+        let expected = AppSettings {
+            theme_family: ThemeFamily::Safelight,
+            ..AppSettings::default()
+        };
         assert_eq!(load(&path), expected);
     }
 
