@@ -31,12 +31,14 @@ export interface FormLora {
   trainedWords: string[];
 }
 
-/** An image picked via {@link ImagePickerModal} (upload or gallery). `base64`
- * has no data-URI prefix; `filename` is display/keyframe metadata only. */
-export interface PickedImage {
+/** A picked file (base64, no data-URI prefix); `filename` is display metadata. */
+export interface PickedFile {
   filename: string;
   base64: string;
 }
+
+/** An image picked via {@link ImagePickerModal} (upload or gallery). */
+export type PickedImage = PickedFile;
 
 /** One LTX-2 keyframe: a conditioning image pinned to a frame index. */
 export interface FormKeyframe {
@@ -81,6 +83,8 @@ export interface GenerateForm {
   retakeRange: TimeRange | null;
   spatialUpscale: Ltx2SpatialUpscale | null;
   temporalUpscale: Ltx2TemporalUpscale | null;
+  /** Conditioning audio for the a2vid pipeline; base64 on the wire. */
+  audioFile: PickedFile | null;
 }
 
 export function newGenerateForm(): GenerateForm {
@@ -115,6 +119,7 @@ export function newGenerateForm(): GenerateForm {
     retakeRange: null,
     spatialUpscale: null,
     temporalUpscale: null,
+    audioFile: null,
   };
 }
 
@@ -156,6 +161,7 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
     form.retakeRange = null;
     form.spatialUpscale = null;
     form.temporalUpscale = null;
+    form.audioFile = null;
   }
 }
 
@@ -223,6 +229,8 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     if (form.retakeRange) req.retake_range = form.retakeRange;
     if (form.spatialUpscale) req.spatial_upscale = form.spatialUpscale;
     if (form.temporalUpscale) req.temporal_upscale = form.temporalUpscale;
+    // a2vid (audio-to-video) requires conditioning audio; other pipelines ignore it.
+    if (form.pipeline === "a2vid" && form.audioFile) req.audio_file = form.audioFile.base64;
   }
 
   return pruneRequestForFamily(req, form.family);

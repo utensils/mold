@@ -169,6 +169,7 @@ export function pruneRequestForFamily(req: GenerateRequest, family: string): Gen
   }
   if (!caps.supportsAudio) delete next.enable_audio;
   if (!caps.supportsAdvancedVideo) {
+    delete next.audio_file;
     delete next.source_video;
     delete next.keyframes;
     delete next.pipeline;

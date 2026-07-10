@@ -4,17 +4,13 @@ import { nextTick } from "vue";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import type { GalleryImage } from "../../lib/api/types";
 
+const meta = { prompt: "", model: "m", seed: 1, steps: 4, guidance: 3, width: 8, height: 8 };
 const galleryItems: GalleryImage[] = [
-  {
-    filename: "a.png",
-    metadata: { prompt: "", model: "m", seed: 1, steps: 4, guidance: 3, width: 8, height: 8 },
-    timestamp: 2,
-  },
-  {
-    filename: "b.png",
-    metadata: { prompt: "", model: "m", seed: 1, steps: 4, guidance: 3, width: 8, height: 8 },
-    timestamp: 1,
-  },
+  { filename: "a.png", metadata: meta, timestamp: 4 },
+  { filename: "b.jpg", metadata: meta, timestamp: 3 },
+  // These must be filtered out — the engine rejects them as source/keyframe input.
+  { filename: "clip.mp4", metadata: meta, timestamp: 2 },
+  { filename: "loop.gif", metadata: meta, timestamp: 1 },
 ];
 
 const apiJson = vi.fn();
@@ -61,8 +57,11 @@ describe("ImagePickerModal", () => {
     await bodyGet<HTMLButtonElement>("[data-test='picker-tab-gallery']").trigger("click");
     await nextTick();
 
+    // Only the PNG/JPEG entries render — the mp4 and gif are excluded.
     const thumbs = document.body.querySelectorAll("[data-test='picker-gallery-item']");
     expect(thumbs.length).toBe(2);
+    const labels = Array.from(thumbs).map((t) => t.getAttribute("aria-label"));
+    expect(labels).toEqual(["a.png", "b.jpg"]);
 
     await new DOMWrapper(thumbs[0] as HTMLElement).trigger("click");
     // blobToBase64 resolves via a FileReader event, not a microtask.

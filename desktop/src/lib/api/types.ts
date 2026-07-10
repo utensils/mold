@@ -187,6 +187,9 @@ export interface GenerateRequest {
   fps?: number;
   enable_audio?: boolean;
   // LTX-2 advanced video (ltx2 only). Omitted → engine auto-selects.
+  /** Conditioning audio for the a2vid (audio-to-video) pipeline, base64 (no
+   * data-URI prefix). mold-core `audio_file`. */
+  audio_file?: string;
   /** Source video for video-to-video / retake, base64 (no data-URI prefix). */
   source_video?: string;
   keyframes?: KeyframeConditionWire[];

@@ -62,6 +62,22 @@ describe("ParamPanel — LTX-2 advanced disclosure", () => {
     expect(form.keyframes[0]!.frame).toBe(0);
   });
 
+  it("shows the conditioning-audio input only for the a2vid pipeline", async () => {
+    const form = formFor("ltx2");
+    const wrapper = mount(ParamPanel, { props: { form } });
+    await wrapper.get("[data-test='ltx2-disclosure']").trigger("click");
+    // Auto pipeline → no audio input.
+    expect(wrapper.find("[data-test='ltx2-audio-file']").exists()).toBe(false);
+
+    await wrapper.get("[data-test='ltx2-pipeline']").setValue("a2vid");
+    expect(form.pipeline).toBe("a2vid");
+    expect(wrapper.find("[data-test='ltx2-audio-file']").exists()).toBe(true);
+
+    // Switching away hides it again.
+    await wrapper.get("[data-test='ltx2-pipeline']").setValue("keyframe");
+    expect(wrapper.find("[data-test='ltx2-audio-file']").exists()).toBe(false);
+  });
+
   it("gives the size and LTX-2 controls accessible names", async () => {
     const wrapper = mount(ParamPanel, { props: { form: formFor("ltx2") } });
     // The width/height pair shares one visible label, so each needs its own name.

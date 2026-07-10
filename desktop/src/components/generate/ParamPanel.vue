@@ -85,6 +85,15 @@ function clearSourceVideo() {
   props.form.sourceVideo = null;
 }
 
+async function setAudioFile(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0];
+  if (!file) return;
+  props.form.audioFile = { filename: file.name, base64: await fileToBase64(file) };
+}
+function clearAudioFile() {
+  props.form.audioFile = null;
+}
+
 function snapFramesField() {
   props.form.frames = snapFrames(props.form.frames);
 }
@@ -388,6 +397,33 @@ const schedulerLabel: Record<string, string> = {
               @input="setRetake('end', ($event.target as HTMLInputElement).value)"
             />
           </div>
+        </template>
+
+        <!-- Conditioning audio (a2vid pipeline only) -->
+        <template v-if="form.pipeline === 'a2vid'">
+          <label class="mt-3 text-caption text-ink-2">Conditioning audio</label>
+          <div v-if="form.audioFile" class="mt-1 flex items-center justify-between gap-2">
+            <span class="data-mono truncate text-caption text-ink" :title="form.audioFile.filename">
+              {{ form.audioFile.filename }}
+            </span>
+            <button
+              type="button"
+              class="text-caption text-ink-3 hover:text-stop"
+              @click="clearAudioFile"
+            >
+              clear
+            </button>
+          </div>
+          <input
+            v-else
+            type="file"
+            accept="audio/*"
+            aria-label="Conditioning audio"
+            class="mt-1 block w-full text-caption text-ink-3"
+            data-test="ltx2-audio-file"
+            @change="setAudioFile"
+          />
+          <p class="mt-1 text-caption text-ink-3">a2vid needs an audio track to drive the video.</p>
         </template>
 
         <!-- Source video -->

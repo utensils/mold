@@ -3,7 +3,7 @@ import { nextTick, onMounted, ref, watch } from "vue";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
 import { apiFetch, apiJson } from "../../lib/api/client";
 import { mediaPath, thumbnailPath } from "../../lib/gallery/media";
-import { blobToBase64, fileToBase64 } from "../../lib/image";
+import { blobToBase64, fileToBase64, isStillImageFile } from "../../lib/image";
 import type { PickedImage } from "../../lib/generateForm";
 import type { GalleryImage } from "../../lib/api/types";
 
@@ -34,7 +34,11 @@ async function loadGallery() {
   error.value = null;
   try {
     const items = await apiJson<GalleryImage[]>("/api/gallery");
-    entries.value = items.slice().sort((a, b) => b.timestamp - a.timestamp);
+    // Only PNG/JPEG are valid as source_image / mask / keyframe conditioning;
+    // hide video and animated outputs so a pick can't fail at generation time.
+    entries.value = items
+      .filter((item) => isStillImageFile(item.filename))
+      .sort((a, b) => b.timestamp - a.timestamp);
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {

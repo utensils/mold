@@ -61,6 +61,31 @@ describe("buildRequest — LTX-2 advanced video", () => {
     ]);
   });
 
+  it("emits audio_file only for the a2vid pipeline", () => {
+    const form = ltx2Form();
+    form.audioFile = { filename: "voice.wav", base64: "AUDIOB64" };
+    // Not a2vid → audio is not sent (server would reject it, or it's irrelevant).
+    form.pipeline = "keyframe";
+    expect(buildRequest(form).audio_file).toBeUndefined();
+    // a2vid → the conditioning audio ships as base64.
+    form.pipeline = "a2vid";
+    expect(buildRequest(form).audio_file).toBe("AUDIOB64");
+  });
+
+  it("omits audio_file for a2vid when no audio was picked", () => {
+    const form = ltx2Form();
+    form.pipeline = "a2vid";
+    expect("audio_file" in buildRequest(form)).toBe(false);
+  });
+
+  it("does not ship audio_file for a non-ltx2 family", () => {
+    const form = ltx2Form();
+    form.pipeline = "a2vid";
+    form.audioFile = { filename: "voice.wav", base64: "AUDIOB64" };
+    form.family = "flux";
+    expect(buildRequest(form).audio_file).toBeUndefined();
+  });
+
   it("includes retake_range only when set", () => {
     const form = ltx2Form();
     expect(buildRequest(form).retake_range).toBeUndefined();
@@ -96,6 +121,7 @@ describe("applyModelDefaults resets advanced video on family change", () => {
     form.pipeline = "two-stage";
     form.keyframes = [{ frame: 0, image: { filename: "k.png", base64: "K" } }];
     form.sourceVideo = { filename: "c.mp4", base64: "V" };
+    form.audioFile = { filename: "voice.wav", base64: "A" };
     form.spatialUpscale = "x2";
 
     applyModelDefaults(form, {
@@ -107,6 +133,7 @@ describe("applyModelDefaults resets advanced video on family change", () => {
     expect(form.pipeline).toBeNull();
     expect(form.keyframes).toEqual([]);
     expect(form.sourceVideo).toBeNull();
+    expect(form.audioFile).toBeNull();
     expect(form.spatialUpscale).toBeNull();
   });
 });

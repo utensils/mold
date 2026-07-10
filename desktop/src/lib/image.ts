@@ -29,3 +29,14 @@ export function blobToBase64(blob: Blob): Promise<string> {
 export function base64ToDataUrl(b64: string, mime = "image/png"): string {
   return `data:${mime};base64,${b64}`;
 }
+
+/**
+ * True for the still-image formats the engine accepts as `source_image` /
+ * `mask_image` / keyframe conditioning: PNG and JPEG only. The gallery also
+ * holds WebP/GIF/APNG/MP4 outputs, which the generate endpoints reject — so the
+ * image picker filters its grid with this to avoid forwarding a pick that
+ * would only fail at generation time.
+ */
+export function isStillImageFile(filename: string): boolean {
+  return /\.(png|jpe?g)$/i.test(filename.trim());
+}
