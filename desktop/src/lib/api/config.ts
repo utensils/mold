@@ -8,9 +8,13 @@ import type { ConfigProfiles, ConfigRow } from "./types";
  * the engine predates the config API — callers treat that as "unavailable".
  */
 export async function fetchConfig(): Promise<ConfigRow[]> {
-  const body = await apiJson<ConfigRow[] | { rows?: ConfigRow[] }>("/api/config");
+  const body = await apiJson<ConfigRow[] | { rows?: ConfigRow[]; entries?: ConfigRow[] }>(
+    "/api/config",
+  );
   if (Array.isArray(body)) return body;
-  return body.rows ?? [];
+  // The shipped wire shape is `{ profile, entries }` (mold_core::ConfigListing);
+  // `rows` kept for the pre-release drafts.
+  return body.entries ?? body.rows ?? [];
 }
 
 export function setConfig(key: string, value: ConfigRow["value"]): Promise<Response> {

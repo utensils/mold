@@ -10,11 +10,19 @@ export interface ConnectionInfo {
   apiKey: string | null;
 }
 
+export type Theme = "system" | "dark" | "light";
+
 export interface AppSettings {
   mode: "local" | "remote" | "off";
   remoteUrl: string | null;
   remoteApiKey: string | null;
   lastRoute: string | null;
+  /** Env applied to the embedded engine at start (Performance knobs). */
+  engineEnv: Record<string, string>;
+  theme: Theme;
+  notifications: boolean;
+  dockBadge: boolean;
+  restoreLastRoute: boolean;
 }
 
 export interface HostTest {
@@ -43,6 +51,11 @@ const browserFallbackSettings = (): AppSettings => ({
   remoteUrl: null,
   remoteApiKey: null,
   lastRoute: null,
+  engineEnv: {},
+  theme: "system",
+  notifications: true,
+  dockBadge: true,
+  restoreLastRoute: false,
 });
 
 export const ipc = {
@@ -88,4 +101,31 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("set_dock_badge", { count }).catch(() => {});
   },
+  /** Open the engine's log directory in Finder. */
+  openLogsDir(): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("open_logs_dir");
+  },
+  /** Keychain-backed secrets (file fallback in dev). Names are allowlisted. */
+  secretGet(name: SecretName): Promise<string | null> {
+    if (!inTauri()) return Promise.resolve(null);
+    return invoke<string | null>("secret_get", { name });
+  },
+  secretSet(name: SecretName, value: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("secret_set", { name, value });
+  },
+  secretClear(name: SecretName): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("secret_clear", { name });
+  },
+  /** Native folder picker; null when cancelled (or in a plain browser). */
+  async pickDirectory(title: string): Promise<string | null> {
+    if (!inTauri()) return null;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ directory: true, multiple: false, title });
+    return typeof picked === "string" ? picked : null;
+  },
 };
+
+export type SecretName = "hf-token" | "civitai-token" | "remote-api-key";

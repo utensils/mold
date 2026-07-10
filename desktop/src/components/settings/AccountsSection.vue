@@ -1,0 +1,25 @@
+<script setup lang="ts">
+import SettingRow from "./SettingRow.vue";
+import SecretControl from "./SecretControl.vue";
+</script>
+
+<template>
+  <div>
+    <SettingRow
+      label="Hugging Face token"
+      help="Needed for gated models (FLUX.1-dev license, private repos). Stored in the macOS Keychain and passed to the engine as HF_TOKEN."
+    >
+      <SecretControl name="hf-token" placeholder="hf_…" />
+    </SettingRow>
+    <SettingRow
+      label="Civitai token"
+      help="Needed for Civitai downloads that require an API key. Passed to the engine as CIVITAI_TOKEN."
+    >
+      <SecretControl name="civitai-token" placeholder="Civitai API key" />
+    </SettingRow>
+    <p class="mt-3 max-w-md text-caption text-ink-3">
+      Tokens apply to the built-in engine the next time it starts. The remote host API key lives in
+      the Engine section.
+    </p>
+  </div>
+</template>

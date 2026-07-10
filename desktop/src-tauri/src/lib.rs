@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod connection;
 pub mod menu;
+pub mod secrets;
 pub mod server;
 pub mod settings;
 
@@ -45,9 +46,11 @@ pub fn run() {
             let menu = menu::build(app.handle())?;
             app.set_menu(menu)?;
             app.manage(commands::SettingsStore::load(app.handle())?);
+            let app_data = app.path().app_data_dir()?;
             app.manage(commands::AppState {
                 conn: tokio::sync::Mutex::new(connection::Conn::Off),
                 local_api_key,
+                secrets: secrets::SecretStore::new(app_data),
             });
             // Keep the tracing appender alive for the app's lifetime.
             app.manage(log_guard);
@@ -64,6 +67,10 @@ pub fn run() {
             commands::get_output_dir,
             commands::set_dock_badge,
             commands::reveal_output_file,
+            commands::open_logs_dir,
+            commands::secret_get,
+            commands::secret_set,
+            commands::secret_clear,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

@@ -8,6 +8,7 @@ import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
 import { resolveShellShortcut } from "./lib/shortcuts";
+import { useAppPrefsStore } from "./stores/appPrefs";
 import { useConnectionStore } from "./stores/connection";
 import { useGenerationStore } from "./stores/generation";
 import { useToastStore } from "./stores/toasts";
@@ -15,6 +16,7 @@ import { useUiStore } from "./stores/ui";
 
 const router = useRouter();
 const sidebarOpen = ref(true);
+const appPrefs = useAppPrefsStore();
 const connection = useConnectionStore();
 const generation = useGenerationStore();
 const toasts = useToastStore();
@@ -110,6 +112,13 @@ function suppressNativeContextMenu(e: Event) {
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("contextmenu", suppressNativeContextMenu);
+  // Prefs first: theme lands before the window is shown, and restore-last-view
+  // navigates before the default route paints.
+  const prefs = await appPrefs.init().catch(() => null);
+  if (prefs?.restoreLastRoute && prefs.lastRoute && prefs.lastRoute !== "/") {
+    await router.replace(prefs.lastRoute).catch(() => {});
+  }
+  router.afterEach((to) => void appPrefs.rememberRoute(to.path));
   void connection.init();
   void listenForMenu();
   // The window starts hidden (tauri.conf.json visible:false) to avoid a

@@ -13,6 +13,7 @@ vi.mock("../lib/ipc", () => ({
     setRemoteHost: vi.fn(),
     testRemoteHost: vi.fn(),
     getConnection: vi.fn(),
+    secretGet: vi.fn().mockResolvedValue(null),
   },
 }));
 
@@ -20,7 +21,17 @@ const mocked = vi.mocked(ipc);
 
 const local = { mode: "local" as const, baseUrl: "http://127.0.0.1:49152", apiKey: "k" };
 const remote = { mode: "remote" as const, baseUrl: "http://studio.local:7680", apiKey: null };
-const defaults = { mode: "local" as const, remoteUrl: null, remoteApiKey: null, lastRoute: null };
+const defaults = {
+  mode: "local" as const,
+  remoteUrl: null,
+  remoteApiKey: null,
+  lastRoute: null,
+  engineEnv: {},
+  theme: "system" as const,
+  notifications: true,
+  dockBadge: true,
+  restoreLastRoute: false,
+};
 
 beforeEach(() => {
   setActivePinia(createPinia());

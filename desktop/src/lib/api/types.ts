@@ -374,6 +374,8 @@ export interface ConfigRow {
   value: string | number | boolean | null;
   source: ConfigSource;
   profile?: string | null;
+  /** Name of the environment variable that wins when source is "env". */
+  env_var?: string | null;
 }
 
 /** `GET /api/config/profiles`. */
