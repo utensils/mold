@@ -1,0 +1,41 @@
+# release-plz drives the release PR (workspace version bump) and the vX.Y.Z
+# tag ONLY. Everything downstream — GitHub release with binaries + desktop DMG,
+# crates.io, Docker, AUR, FlakeHub — stays in the tag-triggered release.yml and
+# desktop-distribution.yml, so publishing and GitHub releases are deliberately
+# disabled here. (Same split as utensils/nxv.)
+
+[workspace]
+# release.yml publishes to crates.io on tag push; release-plz still creates
+# the git tag with publishing disabled.
+publish = false
+
+# release.yml creates the GitHub release (softprops/action-gh-release) and
+# attaches the binaries, desktop DMG, and SHA256SUMS.
+git_release_enable = false
+
+# CHANGELOG.md is hand-maintained (Keep a Changelog): every PR adds entries
+# under [Unreleased]. The release PR gets a scripted follow-up commit that
+# promotes [Unreleased] to the new version and syncs the desktop app version —
+# see scripts/release/sync-release-pr.sh and .github/workflows/release-plz.yml.
+changelog_update = false
+
+# On 0.x versions release-plz bumps only the patch for feat: commits by
+# default. This repo treats 0.x minors as feature releases, so keep that
+# convention.
+features_always_increment_minor = true
+
+# The library crates are implementation details of the mold binary, not a
+# semver contract worth a cargo-semver-checks baseline build on every
+# release PR.
+semver_check = false
+
+# All crates inherit [workspace.package] version, so they bump in lockstep.
+# Emit a single v{version} tag (on mold-ai, the binary crate) instead of one
+# tag per crate — release.yml, desktop-distribution, FlakeHub, and AUR all
+# key on that tag shape.
+git_tag_enable = false
+
+[[package]]
+name = "mold-ai"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"

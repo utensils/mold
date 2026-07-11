@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Automated releases via release-plz.** Pushes to `main` now maintain a release PR (workspace version bump from conventional commits, hand-written `CHANGELOG.md` `[Unreleased]` promotion, desktop-app version sync); merging it creates the `vX.Y.Z` tag that drives binaries, crates.io, Docker, AUR, and FlakeHub publishing exactly as before. Versioned GitHub releases additionally ship the desktop app as a signed, notarized, stapled `Mold_<version>_aarch64.dmg` (plus zipped `Mold.app`), built by the reusable `desktop-distribution.yml` workflow.
 - **Full RunPod network-volume management.** `mold runpod network-volume` now lists, inspects, creates, grows/renames, and deletes persistent volumes, while both `runpod create` and `runpod run` accept `--network-volume`. Volume-backed pods are forced onto Secure Cloud in the volume's datacenter and do not request a redundant workspace disk. The desktop now provides the same lifecycle controls, remembers the selected volume across launches, shows mounted volumes on instance rows, prevents deleting volumes still attached to pods, and clearly surfaces permanent-storage billing and deletion risk.
 - **Persistent whole-app desktop scaling.** ⌘+/⌘− now scales every desktop surface through native webview zoom, ⌘0 restores 100%, and the View menu plus Settings → Appearance & app expose the same controls. Six bounded levels from 80–130% persist across launches. Fixed overlays and right-click context menus scale with the app, clamp to the effective viewport, and scroll rather than clipping when space is tight.
 - **Parallel, cancellable model downloads and a local desktop gallery while remote.** The server now transfers up to two model jobs concurrently, exposes every running job through `DownloadsListing.active_jobs` while retaining the legacy `active` field, and records queued cancellations as terminal cancelled jobs. The desktop and web download UIs track each transfer independently and keep a cancelling row visible until the server confirms termination. When the desktop app is connected to a remote engine, Gallery now offers **Remote** and **This Mac** tabs; local images and range-streamed videos remain browsable, revealable, and deletable without switching the generation engine, while still images additionally support full-resolution clipboard copy.
@@ -841,7 +842,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/utensils/mold/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/utensils/mold/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/utensils/mold/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/utensils/mold/compare/v0.12.0...v0.12.1

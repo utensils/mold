@@ -175,8 +175,13 @@ Connect API credentials (`APPLE_API_ISSUER`, `APPLE_API_KEY`, and
 for Apple notarization, staples the ticket, then verifies the hardened-runtime
 signature, entitlements, Gatekeeper acceptance, and staple on both artifacts.
 
-The Desktop GitHub Actions workflow runs the same signed distribution job on
-`v*` tags and manual dispatch. Repository secrets hold the exported Developer
-ID certificate and App Store Connect key; the private key is written only to
-the runner's temporary directory and the temporary signing keychain is removed
-even if the build fails.
+CI runs the same signed distribution job from
+`.github/workflows/desktop-distribution.yml`: the release workflow calls it on
+every `v*` tag and attaches the resulting DMG (and a zipped `Mold.app`) to the
+GitHub release, so each versioned release ships a signed, notarized, stapled
+`Mold_<version>_aarch64.dmg` you can download and drag to Applications. The
+job also stays runnable via manual dispatch for testing the signing path.
+Repository secrets hold the exported Developer ID certificate and App Store
+Connect key; the private key is written only to the runner's temporary
+directory and the temporary signing keychain is removed even if the build
+fails.

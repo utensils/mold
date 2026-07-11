@@ -1,0 +1,111 @@
+name: Release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  # Creates/updates the "chore: release vX.Y.Z" PR (workspace version bump),
+  # then finishes it with a scripted commit: CHANGELOG.md [Unreleased]
+  # promotion and the desktop-app version sync (desktop/src-tauri is excluded
+  # from the workspace, so release-plz never touches it).
+  #
+  # Both jobs mint a GitHub App token (release-plz-mold) instead of using
+  # GITHUB_TOKEN: events created with the default token never trigger other
+  # workflows (GitHub's recursion guard), so CI would not run on the release
+  # PR and the tag push would not trigger release.yml. The follow-up sync
+  # commit is pushed with the same app token for the same reason — required
+  # status checks bind to the PR HEAD SHA, which the sync commit becomes.
+  release-plz-pr:
+    name: Release PR
+    if: github.repository_owner == 'utensils'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Sync release PR (changelog promotion + desktop version)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          branch=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --json headRefName --jq '[.[].headRefName | select(startswith("release-plz-"))][0] // empty')
+          if [ -z "$branch" ]; then
+            echo "No open release-plz PR; nothing to sync."
+            exit 0
+          fi
+          git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "+refs/heads/$branch:refs/heads/$branch"
+          git checkout "$branch"
+          scripts/release/sync-release-pr.sh
+          if git diff --quiet; then
+            echo "Release PR already in sync."
+            exit 0
+          fi
+          git config user.name "mold Release Bot"
+          git config user.email "brink.james@gmail.com"
+          git commit -am "chore(release): promote changelog and sync desktop version"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$branch"
+
+  # After the release PR merges, creates and pushes the vX.Y.Z tag, which
+  # triggers release.yml (binaries, desktop DMG, GitHub release, crates.io,
+  # Docker, AUR) and flakehub-publish-tagged.yml. publish + git_release are
+  # disabled in release-plz.toml, so this job only tags.
+  #
+  # Deliberately NO concurrency group: cancelling a release mid-flight can
+  # skip it entirely (release-plz docs).
+  release-plz-release:
+    name: Release (tag)
+    if: github.repository_owner == 'utensils'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

@@ -215,6 +215,13 @@ jobs:
           name: mold-x86_64-unknown-linux-gnu-cuda-sm120
           path: mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
 
+  # Signed + notarized desktop app (DMG + .app zip) — tags only. Notarization
+  # costs minutes per run, so the rolling `latest` prerelease skips it.
+  build-desktop-dmg:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/desktop-distribution.yml
+    secrets: inherit
+
   # Docker image — build and push to GHCR
   # Tags: `latest` on main, `v1.2.3` + `latest` on version tags
   docker:
@@ -354,7 +361,7 @@ jobs:
   # Versioned release + crates.io publish on v* tags
   release-version:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-macos, build-linux-sm89, build-linux-sm120]
+    needs: [build-macos, build-linux-sm89, build-linux-sm120, build-desktop-dmg]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -367,7 +374,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: cd artifacts && sha256sum *.tar.gz > SHA256SUMS
+        run: cd artifacts && sha256sum *.tar.gz *.dmg *.zip > SHA256SUMS
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -378,6 +385,8 @@ jobs:
             artifacts/mold-aarch64-apple-darwin.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
+            artifacts/*.dmg
+            artifacts/Mold.app.zip
             artifacts/SHA256SUMS
           generate_release_notes: true
           body: |
@@ -405,6 +414,10 @@ jobs:
             | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
             | Linux x86_64 | CUDA — RTX 50-series (Blackwell) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+
+            ## Desktop app (macOS)
+
+            `Mold_*_aarch64.dmg` — signed, notarized, and stapled. Drag Mold to Applications; no quarantine dance needed.
 
   # Publish to crates.io on v* tags
   publish:
