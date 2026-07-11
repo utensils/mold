@@ -160,6 +160,20 @@ See the [RunPod CLI guide](https://utensils.io/mold/deployment/runpod-cli)
 for full subcommand reference (`doctor`, `gpus`, `network-volume`, `list`,
 `create`, `stop`, `delete`, `logs`, `usage`, …).
 
+### Native macOS desktop
+
+The experimental Tauri desktop app in `desktop/` embeds the Metal engine or
+connects to any local/remote `mold serve`. It includes Generate, a local/remote
+Gallery, parallel model downloads with real cancellation, chains, model
+catalog browsing, history, and a full settings bench. Its RunPod workspace can
+launch and manage pods and persistent network volumes without leaving the app.
+
+Still images expose **Copy image** from their right-click menus at full
+resolution. The complete interface—including fixed overlays and those context
+menus—scales from 80–130% with **⌘+**, **⌘−**, **⌘0**, the View menu, or
+Settings → Appearance & app, and restores the selected scale on relaunch.
+See the [desktop guide](https://utensils.io/mold/guide/desktop).
+
 See the full [CLI reference](https://utensils.io/mold/guide/cli-reference), [configuration guide](https://utensils.io/mold/guide/configuration), and [model catalog](https://utensils.io/mold/models/) in the documentation.
 
 ## Models

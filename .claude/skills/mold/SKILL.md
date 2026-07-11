@@ -850,7 +850,7 @@ services.mold.discord = {
 
 ## Desktop App
 
-An experimental native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/` on the `experiment/desktop` branch. It embeds `mold serve` in-process on Metal, auto-detects a running server on `localhost:7680`, and can point at a remote host. It covers the generation workspace (live "Develop" progress), gallery, model/catalog pulls, the chains editing bench, prompt history, RunPod provisioning/lifecycle/connection, full-resolution image clipboard copy, persistent 80–130% whole-app scaling (⌘+/⌘−/⌘0), and provenance-tagged settings, with a ⌘K command palette.
+An experimental native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/`. It embeds `mold serve` in-process on Metal, auto-detects a running server on `localhost:7680`, and can point at a remote host. It covers the generation workspace (live "Develop" progress), local and remote galleries, parallel cancellable model pulls, the chains editing bench, prompt history, full RunPod pod and network-volume lifecycle management, full-resolution image clipboard copy, persistent 80–130% whole-app scaling (⌘+/⌘−/⌘0), and provenance-tagged settings, with a ⌘K command palette. RunPod volume selection persists; volume-backed launches force Secure Cloud in the volume's datacenter and omit the redundant workspace disk.
 
 Devshell commands (run inside `nix develop`):
 

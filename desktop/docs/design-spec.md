@@ -245,7 +245,7 @@ Flat, fast, keyboard-first list over `prompt_history` (recent/search). ↩ Use f
 │ ENGINE                                                                     │
 │  Mode        ◉ Built-in (this Mac)   ○ Remote server                       │
 │  Remote host  http://studio.local:7680        [Test connection]            │
-│  API key      ••••••••••••                    stored in macOS Keychain     │
+│  API key      ••••••••••••                    stored securely              │
 │ GENERATION                                                                 │
 │  Default size   1024 × 1024                                    ⌂ db        │
 │  Default steps  28                                             ⌂ db        │
@@ -257,13 +257,14 @@ Flat, fast, keyboard-first list over `prompt_history` (recent/search). ↩ Use f
 - **Profiles:** switcher at the top of the tab (`profile.active`), create/duplicate; a Halide banner notes "Settings marked ⌂ are per-profile."
 - **Expansion tab:** backend (local qwen3-expand / OpenAI-compatible URL), model, temperature/top-p/max-tokens, thinking toggle, and per-family word-limit/style-notes overrides in an editable table; system/batch prompt editors in mono with placeholder chips (`{WORD_LIMIT}`, `{MODEL_NOTES}`).
 - **Advanced:** device placement grid (component × auto/cpu/gpu:N — mirrors `DevicePlacement`, persisted via the placement endpoints), text-encoder variant pickers, offload/eager toggles, queue size, cache size, artifact TTL, "Open config.toml", "Open logs".
-- Remote API key lives in the **macOS Keychain**, never in config files.
+- Remote API keys use the **macOS Keychain** in signed builds and the
+  owner-only debug secret file in local development, never ordinary settings.
 
 ---
 
 ### 4.7 RunPod — the remote bench
 
-The RunPod workspace keeps provisioning in the app: Keychain-backed API setup, balance and active hourly spend, GPU stock, cloud/datacenter/storage choices, live pod status, logs, lifecycle controls, and **Use in Mold** to connect the engine to `https://<pod>-7680.proxy.runpod.net`. Network volumes can be created, selected, renamed/grown, and deleted in place; selection persists, volume-backed launches visibly lock to Secure Cloud and the volume datacenter, and destructive deletion names the permanent-data risk. Poll status every ten seconds while the screen is open. Destructive delete uses an inline two-step confirmation. Keys entered in the app go to Keychain, while existing CLI environment/config credentials continue to work and are identified as externally managed.
+The RunPod workspace keeps provisioning in the app: secure API setup, balance and active hourly spend, GPU stock, cloud/datacenter/storage choices, live pod status, console handoff, lifecycle controls, and **Use in Mold** to connect the engine to `https://<pod>-7680.proxy.runpod.net`. Network volumes can be created, selected, renamed/grown, and deleted in place; selection persists, volume-backed launches visibly lock to Secure Cloud and the volume datacenter, and destructive deletion names the permanent-data risk. Poll status every ten seconds while the screen is open without replacing button labels or flashing a loading state. Destructive delete uses an inline two-step confirmation. Keys entered in signed builds go to Keychain; debug builds use the owner-only local secret store so changing ad-hoc signatures do not repeatedly prompt. Existing CLI environment/config credentials continue to work and are identified as externally managed.
 
 While a remote engine is selected, Gallery uses a standard two-tab location switch: **Remote** shows that engine's output and **This Mac** reads the configured local output directory through a restricted native media protocol. Switching gallery location never changes the generation engine.
 
@@ -324,7 +325,7 @@ Everything else is small and mechanical:
 - **Drag-out:** gallery tiles/lightbox → Finder, Mail, Photoshop (real file paths).
 - **Notifications** (tauri-plugin-notification): "Generated — lighthouse at dusk" with thumbnail on job complete _when the app is backgrounded_; "Chain finished · 243 frames" ; "Pull complete — flux-dev:q8". Clicking focuses the relevant item.
 - **Dock:** badge = queue count; a subtle determinate progress overlay on the dock icon during a running chain; dock menu: New Generation, Pause Queue(–), 3 recent prints.
-- Native services: window state restore, full-screen support, standard text editing (dictation/emoji work in the composer), system appearance sync, Keychain for API keys.
+- Native services: window state restore, full-screen support, standard text editing (dictation/emoji work in the composer), system appearance sync, Keychain for signed-build API keys, and an owner-only secret store for debug builds.
 
 ---
 
@@ -353,7 +354,7 @@ Everything else is small and mechanical:
 
 ## Implementation notes for the build phase (summary)
 
-- App = new cargo root `apps/desktop/src-tauri` (own Cargo.lock, added to mold's `[workspace] exclude`), embedding the engine in-process via `mold_server::run_server` and talking to it over localhost HTTP+SSE with `mold-core` wire types; remote mode reuses the same client path. Frontend: fresh Vite app (not the web/ SPA), fonts bundled (Bricolage Grotesque VF, Schibsted Grotesk VF, Martian Mono VF — all OFL). Nix: copy Aethon's `cargo-tauri.hook` + `rustPlatform.buildRustPackage` recipe, macOS `/usr/bin/cc` linker pins, empty darwin buildInputs, `titleBarStyle: Overlay` window config; devshell commands named `app-dev`, `app-build`, `app-check` (no builtin shadowing). Long-running branch: `experiment/desktop`.
+- App = cargo root `desktop/src-tauri` (own Cargo.lock, added to mold's `[workspace] exclude`), embedding the engine in-process via `mold_server::run_server` and talking to it over localhost HTTP+SSE with `mold-core` wire types; remote mode reuses the same client path. Frontend: dedicated Vite app (not the web/ SPA), fonts bundled (Bricolage Grotesque VF, Schibsted Grotesk VF, Martian Mono VF — all OFL). Nix provides `desktop-dev`, `desktop-build`, `desktop-check`, `desktop-test`, `desktop-ui`, and `desktop-bun-lock`; the window uses `titleBarStyle: Overlay`.
 
 ### Critical Files for Implementation
 
