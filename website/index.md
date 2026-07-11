@@ -204,7 +204,7 @@ letters on the side, mountains in the background, dreamy atmosphere"_
 </figure>
 <figure>
 
-![Northern lights — LTX Video](/gallery/ltx-aurora.webp)
+<video autoplay muted loop playsinline aria-label="Northern lights — LTX Video" src="/gallery/ltx-aurora.webm"></video>
 
 **ltx-video-0.9.6-distilled:bf16** — 8 steps, 33 frames, seed 1234 _"Northern
 lights dancing over a frozen lake in Iceland, green and purple aurora ribbons
@@ -213,7 +213,7 @@ reflected in the ice, stars visible, time-lapse photography"_
 </figure>
 <figure>
 
-![Jellyfish — LTX Video 0.9.8](/gallery/ltx-jellyfish.webp)
+<video autoplay muted loop playsinline aria-label="Jellyfish — LTX Video" src="/gallery/ltx-jellyfish.webm"></video>
 
 **ltx-video-0.9.6-distilled:bf16** — 8 steps, 33 frames, seed 707 _"Underwater
 footage of a jellyfish pulsing through deep blue water, bioluminescent glow,
