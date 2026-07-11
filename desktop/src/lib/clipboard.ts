@@ -11,7 +11,7 @@ interface CopyImageDeps {
 }
 
 async function fetchImage(path: string): Promise<Uint8Array> {
-  const response = await apiFetch(path);
+  const response = path.startsWith("mold-local:") ? await fetch(path) : await apiFetch(path);
   return new Uint8Array(await response.arrayBuffer());
 }
 

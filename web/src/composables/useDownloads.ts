@@ -14,13 +14,14 @@ import type {
 } from "../types";
 
 export interface DownloadsState {
+  activeJobs: DownloadJobWire[];
   active: DownloadJobWire | null;
   queued: DownloadJobWire[];
   history: DownloadJobWire[];
 }
 
 export function newDownloadsState(): DownloadsState {
-  return { active: null, queued: [], history: [] };
+  return { activeJobs: [], active: null, queued: [], history: [] };
 }
 
 const HISTORY_CAP = 20;
@@ -45,7 +46,10 @@ export function applyDownloadEvent(
       // serde's `skip_serializing_if = Option::is_none` strips the field.
       // Coalesce so downstream consumers don't have to handle both null
       // and undefined.
-      state.active = event.listing.active ?? null;
+      state.activeJobs =
+        event.listing.active_jobs ??
+        (event.listing.active ? [event.listing.active] : []);
+      state.active = state.activeJobs[0] ?? null;
       state.queued = [...event.listing.queued];
       state.history = [...event.listing.history];
       return;
@@ -91,63 +95,75 @@ export function applyDownloadEvent(
               completed_at: null,
               error: null,
             };
-      state.active = {
+      const active: DownloadJobWire = {
         ...from,
         status: "active",
         files_total: event.files_total,
         bytes_total: event.bytes_total,
         started_at: Date.now(),
       };
+      state.activeJobs = [
+        ...state.activeJobs.filter((job) => job.id !== event.id),
+        active,
+      ];
+      state.active = state.activeJobs[0] ?? null;
       return;
     }
     case "progress": {
-      if (state.active?.id !== event.id) return;
-      state.active.files_done = event.files_done;
-      state.active.bytes_done = event.bytes_done;
-      state.active.current_file = event.current_file ?? null;
+      const active = state.activeJobs.find((job) => job.id === event.id);
+      if (!active) return;
+      active.files_done = event.files_done;
+      active.bytes_done = event.bytes_done;
+      active.current_file = event.current_file ?? null;
       return;
     }
     case "file_done": {
-      if (state.active?.id !== event.id) return;
-      state.active.files_done += 1;
+      const active = state.activeJobs.find((job) => job.id === event.id);
+      if (active) active.files_done += 1;
       return;
     }
     case "job_done": {
-      const active = state.active;
-      if (!active || active.id !== event.id) return;
+      const active = state.activeJobs.find((job) => job.id === event.id);
+      if (!active) return;
       const completed: DownloadJobWire = {
         ...active,
         status: "completed",
         completed_at: Date.now(),
       };
-      state.active = null;
+      state.activeJobs = state.activeJobs.filter((job) => job.id !== event.id);
+      state.active = state.activeJobs[0] ?? null;
       state.history.push(completed);
       while (state.history.length > HISTORY_CAP) state.history.shift();
       return;
     }
     case "job_failed": {
-      const active = state.active;
-      if (!active || active.id !== event.id) return;
+      const active = state.activeJobs.find((job) => job.id === event.id);
+      if (!active) return;
       const failed: DownloadJobWire = {
         ...active,
         status: "failed",
         error: event.error,
         completed_at: Date.now(),
       };
-      state.active = null;
+      state.activeJobs = state.activeJobs.filter((job) => job.id !== event.id);
+      state.active = state.activeJobs[0] ?? null;
       state.history.push(failed);
       while (state.history.length > HISTORY_CAP) state.history.shift();
       return;
     }
     case "job_cancelled": {
-      const active = state.active;
-      if (!active || active.id !== event.id) return;
+      const active =
+        state.activeJobs.find((job) => job.id === event.id) ??
+        state.queued.find((job) => job.id === event.id);
+      if (!active) return;
       const cancelled: DownloadJobWire = {
         ...active,
         status: "cancelled",
         completed_at: Date.now(),
       };
-      state.active = null;
+      state.activeJobs = state.activeJobs.filter((job) => job.id !== event.id);
+      state.active = state.activeJobs[0] ?? null;
+      state.queued = state.queued.filter((job) => job.id !== event.id);
       state.history.push(cancelled);
       while (state.history.length > HISTORY_CAP) state.history.shift();
       return;
@@ -186,6 +202,7 @@ export function computeEtaSeconds(
 // ── Vue runtime singleton ────────────────────────────────────────────────────
 
 export interface UseDownloads {
+  activeJobs: Ref<DownloadJobWire[]>;
   active: Ref<DownloadJobWire | null>;
   queued: Ref<DownloadJobWire[]>;
   history: Ref<DownloadJobWire[]>;
@@ -227,6 +244,7 @@ export function __resetUseDownloadsForTest(): void {
 }
 
 function buildSingleton(): UseDownloads {
+  const activeJobs = ref<DownloadJobWire[]>([]);
   const active = ref<DownloadJobWire | null>(null);
   const queued = ref<DownloadJobWire[]>([]);
   const history = ref<DownloadJobWire[]>([]);
@@ -240,6 +258,7 @@ function buildSingleton(): UseDownloads {
 
   function state(): DownloadsState {
     return {
+      activeJobs: activeJobs.value,
       active: active.value,
       queued: queued.value,
       history: history.value,
@@ -247,13 +266,16 @@ function buildSingleton(): UseDownloads {
   }
 
   function writeBack(next: DownloadsState) {
+    activeJobs.value = [...next.activeJobs];
     active.value = next.active;
     queued.value = [...next.queued];
     history.value = [...next.history];
   }
 
   function applyListing(listing: DownloadsListingWire) {
-    active.value = listing.active ?? null;
+    activeJobs.value =
+      listing.active_jobs ?? (listing.active ? [listing.active] : []);
+    active.value = activeJobs.value[0] ?? null;
     queued.value = [...listing.queued];
     history.value = [...listing.history];
   }
@@ -274,7 +296,10 @@ function buildSingleton(): UseDownloads {
     // pre-fix, every progress tick allocated a fresh object containing
     // every job ever rate-tracked, scaling O(N) with cumulative session
     // length and dragging the main thread after long sessions.
-    if (evt.type === "progress" && active.value && active.value.id === evt.id) {
+    if (
+      evt.type === "progress" &&
+      activeJobs.value.some((job) => job.id === evt.id)
+    ) {
       const id = evt.id;
       const samples = ratesByJob.value[id] ?? [];
       const now = Date.now();
@@ -306,7 +331,10 @@ function buildSingleton(): UseDownloads {
     // dead weight too. Rebuild against the surviving id set.
     if (evt.type === "snapshot") {
       const live = new Set<string>();
-      if (evt.listing.active) live.add(evt.listing.active.id);
+      for (const job of evt.listing.active_jobs ??
+        (evt.listing.active ? [evt.listing.active] : [])) {
+        live.add(job.id);
+      }
       for (const j of evt.listing.queued) live.add(j.id);
       for (const id of Object.keys(ratesByJob.value)) {
         if (!live.has(id)) delete ratesByJob.value[id];
@@ -406,6 +434,7 @@ function buildSingleton(): UseDownloads {
   }
 
   return {
+    activeJobs,
     active,
     queued,
     history,

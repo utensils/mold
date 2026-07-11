@@ -321,6 +321,8 @@ export interface DownloadJob {
 
 /** `GET /api/downloads` — mirrors mold-core `DownloadsListing`. */
 export interface DownloadsListing {
+  active_jobs?: DownloadJob[];
+  /** Compatibility view from older servers and for older clients. */
   active?: DownloadJob | null;
   queued: DownloadJob[];
   history: DownloadJob[];

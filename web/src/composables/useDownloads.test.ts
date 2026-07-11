@@ -137,6 +137,23 @@ describe("applyDownloadEvent", () => {
     expect(state.active?.current_file).toBe("foo.bin");
   });
 
+  it("tracks two active downloads independently", () => {
+    const state = newDownloadsState();
+    for (const id of ["a", "b"]) {
+      applyDownloadEvent(state, { type: "enqueued", id, model: id, position: 1 });
+      applyDownloadEvent(state, { type: "started", id, files_total: 1, bytes_total: 100 });
+    }
+    applyDownloadEvent(state, {
+      type: "progress",
+      id: "b",
+      files_done: 0,
+      bytes_done: 50,
+    });
+    expect(state.activeJobs.map((job) => job.id)).toEqual(["a", "b"]);
+    expect(state.activeJobs.find((job) => job.id === "a")?.bytes_done).toBe(0);
+    expect(state.activeJobs.find((job) => job.id === "b")?.bytes_done).toBe(50);
+  });
+
   it("JobDone moves active into history, capped at 20", () => {
     const state = newDownloadsState();
     for (let i = 0; i < 25; i++) {
@@ -164,7 +181,7 @@ describe("applyDownloadEvent", () => {
     expect(state.history.at(-1)?.id).toBe("id-24");
   });
 
-  it("JobCancelled from queued emits via dequeued event", () => {
+  it("JobCancelled moves a queued job into terminal history", () => {
     const state = newDownloadsState();
     applyDownloadEvent(state, {
       type: "enqueued",
@@ -172,8 +189,9 @@ describe("applyDownloadEvent", () => {
       model: "m",
       position: 1,
     });
-    applyDownloadEvent(state, { type: "dequeued", id: "a" });
+    applyDownloadEvent(state, { type: "job_cancelled", id: "a" });
     expect(state.queued).toHaveLength(0);
+    expect(state.history[0]?.status).toBe("cancelled");
   });
 });
 

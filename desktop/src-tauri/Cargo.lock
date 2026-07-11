@@ -3882,6 +3882,7 @@ dependencies = [
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-server",
+ "percent-encoding",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

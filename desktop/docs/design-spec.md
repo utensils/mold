@@ -197,7 +197,7 @@ Two tabs: **Installed** and **Catalog**, plus a persistent **Downloads** tray.
 
 - **Installed:** grouped by family; rows show quant chip, disk usage bar (proportional, Halide), residency dot, per-row actions. **Info** expands components (`/api/models/:model/components`) with per-component download/verify state and a "Verify checksums" action. Removing warns about shared components: "Keeps t5-xxl (used by 3 models)."
 - **Catalog:** search field + chips for **Source** (HF / Civitai), **Family**, **Kind** (checkpoint/lora/…), NSFW toggle (off by default, remembered), paged results from `/api/catalog/search`. Result cards: name, author, family chip, **SIZE vs FETCH** rendered honestly — `SIZE 23.9 GB · FETCH 8.1 GB` in Martian Mono with a caption "8.1 GB to download; the rest is shared components you already have." Variant selector (q4/q6/q8/bf16…) is a segmented chip row with per-variant sizes. Pull button label: **"Pull q8 · 8.1 GB"**.
-- **Downloads tray:** slides up from the Bench rail while `/api/downloads/stream` has activity: per-download progress (bytes + %), pause-less but cancelable (✕ → `DELETE /api/downloads/:id`), companion downloads nested under their primary. Progress bars here are plain Safelight fills — the Develop is reserved for generation.
+- **Downloads tray:** slides up from the Bench rail while `/api/downloads/stream` has activity: up to two active downloads plus the remaining queue, per-download progress (bytes + %), and cancellation (✕ → `DELETE /api/downloads/:id`) that stays visibly pending until the engine confirms termination. Companion downloads remain grouped under their primary. Progress bars here are plain Safelight fills; the Develop is reserved for generation.
 - Built-in catalog entries and `hf:`/`cv:` live entries are visually identical; the id chip (`cv:12345`) is copyable.
 
 ### 4.4 Chains — the editing bench (mold.chain.v1)
@@ -264,6 +264,8 @@ Flat, fast, keyboard-first list over `prompt_history` (recent/search). ↩ Use f
 ### 4.7 RunPod — the remote bench
 
 The RunPod workspace keeps provisioning in the app: Keychain-backed API setup, balance and active hourly spend, GPU stock, cloud/datacenter/storage choices, live pod status, logs, lifecycle controls, and **Use in Mold** to connect the engine to `https://<pod>-7680.proxy.runpod.net`. Poll status every ten seconds while the screen is open. Destructive delete uses an inline two-step confirmation. Keys entered in the app go to Keychain, while existing CLI environment/config credentials continue to work and are identified as externally managed.
+
+While a remote engine is selected, Gallery uses a standard two-tab location switch: **Remote** shows that engine's output and **This Mac** reads the configured local output directory through a restricted native media protocol. Switching gallery location never changes the generation engine.
 
 ## 5. States
 

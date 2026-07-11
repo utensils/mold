@@ -1,4 +1,5 @@
 import type { RunPodCreateInput, RunPodOverview, RunPodPod } from "./runpod";
+import type { GalleryImage } from "./api/types";
 
 /**
  * Typed wrappers around Tauri IPC. In a plain browser (`bun run dev` /
@@ -119,6 +120,14 @@ export const ipc = {
   revealOutputFile(filename: string): Promise<void> {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("reveal_output_file", { filename });
+  },
+  localGalleryList(): Promise<GalleryImage[]> {
+    if (!inTauri()) return Promise.resolve([]);
+    return invoke<GalleryImage[]>("local_gallery_list");
+  },
+  localGalleryDelete(filename: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("local_gallery_delete", { filename });
   },
   /** macOS dock badge; null clears it. */
   setDockBadge(count: number | null): Promise<void> {

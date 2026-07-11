@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { podProxyUrl, rankRunPodGpus, type RunPodGpu } from "./runpod";
+import { podGpuName, podProxyUrl, rankRunPodGpus, type RunPodGpu, type RunPodPod } from "./runpod";
 
 const gpu = (displayName: string, stockStatus: string | null, memoryInGb: number): RunPodGpu => ({
   id: displayName,
@@ -30,5 +30,13 @@ describe("RunPod presentation helpers", () => {
 
   it("builds the RunPod HTTP proxy URL used by mold serve", () => {
     expect(podProxyUrl("abc123")).toBe("https://abc123-7680.proxy.runpod.net");
+  });
+
+  it("uses the top-level REST GPU when machine metadata omits it", () => {
+    const pod = {
+      machine: { gpuDisplayName: null, location: "US" },
+      gpu: { id: "NVIDIA RTX PRO 6000", displayName: "RTX PRO 6000 Blackwell", count: 1 },
+    } as RunPodPod;
+    expect(podGpuName(pod)).toBe("RTX PRO 6000 Blackwell");
   });
 });

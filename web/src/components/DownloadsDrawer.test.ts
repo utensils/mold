@@ -22,7 +22,7 @@ describe("DownloadsDrawer", () => {
     const wrapper = mount(DownloadsDrawer, {
       props: {
         open: true,
-        active: makeJob() as never,
+        active: [makeJob() as never],
         queued: [],
         history: [],
         etaSeconds: 5,
@@ -37,7 +37,7 @@ describe("DownloadsDrawer", () => {
     const wrapper = mount(DownloadsDrawer, {
       props: {
         open: true,
-        active: null,
+        active: [],
         queued: [
           makeJob({ id: "q1", model: "sd1.5:fp16", status: "queued" }) as never,
           makeJob({
@@ -61,7 +61,7 @@ describe("DownloadsDrawer", () => {
     const wrapper = mount(DownloadsDrawer, {
       props: {
         open: true,
-        active: null,
+        active: [],
         queued: [],
         history: [
           makeJob({
@@ -83,16 +83,18 @@ describe("DownloadsDrawer", () => {
     const wrapper = mount(DownloadsDrawer, {
       props: {
         open: true,
-        active: makeJob({
-          id: "primary",
-          model: "cv:2910912",
-          catalog_id: "cv:2910912",
-          files_done: 0,
-          files_total: 1,
-          bytes_done: 500,
-          bytes_total: 1_000,
-          current_file: "moody.safetensors",
-        }) as never,
+        active: [
+          makeJob({
+            id: "primary",
+            model: "cv:2910912",
+            catalog_id: "cv:2910912",
+            files_done: 0,
+            files_total: 1,
+            bytes_done: 500,
+            bytes_total: 1_000,
+            current_file: "moody.safetensors",
+          }) as never,
+        ],
         queued: [
           makeJob({
             id: "clip",

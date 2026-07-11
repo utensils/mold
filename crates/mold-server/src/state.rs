@@ -167,7 +167,7 @@ pub struct AppState {
     /// unavailable; chain-job API handlers return 503 in that state.
     pub chain_jobs: Option<Arc<crate::chain_job_runner::ChainJobRunnerHandle>>,
     // ── Downloads UI (Agent A) ──────────────────────────────────────────────
-    /// Single-writer download queue.
+    /// Bounded-parallel download queue.
     pub downloads: Arc<DownloadQueue>,
     /// Always-on resource telemetry (Agent B).
     pub resources: Arc<ResourceBroadcaster>,

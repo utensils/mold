@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import AuthedMedia from "./AuthedMedia.vue";
-import { mediaPath } from "../../lib/gallery/media";
+import { galleryMediaPath, type GallerySource } from "../../lib/gallery/media";
 import { ipc } from "../../lib/ipc";
 import { useComposerStore } from "../../stores/composer";
 import { useToastStore } from "../../stores/toasts";
@@ -11,12 +11,17 @@ import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { copyImageBytesToClipboard } from "../../lib/clipboard";
 import type { GalleryImage } from "../../lib/api/types";
 
-const props = defineProps<{
-  item: GalleryImage;
-  index: number;
-  count: number;
-  video: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    item: GalleryImage;
+    index: number;
+    count: number;
+    video: boolean;
+    source?: GallerySource;
+    canReveal?: boolean;
+  }>(),
+  { source: "engine", canReveal: false },
+);
 const emit = defineEmits<{ close: []; prev: []; next: []; delete: [] }>();
 
 const router = useRouter();
@@ -88,7 +93,7 @@ async function copy(text: string) {
 
 async function copyImage() {
   try {
-    await copyImageBytesToClipboard(mediaPath(props.item.filename));
+    await copyImageBytesToClipboard(galleryMediaPath(props.item.filename, props.source));
     toasts.push("Image copied");
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
@@ -101,13 +106,9 @@ function imageMenu(): MenuEntry[] {
     { label: "Copy prompt", action: () => void copy(meta.value.prompt) },
     { label: "Copy seed", action: () => void copy(String(meta.value.seed)) },
     { separator: true },
-    { label: "Reveal in Finder", disabled: !canReveal.value, action: () => void reveal() },
+    { label: "Reveal in Finder", disabled: !props.canReveal, action: () => void reveal() },
   ];
 }
-
-// Reveal in Finder only exists when the engine writes to this disk.
-const canReveal = ref(false);
-void ipc.getOutputDir().then((dir) => (canReveal.value = dir !== null));
 
 async function reveal() {
   try {
@@ -152,7 +153,7 @@ function onDelete() {
         @contextmenu="contextMenu.open($event, imageMenu())"
       >
         <AuthedMedia
-          :path="mediaPath(item.filename)"
+          :path="galleryMediaPath(item.filename, source)"
           :video="video"
           :controls="video"
           :alt="meta.prompt"

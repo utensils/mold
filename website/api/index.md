@@ -34,7 +34,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `DELETE` | `/api/gallery/image/:name`                | Delete a saved image                                                                                              |
 | `GET`    | `/api/gallery/thumbnail/:name`            | Fetch a cached thumbnail                                                                                          |
 | `GET`    | `/api/gallery/preview/:name`              | Fetch a cached GIF preview for video gallery rows                                                                 |
-| `GET`    | `/api/downloads`                          | List active, queued, failed, and completed downloads                                                              |
+| `GET`    | `/api/downloads`                          | List up to two active downloads (`active_jobs`), plus queued, failed, and completed jobs                          |
 | `POST`   | `/api/downloads`                          | Queue a manifest model download                                                                                   |
 | `DELETE` | `/api/downloads/:id`                      | Cancel a queued or active download                                                                                |
 | `GET`    | `/api/downloads/stream`                   | Download queue updates as SSE                                                                                     |

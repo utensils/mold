@@ -38,9 +38,10 @@ const downloads = useDownloadsStore();
           class="text-ink-3 hover:text-stop active:translate-y-px"
           title="Cancel download"
           :aria-label="`Cancel download of ${job.model}`"
+          :disabled="downloads.cancelling.includes(job.id)"
           @click="downloads.cancel(job.id)"
         >
-          ✕
+          {{ downloads.cancelling.includes(job.id) ? "…" : "✕" }}
         </button>
       </div>
     </div>

@@ -83,22 +83,14 @@ pub async fn get_connection(state: tauri::State<'_, AppState>) -> Result<Connect
     Ok(state.conn.lock().await.info(&state.local_api_key))
 }
 
-/// Where the local engine writes gallery files. `None` for remote hosts —
-/// reveal-in-Finder and drag-out only make sense for on-disk media.
+/// Where this Mac writes gallery files. Remote engine selection does not
+/// hide the local gallery from the user.
 #[tauri::command]
 pub async fn get_output_dir(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
-    let conn = state.conn.lock().await;
-    Ok(match &*conn {
-        Conn::Local(_) | Conn::External { .. } => {
-            let config = mold_core::Config::load_or_default();
-            if config.is_output_disabled() {
-                None
-            } else {
-                Some(config.effective_output_dir().to_string_lossy().into_owned())
-            }
-        }
-        _ => None,
-    })
+    let _ = state;
+    let config = mold_core::Config::load_or_default();
+    Ok((!config.is_output_disabled())
+        .then(|| config.effective_output_dir().to_string_lossy().into_owned()))
 }
 
 /// Dock badge: queue depth while jobs wait, cleared when idle (macOS).
@@ -124,15 +116,8 @@ pub async fn reveal_output_file(
     if filename.contains('/') || filename.contains("..") {
         return Err("Invalid filename.".into());
     }
-    let dir = {
-        let conn = state.conn.lock().await;
-        match &*conn {
-            Conn::Local(_) | Conn::External { .. } => {
-                mold_core::Config::load_or_default().effective_output_dir()
-            }
-            _ => return Err("Reveal in Finder works with the built-in engine only.".into()),
-        }
-    };
+    let _ = state;
+    let dir = mold_core::Config::load_or_default().effective_output_dir();
     let path = dir.join(&filename);
     if !path.exists() {
         return Err("The file is no longer on disk.".into());

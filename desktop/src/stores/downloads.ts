@@ -7,13 +7,13 @@ import { useToastStore } from "./toasts";
 import type { DownloadEvent, DownloadJob, DownloadsListing } from "../lib/api/types";
 
 export interface DownloadsState {
-  active: DownloadJob | null;
+  activeJobs: DownloadJob[];
   queued: DownloadJob[];
   history: DownloadJob[];
 }
 
 export function emptyDownloadsState(): DownloadsState {
-  return { active: null, queued: [], history: [] };
+  return { activeJobs: [], queued: [], history: [] };
 }
 
 function synthQueued(id: string, model: string): DownloadJob {
@@ -35,13 +35,13 @@ function finishJob(
   status: DownloadJob["status"],
   error?: string,
 ): DownloadsState {
-  const job = state.active?.id === id ? state.active : state.queued.find((j) => j.id === id);
-  const active = state.active?.id === id ? null : state.active;
+  const job = state.activeJobs.find((j) => j.id === id) ?? state.queued.find((j) => j.id === id);
+  const activeJobs = state.activeJobs.filter((j) => j.id !== id);
   const queued = state.queued.filter((j) => j.id !== id);
   const history = job
     ? [{ ...job, status, error: error ?? job.error ?? null }, ...state.history]
     : state.history;
-  return { active, queued, history };
+  return { activeJobs, queued, history };
 }
 
 /**
@@ -53,37 +53,47 @@ export function applyDownloadEvent(state: DownloadsState, ev: DownloadEvent): Do
   switch (ev.type) {
     case "snapshot":
       return {
-        active: ev.listing.active ?? null,
+        activeJobs: ev.listing.active_jobs ?? (ev.listing.active ? [ev.listing.active] : []),
         queued: [...ev.listing.queued],
         history: [...ev.listing.history],
       };
     case "enqueued":
-      if (state.queued.some((j) => j.id === ev.id) || state.active?.id === ev.id) return state;
+      if (state.queued.some((j) => j.id === ev.id) || state.activeJobs.some((j) => j.id === ev.id))
+        return state;
       return { ...state, queued: [...state.queued, synthQueued(ev.id, ev.model)] };
     case "dequeued":
       return { ...state, queued: state.queued.filter((j) => j.id !== ev.id) };
     case "started": {
       const base =
         state.queued.find((j) => j.id === ev.id) ??
-        (state.active?.id === ev.id ? state.active : synthQueued(ev.id, ""));
+        state.activeJobs.find((j) => j.id === ev.id) ??
+        synthQueued(ev.id, "");
       const active: DownloadJob = {
         ...base,
         status: "active",
         files_total: ev.files_total,
         bytes_total: ev.bytes_total,
       };
-      return { active, queued: state.queued.filter((j) => j.id !== ev.id), history: state.history };
+      return {
+        activeJobs: [...state.activeJobs.filter((j) => j.id !== ev.id), active],
+        queued: state.queued.filter((j) => j.id !== ev.id),
+        history: state.history,
+      };
     }
     case "progress":
-      if (state.active?.id !== ev.id) return state;
+      if (!state.activeJobs.some((job) => job.id === ev.id)) return state;
       return {
         ...state,
-        active: {
-          ...state.active,
-          files_done: ev.files_done,
-          bytes_done: ev.bytes_done,
-          current_file: ev.current_file ?? state.active.current_file ?? null,
-        },
+        activeJobs: state.activeJobs.map((job) =>
+          job.id === ev.id
+            ? {
+                ...job,
+                files_done: ev.files_done,
+                bytes_done: ev.bytes_done,
+                current_file: ev.current_file ?? job.current_file ?? null,
+              }
+            : job,
+        ),
       };
     case "file_done":
       return state;
@@ -105,11 +115,12 @@ export const useDownloadsStore = defineStore("downloads", {
     ...emptyDownloadsState(),
     subscribed: false,
     abort: null as AbortController | null,
+    cancelling: [] as string[],
   }),
   getters: {
     /** In-flight rows for the tray: the active job first, then the queue. */
     inFlight(state): DownloadJob[] {
-      return state.active ? [state.active, ...state.queued] : state.queued;
+      return [...state.activeJobs, ...state.queued];
     },
     hasActivity(): boolean {
       return this.inFlight.length > 0;
@@ -122,9 +133,12 @@ export const useDownloadsStore = defineStore("downloads", {
     },
     apply(ev: DownloadEvent) {
       const next = applyDownloadEvent(this.$state, ev);
-      this.active = next.active;
+      this.activeJobs = next.activeJobs;
       this.queued = next.queued;
       this.history = next.history;
+      if (ev.type === "job_cancelled" || ev.type === "job_done" || ev.type === "job_failed") {
+        this.cancelling = this.cancelling.filter((id) => id !== ev.id);
+      }
     },
     /** Subscribe to the download stream. Idempotent — safe to call on mount. */
     subscribe() {
@@ -174,8 +188,14 @@ export const useDownloadsStore = defineStore("downloads", {
       }
     },
     async cancel(id: string) {
-      await apiFetch(`/api/downloads/${encodeURIComponent(id)}`, { method: "DELETE" });
-      this.apply({ type: "job_cancelled", id });
+      if (this.cancelling.includes(id)) return;
+      this.cancelling.push(id);
+      try {
+        await apiFetch(`/api/downloads/${encodeURIComponent(id)}`, { method: "DELETE" });
+      } catch (error) {
+        this.cancelling = this.cancelling.filter((candidate) => candidate !== id);
+        throw error;
+      }
     },
   },
 });

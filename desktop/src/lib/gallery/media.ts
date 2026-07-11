@@ -9,6 +9,7 @@ import { apiFetch } from "../api/client";
 const cache = new Map<string, Promise<string>>();
 
 export function authedMediaUrl(path: string): Promise<string> {
+  if (path.startsWith("mold-local:")) return Promise.resolve(path);
   let url = cache.get(path);
   if (!url) {
     url = apiFetch(path)
@@ -29,3 +30,15 @@ export function evictMedia(path: string): void {
 export const thumbnailPath = (filename: string) =>
   `/api/gallery/thumbnail/${encodeURIComponent(filename)}`;
 export const mediaPath = (filename: string) => `/api/gallery/image/${encodeURIComponent(filename)}`;
+
+export type GallerySource = "engine" | "local";
+
+export const localMediaPath = (filename: string) =>
+  `mold-local://localhost/${encodeURIComponent(filename)}`;
+
+export const galleryMediaPath = (filename: string, source: GallerySource, thumbnail = false) =>
+  source === "local"
+    ? localMediaPath(filename)
+    : thumbnail
+      ? thumbnailPath(filename)
+      : mediaPath(filename);

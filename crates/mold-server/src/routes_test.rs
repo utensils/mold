@@ -4537,6 +4537,7 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["active_jobs"].is_array());
         assert!(v["queued"].is_array());
         assert!(v["history"].is_array());
         assert_eq!(v["queued"].as_array().unwrap().len(), 1);

@@ -180,6 +180,10 @@ pub struct Pod {
     pub env: serde_json::Value,
     #[serde(default)]
     pub machine: Option<PodMachine>,
+    /// Current REST responses expose the assigned GPU here even when the
+    /// optional machine expansion omits `gpuDisplayName`.
+    #[serde(default)]
+    pub gpu: Option<PodGpu>,
     #[serde(default)]
     pub runtime: Option<serde_json::Value>,
 }
@@ -190,6 +194,16 @@ pub struct PodMachine {
     pub gpu_display_name: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PodGpu {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(rename = "displayName", default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub count: Option<u32>,
 }
 
 /// Body for `POST /pods`.
@@ -727,6 +741,20 @@ mod tests {
         assert_eq!(image_tag_for_gpu("RTX 3090"), "latest-sm80");
         assert_eq!(image_tag_for_gpu("H100 SXM"), "latest-sm90");
         assert_eq!(image_tag_for_gpu("H200 SXM"), "latest-sm90");
+    }
+
+    #[test]
+    fn pod_reads_gpu_from_top_level_rest_shape() {
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "id": "pod-1",
+            "desiredStatus": "RUNNING",
+            "gpu": { "id": "NVIDIA RTX 6000", "displayName": "RTX PRO 6000 Blackwell" }
+        }))
+        .unwrap();
+        assert_eq!(
+            pod.gpu.and_then(|gpu| gpu.display_name).as_deref(),
+            Some("RTX PRO 6000 Blackwell")
+        );
     }
 
     #[test]

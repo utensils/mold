@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { podProxyUrl, type RunPodCreateInput, type RunPodPod } from "../lib/runpod";
+import { podGpuName, podProxyUrl, type RunPodCreateInput, type RunPodPod } from "../lib/runpod";
 import { inTauri } from "../lib/ipc";
 import { useConnectionStore } from "../stores/connection";
 import { useAppPrefsStore } from "../stores/appPrefs";
@@ -462,8 +462,7 @@ onBeforeUnmount(() => {
                   >
                 </div>
                 <p class="data-mono truncate text-caption text-ink-3">
-                  {{ pod.machine?.gpuDisplayName ?? "GPU pending" }} ·
-                  {{ pod.machine?.location ?? "Placement pending" }} ·
+                  {{ podGpuName(pod) }} · {{ pod.machine?.location ?? "Placement pending" }} ·
                   {{ money(pod.costPerHr) }}/hr<span v-if="pod.uptimeSeconds">
                     · {{ uptime(pod.uptimeSeconds) }}</span
                   >

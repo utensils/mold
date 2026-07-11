@@ -83,7 +83,7 @@ provide(RESOURCES_INJECTION_KEY, resources);
   <ResourceTray />
   <DownloadsDrawer
     :open="drawerOpen"
-    :active="downloads.active.value"
+    :active="downloads.activeJobs.value"
     :queued="downloads.queued.value"
     :history="downloads.history.value"
     :eta-seconds="etaSeconds"
