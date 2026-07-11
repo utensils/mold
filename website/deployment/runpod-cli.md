@@ -1,9 +1,9 @@
 # `mold runpod` — native RunPod CLI
 
 `mold runpod` manages RunPod cloud GPU pods end-to-end from the same binary
-you use for local generation. Create a pod, connect to it, stream logs,
-track spend, and (with `mold runpod run`) create-generate-save in a single
-command.
+you use for local generation. Create a pod, connect to it, hand off logs to the
+RunPod console, track spend, and (with `mold runpod run`) create-generate-save
+in a single command.
 
 Compared to the [Docker & RunPod](./docker) guide — which shows the manual
 pod-creation flow via `runpodctl` or the web console — this guide covers
@@ -120,8 +120,7 @@ mold runpod connect <pod-id>                    # print export MOLD_HOST=…
 eval "$(mold runpod connect <pod-id>)"          # exec the export in your shell
 
 # Observability
-mold runpod logs <pod-id>                       # one-shot
-mold runpod logs <pod-id> --follow              # tail (polls every 2s)
+mold runpod logs <pod-id>                       # validate pod + print console handoff
 ```
 
 ## Smart defaults explained
@@ -206,11 +205,11 @@ environment — never written into the Nix store. Same pattern as
 
 ## REST vs GraphQL
 
-`RunPodClient` hits RunPod's REST API at `https://rest.runpod.io/v1/`
-for pod lifecycle (create/list/get/stop/start/delete/logs) and uses
-the GraphQL endpoint at `https://api.runpod.io/graphql` for account
-info, GPU catalog, and datacenter availability — those aren't exposed
-via REST.
+`RunPodClient` hits RunPod's REST API at `https://rest.runpod.io/v1/` for pod
+lifecycle (create/list/get/stop/start/delete) and network-volume management,
+and uses the GraphQL endpoint at `https://api.runpod.io/graphql` for account
+info, GPU catalog, and datacenter availability — those aren't exposed via
+REST. Container/system logs remain a RunPod console-only surface.
 
 Both paths use the same API key (`Authorization: Bearer …`).
 
@@ -229,6 +228,11 @@ REST doesn't accept. Omit `--dc` to let RunPod pick.
 **"RunPod /user 401" or "…403"** — stale/invalid/missing API key. Run
 `mold runpod doctor` to confirm. Regenerate at
 [runpod.io/console/user/settings](https://www.runpod.io/console/user/settings).
+
+**Pod logs** — RunPod does not expose container/system logs through the Pod
+REST API. `mold runpod logs <pod-id>` validates the Pod, prints its state and
+the console URL, then tells you to open that Pod's **Logs** panel. `--follow`
+is retained for compatibility but cannot stream console-only logs.
 
 **Orphaned pods after Ctrl-C** — `mold runpod run` persists `last_pod_id`
 **before** waiting for readiness, so `mold runpod list` always surfaces

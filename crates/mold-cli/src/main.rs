@@ -274,11 +274,11 @@ Example:
         #[arg(long)]
         check: bool,
     },
-    /// Stream pod logs
+    /// Validate a pod and print the RunPod console logs handoff
     Logs {
         #[arg(add = ArgValueCandidates::new(commands::runpod::complete_pod_id))]
         pod_id: String,
-        /// Follow logs (poll every 2s)
+        /// Deprecated: RunPod exposes live logs only in its web console
         #[arg(long, short = 'f')]
         follow: bool,
     },

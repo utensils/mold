@@ -272,8 +272,9 @@ mold runpod connect <pod-id>
 mold runpod delete <pod-id>
 ```
 
-Common subcommands are `doctor`, `gpus`, `datacenters`, `list`, `get`,
-`create`, `start`, `stop`, `delete`, `connect`, `logs`, `usage`, and `run`.
+Common subcommands are `doctor`, `gpus`, `datacenters`, `network-volume`,
+`list`, `get`, `create`, `start`, `stop`, `delete`, `connect`, `logs` (RunPod
+console handoff), `usage`, and `run`.
 See [mold runpod CLI](/deployment/runpod-cli).
 
 ## `mold lambda`

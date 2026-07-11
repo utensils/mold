@@ -136,22 +136,24 @@ pub fn protocol_response(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
         );
     };
     let total = metadata.len();
-    let range = request
-        .headers()
-        .get(header::RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("bytes="))
-        .and_then(|value| value.split(',').next())
-        .and_then(|value| {
-            let (start, end) = value.split_once('-')?;
-            let start = start.parse::<u64>().ok()?;
-            let end = if end.is_empty() {
-                total.saturating_sub(1)
-            } else {
-                end.parse::<u64>().ok()?.min(total.saturating_sub(1))
-            };
-            (start <= end && start < total).then_some((start, end))
-        });
+    let range = match request.headers().get(header::RANGE) {
+        Some(value) => match value
+            .to_str()
+            .map_err(|_| ())
+            .and_then(|value| parse_byte_range(value, total))
+        {
+            Ok(range) => range,
+            Err(()) => {
+                return Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .body(Vec::new())
+                    .expect("valid range error response")
+            }
+        },
+        None => None,
+    };
     let (status, start, end) = range
         .map(|(start, end)| (StatusCode::PARTIAL_CONTENT, start, end))
         .unwrap_or((StatusCode::OK, 0, total.saturating_sub(1)));
@@ -184,6 +186,38 @@ pub fn protocol_response(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     response.body(body).expect("valid protocol response")
 }
 
+fn parse_byte_range(value: &str, total: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(spec) = value.strip_prefix("bytes=") else {
+        return Ok(None);
+    };
+    if total == 0 {
+        return Err(());
+    }
+    let first = spec.split(',').next().ok_or(())?.trim();
+    let (start, end) = first.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        let suffix = end.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        let length = suffix.min(total);
+        return Ok(Some((total - length, total - 1)));
+    }
+    let start = start.parse::<u64>().map_err(|_| ())?;
+    if start >= total {
+        return Err(());
+    }
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        end.parse::<u64>().map_err(|_| ())?.min(total - 1)
+    };
+    if end < start {
+        return Err(());
+    }
+    Ok(Some((start, end)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +227,20 @@ mod tests {
         assert!(!valid_filename("../secrets.json"));
         assert!(!valid_filename("nested/image.png"));
         assert!(valid_filename("mold-flux-1.png"));
+    }
+
+    #[test]
+    fn parses_open_ended_and_suffix_byte_ranges() {
+        assert_eq!(parse_byte_range("bytes=5-", 10), Ok(Some((5, 9))));
+        assert_eq!(parse_byte_range("bytes=-4", 10), Ok(Some((6, 9))));
+        assert_eq!(parse_byte_range("bytes=-40", 10), Ok(Some((0, 9))));
+    }
+
+    #[test]
+    fn rejects_unsatisfiable_or_malformed_byte_ranges() {
+        assert_eq!(parse_byte_range("bytes=10-", 10), Err(()));
+        assert_eq!(parse_byte_range("bytes=8-2", 10), Err(()));
+        assert_eq!(parse_byte_range("bytes=-0", 10), Err(()));
+        assert_eq!(parse_byte_range("bytes=nope", 10), Err(()));
     }
 }

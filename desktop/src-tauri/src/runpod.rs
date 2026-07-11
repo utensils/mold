@@ -323,22 +323,10 @@ pub async fn runpod_network_volume_delete(
     id: String,
 ) -> Result<(), String> {
     let (client, _) = client(&state)?.ok_or_else(|| "Add a RunPod API key first.".to_string())?;
-    if let Ok(pods) = client.list_pods().await {
-        if let Some(pod) = pods.iter().find(|pod| {
-            pod.network_volume
-                .as_ref()
-                .is_some_and(|volume| volume.id == id)
-        }) {
-            return Err(format!(
-                "Delete instance '{}' before deleting its attached network volume.",
-                pod.name.as_deref().unwrap_or(&pod.id)
-            ));
-        }
-    }
     client
-        .delete_network_volume(&id)
+        .delete_network_volume_if_detached(&id)
         .await
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| format!("Could not safely delete network volume: {e:#}"))
 }
 
 #[tauri::command]
@@ -417,5 +405,6 @@ mod tests {
         assert_eq!(request.cloud_type, "SECURE");
         assert_eq!(request.data_center_ids, Some(vec!["US-KS-2".into()]));
         assert_eq!(request.network_volume_id.as_deref(), Some("nv-1"));
+        assert_eq!(request.volume_in_gb, 0);
     }
 }

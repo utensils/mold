@@ -33,6 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 percent-encoding = "2"
 anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 tracing = "0.1"
 # Local interface enumeration so discovered servers can be flagged "This Mac".
 if-addrs = "0.15"

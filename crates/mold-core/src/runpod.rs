@@ -458,25 +458,6 @@ impl RunPodClient {
         }
     }
 
-    async fn get_text(&self, path: &str) -> Result<String> {
-        let resp = self
-            .http
-            .get(self.url(path))
-            .bearer_auth(&self.api_key)
-            .send()
-            .await
-            .map_err(|e| MoldError::RunPod(format!("RunPod {path}: {e}")))?;
-        let status = resp.status();
-        if status.is_success() {
-            Ok(resp
-                .text()
-                .await
-                .map_err(|e| MoldError::RunPod(format!("RunPod {path} body: {e}")))?)
-        } else {
-            Err(http_error(path, status, resp).await.into())
-        }
-    }
-
     // ─── Typed endpoints ────────────────────────────────────────────
 
     /// User/account info isn't exposed by the REST API, so we fall back to
@@ -676,10 +657,6 @@ impl RunPodClient {
         self.delete(&format!("/pods/{id}")).await
     }
 
-    pub async fn pod_logs(&self, id: &str) -> Result<String> {
-        self.get_text(&format!("/pods/{id}/logs")).await
-    }
-
     pub async fn network_volumes(&self) -> Result<Vec<NetworkVolume>> {
         self.get_json("/networkvolumes").await
     }
@@ -705,6 +682,25 @@ impl RunPodClient {
 
     pub async fn delete_network_volume(&self, id: &str) -> Result<()> {
         self.delete(&format!("/networkvolumes/{id}")).await
+    }
+
+    /// Permanently delete a network volume only after proving that no Pod is
+    /// attached. The attachment check intentionally fails closed: an auth,
+    /// transport, or API error must never fall through to destructive delete.
+    pub async fn delete_network_volume_if_detached(&self, id: &str) -> Result<()> {
+        let pods = self.list_pods().await?;
+        if let Some(pod) = pods.iter().find(|pod| {
+            pod.network_volume
+                .as_ref()
+                .is_some_and(|volume| volume.id == id)
+        }) {
+            return Err(MoldError::RunPod(format!(
+                "delete pod {} before deleting its attached network volume",
+                pod.id
+            ))
+            .into());
+        }
+        self.delete_network_volume(id).await
     }
 }
 

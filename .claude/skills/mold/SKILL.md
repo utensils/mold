@@ -600,7 +600,7 @@ mold runpod list --json
 mold runpod get <pod-id>
 mold runpod stop <pod-id>                        # pause billing, keep storage
 mold runpod start <pod-id>                       # resume
-mold runpod delete <pod-id>                      # tear down (-f to skip confirm)
+mold runpod delete <pod-id>                      # immediate, non-interactive teardown
 
 # Connecting
 mold runpod connect <pod-id>                     # print export MOLD_HOST=…
@@ -608,8 +608,7 @@ eval "$(mold runpod connect <pod-id>)"           # exec the export in your shell
 mold runpod connect <pod-id> --check             # also probe the pod first
 
 # Observability
-mold runpod logs <pod-id>                        # one-shot pull
-mold runpod logs <pod-id> --follow               # tail (2s poll)
+mold runpod logs <pod-id>                        # validate pod + print console logs handoff
 mold runpod usage                                # balance + active pods
 mold runpod usage --since 7d                     # with historical spend window
 mold runpod usage --json                         # machine-readable

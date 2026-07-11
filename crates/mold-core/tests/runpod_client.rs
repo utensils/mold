@@ -244,6 +244,26 @@ async fn network_volume_crud_uses_rest_contract() {
 }
 
 #[tokio::test]
+async fn network_volume_delete_fails_closed_when_attachment_check_fails() {
+    let (client, server) = client_with_mock().await;
+    Mock::given(method("GET"))
+        .and(path("/pods"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("temporarily unavailable"))
+        .mount(&server)
+        .await;
+
+    assert!(client
+        .delete_network_volume_if_detached("nv-1")
+        .await
+        .is_err());
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| !(request.method.as_str() == "DELETE"
+            && request.url.path() == "/networkvolumes/nv-1")));
+}
+
+#[tokio::test]
 async fn stop_and_start_pod_happy_paths() {
     let (client, server) = client_with_mock().await;
     Mock::given(method("POST"))
@@ -258,18 +278,6 @@ async fn stop_and_start_pod_happy_paths() {
         .await;
     assert!(client.stop_pod("abc").await.is_ok());
     assert!(client.start_pod("abc").await.is_ok());
-}
-
-#[tokio::test]
-async fn pod_logs_returns_raw_text() {
-    let (client, server) = client_with_mock().await;
-    Mock::given(method("GET"))
-        .and(path("/pods/abc/logs"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("line1\nline2\n"))
-        .mount(&server)
-        .await;
-    let text = client.pod_logs("abc").await.unwrap();
-    assert_eq!(text, "line1\nline2\n");
 }
 
 #[tokio::test]

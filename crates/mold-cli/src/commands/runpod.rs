@@ -126,6 +126,30 @@ fn network_volume_selection_mismatch(attached: Option<&str>, requested: Option<&
     attached != requested
 }
 
+fn authoritative_datacenter(
+    cli: Option<&str>,
+    config: Option<&str>,
+    network_volume: Option<&str>,
+) -> Option<String> {
+    network_volume.or(cli).or(config).map(str::to_owned)
+}
+
+fn network_volume_placement(
+    volume: Option<&NetworkVolume>,
+    fallback_datacenter: Option<String>,
+    fallback_cloud: &str,
+    fallback_workspace_gb: u32,
+) -> (Option<String>, String, u32) {
+    match volume {
+        Some(volume) => (Some(volume.data_center_id.clone()), "SECURE".to_string(), 0),
+        None => (
+            fallback_datacenter,
+            fallback_cloud.to_string(),
+            fallback_workspace_gb,
+        ),
+    }
+}
+
 // ── Client construction + error translation ────────────────────────────
 
 fn build_client() -> Result<RunPodClient> {
@@ -534,19 +558,10 @@ pub async fn run_network_volume_update(
 
 pub async fn run_network_volume_delete(volume_id: String, json: bool) -> Result<()> {
     let client = build_client()?;
-    if let Ok(pods) = client.list_pods().await {
-        if let Some(pod) = pods.iter().find(|pod| {
-            pod.network_volume
-                .as_ref()
-                .is_some_and(|volume| volume.id == volume_id)
-        }) {
-            bail!(
-                "delete pod {} before deleting its attached network volume",
-                pod.id
-            );
-        }
-    }
-    client.delete_network_volume(&volume_id).await?;
+    client
+        .delete_network_volume_if_detached(&volume_id)
+        .await
+        .context("verify network volume is detached and delete it")?;
     if json {
         println!("{}", serde_json::json!({ "deleted": volume_id }));
     } else {
@@ -882,16 +897,17 @@ pub async fn build_create_request(
 
     // A network volume is physically scoped to one Secure Cloud datacenter;
     // it is authoritative over explicit/default cloud and DC preferences.
-    let dc = if let Some(volume) = &network_volume {
-        Some(volume.data_center_id.clone())
-    } else {
+    let fallback_dc = if network_volume.is_none() {
         resolve_datacenter(opts, client, config, &gpu_display).await?
-    };
-    let cloud_type = if network_volume.is_some() {
-        "SECURE"
     } else {
-        opts.cloud.as_str()
+        None
     };
+    let (dc, cloud_type, workspace_gb) = network_volume_placement(
+        network_volume.as_ref(),
+        fallback_dc,
+        opts.cloud.as_str(),
+        opts.volume_gb,
+    );
 
     // Build env.
     let mut env = serde_json::Map::new();
@@ -911,15 +927,11 @@ pub async fn build_create_request(
         name,
         image_name: image,
         gpu_type_ids: vec![gpu_name],
-        cloud_type: cloud_type.to_string(),
+        cloud_type,
         data_center_ids: dc.map(|id| vec![id]),
         gpu_count: 1,
         container_disk_in_gb: opts.disk_gb,
-        volume_in_gb: if network_volume.is_some() {
-            0
-        } else {
-            opts.volume_gb
-        },
+        volume_in_gb: workspace_gb,
         volume_mount_path: "/workspace".to_string(),
         ports: vec!["7680/http".into(), "22/tcp".into()],
         env,
@@ -1373,7 +1385,7 @@ pub async fn run_connect(pod_id: String, check: bool) -> Result<()> {
     Ok(())
 }
 
-/// `mold runpod logs <pod-id> [--follow]` — print pod logs.
+/// `mold runpod logs <pod-id>` — hand off to RunPod's supported web console.
 pub async fn run_logs(pod_id: String, follow: bool) -> Result<()> {
     let client = match build_client() {
         Ok(c) => c,
@@ -1382,37 +1394,23 @@ pub async fn run_logs(pod_id: String, follow: bool) -> Result<()> {
             return Err(AlreadyReported.into());
         }
     };
-    let initial = match client.pod_logs(&pod_id).await {
-        Ok(s) => s,
+    let pod = match client.get_pod(&pod_id).await {
+        Ok(pod) => pod,
         Err(e) => {
             explain_runpod_error(&e);
             return Err(AlreadyReported.into());
         }
     };
-    print!("{initial}");
-    if !follow {
-        return Ok(());
+    if follow {
+        eprintln!(
+            "{} RunPod does not expose Pod logs through its REST API; --follow cannot stream them.",
+            theme::prefix_hint()
+        );
     }
-    // Crude delta-polling: track the prefix we last printed and emit only the
-    // tail. Poll at 2s. Stops on Ctrl-C (global handler) or network error.
-    let mut last = initial;
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let next = match client.pod_logs(&pod_id).await {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if next.starts_with(&last) {
-            let delta = &next[last.len()..];
-            if !delta.is_empty() {
-                print!("{delta}");
-            }
-        } else {
-            // log file rotated — reprint
-            print!("\n{next}");
-        }
-        last = next;
-    }
+    println!("pod: {} ({})", pod.id, pod.desired_status);
+    println!("logs: https://www.runpod.io/console/pods");
+    println!("Open the Pod row and select Logs (container or system).");
+    Ok(())
 }
 
 // ── Killer feature: run ────────────────────────────────────────────────
@@ -1995,17 +1993,11 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
         .data_center_ids
         .as_ref()
         .and_then(|v| v.first().cloned());
-    let user_pinned = create_opts.datacenter.is_some()
-        || config.runpod.default_datacenter.is_some()
-        || volume_pinned_dc.is_some();
-    if let Some(dc) = &create_opts.datacenter {
-        candidates.push(dc.clone());
-    } else if let Some(dc) = &config.runpod.default_datacenter {
-        // Config-pinned DC is honored — ensures pods land in the region
-        // where the attached network volume lives.
-        candidates.push(dc.clone());
-    } else if let Some(dc) = volume_pinned_dc {
-        // Network-volume-derived DC pin.
+    if let Some(dc) = authoritative_datacenter(
+        create_opts.datacenter.as_deref(),
+        config.runpod.default_datacenter.as_deref(),
+        volume_pinned_dc.as_deref(),
+    ) {
         candidates.push(dc);
     } else {
         // Try "any DC" first.
@@ -2043,8 +2035,6 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
             }
         }
     }
-    let _ = user_pinned;
-
     print_create_plan(&base_req);
     let mut last_err: Option<anyhow::Error> = None;
     for (idx, dc) in candidates.iter().enumerate() {
@@ -2365,6 +2355,36 @@ mod tests {
             Some("nv-1"),
             Some("nv-2")
         ));
+    }
+
+    #[test]
+    fn network_volume_datacenter_overrides_cli_and_config_pins() {
+        assert_eq!(
+            authoritative_datacenter(Some("CLI-DC"), Some("CONFIG-DC"), Some("VOLUME-DC")),
+            Some("VOLUME-DC".to_string())
+        );
+        assert_eq!(
+            authoritative_datacenter(Some("CLI-DC"), Some("CONFIG-DC"), None),
+            Some("CLI-DC".to_string())
+        );
+        assert_eq!(
+            authoritative_datacenter(None, Some("CONFIG-DC"), None),
+            Some("CONFIG-DC".to_string())
+        );
+    }
+
+    #[test]
+    fn network_volume_forces_secure_placement_without_workspace_disk() {
+        let volume = NetworkVolume {
+            id: "nv-1".into(),
+            name: "models".into(),
+            data_center_id: "VOLUME-DC".into(),
+            size: 100,
+        };
+        assert_eq!(
+            network_volume_placement(Some(&volume), Some("OTHER-DC".into()), "COMMUNITY", 80),
+            (Some("VOLUME-DC".into()), "SECURE".into(), 0)
+        );
     }
 
     #[test]

@@ -723,6 +723,9 @@ onBeforeUnmount(() => {
                 <p v-if="pod.networkVolume" class="data-mono truncate text-caption text-ink-3">
                   {{ pod.networkVolume.name }} · {{ pod.networkVolume.size }} GB network volume
                 </p>
+                <p v-if="pod.networkVolume" class="mt-1 text-caption text-ink-3">
+                  Delete the instance to stop compute; /workspace remains on the volume.
+                </p>
               </div>
               <button
                 v-if="pod.desiredStatus === 'RUNNING'"
@@ -733,7 +736,7 @@ onBeforeUnmount(() => {
                 Use in Mold
               </button>
               <button
-                v-if="pod.desiredStatus === 'RUNNING'"
+                v-if="!pod.networkVolume && pod.desiredStatus === 'RUNNING'"
                 type="button"
                 class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
                 :disabled="runpod.mutating === `stop:${pod.id}`"
@@ -742,7 +745,7 @@ onBeforeUnmount(() => {
                 Stop
               </button>
               <button
-                v-else
+                v-else-if="!pod.networkVolume"
                 type="button"
                 class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
                 :disabled="runpod.mutating === `start:${pod.id}`"
@@ -755,7 +758,7 @@ onBeforeUnmount(() => {
                 class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
                 @click="openConsole"
               >
-                View logs ↗
+                RunPod console ↗
               </button>
               <button
                 type="button"

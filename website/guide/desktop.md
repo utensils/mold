@@ -46,7 +46,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
   datacenter discovery, pod launch/lifecycle/connection, and persistent network
   volume create/select/rename/grow/delete. A selected volume is remembered,
   forces Secure Cloud in its datacenter, replaces the ordinary workspace disk,
-  and cannot be deleted while attached to a pod.
+  and cannot be deleted while attached to a pod. Because RunPod cannot stop a
+  network-volume Pod, the app hides Start/Stop for those rows and explains that
+  deleting the compute instance preserves `/workspace` on the volume. Logs use
+  a supported handoff to the RunPod console rather than a nonexistent REST
+  endpoint.
 - **Settings** — a full preferences bench with a section rail and
   cross-section search: Engine (connection, native folder pickers for the
   models/output directories), Performance (the `MOLD_*` engine knobs as real

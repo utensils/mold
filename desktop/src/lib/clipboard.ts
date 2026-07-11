@@ -1,11 +1,10 @@
 import { apiFetch } from "./api/client";
-import { inTauri } from "./ipc";
+import { inTauri, ipc } from "./ipc";
 
 interface CopyImageDeps {
   fetchImage: (path: string) => Promise<Uint8Array>;
   native: boolean;
-  fromBytes?: (bytes: Uint8Array) => Promise<unknown>;
-  writeImage?: (image: unknown) => Promise<void>;
+  nativeWrite?: (bytes: Uint8Array) => Promise<void>;
   browserWrite?: (items: ClipboardItem[]) => Promise<void>;
   mimeType?: string;
 }
@@ -22,31 +21,8 @@ export async function copyImageBytesToClipboard(
   const native = provided?.native ?? inTauri();
   const bytes = await (provided?.fetchImage ?? fetchImage)(path);
   if (native) {
-    const fromBytes =
-      provided?.fromBytes ??
-      (async (data: Uint8Array) => {
-        const { Image } = await import("@tauri-apps/api/image");
-        return Image.fromBytes(data);
-      });
-    const writeImage =
-      provided?.writeImage ??
-      (async (image: unknown) => {
-        const clipboard = await import("@tauri-apps/plugin-clipboard-manager");
-        await clipboard.writeImage(image as Parameters<typeof clipboard.writeImage>[0]);
-      });
-    const image = await fromBytes(bytes);
-    try {
-      await writeImage(image);
-    } finally {
-      if (
-        typeof image === "object" &&
-        image !== null &&
-        "close" in image &&
-        typeof image.close === "function"
-      ) {
-        await image.close();
-      }
-    }
+    const nativeWrite = provided?.nativeWrite ?? (async (data) => ipc.clipboardWriteImage(data));
+    await nativeWrite(bytes);
     return;
   }
 

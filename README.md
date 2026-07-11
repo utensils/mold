@@ -158,7 +158,7 @@ datacenters if scheduling stalls, streams SSE progress over RunPod's
 Cloudflare proxy, and leaves the pod warm for reuse on the next call.
 See the [RunPod CLI guide](https://utensils.io/mold/deployment/runpod-cli)
 for full subcommand reference (`doctor`, `gpus`, `network-volume`, `list`,
-`create`, `stop`, `delete`, `logs`, `usage`, …).
+`create`, `stop`, `delete`, console-log handoff, `usage`, …).
 
 ### Native macOS desktop
 

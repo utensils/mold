@@ -3877,6 +3877,7 @@ dependencies = [
  "anyhow",
  "hostname",
  "if-addrs",
+ "image",
  "keyring",
  "mdns-sd-discovery",
  "mold-ai-core",

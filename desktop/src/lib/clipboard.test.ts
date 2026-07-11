@@ -3,20 +3,17 @@ import { copyImageBytesToClipboard } from "./clipboard";
 
 describe("copyImageBytesToClipboard", () => {
   it("copies fetched full-resolution bytes through the native image clipboard", async () => {
-    const fromBytes = vi.fn(async () => ({ rid: 7 }));
-    const writeImage = vi.fn(async () => {});
+    const nativeWrite = vi.fn(async () => {});
     const fetchImage = vi.fn(async () => new Uint8Array([137, 80, 78, 71]));
 
     await copyImageBytesToClipboard("/api/gallery/image/print.png", {
       fetchImage,
       native: true,
-      fromBytes,
-      writeImage,
+      nativeWrite,
     });
 
     expect(fetchImage).toHaveBeenCalledWith("/api/gallery/image/print.png");
-    expect(fromBytes).toHaveBeenCalledWith(new Uint8Array([137, 80, 78, 71]));
-    expect(writeImage).toHaveBeenCalledWith({ rid: 7 });
+    expect(nativeWrite).toHaveBeenCalledWith(new Uint8Array([137, 80, 78, 71]));
   });
 
   it("uses ClipboardItem in browser mode", async () => {

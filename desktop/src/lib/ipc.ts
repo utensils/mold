@@ -140,6 +140,10 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("local_gallery_delete", { filename });
   },
+  clipboardWriteImage(bytes: Uint8Array): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("clipboard_write_image", { bytes });
+  },
   /** macOS dock badge; null clears it. */
   setDockBadge(count: number | null): Promise<void> {
     if (!inTauri()) return Promise.resolve();

@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod commands;
 pub mod connection;
 pub mod gallery;
@@ -76,6 +77,7 @@ pub fn run() {
             commands::open_logs_dir,
             gallery::local_gallery_list,
             gallery::local_gallery_delete,
+            clipboard::clipboard_write_image,
             commands::secret_get,
             commands::secret_set,
             commands::secret_clear,
