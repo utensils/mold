@@ -30,7 +30,7 @@ include text encoders, tokenizers, VAEs, and LTX-2 companion assets.
    searches include NSFW rows by default.
 4. Click **Install** on the entry you want.
 
-The downloads drawer tracks queued and running jobs. Installed LoRAs then appear
+The downloads drawer tracks queued jobs and up to two concurrent transfers. Cancelling a queued or running job remains visible until the server confirms it has stopped. Installed LoRAs then appear
 in compatible LoRA pickers in Generate, and installed models appear in the model
 picker and `mold list`.
 

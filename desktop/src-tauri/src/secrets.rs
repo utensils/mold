@@ -10,7 +10,12 @@ use std::sync::Mutex;
 const SERVICE: &str = "com.utensils.mold";
 
 /// Secrets the webview may read/write. Anything else is rejected.
-pub const ALLOWED: &[&str] = &["hf-token", "civitai-token", "remote-api-key"];
+pub const ALLOWED: &[&str] = &[
+    "hf-token",
+    "civitai-token",
+    "remote-api-key",
+    "runpod-api-key",
+];
 
 pub struct SecretStore {
     /// Try the OS keychain first; on any error fall back to the file store.
@@ -22,7 +27,10 @@ pub struct SecretStore {
 impl SecretStore {
     pub fn new(app_data_dir: PathBuf) -> Self {
         Self {
-            use_keyring: true,
+            // Ad-hoc development signatures get a new identity on every
+            // rebuild, which makes macOS prompt for every Keychain access.
+            // Release builds are stably signed and continue to use Keychain.
+            use_keyring: !cfg!(debug_assertions),
             fallback_path: app_data_dir.join("secrets.json"),
             cache: Mutex::new(None),
         }
@@ -168,5 +176,13 @@ mod tests {
             .unwrap();
         let again = SecretStore::file_only(dir.path().to_path_buf());
         assert_eq!(again.get("civitai-token").unwrap().as_deref(), Some("cv_1"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_builds_do_not_touch_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretStore::new(dir.path().to_path_buf());
+        assert!(!store.use_keyring);
     }
 }

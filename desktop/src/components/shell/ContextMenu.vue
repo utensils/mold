@@ -50,8 +50,12 @@ onUnmounted(() => {
     />
     <div
       v-if="menu.visible"
-      class="border-edge fixed z-50 rounded-chrome border bg-bench py-1 shadow-[0_8px_28px_rgba(0,0,0,0.5)]"
-      :style="{ left: `${menu.x}px`, top: `${menu.y}px`, width: `${MENU_WIDTH}px` }"
+      class="border-edge fixed z-50 max-h-[calc(100vh-12px)] max-w-[calc(100vw-12px)] overflow-y-auto rounded-chrome border bg-bench py-1 shadow-[0_4px_8px_rgba(0,0,0,0.5)]"
+      :style="{
+        left: `${menu.x}px`,
+        top: `${menu.y}px`,
+        width: `min(${MENU_WIDTH}px, calc(100vw - 12px))`,
+      }"
       role="menu"
       aria-orientation="vertical"
       aria-label="Context menu"

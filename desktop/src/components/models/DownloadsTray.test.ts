@@ -25,7 +25,7 @@ beforeEach(() => {
 describe("DownloadsTray a11y", () => {
   it("exposes each download as a determinate progressbar", () => {
     const store = useDownloadsStore();
-    store.active = job();
+    store.activeJobs = [job()];
     const wrapper = mount(DownloadsTray);
 
     const bar = wrapper.get('[role="progressbar"]');
@@ -37,7 +37,7 @@ describe("DownloadsTray a11y", () => {
 
   it("labels the cancel control with the model name", () => {
     const store = useDownloadsStore();
-    store.active = job();
+    store.activeJobs = [job()];
     const wrapper = mount(DownloadsTray);
 
     const cancel = wrapper.get("button");

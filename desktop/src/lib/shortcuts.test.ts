@@ -39,11 +39,15 @@ describe("resolveShellShortcut", () => {
     expect(resolveShellShortcut(key("C", { shiftKey: true }))).toEqual({ kind: "copy-seed" });
   });
 
-  it("maps ⌘0 / ⌘+ / ⌘- to gallery zoom", () => {
-    expect(resolveShellShortcut(key("0"))).toEqual({ kind: "gallery-zoom", direction: "reset" });
-    expect(resolveShellShortcut(key("="))).toEqual({ kind: "gallery-zoom", direction: "in" });
-    expect(resolveShellShortcut(key("+"))).toEqual({ kind: "gallery-zoom", direction: "in" });
-    expect(resolveShellShortcut(key("-"))).toEqual({ kind: "gallery-zoom", direction: "out" });
+  it("maps ⌘0 / ⌘+ / ⌘- to whole-app scaling", () => {
+    expect(resolveShellShortcut(key("0"))).toEqual({ kind: "ui-scale", direction: "reset" });
+    expect(resolveShellShortcut(key("="))).toEqual({ kind: "ui-scale", direction: "in" });
+    expect(resolveShellShortcut(key("+"))).toEqual({ kind: "ui-scale", direction: "in" });
+    expect(resolveShellShortcut(key("+", { shiftKey: true }))).toEqual({
+      kind: "ui-scale",
+      direction: "in",
+    });
+    expect(resolveShellShortcut(key("-"))).toEqual({ kind: "ui-scale", direction: "out" });
   });
 
   it("ignores keys without ⌘ or with disallowed modifiers", () => {

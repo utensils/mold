@@ -174,6 +174,12 @@ enum RunpodAction {
         #[arg(long)]
         json: bool,
     },
+    /// Manage persistent RunPod network volumes
+    #[command(alias = "volumes", alias = "volume")]
+    NetworkVolume {
+        #[command(subcommand)]
+        action: RunpodNetworkVolumeAction,
+    },
     /// List pods in your account
     List {
         #[arg(long)]
@@ -205,6 +211,9 @@ Examples:
         /// Datacenter id (e.g. EUR-IS-2, US-IL-1)
         #[arg(long = "dc", add = ArgValueCandidates::new(commands::runpod::complete_dc_id))]
         datacenter: Option<String>,
+        /// Attach this persistent network volume (forces Secure Cloud and its datacenter)
+        #[arg(long, add = ArgValueCandidates::new(commands::runpod::complete_network_volume_id))]
+        network_volume: Option<String>,
         /// Cloud tier: secure or community
         #[arg(long, default_value = "secure", add = ArgValueCandidates::new(commands::runpod::complete_cloud_type))]
         cloud: String,
@@ -223,9 +232,6 @@ Examples:
         /// Wire HF_TOKEN={{ RUNPOD_SECRET_HF_TOKEN }} into the pod env
         #[arg(long)]
         hf_token: bool,
-        /// Attach this network volume id
-        #[arg(long)]
-        network_volume: Option<String>,
         /// Print the request plan and exit without creating
         #[arg(long)]
         dry_run: bool,
@@ -268,11 +274,11 @@ Example:
         #[arg(long)]
         check: bool,
     },
-    /// Stream pod logs
+    /// Validate a pod and print the RunPod console logs handoff
     Logs {
         #[arg(add = ArgValueCandidates::new(commands::runpod::complete_pod_id))]
         pod_id: String,
-        /// Follow logs (poll every 2s)
+        /// Deprecated: RunPod exposes live logs only in its web console
         #[arg(long, short = 'f')]
         follow: bool,
     },
@@ -321,6 +327,9 @@ Examples:
         /// Datacenter override
         #[arg(long = "dc", add = ArgValueCandidates::new(commands::runpod::complete_dc_id))]
         datacenter: Option<String>,
+        /// Attach this persistent network volume (forces Secure Cloud and its datacenter)
+        #[arg(long, add = ArgValueCandidates::new(commands::runpod::complete_network_volume_id))]
+        network_volume: Option<String>,
         /// Pod-ready timeout in seconds
         #[arg(long, default_value_t = 600)]
         wait_timeout: u64,
@@ -329,6 +338,54 @@ Examples:
         /// RunPod secret `HF_TOKEN`.
         #[arg(long)]
         hf_token: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunpodNetworkVolumeAction {
+    /// List network volumes
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one network volume
+    Get {
+        #[arg(add = ArgValueCandidates::new(commands::runpod::complete_network_volume_id))]
+        volume_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create persistent storage in a Secure Cloud datacenter
+    Create {
+        #[arg(long)]
+        name: String,
+        /// Size in GB (10-3999; live RunPod production bound)
+        #[arg(long)]
+        size: u32,
+        /// Datacenter id where the volume will live
+        #[arg(long = "dc", add = ArgValueCandidates::new(commands::runpod::complete_dc_id))]
+        datacenter: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename or grow a network volume (sizes cannot shrink)
+    Update {
+        #[arg(add = ArgValueCandidates::new(commands::runpod::complete_network_volume_id))]
+        volume_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// New total size in GB (must be larger than current size)
+        #[arg(long)]
+        size: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Permanently delete a network volume and all of its data
+    Delete {
+        #[arg(add = ArgValueCandidates::new(commands::runpod::complete_network_volume_id))]
+        volume_id: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1805,6 +1862,34 @@ async fn run() -> anyhow::Result<()> {
             RunpodAction::Datacenters { gpu, json } => {
                 commands::runpod::run_datacenters(gpu, json).await?
             }
+            RunpodAction::NetworkVolume { action } => match action {
+                RunpodNetworkVolumeAction::List { json } => {
+                    commands::runpod::run_network_volume_list(json).await?
+                }
+                RunpodNetworkVolumeAction::Get { volume_id, json } => {
+                    commands::runpod::run_network_volume_get(volume_id, json).await?
+                }
+                RunpodNetworkVolumeAction::Create {
+                    name,
+                    size,
+                    datacenter,
+                    json,
+                } => {
+                    commands::runpod::run_network_volume_create(name, size, datacenter, json)
+                        .await?
+                }
+                RunpodNetworkVolumeAction::Update {
+                    volume_id,
+                    name,
+                    size,
+                    json,
+                } => {
+                    commands::runpod::run_network_volume_update(volume_id, name, size, json).await?
+                }
+                RunpodNetworkVolumeAction::Delete { volume_id, json } => {
+                    commands::runpod::run_network_volume_delete(volume_id, json).await?
+                }
+            },
             RunpodAction::List { json } => commands::runpod::run_list(json).await?,
             RunpodAction::Get { pod_id, json } => commands::runpod::run_get(pod_id, json).await?,
             RunpodAction::Create {
@@ -1866,6 +1951,7 @@ async fn run() -> anyhow::Result<()> {
                 height,
                 gpu,
                 datacenter,
+                network_volume,
                 wait_timeout,
                 hf_token,
             } => {
@@ -1879,7 +1965,7 @@ async fn run() -> anyhow::Result<()> {
                     image_tag: None,
                     model: model.clone(),
                     hf_token,
-                    network_volume_id: None,
+                    network_volume_id: network_volume,
                     dry_run: false,
                     json: false,
                 };

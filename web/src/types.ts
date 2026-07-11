@@ -704,6 +704,7 @@ export interface DownloadJobWire {
 }
 
 export interface DownloadsListingWire {
+  active_jobs?: DownloadJobWire[];
   active?: DownloadJobWire | null;
   queued: DownloadJobWire[];
   history: DownloadJobWire[];
@@ -716,7 +717,8 @@ export type DownloadEventWire =
   | {
       type: "snapshot";
       listing: {
-        active: DownloadJobWire | null;
+        active_jobs?: DownloadJobWire[];
+        active?: DownloadJobWire | null;
         queued: DownloadJobWire[];
         history: DownloadJobWire[];
       };

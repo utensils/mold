@@ -6,33 +6,30 @@ import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
-import { thumbnailPath } from "../lib/gallery/media";
+import { galleryMediaPath, type GallerySource } from "../lib/gallery/media";
 import { formatBytes } from "../lib/format";
 import { useConnectionStore } from "../stores/connection";
 import { useGalleryStore } from "../stores/gallery";
-import { useUiStore } from "../stores/ui";
 import { useComposerStore } from "../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
 import { ipc } from "../lib/ipc";
+import { copyImageBytesToClipboard } from "../lib/clipboard";
 import type { GalleryImage } from "../lib/api/types";
 
 const GAP = 8;
 const PAD = 16;
-// Zoom levels for the justified row target height (⌘0 / ⌘+ / ⌘-).
-const ROW_HEIGHTS = [120, 180, 240];
 
 const router = useRouter();
 const conn = useConnectionStore();
 const gallery = useGalleryStore();
-const ui = useUiStore();
 const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
 const toasts = useToastStore();
 
-// Reveal in Finder only exists when the engine writes to this disk.
-const canReveal = ref(false);
-void ipc.getOutputDir().then((dir) => (canReveal.value = dir !== null));
+const canReveal = computed(
+  () => gallery.source === "local" || conn.mode === "local" || conn.mode === "external",
+);
 
 function tileMenu(item: GalleryImage): MenuEntry[] {
   const m = item.metadata;
@@ -63,6 +60,11 @@ function tileMenu(item: GalleryImage): MenuEntry[] {
       action: () => {
         void navigator.clipboard.writeText(String(m.seed)).then(() => toasts.push("Copied"));
       },
+    },
+    {
+      label: "Copy image",
+      disabled: isVideo(item),
+      action: () => void copyImage(item),
     },
     { separator: true },
     {
@@ -111,21 +113,6 @@ const virtualizer = useVirtualizer(
   })),
 );
 
-// ⌘0 reset · ⌘+ zoom in (taller rows) · ⌘- zoom out, clamped to ROW_HEIGHTS.
-watch(
-  () => ui.galleryZoomTick,
-  () => {
-    if (ui.galleryZoomDir === "reset") {
-      rowHeight.value = 180;
-      return;
-    }
-    const i = ROW_HEIGHTS.indexOf(rowHeight.value);
-    const base = i === -1 ? 1 : i;
-    const next = ui.galleryZoomDir === "in" ? base + 1 : base - 1;
-    rowHeight.value = ROW_HEIGHTS[Math.min(ROW_HEIGHTS.length - 1, Math.max(0, next))]!;
-  },
-);
-
 const totalBytes = computed(() => gallery.items.reduce((sum, i) => sum + (i.size_bytes ?? 0), 0));
 
 const selectedIndex = computed(() => gallery.items.findIndex((i) => i.filename === selected.value));
@@ -135,6 +122,15 @@ const selectedItem = computed<GalleryImage | null>(
 
 const isVideo = (i: GalleryImage) =>
   i.format === "mp4" || i.filename.endsWith(".mp4") || !!i.metadata.video_frames;
+
+async function copyImage(item: GalleryImage) {
+  try {
+    await copyImageBytesToClipboard(galleryMediaPath(item.filename, gallery.source));
+    toasts.push("Image copied");
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  }
+}
 
 function moveSelection(delta: number) {
   if (gallery.items.length === 0) return;
@@ -174,10 +170,18 @@ async function removeSelected() {
   }
 }
 
+async function switchSource(source: GallerySource) {
+  if (source === gallery.source) return;
+  selected.value = null;
+  lightboxOpen.value = false;
+  await gallery.fetch(source);
+}
+
 watch(
-  () => conn.ready,
-  (ready) => {
-    if (ready) void gallery.fetch();
+  () => [conn.ready, conn.mode] as const,
+  ([ready, mode]) => {
+    if (!ready) return;
+    void gallery.fetch(mode === "remote" ? gallery.source : "engine");
   },
   { immediate: true },
 );
@@ -199,15 +203,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <EmptyState
-    v-if="gallery.loaded && gallery.items.length === 0"
-    headline="No prints yet"
-    detail="Generate one and it lands here."
-    action="Go to Generate"
-    @action="router.push('/generate')"
-  />
-
-  <div v-else class="flex h-full flex-col">
+  <div class="flex h-full flex-col">
     <header class="border-edge flex h-11 items-center gap-3 border-b px-4">
       <span class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
         Gallery
@@ -215,11 +211,48 @@ onUnmounted(() => {
       <span class="data-mono text-caption text-ink-3">
         {{ gallery.items.length }} prints · {{ formatBytes(totalBytes) }}
       </span>
+      <div
+        v-if="conn.mode === 'remote'"
+        class="border-edge ml-2 flex rounded-control border bg-bath p-0.5"
+        role="tablist"
+        aria-label="Gallery location"
+      >
+        <button
+          v-for="option in [
+            ['engine', 'Remote'],
+            ['local', 'This Mac'],
+          ] as const"
+          :key="option[0]"
+          type="button"
+          role="tab"
+          class="rounded-control px-2.5 py-1 text-caption transition-colors"
+          :class="
+            gallery.source === option[0]
+              ? 'bg-bench font-medium text-ink shadow-sm'
+              : 'text-ink-3 hover:text-ink'
+          "
+          :aria-selected="gallery.source === option[0]"
+          @click="switchSource(option[0])"
+        >
+          {{ option[1] }}
+        </button>
+      </div>
       <span v-if="gallery.error" class="ml-auto text-caption text-stop">{{ gallery.error }}</span>
     </header>
 
     <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto" style="contain: strict">
-      <div :style="{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }">
+      <EmptyState
+        v-if="gallery.loaded && gallery.items.length === 0"
+        headline="No prints here yet"
+        :detail="
+          gallery.source === 'local'
+            ? 'Generations saved on this Mac will appear here.'
+            : 'Generate one and it lands here.'
+        "
+        action="Go to Generate"
+        @action="router.push('/generate')"
+      />
+      <div v-else :style="{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }">
         <div
           v-for="vrow in virtualizer.getVirtualItems()"
           :key="vrow.key as number"
@@ -252,7 +285,8 @@ onUnmounted(() => {
             "
           >
             <AuthedMedia
-              :path="thumbnailPath(laid.item.filename)"
+              :path="galleryMediaPath(laid.item.filename, gallery.source, true)"
+              :video="gallery.source === 'local' && isVideo(laid.item)"
               :alt="laid.item.metadata.prompt"
             />
             <span
@@ -277,6 +311,8 @@ onUnmounted(() => {
       :index="selectedIndex"
       :count="gallery.items.length"
       :video="isVideo(selectedItem)"
+      :source="gallery.source"
+      :can-reveal="canReveal"
       @close="lightboxOpen = false"
       @prev="moveSelection(-1)"
       @next="moveSelection(1)"

@@ -1,6 +1,9 @@
+pub mod clipboard;
 pub mod commands;
 pub mod connection;
+pub mod gallery;
 pub mod menu;
+pub mod runpod;
 pub mod secrets;
 pub mod server;
 pub mod settings;
@@ -31,6 +34,9 @@ pub fn run() {
     std::env::set_var("MOLD_API_KEY", &local_api_key);
 
     tauri::Builder::default()
+        .register_uri_scheme_protocol("mold-local", |_context, request| {
+            gallery::protocol_response(request)
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
@@ -69,9 +75,20 @@ pub fn run() {
             commands::set_dock_badge,
             commands::reveal_output_file,
             commands::open_logs_dir,
+            gallery::local_gallery_list,
+            gallery::local_gallery_delete,
+            clipboard::clipboard_write_image,
             commands::secret_get,
             commands::secret_set,
             commands::secret_clear,
+            runpod::runpod_overview,
+            runpod::runpod_create,
+            runpod::runpod_network_volume_create,
+            runpod::runpod_network_volume_update,
+            runpod::runpod_network_volume_delete,
+            runpod::runpod_start,
+            runpod::runpod_stop,
+            runpod::runpod_delete,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

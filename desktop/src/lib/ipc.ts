@@ -1,3 +1,13 @@
+import type {
+  RunPodCreateInput,
+  RunPodNetworkVolume,
+  RunPodNetworkVolumeCreateInput,
+  RunPodNetworkVolumeUpdateInput,
+  RunPodOverview,
+  RunPodPod,
+} from "./runpod";
+import type { GalleryImage } from "./api/types";
+
 /**
  * Typed wrappers around Tauri IPC. In a plain browser (`bun run dev` /
  * desktop-ui against a running `mold serve`) there is no Tauri runtime, so
@@ -26,6 +36,9 @@ export interface AppSettings {
   notifications: boolean;
   dockBadge: boolean;
   restoreLastRoute: boolean;
+  runpodIncludeHfToken: boolean;
+  runpodNetworkVolumeId: string | null;
+  uiScalePercent: number;
 }
 
 export interface HostTest {
@@ -71,6 +84,9 @@ const browserFallbackSettings = (): AppSettings => ({
   notifications: true,
   dockBadge: true,
   restoreLastRoute: false,
+  runpodIncludeHfToken: false,
+  runpodNetworkVolumeId: null,
+  uiScalePercent: 100,
 });
 
 export const ipc = {
@@ -116,6 +132,18 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("reveal_output_file", { filename });
   },
+  localGalleryList(): Promise<GalleryImage[]> {
+    if (!inTauri()) return Promise.resolve([]);
+    return invoke<GalleryImage[]>("local_gallery_list");
+  },
+  localGalleryDelete(filename: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("local_gallery_delete", { filename });
+  },
+  clipboardWriteImage(bytes: Uint8Array): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("clipboard_write_image", { bytes });
+  },
   /** macOS dock badge; null clears it. */
   setDockBadge(count: number | null): Promise<void> {
     if (!inTauri()) return Promise.resolve();
@@ -125,6 +153,51 @@ export const ipc = {
   openLogsDir(): Promise<void> {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("open_logs_dir");
+  },
+  runpodOverview(): Promise<RunPodOverview> {
+    if (!inTauri()) {
+      return Promise.resolve({
+        configured: false,
+        credentialSource: null,
+        account: null,
+        pods: [],
+        gpus: [],
+        datacenters: [],
+        networkVolumes: [],
+      });
+    }
+    return invoke<RunPodOverview>("runpod_overview");
+  },
+  runpodCreate(input: RunPodCreateInput): Promise<RunPodPod> {
+    if (!inTauri())
+      return Promise.reject(new Error("RunPod provisioning requires the desktop app."));
+    return invoke<RunPodPod>("runpod_create", { input });
+  },
+  runpodNetworkVolumeCreate(input: RunPodNetworkVolumeCreateInput): Promise<RunPodNetworkVolume> {
+    if (!inTauri())
+      return Promise.reject(new Error("RunPod volume management requires the desktop app."));
+    return invoke<RunPodNetworkVolume>("runpod_network_volume_create", { input });
+  },
+  runpodNetworkVolumeUpdate(input: RunPodNetworkVolumeUpdateInput): Promise<RunPodNetworkVolume> {
+    if (!inTauri())
+      return Promise.reject(new Error("RunPod volume management requires the desktop app."));
+    return invoke<RunPodNetworkVolume>("runpod_network_volume_update", { input });
+  },
+  runpodNetworkVolumeDelete(id: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("runpod_network_volume_delete", { id });
+  },
+  runpodStart(id: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("runpod_start", { id });
+  },
+  runpodStop(id: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("runpod_stop", { id });
+  },
+  runpodDelete(id: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("runpod_delete", { id });
   },
   /** Keychain-backed secrets (file fallback in dev). Names are allowlisted. */
   secretGet(name: SecretName): Promise<string | null> {
@@ -148,4 +221,4 @@ export const ipc = {
   },
 };
 
-export type SecretName = "hf-token" | "civitai-token" | "remote-api-key";
+export type SecretName = "hf-token" | "civitai-token" | "remote-api-key" | "runpod-api-key";

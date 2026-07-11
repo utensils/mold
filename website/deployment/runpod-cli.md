@@ -1,9 +1,9 @@
 # `mold runpod` — native RunPod CLI
 
 `mold runpod` manages RunPod cloud GPU pods end-to-end from the same binary
-you use for local generation. Create a pod, connect to it, stream logs,
-track spend, and (with `mold runpod run`) create-generate-save in a single
-command.
+you use for local generation. Create a pod, connect to it, hand off logs to the
+RunPod console, track spend, and (with `mold runpod run`) create-generate-save
+in a single command.
 
 Compared to the [Docker & RunPod](./docker) guide — which shows the manual
 pod-creation flow via `runpodctl` or the web console — this guide covers
@@ -83,6 +83,7 @@ if you don't want the endpoint open to the public proxy.
 mold runpod run "a cat" --model flux-dev:q4        # preload a specific model
 mold runpod run "a cat" --gpu 5090                 # force a GPU family
 mold runpod run "a cat" --dc US-IL-1               # pin a datacenter
+mold runpod run "a cat" --network-volume <id>       # persistent /workspace
 mold runpod run "a cat" --keep                     # don't park pod for reuse
 mold runpod run "a cat" --steps 28 --seed 42       # forward standard gen flags
 mold runpod run "a cat" --output-dir ./renders     # custom save path
@@ -106,16 +107,31 @@ mold runpod stop <pod-id>                  # pause billing, keep storage
 mold runpod start <pod-id>                 # resume
 mold runpod delete <pod-id>                # tear down
 
+# Persistent network volumes
+mold runpod network-volume list
+mold runpod network-volume get <volume-id>
+mold runpod network-volume create --name models --size 100 --dc US-KS-2
+mold runpod network-volume update <volume-id> --size 200
+mold runpod network-volume update <volume-id> --name shared-models
+mold runpod network-volume delete <volume-id>       # permanently deletes all data
+
 # Connecting
 mold runpod connect <pod-id>                    # print export MOLD_HOST=…
 eval "$(mold runpod connect <pod-id>)"          # exec the export in your shell
 
 # Observability
-mold runpod logs <pod-id>                       # one-shot
-mold runpod logs <pod-id> --follow              # tail (polls every 2s)
+mold runpod logs <pod-id>                       # validate pod + print console handoff
 ```
 
 ## Smart defaults explained
+
+When a network volume is selected, it replaces the ordinary Pod workspace
+disk at `/workspace`. Mold forces Secure Cloud and pins deployment to the
+volume's datacenter, even if `--cloud`, `--dc`, or their config defaults say
+otherwise. Production currently accepts 10–3999 GB. A volume can be renamed
+and grown within that range, but cannot shrink.
+It remains billable independently of pods until explicitly deleted, and must be
+detached by deleting its pod before the volume itself can be deleted.
 
 When `mold runpod create` (or `run`) is invoked without `--gpu`/`--dc`:
 
@@ -190,11 +206,11 @@ environment — never written into the Nix store. Same pattern as
 
 ## REST vs GraphQL
 
-`RunPodClient` hits RunPod's REST API at `https://rest.runpod.io/v1/`
-for pod lifecycle (create/list/get/stop/start/delete/logs) and uses
-the GraphQL endpoint at `https://api.runpod.io/graphql` for account
-info, GPU catalog, and datacenter availability — those aren't exposed
-via REST.
+`RunPodClient` hits RunPod's REST API at `https://rest.runpod.io/v1/` for pod
+lifecycle (create/list/get/stop/start/delete) and network-volume management,
+and uses the GraphQL endpoint at `https://api.runpod.io/graphql` for account
+info, GPU catalog, and datacenter availability — those aren't exposed via
+REST. Container/system logs remain a RunPod console-only surface.
 
 Both paths use the same API key (`Authorization: Bearer …`).
 
@@ -213,6 +229,11 @@ REST doesn't accept. Omit `--dc` to let RunPod pick.
 **"RunPod /user 401" or "…403"** — stale/invalid/missing API key. Run
 `mold runpod doctor` to confirm. Regenerate at
 [runpod.io/console/user/settings](https://www.runpod.io/console/user/settings).
+
+**Pod logs** — RunPod does not expose container/system logs through the Pod
+REST API. `mold runpod logs <pod-id>` validates the Pod, prints its state and
+the console URL, then tells you to open that Pod's **Logs** panel. `--follow`
+is retained for compatibility but cannot stream console-only logs.
 
 **Orphaned pods after Ctrl-C** — `mold runpod run` persists `last_pod_id`
 **before** waiting for readiness, so `mold runpod list` always surfaces

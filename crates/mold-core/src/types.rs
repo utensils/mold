@@ -3061,6 +3061,10 @@ pub enum DownloadEvent {
 /// Listing returned from `GET /api/downloads`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadsListing {
+    /// All downloads currently transferring. New clients should use this
+    /// field; `active` remains as a compatibility view of the first job.
+    #[serde(default)]
+    pub active_jobs: Vec<DownloadJob>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active: Option<DownloadJob>,
     pub queued: Vec<DownloadJob>,

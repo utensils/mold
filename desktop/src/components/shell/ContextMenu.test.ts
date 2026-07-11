@@ -52,4 +52,14 @@ describe("ContextMenu a11y roles", () => {
     expect(enabled?.getAttribute("aria-disabled")).toBeNull();
     wrapper.unmount();
   });
+
+  it("constrains the teleported menu to the scaled viewport", async () => {
+    const wrapper = mount(ContextMenu, { attachTo: document.body });
+    openMenu();
+    await wrapper.vm.$nextTick();
+    const menu = document.body.querySelector<HTMLElement>("[role='menu']");
+    expect(menu?.className).toContain("max-h-[calc(100vh-12px)]");
+    expect(menu?.className).toContain("max-w-[calc(100vw-12px)]");
+    wrapper.unmount();
+  });
 });

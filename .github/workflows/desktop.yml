@@ -5,11 +5,16 @@ name: Desktop
 # workspace, so --workspace gates never see it.
 on:
   push:
-    branches: [main, experiment/desktop]
+    branches: [main]
     tags: ["v*"]
   pull_request:
     paths:
       - "desktop/**"
+      - "crates/mold-core/**"
+      - "crates/mold-catalog/**"
+      - "crates/mold-db/**"
+      - "crates/mold-inference/**"
+      - "crates/mold-server/**"
       - "flake.nix"
       - "Cargo.toml"
       - ".github/workflows/desktop.yml"

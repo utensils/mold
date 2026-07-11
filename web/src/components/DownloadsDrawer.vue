@@ -4,10 +4,10 @@ import type { DownloadJobWire } from "../types";
 
 const props = defineProps<{
   open: boolean;
-  active: DownloadJobWire | null;
+  active: DownloadJobWire[];
   queued: DownloadJobWire[];
   history: DownloadJobWire[];
-  etaSeconds: number | null;
+  etaByJob: Record<string, number | null>;
 }>();
 
 const emit = defineEmits<{
@@ -43,8 +43,10 @@ function formatEta(seconds: number | null): string {
   return `${m}m ${s}s`;
 }
 
+const etaFor = (id: string): number | null => props.etaByJob[id] ?? null;
+
 const looseActive = computed(() =>
-  props.active && !props.active.catalog_id ? props.active : null,
+  props.active.filter((job) => !job.catalog_id),
 );
 
 const looseQueued = computed(() =>
@@ -55,19 +57,14 @@ const looseHistory = computed(() =>
   props.history.filter((job) => !job.catalog_id || job.status !== "completed"),
 );
 
-const activePct = computed(() => {
-  const a = looseActive.value;
-  if (!a || a.bytes_total === 0) return 0;
-  return Math.min(100, Math.round((a.bytes_done / a.bytes_total) * 100));
-});
+function activePct(job: DownloadJobWire): number {
+  if (job.bytes_total === 0) return 0;
+  return Math.min(100, Math.round((job.bytes_done / job.bytes_total) * 100));
+}
 
 const catalogGroups = computed<DownloadGroup[]>(() => {
   const byId = new Map<string, DownloadJobWire[]>();
-  for (const job of [
-    ...(props.active ? [props.active] : []),
-    ...props.queued,
-    ...props.history,
-  ]) {
+  for (const job of [...props.active, ...props.queued, ...props.history]) {
     if (!job.catalog_id) continue;
     const jobs = byId.get(job.catalog_id) ?? [];
     jobs.push(job);
@@ -185,8 +182,13 @@ function jobLabel(job: DownloadJobWire): string {
         {{ formatGb(group.bytesDone) }} / {{ formatGb(group.bytesTotal) }} ·
         {{ group.filesDone }}/{{ group.filesTotal }} files ·
         {{ groupPct(group) }}%
-        <template v-if="active?.catalog_id === group.id">
-          · ETA {{ formatEta(etaSeconds) }}
+        <template v-if="active.some((job) => job.catalog_id === group.id)">
+          · ETA
+          {{
+            formatEta(
+              etaFor(active.find((job) => job.catalog_id === group.id)!.id),
+            )
+          }}
         </template>
       </div>
       <div
@@ -220,7 +222,8 @@ function jobLabel(job: DownloadJobWire): string {
 
     <!-- Active -->
     <section
-      v-if="looseActive"
+      v-for="job in looseActive"
+      :key="job.id"
       class="rounded-2xl border border-white/5 bg-white/5 p-3"
     >
       <div class="mb-2 text-xs uppercase tracking-wider text-ink-300">
@@ -228,38 +231,34 @@ function jobLabel(job: DownloadJobWire): string {
       </div>
       <div class="flex items-center justify-between">
         <div class="text-sm font-medium text-ink-50">
-          {{ looseActive.model }}
+          {{ job.model }}
         </div>
         <button
           class="rounded-full bg-red-500/20 px-2 py-0.5 text-xs text-red-200 hover:bg-red-500/40"
-          @click="emit('cancel', looseActive.id)"
+          @click="emit('cancel', job.id)"
         >
           Cancel
         </button>
       </div>
       <div class="mt-1 text-xs text-ink-300">
-        {{ formatGb(looseActive.bytes_done) }} /
-        {{ formatGb(looseActive.bytes_total) }} ·
-        {{ looseActive.files_done }}/{{ looseActive.files_total }} · ETA
-        {{ formatEta(etaSeconds) }}
+        {{ formatGb(job.bytes_done) }} / {{ formatGb(job.bytes_total) }} ·
+        {{ job.files_done }}/{{ job.files_total }} · ETA
+        {{ formatEta(etaFor(job.id)) }}
       </div>
       <div
         class="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/10"
         role="progressbar"
-        :aria-valuenow="activePct"
+        :aria-valuenow="activePct(job)"
         aria-valuemin="0"
         aria-valuemax="100"
       >
         <div
           class="h-full bg-brand-400 transition-[width]"
-          :style="{ width: activePct + '%' }"
+          :style="{ width: activePct(job) + '%' }"
         />
       </div>
-      <div
-        v-if="looseActive.current_file"
-        class="mt-2 truncate text-xs text-ink-400"
-      >
-        {{ looseActive.current_file }}
+      <div v-if="job.current_file" class="mt-2 truncate text-xs text-ink-400">
+        {{ job.current_file }}
       </div>
     </section>
 
@@ -332,7 +331,7 @@ function jobLabel(job: DownloadJobWire): string {
 
     <p
       v-if="
-        !looseActive &&
+        !looseActive.length &&
         !looseQueued.length &&
         !looseHistory.length &&
         !catalogGroups.length

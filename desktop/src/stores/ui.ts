@@ -13,8 +13,6 @@ export const useUiStore = defineStore("ui", {
     expandTick: 0,
     randomizeSeedTick: 0,
     copySeedTick: 0,
-    galleryZoomTick: 0,
-    galleryZoomDir: "reset" as "reset" | "in" | "out",
   }),
   actions: {
     togglePalette() {
@@ -37,10 +35,6 @@ export const useUiStore = defineStore("ui", {
     },
     copySeed() {
       this.copySeedTick++;
-    },
-    zoomGallery(dir: "reset" | "in" | "out") {
-      this.galleryZoomDir = dir;
-      this.galleryZoomTick++;
     },
   },
 });

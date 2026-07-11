@@ -8,11 +8,13 @@ vi.mock("../../lib/ipc", () => ({
 }));
 
 import Lightbox from "./Lightbox.vue";
+import { useContextMenuStore } from "../../stores/contextMenu";
 import type { GalleryImage } from "../../lib/api/types";
 
 const item: GalleryImage = {
   filename: "print-0001.png",
   timestamp: 1_700_000_000,
+  format: "png",
   metadata: {
     prompt: "a lighthouse at dusk",
     model: "flux-dev:q8",
@@ -48,5 +50,18 @@ describe("Lightbox a11y", () => {
     expect(wrapper.find("[aria-label='Close']").exists()).toBe(true);
     expect(wrapper.find("[aria-label='Previous print']").exists()).toBe(true);
     expect(wrapper.find("[aria-label='Next print']").exists()).toBe(true);
+  });
+
+  it("offers full image copy from the still-image context menu", async () => {
+    const wrapper = mountLightbox();
+
+    await wrapper.get('[data-test="lightbox-media"]').trigger("contextmenu");
+
+    const menu = useContextMenuStore();
+    expect(menu.visible).toBe(true);
+    expect(menu.entries).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: "Copy image", disabled: false })]),
+    );
+    wrapper.unmount();
   });
 });

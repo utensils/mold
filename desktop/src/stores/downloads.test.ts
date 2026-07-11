@@ -33,7 +33,7 @@ const snapshot: DownloadsListing = {
 describe("applyDownloadEvent", () => {
   it("seeds state from the snapshot frame", () => {
     const s = reduce([{ type: "snapshot", listing: snapshot }]);
-    expect(s.active?.id).toBe("a");
+    expect(s.activeJobs.map((job) => job.id)).toEqual(["a"]);
     expect(s.queued.map((j) => j.id)).toEqual(["b"]);
   });
 
@@ -49,9 +49,9 @@ describe("applyDownloadEvent", () => {
       },
       { type: "progress", id: "b", files_done: 9, bytes_done: 9 }, // ignored — b isn't active
     ]);
-    expect(s.active?.bytes_done).toBe(8_000_000);
-    expect(s.active?.files_done).toBe(2);
-    expect(s.active?.current_file).toBe("unet.safetensors");
+    expect(s.activeJobs[0]?.bytes_done).toBe(8_000_000);
+    expect(s.activeJobs[0]?.files_done).toBe(2);
+    expect(s.activeJobs[0]?.current_file).toBe("unet.safetensors");
   });
 
   it("promotes a queued job to active on started with its totals", () => {
@@ -59,9 +59,9 @@ describe("applyDownloadEvent", () => {
       { type: "snapshot", listing: { active: null, queued: snapshot.queued, history: [] } },
       { type: "started", id: "b", files_total: 4, bytes_total: 6_900_000 },
     ]);
-    expect(s.active?.id).toBe("b");
-    expect(s.active?.status).toBe("active");
-    expect(s.active?.bytes_total).toBe(6_900_000);
+    expect(s.activeJobs[0]?.id).toBe("b");
+    expect(s.activeJobs[0]?.status).toBe("active");
+    expect(s.activeJobs[0]?.bytes_total).toBe(6_900_000);
     expect(s.queued).toHaveLength(0);
   });
 
@@ -80,7 +80,7 @@ describe("applyDownloadEvent", () => {
       { type: "snapshot", listing: snapshot },
       { type: "job_done", id: "a", model: "flux-dev:q8" },
     ]);
-    expect(s.active).toBeNull();
+    expect(s.activeJobs).toHaveLength(0);
     expect(s.history[0]!.id).toBe("a");
     expect(s.history[0]!.status).toBe("completed");
   });
@@ -102,5 +102,16 @@ describe("applyDownloadEvent", () => {
     expect(s.queued).toHaveLength(0);
     expect(s.history[0]!.id).toBe("b");
     expect(s.history[0]!.status).toBe("cancelled");
+  });
+
+  it("tracks progress for multiple active downloads independently", () => {
+    const s = reduce([
+      { type: "started", id: "a", files_total: 2, bytes_total: 100 },
+      { type: "started", id: "b", files_total: 4, bytes_total: 200 },
+      { type: "progress", id: "b", files_done: 1, bytes_done: 50 },
+    ]);
+    expect(s.activeJobs.map((job) => job.id)).toEqual(["a", "b"]);
+    expect(s.activeJobs.find((job) => job.id === "a")?.bytes_done).toBe(0);
+    expect(s.activeJobs.find((job) => job.id === "b")?.bytes_done).toBe(50);
   });
 });

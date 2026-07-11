@@ -22,10 +22,10 @@ describe("DownloadsDrawer", () => {
     const wrapper = mount(DownloadsDrawer, {
       props: {
         open: true,
-        active: makeJob() as never,
+        active: [makeJob() as never],
         queued: [],
         history: [],
-        etaSeconds: 5,
+        etaByJob: { a: 5 },
       },
     });
     expect(wrapper.text()).toContain("flux-dev:q4");
@@ -37,7 +37,7 @@ describe("DownloadsDrawer", () => {
     const wrapper = mount(DownloadsDrawer, {
       props: {
         open: true,
-        active: null,
+        active: [],
         queued: [
           makeJob({ id: "q1", model: "sd1.5:fp16", status: "queued" }) as never,
           makeJob({
@@ -47,7 +47,7 @@ describe("DownloadsDrawer", () => {
           }) as never,
         ],
         history: [],
-        etaSeconds: null,
+        etaByJob: {},
       },
     });
     expect(wrapper.text()).toContain("sd1.5:fp16");
@@ -61,7 +61,7 @@ describe("DownloadsDrawer", () => {
     const wrapper = mount(DownloadsDrawer, {
       props: {
         open: true,
-        active: null,
+        active: [],
         queued: [],
         history: [
           makeJob({
@@ -70,7 +70,7 @@ describe("DownloadsDrawer", () => {
             error: "network blip",
           }) as never,
         ],
-        etaSeconds: null,
+        etaByJob: {},
         onRetry,
       },
     });
@@ -83,16 +83,18 @@ describe("DownloadsDrawer", () => {
     const wrapper = mount(DownloadsDrawer, {
       props: {
         open: true,
-        active: makeJob({
-          id: "primary",
-          model: "cv:2910912",
-          catalog_id: "cv:2910912",
-          files_done: 0,
-          files_total: 1,
-          bytes_done: 500,
-          bytes_total: 1_000,
-          current_file: "moody.safetensors",
-        }) as never,
+        active: [
+          makeJob({
+            id: "primary",
+            model: "cv:2910912",
+            catalog_id: "cv:2910912",
+            files_done: 0,
+            files_total: 1,
+            bytes_done: 500,
+            bytes_total: 1_000,
+            current_file: "moody.safetensors",
+          }) as never,
+        ],
         queued: [
           makeJob({
             id: "clip",
@@ -119,7 +121,7 @@ describe("DownloadsDrawer", () => {
             current_file: null,
           }) as never,
         ],
-        etaSeconds: 12,
+        etaByJob: { primary: 12 },
       },
     });
 
@@ -130,5 +132,23 @@ describe("DownloadsDrawer", () => {
     expect(wrapper.text()).toContain("flux2-vae");
     expect(wrapper.text()).toContain("moody.safetensors");
     expect(wrapper.text()).toContain("12s");
+  });
+
+  it("shows each concurrent download its own ETA", () => {
+    const wrapper = mount(DownloadsDrawer, {
+      props: {
+        open: true,
+        active: [
+          makeJob({ id: "a", model: "model-a" }) as never,
+          makeJob({ id: "b", model: "model-b" }) as never,
+        ],
+        queued: [],
+        history: [],
+        etaByJob: { a: 5, b: 42 },
+      },
+    });
+
+    expect(wrapper.text()).toContain("5s");
+    expect(wrapper.text()).toContain("42s");
   });
 });

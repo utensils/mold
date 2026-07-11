@@ -16,6 +16,7 @@ async fn queue_starts_empty() {
     let queue = DownloadQueue::new_for_test();
     let listing = queue.listing().await;
     assert!(listing.active.is_none());
+    assert!(listing.active_jobs.is_empty());
     assert!(listing.queued.is_empty());
     assert!(listing.history.is_empty());
 }
@@ -235,7 +236,34 @@ async fn cancel_active_emits_job_cancelled_and_clears_active() {
 }
 
 #[tokio::test]
-async fn cancel_queued_removes_from_queue_and_emits_dequeued() {
+async fn driver_runs_two_downloads_in_parallel() {
+    let queue = DownloadQueue::new();
+    let shutdown = CancellationToken::new();
+    let driver = spawn_test_driver(queue.clone(), Arc::new(SlowPuller), shutdown.clone());
+
+    let (first, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+    let (second, _, _) = queue.enqueue("flux-dev:q4".into()).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if queue.listing().await.active_jobs.len() == 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both downloads should become active"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert!(queue.cancel(&first).await);
+    assert!(queue.cancel(&second).await);
+    shutdown.cancel();
+    let _ = driver.await;
+}
+
+#[tokio::test]
+async fn cancel_queued_moves_to_history_and_emits_cancelled() {
     let queue = DownloadQueue::new();
     // No driver needed — we never let these jobs run.
     let (id_a, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
@@ -252,13 +280,14 @@ async fn cancel_queued_removes_from_queue_and_emits_dequeued() {
         .expect("timed out waiting for Dequeued")
         .expect("broadcast channel closed");
     match got {
-        DownloadEvent::Dequeued { id } => assert_eq!(id, id_b),
-        other => panic!("expected Dequeued, got {other:?}"),
+        DownloadEvent::JobCancelled { id } => assert_eq!(id, id_b),
+        other => panic!("expected JobCancelled, got {other:?}"),
     }
 
     let listing = queue.listing().await;
     assert_eq!(listing.queued.len(), 1);
     assert_eq!(listing.queued[0].id, id_a);
+    assert_eq!(listing.history.last().unwrap().status, JobStatus::Cancelled);
 }
 
 #[tokio::test]

@@ -29,10 +29,12 @@ export function clampPosition(
   entries: MenuEntry[],
   viewport: { width: number; height: number },
 ): { x: number; y: number } {
-  const height =
+  const width = Math.min(MENU_WIDTH, Math.max(0, viewport.width - MARGIN * 2));
+  const estimatedHeight =
     entries.reduce((h, e) => h + (isSeparator(e) ? SEPARATOR_HEIGHT : ITEM_HEIGHT), 0) + 10;
+  const height = Math.min(estimatedHeight, Math.max(0, viewport.height - MARGIN * 2));
   return {
-    x: Math.max(MARGIN, Math.min(x, viewport.width - MENU_WIDTH - MARGIN)),
+    x: Math.max(MARGIN, Math.min(x, viewport.width - width - MARGIN)),
     y: Math.max(MARGIN, Math.min(y, viewport.height - height - MARGIN)),
   };
 }

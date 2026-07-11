@@ -266,12 +266,15 @@ mold config set runpod.api_key <key>
 mold runpod doctor
 mold runpod run "a cat on a skateboard"
 mold runpod create --gpu 5090
+mold runpod network-volume create --name models --size 100 --dc US-KS-2
+mold runpod run "a cat" --network-volume <volume-id>
 mold runpod connect <pod-id>
 mold runpod delete <pod-id>
 ```
 
-Common subcommands are `doctor`, `gpus`, `datacenters`, `list`, `get`,
-`create`, `start`, `stop`, `delete`, `connect`, `logs`, `usage`, and `run`.
+Common subcommands are `doctor`, `gpus`, `datacenters`, `network-volume`,
+`list`, `get`, `create`, `start`, `stop`, `delete`, `connect`, `logs` (RunPod
+console handoff), `usage`, and `run`.
 See [mold runpod CLI](/deployment/runpod-cli).
 
 ## `mold lambda`

@@ -1,4 +1,4 @@
-//! Single-writer download queue wrapping `mold_core::download::pull_model_with_callback`.
+//! Bounded-parallel download queue wrapping `mold_core::download::pull_model_with_callback`.
 //!
 //! One long-running driver task pulls jobs off a `VecDeque`, spawns a pull
 //! task per job, forwards `DownloadProgressEvent` → `DownloadEvent` on a
@@ -46,6 +46,10 @@ pub const EVENT_BUFFER: usize = 256;
 /// Max history entries retained for the drawer's "Recent" section.
 pub const HISTORY_CAP: usize = 20;
 
+/// Two simultaneous model pulls make good use of fast remote hosts without
+/// multiplying disk pressure for large checkpoints without bound.
+pub const DOWNLOAD_CONCURRENCY: usize = 2;
+
 /// Active download handle.
 pub struct ActiveHandle {
     pub job: DownloadJob,
@@ -74,7 +78,7 @@ struct CatalogGroup {
 }
 
 pub struct DownloadQueue {
-    active: AsyncMutex<Option<ActiveHandle>>,
+    active: AsyncMutex<HashMap<String, ActiveHandle>>,
     queued: StdMutex<VecDeque<DownloadJob>>,
     history: StdMutex<VecDeque<DownloadJob>>,
     events: broadcast::Sender<DownloadEvent>,
@@ -112,7 +116,7 @@ impl DownloadQueue {
     pub fn new() -> Arc<Self> {
         let (events, _rx) = broadcast::channel(EVENT_BUFFER);
         Arc::new(Self {
-            active: AsyncMutex::new(None),
+            active: AsyncMutex::new(HashMap::new()),
             queued: StdMutex::new(VecDeque::new()),
             history: StdMutex::new(VecDeque::new()),
             events,
@@ -135,7 +139,15 @@ impl DownloadQueue {
 
     /// Returns the current active/queued/history snapshot.
     pub async fn listing(&self) -> DownloadsListing {
-        let active = self.active.lock().await.as_ref().map(|a| a.job.clone());
+        let mut active_jobs: Vec<DownloadJob> = self
+            .active
+            .lock()
+            .await
+            .values()
+            .map(|handle| handle.job.clone())
+            .collect();
+        active_jobs.sort_by_key(|job| (job.started_at, job.id.clone()));
+        let active = active_jobs.first().cloned();
         let queued: Vec<DownloadJob> = self
             .queued
             .lock()
@@ -151,6 +163,7 @@ impl DownloadQueue {
             .cloned()
             .collect();
         DownloadsListing {
+            active_jobs,
             active,
             queued,
             history,
@@ -174,10 +187,8 @@ impl DownloadQueue {
         // Check for active/queued duplicate.
         {
             let active = self.active.lock().await;
-            if let Some(handle) = active.as_ref() {
-                if handle.job.model == canonical {
-                    return Ok((handle.job.id.clone(), 0, EnqueueOutcome::AlreadyPresent));
-                }
+            if let Some(handle) = active.values().find(|handle| handle.job.model == canonical) {
+                return Ok((handle.job.id.clone(), 0, EnqueueOutcome::AlreadyPresent));
             }
         }
         {
@@ -241,10 +252,11 @@ impl DownloadQueue {
         // Dedup: active or queued recipe with the same catalog id?
         {
             let active = self.active.lock().await;
-            if let Some(handle) = active.as_ref() {
-                if handle.job.model == payload.catalog_id {
-                    return Ok((handle.job.id.clone(), 0, EnqueueOutcome::AlreadyPresent));
-                }
+            if let Some(handle) = active
+                .values()
+                .find(|handle| handle.job.model == payload.catalog_id)
+            {
+                return Ok((handle.job.id.clone(), 0, EnqueueOutcome::AlreadyPresent));
             }
         }
         {
@@ -355,7 +367,7 @@ impl DownloadQueue {
             }
         }
         if let Ok(mut active) = self.active.try_lock() {
-            if let Some(handle) = active.as_mut().filter(|handle| handle.job.id == job_id) {
+            if let Some(handle) = active.get_mut(job_id) {
                 handle.job.catalog_id = Some(catalog_id.to_string());
             }
         }
@@ -422,22 +434,31 @@ impl DownloadQueue {
         {
             let mut queued = self.queued.lock().expect("queued lock poisoned");
             if let Some(pos) = queued.iter().position(|j| j.id == id) {
-                queued.remove(pos);
+                let mut job = queued.remove(pos).expect("queued position must exist");
                 drop(queued);
+                job.status = JobStatus::Cancelled;
+                job.completed_at = Some(now_ms());
+                self.recipe_payloads
+                    .lock()
+                    .expect("recipe payload lock poisoned")
+                    .remove(id);
+                self.push_history(job);
+                let _ = self
+                    .events
+                    .send(DownloadEvent::JobCancelled { id: id.to_string() });
                 let _ = self
                     .events
                     .send(DownloadEvent::Dequeued { id: id.to_string() });
+                self.settle_for_group(id, JobStatus::Cancelled);
                 return true;
             }
         }
         // Active?
         let active = self.active.lock().await;
-        if let Some(handle) = active.as_ref() {
-            if handle.job.id == id {
-                handle.abort.cancel();
-                // Driver task will observe the cancel, emit JobCancelled, and clear `active`.
-                return true;
-            }
+        if let Some(handle) = active.get(id) {
+            handle.abort.cancel();
+            // Driver task will observe the cancel, emit JobCancelled, and clear the job.
+            return true;
         }
         // Not found.
         false
@@ -469,19 +490,28 @@ impl DownloadQueue {
     }
 
     pub(crate) async fn set_active(&self, handle: ActiveHandle) {
-        *self.active.lock().await = Some(handle);
+        self.active
+            .lock()
+            .await
+            .insert(handle.job.id.clone(), handle);
     }
 
-    pub(crate) async fn clear_active(&self) -> Option<ActiveHandle> {
-        self.active.lock().await.take()
+    pub(crate) async fn clear_active(&self, id: &str) -> Option<ActiveHandle> {
+        self.active.lock().await.remove(id)
     }
 
-    pub(crate) async fn with_active<F, R>(&self, f: F) -> Option<R>
+    pub(crate) async fn with_active<F, R>(&self, id: &str, f: F) -> Option<R>
     where
         F: FnOnce(&mut DownloadJob) -> R,
     {
         let mut active = self.active.lock().await;
-        active.as_mut().map(|a| f(&mut a.job))
+        active.get_mut(id).map(|a| f(&mut a.job))
+    }
+
+    async fn cancel_all_active(&self) {
+        for handle in self.active.lock().await.values() {
+            handle.abort.cancel();
+        }
     }
 
     pub(crate) fn emit(&self, event: DownloadEvent) {
@@ -740,8 +770,8 @@ fn cleanup_partials_in_dir_under_root(dir: &std::path::Path, root: &std::path::P
     }
 }
 
-/// Spawn the single driver task. Returns the JoinHandle; drop or await to
-/// stop the driver (combined with `shutdown.cancel()`).
+/// Spawn the bounded-parallel driver. Returns the JoinHandle; drop or await
+/// to stop the driver (combined with `shutdown.cancel()`).
 pub fn spawn_driver(
     queue: Arc<DownloadQueue>,
     driver: Arc<dyn PullDriver>,
@@ -751,18 +781,33 @@ pub fn spawn_driver(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("download queue driver started");
+        let mut running = tokio::task::JoinSet::new();
         loop {
-            queue.wait_for_work(&shutdown).await;
             if shutdown.is_cancelled() {
+                queue.cancel_all_active().await;
+                while running.join_next().await.is_some() {}
                 break;
             }
-            while let Some(mut job) = queue.take_next_queued() {
-                if shutdown.is_cancelled() {
+            while running.len() < DOWNLOAD_CONCURRENCY {
+                let Some(job) = queue.take_next_queued() else {
                     break;
-                }
-                run_one_job(&queue, &driver, &recipe_driver, &models_dir, &mut job).await;
-                if shutdown.is_cancelled() {
-                    break;
+                };
+                let queue = queue.clone();
+                let driver = driver.clone();
+                let recipe_driver = recipe_driver.clone();
+                let models_dir = models_dir.clone();
+                running.spawn(async move {
+                    run_one_job(&queue, &driver, &recipe_driver, &models_dir, job).await;
+                });
+            }
+
+            if running.is_empty() {
+                queue.wait_for_work(&shutdown).await;
+            } else {
+                tokio::select! {
+                    _ = queue.notify.notified() => {},
+                    _ = running.join_next() => {},
+                    _ = shutdown.cancelled() => {},
                 }
             }
         }
@@ -775,7 +820,7 @@ async fn run_one_job(
     driver: &Arc<dyn PullDriver>,
     recipe_driver: &Arc<dyn RecipePullDriver>,
     models_dir: &std::path::Path,
-    job: &mut DownloadJob,
+    mut job: DownloadJob,
 ) {
     job.status = JobStatus::Active;
     job.started_at = Some(now_ms());
@@ -800,17 +845,17 @@ async fn run_one_job(
         recipe_driver,
         models_dir,
         recipe_payload.as_ref(),
-        job,
+        &mut job,
         cancel.clone(),
     )
     .await;
 
     // Move the finished job into history.
     let final_job = queue
-        .with_active(|a| a.clone())
+        .with_active(&job.id, |a| a.clone())
         .await
         .unwrap_or_else(|| job.clone());
-    queue.clear_active().await;
+    queue.clear_active(&job.id).await;
     queue.push_history(final_job);
 }
 
@@ -842,7 +887,7 @@ async fn try_pull_with_retry(
                 job.completed_at = Some(now_ms());
                 // Reflect into the active-job snapshot so history includes the final state.
                 queue
-                    .with_active(|a| {
+                    .with_active(&job.id, |a| {
                         *a = job.clone();
                     })
                     .await;
@@ -857,7 +902,7 @@ async fn try_pull_with_retry(
                 job.status = JobStatus::Cancelled;
                 job.completed_at = Some(now_ms());
                 queue
-                    .with_active(|a| {
+                    .with_active(&job.id, |a| {
                         *a = job.clone();
                     })
                     .await;
@@ -875,7 +920,7 @@ async fn try_pull_with_retry(
                             job.status = JobStatus::Cancelled;
                             job.completed_at = Some(now_ms());
                             queue
-                                .with_active(|a| {
+                                .with_active(&job.id, |a| {
                                     *a = job.clone();
                                 })
                                 .await;
@@ -891,7 +936,7 @@ async fn try_pull_with_retry(
                 job.error = Some(msg.clone());
                 job.completed_at = Some(now_ms());
                 queue
-                    .with_active(|a| {
+                    .with_active(&job.id, |a| {
                         *a = job.clone();
                     })
                     .await;
@@ -983,7 +1028,7 @@ async fn translate_event(
                 ..
             } => {
                 let emitted_started = queue
-                    .with_active(|j| {
+                    .with_active(&id, |j| {
                         if j.files_total == 0 {
                             j.files_total = total_files;
                             j.bytes_total = batch_bytes_total;
@@ -1003,7 +1048,7 @@ async fn translate_event(
                 }
                 let _ = file_index;
                 queue
-                    .with_active(|j| {
+                    .with_active(&id, |j| {
                         j.current_file = Some(filename.clone());
                     })
                     .await;
@@ -1025,7 +1070,7 @@ async fn translate_event(
                 // reset the drawer's "X of Y files" counter and cause a
                 // visible flicker until the next FileDone event.
                 let files_done = queue
-                    .with_active(|j| {
+                    .with_active(&id, |j| {
                         j.bytes_done = batch_bytes_downloaded;
                         if j.bytes_total == 0 {
                             j.bytes_total = batch_bytes_total;
@@ -1052,7 +1097,7 @@ async fn translate_event(
             } => {
                 let _ = batch_bytes_total;
                 queue
-                    .with_active(|j| {
+                    .with_active(&id, |j| {
                         j.files_done = file_index + 1;
                         j.files_total = total_files;
                         j.bytes_done = batch_bytes_downloaded;
@@ -1067,7 +1112,7 @@ async fn translate_event(
                 // Only surface as a transient info on the active job's current_file
                 // placeholder. The drawer shows `current_file` literally.
                 queue
-                    .with_active(|j| {
+                    .with_active(&id, |j| {
                         j.current_file = Some(message.clone());
                     })
                     .await;

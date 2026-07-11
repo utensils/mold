@@ -6,9 +6,9 @@ matte "digital darkroom" that treats every generation as a print being
 developed.
 
 ::: warning Experimental
-The desktop app lives in `desktop/` on the `experiment/desktop` branch and is
-under active development. It is macOS-first (Apple Silicon, Metal) and not yet
-part of a tagged release. Build it from source with the devshell commands below.
+The desktop app lives in `desktop/` and is under active development. It is
+macOS-first (Apple Silicon, Metal) and not yet part of a tagged release. Build
+it from source with the devshell commands below.
 :::
 
 ## What it is
@@ -28,23 +28,39 @@ surface powers it, so anything the app does maps to a documented endpoint.
   before you press Generate.
 - **Gallery** — a justified, virtualized contact-sheet grid. **Space** opens
   Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Generate with
-  every parameter restored. ⌘0 / ⌘+ / ⌘− adjust thumbnail size.
+  every parameter restored. When the active engine is remote, **This Mac**
+  remains available as a separate local-gallery source. Still images offer
+  full-resolution **Copy image** from tile and lightbox right-click menus.
 - **Models & catalog** — installed models grouped by family with residency and
   disk usage, plus a live HuggingFace/Civitai catalog. Pulls render **SIZE vs
   FETCH** honestly (model weights vs. the full download including shared
-  components) and stream through a downloads tray.
+  components), run in parallel, and stream through a downloads tray whose
+  cancel action aborts queued or active work rather than only hiding the row.
 - **Chains** — a filmstrip editing bench for multi-stage video
   (`mold.chain.v1`): per-stage prompts and frame counts (validated `8n+1`),
   splice transitions (smooth / cut / fade) you click to cycle, a live
   fits/duration forecast against `/api/capabilities/chain-limits`, TOML
   import/export, and a durable jobs list with resume, cancel, and retake.
 - **History** — a fast, searchable list of past prompts; ↩ refills the composer.
+- **RunPod** — secure account setup, balance and live spend, GPU and
+  datacenter discovery, pod launch/lifecycle/connection, and persistent network
+  volume create/select/rename/grow/delete. A selected volume is remembered,
+  forces Secure Cloud in its datacenter, replaces the ordinary workspace disk,
+  and cannot be deleted while attached to a pod. Because RunPod cannot stop a
+  network-volume Pod, the app hides Start/Stop for those rows and explains that
+  deleting the compute instance preserves `/workspace` on the volume. Logs use
+  a supported handoff to the RunPod console rather than a nonexistent REST
+  endpoint. Production network volumes accept 10–3999 GB; the form and native
+  validation enforce that live bound before launch. Region selectors show both
+  the geographic location and RunPod ID, while the volume form limits choices
+  to datacenters that currently support persistent volumes.
 - **Settings** — a full preferences bench with a section rail and
   cross-section search: Engine (connection, native folder pickers for the
   models/output directories), Performance (the `MOLD_*` engine knobs as real
   controls, applied on engine restart), Generation defaults, a Prompt
   expansion form, Accounts & tokens (Hugging Face / Civitai keys in the macOS
-  Keychain, exported to the engine as `HF_TOKEN`/`CIVITAI_TOKEN`), Appearance
+  Keychain in signed builds and an owner-only local file in debug builds,
+  exported to the engine as `HF_TOKEN`/`CIVITAI_TOKEN`), Appearance
   (the website-aligned Mold palette by default or the original Safelight,
   each with System/Dark/Light; media never inverts), Profiles (switch or create), and
   Advanced — every remaining `/api/config` row with its provenance tag (⌂ db /
@@ -70,7 +86,12 @@ surface powers it, so anything the app does maps to a documented endpoint.
 | Space        | Quick Look in Gallery                   |
 | ←/→, ⌫       | Gallery navigate / delete               |
 | ⇧⌘C          | Copy seed (lightbox)                    |
-| ⌘0 / ⌘+ / ⌘− | Gallery thumbnail zoom reset / in / out |
+| ⌘0 / ⌘+ / ⌘− | Interface size reset / larger / smaller |
+
+Interface scaling applies to the complete app, including fixed overlays and
+right-click menus. Choose 80–130% from **Settings → Appearance & app → Interface size**, or
+use the View menu and keyboard shortcuts. The selected level is restored on
+the next launch.
 
 ## Generation templates
 
@@ -120,7 +141,8 @@ wire types as the CLI and web UI:
   `localhost:7680`.
 - **Remote host** — point it at a remote GPU box (e.g. a Linux CUDA machine for
   LTX-2), configured in Settings → Engine, with the API key stored in the macOS
-  Keychain. A bare hostname is enough: `hal9000` expands to
+  Keychain in signed builds (the owner-only debug secret store is used during
+  local development). A bare hostname is enough: `hal9000` expands to
   `http://hal9000:7680`. The network list uses the operating system's native
   DNS-SD browser on macOS, so advertised `_mold._tcp` services share the same
   cache and interface handling as Finder and `dns-sd`.

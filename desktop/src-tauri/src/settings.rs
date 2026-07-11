@@ -59,6 +59,10 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub dock_badge: bool,
     pub restore_last_route: bool,
+    pub runpod_include_hf_token: bool,
+    pub runpod_network_volume_id: Option<String>,
+    /// Whole-webview scale, stored as a percentage (80-130).
+    pub ui_scale_percent: u16,
 }
 
 impl Default for AppSettings {
@@ -74,6 +78,9 @@ impl Default for AppSettings {
             notifications: true,
             dock_badge: true,
             restore_last_route: false,
+            runpod_include_hf_token: false,
+            runpod_network_volume_id: None,
+            ui_scale_percent: 100,
         }
     }
 }
@@ -126,6 +133,9 @@ mod tests {
             notifications: false,
             dock_badge: true,
             restore_last_route: true,
+            runpod_include_hf_token: true,
+            runpod_network_volume_id: Some("nv-models".into()),
+            ui_scale_percent: 120,
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path), settings);
@@ -144,6 +154,9 @@ mod tests {
         assert_eq!(loaded.theme, Theme::System);
         assert_eq!(loaded.theme_family, ThemeFamily::Safelight);
         assert!(loaded.engine_env.is_empty());
+        assert!(!loaded.runpod_include_hf_token);
+        assert_eq!(loaded.runpod_network_volume_id, None);
+        assert_eq!(loaded.ui_scale_percent, 100);
     }
 
     #[test]

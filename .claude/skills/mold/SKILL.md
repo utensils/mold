@@ -565,6 +565,7 @@ mold runpod run "a cat on a skateboard"          # smart defaults
 mold runpod run "a sunset" --model flux-dev:q4   # preload a model
 mold runpod run "a cat" --gpu 5090               # force GPU family
 mold runpod run "a cat" --dc US-IL-1             # pin datacenter
+mold runpod run "a cat" --network-volume nv-abc123 # persistent /workspace
 mold runpod run "a cat" --keep                   # don't park — leave running
 mold runpod run "a cat" --steps 28 --seed 42     # forward standard flags
 mold runpod run "a cat" --output-dir ./renders   # custom save path
@@ -588,12 +589,18 @@ mold runpod create --dry-run                     # print plan, don't create
 mold runpod create --cloud community             # secure is default
 mold runpod create --hf-token                    # wire HF_TOKEN secret into pod env
 mold runpod create --network-volume nv-abc123    # attach pre-created volume
+mold runpod network-volume list                  # list persistent volumes
+mold runpod network-volume get nv-abc123         # inspect one volume
+mold runpod network-volume create --name models --size 100 --dc US-KS-2
+mold runpod network-volume update nv-abc123 --size 200 # grow only
+mold runpod network-volume update nv-abc123 --name shared-models
+mold runpod network-volume delete nv-abc123      # permanently deletes data
 mold runpod list
 mold runpod list --json
 mold runpod get <pod-id>
 mold runpod stop <pod-id>                        # pause billing, keep storage
 mold runpod start <pod-id>                       # resume
-mold runpod delete <pod-id>                      # tear down (-f to skip confirm)
+mold runpod delete <pod-id>                      # immediate, non-interactive teardown
 
 # Connecting
 mold runpod connect <pod-id>                     # print export MOLD_HOST=…
@@ -601,12 +608,18 @@ eval "$(mold runpod connect <pod-id>)"           # exec the export in your shell
 mold runpod connect <pod-id> --check             # also probe the pod first
 
 # Observability
-mold runpod logs <pod-id>                        # one-shot pull
-mold runpod logs <pod-id> --follow               # tail (2s poll)
+mold runpod logs <pod-id>                        # validate pod + print console logs handoff
 mold runpod usage                                # balance + active pods
 mold runpod usage --since 7d                     # with historical spend window
 mold runpod usage --json                         # machine-readable
 ```
+
+Production network volumes accept 10–3999 GB. Current Pod list/get responses
+identify attachments with `networkVolumeId` and assigned GPUs with
+`machine.gpuTypeId`; callers must handle those shapes even when expanded
+`networkVolume` / `gpu.displayName` fields are absent. Volume-backed Pods use
+Secure Cloud in the volume's datacenter, request a 0 GB ordinary workspace
+disk, cannot be stopped, and must be deleted before the volume can be removed.
 
 ### Config keys under `[runpod]`
 
@@ -696,6 +709,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `GET /api/models` · `GET /api/loras` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
 - `DELETE /api/models/:model` — remove a downloaded model (HTTP `mold rm`): deletes only exclusively-owned files, keeps shared components, returns `{ removed, kept, freed_bytes }`; 409 while loaded
 - `GET /api/gallery` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`
+- `GET/POST /api/downloads` · `DELETE /api/downloads/:id` · `GET /api/downloads/stream` — bounded-parallel model pulls (two active); listings expose `active_jobs` plus legacy first-job `active`; cancel works for queued and active jobs
 - `POST /api/upscale` · `POST /api/upscale/stream`
 - `GET /api/queue` — authoritative server-side job listing for SPA reconciliation (queued + running jobs with UUIDv4 ids)
 - `DELETE /api/queue/:id` — cancel a still-queued generation job (204; 404 unknown; 409 once running)
@@ -842,7 +856,7 @@ services.mold.discord = {
 
 ## Desktop App
 
-An experimental native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/` on the `experiment/desktop` branch. It embeds `mold serve` in-process on Metal, auto-detects a running server on `localhost:7680`, and can point at a remote host. It covers the generation workspace (live "Develop" progress), gallery, model/catalog pulls, the chains editing bench, prompt history, and provenance-tagged settings, with a ⌘K command palette.
+An experimental native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/`. It embeds `mold serve` in-process on Metal, auto-detects a running server on `localhost:7680`, and can point at a remote host. It covers the generation workspace (live "Develop" progress), local and remote galleries, parallel cancellable model pulls, the chains editing bench, prompt history, full RunPod pod and network-volume lifecycle management, full-resolution image clipboard copy, persistent 80–130% whole-app scaling (⌘+/⌘−/⌘0), and provenance-tagged settings, with a ⌘K command palette. RunPod volume selection persists; volume-backed launches force Secure Cloud in the volume's datacenter and omit the redundant workspace disk.
 
 Devshell commands (run inside `nix develop`):
 

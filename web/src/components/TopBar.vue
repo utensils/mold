@@ -12,7 +12,9 @@ type ViewMode = "feed" | "grid";
 // ─── Downloads UI (Agent A) ───────────────────────────────────────────────────
 const downloads = useDownloads();
 const badgeCount = computed(
-  () => (downloads.active.value ? 1 : 0) + downloads.queued.value.length,
+  () =>
+    (downloads.activeJobs?.value.length ?? (downloads.active.value ? 1 : 0)) +
+    downloads.queued.value.length,
 );
 
 function openDownloadsDrawer() {

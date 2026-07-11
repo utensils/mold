@@ -149,14 +149,30 @@ Generate on a cloud GPU without managing pods yourself:
 ```bash
 mold config set runpod.api_key <key>         # one-time setup
 mold runpod run "a cat on a skateboard"       # creates pod → generates → saves to ./mold-outputs/
+mold runpod network-volume create --name models --size 100 --dc US-KS-2
+mold runpod run "a cat" --network-volume <volume-id>
 ```
 
 `mold runpod run` picks the cheapest available GPU, falls back across
 datacenters if scheduling stalls, streams SSE progress over RunPod's
 Cloudflare proxy, and leaves the pod warm for reuse on the next call.
 See the [RunPod CLI guide](https://utensils.io/mold/deployment/runpod-cli)
-for full subcommand reference (`doctor`, `gpus`, `list`, `create`, `stop`,
-`delete`, `logs`, `usage`, …).
+for full subcommand reference (`doctor`, `gpus`, `network-volume`, `list`,
+`create`, `stop`, `delete`, console-log handoff, `usage`, …).
+
+### Native macOS desktop
+
+The experimental Tauri desktop app in `desktop/` embeds the Metal engine or
+connects to any local/remote `mold serve`. It includes Generate, a local/remote
+Gallery, parallel model downloads with real cancellation, chains, model
+catalog browsing, history, and a full settings bench. Its RunPod workspace can
+launch and manage pods and persistent network volumes without leaving the app.
+
+Still images expose **Copy image** from their right-click menus at full
+resolution. The complete interface—including fixed overlays and those context
+menus—scales from 80–130% with **⌘+**, **⌘−**, **⌘0**, the View menu, or
+Settings → Appearance & app, and restores the selected scale on relaunch.
+See the [desktop guide](https://utensils.io/mold/guide/desktop).
 
 See the full [CLI reference](https://utensils.io/mold/guide/cli-reference), [configuration guide](https://utensils.io/mold/guide/configuration), and [model catalog](https://utensils.io/mold/models/) in the documentation.
 

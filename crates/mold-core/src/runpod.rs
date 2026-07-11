@@ -8,6 +8,7 @@ use crate::error::MoldError;
 use anyhow::Result;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 
@@ -19,6 +20,15 @@ pub const GRAPHQL_ENDPOINT: &str = "https://api.runpod.io/graphql";
 
 /// Environment variable that holds the RunPod API key.
 pub const API_KEY_ENV: &str = "RUNPOD_API_KEY";
+
+/// Live RunPod REST limits. The generated API schema currently advertises a
+/// wider range, but the production service rejects sizes below 10 GB and 4 TB.
+pub const NETWORK_VOLUME_MIN_GB: u32 = 10;
+pub const NETWORK_VOLUME_MAX_GB: u32 = 3999;
+
+pub fn valid_network_volume_size(size: u32) -> bool {
+    (NETWORK_VOLUME_MIN_GB..=NETWORK_VOLUME_MAX_GB).contains(&size)
+}
 
 /// Persisted configuration under `[runpod]` in `config.toml`.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -179,16 +189,72 @@ pub struct Pod {
     pub env: serde_json::Value,
     #[serde(default)]
     pub machine: Option<PodMachine>,
+    /// Current REST responses expose the assigned GPU here even when the
+    /// optional machine expansion omits `gpuDisplayName`.
+    #[serde(default)]
+    pub gpu: Option<PodGpu>,
     #[serde(default)]
     pub runtime: Option<serde_json::Value>,
+    #[serde(rename = "networkVolume", default)]
+    pub network_volume: Option<NetworkVolume>,
+    /// Current REST list/get responses expose only this id; create responses
+    /// may additionally include the expanded `networkVolume` object above.
+    #[serde(rename = "networkVolumeId", default)]
+    pub network_volume_id: Option<String>,
+}
+
+impl Pod {
+    pub fn attached_network_volume_id(&self) -> Option<&str> {
+        self.network_volume
+            .as_ref()
+            .map(|volume| volume.id.as_str())
+            .or(self.network_volume_id.as_deref())
+    }
+
+    pub fn gpu_name(&self) -> Option<&str> {
+        self.gpu
+            .as_ref()
+            .and_then(|gpu| gpu.display_name.as_deref())
+            .or_else(|| {
+                self.machine
+                    .as_ref()
+                    .and_then(|machine| machine.gpu_display_name.as_deref())
+            })
+            .or_else(|| {
+                self.machine
+                    .as_ref()
+                    .and_then(|machine| machine.gpu_type_id.as_deref())
+            })
+            .or_else(|| self.gpu.as_ref().and_then(|gpu| gpu.id.as_deref()))
+    }
+
+    pub fn datacenter_id(&self) -> Option<&str> {
+        self.machine
+            .as_ref()
+            .and_then(|machine| machine.data_center_id.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PodMachine {
     #[serde(rename = "gpuDisplayName", default)]
     pub gpu_display_name: Option<String>,
+    #[serde(rename = "gpuTypeId", default)]
+    pub gpu_type_id: Option<String>,
+    #[serde(rename = "dataCenterId", default)]
+    pub data_center_id: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PodGpu {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(rename = "displayName", default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub count: Option<u32>,
 }
 
 /// Body for `POST /pods`.
@@ -225,6 +291,24 @@ pub struct NetworkVolume {
     #[serde(rename = "dataCenterId", default)]
     pub data_center_id: String,
     pub size: u32,
+}
+
+/// Body for `POST /networkvolumes`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateNetworkVolumeRequest {
+    pub name: String,
+    pub size: u32,
+    #[serde(rename = "dataCenterId")]
+    pub data_center_id: String,
+}
+
+/// Body for `PATCH /networkvolumes/{id}`. Sizes may only increase.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateNetworkVolumeRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
 }
 
 // ─── Client ────────────────────────────────────────────────────────────────
@@ -376,6 +460,37 @@ impl RunPodClient {
         }
     }
 
+    async fn patch_json<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let resp = self
+            .http
+            .patch(self.url(path))
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| MoldError::RunPod(format!("RunPod {path}: {e}")))?;
+        let status = resp.status();
+        if status.is_success() {
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| MoldError::RunPod(format!("RunPod {path} body: {e}")))?;
+            serde_json::from_str(&text).map_err(|e| {
+                MoldError::RunPod(format!(
+                    "RunPod {path}: failed to parse response: {e} — body: {}",
+                    truncate_for_error(&text)
+                ))
+                .into()
+            })
+        } else {
+            Err(http_error(path, status, resp).await.into())
+        }
+    }
+
     async fn delete(&self, path: &str) -> Result<()> {
         let resp = self
             .http
@@ -387,25 +502,6 @@ impl RunPodClient {
         let status = resp.status();
         if status.is_success() {
             Ok(())
-        } else {
-            Err(http_error(path, status, resp).await.into())
-        }
-    }
-
-    async fn get_text(&self, path: &str) -> Result<String> {
-        let resp = self
-            .http
-            .get(self.url(path))
-            .bearer_auth(&self.api_key)
-            .send()
-            .await
-            .map_err(|e| MoldError::RunPod(format!("RunPod {path}: {e}")))?;
-        let status = resp.status();
-        if status.is_success() {
-            Ok(resp
-                .text()
-                .await
-                .map_err(|e| MoldError::RunPod(format!("RunPod {path} body: {e}")))?)
         } else {
             Err(http_error(path, status, resp).await.into())
         }
@@ -578,15 +674,24 @@ impl RunPodClient {
     }
 
     pub async fn list_pods(&self) -> Result<Vec<Pod>> {
-        self.get_json("/pods").await
+        self.get_json("/pods?includeMachine=true").await
     }
 
     pub async fn get_pod(&self, id: &str) -> Result<Pod> {
-        self.get_json(&format!("/pods/{id}")).await
+        self.get_json(&format!("/pods/{id}?includeMachine=true"))
+            .await
     }
 
     pub async fn create_pod(&self, req: &CreatePodRequest) -> Result<Pod> {
         self.post_json("/pods", req).await
+    }
+
+    /// GPU IDs accepted by the REST Pod create endpoint. RunPod's GraphQL
+    /// inventory can advertise GPUs before the REST create schema accepts
+    /// them, so launchers must intersect inventory with this live contract.
+    pub async fn supported_pod_gpu_type_ids(&self) -> Result<HashSet<String>> {
+        let spec: serde_json::Value = self.get_json("/openapi.json").await?;
+        parse_pod_gpu_type_ids(&spec)
     }
 
     pub async fn stop_pod(&self, id: &str) -> Result<()> {
@@ -601,12 +706,49 @@ impl RunPodClient {
         self.delete(&format!("/pods/{id}")).await
     }
 
-    pub async fn pod_logs(&self, id: &str) -> Result<String> {
-        self.get_text(&format!("/pods/{id}/logs")).await
-    }
-
     pub async fn network_volumes(&self) -> Result<Vec<NetworkVolume>> {
         self.get_json("/networkvolumes").await
+    }
+
+    pub async fn get_network_volume(&self, id: &str) -> Result<NetworkVolume> {
+        self.get_json(&format!("/networkvolumes/{id}")).await
+    }
+
+    pub async fn create_network_volume(
+        &self,
+        req: &CreateNetworkVolumeRequest,
+    ) -> Result<NetworkVolume> {
+        self.post_json("/networkvolumes", req).await
+    }
+
+    pub async fn update_network_volume(
+        &self,
+        id: &str,
+        req: &UpdateNetworkVolumeRequest,
+    ) -> Result<NetworkVolume> {
+        self.patch_json(&format!("/networkvolumes/{id}"), req).await
+    }
+
+    pub async fn delete_network_volume(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/networkvolumes/{id}")).await
+    }
+
+    /// Permanently delete a network volume only after proving that no Pod is
+    /// attached. The attachment check intentionally fails closed: an auth,
+    /// transport, or API error must never fall through to destructive delete.
+    pub async fn delete_network_volume_if_detached(&self, id: &str) -> Result<()> {
+        let pods = self.list_pods().await?;
+        if let Some(pod) = pods
+            .iter()
+            .find(|pod| pod.attached_network_volume_id() == Some(id))
+        {
+            return Err(MoldError::RunPod(format!(
+                "delete pod {} before deleting its attached network volume",
+                pod.id
+            ))
+            .into());
+        }
+        self.delete_network_volume(id).await
     }
 }
 
@@ -622,8 +764,14 @@ async fn http_error(path: &str, status: StatusCode, resp: reqwest::Response) -> 
         StatusCode::NOT_FOUND => {
             MoldError::RunPodNotFound(format!("RunPod {path} {status}: {msg}"))
         }
-        StatusCode::CONFLICT | StatusCode::SERVICE_UNAVAILABLE
-            if msg.to_lowercase().contains("does not have the resources") =>
+        StatusCode::CONFLICT
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::INTERNAL_SERVER_ERROR
+            if {
+                let lower = msg.to_lowercase();
+                lower.contains("does not have the resources")
+                    || lower.contains("no instances currently available")
+            } =>
         {
             MoldError::RunPodNoStock(format!("RunPod {path} {status}: {msg}"))
         }
@@ -640,6 +788,18 @@ fn stock_rank(s: &str) -> u8 {
     }
 }
 
+fn parse_pod_gpu_type_ids(spec: &serde_json::Value) -> Result<HashSet<String>> {
+    let values = spec
+        .pointer("/components/schemas/PodCreateInput/properties/gpuTypeIds/items/enum")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| MoldError::RunPod("OpenAPI schema is missing Pod GPU types".into()))?;
+    Ok(values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect())
+}
+
 fn truncate_for_error(s: &str) -> String {
     const MAX: usize = 400;
     let s = s.trim();
@@ -654,8 +814,15 @@ fn truncate_for_error(s: &str) -> String {
 /// `ghcr.io/utensils/mold` image tag.
 pub fn image_tag_for_gpu(display_name: &str) -> &'static str {
     let d = display_name.to_lowercase();
-    if d.contains("5090") || d.contains("blackwell") || d.contains("b200") {
+    if d.contains("5090") || d.contains("rtx pro") || d.contains("blackwell") || d.contains("b200")
+    {
         "latest-sm120"
+    } else if d.contains("h100")
+        || d.contains("h200")
+        || d.contains("gh200")
+        || d.contains("hopper")
+    {
+        "latest-sm90"
     } else if d.contains("a100") || d.contains("3090") || d.contains("a40") || d.contains("ampere")
     {
         "latest-sm80"
@@ -686,9 +853,85 @@ mod tests {
         assert_eq!(image_tag_for_gpu("L40S"), "latest");
         assert_eq!(image_tag_for_gpu("RTX 5090"), "latest-sm120");
         assert_eq!(image_tag_for_gpu("NVIDIA GeForce RTX 5090"), "latest-sm120");
+        assert_eq!(image_tag_for_gpu("RTX PRO 4500"), "latest-sm120");
         assert_eq!(image_tag_for_gpu("A100 80GB"), "latest-sm80");
         assert_eq!(image_tag_for_gpu("A100 PCIe"), "latest-sm80");
         assert_eq!(image_tag_for_gpu("RTX 3090"), "latest-sm80");
+        assert_eq!(image_tag_for_gpu("H100 SXM"), "latest-sm90");
+        assert_eq!(image_tag_for_gpu("H200 SXM"), "latest-sm90");
+    }
+
+    #[test]
+    fn live_network_volume_size_bounds_are_enforced() {
+        assert!(!valid_network_volume_size(9));
+        assert!(valid_network_volume_size(10));
+        assert!(valid_network_volume_size(3999));
+        assert!(!valid_network_volume_size(4000));
+    }
+
+    #[test]
+    fn pod_reads_gpu_from_top_level_rest_shape() {
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "id": "pod-1",
+            "desiredStatus": "RUNNING",
+            "gpu": { "id": "NVIDIA RTX 6000", "displayName": "RTX PRO 6000 Blackwell" }
+        }))
+        .unwrap();
+        assert_eq!(
+            pod.gpu.and_then(|gpu| gpu.display_name).as_deref(),
+            Some("RTX PRO 6000 Blackwell")
+        );
+    }
+
+    #[test]
+    fn pod_reads_current_machine_gpu_and_network_volume_id_shape() {
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "id": "pod-1",
+            "desiredStatus": "RUNNING",
+            "networkVolumeId": "nv-1",
+            "machine": {
+                "gpuTypeId": "NVIDIA GeForce RTX 4090",
+                "dataCenterId": "EU-RO-1",
+                "location": "RO"
+            }
+        }))
+        .unwrap();
+        assert_eq!(pod.attached_network_volume_id(), Some("nv-1"));
+        assert_eq!(pod.gpu_name(), Some("NVIDIA GeForce RTX 4090"));
+        assert_eq!(pod.datacenter_id(), Some("EU-RO-1"));
+        assert_eq!(
+            pod.machine
+                .as_ref()
+                .and_then(|machine| machine.gpu_type_id.as_deref()),
+            Some("NVIDIA GeForce RTX 4090")
+        );
+    }
+
+    #[test]
+    fn pod_location_is_not_treated_as_an_exact_datacenter_id() {
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "id": "pod-1",
+            "machine": { "location": "RO" }
+        }))
+        .unwrap();
+
+        assert_eq!(pod.datacenter_id(), None);
+    }
+
+    #[test]
+    fn parses_rest_pod_gpu_ids_from_openapi() {
+        let spec = serde_json::json!({
+            "components": { "schemas": { "PodCreateInput": { "properties": {
+                "gpuTypeIds": { "items": { "enum": ["NVIDIA GeForce RTX 5090", "NVIDIA L40S"] } }
+            } } } }
+        });
+        assert_eq!(
+            parse_pod_gpu_type_ids(&spec).unwrap(),
+            ["NVIDIA GeForce RTX 5090", "NVIDIA L40S"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
     }
 
     #[test]
