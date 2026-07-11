@@ -54,15 +54,19 @@ else
 fi
 
 # --- 2. Desktop app version ------------------------------------------------
-# First `version = "..."` line is the [package] version in both files.
+# First `version = "..."` line is the [package] version; the path dependencies
+# on workspace crates (package = "mold-ai-*") carry version requirements that
+# must track the workspace version or cargo fails to select them.
 awk -v ver="$version" '
   !done && /^version = "/ { print "version = \"" ver "\""; done = 1; next }
+  /package = "mold-ai-/ { gsub(/version = "[^"]*"/, "version = \"" ver "\"") }
   { print }
 ' desktop/src-tauri/Cargo.toml > desktop/src-tauri/Cargo.toml.tmp \
   && mv desktop/src-tauri/Cargo.toml.tmp desktop/src-tauri/Cargo.toml
 
+# mold-desktop itself plus every workspace crate resolved via path deps.
 awk -v ver="$version" '
-  /^name = "mold-desktop"$/ { print; sync = 1; next }
+  /^name = "mold-desktop"$/ || /^name = "mold-ai-/ { print; sync = 1; next }
   sync && /^version = / { print "version = \"" ver "\""; sync = 0; next }
   { print }
 ' desktop/src-tauri/Cargo.lock > desktop/src-tauri/Cargo.lock.tmp \

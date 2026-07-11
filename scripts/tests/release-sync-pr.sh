@@ -46,6 +46,10 @@ version = "0.14.0"
 edition = "2021"
 
 [dependencies]
+mold-core = { path = "../../crates/mold-core", package = "mold-ai-core", version = "0.14.0" }
+mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.14.0", features = [
+  "preview",
+] }
 serde = { version = "1", features = ["derive"] }
 EOF
 
@@ -89,9 +93,12 @@ awk '/^## \[Unreleased\]$/{getline; getline; exit ($0 ~ /^## \[0.15.0\]/) ? 0 : 
 
 grep -q '^version = "0.15.0"$' "$tmp/desktop/src-tauri/Cargo.toml" || fail "desktop Cargo.toml version not synced"
 grep -q '^edition = "2021"$' "$tmp/desktop/src-tauri/Cargo.toml" || fail "desktop Cargo.toml collateral damage"
+grep -q 'package = "mold-ai-core", version = "0.15.0"' "$tmp/desktop/src-tauri/Cargo.toml" || fail "mold-ai-core dep requirement not synced"
+grep -q 'package = "mold-ai-server", version = "0.15.0", features' "$tmp/desktop/src-tauri/Cargo.toml" || fail "mold-ai-server dep requirement not synced (inline attrs lost?)"
+grep -q 'serde = { version = "1", features' "$tmp/desktop/src-tauri/Cargo.toml" || fail "serde dep requirement was touched"
 grep -q '"version": "0.15.0"' "$tmp/desktop/package.json" || fail "desktop package.json version not synced"
 awk '/^name = "mold-desktop"$/{getline; exit ($0 == "version = \"0.15.0\"") ? 0 : 1}' "$tmp/desktop/src-tauri/Cargo.lock" || fail "Cargo.lock mold-desktop version not synced"
-awk '/^name = "mold-ai-core"$/{getline; exit ($0 == "version = \"0.14.0\"") ? 0 : 1}' "$tmp/desktop/src-tauri/Cargo.lock" || fail "Cargo.lock touched an unrelated package"
+awk '/^name = "mold-ai-core"$/{getline; exit ($0 == "version = \"0.15.0\"") ? 0 : 1}' "$tmp/desktop/src-tauri/Cargo.lock" || fail "Cargo.lock mold-ai-core version not synced"
 awk '/^name = "serde"$/{getline; exit ($0 == "version = \"1.0.0\"") ? 0 : 1}' "$tmp/desktop/src-tauri/Cargo.lock" || fail "Cargo.lock touched serde"
 
 # Idempotency: second run must not change anything.
