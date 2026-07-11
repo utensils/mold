@@ -56,8 +56,6 @@ uat-*
 *.gif
 *.apng
 *.webp
-# Website gallery assets are real content, not generation scratch
-!website/public/gallery/*.webp
 *.mp4
 *.zip
 .superpowers/

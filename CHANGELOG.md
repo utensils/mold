@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **FlakeHub publishing failed on v0.15.0** — the flake source archive outgrew FlakeHub's 75 MB limit. The two LTX gallery demos on the website were 23 MB animated WebPs each; they are now 135 KB VP9 `webm` videos (same frames, same size, autoplaying loop), shrinking the tracked tree by ~46 MB so tagged releases publish to FlakeHub again. v0.15.0 itself is not on FlakeHub; `nix run github:utensils/mold/v0.15.0` is unaffected.
+
 ### Added
 
 - **Automated releases via release-plz.** Pushes to `main` now maintain a release PR (workspace version bump from conventional commits, hand-written `CHANGELOG.md` `[Unreleased]` promotion, desktop-app version sync); merging it creates the `vX.Y.Z` tag that drives binaries, crates.io, Docker, AUR, and FlakeHub publishing exactly as before. Versioned GitHub releases additionally ship the desktop app as a signed, notarized, stapled `Mold_<version>_aarch64.dmg` (plus zipped `Mold.app`), built by the reusable `desktop-distribution.yml` workflow.
