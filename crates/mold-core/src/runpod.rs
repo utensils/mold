@@ -229,12 +229,9 @@ impl Pod {
     }
 
     pub fn datacenter_id(&self) -> Option<&str> {
-        self.machine.as_ref().and_then(|machine| {
-            machine
-                .data_center_id
-                .as_deref()
-                .or(machine.location.as_deref())
-        })
+        self.machine
+            .as_ref()
+            .and_then(|machine| machine.data_center_id.as_deref())
     }
 }
 
@@ -908,6 +905,17 @@ mod tests {
                 .and_then(|machine| machine.gpu_type_id.as_deref()),
             Some("NVIDIA GeForce RTX 4090")
         );
+    }
+
+    #[test]
+    fn pod_location_is_not_treated_as_an_exact_datacenter_id() {
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "id": "pod-1",
+            "machine": { "location": "RO" }
+        }))
+        .unwrap();
+
+        assert_eq!(pod.datacenter_id(), None);
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ipc } from "../lib/ipc";
 import {
   emptyRunPodOverview,
+  friendlyRunPodError,
   rankRunPodGpus,
   type RunPodCreateInput,
   type RunPodNetworkVolumeCreateInput,
@@ -61,7 +62,9 @@ export const useRunPodStore = defineStore("runpod", {
         await ipc.runpodCreate(input);
         await this.load();
       } catch (error) {
-        this.operationError = error instanceof Error ? error.message : String(error);
+        this.operationError = friendlyRunPodError(
+          error instanceof Error ? error.message : String(error),
+        );
         throw error;
       } finally {
         this.mutating = null;
@@ -75,7 +78,9 @@ export const useRunPodStore = defineStore("runpod", {
         await this.load();
         return volume;
       } catch (error) {
-        this.operationError = error instanceof Error ? error.message : String(error);
+        this.operationError = friendlyRunPodError(
+          error instanceof Error ? error.message : String(error),
+        );
         throw error;
       } finally {
         this.mutating = null;
@@ -89,7 +94,9 @@ export const useRunPodStore = defineStore("runpod", {
         await this.load();
         return volume;
       } catch (error) {
-        this.operationError = error instanceof Error ? error.message : String(error);
+        this.operationError = friendlyRunPodError(
+          error instanceof Error ? error.message : String(error),
+        );
         throw error;
       } finally {
         this.mutating = null;
@@ -102,7 +109,9 @@ export const useRunPodStore = defineStore("runpod", {
         await ipc.runpodNetworkVolumeDelete(id);
         await this.load();
       } catch (error) {
-        this.operationError = error instanceof Error ? error.message : String(error);
+        this.operationError = friendlyRunPodError(
+          error instanceof Error ? error.message : String(error),
+        );
         throw error;
       } finally {
         this.mutating = null;
@@ -117,7 +126,9 @@ export const useRunPodStore = defineStore("runpod", {
         else await ipc.runpodDelete(id);
         await this.load();
       } catch (error) {
-        this.operationError = error instanceof Error ? error.message : String(error);
+        this.operationError = friendlyRunPodError(
+          error instanceof Error ? error.message : String(error),
+        );
         throw error;
       } finally {
         this.mutating = null;

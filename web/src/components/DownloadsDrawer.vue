@@ -7,7 +7,7 @@ const props = defineProps<{
   active: DownloadJobWire[];
   queued: DownloadJobWire[];
   history: DownloadJobWire[];
-  etaSeconds: number | null;
+  etaByJob: Record<string, number | null>;
 }>();
 
 const emit = defineEmits<{
@@ -42,6 +42,8 @@ function formatEta(seconds: number | null): string {
   const s = seconds % 60;
   return `${m}m ${s}s`;
 }
+
+const etaFor = (id: string): number | null => props.etaByJob[id] ?? null;
 
 const looseActive = computed(() =>
   props.active.filter((job) => !job.catalog_id),
@@ -181,7 +183,12 @@ function jobLabel(job: DownloadJobWire): string {
         {{ group.filesDone }}/{{ group.filesTotal }} files ·
         {{ groupPct(group) }}%
         <template v-if="active.some((job) => job.catalog_id === group.id)">
-          · ETA {{ formatEta(etaSeconds) }}
+          · ETA
+          {{
+            formatEta(
+              etaFor(active.find((job) => job.catalog_id === group.id)!.id),
+            )
+          }}
         </template>
       </div>
       <div
@@ -236,7 +243,7 @@ function jobLabel(job: DownloadJobWire): string {
       <div class="mt-1 text-xs text-ink-300">
         {{ formatGb(job.bytes_done) }} / {{ formatGb(job.bytes_total) }} ·
         {{ job.files_done }}/{{ job.files_total }} · ETA
-        {{ formatEta(etaSeconds) }}
+        {{ formatEta(etaFor(job.id)) }}
       </div>
       <div
         class="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/10"

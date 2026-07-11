@@ -91,6 +91,77 @@ export interface RunPodCreateInput {
   includeHfToken: boolean;
 }
 
+// Production REST currently exposes pod-only datacenters alongside locations
+// that can host network volumes. Keep the volume picker fail-closed so users
+// never discover the distinction through a billable API error.
+export const NETWORK_VOLUME_DATACENTER_IDS = new Set([
+  "AP-IN-2",
+  "AP-JP-1",
+  "CA-MTL-3",
+  "CA-MTL-4",
+  "EU-CZ-1",
+  "EU-FR-1",
+  "EU-NL-1",
+  "EU-RO-1",
+  "EUR-IS-1",
+  "EUR-IS-3",
+  "EUR-NO-1",
+  "EUR-NO-2",
+  "US-CA-2",
+  "US-IL-1",
+  "US-MO-2",
+  "US-NC-1",
+  "US-NE-1",
+  "US-TX-3",
+  "US-WA-1",
+]);
+
+const REGION_NAMES: Record<string, string> = {
+  IN: "India",
+  JP: "Japan",
+  MTL: "Montreal, Canada",
+  CZ: "Czech Republic, Europe",
+  FR: "France, Europe",
+  NL: "Netherlands, Europe",
+  RO: "Romania, Europe",
+  IS: "Iceland, Europe",
+  NO: "Norway, Europe",
+  CA: "California, United States",
+  IL: "Illinois, United States",
+  MO: "Missouri, United States",
+  NC: "North Carolina, United States",
+  NE: "Nebraska, United States",
+  TX: "Texas, United States",
+  WA: "Washington, United States",
+};
+
+export const isNetworkVolumeDatacenter = (id: string): boolean =>
+  NETWORK_VOLUME_DATACENTER_IDS.has(id);
+
+export function runPodRegionLabel(id: string, fallback?: string | null): string {
+  const regionCode = id.split("-").at(-2) ?? "";
+  const region = REGION_NAMES[regionCode] ?? fallback ?? "Location unavailable";
+  return `${region} · ${id}`;
+}
+
+export function friendlyRunPodError(message: string): string {
+  let detail = message;
+  const jsonStart = message.indexOf("{");
+  if (jsonStart >= 0) {
+    try {
+      const payload = JSON.parse(message.slice(jsonStart)) as { error?: string };
+      if (payload.error) detail = payload.error;
+    } catch {
+      // Preserve the original response when RunPod returns malformed JSON.
+    }
+  }
+  const unsupported = detail.match(/Data center [\\"']*([A-Z]{2,3}-[A-Z]{2,3}-\d+)[\\"']*/i);
+  if (unsupported?.[1] && detail.includes("does not support network volumes")) {
+    return `${unsupported[1]} does not support network volumes. Choose a supported region and try again.`;
+  }
+  return detail.replace(/^create network volume:\s*/i, "");
+}
+
 const STOCK_RANK: Record<string, number> = { High: 3, Medium: 2, Low: 1, None: 0 };
 
 export function rankRunPodGpus(gpus: RunPodGpu[]): RunPodGpu[] {

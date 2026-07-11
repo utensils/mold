@@ -51,12 +51,17 @@ onBeforeUnmount(() => {
   reconciler.stop();
 });
 
-const etaSeconds = computed(() => {
-  const a = downloads.active.value;
-  if (!a) return null;
-  const samples = downloads.ratesByJob.value[a.id] ?? [];
-  return computeEtaSeconds(samples, a.bytes_total);
-});
+const etaByJob = computed(() =>
+  Object.fromEntries(
+    downloads.activeJobs.value.map((job) => [
+      job.id,
+      computeEtaSeconds(
+        downloads.ratesByJob.value[job.id] ?? [],
+        job.bytes_total,
+      ),
+    ]),
+  ),
+);
 
 async function handleCancel(id: string) {
   await downloads.cancel(id);
@@ -86,7 +91,7 @@ provide(RESOURCES_INJECTION_KEY, resources);
     :active="downloads.activeJobs.value"
     :queued="downloads.queued.value"
     :history="downloads.history.value"
-    :eta-seconds="etaSeconds"
+    :eta-by-job="etaByJob"
     @close="closeDownloads"
     @cancel="handleCancel"
     @retry="handleRetry"

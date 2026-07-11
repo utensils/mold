@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
+  isNetworkVolumeDatacenter,
   podGpuName,
   podProxyUrl,
+  runPodRegionLabel,
   type RunPodCreateInput,
   type RunPodNetworkVolume,
   type RunPodPod,
@@ -62,6 +64,10 @@ const datacenters = computed(() => {
     ),
   );
 });
+
+const networkVolumeDatacenters = computed(() =>
+  runpod.overview.datacenters.filter((dc) => isNetworkVolumeDatacenter(dc.id)),
+);
 
 watch(
   [() => prefs.settings?.runpodNetworkVolumeId, () => runpod.overview.networkVolumes],
@@ -385,7 +391,7 @@ onBeforeUnmount(() => {
         >
           <option :value="null">Automatic (best stock)</option>
           <option v-for="dc in datacenters" :key="dc.id" :value="dc.id">
-            {{ dc.name || dc.id }}{{ dc.location ? ` · ${dc.location}` : "" }}
+            {{ runPodRegionLabel(dc.id, dc.location) }}
           </option>
         </select>
 
@@ -453,7 +459,8 @@ onBeforeUnmount(() => {
           </option>
         </select>
         <p v-if="selectedNetworkVolume" class="mt-1 text-caption text-ink-3">
-          Secure Cloud · pinned to {{ selectedNetworkVolume.dataCenterId }} · mounted at /workspace
+          Secure Cloud · pinned to
+          {{ runPodRegionLabel(selectedNetworkVolume.dataCenterId) }} · mounted at /workspace
         </p>
         <p
           v-else-if="runpod.overview.networkVolumes.length === 0"
@@ -569,8 +576,8 @@ onBeforeUnmount(() => {
                 class="border-edge mt-1 h-8 w-full rounded-control border bg-bench px-2 text-body text-ink"
               >
                 <option value="" disabled>Choose a datacenter</option>
-                <option v-for="dc in runpod.overview.datacenters" :key="dc.id" :value="dc.id">
-                  {{ dc.name || dc.id }}{{ dc.location ? ` · ${dc.location}` : "" }}
+                <option v-for="dc in networkVolumeDatacenters" :key="dc.id" :value="dc.id">
+                  {{ runPodRegionLabel(dc.id, dc.location) }}
                 </option>
               </select>
             </label>
@@ -600,7 +607,8 @@ onBeforeUnmount(() => {
                 <div class="min-w-0 flex-1">
                   <p class="truncate text-body font-semibold text-ink">{{ volume.name }}</p>
                   <p class="data-mono text-caption text-ink-3">
-                    {{ volume.size }} GB · {{ volume.dataCenterId }} · {{ volume.id }}
+                    {{ volume.size }} GB · {{ runPodRegionLabel(volume.dataCenterId) }} ·
+                    {{ volume.id }}
                   </p>
                 </div>
                 <span v-if="form.networkVolumeId === volume.id" class="edge-code text-halide">
