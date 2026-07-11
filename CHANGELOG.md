@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-11
+
 ### Added
 
 - **Automated releases via release-plz.** Pushes to `main` now maintain a release PR (workspace version bump from conventional commits, hand-written `CHANGELOG.md` `[Unreleased]` promotion, desktop-app version sync); merging it creates the `vX.Y.Z` tag that drives binaries, crates.io, Docker, AUR, and FlakeHub publishing exactly as before. Versioned GitHub releases additionally ship the desktop app as a signed, notarized, stapled `Mold_<version>_aarch64.dmg` (plus zipped `Mold.app`), built by the reusable `desktop-distribution.yml` workflow.
@@ -842,7 +844,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/utensils/mold/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/utensils/mold/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/utensils/mold/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/utensils/mold/compare/v0.12.1...v0.13.0
