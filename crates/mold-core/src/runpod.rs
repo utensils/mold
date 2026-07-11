@@ -186,6 +186,8 @@ pub struct Pod {
     pub gpu: Option<PodGpu>,
     #[serde(default)]
     pub runtime: Option<serde_json::Value>,
+    #[serde(rename = "networkVolume", default)]
+    pub network_volume: Option<NetworkVolume>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -240,6 +242,24 @@ pub struct NetworkVolume {
     #[serde(rename = "dataCenterId", default)]
     pub data_center_id: String,
     pub size: u32,
+}
+
+/// Body for `POST /networkvolumes`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateNetworkVolumeRequest {
+    pub name: String,
+    pub size: u32,
+    #[serde(rename = "dataCenterId")]
+    pub data_center_id: String,
+}
+
+/// Body for `PATCH /networkvolumes/{id}`. Sizes may only increase.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateNetworkVolumeRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
 }
 
 // ─── Client ────────────────────────────────────────────────────────────────
@@ -386,6 +406,37 @@ impl RunPodClient {
         let status = resp.status();
         if status.is_success() {
             Ok(())
+        } else {
+            Err(http_error(path, status, resp).await.into())
+        }
+    }
+
+    async fn patch_json<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let resp = self
+            .http
+            .patch(self.url(path))
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| MoldError::RunPod(format!("RunPod {path}: {e}")))?;
+        let status = resp.status();
+        if status.is_success() {
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| MoldError::RunPod(format!("RunPod {path} body: {e}")))?;
+            serde_json::from_str(&text).map_err(|e| {
+                MoldError::RunPod(format!(
+                    "RunPod {path}: failed to parse response: {e} — body: {}",
+                    truncate_for_error(&text)
+                ))
+                .into()
+            })
         } else {
             Err(http_error(path, status, resp).await.into())
         }
@@ -631,6 +682,29 @@ impl RunPodClient {
 
     pub async fn network_volumes(&self) -> Result<Vec<NetworkVolume>> {
         self.get_json("/networkvolumes").await
+    }
+
+    pub async fn get_network_volume(&self, id: &str) -> Result<NetworkVolume> {
+        self.get_json(&format!("/networkvolumes/{id}")).await
+    }
+
+    pub async fn create_network_volume(
+        &self,
+        req: &CreateNetworkVolumeRequest,
+    ) -> Result<NetworkVolume> {
+        self.post_json("/networkvolumes", req).await
+    }
+
+    pub async fn update_network_volume(
+        &self,
+        id: &str,
+        req: &UpdateNetworkVolumeRequest,
+    ) -> Result<NetworkVolume> {
+        self.patch_json(&format!("/networkvolumes/{id}"), req).await
+    }
+
+    pub async fn delete_network_volume(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/networkvolumes/{id}")).await
     }
 }
 

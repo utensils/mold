@@ -565,6 +565,7 @@ mold runpod run "a cat on a skateboard"          # smart defaults
 mold runpod run "a sunset" --model flux-dev:q4   # preload a model
 mold runpod run "a cat" --gpu 5090               # force GPU family
 mold runpod run "a cat" --dc US-IL-1             # pin datacenter
+mold runpod run "a cat" --network-volume nv-abc123 # persistent /workspace
 mold runpod run "a cat" --keep                   # don't park — leave running
 mold runpod run "a cat" --steps 28 --seed 42     # forward standard flags
 mold runpod run "a cat" --output-dir ./renders   # custom save path
@@ -588,6 +589,12 @@ mold runpod create --dry-run                     # print plan, don't create
 mold runpod create --cloud community             # secure is default
 mold runpod create --hf-token                    # wire HF_TOKEN secret into pod env
 mold runpod create --network-volume nv-abc123    # attach pre-created volume
+mold runpod network-volume list                  # list persistent volumes
+mold runpod network-volume get nv-abc123         # inspect one volume
+mold runpod network-volume create --name models --size 100 --dc US-KS-2
+mold runpod network-volume update nv-abc123 --size 200 # grow only
+mold runpod network-volume update nv-abc123 --name shared-models
+mold runpod network-volume delete nv-abc123      # permanently deletes data
 mold runpod list
 mold runpod list --json
 mold runpod get <pod-id>
@@ -843,7 +850,7 @@ services.mold.discord = {
 
 ## Desktop App
 
-An experimental native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/` on the `experiment/desktop` branch. It embeds `mold serve` in-process on Metal, auto-detects a running server on `localhost:7680`, and can point at a remote host. It covers the generation workspace (live "Develop" progress), gallery, model/catalog pulls, the chains editing bench, prompt history, RunPod provisioning/lifecycle/connection, full-resolution image clipboard copy, and provenance-tagged settings, with a ⌘K command palette.
+An experimental native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/` on the `experiment/desktop` branch. It embeds `mold serve` in-process on Metal, auto-detects a running server on `localhost:7680`, and can point at a remote host. It covers the generation workspace (live "Develop" progress), gallery, model/catalog pulls, the chains editing bench, prompt history, RunPod provisioning/lifecycle/connection, full-resolution image clipboard copy, persistent 80–130% whole-app scaling (⌘+/⌘−/⌘0), and provenance-tagged settings, with a ⌘K command palette.
 
 Devshell commands (run inside `nix develop`):
 

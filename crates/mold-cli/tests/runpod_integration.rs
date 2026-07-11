@@ -20,6 +20,7 @@ fn runpod_help_lists_all_subcommands() {
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("gpus"))
         .stdout(predicate::str::contains("datacenters"))
+        .stdout(predicate::str::contains("network-volume"))
         .stdout(predicate::str::contains("list"))
         .stdout(predicate::str::contains("get"))
         .stdout(predicate::str::contains("create"))
@@ -30,6 +31,20 @@ fn runpod_help_lists_all_subcommands() {
         .stdout(predicate::str::contains("logs"))
         .stdout(predicate::str::contains("usage"))
         .stdout(predicate::str::contains("run"));
+}
+
+#[test]
+fn runpod_network_volume_help_lists_lifecycle_commands() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args(["runpod", "network-volume", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("get"))
+        .stdout(predicate::str::contains("create"))
+        .stdout(predicate::str::contains("update"))
+        .stdout(predicate::str::contains("delete"));
 }
 
 #[test]
@@ -61,6 +76,11 @@ fn runpod_run_help_documents_flags() {
         .stdout(predicate::str::contains("--keep"))
         .stdout(predicate::str::contains("--seed"))
         .stdout(predicate::str::contains("--wait-timeout"));
+    env.cmd()
+        .args(["runpod", "run", "a cat", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--network-volume"));
 }
 
 #[test]

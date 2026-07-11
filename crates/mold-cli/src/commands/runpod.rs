@@ -11,7 +11,8 @@ use colored::Colorize;
 use mold_core::config::Config;
 use mold_core::error::MoldError;
 use mold_core::runpod::{
-    image_tag_for_gpu, CreatePodRequest, GpuType, Pod, RunPodClient, API_KEY_ENV, DEFAULT_ENDPOINT,
+    image_tag_for_gpu, CreateNetworkVolumeRequest, CreatePodRequest, GpuType, NetworkVolume, Pod,
+    RunPodClient, UpdateNetworkVolumeRequest, API_KEY_ENV, DEFAULT_ENDPOINT,
 };
 
 use crate::theme;
@@ -119,6 +120,10 @@ fn now_epoch() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn network_volume_selection_mismatch(attached: Option<&str>, requested: Option<&str>) -> bool {
+    attached != requested
 }
 
 // ── Client construction + error translation ────────────────────────────
@@ -394,6 +399,158 @@ pub async fn run_datacenters(gpu_filter: Option<String>, json: bool) -> Result<(
         } else {
             println!("{:<18}{:<30}", dc.id, location);
         }
+    }
+    Ok(())
+}
+
+fn print_network_volume(volume: &NetworkVolume) {
+    println!("{} {}", theme::icon_ok(), volume.id);
+    println!("  name: {}", volume.name);
+    println!("  size: {} GB", volume.size);
+    println!("  datacenter: {}", volume.data_center_id);
+}
+
+pub async fn run_network_volume_list(json: bool) -> Result<()> {
+    let client = build_client()?;
+    let volumes = match with_spinner("listing network volumes…", client.network_volumes()).await {
+        Ok(volumes) => volumes,
+        Err(error) => {
+            explain_runpod_error(&error);
+            return Err(AlreadyReported.into());
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&volumes)?);
+    } else if volumes.is_empty() {
+        println!("{} no network volumes.", theme::icon_neutral());
+    } else {
+        println!(
+            "{:<18}{:<28}{:<12}{}",
+            "id".bold(),
+            "name".bold(),
+            "size".bold(),
+            "datacenter".bold()
+        );
+        for volume in volumes {
+            println!(
+                "{:<18}{:<28}{:<12}{}",
+                volume.id,
+                volume.name,
+                format!("{} GB", volume.size),
+                volume.data_center_id
+            );
+        }
+    }
+    Ok(())
+}
+
+pub async fn run_network_volume_get(volume_id: String, json: bool) -> Result<()> {
+    let client = build_client()?;
+    let volume = match client.get_network_volume(&volume_id).await {
+        Ok(volume) => volume,
+        Err(error) => {
+            explain_runpod_error(&error);
+            return Err(AlreadyReported.into());
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&volume)?);
+    } else {
+        print_network_volume(&volume);
+    }
+    Ok(())
+}
+
+pub async fn run_network_volume_create(
+    name: String,
+    size: u32,
+    datacenter: String,
+    json: bool,
+) -> Result<()> {
+    let name = name.trim();
+    let datacenter = datacenter.trim();
+    if name.is_empty() {
+        bail!("network volume name cannot be empty");
+    }
+    if datacenter.is_empty() {
+        bail!("network volume datacenter cannot be empty");
+    }
+    if !(1..=4000).contains(&size) {
+        bail!("network volume size must be between 1 and 4000 GB");
+    }
+    let client = build_client()?;
+    let volume = client
+        .create_network_volume(&CreateNetworkVolumeRequest {
+            name: name.into(),
+            size,
+            data_center_id: datacenter.into(),
+        })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&volume)?);
+    } else {
+        print_network_volume(&volume);
+        println!("  note: network volumes are billed until explicitly deleted");
+    }
+    Ok(())
+}
+
+pub async fn run_network_volume_update(
+    volume_id: String,
+    name: Option<String>,
+    size: Option<u32>,
+    json: bool,
+) -> Result<()> {
+    if name.is_none() && size.is_none() {
+        bail!("provide --name and/or --size");
+    }
+    let name = name.map(|name| name.trim().to_string());
+    if name.as_deref().is_some_and(str::is_empty) {
+        bail!("network volume name cannot be empty");
+    }
+    if size.is_some_and(|size| !(1..=4000).contains(&size)) {
+        bail!("network volume size must be between 1 and 4000 GB");
+    }
+    let client = build_client()?;
+    if let Some(new_size) = size {
+        let current = client.get_network_volume(&volume_id).await?;
+        if new_size <= current.size {
+            bail!(
+                "network volume size can only grow (current: {} GB, requested: {new_size} GB)",
+                current.size
+            );
+        }
+    }
+    let volume = client
+        .update_network_volume(&volume_id, &UpdateNetworkVolumeRequest { name, size })
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&volume)?);
+    } else {
+        print_network_volume(&volume);
+    }
+    Ok(())
+}
+
+pub async fn run_network_volume_delete(volume_id: String, json: bool) -> Result<()> {
+    let client = build_client()?;
+    if let Ok(pods) = client.list_pods().await {
+        if let Some(pod) = pods.iter().find(|pod| {
+            pod.network_volume
+                .as_ref()
+                .is_some_and(|volume| volume.id == volume_id)
+        }) {
+            bail!(
+                "delete pod {} before deleting its attached network volume",
+                pod.id
+            );
+        }
+    }
+    client.delete_network_volume(&volume_id).await?;
+    if json {
+        println!("{}", serde_json::json!({ "deleted": volume_id }));
+    } else {
+        println!("{} deleted network volume {volume_id}", theme::icon_ok());
     }
     Ok(())
 }
@@ -701,9 +858,6 @@ pub async fn build_create_request(
     // Resolve GPU — either user-supplied, config default, or cheapest available.
     let (gpu_name, gpu_display) = resolve_gpu(opts, client, config).await?;
 
-    // Resolve datacenter — either user-supplied, config default, or first with stock.
-    let dc = resolve_datacenter(opts, client, config, &gpu_display).await?;
-
     // Resolve image tag.
     let image_tag = opts
         .image_tag
@@ -716,6 +870,28 @@ pub async fn build_create_request(
         .network_volume_id
         .clone()
         .or_else(|| config.runpod.default_network_volume_id.clone());
+    let network_volume = match volume_id.as_deref() {
+        Some(id) => Some(
+            client
+                .get_network_volume(id)
+                .await
+                .with_context(|| format!("load network volume {id}"))?,
+        ),
+        None => None,
+    };
+
+    // A network volume is physically scoped to one Secure Cloud datacenter;
+    // it is authoritative over explicit/default cloud and DC preferences.
+    let dc = if let Some(volume) = &network_volume {
+        Some(volume.data_center_id.clone())
+    } else {
+        resolve_datacenter(opts, client, config, &gpu_display).await?
+    };
+    let cloud_type = if network_volume.is_some() {
+        "SECURE"
+    } else {
+        opts.cloud.as_str()
+    };
 
     // Build env.
     let mut env = serde_json::Map::new();
@@ -735,11 +911,15 @@ pub async fn build_create_request(
         name,
         image_name: image,
         gpu_type_ids: vec![gpu_name],
-        cloud_type: opts.cloud.as_str().to_string(),
+        cloud_type: cloud_type.to_string(),
         data_center_ids: dc.map(|id| vec![id]),
         gpu_count: 1,
         container_disk_in_gb: opts.disk_gb,
-        volume_in_gb: opts.volume_gb,
+        volume_in_gb: if network_volume.is_some() {
+            0
+        } else {
+            opts.volume_gb
+        },
         volume_mount_path: "/workspace".to_string(),
         ports: vec!["7680/http".into(), "22/tcp".into()],
         env,
@@ -1701,6 +1881,11 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                     .datacenter
                     .clone()
                     .or_else(|| config.runpod.default_datacenter.clone());
+                let want_volume = opts
+                    .create
+                    .network_volume_id
+                    .clone()
+                    .or_else(|| config.runpod.default_network_volume_id.clone());
                 let gpu_mismatch = want_gpu
                     .as_deref()
                     .map(normalize_gpu_id)
@@ -1715,23 +1900,16 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                     .as_deref()
                     .map(|want| !warm_dc.is_empty() && !warm_dc.eq_ignore_ascii_case(want))
                     .unwrap_or(false);
-                if gpu_mismatch || dc_mismatch {
+                let volume_mismatch = network_volume_selection_mismatch(
+                    pod.network_volume.as_ref().map(|volume| volume.id.as_str()),
+                    want_volume.as_deref(),
+                );
+                if gpu_mismatch || dc_mismatch || volume_mismatch {
                     eprintln!(
-                        "{} warm pod {} is {}{} but --gpu/--dc asks for {}{} — \
+                        "{} warm pod {} does not match the requested GPU, datacenter, or network volume — \
                          deleting warm pod and provisioning fresh",
                         theme::icon_warn(),
                         id,
-                        warm_gpu,
-                        if warm_dc.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" ({warm_dc})")
-                        },
-                        want_gpu.clone().unwrap_or_else(|| "(any)".into()),
-                        want_dc
-                            .clone()
-                            .map(|d| format!(" ({d})"))
-                            .unwrap_or_default(),
                     );
                     let _ = client.delete_pod(&id).await;
                     mark_history_deleted(&id);
@@ -2141,6 +2319,15 @@ pub fn complete_dc_id() -> Vec<CompletionCandidate> {
     .collect()
 }
 
+pub fn complete_network_volume_id() -> Vec<CompletionCandidate> {
+    Config::load_or_default()
+        .runpod
+        .default_network_volume_id
+        .into_iter()
+        .map(CompletionCandidate::new)
+        .collect()
+}
+
 pub fn complete_cloud_type() -> Vec<CompletionCandidate> {
     vec![
         CompletionCandidate::new("secure"),
@@ -2163,6 +2350,21 @@ mod tests {
             normalize_gpu_id("NVIDIA GeForce RTX 4090"),
             "NVIDIA GeForce RTX 4090"
         );
+    }
+
+    #[test]
+    fn warm_pod_network_volume_must_match_requested_selection() {
+        assert!(!network_volume_selection_mismatch(None, None));
+        assert!(!network_volume_selection_mismatch(
+            Some("nv-1"),
+            Some("nv-1")
+        ));
+        assert!(network_volume_selection_mismatch(None, Some("nv-1")));
+        assert!(network_volume_selection_mismatch(Some("nv-1"), None));
+        assert!(network_volume_selection_mismatch(
+            Some("nv-1"),
+            Some("nv-2")
+        ));
     }
 
     #[test]

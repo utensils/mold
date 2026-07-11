@@ -47,6 +47,19 @@ export interface RunPodPod {
   volumeInGb: number;
   machine: { gpuDisplayName: string | null; location: string | null } | null;
   gpu: { id: string | null; displayName: string | null; count: number | null } | null;
+  networkVolume: RunPodNetworkVolume | null;
+}
+
+export interface RunPodNetworkVolumeCreateInput {
+  name: string;
+  sizeGb: number;
+  datacenterId: string;
+}
+
+export interface RunPodNetworkVolumeUpdateInput {
+  id: string;
+  name: string | null;
+  sizeGb: number | null;
 }
 
 export interface RunPodOverview {

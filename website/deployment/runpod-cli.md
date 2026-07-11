@@ -83,6 +83,7 @@ if you don't want the endpoint open to the public proxy.
 mold runpod run "a cat" --model flux-dev:q4        # preload a specific model
 mold runpod run "a cat" --gpu 5090                 # force a GPU family
 mold runpod run "a cat" --dc US-IL-1               # pin a datacenter
+mold runpod run "a cat" --network-volume <id>       # persistent /workspace
 mold runpod run "a cat" --keep                     # don't park pod for reuse
 mold runpod run "a cat" --steps 28 --seed 42       # forward standard gen flags
 mold runpod run "a cat" --output-dir ./renders     # custom save path
@@ -106,6 +107,14 @@ mold runpod stop <pod-id>                  # pause billing, keep storage
 mold runpod start <pod-id>                 # resume
 mold runpod delete <pod-id>                # tear down
 
+# Persistent network volumes
+mold runpod network-volume list
+mold runpod network-volume get <volume-id>
+mold runpod network-volume create --name models --size 100 --dc US-KS-2
+mold runpod network-volume update <volume-id> --size 200
+mold runpod network-volume update <volume-id> --name shared-models
+mold runpod network-volume delete <volume-id>       # permanently deletes all data
+
 # Connecting
 mold runpod connect <pod-id>                    # print export MOLD_HOST=…
 eval "$(mold runpod connect <pod-id>)"          # exec the export in your shell
@@ -116,6 +125,13 @@ mold runpod logs <pod-id> --follow              # tail (polls every 2s)
 ```
 
 ## Smart defaults explained
+
+When a network volume is selected, it replaces the ordinary Pod workspace
+disk at `/workspace`. Mold forces Secure Cloud and pins deployment to the
+volume's datacenter, even if `--cloud`, `--dc`, or their config defaults say
+otherwise. A volume can be renamed and grown up to 4000 GB, but cannot shrink.
+It remains billable independently of pods until explicitly deleted, and must be
+detached by deleting its pod before the volume itself can be deleted.
 
 When `mold runpod create` (or `run`) is invoked without `--gpu`/`--dc`:
 

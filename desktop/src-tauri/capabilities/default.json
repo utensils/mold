@@ -9,6 +9,7 @@
     "core:window:allow-set-focus",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
+    "core:webview:allow-set-webview-zoom",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-write-image",
     "dialog:default",

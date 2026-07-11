@@ -10,7 +10,6 @@ import { galleryMediaPath, type GallerySource } from "../lib/gallery/media";
 import { formatBytes } from "../lib/format";
 import { useConnectionStore } from "../stores/connection";
 import { useGalleryStore } from "../stores/gallery";
-import { useUiStore } from "../stores/ui";
 import { useComposerStore } from "../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
@@ -20,13 +19,10 @@ import type { GalleryImage } from "../lib/api/types";
 
 const GAP = 8;
 const PAD = 16;
-// Zoom levels for the justified row target height (⌘0 / ⌘+ / ⌘-).
-const ROW_HEIGHTS = [120, 180, 240];
 
 const router = useRouter();
 const conn = useConnectionStore();
 const gallery = useGalleryStore();
-const ui = useUiStore();
 const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
 const toasts = useToastStore();
@@ -115,21 +111,6 @@ const virtualizer = useVirtualizer(
     estimateSize: (i: number) => (rows.value[i]?.height ?? rowHeight.value) + GAP,
     overscan: 5,
   })),
-);
-
-// ⌘0 reset · ⌘+ zoom in (taller rows) · ⌘- zoom out, clamped to ROW_HEIGHTS.
-watch(
-  () => ui.galleryZoomTick,
-  () => {
-    if (ui.galleryZoomDir === "reset") {
-      rowHeight.value = 180;
-      return;
-    }
-    const i = ROW_HEIGHTS.indexOf(rowHeight.value);
-    const base = i === -1 ? 1 : i;
-    const next = ui.galleryZoomDir === "in" ? base + 1 : base - 1;
-    rowHeight.value = ROW_HEIGHTS[Math.min(ROW_HEIGHTS.length - 1, Math.max(0, next))]!;
-  },
 );
 
 const totalBytes = computed(() => gallery.items.reduce((sum, i) => sum + (i.size_bytes ?? 0), 0));

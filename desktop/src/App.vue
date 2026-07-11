@@ -10,6 +10,7 @@ import ContextMenu from "./components/shell/ContextMenu.vue";
 import { resolveShellShortcut } from "./lib/shortcuts";
 import { useAppPrefsStore } from "./stores/appPrefs";
 import { useConnectionStore } from "./stores/connection";
+import { useContextMenuStore } from "./stores/contextMenu";
 import { useGenerationStore } from "./stores/generation";
 import { useToastStore } from "./stores/toasts";
 import { useUiStore } from "./stores/ui";
@@ -18,6 +19,7 @@ const router = useRouter();
 const sidebarOpen = ref(true);
 const appPrefs = useAppPrefsStore();
 const connection = useConnectionStore();
+const contextMenu = useContextMenuStore();
 const generation = useGenerationStore();
 const toasts = useToastStore();
 const ui = useUiStore();
@@ -54,8 +56,9 @@ function onKeydown(e: KeyboardEvent) {
     case "copy-seed":
       ui.copySeed();
       break;
-    case "gallery-zoom":
-      if (route === "/gallery") ui.zoomGallery(action.direction);
+    case "ui-scale":
+      contextMenu.close();
+      void appPrefs.scaleUi(action.direction);
       break;
   }
 }
@@ -86,6 +89,15 @@ async function listenForMenu() {
       case "toggle-sidebar":
         sidebarOpen.value = !sidebarOpen.value;
         return;
+      case "zoom-in":
+        contextMenu.close();
+        return void appPrefs.scaleUi("in");
+      case "zoom-out":
+        contextMenu.close();
+        return void appPrefs.scaleUi("out");
+      case "actual-size":
+        contextMenu.close();
+        return void appPrefs.scaleUi("reset");
       case "help:api":
         if (connection.baseUrl) {
           void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>

@@ -266,6 +266,8 @@ mold config set runpod.api_key <key>
 mold runpod doctor
 mold runpod run "a cat on a skateboard"
 mold runpod create --gpu 5090
+mold runpod network-volume create --name models --size 100 --dc US-KS-2
+mold runpod run "a cat" --network-volume <volume-id>
 mold runpod connect <pod-id>
 mold runpod delete <pod-id>
 ```

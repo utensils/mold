@@ -33,6 +33,8 @@ const defaults = {
   dockBadge: true,
   restoreLastRoute: false,
   runpodIncludeHfToken: false,
+  runpodNetworkVolumeId: null,
+  uiScalePercent: 100,
 };
 
 beforeEach(() => {

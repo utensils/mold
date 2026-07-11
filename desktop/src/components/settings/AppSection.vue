@@ -17,6 +17,11 @@ const THEME_FAMILIES = [
   { value: "safelight", label: "Safelight" },
   { value: "mold", label: "Mold" },
 ];
+
+const UI_SCALES = [80, 90, 100, 110, 120, 130].map((value) => ({
+  value: String(value),
+  label: `${value}%`,
+}));
 </script>
 
 <template>
@@ -41,6 +46,17 @@ const THEME_FAMILIES = [
         :options="THEMES"
         aria-label="Appearance"
         @commit="(v) => prefs.update({ theme: v as Theme })"
+      />
+    </SettingRow>
+    <SettingRow
+      label="Interface size"
+      help="Scale the complete interface, including menus and overlays. Use ⌘+, ⌘−, or ⌘0 at any time."
+    >
+      <SelectControl
+        :model-value="String(prefs.uiScalePercent)"
+        :options="UI_SCALES"
+        aria-label="Interface size"
+        @commit="(v) => prefs.update({ uiScalePercent: Number(v) })"
       />
     </SettingRow>
     <SettingRow

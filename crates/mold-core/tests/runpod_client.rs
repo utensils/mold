@@ -6,8 +6,11 @@
 //! adapter behaviour in `gpu_types` / `datacenters`.
 
 use mold_core::error::MoldError;
-use mold_core::runpod::{CreatePodRequest, RunPodClient, RunPodSettings};
-use wiremock::matchers::{bearer_token, method, path};
+use mold_core::runpod::{
+    CreateNetworkVolumeRequest, CreatePodRequest, RunPodClient, RunPodSettings,
+    UpdateNetworkVolumeRequest,
+};
+use wiremock::matchers::{bearer_token, body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── helpers ────────────────────────────────────────────────────────────
@@ -177,6 +180,67 @@ async fn delete_pod_requires_success_status() {
         .mount(&server)
         .await;
     assert!(client.delete_pod("abc").await.is_ok());
+}
+
+#[tokio::test]
+async fn network_volume_crud_uses_rest_contract() {
+    let (client, server) = client_with_mock().await;
+    let volume_json = r#"{"id":"nv-1","name":"models","dataCenterId":"US-KS-2","size":100}"#;
+
+    Mock::given(method("GET"))
+        .and(path("/networkvolumes/nv-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(volume_json))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/networkvolumes"))
+        .and(body_json(serde_json::json!({
+            "name": "models",
+            "size": 100,
+            "dataCenterId": "US-KS-2"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_string(volume_json))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/networkvolumes/nv-1"))
+        .and(body_json(
+            serde_json::json!({"name": "models-v2", "size": 150}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"id":"nv-1","name":"models-v2","dataCenterId":"US-KS-2","size":150}"#,
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/networkvolumes/nv-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let found = client.get_network_volume("nv-1").await.unwrap();
+    assert_eq!(found.data_center_id, "US-KS-2");
+    let created = client
+        .create_network_volume(&CreateNetworkVolumeRequest {
+            name: "models".into(),
+            size: 100,
+            data_center_id: "US-KS-2".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.size, 100);
+    let updated = client
+        .update_network_volume(
+            "nv-1",
+            &UpdateNetworkVolumeRequest {
+                name: Some("models-v2".into()),
+                size: Some(150),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.name, "models-v2");
+    assert!(client.delete_network_volume("nv-1").await.is_ok());
 }
 
 #[tokio::test]

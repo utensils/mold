@@ -149,14 +149,16 @@ Generate on a cloud GPU without managing pods yourself:
 ```bash
 mold config set runpod.api_key <key>         # one-time setup
 mold runpod run "a cat on a skateboard"       # creates pod → generates → saves to ./mold-outputs/
+mold runpod network-volume create --name models --size 100 --dc US-KS-2
+mold runpod run "a cat" --network-volume <volume-id>
 ```
 
 `mold runpod run` picks the cheapest available GPU, falls back across
 datacenters if scheduling stalls, streams SSE progress over RunPod's
 Cloudflare proxy, and leaves the pod warm for reuse on the next call.
 See the [RunPod CLI guide](https://utensils.io/mold/deployment/runpod-cli)
-for full subcommand reference (`doctor`, `gpus`, `list`, `create`, `stop`,
-`delete`, `logs`, `usage`, …).
+for full subcommand reference (`doctor`, `gpus`, `network-volume`, `list`,
+`create`, `stop`, `delete`, `logs`, `usage`, …).
 
 See the full [CLI reference](https://utensils.io/mold/guide/cli-reference), [configuration guide](https://utensils.io/mold/guide/configuration), and [model catalog](https://utensils.io/mold/models/) in the documentation.
 

@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { ipc, type AppSettings, type Theme, type ThemeFamily } from "../lib/ipc";
+import { applyUiScale, nextUiScale, type UiScaleDirection } from "../lib/uiScale";
 
 /**
  * Resolve what `data-theme` should be on the root element. Pure — exported
@@ -40,19 +41,32 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     dockBadge: (s) => s.settings?.dockBadge ?? true,
     restoreLastRoute: (s) => s.settings?.restoreLastRoute ?? false,
     runpodIncludeHfToken: (s) => s.settings?.runpodIncludeHfToken ?? false,
+    runpodNetworkVolumeId: (s) => s.settings?.runpodNetworkVolumeId ?? null,
+    uiScalePercent: (s) => s.settings?.uiScalePercent ?? 100,
     engineEnv: (s): Record<string, string> => s.settings?.engineEnv ?? {},
   },
   actions: {
     async init(): Promise<AppSettings> {
       this.settings = await ipc.appSettingsGet();
       applyTheme(this.settings.theme, this.settings.themeFamily);
+      const normalizedScale = await applyUiScale(this.settings.uiScalePercent);
+      if (normalizedScale !== this.settings.uiScalePercent) {
+        this.settings = { ...this.settings, uiScalePercent: normalizedScale };
+        await ipc.appSettingsSet(this.settings);
+      }
       return this.settings;
     },
     async update(patch: Partial<AppSettings>): Promise<void> {
       const current = this.settings ?? (await ipc.appSettingsGet());
       this.settings = { ...current, ...patch };
       applyTheme(this.settings.theme, this.settings.themeFamily);
+      const normalizedScale = await applyUiScale(this.settings.uiScalePercent);
+      this.settings = { ...this.settings, uiScalePercent: normalizedScale };
       await ipc.appSettingsSet(this.settings);
+    },
+    async scaleUi(direction: UiScaleDirection): Promise<void> {
+      const current = this.settings ?? (await this.init());
+      await this.update({ uiScalePercent: nextUiScale(current.uiScalePercent, direction) });
     },
     /** Remember the route for restore-on-launch without churning the theme. */
     async rememberRoute(route: string): Promise<void> {

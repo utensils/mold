@@ -4,6 +4,8 @@ import {
   emptyRunPodOverview,
   rankRunPodGpus,
   type RunPodCreateInput,
+  type RunPodNetworkVolumeCreateInput,
+  type RunPodNetworkVolumeUpdateInput,
   type RunPodOverview,
 } from "../lib/runpod";
 
@@ -57,6 +59,47 @@ export const useRunPodStore = defineStore("runpod", {
       this.operationError = null;
       try {
         await ipc.runpodCreate(input);
+        await this.load();
+      } catch (error) {
+        this.operationError = error instanceof Error ? error.message : String(error);
+        throw error;
+      } finally {
+        this.mutating = null;
+      }
+    },
+    async createNetworkVolume(input: RunPodNetworkVolumeCreateInput) {
+      this.mutating = "volume:create";
+      this.operationError = null;
+      try {
+        const volume = await ipc.runpodNetworkVolumeCreate(input);
+        await this.load();
+        return volume;
+      } catch (error) {
+        this.operationError = error instanceof Error ? error.message : String(error);
+        throw error;
+      } finally {
+        this.mutating = null;
+      }
+    },
+    async updateNetworkVolume(input: RunPodNetworkVolumeUpdateInput) {
+      this.mutating = `volume:update:${input.id}`;
+      this.operationError = null;
+      try {
+        const volume = await ipc.runpodNetworkVolumeUpdate(input);
+        await this.load();
+        return volume;
+      } catch (error) {
+        this.operationError = error instanceof Error ? error.message : String(error);
+        throw error;
+      } finally {
+        this.mutating = null;
+      }
+    },
+    async deleteNetworkVolume(id: string) {
+      this.mutating = `volume:delete:${id}`;
+      this.operationError = null;
+      try {
+        await ipc.runpodNetworkVolumeDelete(id);
         await this.load();
       } catch (error) {
         this.operationError = error instanceof Error ? error.message : String(error);

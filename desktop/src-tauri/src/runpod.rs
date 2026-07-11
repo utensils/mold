@@ -1,6 +1,6 @@
 use mold_core::runpod::{
-    image_tag_for_gpu, CreatePodRequest, Datacenter, GpuType, NetworkVolume, Pod, RunPodClient,
-    DEFAULT_ENDPOINT,
+    image_tag_for_gpu, CreateNetworkVolumeRequest, CreatePodRequest, Datacenter, GpuType,
+    NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest, DEFAULT_ENDPOINT,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
@@ -58,6 +58,22 @@ pub struct RunPodCreateInput {
     pub model: Option<String>,
     #[serde(default)]
     pub include_hf_token: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunPodNetworkVolumeCreateInput {
+    pub name: String,
+    pub size_gb: u32,
+    pub datacenter_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunPodNetworkVolumeUpdateInput {
+    pub id: String,
+    pub name: Option<String>,
+    pub size_gb: Option<u32>,
 }
 
 fn client(state: &AppState) -> Result<Option<(RunPodClient, &'static str)>, String> {
@@ -162,6 +178,15 @@ fn build_request(
     })
 }
 
+fn apply_network_volume_constraints(input: &mut RunPodCreateInput, volume: &NetworkVolume) {
+    input.cloud_type = "SECURE".into();
+    input.datacenter_id = Some(volume.data_center_id.clone());
+    input.network_volume_id = Some(volume.id.clone());
+    // RunPod replaces the ordinary Pod volume with the attached network
+    // volume. Sending zero makes the launch plan and billing intent explicit.
+    input.volume_gb = 0;
+}
+
 #[tauri::command]
 pub async fn runpod_overview(state: tauri::State<'_, AppState>) -> Result<RunPodOverview, String> {
     let Some((client, credential_source)) = client(&state)? else {
@@ -203,9 +228,16 @@ pub async fn runpod_overview(state: tauri::State<'_, AppState>) -> Result<RunPod
 #[tauri::command]
 pub async fn runpod_create(
     state: tauri::State<'_, AppState>,
-    input: RunPodCreateInput,
+    mut input: RunPodCreateInput,
 ) -> Result<Pod, String> {
     let (client, _) = client(&state)?.ok_or_else(|| "Add a RunPod API key first.".to_string())?;
+    if let Some(volume_id) = input.network_volume_id.clone() {
+        let volume = client
+            .get_network_volume(&volume_id)
+            .await
+            .map_err(|e| format!("Could not load network volume {volume_id}: {e:#}"))?;
+        apply_network_volume_constraints(&mut input, &volume);
+    }
     let hf_token = if input.include_hf_token {
         state.secrets.get("hf-token").map_err(|e| e.to_string())?
     } else {
@@ -214,6 +246,97 @@ pub async fn runpod_create(
     let request = build_request(input, hf_token)?;
     client
         .create_pod(&request)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn runpod_network_volume_create(
+    state: tauri::State<'_, AppState>,
+    input: RunPodNetworkVolumeCreateInput,
+) -> Result<NetworkVolume, String> {
+    let (client, _) = client(&state)?.ok_or_else(|| "Add a RunPod API key first.".to_string())?;
+    let name = input.name.trim();
+    let datacenter_id = input.datacenter_id.trim();
+    if name.is_empty() {
+        return Err("Enter a name for the network volume.".into());
+    }
+    if datacenter_id.is_empty() {
+        return Err("Choose a datacenter for the network volume.".into());
+    }
+    if !(1..=4000).contains(&input.size_gb) {
+        return Err("Network volume size must be between 1 and 4000 GB.".into());
+    }
+    client
+        .create_network_volume(&CreateNetworkVolumeRequest {
+            name: name.into(),
+            size: input.size_gb,
+            data_center_id: datacenter_id.into(),
+        })
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn runpod_network_volume_update(
+    state: tauri::State<'_, AppState>,
+    input: RunPodNetworkVolumeUpdateInput,
+) -> Result<NetworkVolume, String> {
+    let (client, _) = client(&state)?.ok_or_else(|| "Add a RunPod API key first.".to_string())?;
+    if input.name.is_none() && input.size_gb.is_none() {
+        return Err("Change the name or enter a larger size.".into());
+    }
+    let name = input.name.map(|name| name.trim().to_string());
+    if name.as_deref().is_some_and(str::is_empty) {
+        return Err("Network volume name cannot be empty.".into());
+    }
+    if let Some(size) = input.size_gb {
+        if !(1..=4000).contains(&size) {
+            return Err("Network volume size must be between 1 and 4000 GB.".into());
+        }
+        let current = client
+            .get_network_volume(&input.id)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        if size <= current.size {
+            return Err(format!(
+                "Network volumes can only grow. Current size is {} GB.",
+                current.size
+            ));
+        }
+    }
+    client
+        .update_network_volume(
+            &input.id,
+            &UpdateNetworkVolumeRequest {
+                name,
+                size: input.size_gb,
+            },
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn runpod_network_volume_delete(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let (client, _) = client(&state)?.ok_or_else(|| "Add a RunPod API key first.".to_string())?;
+    if let Ok(pods) = client.list_pods().await {
+        if let Some(pod) = pods.iter().find(|pod| {
+            pod.network_volume
+                .as_ref()
+                .is_some_and(|volume| volume.id == id)
+        }) {
+            return Err(format!(
+                "Delete instance '{}' before deleting its attached network volume.",
+                pod.name.as_deref().unwrap_or(&pod.id)
+            ));
+        }
+    }
+    client
+        .delete_network_volume(&id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -273,5 +396,26 @@ mod tests {
         assert!(build_request(invalid, None)
             .unwrap_err()
             .contains("between 10 and 1000"));
+    }
+
+    #[test]
+    fn network_volume_forces_secure_cloud_and_its_datacenter() {
+        let mut input = input();
+        input.cloud_type = "COMMUNITY".into();
+        input.datacenter_id = Some("EU-RO-1".into());
+        input.network_volume_id = Some("nv-1".into());
+        apply_network_volume_constraints(
+            &mut input,
+            &NetworkVolume {
+                id: "nv-1".into(),
+                name: "models".into(),
+                data_center_id: "US-KS-2".into(),
+                size: 100,
+            },
+        );
+        let request = build_request(input, None).unwrap();
+        assert_eq!(request.cloud_type, "SECURE");
+        assert_eq!(request.data_center_ids, Some(vec!["US-KS-2".into()]));
+        assert_eq!(request.network_volume_id.as_deref(), Some("nv-1"));
     }
 }

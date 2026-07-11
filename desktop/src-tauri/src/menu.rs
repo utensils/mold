@@ -113,6 +113,22 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                 .build(app)?,
         )
         .separator()
+        .item(
+            &MenuItemBuilder::with_id("actual-size", "Actual Size")
+                .accelerator("Cmd+0")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("zoom-in", "Zoom In")
+                .accelerator("Cmd+=")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("zoom-out", "Zoom Out")
+                .accelerator("Cmd+-")
+                .build(app)?,
+        )
+        .separator()
         .fullscreen()
         .build()?;
 

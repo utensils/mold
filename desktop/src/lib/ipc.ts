@@ -1,4 +1,11 @@
-import type { RunPodCreateInput, RunPodOverview, RunPodPod } from "./runpod";
+import type {
+  RunPodCreateInput,
+  RunPodNetworkVolume,
+  RunPodNetworkVolumeCreateInput,
+  RunPodNetworkVolumeUpdateInput,
+  RunPodOverview,
+  RunPodPod,
+} from "./runpod";
 import type { GalleryImage } from "./api/types";
 
 /**
@@ -30,6 +37,8 @@ export interface AppSettings {
   dockBadge: boolean;
   restoreLastRoute: boolean;
   runpodIncludeHfToken: boolean;
+  runpodNetworkVolumeId: string | null;
+  uiScalePercent: number;
 }
 
 export interface HostTest {
@@ -76,6 +85,8 @@ const browserFallbackSettings = (): AppSettings => ({
   dockBadge: true,
   restoreLastRoute: false,
   runpodIncludeHfToken: false,
+  runpodNetworkVolumeId: null,
+  uiScalePercent: 100,
 });
 
 export const ipc = {
@@ -157,6 +168,20 @@ export const ipc = {
     if (!inTauri())
       return Promise.reject(new Error("RunPod provisioning requires the desktop app."));
     return invoke<RunPodPod>("runpod_create", { input });
+  },
+  runpodNetworkVolumeCreate(input: RunPodNetworkVolumeCreateInput): Promise<RunPodNetworkVolume> {
+    if (!inTauri())
+      return Promise.reject(new Error("RunPod volume management requires the desktop app."));
+    return invoke<RunPodNetworkVolume>("runpod_network_volume_create", { input });
+  },
+  runpodNetworkVolumeUpdate(input: RunPodNetworkVolumeUpdateInput): Promise<RunPodNetworkVolume> {
+    if (!inTauri())
+      return Promise.reject(new Error("RunPod volume management requires the desktop app."));
+    return invoke<RunPodNetworkVolume>("runpod_network_volume_update", { input });
+  },
+  runpodNetworkVolumeDelete(id: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("runpod_network_volume_delete", { id });
   },
   runpodStart(id: string): Promise<void> {
     if (!inTauri()) return Promise.resolve();

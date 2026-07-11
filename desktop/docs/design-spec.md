@@ -263,7 +263,7 @@ Flat, fast, keyboard-first list over `prompt_history` (recent/search). ↩ Use f
 
 ### 4.7 RunPod — the remote bench
 
-The RunPod workspace keeps provisioning in the app: Keychain-backed API setup, balance and active hourly spend, GPU stock, cloud/datacenter/storage choices, live pod status, logs, lifecycle controls, and **Use in Mold** to connect the engine to `https://<pod>-7680.proxy.runpod.net`. Poll status every ten seconds while the screen is open. Destructive delete uses an inline two-step confirmation. Keys entered in the app go to Keychain, while existing CLI environment/config credentials continue to work and are identified as externally managed.
+The RunPod workspace keeps provisioning in the app: Keychain-backed API setup, balance and active hourly spend, GPU stock, cloud/datacenter/storage choices, live pod status, logs, lifecycle controls, and **Use in Mold** to connect the engine to `https://<pod>-7680.proxy.runpod.net`. Network volumes can be created, selected, renamed/grown, and deleted in place; selection persists, volume-backed launches visibly lock to Secure Cloud and the volume datacenter, and destructive deletion names the permanent-data risk. Poll status every ten seconds while the screen is open. Destructive delete uses an inline two-step confirmation. Keys entered in the app go to Keychain, while existing CLI environment/config credentials continue to work and are identified as externally managed.
 
 While a remote engine is selected, Gallery uses a standard two-tab location switch: **Remote** shows that engine's output and **This Mac** reads the configured local output directory through a restricted native media protocol. Switching gallery location never changes the generation engine.
 
@@ -315,7 +315,7 @@ Everything else is small and mechanical:
 | ⌘.           | Cancel focused job                            |
 | ⌘\           | Toggle sidebar                                |
 | ⌘[ / ⌘]      | Back / forward                                |
-| ⌘0 / ⌘+ / ⌘− | Gallery zoom reset / in / out                 |
+| ⌘0 / ⌘+ / ⌘− | Interface size reset / larger / smaller       |
 | ⇧⌘C          | Copy seed (lightbox) · ⌥⌘C copy prompt        |
 
 **Menu bar:** **mold** (About, Check for Updates…, Settings… ⌘,, Quit) · **File** (New Generation ⌘N, New Chain, Open Chain Script…, Import Image for img2img…, Export Selection…, Reveal in Finder) · **Edit** (standard + Copy Seed, Copy Prompt) · **Generate** (Generate ⌘↩, Expand Prompt ⌘E, Randomize Seed ⌘R, Duplicate Last ⌘D, Cancel Job ⌘.) · **View** (screens ⌘1–5, Toggle Sidebar ⌘\, Appearance ▸, Actual Size/Zoom) · **Window** / **Help** (Shortcuts, API Reference → /api/docs, Open Logs).

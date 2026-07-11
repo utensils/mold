@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { podGpuName, podProxyUrl, type RunPodCreateInput, type RunPodPod } from "../lib/runpod";
+import {
+  podGpuName,
+  podProxyUrl,
+  type RunPodCreateInput,
+  type RunPodNetworkVolume,
+  type RunPodPod,
+} from "../lib/runpod";
 import { inTauri } from "../lib/ipc";
 import { useConnectionStore } from "../stores/connection";
 import { useAppPrefsStore } from "../stores/appPrefs";
@@ -14,6 +20,12 @@ const toasts = useToastStore();
 const apiKey = ref("");
 const savingKey = ref(false);
 const confirmingDelete = ref<string | null>(null);
+const showVolumeCreate = ref(false);
+const editingVolumeId = ref<string | null>(null);
+const confirmingVolumeDelete = ref<string | null>(null);
+const restoredVolumePreference = ref(false);
+const volumeCreate = reactive({ name: "mold-models", sizeGb: 100, datacenterId: "" });
+const volumeEdit = reactive({ name: "", sizeGb: 0 });
 let poll: ReturnType<typeof setInterval> | null = null;
 
 const form = reactive<RunPodCreateInput>({
@@ -33,7 +45,16 @@ const selectedGpu = computed(() =>
   runpod.gpus.find((gpu) => (gpu.id ?? gpu.gpuId) === form.gpuTypeId),
 );
 
+const selectedNetworkVolume = computed(() =>
+  runpod.overview.networkVolumes.find((volume) => volume.id === form.networkVolumeId),
+);
+
 const datacenters = computed(() => {
+  if (selectedNetworkVolume.value) {
+    return runpod.overview.datacenters.filter(
+      (dc) => dc.id === selectedNetworkVolume.value?.dataCenterId,
+    );
+  }
   if (!selectedGpu.value) return runpod.overview.datacenters;
   return runpod.overview.datacenters.filter((dc) =>
     dc.gpuAvailability.some(
@@ -41,6 +62,35 @@ const datacenters = computed(() => {
     ),
   );
 });
+
+watch(
+  [() => prefs.settings?.runpodNetworkVolumeId, () => runpod.overview.networkVolumes],
+  ([saved, volumes]) => {
+    if (restoredVolumePreference.value || volumes.length === 0) return;
+    form.networkVolumeId = volumes.some((volume) => volume.id === saved) ? (saved ?? null) : null;
+    restoredVolumePreference.value = true;
+  },
+  { immediate: true },
+);
+
+watch(selectedNetworkVolume, (volume, previous) => {
+  if (volume) {
+    form.cloudType = "SECURE";
+    form.datacenterId = volume.dataCenterId;
+    form.volumeGb = 0;
+  } else if (previous && form.volumeGb === 0) {
+    form.volumeGb = 80;
+  }
+});
+
+watch(
+  () => form.networkVolumeId,
+  (id) => {
+    if (restoredVolumePreference.value && prefs.settings && id !== prefs.runpodNetworkVolumeId) {
+      void prefs.update({ runpodNetworkVolumeId: id });
+    }
+  },
+);
 
 watch(
   () => runpod.gpus,
@@ -108,6 +158,52 @@ async function launch() {
   try {
     await runpod.create({ ...form });
     toasts.push("GPU instance requested");
+  } catch (error) {
+    toasts.push(errorMessage(error), "error");
+  }
+}
+
+async function createNetworkVolume() {
+  try {
+    const volume = await runpod.createNetworkVolume({ ...volumeCreate });
+    form.networkVolumeId = volume.id;
+    showVolumeCreate.value = false;
+    toasts.push(`Created ${volume.name}`);
+  } catch (error) {
+    toasts.push(errorMessage(error), "error");
+  }
+}
+
+function startVolumeEdit(volume: RunPodNetworkVolume) {
+  editingVolumeId.value = volume.id;
+  volumeEdit.name = volume.name;
+  volumeEdit.sizeGb = volume.size;
+}
+
+async function updateNetworkVolume(volume: RunPodNetworkVolume) {
+  try {
+    await runpod.updateNetworkVolume({
+      id: volume.id,
+      name: volumeEdit.name === volume.name ? null : volumeEdit.name,
+      sizeGb: volumeEdit.sizeGb === volume.size ? null : volumeEdit.sizeGb,
+    });
+    editingVolumeId.value = null;
+    toasts.push(`Updated ${volumeEdit.name}`);
+  } catch (error) {
+    toasts.push(errorMessage(error), "error");
+  }
+}
+
+async function deleteNetworkVolume(volume: RunPodNetworkVolume) {
+  if (confirmingVolumeDelete.value !== volume.id) {
+    confirmingVolumeDelete.value = volume.id;
+    return;
+  }
+  confirmingVolumeDelete.value = null;
+  try {
+    await runpod.deleteNetworkVolume(volume.id);
+    if (form.networkVolumeId === volume.id) form.networkVolumeId = null;
+    toasts.push(`Deleted ${volume.name}`);
   } catch (error) {
     toasts.push(errorMessage(error), "error");
   }
@@ -267,11 +363,12 @@ onBeforeUnmount(() => {
             v-for="cloud in ['SECURE', 'COMMUNITY'] as const"
             :key="cloud"
             type="button"
+            :disabled="Boolean(selectedNetworkVolume) && cloud === 'COMMUNITY'"
             class="flex-1 rounded-control px-2 py-1.5 text-body transition-colors"
             :class="
               form.cloudType === cloud
                 ? 'bg-safelight font-semibold text-[#141110]'
-                : 'text-ink-2 hover:text-ink'
+                : 'text-ink-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-35'
             "
             @click="form.cloudType = cloud"
           >
@@ -283,6 +380,7 @@ onBeforeUnmount(() => {
         <select
           id="runpod-dc"
           v-model="form.datacenterId"
+          :disabled="Boolean(selectedNetworkVolume)"
           class="border-edge mt-1 h-9 w-full rounded-control border bg-bath px-2 text-body text-ink"
         >
           <option :value="null">Automatic (best stock)</option>
@@ -331,6 +429,7 @@ onBeforeUnmount(() => {
                 type="number"
                 min="0"
                 max="10000"
+                :disabled="Boolean(selectedNetworkVolume)"
                 class="data-mono min-w-0 flex-1 bg-transparent text-ink outline-none"
               />
               <span>GB</span>
@@ -338,14 +437,8 @@ onBeforeUnmount(() => {
           </label>
         </div>
 
-        <label
-          v-if="runpod.overview.networkVolumes.length"
-          class="mt-4 block text-caption text-ink-3"
-          for="runpod-volume"
-          >Network volume</label
-        >
+        <label class="mt-4 block text-caption text-ink-3" for="runpod-volume">Network volume</label>
         <select
-          v-if="runpod.overview.networkVolumes.length"
           id="runpod-volume"
           v-model="form.networkVolumeId"
           class="border-edge mt-1 h-9 w-full rounded-control border bg-bath px-2 text-body text-ink"
@@ -359,6 +452,15 @@ onBeforeUnmount(() => {
             {{ volume.name }} · {{ volume.size }} GB · {{ volume.dataCenterId }}
           </option>
         </select>
+        <p v-if="selectedNetworkVolume" class="mt-1 text-caption text-ink-3">
+          Secure Cloud · pinned to {{ selectedNetworkVolume.dataCenterId }} · mounted at /workspace
+        </p>
+        <p
+          v-else-if="runpod.overview.networkVolumes.length === 0"
+          class="mt-1 text-caption text-ink-3"
+        >
+          Create persistent storage in the Network volumes panel.
+        </p>
 
         <label class="mt-4 flex items-start gap-2 text-caption text-ink-2">
           <input v-model="form.includeHfToken" type="checkbox" class="mt-0.5 accent-safelight" />
@@ -417,6 +519,157 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </section>
+        <section class="border-edge mb-5 rounded-chrome border bg-bath">
+          <div class="flex items-center justify-between px-3 py-2.5">
+            <div>
+              <h2 class="text-body-lg font-semibold text-ink">Network volumes</h2>
+              <p class="text-caption text-ink-3">
+                Persistent storage that survives instance deletion and remains billable until
+                deleted.
+              </p>
+            </div>
+            <button
+              type="button"
+              class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+              @click="showVolumeCreate = !showVolumeCreate"
+            >
+              {{ showVolumeCreate ? "Cancel" : "New volume" }}
+            </button>
+          </div>
+
+          <form
+            v-if="showVolumeCreate"
+            class="border-edge grid grid-cols-[1fr_110px_1fr_auto] items-end gap-2 border-t p-3"
+            @submit.prevent="createNetworkVolume"
+          >
+            <label class="text-caption text-ink-3">
+              Name
+              <input
+                v-model="volumeCreate.name"
+                required
+                class="border-edge mt-1 h-8 w-full rounded-control border bg-bench px-2 text-body text-ink"
+              />
+            </label>
+            <label class="text-caption text-ink-3">
+              Size (GB)
+              <input
+                v-model.number="volumeCreate.sizeGb"
+                type="number"
+                min="1"
+                max="4000"
+                required
+                class="border-edge data-mono mt-1 h-8 w-full rounded-control border bg-bench px-2 text-ink"
+              />
+            </label>
+            <label class="text-caption text-ink-3">
+              Datacenter
+              <select
+                v-model="volumeCreate.datacenterId"
+                required
+                class="border-edge mt-1 h-8 w-full rounded-control border bg-bench px-2 text-body text-ink"
+              >
+                <option value="" disabled>Choose a datacenter</option>
+                <option v-for="dc in runpod.overview.datacenters" :key="dc.id" :value="dc.id">
+                  {{ dc.name || dc.id }}{{ dc.location ? ` · ${dc.location}` : "" }}
+                </option>
+              </select>
+            </label>
+            <button
+              type="submit"
+              :disabled="runpod.mutating === 'volume:create'"
+              class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] disabled:opacity-50"
+            >
+              {{ runpod.mutating === "volume:create" ? "Creating…" : "Create" }}
+            </button>
+          </form>
+
+          <p
+            v-if="runpod.overview.networkVolumes.length === 0 && !showVolumeCreate"
+            class="border-edge border-t px-3 py-4 text-caption text-ink-3"
+          >
+            No network volumes yet. Create one to keep models and outputs between instances.
+          </p>
+          <div v-else-if="runpod.overview.networkVolumes.length" class="border-edge border-t">
+            <article
+              v-for="(volume, index) in runpod.overview.networkVolumes"
+              :key="volume.id"
+              class="px-3 py-2.5"
+              :class="index ? 'border-edge border-t' : ''"
+            >
+              <div v-if="editingVolumeId !== volume.id" class="flex items-center gap-3">
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-body font-semibold text-ink">{{ volume.name }}</p>
+                  <p class="data-mono text-caption text-ink-3">
+                    {{ volume.size }} GB · {{ volume.dataCenterId }} · {{ volume.id }}
+                  </p>
+                </div>
+                <span v-if="form.networkVolumeId === volume.id" class="edge-code text-halide">
+                  SELECTED
+                </span>
+                <button
+                  type="button"
+                  class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+                  @click="startVolumeEdit(volume)"
+                >
+                  Manage
+                </button>
+              </div>
+              <form
+                v-else
+                class="grid grid-cols-[1fr_110px_auto_auto_auto] items-end gap-2"
+                @submit.prevent="updateNetworkVolume(volume)"
+              >
+                <label class="text-caption text-ink-3">
+                  Name
+                  <input
+                    v-model="volumeEdit.name"
+                    class="border-edge mt-1 h-8 w-full rounded-control border bg-bench px-2 text-body text-ink"
+                  />
+                </label>
+                <label class="text-caption text-ink-3">
+                  Grow to (GB)
+                  <input
+                    v-model.number="volumeEdit.sizeGb"
+                    type="number"
+                    :min="volume.size"
+                    max="4000"
+                    class="border-edge data-mono mt-1 h-8 w-full rounded-control border bg-bench px-2 text-ink"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  :disabled="
+                    (volumeEdit.name === volume.name && volumeEdit.sizeGb === volume.size) ||
+                    runpod.mutating === `volume:update:${volume.id}`
+                  "
+                  class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] disabled:opacity-50"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  class="h-8 px-2 text-body text-ink-3 hover:text-ink"
+                  @click="editingVolumeId = null"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  class="h-8 rounded-control px-2 text-body"
+                  :class="
+                    confirmingVolumeDelete === volume.id
+                      ? 'bg-stop font-semibold text-[#141110]'
+                      : 'text-stop'
+                  "
+                  @blur="confirmingVolumeDelete = null"
+                  @click="deleteNetworkVolume(volume)"
+                >
+                  {{ confirmingVolumeDelete === volume.id ? "Delete all data?" : "Delete" }}
+                </button>
+              </form>
+            </article>
+          </div>
+        </section>
         <div class="flex items-baseline justify-between">
           <div>
             <h2 class="text-body-lg font-semibold text-ink">Your instances</h2>
@@ -466,6 +719,9 @@ onBeforeUnmount(() => {
                   {{ money(pod.costPerHr) }}/hr<span v-if="pod.uptimeSeconds">
                     · {{ uptime(pod.uptimeSeconds) }}</span
                   >
+                </p>
+                <p v-if="pod.networkVolume" class="data-mono truncate text-caption text-ink-3">
+                  {{ pod.networkVolume.name }} · {{ pod.networkVolume.size }} GB network volume
                 </p>
               </div>
               <button

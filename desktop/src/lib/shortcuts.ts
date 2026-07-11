@@ -21,7 +21,7 @@ export type ShellAction =
   | { kind: "new-generation" }
   | { kind: "randomize-seed" }
   | { kind: "copy-seed" }
-  | { kind: "gallery-zoom"; direction: "reset" | "in" | "out" };
+  | { kind: "ui-scale"; direction: "reset" | "in" | "out" };
 
 export interface KeyLike {
   key: string;
@@ -34,11 +34,14 @@ export interface KeyLike {
 /**
  * Resolve a keydown into a shell-level action, or null if unhandled. Requires
  * ⌘ and no ctrl/alt. The only ⇧⌘ combo is ⇧⌘C (copy seed); every other action
- * is plain ⌘. Route-scoped actions (randomize seed, gallery zoom) are resolved
+ * is plain ⌘. Route-scoped actions (such as randomize seed) are resolved
  * here but gated by the current route in the shell.
  */
 export function resolveShellShortcut(e: KeyLike): ShellAction | null {
   if (!e.metaKey || e.ctrlKey || e.altKey) return null;
+  // `+` is Shift+= on standard keyboards, so recognize zoom before the
+  // general shifted-shortcut gate below.
+  if (e.key === "+") return { kind: "ui-scale", direction: "in" };
   if (e.shiftKey) {
     return e.key === "c" || e.key === "C" ? { kind: "copy-seed" } : null;
   }
@@ -49,8 +52,8 @@ export function resolveShellShortcut(e: KeyLike): ShellAction | null {
   if (e.key === ".") return { kind: "cancel-job" };
   if (e.key === "n") return { kind: "new-generation" };
   if (e.key === "r") return { kind: "randomize-seed" };
-  if (e.key === "0") return { kind: "gallery-zoom", direction: "reset" };
-  if (e.key === "=" || e.key === "+") return { kind: "gallery-zoom", direction: "in" };
-  if (e.key === "-" || e.key === "_") return { kind: "gallery-zoom", direction: "out" };
+  if (e.key === "0") return { kind: "ui-scale", direction: "reset" };
+  if (e.key === "=") return { kind: "ui-scale", direction: "in" };
+  if (e.key === "-" || e.key === "_") return { kind: "ui-scale", direction: "out" };
   return null;
 }

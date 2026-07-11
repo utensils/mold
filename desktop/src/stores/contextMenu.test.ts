@@ -27,6 +27,13 @@ describe("clampPosition", () => {
   it("passes through positions that already fit", () => {
     expect(clampPosition(100, 100, items(2), viewport)).toEqual({ x: 100, y: 100 });
   });
+
+  it("stays usable when the scaled viewport is narrower than the normal menu", () => {
+    expect(clampPosition(300, 300, items(20), { width: 180, height: 140 })).toEqual({
+      x: 6,
+      y: 6,
+    });
+  });
 });
 
 describe("context menu store", () => {

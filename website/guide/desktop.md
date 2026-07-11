@@ -28,7 +28,7 @@ surface powers it, so anything the app does maps to a documented endpoint.
   before you press Generate.
 - **Gallery** — a justified, virtualized contact-sheet grid. **Space** opens
   Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Generate with
-  every parameter restored. ⌘0 / ⌘+ / ⌘− adjust thumbnail size.
+  every parameter restored.
 - **Models & catalog** — installed models grouped by family with residency and
   disk usage, plus a live HuggingFace/Civitai catalog. Pulls render **SIZE vs
   FETCH** honestly (model weights vs. the full download including shared
@@ -70,7 +70,12 @@ surface powers it, so anything the app does maps to a documented endpoint.
 | Space        | Quick Look in Gallery                   |
 | ←/→, ⌫       | Gallery navigate / delete               |
 | ⇧⌘C          | Copy seed (lightbox)                    |
-| ⌘0 / ⌘+ / ⌘− | Gallery thumbnail zoom reset / in / out |
+| ⌘0 / ⌘+ / ⌘− | Interface size reset / larger / smaller |
+
+Interface scaling applies to the complete app, including fixed overlays and
+right-click menus. Choose 80–130% from **Settings → App → Interface size**, or
+use the View menu and keyboard shortcuts. The selected level is restored on
+the next launch.
 
 ## Generation templates
 
