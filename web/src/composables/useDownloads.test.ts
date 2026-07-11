@@ -140,8 +140,18 @@ describe("applyDownloadEvent", () => {
   it("tracks two active downloads independently", () => {
     const state = newDownloadsState();
     for (const id of ["a", "b"]) {
-      applyDownloadEvent(state, { type: "enqueued", id, model: id, position: 1 });
-      applyDownloadEvent(state, { type: "started", id, files_total: 1, bytes_total: 100 });
+      applyDownloadEvent(state, {
+        type: "enqueued",
+        id,
+        model: id,
+        position: 1,
+      });
+      applyDownloadEvent(state, {
+        type: "started",
+        id,
+        files_total: 1,
+        bytes_total: 100,
+      });
     }
     applyDownloadEvent(state, {
       type: "progress",

@@ -22,12 +22,14 @@ describe("RunPod network volume UX", () => {
       expect(labelAt).toBeGreaterThan(0);
       return source.slice(source.lastIndexOf("<button", labelAt), labelAt);
     };
-    expect(button("Use in Mold")).toContain('v-if="pod.desiredStatus === \'RUNNING\'"');
+    expect(button("Use in Mold")).toContain("v-if=\"pod.desiredStatus === 'RUNNING'\"");
     expect(button("Use in Mold")).not.toContain("!pod.networkVolume");
     expect(button("Stop")).toContain(
-      'v-if="!pod.networkVolume && pod.desiredStatus === \'RUNNING\'"',
+      "v-if=\"!pod.networkVolume && pod.desiredStatus === 'RUNNING'\"",
     );
     expect(button("Start")).toContain('v-else-if="!pod.networkVolume"');
-    expect(source).toContain("Delete the instance to stop compute; /workspace remains on the volume.");
+    expect(source).toContain(
+      "Delete the instance to stop compute; /workspace remains on the volume.",
+    );
   });
 });
