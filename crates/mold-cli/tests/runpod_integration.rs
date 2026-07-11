@@ -9,6 +9,10 @@ mod common;
 
 use common::TestEnv;
 use predicates::prelude::*;
+use wiremock::{
+    matchers::{body_json, method, path},
+    Mock, MockServer, ResponseTemplate,
+};
 
 #[test]
 fn runpod_help_lists_all_subcommands() {
@@ -194,4 +198,107 @@ fn runpod_connect_prints_export_line() {
         .stderr(predicate::str::contains(
             "https://abc123-7680.proxy.runpod.net",
         ));
+}
+
+#[tokio::test]
+async fn runpod_network_volume_cli_covers_live_lifecycle() {
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    env.write_config(&format!(
+        "[runpod]\napi_key = \"test-key\"\nendpoint = {:?}\n",
+        server.uri()
+    ));
+    let volume = r#"{"id":"nv-1","name":"models","dataCenterId":"EU-RO-1","size":100}"#;
+
+    Mock::given(method("GET"))
+        .and(path("/networkvolumes"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!("[{volume}]")))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/networkvolumes/nv-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(volume))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/networkvolumes"))
+        .and(body_json(serde_json::json!({
+            "name": "models",
+            "size": 100,
+            "dataCenterId": "EU-RO-1"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_string(volume))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/networkvolumes/nv-1"))
+        .and(body_json(
+            serde_json::json!({"name": "models-v2", "size": 150}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"id":"nv-1","name":"models-v2","dataCenterId":"EU-RO-1","size":150}"#,
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/pods"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/networkvolumes/nv-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .args(["runpod", "network-volume", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("models"));
+    env.cmd()
+        .args(["runpod", "network-volume", "list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("EU-RO-1"));
+    env.cmd()
+        .args(["runpod", "network-volume", "get", "nv-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("100 GB"));
+    env.cmd()
+        .args([
+            "runpod",
+            "network-volume",
+            "create",
+            "--name",
+            "models",
+            "--size",
+            "100",
+            "--dc",
+            "EU-RO-1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("billed until explicitly deleted"));
+    env.cmd()
+        .args([
+            "runpod",
+            "network-volume",
+            "update",
+            "nv-1",
+            "--name",
+            "models-v2",
+            "--size",
+            "150",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("models-v2"));
+    env.cmd()
+        .args(["runpod", "network-volume", "delete", "nv-1", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nv-1"));
 }
