@@ -1,6 +1,7 @@
 use mold_core::runpod::{
-    image_tag_for_gpu, CreateNetworkVolumeRequest, CreatePodRequest, Datacenter, GpuType,
-    NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest, DEFAULT_ENDPOINT,
+    image_tag_for_gpu, valid_network_volume_size, CreateNetworkVolumeRequest, CreatePodRequest,
+    Datacenter, GpuType, NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest,
+    DEFAULT_ENDPOINT, NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
@@ -193,21 +194,31 @@ pub async fn runpod_overview(state: tauri::State<'_, AppState>) -> Result<RunPod
         return Ok(RunPodOverview::unconfigured());
     };
 
-    let (user, pods, mut gpus, datacenters, network_volumes, supported_gpu_ids) = tokio::try_join!(
-        client.user(),
-        client.list_pods(),
-        client.gpu_types(),
-        client.datacenters(),
-        client.network_volumes(),
-        SUPPORTED_POD_GPU_IDS.get_or_try_init(|| client.supported_pod_gpu_type_ids()),
-    )
-    .map_err(|e| format!("{e:#}"))?;
+    let (user, mut pods, mut gpus, datacenters, network_volumes, supported_gpu_ids) =
+        tokio::try_join!(
+            client.user(),
+            client.list_pods(),
+            client.gpu_types(),
+            client.datacenters(),
+            client.network_volumes(),
+            SUPPORTED_POD_GPU_IDS.get_or_try_init(|| client.supported_pod_gpu_type_ids()),
+        )
+        .map_err(|e| format!("{e:#}"))?;
     gpus.retain(|gpu| {
         gpu.id
             .as_deref()
             .or_else(|| (!gpu.gpu_id.is_empty()).then_some(gpu.gpu_id.as_str()))
             .is_some_and(|id| supported_gpu_ids.contains(id))
     });
+    for pod in &mut pods {
+        if pod.network_volume.is_none() {
+            pod.network_volume = pod
+                .network_volume_id
+                .as_deref()
+                .and_then(|id| network_volumes.iter().find(|volume| volume.id == id))
+                .cloned();
+        }
+    }
 
     Ok(RunPodOverview {
         configured: true,
@@ -264,8 +275,10 @@ pub async fn runpod_network_volume_create(
     if datacenter_id.is_empty() {
         return Err("Choose a datacenter for the network volume.".into());
     }
-    if !(1..=4000).contains(&input.size_gb) {
-        return Err("Network volume size must be between 1 and 4000 GB.".into());
+    if !valid_network_volume_size(input.size_gb) {
+        return Err(format!(
+            "Network volume size must be between {NETWORK_VOLUME_MIN_GB} and {NETWORK_VOLUME_MAX_GB} GB."
+        ));
     }
     client
         .create_network_volume(&CreateNetworkVolumeRequest {
@@ -291,8 +304,10 @@ pub async fn runpod_network_volume_update(
         return Err("Network volume name cannot be empty.".into());
     }
     if let Some(size) = input.size_gb {
-        if !(1..=4000).contains(&size) {
-            return Err("Network volume size must be between 1 and 4000 GB.".into());
+        if !valid_network_volume_size(size) {
+            return Err(format!(
+                "Network volume size must be between {NETWORK_VOLUME_MIN_GB} and {NETWORK_VOLUME_MAX_GB} GB."
+            ));
         }
         let current = client
             .get_network_volume(&input.id)

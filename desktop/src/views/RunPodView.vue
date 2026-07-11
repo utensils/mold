@@ -555,8 +555,8 @@ onBeforeUnmount(() => {
               <input
                 v-model.number="volumeCreate.sizeGb"
                 type="number"
-                min="1"
-                max="4000"
+                min="10"
+                max="3999"
                 required
                 class="border-edge data-mono mt-1 h-8 w-full rounded-control border bg-bench px-2 text-ink"
               />
@@ -632,7 +632,7 @@ onBeforeUnmount(() => {
                     v-model.number="volumeEdit.sizeGb"
                     type="number"
                     :min="volume.size"
-                    max="4000"
+                    max="3999"
                     class="border-edge data-mono mt-1 h-8 w-full rounded-control border bg-bench px-2 text-ink"
                   />
                 </label>

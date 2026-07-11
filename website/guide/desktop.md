@@ -50,7 +50,8 @@ surface powers it, so anything the app does maps to a documented endpoint.
   network-volume Pod, the app hides Start/Stop for those rows and explains that
   deleting the compute instance preserves `/workspace` on the volume. Logs use
   a supported handoff to the RunPod console rather than a nonexistent REST
-  endpoint.
+  endpoint. Production network volumes accept 10–3999 GB; the form and native
+  validation enforce that live bound before launch.
 - **Settings** — a full preferences bench with a section rail and
   cross-section search: Engine (connection, native folder pickers for the
   models/output directories), Performance (the `MOLD_*` engine knobs as real

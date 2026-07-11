@@ -359,7 +359,7 @@ enum RunpodNetworkVolumeAction {
     Create {
         #[arg(long)]
         name: String,
-        /// Size in GB (1-4000)
+        /// Size in GB (10-3999; live RunPod production bound)
         #[arg(long)]
         size: u32,
         /// Datacenter id where the volume will live

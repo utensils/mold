@@ -614,6 +614,13 @@ mold runpod usage --since 7d                     # with historical spend window
 mold runpod usage --json                         # machine-readable
 ```
 
+Production network volumes accept 10–3999 GB. Current Pod list/get responses
+identify attachments with `networkVolumeId` and assigned GPUs with
+`machine.gpuTypeId`; callers must handle those shapes even when expanded
+`networkVolume` / `gpu.displayName` fields are absent. Volume-backed Pods use
+Secure Cloud in the volume's datacenter, request a 0 GB ordinary workspace
+disk, cannot be stopped, and must be deleted before the volume can be removed.
+
 ### Config keys under `[runpod]`
 
 | Key | Description |

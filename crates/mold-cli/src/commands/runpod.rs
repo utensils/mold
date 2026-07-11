@@ -1,7 +1,8 @@
 //! `mold runpod` — native RunPod pod management.
 //!
 //! Wraps `mold_core::runpod::RunPodClient` so users can manage cloud GPU pods
-//! end-to-end from the mold CLI: list/create/stop/delete pods, stream logs,
+//! end-to-end from the mold CLI: list/create/stop/delete pods, hand logs off
+//! to RunPod's console,
 //! check spend, and (via `run`) generate images on a freshly-provisioned pod
 //! with one command.
 
@@ -11,8 +12,9 @@ use colored::Colorize;
 use mold_core::config::Config;
 use mold_core::error::MoldError;
 use mold_core::runpod::{
-    image_tag_for_gpu, CreateNetworkVolumeRequest, CreatePodRequest, GpuType, NetworkVolume, Pod,
-    RunPodClient, UpdateNetworkVolumeRequest, API_KEY_ENV, DEFAULT_ENDPOINT,
+    image_tag_for_gpu, valid_network_volume_size, CreateNetworkVolumeRequest, CreatePodRequest,
+    GpuType, NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest, API_KEY_ENV,
+    DEFAULT_ENDPOINT, NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
 };
 
 use crate::theme;
@@ -124,6 +126,18 @@ fn now_epoch() -> u64 {
 
 fn network_volume_selection_mismatch(attached: Option<&str>, requested: Option<&str>) -> bool {
     attached != requested
+}
+
+fn warm_datacenter_requirement(
+    cli: Option<&str>,
+    config: Option<&str>,
+    network_volume: Option<&str>,
+) -> Option<String> {
+    if network_volume.is_some() {
+        None
+    } else {
+        cli.or(config).map(str::to_owned)
+    }
 }
 
 fn authoritative_datacenter(
@@ -499,8 +513,10 @@ pub async fn run_network_volume_create(
     if datacenter.is_empty() {
         bail!("network volume datacenter cannot be empty");
     }
-    if !(1..=4000).contains(&size) {
-        bail!("network volume size must be between 1 and 4000 GB");
+    if !valid_network_volume_size(size) {
+        bail!(
+            "network volume size must be between {NETWORK_VOLUME_MIN_GB} and {NETWORK_VOLUME_MAX_GB} GB"
+        );
     }
     let client = build_client()?;
     let volume = client
@@ -532,8 +548,10 @@ pub async fn run_network_volume_update(
     if name.as_deref().is_some_and(str::is_empty) {
         bail!("network volume name cannot be empty");
     }
-    if size.is_some_and(|size| !(1..=4000).contains(&size)) {
-        bail!("network volume size must be between 1 and 4000 GB");
+    if size.is_some_and(|size| !valid_network_volume_size(size)) {
+        bail!(
+            "network volume size must be between {NETWORK_VOLUME_MIN_GB} and {NETWORK_VOLUME_MAX_GB} GB"
+        );
     }
     let client = build_client()?;
     if let Some(new_size) = size {
@@ -604,11 +622,7 @@ pub async fn run_list(json: bool) -> Result<()> {
         "$/hr".bold()
     );
     for p in &pods {
-        let gpu = p
-            .machine
-            .as_ref()
-            .and_then(|m| m.gpu_display_name.clone())
-            .unwrap_or_else(|| "—".into());
+        let gpu = p.gpu_name().unwrap_or("—");
         let status = p.desired_status.clone();
         println!(
             "{:<18}{:<20}{:<18}{:<10}${:.2}",
@@ -655,10 +669,8 @@ fn print_pod_detail(pod: &Pod) {
     if let Some(image) = &pod.image_name {
         println!("  image: {image}");
     }
-    if let Some(machine) = &pod.machine {
-        let gpu = machine.gpu_display_name.clone().unwrap_or_default();
-        let loc = machine.location.clone().unwrap_or_default();
-        println!("  gpu: {gpu} ({loc})");
+    if let Some(gpu_line) = pod_detail_gpu_line(pod) {
+        println!("  gpu: {gpu_line}");
     }
     println!("  cost: ${:.2}/hr", pod.cost_per_hr);
     if pod.uptime_seconds > 0 {
@@ -671,6 +683,16 @@ fn print_pod_detail(pod: &Pod) {
     );
     let proxy = format!("https://{}-7680.proxy.runpod.net", pod.id);
     println!("  proxy: {}", proxy.cyan());
+}
+
+fn pod_detail_gpu_line(pod: &Pod) -> Option<String> {
+    let gpu = pod.gpu_name()?;
+    Some(
+        match pod.datacenter_id().filter(|location| !location.is_empty()) {
+            Some(location) => format!("{gpu} ({location})"),
+            None => gpu.to_owned(),
+        },
+    )
 }
 
 /// `mold runpod usage [--since 7d] [--json]` — show spend summary.
@@ -735,11 +757,7 @@ pub async fn run_usage(since: Option<String>, json: bool) -> Result<()> {
         session_spend.max(0.0),
     );
     for p in &pods {
-        let gpu = p
-            .machine
-            .as_ref()
-            .and_then(|m| m.gpu_display_name.clone())
-            .unwrap_or_else(|| "—".into());
+        let gpu = p.gpu_name().unwrap_or("—");
         println!(
             "  · {} {} {} — ${:.2}/hr × {:.2}h = ${:.2}",
             p.id,
@@ -1176,9 +1194,8 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
     // user explicitly created should only be deleted when the user says
     // so (`mold runpod delete <id>`).
     let gpu_display = pod
-        .machine
-        .as_ref()
-        .and_then(|m| m.gpu_display_name.clone())
+        .gpu_name()
+        .map(str::to_owned)
         .unwrap_or_else(|| friendly_gpu_name(&req.gpu_type_ids[0]));
     let _ = append_history(&HistoryEntry {
         pod_id: pod.id.clone(),
@@ -1363,6 +1380,45 @@ fn mark_history_deleted(pod_id: &str) {
     let _ = std::fs::write(&path, buf);
 }
 
+async fn delete_tracked_pod(client: &RunPodClient, pod_id: &str) -> Result<()> {
+    delete_then_finalize(client, pod_id, || {
+        mark_history_deleted(pod_id);
+        let mut state = load_state();
+        if state.last_pod_id.as_deref() == Some(pod_id) {
+            state.last_pod_id = None;
+            state.last_pod_created_at = None;
+            state.last_pod_last_used_at = None;
+            state.last_pod_gpu = None;
+            state.last_pod_cost_per_hr = None;
+            save_state(&state)?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+async fn delete_then_finalize(
+    client: &RunPodClient,
+    pod_id: &str,
+    finalize: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    client.delete_pod(pod_id).await.with_context(|| {
+        format!("delete pod {pod_id}; it remains tracked and may still be billing")
+    })?;
+    finalize()
+}
+
+fn tracked_pod_is_absent(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<MoldError>(),
+        Some(MoldError::RunPodNotFound(_))
+    )
+}
+
+fn pod_is_scheduled(pod: &Pod) -> bool {
+    pod.uptime_seconds > 0 || pod.gpu_name().is_some_and(|name| !name.is_empty())
+}
+
 /// `mold runpod connect <pod-id>` — print an `export MOLD_HOST=…` snippet.
 pub async fn run_connect(pod_id: String, check: bool) -> Result<()> {
     if check {
@@ -1468,10 +1524,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         "{} using pod {} on {}",
         theme::icon_ok(),
         pod.id.bold(),
-        pod.machine
-            .as_ref()
-            .and_then(|m| m.gpu_display_name.clone())
-            .unwrap_or_default()
+        pod.gpu_name().unwrap_or_default()
     );
 
     // Wait for proxy readiness.
@@ -1604,11 +1657,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
                 // usually means the container's binary doesn't match the
                 // host GPU (e.g. :latest built for sm_89 running on H100).
                 let msg = e.to_string();
-                let gpu = pod
-                    .machine
-                    .as_ref()
-                    .and_then(|m| m.gpu_display_name.clone())
-                    .unwrap_or_default();
+                let gpu = pod.gpu_name().unwrap_or_default();
                 if msg.contains("404") {
                     bail!(
                         "generation failed: proxy returned 404 on /api/generate. \
@@ -1658,11 +1707,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
             "{} auto-teardown enabled — deleting pod",
             theme::icon_info()
         );
-        let _ = client.delete_pod(&pod.id).await;
-        mark_history_deleted(&pod.id);
-        let mut state = load_state();
-        state.last_pod_id = None;
-        let _ = save_state(&state);
+        delete_tracked_pod(&client, &pod.id).await?;
     } else if opts.keep {
         println!(
             "{} pod {} kept running (--keep). Delete with {}",
@@ -1755,13 +1800,25 @@ pub async fn reap_idle_warm_pod_if_needed() -> bool {
         return false;
     };
     // Verify the pod still exists + is running (not already gone).
-    let Ok(pod) = client.get_pod(&pod_id).await else {
-        // Already gone — clear stale state.
-        let mut state = state;
-        state.last_pod_id = None;
-        state.last_pod_last_used_at = None;
-        let _ = save_state(&state);
-        return false;
+    let pod = match client.get_pod(&pod_id).await {
+        Ok(pod) => pod,
+        Err(error) if tracked_pod_is_absent(&error) => {
+            let mut state = state;
+            state.last_pod_id = None;
+            state.last_pod_created_at = None;
+            state.last_pod_last_used_at = None;
+            state.last_pod_gpu = None;
+            state.last_pod_cost_per_hr = None;
+            let _ = save_state(&state);
+            return false;
+        }
+        Err(error) => {
+            eprintln!(
+                "{} could not verify tracked pod {pod_id}; retaining it: {error:#}",
+                theme::icon_warn()
+            );
+            return false;
+        }
     };
     if pod.desired_status != "RUNNING" {
         return false;
@@ -1772,13 +1829,13 @@ pub async fn reap_idle_warm_pod_if_needed() -> bool {
         pod_id,
         idle_secs / 60,
     );
-    let _ = client.delete_pod(&pod_id).await;
-    mark_history_deleted(&pod_id);
-    let mut state = state;
-    state.last_pod_id = None;
-    state.last_pod_last_used_at = None;
-    let _ = save_state(&state);
-    true
+    match delete_tracked_pod(&client, &pod_id).await {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("{} {error:#}", theme::icon_warn());
+            false
+        }
+    }
 }
 
 fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
@@ -1859,31 +1916,26 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                 // warm pod has to match, otherwise a fresh provision is
                 // strictly what was asked for.
                 let warm_gpu = pod
-                    .machine
-                    .as_ref()
-                    .and_then(|m| m.gpu_display_name.clone())
+                    .gpu_name()
+                    .map(str::to_owned)
                     .or_else(|| state.last_pod_gpu.clone())
                     .unwrap_or_default();
-                let warm_dc = pod
-                    .machine
-                    .as_ref()
-                    .and_then(|m| m.location.clone())
-                    .unwrap_or_default();
+                let warm_dc = pod.datacenter_id().unwrap_or_default();
                 let want_gpu = opts
                     .create
                     .gpu
                     .clone()
                     .or_else(|| config.runpod.default_gpu.clone());
-                let want_dc = opts
-                    .create
-                    .datacenter
-                    .clone()
-                    .or_else(|| config.runpod.default_datacenter.clone());
                 let want_volume = opts
                     .create
                     .network_volume_id
                     .clone()
                     .or_else(|| config.runpod.default_network_volume_id.clone());
+                let want_dc = warm_datacenter_requirement(
+                    opts.create.datacenter.as_deref(),
+                    config.runpod.default_datacenter.as_deref(),
+                    want_volume.as_deref(),
+                );
                 let gpu_mismatch = want_gpu
                     .as_deref()
                     .map(normalize_gpu_id)
@@ -1899,7 +1951,7 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                     .map(|want| !warm_dc.is_empty() && !warm_dc.eq_ignore_ascii_case(want))
                     .unwrap_or(false);
                 let volume_mismatch = network_volume_selection_mismatch(
-                    pod.network_volume.as_ref().map(|volume| volume.id.as_str()),
+                    pod.attached_network_volume_id(),
                     want_volume.as_deref(),
                 );
                 if gpu_mismatch || dc_mismatch || volume_mismatch {
@@ -1909,12 +1961,7 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                         theme::icon_warn(),
                         id,
                     );
-                    let _ = client.delete_pod(&id).await;
-                    mark_history_deleted(&id);
-                    let mut state = load_state();
-                    state.last_pod_id = None;
-                    state.last_pod_last_used_at = None;
-                    let _ = save_state(&state);
+                    delete_tracked_pod(client, &id).await?;
                 } else {
                     // REST v1 can leave `runtime` / `machine.gpu_display_name`
                     // unpopulated on fully-booted pods (same reason we had
@@ -1938,31 +1985,27 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                         theme::icon_warn(),
                         id
                     );
-                    let _ = client.delete_pod(&id).await;
-                    mark_history_deleted(&id);
-                    let mut state = load_state();
-                    state.last_pod_id = None;
-                    state.last_pod_last_used_at = None;
-                    let _ = save_state(&state);
+                    delete_tracked_pod(client, &id).await?;
                 }
             }
             Ok(_) => {
                 // Non-RUNNING state (STOPPED, EXITED, TERMINATED…) — kill
                 // it and clear state.
-                let _ = client.delete_pod(&id).await;
-                mark_history_deleted(&id);
-                let mut state = load_state();
-                state.last_pod_id = None;
-                state.last_pod_last_used_at = None;
-                let _ = save_state(&state);
+                delete_tracked_pod(client, &id).await?;
             }
-            Err(_) => {
-                // API lookup failed — clear the state entry so we don't
-                // keep trying the same missing id.
+            Err(error) if tracked_pod_is_absent(&error) => {
                 let mut state = load_state();
                 state.last_pod_id = None;
+                state.last_pod_created_at = None;
                 state.last_pod_last_used_at = None;
-                let _ = save_state(&state);
+                state.last_pod_gpu = None;
+                state.last_pod_cost_per_hr = None;
+                save_state(&state)?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("check tracked warm pod {id}; refusing to provision a replacement")
+                });
             }
         }
     }
@@ -2070,6 +2113,7 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
         state.last_pod_id = Some(pod.id.clone());
         state.last_pod_created_at = Some(now_epoch());
         state.last_pod_last_used_at = Some(now_epoch());
+        state.last_pod_gpu = base_req.gpu_type_ids.first().cloned();
         state.last_pod_cost_per_hr = Some(pod.cost_per_hr);
         let _ = save_state(&state);
         let _ = append_history(&HistoryEntry {
@@ -2095,16 +2139,8 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                 println!(
                     "{} scheduled on {} ({})",
                     theme::icon_ok(),
-                    scheduled
-                        .machine
-                        .as_ref()
-                        .and_then(|m| m.gpu_display_name.clone())
-                        .unwrap_or_default(),
-                    scheduled
-                        .machine
-                        .as_ref()
-                        .and_then(|m| m.location.clone())
-                        .unwrap_or_default(),
+                    scheduled.gpu_name().unwrap_or_default(),
+                    scheduled.datacenter_id().unwrap_or_default(),
                 );
                 return Ok(*scheduled);
             }
@@ -2114,11 +2150,7 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                     theme::icon_warn(),
                     pod.id
                 );
-                let _ = client.delete_pod(&pod.id).await;
-                mark_history_deleted(&pod.id);
-                let mut state = load_state();
-                state.last_pod_id = None;
-                let _ = save_state(&state);
+                delete_tracked_pod(client, &pod.id).await?;
                 bail!("interrupted by user");
             }
             WaitOutcome::Failed(e) => {
@@ -2127,11 +2159,7 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
                     theme::icon_warn(),
                     pod.id
                 );
-                let _ = client.delete_pod(&pod.id).await;
-                mark_history_deleted(&pod.id);
-                let mut state = load_state();
-                state.last_pod_id = None;
-                let _ = save_state(&state);
+                delete_tracked_pod(client, &pod.id).await?;
                 last_err = Some(e);
             }
         }
@@ -2146,7 +2174,7 @@ async fn ensure_pod(client: &RunPodClient, config: &Config, opts: &RunOptions) -
 /// (we've seen `status=RUNNING uptime=0` persist on a fully booted pod),
 /// we treat any of these as "scheduled":
 ///   * `uptime_seconds > 0`
-///   * `runtime` is non-null with a populated `gpuDisplayName`
+///   * `machine` identifies an allocated GPU via `gpuDisplayName` or `gpuTypeId`
 ///   * the public proxy `https://<id>-7680.proxy.runpod.net/api/status`
 ///     responds at all (DNS + edge routing only land once scheduled)
 async fn wait_for_schedule(client: &RunPodClient, pod_id: &str, timeout_secs: u64) -> Result<Pod> {
@@ -2172,12 +2200,7 @@ async fn wait_for_schedule(client: &RunPodClient, pod_id: &str, timeout_secs: u6
         let proxy_reached = proxy.is_ok();
         match rest {
             Ok(pod) => {
-                let rest_scheduled = pod.uptime_seconds > 0
-                    || pod
-                        .machine
-                        .as_ref()
-                        .and_then(|m| m.gpu_display_name.as_deref())
-                        .is_some_and(|s| !s.is_empty());
+                let rest_scheduled = pod_is_scheduled(&pod);
                 if rest_scheduled || proxy_reached {
                     pb.finish_and_clear();
                     return Ok(pod);
@@ -2328,6 +2351,11 @@ pub fn complete_cloud_type() -> Vec<CompletionCandidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn gpu_id_normalization() {
@@ -2355,6 +2383,79 @@ mod tests {
             Some("nv-1"),
             Some("nv-2")
         ));
+    }
+
+    #[test]
+    fn matching_network_volume_supersedes_conflicting_warm_datacenter_pin() {
+        assert_eq!(
+            warm_datacenter_requirement(Some("OTHER-DC"), Some("CONFIG-DC"), Some("nv-1")),
+            None
+        );
+        assert_eq!(
+            warm_datacenter_requirement(Some("CLI-DC"), Some("CONFIG-DC"), None),
+            Some("CLI-DC".into())
+        );
+    }
+
+    #[test]
+    fn machine_gpu_type_id_is_an_allocation_signal() {
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "id": "pod-live-shape",
+            "desiredStatus": "RUNNING",
+            "uptimeSeconds": 0,
+            "machine": { "gpuTypeId": "NVIDIA GeForce RTX 4090" }
+        }))
+        .unwrap();
+
+        assert!(pod_is_scheduled(&pod));
+    }
+
+    #[test]
+    fn pod_detail_shows_top_level_gpu_without_machine() {
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "id": "pod-top-level-gpu",
+            "gpu": { "displayName": "NVIDIA H100 NVL" }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            pod_detail_gpu_line(&pod).as_deref(),
+            Some("NVIDIA H100 NVL")
+        );
+    }
+
+    #[test]
+    fn only_not_found_clears_a_missing_tracked_pod() {
+        let not_found = anyhow::Error::new(MoldError::RunPodNotFound("gone".into()));
+        let transient = anyhow::Error::new(MoldError::RunPod("service unavailable".into()));
+        let auth = anyhow::Error::new(MoldError::RunPodAuth("expired".into()));
+
+        assert!(tracked_pod_is_absent(&not_found));
+        assert!(!tracked_pod_is_absent(&transient));
+        assert!(!tracked_pod_is_absent(&auth));
+    }
+
+    #[tokio::test]
+    async fn failed_delete_does_not_finalize_tracked_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let client = RunPodClient::new(server.uri(), "test-key");
+        let finalized = Arc::new(AtomicBool::new(false));
+        let finalized_in_callback = Arc::clone(&finalized);
+
+        let error = delete_then_finalize(&client, "still-billing", move || {
+            finalized_in_callback.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(!finalized.load(Ordering::SeqCst));
+        assert!(error.to_string().contains("remains tracked"));
+        assert!(error.to_string().contains("may still be billing"));
     }
 
     #[test]

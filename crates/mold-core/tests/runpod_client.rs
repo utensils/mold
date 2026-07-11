@@ -264,6 +264,28 @@ async fn network_volume_delete_fails_closed_when_attachment_check_fails() {
 }
 
 #[tokio::test]
+async fn network_volume_delete_blocks_current_rest_attachment_shape() {
+    let (client, server) = client_with_mock().await;
+    Mock::given(method("GET"))
+        .and(path("/pods"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{"id":"pod-1","desiredStatus":"RUNNING","networkVolumeId":"nv-1"}]"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let error = client
+        .delete_network_volume_if_detached("nv-1")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("delete pod pod-1"));
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| request.method.as_str() != "DELETE"));
+}
+
+#[tokio::test]
 async fn stop_and_start_pod_happy_paths() {
     let (client, server) = client_with_mock().await;
     Mock::given(method("POST"))

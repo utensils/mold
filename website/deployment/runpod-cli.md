@@ -128,7 +128,8 @@ mold runpod logs <pod-id>                       # validate pod + print console h
 When a network volume is selected, it replaces the ordinary Pod workspace
 disk at `/workspace`. Mold forces Secure Cloud and pins deployment to the
 volume's datacenter, even if `--cloud`, `--dc`, or their config defaults say
-otherwise. A volume can be renamed and grown up to 4000 GB, but cannot shrink.
+otherwise. Production currently accepts 10–3999 GB. A volume can be renamed
+and grown within that range, but cannot shrink.
 It remains billable independently of pods until explicitly deleted, and must be
 detached by deleting its pod before the volume itself can be deleted.
 

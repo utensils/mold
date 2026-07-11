@@ -21,6 +21,15 @@ pub const GRAPHQL_ENDPOINT: &str = "https://api.runpod.io/graphql";
 /// Environment variable that holds the RunPod API key.
 pub const API_KEY_ENV: &str = "RUNPOD_API_KEY";
 
+/// Live RunPod REST limits. The generated API schema currently advertises a
+/// wider range, but the production service rejects sizes below 10 GB and 4 TB.
+pub const NETWORK_VOLUME_MIN_GB: u32 = 10;
+pub const NETWORK_VOLUME_MAX_GB: u32 = 3999;
+
+pub fn valid_network_volume_size(size: u32) -> bool {
+    (NETWORK_VOLUME_MIN_GB..=NETWORK_VOLUME_MAX_GB).contains(&size)
+}
+
 /// Persisted configuration under `[runpod]` in `config.toml`.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct RunPodSettings {
@@ -188,12 +197,55 @@ pub struct Pod {
     pub runtime: Option<serde_json::Value>,
     #[serde(rename = "networkVolume", default)]
     pub network_volume: Option<NetworkVolume>,
+    /// Current REST list/get responses expose only this id; create responses
+    /// may additionally include the expanded `networkVolume` object above.
+    #[serde(rename = "networkVolumeId", default)]
+    pub network_volume_id: Option<String>,
+}
+
+impl Pod {
+    pub fn attached_network_volume_id(&self) -> Option<&str> {
+        self.network_volume
+            .as_ref()
+            .map(|volume| volume.id.as_str())
+            .or(self.network_volume_id.as_deref())
+    }
+
+    pub fn gpu_name(&self) -> Option<&str> {
+        self.gpu
+            .as_ref()
+            .and_then(|gpu| gpu.display_name.as_deref())
+            .or_else(|| {
+                self.machine
+                    .as_ref()
+                    .and_then(|machine| machine.gpu_display_name.as_deref())
+            })
+            .or_else(|| {
+                self.machine
+                    .as_ref()
+                    .and_then(|machine| machine.gpu_type_id.as_deref())
+            })
+            .or_else(|| self.gpu.as_ref().and_then(|gpu| gpu.id.as_deref()))
+    }
+
+    pub fn datacenter_id(&self) -> Option<&str> {
+        self.machine.as_ref().and_then(|machine| {
+            machine
+                .data_center_id
+                .as_deref()
+                .or(machine.location.as_deref())
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PodMachine {
     #[serde(rename = "gpuDisplayName", default)]
     pub gpu_display_name: Option<String>,
+    #[serde(rename = "gpuTypeId", default)]
+    pub gpu_type_id: Option<String>,
+    #[serde(rename = "dataCenterId", default)]
+    pub data_center_id: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
 }
@@ -689,11 +741,10 @@ impl RunPodClient {
     /// transport, or API error must never fall through to destructive delete.
     pub async fn delete_network_volume_if_detached(&self, id: &str) -> Result<()> {
         let pods = self.list_pods().await?;
-        if let Some(pod) = pods.iter().find(|pod| {
-            pod.network_volume
-                .as_ref()
-                .is_some_and(|volume| volume.id == id)
-        }) {
+        if let Some(pod) = pods
+            .iter()
+            .find(|pod| pod.attached_network_volume_id() == Some(id))
+        {
             return Err(MoldError::RunPod(format!(
                 "delete pod {} before deleting its attached network volume",
                 pod.id
@@ -814,6 +865,14 @@ mod tests {
     }
 
     #[test]
+    fn live_network_volume_size_bounds_are_enforced() {
+        assert!(!valid_network_volume_size(9));
+        assert!(valid_network_volume_size(10));
+        assert!(valid_network_volume_size(3999));
+        assert!(!valid_network_volume_size(4000));
+    }
+
+    #[test]
     fn pod_reads_gpu_from_top_level_rest_shape() {
         let pod: Pod = serde_json::from_value(serde_json::json!({
             "id": "pod-1",
@@ -824,6 +883,30 @@ mod tests {
         assert_eq!(
             pod.gpu.and_then(|gpu| gpu.display_name).as_deref(),
             Some("RTX PRO 6000 Blackwell")
+        );
+    }
+
+    #[test]
+    fn pod_reads_current_machine_gpu_and_network_volume_id_shape() {
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "id": "pod-1",
+            "desiredStatus": "RUNNING",
+            "networkVolumeId": "nv-1",
+            "machine": {
+                "gpuTypeId": "NVIDIA GeForce RTX 4090",
+                "dataCenterId": "EU-RO-1",
+                "location": "RO"
+            }
+        }))
+        .unwrap();
+        assert_eq!(pod.attached_network_volume_id(), Some("nv-1"));
+        assert_eq!(pod.gpu_name(), Some("NVIDIA GeForce RTX 4090"));
+        assert_eq!(pod.datacenter_id(), Some("EU-RO-1"));
+        assert_eq!(
+            pod.machine
+                .as_ref()
+                .and_then(|machine| machine.gpu_type_id.as_deref()),
+            Some("NVIDIA GeForce RTX 4090")
         );
     }
 

@@ -34,9 +34,22 @@ describe("RunPod presentation helpers", () => {
 
   it("uses the top-level REST GPU when machine metadata omits it", () => {
     const pod = {
-      machine: { gpuDisplayName: null, location: "US" },
+      machine: { gpuDisplayName: null, gpuTypeId: null, dataCenterId: null, location: "US" },
       gpu: { id: "NVIDIA RTX PRO 6000", displayName: "RTX PRO 6000 Blackwell", count: 1 },
     } as RunPodPod;
     expect(podGpuName(pod)).toBe("RTX PRO 6000 Blackwell");
+  });
+
+  it("uses current REST machine.gpuTypeId when display-name fields are absent", () => {
+    const pod = {
+      machine: {
+        gpuDisplayName: null,
+        gpuTypeId: "NVIDIA GeForce RTX 4090",
+        dataCenterId: "EU-RO-1",
+        location: "RO",
+      },
+      gpu: null,
+    } as RunPodPod;
+    expect(podGpuName(pod)).toBe("NVIDIA GeForce RTX 4090");
   });
 });

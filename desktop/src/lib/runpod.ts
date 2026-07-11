@@ -45,8 +45,14 @@ export interface RunPodPod {
   memoryInGb: number;
   vcpuCount: number;
   volumeInGb: number;
-  machine: { gpuDisplayName: string | null; location: string | null } | null;
+  machine: {
+    gpuDisplayName: string | null;
+    gpuTypeId: string | null;
+    dataCenterId: string | null;
+    location: string | null;
+  } | null;
   gpu: { id: string | null; displayName: string | null; count: number | null } | null;
+  networkVolumeId: string | null;
   networkVolume: RunPodNetworkVolume | null;
 }
 
@@ -98,7 +104,11 @@ export function rankRunPodGpus(gpus: RunPodGpu[]): RunPodGpu[] {
 export const podProxyUrl = (id: string): string => `https://${id}-7680.proxy.runpod.net`;
 
 export const podGpuName = (pod: RunPodPod): string =>
-  pod.machine?.gpuDisplayName ?? pod.gpu?.displayName ?? pod.gpu?.id ?? "GPU details unavailable";
+  pod.gpu?.displayName ??
+  pod.machine?.gpuDisplayName ??
+  pod.machine?.gpuTypeId ??
+  pod.gpu?.id ??
+  "GPU details unavailable";
 
 export const emptyRunPodOverview = (): RunPodOverview => ({
   configured: false,
