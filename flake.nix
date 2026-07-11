@@ -947,6 +947,17 @@
                 command = ''
                   set -euo pipefail
                   ${desktopSetup}
+                  # Killing a previous desktop-dev mid-build orphans its Vite
+                  # child, which keeps :1430 bound and fails the next run with
+                  # "Port 1430 is already in use" — reap stale listeners first.
+                  stale=$(lsof -ti tcp:1430 || true)
+                  if [ -n "$stale" ]; then
+                    echo "desktop-dev: killing stale listener(s) on :1430 (pid $stale)"
+                    kill $stale 2>/dev/null || true
+                    sleep 1
+                    stale=$(lsof -ti tcp:1430 || true)
+                    [ -z "$stale" ] || kill -9 $stale 2>/dev/null || true
+                  fi
                   cd desktop
                   bun install --frozen-lockfile
                   cargo tauri dev --features metal "$@"
