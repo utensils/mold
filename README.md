@@ -170,6 +170,17 @@ Gallery, parallel model downloads with real cancellation, chains, model
 catalog browsing, history, and a full settings bench. Its RunPod workspace can
 launch and manage pods and persistent network volumes without leaving the app.
 
+Signed desktop builds check for updates when they open, but a check never
+installs anything. Choose **Stable** (tagged releases) or **Nightly** (signed
+builds from desktop-relevant commits on `main`) in **Settings → Updates**, run
+**Check for updates** whenever you want, then explicitly choose **Update and
+restart**. Tauri verifies every update's mandatory signature, bundle identity,
+and manifest version before Mold stages it. Mold keeps the previously healthy
+app until the replacement completes its launch-health handshake and process
+probation; failed, interrupted, or unhealthy installs restore and relaunch that
+backup. Moving from Nightly back to Stable never silently
+downgrades the app—if the nightly is newer, Mold waits for a newer Stable build.
+
 Still images expose **Copy image** from their right-click menus at full
 resolution. The complete interface—including fixed overlays and those context
 menus—scales from 80–130% with **⌘+**, **⌘−**, **⌘0**, the View menu, or

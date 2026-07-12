@@ -32,6 +32,14 @@ pub enum ThemeFamily {
     Mold,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Nightly,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -63,6 +71,9 @@ pub struct AppSettings {
     pub runpod_network_volume_id: Option<String>,
     /// Whole-webview scale, stored as a percentage (80-130).
     pub ui_scale_percent: u16,
+    /// Signed desktop release stream. Stable is deliberately the migration
+    /// default; opting into main-branch builds must always be explicit.
+    pub update_channel: UpdateChannel,
 }
 
 impl Default for AppSettings {
@@ -81,6 +92,7 @@ impl Default for AppSettings {
             runpod_include_hf_token: false,
             runpod_network_volume_id: None,
             ui_scale_percent: 100,
+            update_channel: UpdateChannel::Stable,
         }
     }
 }
@@ -136,6 +148,7 @@ mod tests {
             runpod_include_hf_token: true,
             runpod_network_volume_id: Some("nv-models".into()),
             ui_scale_percent: 120,
+            update_channel: UpdateChannel::Nightly,
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path), settings);
@@ -157,6 +170,7 @@ mod tests {
         assert!(!loaded.runpod_include_hf_token);
         assert_eq!(loaded.runpod_network_volume_id, None);
         assert_eq!(loaded.ui_scale_percent, 100);
+        assert_eq!(loaded.update_channel, UpdateChannel::Stable);
     }
 
     #[test]
@@ -166,6 +180,21 @@ mod tests {
         assert_eq!(AppSettings::default().mode, ConnectionMode::Local);
         assert_eq!(AppSettings::default().theme, Theme::System);
         assert_eq!(AppSettings::default().theme_family, ThemeFamily::Mold);
+        assert_eq!(AppSettings::default().update_channel, UpdateChannel::Stable);
+    }
+
+    #[test]
+    fn update_channel_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        let settings = AppSettings {
+            update_channel: UpdateChannel::Nightly,
+            ..AppSettings::default()
+        };
+
+        save(&path, &settings).unwrap();
+
+        assert_eq!(load(&path).update_channel, UpdateChannel::Nightly);
     }
 
     #[test]

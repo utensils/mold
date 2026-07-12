@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import EngineSection from "../components/settings/EngineSection.vue";
 import PerformanceSection from "../components/settings/PerformanceSection.vue";
 import GenerationSection from "../components/settings/GenerationSection.vue";
 import ExpansionSection from "../components/settings/ExpansionSection.vue";
 import AccountsSection from "../components/settings/AccountsSection.vue";
 import AppSection from "../components/settings/AppSection.vue";
+import UpdatesSection from "../components/settings/UpdatesSection.vue";
 import ProfilesSection from "../components/settings/ProfilesSection.vue";
 import AdvancedSection from "../components/settings/AdvancedSection.vue";
 import AboutSection from "../components/settings/AboutSection.vue";
@@ -24,9 +26,34 @@ import { useSettingsConfigStore } from "../stores/settingsConfig";
 const conn = useConnectionStore();
 const config = useSettingsConfigStore();
 const models = useModelStore();
+const route = useRoute();
+const router = useRouter();
 
-const section = ref<SectionId>("engine");
+function sectionFromQuery(value: unknown): SectionId {
+  return typeof value === "string" && SECTIONS.some((candidate) => candidate.id === value)
+    ? (value as SectionId)
+    : "engine";
+}
+
+const section = ref<SectionId>(sectionFromQuery(route.query.section));
 const query = ref("");
+
+watch(
+  () => route.query.section,
+  (value) => {
+    section.value = sectionFromQuery(value);
+    query.value = "";
+  },
+);
+
+function selectSection(next: SectionId) {
+  section.value = next;
+  query.value = "";
+  const nextQuery = { ...route.query };
+  if (next === "engine") delete nextQuery.section;
+  else nextQuery.section = next;
+  void router.replace({ query: nextQuery });
+}
 
 watch(
   () => conn.ready,
@@ -63,6 +90,7 @@ const componentFor: Record<SectionId, unknown> = {
   expansion: ExpansionSection,
   accounts: AccountsSection,
   app: AppSection,
+  updates: UpdatesSection,
   profiles: ProfilesSection,
   advanced: AdvancedSection,
   about: AboutSection,
@@ -93,10 +121,7 @@ const componentFor: Record<SectionId, unknown> = {
             ? 'bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)] text-ink'
             : 'text-ink-2 hover:text-ink'
         "
-        @click="
-          section = s.id;
-          query = '';
-        "
+        @click="selectSection(s.id)"
       >
         {{ s.label }}
       </button>
@@ -130,10 +155,7 @@ const componentFor: Record<SectionId, unknown> = {
             v-if="matchedKnobs"
             type="button"
             class="border-edge mt-3 h-8 w-full rounded-control border px-3 text-left text-body text-ink-2 hover:text-ink"
-            @click="
-              section = 'performance';
-              query = '';
-            "
+            @click="selectSection('performance')"
           >
             Performance knobs match — open Performance →
           </button>

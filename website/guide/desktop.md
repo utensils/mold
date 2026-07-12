@@ -81,6 +81,49 @@ surface powers it, so anything the app does maps to a documented endpoint.
 - **Native macOS** — menu bar, keyboard shortcuts, and background notifications
   on generation, chain, and pull completion.
 
+## Updates
+
+Signed desktop builds keep update checks separate from installation. Mold makes
+a best-effort check after the app opens, and **Mold → Check for Updates…** plus
+**Settings → Updates → Check for updates** run the same check manually. A
+check only reports what is available: Mold does not download, install, or
+restart until you explicitly choose **Update and restart**.
+
+Choose the release stream in **Settings → Updates**:
+
+- **Stable** (default) follows tagged, production releases.
+- **Nightly** follows signed and notarized builds from desktop-relevant commits
+  on `main`, after both desktop frontend and Rust CI gates pass. Nightlies expose
+  changes sooner and may contain regressions.
+
+Both channels use public, HTTPS-hosted manifests:
+
+- [Stable manifest](https://github.com/utensils/mold/releases/latest/download/mold-desktop-stable.json)
+- [Nightly manifest](https://github.com/utensils/mold/releases/download/latest/mold-desktop-nightly.json)
+
+Tauri's updater signature check is mandatory. The complete archive must pass
+Minisign verification against the public key embedded in Mold before the app is
+staged, and its bundle identifier and version must match the signed manifest;
+this is separate from the Developer ID signature and Apple notarization that
+macOS verifies. Downloads stop cleanly after 15 minutes. Mold refuses to stage
+an update while it is running from a DMG or a translocated location—move it to
+Applications and reopen it first.
+
+Before installation, Mold persists a copy of the currently healthy `.app` and
+starts a supervisor from that backup. The supervisor survives replacement of
+the primary app, launches the candidate, and waits up to 60 seconds for the
+mounted interface's health handshake, then keeps watching the process through a
+10-second probation. An install failure, early candidate exit, or missing
+handshake restores and relaunches the backup. A shutdown during installation is
+reconciled on the next launch. The backup is removed only after probation; if
+automatic restoration itself fails, Settings shows the preserved recovery-app
+path and manual copy instructions.
+
+Switching from Nightly to Stable changes which manifest Mold checks, but never
+silently downgrades the installed app. If your nightly version is newer than the
+latest stable version, Mold reports Stable as current until a newer tagged
+release is published.
+
 ### Keyboard map
 
 | Shortcut     | Action                                  |
@@ -186,12 +229,21 @@ for Apple notarization, staples the ticket, then verifies the hardened-runtime
 signature, entitlements, Gatekeeper acceptance, and staple on both artifacts.
 
 CI runs the same signed distribution job from
-`.github/workflows/desktop-distribution.yml`: the release workflow calls it on
-every `v*` tag and attaches the resulting DMG (and a zipped `Mold.app`) to the
-GitHub release, so each versioned release ships a signed, notarized, stapled
-`Mold_<version>_aarch64.dmg` you can download and drag to Applications. The
-job also stays runnable via manual dispatch for testing the signing path.
-Repository secrets hold the exported Developer ID certificate and App Store
-Connect key; the private key is written only to the runner's temporary
-directory and the temporary signing keychain is removed even if the build
-fails.
+`.github/workflows/desktop-distribution.yml`. Tagged releases publish the Stable
+DMG, updater archive, signature, and `mold-desktop-stable.json`; desktop-relevant
+commits on `main` publish their signed Nightly counterparts to the rolling
+`latest` prerelease only after desktop CI passes. Both publication paths verify
+the archived app and updater signature against the exact public key embedded in
+Mold, then prove that the public manifest points at an anonymously downloadable
+payload before moving the channel pointer. Nightly publication prunes only old
+desktop assets after that verification and retains ten generations; unrelated
+CLI assets and the current manifest target are never selected.
+
+Repository secrets hold the exported Developer ID certificate, App Store
+Connect key, and the Tauri updater credentials `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Never print or commit the updater private
+key. Keep a controlled offline backup: losing it prevents already installed
+copies from trusting future updates. Key rotation must be staged by first
+shipping the replacement public key in an update signed with the existing key.
+Runner-only key material is written to temporary paths, and the temporary
+signing keychain is removed even if the build fails.

@@ -22,6 +22,41 @@ export interface ConnectionInfo {
 
 export type Theme = "system" | "dark" | "light";
 export type ThemeFamily = "safelight" | "mold";
+export type UpdateChannel = "stable" | "nightly";
+
+export interface UpdateCandidate {
+  /** Opaque backend-issued identifier. The webview never supplies update URLs. */
+  id: string;
+  version: string;
+  publishedAt: string | null;
+  notes: string | null;
+}
+
+export interface UpdateCheckResult {
+  supported: boolean;
+  channel: UpdateChannel;
+  currentVersion: string;
+  checkedAt: string;
+  candidate: UpdateCandidate | null;
+}
+
+export type UpdateProgressPhase =
+  "downloading" | "verifying" | "staging" | "installing" | "rolling-back";
+
+export interface UpdateProgress {
+  candidateId: string;
+  phase: UpdateProgressPhase;
+  downloadedBytes: number | null;
+  totalBytes: number | null;
+}
+
+export interface UpdateRecovery {
+  restoredVersion: string;
+  failedVersion: string | null;
+  message: string;
+  rollbackFailed?: boolean;
+  backupPath?: string | null;
+}
 
 export interface AppSettings {
   mode: "local" | "remote" | "off";
@@ -39,6 +74,8 @@ export interface AppSettings {
   runpodIncludeHfToken: boolean;
   runpodNetworkVolumeId: string | null;
   uiScalePercent: number;
+  /** Signed desktop release stream. Nightly follows builds from main. */
+  updateChannel: UpdateChannel;
 }
 
 export interface HostTest {
@@ -87,6 +124,7 @@ const browserFallbackSettings = (): AppSettings => ({
   runpodIncludeHfToken: false,
   runpodNetworkVolumeId: null,
   uiScalePercent: 100,
+  updateChannel: "stable",
 });
 
 export const ipc = {
@@ -122,6 +160,35 @@ export const ipc = {
   appSettingsSet(settings: AppSettings): Promise<void> {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("app_settings_set", { settings });
+  },
+  checkForUpdates(channel: UpdateChannel): Promise<UpdateCheckResult> {
+    if (!inTauri()) {
+      return Promise.resolve({
+        supported: false,
+        channel,
+        currentVersion: "dev",
+        checkedAt: new Date().toISOString(),
+        candidate: null,
+      });
+    }
+    return invoke<UpdateCheckResult>("check_for_updates", { channel });
+  },
+  installPendingUpdate(candidateId: string): Promise<void> {
+    if (!inTauri()) return Promise.reject(new Error("Updates require a signed desktop build."));
+    return invoke<void>("install_pending_update", { candidateId });
+  },
+  takeUpdateRecovery(): Promise<UpdateRecovery | null> {
+    if (!inTauri()) return Promise.resolve(null);
+    return invoke<UpdateRecovery | null>("take_update_recovery");
+  },
+  confirmUpdateHealthy(): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("confirm_update_healthy");
+  },
+  async onUpdaterProgress(listener: (progress: UpdateProgress) => void): Promise<() => void> {
+    if (!inTauri()) return () => {};
+    const { listen } = await import("@tauri-apps/api/event");
+    return listen<UpdateProgress>("updater-progress", ({ payload }) => listener(payload));
   },
   /** Where the local engine writes gallery files; null on remote hosts. */
   getOutputDir(): Promise<string | null> {

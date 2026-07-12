@@ -1,5 +1,11 @@
 import { defineStore } from "pinia";
-import { ipc, type AppSettings, type Theme, type ThemeFamily } from "../lib/ipc";
+import {
+  ipc,
+  type AppSettings,
+  type Theme,
+  type ThemeFamily,
+  type UpdateChannel,
+} from "../lib/ipc";
 import { applyUiScale, nextUiScale, type UiScaleDirection } from "../lib/uiScale";
 
 /**
@@ -43,6 +49,7 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     runpodIncludeHfToken: (s) => s.settings?.runpodIncludeHfToken ?? false,
     runpodNetworkVolumeId: (s) => s.settings?.runpodNetworkVolumeId ?? null,
     uiScalePercent: (s) => s.settings?.uiScalePercent ?? 100,
+    updateChannel: (s): UpdateChannel => s.settings?.updateChannel ?? "stable",
     engineEnv: (s): Record<string, string> => s.settings?.engineEnv ?? {},
   },
   actions: {

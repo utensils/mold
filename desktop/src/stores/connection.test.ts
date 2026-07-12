@@ -35,6 +35,7 @@ const defaults = {
   runpodIncludeHfToken: false,
   runpodNetworkVolumeId: null,
   uiScalePercent: 100,
+  updateChannel: "stable" as const,
 };
 
 beforeEach(() => {

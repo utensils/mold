@@ -20,6 +20,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             Some(about),
         )?)
         .separator()
+        .item(&MenuItemBuilder::with_id("check-for-updates", "Check for Updates…").build(app)?)
+        .separator()
         .item(
             &MenuItemBuilder::with_id("settings", "Settings…")
                 .accelerator("Cmd+,")

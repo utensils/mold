@@ -19,7 +19,25 @@ on:
       - "flake.nix"
       - "Cargo.toml"
       - ".github/workflows/desktop.yml"
+      - ".github/workflows/desktop-distribution.yml"
+      - "scripts/check-desktop-nightly-main-head.sh"
+      - "scripts/create-desktop-bundle-version.sh"
+      - "scripts/create-desktop-nightly-version.sh"
+      - "scripts/create-desktop-update-manifest.sh"
+      - "scripts/fix-desktop-macos-linkage.sh"
+      - "scripts/notarize-desktop-dmg.sh"
+      - "scripts/prune-desktop-nightly-assets.sh"
+      - "scripts/select-desktop-stable-latest.sh"
+      - "scripts/tests/check-desktop-nightly-main-head.sh"
+      - "scripts/tests/create-desktop-bundle-version.sh"
+      - "scripts/tests/create-desktop-nightly-version.sh"
+      - "scripts/tests/create-desktop-update-manifest.sh"
+      - "scripts/tests/desktop-nightly-race-guards.sh"
+      - "scripts/tests/prune-desktop-nightly-assets.sh"
+      - "scripts/tests/select-desktop-stable-latest.sh"
+      - "scripts/tests/verify-desktop-updater-signature.sh"
       - "scripts/verify-desktop-release.sh"
+      - "scripts/verify-desktop-updater-signature.sh"
   pull_request:
     paths:
       - "desktop/**"
@@ -31,8 +49,35 @@ on:
       - "flake.nix"
       - "Cargo.toml"
       - ".github/workflows/desktop.yml"
+      - ".github/workflows/desktop-distribution.yml"
+      - "scripts/check-desktop-nightly-main-head.sh"
+      - "scripts/create-desktop-bundle-version.sh"
+      - "scripts/create-desktop-nightly-version.sh"
+      - "scripts/create-desktop-update-manifest.sh"
+      - "scripts/fix-desktop-macos-linkage.sh"
+      - "scripts/notarize-desktop-dmg.sh"
+      - "scripts/prune-desktop-nightly-assets.sh"
+      - "scripts/select-desktop-stable-latest.sh"
+      - "scripts/tests/check-desktop-nightly-main-head.sh"
+      - "scripts/tests/create-desktop-bundle-version.sh"
+      - "scripts/tests/create-desktop-nightly-version.sh"
+      - "scripts/tests/create-desktop-update-manifest.sh"
+      - "scripts/tests/desktop-nightly-race-guards.sh"
+      - "scripts/tests/prune-desktop-nightly-assets.sh"
+      - "scripts/tests/select-desktop-stable-latest.sh"
+      - "scripts/tests/verify-desktop-updater-signature.sh"
       - "scripts/verify-desktop-release.sh"
+      - "scripts/verify-desktop-updater-signature.sh"
   workflow_dispatch:
+
+concurrency:
+  # First-attempt pushes share one primary lane. Reruns and manual runs use
+  # their run ID so they cannot cancel or replace a live primary build.
+  group: desktop-${{ github.event_name == 'push' && github.run_attempt == 1 && 'primary' || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -47,6 +92,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - name: Install updater verification tooling
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Test updater release scripts
+        run: |
+          bash ../scripts/tests/check-desktop-nightly-main-head.sh
+          bash ../scripts/tests/create-desktop-bundle-version.sh
+          bash ../scripts/tests/create-desktop-nightly-version.sh
+          bash ../scripts/tests/create-desktop-update-manifest.sh
+          bash ../scripts/tests/desktop-nightly-race-guards.sh
+          bash ../scripts/tests/verify-desktop-updater-signature.sh
+          bash ../scripts/tests/prune-desktop-nightly-assets.sh
+          bash ../scripts/tests/select-desktop-stable-latest.sh
       - run: bun install --frozen-lockfile
       - run: bun run fmt:check
       - run: bunx vue-tsc -b
@@ -73,6 +130,163 @@ jobs:
       - name: Bundle proof (unsigned .app)
         run: bunx tauri build --bundles app --ci
 
-  # The signed + notarized distribution build lives in
-  # desktop-distribution.yml: release.yml calls it on v* tags so the DMG
-  # ships on the GitHub release, and it stays runnable via workflow_dispatch.
+  # Every desktop-relevant main commit that passes both CI jobs becomes a
+  # signed, notarized nightly. The updater-artifact overlay stays isolated
+  # from the unsigned PR bundle proof above.
+  desktop-nightly:
+    name: Build nightly distribution
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [desktop-frontend, desktop-rust]
+    uses: ./.github/workflows/desktop-distribution.yml
+    with:
+      channel: nightly
+    secrets: inherit
+
+  publish-desktop-nightly:
+    name: Publish nightly update
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [desktop-nightly]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: desktop-nightly-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install updater verification tooling
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - uses: actions/download-artifact@v8
+        with:
+          name: mold-desktop-macos-nightly
+          path: artifacts
+
+      - name: Upload immutable nightly payloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.desktop-nightly.outputs.version }}
+          UPDATER_ARTIFACT_NAME: ${{ needs.desktop-nightly.outputs.updater_artifact_name }}
+          DMG_NAME: ${{ needs.desktop-nightly.outputs.dmg_name }}
+          MANIFEST_NAME: ${{ needs.desktop-nightly.outputs.manifest_name }}
+        run: |
+          set -euo pipefail
+          payload="artifacts/$UPDATER_ARTIFACT_NAME"
+          signature="$payload.sig"
+          dmg="artifacts/$DMG_NAME"
+          manifest="artifacts/$MANIFEST_NAME"
+          for path in "$payload" "$signature" "$dmg" "$manifest"; do
+            if [[ ! -f "$path" ]]; then
+              echo "::error::missing nightly artifact $path"
+              exit 1
+            fi
+          done
+
+          if scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"; then
+            :
+          else
+            head_status=$?
+            if [[ "$head_status" -eq 10 ]]; then
+              echo "::notice::Skipping stale desktop nightly $VERSION; main advanced during the build."
+              exit 0
+            fi
+            exit "$head_status"
+          fi
+
+          scripts/verify-desktop-updater-signature.sh \
+            --artifact "$payload" \
+            --signature "$signature" \
+            --config desktop/src-tauri/tauri.conf.json
+
+          # release.yml normally owns this rolling prerelease. Handle the first
+          # run (or a race with that workflow) without changing its body later.
+          if ! gh release view latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create latest \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Latest Build" \
+              --notes "Rolling pre-release from main." \
+              --prerelease \
+              || gh release view latest --repo "$GITHUB_REPOSITORY" > /dev/null
+          fi
+
+          # The manifest is the channel pointer, so publish and prove every
+          # version-unique target before changing that pointer.
+          gh release upload latest "$payload" "$signature" "$dmg" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+          payload_url=$(jq -r '.platforms["darwin-aarch64"].url' "$manifest")
+          expected_sha=$(sha256sum "$payload" | awk '{print $1}')
+          remote_payload="$RUNNER_TEMP/$UPDATER_ARTIFACT_NAME"
+          payload_ready=false
+          for attempt in $(seq 1 20); do
+            if curl -fsSL "$payload_url" -o "$remote_payload"; then
+              actual_sha=$(sha256sum "$remote_payload" | awk '{print $1}')
+              if [[ "$actual_sha" == "$expected_sha" ]]; then
+                payload_ready=true
+                break
+              fi
+            fi
+            if [[ "$attempt" -lt 20 ]]; then
+              echo "Nightly payload not anonymously available yet (attempt $attempt/20); retrying in 15s"
+              sleep 15
+            fi
+          done
+          if [[ "$payload_ready" != true ]]; then
+            echo "::error::nightly updater payload failed anonymous SHA-256 verification"
+            exit 1
+          fi
+
+          # Main can advance while the immutable payload is propagating. Check
+          # again at the channel-pointer boundary so a stale build cannot flip
+          # the manifest after a newer primary run has started.
+          if scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"; then
+            :
+          else
+            head_status=$?
+            if [[ "$head_status" -eq 10 ]]; then
+              echo "::notice::Leaving verified stale payload $VERSION unpublished; main advanced before the manifest flip."
+              exit 0
+            fi
+            exit "$head_status"
+          fi
+
+          gh release upload latest "$manifest" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+          manifest_url="https://github.com/$GITHUB_REPOSITORY/releases/download/latest/$MANIFEST_NAME"
+          expected_signature=$(tr -d '\r\n' < "$signature")
+          remote_manifest="$RUNNER_TEMP/$MANIFEST_NAME"
+          manifest_ready=false
+          for attempt in $(seq 1 20); do
+            if curl -fsSL "$manifest_url" -o "$remote_manifest" \
+              && jq -e \
+                --arg version "$VERSION" \
+                --arg url "$payload_url" \
+                --arg signature "$expected_signature" \
+                '.version == $version
+                  and .platforms["darwin-aarch64"].url == $url
+                  and .platforms["darwin-aarch64"].signature == $signature' \
+                "$remote_manifest" > /dev/null; then
+              manifest_ready=true
+              break
+            fi
+            if [[ "$attempt" -lt 20 ]]; then
+              echo "Nightly manifest not anonymously available yet (attempt $attempt/20); retrying in 15s"
+              sleep 15
+            fi
+          done
+          if [[ "$manifest_ready" != true ]]; then
+            echo "::error::nightly updater manifest failed anonymous verification"
+            exit 1
+          fi
+
+          # The manifest now points at a fully verified immutable payload. Only
+          # after that atomic flip is it safe to remove older generations.
+          scripts/prune-desktop-nightly-assets.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-tag latest \
+            --current-version "$VERSION" \
+            --keep 10
+
+          echo "Published Mold desktop nightly $VERSION"
+          echo "Manifest: $manifest_url"

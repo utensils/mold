@@ -7,6 +7,7 @@ pub mod runpod;
 pub mod secrets;
 pub mod server;
 pub mod settings;
+pub mod updater;
 
 use tauri::Manager;
 
@@ -47,11 +48,13 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(move |app| {
             let menu = menu::build(app.handle())?;
             app.set_menu(menu)?;
             app.manage(commands::SettingsStore::load(app.handle())?);
+            app.manage(updater::UpdaterState::default());
             let app_data = app.path().app_data_dir()?;
             app.manage(commands::AppState {
                 conn: tokio::sync::Mutex::new(connection::Conn::Off),
@@ -75,6 +78,10 @@ pub fn run() {
             commands::set_dock_badge,
             commands::reveal_output_file,
             commands::open_logs_dir,
+            updater::check_for_updates,
+            updater::install_pending_update,
+            updater::take_update_recovery,
+            updater::confirm_update_healthy,
             gallery::local_gallery_list,
             gallery::local_gallery_delete,
             clipboard::clipboard_write_image,
