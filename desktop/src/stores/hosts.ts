@@ -83,12 +83,15 @@ export const useHostsStore = defineStore("hosts", {
         version: t?.version ?? null,
       };
     },
-    /** Every host, primary first; an extra shadowed by the primary is hidden. */
+    /** Every host, primary first; an extra shadowed by the primary is hidden.
+     *  Dedupe by URL as well as id — the local primary's id is the literal
+     *  "local", so a loopback extra pointing at the same server would
+     *  otherwise be listed (and routed to) twice. */
     all(state): HostView[] {
       const primary = this.primaryHost;
       const rows: HostView[] = primary ? [primary] : [];
       for (const extra of state.extras) {
-        if (extra.id === primary?.id) continue;
+        if (extra.id === primary?.id || extra.url === primary?.baseUrl) continue;
         const t = state.telemetry[extra.id];
         rows.push({
           id: extra.id,
@@ -192,9 +195,12 @@ export const useHostsStore = defineStore("hosts", {
       extra.error = test.ok ? null : test.error;
     },
     /**
-     * Resolve where a batch should run. `null`/unknown selection = Auto
-     * (least busy). An explicit pick that is not ready resolves to null so
-     * the caller can say so instead of silently rerouting.
+     * Resolve where a batch should run. `null` = Auto (least busy). An
+     * explicit pick that is CONNECTED but not ready resolves to null so the
+     * caller reports it instead of silently rerouting; a pick whose host is
+     * gone entirely (disconnected, forgotten) falls back to Auto — the
+     * selector already displays it as Auto, and a stale persisted id must
+     * never wedge every Generate click.
      */
     resolveRoute(selection: string | null): HostRoute | null {
       const routable = this.all.map((h) => ({
@@ -202,9 +208,11 @@ export const useHostsStore = defineStore("hosts", {
         kind: h.kind,
         queueDepth: h.queueDepth,
       }));
-      const chosen = selection
-        ? (routable.find((h) => h.id === selection && h.status === "ready") ?? null)
-        : pickAutoHost(routable);
+      const exists = selection !== null && routable.some((h) => h.id === selection);
+      const chosen =
+        selection && exists
+          ? (routable.find((h) => h.id === selection && h.status === "ready") ?? null)
+          : pickAutoHost(routable);
       if (!chosen?.baseUrl) return null;
       return {
         hostId: chosen.id,
@@ -256,8 +264,11 @@ export const useHostsStore = defineStore("hosts", {
     /** Remember the host across launches (MRU list + reconnect set). */
     async persist(id: string, url: string, name: string | null) {
       const settings = await ipc.appSettingsGet();
+      // A nameless reconnect must not wipe a previously discovered name —
+      // same rule as Rust's upsert_saved_host.
+      const existingName = settings.savedHosts.find((h) => h.id === id)?.name ?? null;
       const savedHosts: SavedHost[] = [
-        { id, name, url, lastUsedMs: Date.now() },
+        { id, name: name ?? existingName, url, lastUsedMs: Date.now() },
         ...settings.savedHosts.filter((h) => h.id !== id),
       ].slice(0, MAX_SAVED_HOSTS);
       const connectedHostIds = settings.connectedHostIds.includes(id)

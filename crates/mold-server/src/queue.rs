@@ -515,6 +515,10 @@ pub async fn run_queue_worker(
         }
         // Top up the buffer without blocking — drain the channel up to capacity.
         top_up_buffer(&mut buffer, &mut job_rx, buffer_size);
+        // Re-check after the recv: a pause that landed while this loop was
+        // parked waiting for work must hold the job that woke it, not leak
+        // it into dispatch.
+        state.queue_pause.wait_if_paused().await;
 
         let loaded = single_gpu_loaded_models(&state).await;
         let job = pick_next_job(&mut buffer, &loaded, max_deferrals);
@@ -1083,6 +1087,10 @@ async fn run_queue_dispatcher_with_tuning(
             }
         }
         top_up_buffer(&mut buffer, &mut job_rx, buffer_size);
+        // Re-check after the recv: a pause that landed while this loop was
+        // parked waiting for work must hold the job that woke it, not leak
+        // it into dispatch.
+        state.queue_pause.wait_if_paused().await;
 
         let loaded = multi_gpu_loaded_models(&state);
         let job = pick_next_job(&mut buffer, &loaded, max_deferrals);
@@ -2772,6 +2780,56 @@ mod tests {
         let dispatched = rx0
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("resumed dispatcher should dispatch the queued job");
+        assert_eq!(dispatched.model, "flux-dev:q4");
+
+        drop(job_tx);
+        dispatcher.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pause_while_dispatcher_is_parked_on_an_empty_queue_still_holds_the_next_job() {
+        // The subtle ordering: the dispatcher passes the top-of-loop gate,
+        // then parks in job_rx.recv() on an EMPTY queue. A pause that lands
+        // while it is parked must hold the very job whose arrival wakes it —
+        // without the post-recv re-check, that job leaks into dispatch.
+        let (worker0, rx0) = test_worker(0, 1);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(job_tx.clone());
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker0],
+            }),
+            8,
+        );
+
+        // Dispatcher starts UNPAUSED and parks waiting for work.
+        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Pause lands while it is parked, then a job arrives.
+        assert!(state.queue_pause.pause());
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let job = crate::state::GenerationJob {
+            id: "parked-job".to_string(),
+            request: fake_request("flux-dev:q4"),
+            progress_tx: None,
+            result_tx,
+            output_dir: None,
+        };
+        let _position = queue.submit(job, 8).await.unwrap();
+
+        assert!(
+            rx0.recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "a job arriving while paused must not wake straight into dispatch"
+        );
+
+        assert!(state.queue_pause.resume());
+        let dispatched = rx0
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("resume should release the held job");
         assert_eq!(dispatched.model, "flux-dev:q4");
 
         drop(job_tx);

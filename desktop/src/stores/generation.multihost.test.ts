@@ -80,14 +80,16 @@ describe("generation store multi-host routing", () => {
     expect(options.target?.baseUrl).toBe("http://hal9000:7680");
   });
 
-  it("falls back to the primary connection when no route is given", async () => {
+  it("snapshots the primary target at submit when no route is given", async () => {
     sseStream.mockResolvedValue(undefined);
     const store = useGenerationStore();
     const { jobs, settled } = store.submitBatch(request(), 1);
     await settled;
     expect(jobs[0]?.hostId).toBeNull();
-    const options = sseStream.mock.calls[0]?.[1] as { target?: unknown };
-    expect(options.target).toBeUndefined();
+    // The target is pinned at submit time — a mid-batch primary switch must
+    // not reroute queued siblings or cancels to the new engine.
+    const options = sseStream.mock.calls[0]?.[1] as { target?: { baseUrl: string } };
+    expect(options.target?.baseUrl).toBe("http://primary:7680");
   });
 
   it("auto-saves remote results to this Mac when the pref is on", async () => {

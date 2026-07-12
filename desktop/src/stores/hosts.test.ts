@@ -162,6 +162,35 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute("hal9000-7680")).toBeNull();
   });
 
+  it("resolveRoute falls back to Auto for a stale pick whose host is gone", () => {
+    const hosts = useHostsStore();
+    // Only the primary exists; a persisted pick for a forgotten host must
+    // route like Auto instead of wedging every generate.
+    expect(hosts.resolveRoute("vanished-host")?.hostId).toBe("local");
+  });
+
+  it("hides a loopback extra that points at the same server as the primary", async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("http://127.0.0.1:49152", null, null);
+    // Same URL as the primary — one row, not two.
+    expect(hosts.all).toHaveLength(1);
+    expect(hosts.all[0]?.id).toBe("local");
+  });
+
+  it("persist keeps a previously discovered name across nameless reconnects", async () => {
+    installSettings(
+      settings({
+        savedHosts: [hal],
+      }),
+    );
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("http://hal9000:7680", null, null); // no name passed
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.savedHosts[0]).toMatchObject({ id: "hal9000-7680", name: "hal9000" });
+  });
+
   it("refresh() pulls queue telemetry from every host", async () => {
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
     apiJsonTo.mockResolvedValue({ queue_depth: 2, queue_capacity: 8, version: "0.16.0" });

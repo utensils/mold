@@ -103,7 +103,7 @@ function reuse(job: Job) {
     width: job.width,
     height: job.height,
     steps: job.total,
-    guidance: 1.0,
+    guidance: job.guidance,
   });
   void router.push("/generate");
 }

@@ -146,3 +146,40 @@ describe("appPrefs store", () => {
     );
   });
 });
+
+describe("appPrefs concurrent-writer safety", () => {
+  it("update() merges onto fresh disk settings, not the boot snapshot", async () => {
+    const prefs = useAppPrefsStore();
+    await prefs.init(); // snapshot has savedHosts: []
+    // Another writer (hosts store / Rust set_remote_host) persists a host…
+    vi.mocked(ipc.appSettingsGet).mockResolvedValue({
+      ...(prefs.settings as NonNullable<typeof prefs.settings>),
+      savedHosts: [
+        { id: "hal9000-7680", name: "hal9000", url: "http://hal9000:7680", lastUsedMs: 1 },
+      ],
+      connectedHostIds: ["hal9000-7680"],
+    });
+    // …then a routine pref write happens. It must NOT erase the host.
+    await prefs.update({ theme: "light" });
+    expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        theme: "light",
+        connectedHostIds: ["hal9000-7680"],
+        savedHosts: [expect.objectContaining({ id: "hal9000-7680" })],
+      }),
+    );
+  });
+
+  it("rememberRoute() also merges onto fresh disk settings", async () => {
+    const prefs = useAppPrefsStore();
+    await prefs.init();
+    vi.mocked(ipc.appSettingsGet).mockResolvedValue({
+      ...(prefs.settings as NonNullable<typeof prefs.settings>),
+      connectedHostIds: ["hal9000-7680"],
+    });
+    await prefs.rememberRoute("/jobs");
+    expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ lastRoute: "/jobs", connectedHostIds: ["hal9000-7680"] }),
+    );
+  });
+});

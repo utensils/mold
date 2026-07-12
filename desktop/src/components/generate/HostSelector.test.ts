@@ -12,6 +12,7 @@ vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
   ipc: {
     appSettingsSet: (...a: unknown[]) => appSettingsSet(...a),
+    appSettingsGet: () => Promise.resolve(baseSettings()),
   },
 }));
 
