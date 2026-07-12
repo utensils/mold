@@ -71,13 +71,18 @@ pub fn upsert_saved_host(
     name: Option<String>,
     now_ms: u64,
 ) {
+    // A fresh name wins, but a nameless reconnect (typed hostname, boot-time
+    // restore) must not wipe the friendly name a discovery scan gave us.
+    let existing_name = hosts
+        .iter()
+        .find(|h| h.id == id)
+        .and_then(|h| h.name.clone());
     hosts.retain(|h| h.id != id);
     hosts.insert(
         0,
         SavedHost {
             id: id.to_string(),
-            // A fresh name wins; otherwise keep whatever the URL implies.
-            name,
+            name: name.or(existing_name),
             url: url.to_string(),
             last_used_ms: Some(now_ms),
         },
@@ -228,6 +233,30 @@ mod tests {
         let path = path_in(&dir);
         std::fs::write(&path, r#"{"mode":"remote","remoteUrl":"http://h:1"}"#).unwrap();
         assert!(load(&path).saved_hosts.is_empty());
+    }
+
+    #[test]
+    fn upsert_saved_host_keeps_the_friendly_name_across_nameless_reconnects() {
+        let mut hosts = Vec::new();
+        upsert_saved_host(
+            &mut hosts,
+            "hal9000-7680",
+            "http://hal9000:7680",
+            Some("hal9000".into()),
+            1,
+        );
+        // Boot-time reconnect passes no name; the mDNS name must survive.
+        upsert_saved_host(&mut hosts, "hal9000-7680", "http://hal9000:7680", None, 2);
+        assert_eq!(hosts[0].name.as_deref(), Some("hal9000"));
+        // A fresh explicit name still wins.
+        upsert_saved_host(
+            &mut hosts,
+            "hal9000-7680",
+            "http://hal9000:7680",
+            Some("renamed".into()),
+            3,
+        );
+        assert_eq!(hosts[0].name.as_deref(), Some("renamed"));
     }
 
     #[test]
