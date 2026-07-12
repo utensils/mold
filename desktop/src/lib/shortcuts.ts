@@ -10,6 +10,7 @@ export const NAV_ROUTES: Readonly<Record<string, string>> = {
   "3": "/chains",
   "4": "/models",
   "5": "/history",
+  "6": "/jobs",
   ",": "/settings",
 };
 

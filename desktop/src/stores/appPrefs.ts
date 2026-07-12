@@ -51,6 +51,7 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     uiScalePercent: (s) => s.settings?.uiScalePercent ?? 100,
     updateChannel: (s): UpdateChannel => s.settings?.updateChannel ?? "stable",
     engineEnv: (s): Record<string, string> => s.settings?.engineEnv ?? {},
+    saveRemoteOutputs: (s) => s.settings?.saveRemoteOutputs ?? true,
   },
   actions: {
     async init(): Promise<AppSettings> {

@@ -203,6 +203,23 @@ wire types as the CLI and web UI:
   without forgetting your preference. The network list uses the operating
   system's native DNS-SD browser on macOS, so advertised `_mold._tcp` services
   share the same cache and interface handling as Finder and `dns-sd`.
+- **Jobs (⌘6)** — a queue console for every connected host: the full
+  server-side queue (other clients' jobs included), live thumbnails and step
+  progress for this app's own jobs, per-job cancel, **Pause/Resume** of a
+  host's queue (the running job finishes; nothing new starts), a two-step
+  **Cancel all**, and a "Finished this session" list with one-click reuse.
+  Pause and cancel-all are feature-detected via `/api/capabilities`, so older
+  servers simply hide the controls.
+- **History** — two lenses: **Runs** (every finished generation with its
+  thumbnail, model, size, seed, and step count — click to reuse the full
+  settings including the seed) and **Prompts** (the raw prompt log, searchable,
+  for prompts whose outputs are gone).
+- **Remote prints saved locally** — generations from remote hosts and RunPod
+  are also written into this Mac's output directory (Settings → App → "Save
+  remote prints locally", on by default), with embedded metadata intact, so
+  your local gallery stays the complete record even when the GPU lives
+  elsewhere. The gallery's right-click menu adds **Save to this Mac** for
+  pulling any older remote print down on demand.
 - **Several hosts at once** — beyond the primary engine, any number of extra
   hosts can be live simultaneously (**Add as extra host** in Settings →
   Engine, or the **+** next to a detected server in the sidebar's HOSTS

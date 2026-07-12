@@ -22,6 +22,7 @@ vi.mock("../lib/ipc", () => ({
       savedHosts: [],
       connectedHostIds: [],
       generateTargetHost: null,
+      saveRemoteOutputs: true,
     }),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
   },

@@ -373,7 +373,9 @@ export type ServerEvent =
   | { type: "job_started"; id: string; model: string; gpu?: number | null }
   | { type: "job_ended"; id: string }
   | { type: "gallery_added"; filename: string; image?: GalleryImage | null }
-  | { type: "gallery_removed"; filename: string };
+  | { type: "gallery_removed"; filename: string }
+  | { type: "queue_paused" }
+  | { type: "queue_resumed" };
 
 // ── Catalog ───────────────────────────────────────────────────────────────
 

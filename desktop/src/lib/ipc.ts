@@ -91,6 +91,8 @@ export interface AppSettings {
   connectedHostIds: string[];
   /** Sticky generation-target host id; null routes automatically. */
   generateTargetHost: string | null;
+  /** Also save generations from remote hosts into this Mac's gallery. */
+  saveRemoteOutputs: boolean;
 }
 
 export interface HostTest {
@@ -143,6 +145,7 @@ const browserFallbackSettings = (): AppSettings => ({
   savedHosts: [],
   connectedHostIds: [],
   generateTargetHost: null,
+  saveRemoteOutputs: true,
 });
 
 export const ipc = {
@@ -229,6 +232,11 @@ export const ipc = {
   localGalleryDelete(filename: string): Promise<void> {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("local_gallery_delete", { filename });
+  },
+  /** Write encoded output bytes (base64) into this Mac's output dir. */
+  saveOutputBytes(filename: string, dataB64: string): Promise<string> {
+    if (!inTauri()) return Promise.reject(new Error("Local saves require the desktop app."));
+    return invoke<string>("save_output_bytes", { filename, dataB64 });
   },
   clipboardWriteImage(bytes: Uint8Array): Promise<void> {
     if (!inTauri()) return Promise.resolve();

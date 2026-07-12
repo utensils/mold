@@ -34,6 +34,7 @@ function baseSettings(): AppSettings {
     savedHosts: [],
     connectedHostIds: [],
     generateTargetHost: null,
+    saveRemoteOutputs: true,
   };
 }
 

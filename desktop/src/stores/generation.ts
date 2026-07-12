@@ -2,7 +2,10 @@ import { reactive } from "vue";
 import { defineStore } from "pinia";
 import { apiFetchTo, currentTarget, ApiError, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
+import { ipc } from "../lib/ipc";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
+import { useAppPrefsStore } from "./appPrefs";
+import { useConnectionStore } from "./connection";
 import type { CompleteEvent, GenerateRequest, ProgressEvent } from "../lib/api/types";
 import type { DevelopPhase } from "../lib/develop/grain";
 
@@ -10,7 +13,27 @@ import type { DevelopPhase } from "../lib/develop/grain";
 export interface JobRoute {
   hostId: string;
   label: string;
+  kind: "local" | "remote";
   target: ApiTarget;
+}
+
+/** Whether the primary connection points at a remote host. */
+function primaryIsRemote(): boolean {
+  return useConnectionStore().mode === "remote";
+}
+
+/** Filesystem-safe local filename for a saved output. */
+export function suggestOutputFilename(
+  model: string,
+  seed: number,
+  format: string,
+  nowMs: number = Date.now(),
+): string {
+  const slug = model
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `mold-${slug}-${seed}-${nowMs}.${format}`;
 }
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
@@ -42,6 +65,8 @@ export interface Job {
   /** Host this job queued on; null = the primary connection. */
   hostId: string | null;
   hostLabel: string | null;
+  /** True when the job runs on a remote host (drives the auto local-save). */
+  remote: boolean;
 }
 
 export function newJob(req: GenerateRequest): Job {
@@ -65,6 +90,7 @@ export function newJob(req: GenerateRequest): Job {
     result: null,
     hostId: null,
     hostLabel: null,
+    remote: false,
   };
 }
 
@@ -293,7 +319,12 @@ export const useGenerationStore = defineStore("generation", {
         if (route) {
           job.hostId = route.hostId;
           job.hostLabel = route.label;
+          job.remote = route.kind === "remote";
           targets.set(job.clientId, route.target);
+        } else {
+          // Unrouted = the primary connection, which may itself be remote
+          // (single-host remote mode) — those prints get saved locally too.
+          job.remote = primaryIsRemote();
         }
         return job;
       });
@@ -417,6 +448,19 @@ export const useGenerationStore = defineStore("generation", {
               if (current.previewUrl) {
                 URL.revokeObjectURL(current.previewUrl);
                 current.previewUrl = null;
+              }
+              // Remote prints also land in this Mac's gallery (pref-gated):
+              // the SSE payload is the encoded output file, metadata included,
+              // so no extra download is needed.
+              if (current.remote && (useAppPrefsStore().settings?.saveRemoteOutputs ?? true)) {
+                const filename = suggestOutputFilename(
+                  complete.model,
+                  complete.seed_used,
+                  complete.format,
+                );
+                ipc.saveOutputBytes(filename, complete.image).catch((err) => {
+                  console.warn("local save of remote output failed:", err);
+                });
               }
             } else if (event === "error") {
               current.status = "error";

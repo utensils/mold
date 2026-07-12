@@ -69,11 +69,21 @@ const UI_SCALES = [80, 90, 100, 110, 120, 130].map((value) => ({
         @commit="(v) => prefs.update({ notifications: v })"
       />
     </SettingRow>
-    <SettingRow label="Dock badge" help="Show the queue depth on the Dock icon.">
+    <SettingRow label="Dock badge" help="Show this app's active job count on the Dock icon.">
       <ToggleControl
         :model-value="prefs.dockBadge"
         aria-label="Dock badge"
         @commit="(v) => prefs.update({ dockBadge: v })"
+      />
+    </SettingRow>
+    <SettingRow
+      label="Save remote prints locally"
+      help="Also save generations from remote hosts and RunPod into this Mac's gallery."
+    >
+      <ToggleControl
+        :model-value="prefs.saveRemoteOutputs"
+        aria-label="Save remote prints locally"
+        @commit="(v) => prefs.update({ saveRemoteOutputs: v })"
       />
     </SettingRow>
     <SettingRow label="Reopen last view" help="Launch into the view you left instead of Generate.">

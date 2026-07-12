@@ -44,6 +44,7 @@ beforeEach(() => {
     savedHosts: [],
     connectedHostIds: [],
     generateTargetHost: null,
+    saveRemoteOutputs: true,
   };
 });
 

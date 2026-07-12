@@ -202,6 +202,33 @@ impl JobRegistry {
         Ok(())
     }
 
+    /// Cancel every still-queued job in one pass, backing `DELETE /api/queue`.
+    /// Under a single write lock this removes each `Queued` entry and fires its
+    /// cancel signal; running jobs are left untouched (same rule as
+    /// [`cancel_queued`](Self::cancel_queued) — a GPU worker owns them). After
+    /// dropping the lock it emits one `JobEnded` per cancelled job (the
+    /// emit-outside-lock discipline). Returns the number of jobs cancelled.
+    pub fn cancel_all_queued(&self) -> usize {
+        let cancelled_ids = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let mut ids = Vec::new();
+            entries.retain(|e| {
+                if e.state == JobLifecycle::Queued {
+                    e.cancel.notify_one();
+                    ids.push(e.id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            ids
+        };
+        for id in &cancelled_ids {
+            self.emit(ServerEvent::JobEnded { id: id.clone() });
+        }
+        cancelled_ids.len()
+    }
+
     /// Promote a registry entry from `Queued` to `Running`. No-op if `id`
     /// isn't present (the entry may have been removed concurrently).
     pub fn mark_running(&self, id: &str, gpu: Option<usize>) {
@@ -433,6 +460,46 @@ mod tests {
         assert_eq!(err, QueuedJobCancelError::NotFound);
     }
 
+    #[test]
+    fn cancel_all_queued_removes_only_queued_and_returns_count() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.register("b", "sdxl:q8");
+        reg.register("c", "ltx-video:q8");
+        // `b` is running — it must survive the bulk cancel.
+        reg.mark_running("b", Some(0));
+
+        let cancelled = reg.cancel_all_queued();
+        assert_eq!(cancelled, 2, "both queued jobs cancelled, running one kept");
+        let snap = reg.snapshot();
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.entries[0].id, "b");
+        assert_eq!(snap.entries[0].state, JobLifecycle::Running);
+    }
+
+    #[test]
+    fn cancel_all_queued_on_empty_registry_returns_zero() {
+        let reg = JobRegistry::new();
+        assert_eq!(reg.cancel_all_queued(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancel_all_queued_signals_every_registered_waiter() {
+        // Each queued job's cancel handle must resolve — cancel_all_queued
+        // fires notify_one() per entry, so the permit survives even when the
+        // cancel lands before the waiter awaits.
+        let reg = JobRegistry::new();
+        let cancel_a = reg.register("a", "flux-dev:fp16");
+        let cancel_b = reg.register("b", "sdxl:q8");
+        assert_eq!(reg.cancel_all_queued(), 2);
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancel_a.notified())
+            .await
+            .expect("cancel signal for a must resolve");
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancel_b.notified())
+            .await
+            .expect("cancel signal for b must resolve");
+    }
+
     #[tokio::test]
     async fn cancel_queued_signals_the_registered_waiter() {
         // The handle returned by register() must resolve `notified()` even
@@ -546,6 +613,28 @@ mod tests {
                 ServerEvent::JobEnded { id } => assert_eq!(id, "a"),
                 other => panic!("expected job_ended, got {other:?}"),
             }
+        }
+
+        #[test]
+        fn cancel_all_queued_emits_exactly_one_job_ended_per_cancelled_job() {
+            let (reg, mut rx) = wired();
+            reg.register("a", "flux-dev:fp16");
+            reg.register("b", "sdxl:q8");
+            reg.register("c", "ltx-video:q8");
+            reg.mark_running("c", Some(0));
+            // Drain the three job_queued + one job_started emissions.
+            while rx.try_recv().is_ok() {}
+
+            assert_eq!(reg.cancel_all_queued(), 2);
+            let mut ended = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                match ev {
+                    ServerEvent::JobEnded { id } => ended.push(id),
+                    other => panic!("expected only job_ended, got {other:?}"),
+                }
+            }
+            ended.sort();
+            assert_eq!(ended, vec!["a".to_string(), "b".to_string()]);
         }
     }
 }

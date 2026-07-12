@@ -897,6 +897,10 @@ pub struct ServerStatus {
     /// Maximum queue capacity (multi-GPU only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_capacity: Option<usize>,
+    /// Whether new-job dispatch is currently paused (`POST /api/queue/pause`).
+    /// Absent on older servers that don't support pausing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_paused: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -2494,6 +2498,7 @@ mod tests {
             gpus: None,
             queue_depth: None,
             queue_capacity: None,
+            queue_paused: Some(true),
         };
         let json = serde_json::to_string(&status).unwrap();
         let parsed: super::ServerStatus = serde_json::from_str(&json).unwrap();
@@ -2502,6 +2507,19 @@ mod tests {
             parsed.memory_status.as_deref(),
             Some("Memory: 64.0 GB free, 96.0 GB available")
         );
+        assert_eq!(parsed.queue_paused, Some(true));
+    }
+
+    #[test]
+    fn server_status_omits_queue_paused_when_absent() {
+        // Older servers don't emit `queue_paused`; deserializing their
+        // responses must default it to None rather than failing.
+        let json = r#"{"version":"0.6.3","models_loaded":[],"gpu_info":null,"uptime_secs":0}"#;
+        let status: super::ServerStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status.queue_paused, None);
+        assert!(!serde_json::to_string(&status)
+            .unwrap()
+            .contains("queue_paused"));
     }
 
     // ── UpscaleRequest / UpscaleResponse tests ────────────────────────────
@@ -2820,6 +2838,16 @@ pub struct EventsCapabilities {
     pub available: bool,
 }
 
+/// Whether the server exposes queue-wide controls. `can_pause` covers
+/// `POST /api/queue/pause` and `POST /api/queue/resume`; `can_cancel_all`
+/// covers `DELETE /api/queue`. Both default to `false` so older servers that
+/// omit the field are treated as lacking the controls.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QueueCapabilities {
+    pub can_pause: bool,
+    pub can_cancel_all: bool,
+}
+
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
 /// the shape extensible — future areas (inpainting, upscaling modes, etc.)
 /// can add their own sub-structs without churning existing fields.
@@ -2831,6 +2859,10 @@ pub struct ServerCapabilities {
     /// of their responses working (events.available = false).
     #[serde(default)]
     pub events: EventsCapabilities,
+    /// Absent on older servers — `#[serde(default)]` keeps deserialization
+    /// of their responses working (can_pause = can_cancel_all = false).
+    #[serde(default)]
+    pub queue: QueueCapabilities,
 }
 
 /// One prompt-history row returned by `GET /api/history`. Deliberately a
@@ -3113,6 +3145,12 @@ pub enum ServerEvent {
     GalleryRemoved {
         filename: String,
     },
+    /// New-job dispatch was paused via `POST /api/queue/pause`. Emitted only
+    /// on the resumed→paused transition — idempotent no-op pauses are silent.
+    QueuePaused,
+    /// New-job dispatch resumed via `POST /api/queue/resume`. Emitted only on
+    /// the paused→resumed transition.
+    QueueResumed,
 }
 
 /// Listing returned from `GET /api/downloads`.
@@ -3186,6 +3224,18 @@ mod server_event_tests {
     }
 
     #[test]
+    fn queue_pause_events_serialize_as_bare_tagged_units() {
+        assert_eq!(
+            serde_json::to_string(&ServerEvent::QueuePaused).unwrap(),
+            r#"{"type":"queue_paused"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerEvent::QueueResumed).unwrap(),
+            r#"{"type":"queue_resumed"}"#
+        );
+    }
+
+    #[test]
     fn gallery_added_round_trips_with_image_row() {
         let metadata: OutputMetadata = serde_json::from_str(
             r#"{"prompt":"a cat","model":"flux-dev:q4","seed":7,"steps":4,"guidance":3.5,"width":1024,"height":1024,"version":"test"}"#,
@@ -3224,6 +3274,17 @@ mod server_event_tests {
         )
         .unwrap();
         assert!(!caps.events.available);
+    }
+
+    #[test]
+    fn capabilities_without_queue_field_deserializes_as_uncontrollable() {
+        // An older server omits the `queue` block — both flags default false.
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":false,"families":[]},"events":{"available":true}}"#,
+        )
+        .unwrap();
+        assert!(!caps.queue.can_pause);
+        assert!(!caps.queue.can_cancel_all);
     }
 }
 

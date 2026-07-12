@@ -108,6 +108,11 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                 .accelerator("Cmd+5")
                 .build(app)?,
         )
+        .item(
+            &MenuItemBuilder::with_id("nav:/jobs", "Jobs")
+                .accelerator("Cmd+6")
+                .build(app)?,
+        )
         .separator()
         .item(
             &MenuItemBuilder::with_id("toggle-sidebar", "Toggle Sidebar")

@@ -7,8 +7,9 @@ use mold_core::{
 };
 use mold_db::{MetadataDb, RecordSource};
 use sha2::{Digest, Sha256};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+use tokio::sync::Notify;
 
 use crate::gpu_pool::GpuJob;
 use crate::model_manager;
@@ -429,6 +430,66 @@ pub(crate) fn build_sse_complete_event(
     }
 }
 
+/// Dispatch gate shared through `AppState`, toggled by `POST /api/queue/pause`
+/// and `POST /api/queue/resume`. When paused the dispatch loops stop pulling
+/// *new* jobs off the channel; the job already running on a worker finishes
+/// untouched. Cheap to poll (a single relaxed-ish atomic) so it can sit at the
+/// top of every loop iteration.
+pub struct QueuePause {
+    paused: AtomicBool,
+    /// Wakes every gated dispatch loop on resume. Resume calls
+    /// `notify_waiters()` so *all* loops (single- and multi-GPU) proceed, not
+    /// just one.
+    notify: Notify,
+}
+
+impl QueuePause {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            paused: AtomicBool::new(false),
+            notify: Notify::new(),
+        })
+    }
+
+    /// Pause new-job dispatch. Returns `true` iff this call flipped the state
+    /// (was running); idempotent repeat pauses return `false` so the route can
+    /// suppress a duplicate `queue_paused` event.
+    pub fn pause(&self) -> bool {
+        !self.paused.swap(true, Ordering::SeqCst)
+    }
+
+    /// Resume dispatch and wake every gated loop. Returns `true` iff this call
+    /// flipped the state (was paused).
+    pub fn resume(&self) -> bool {
+        let was_paused = self.paused.swap(false, Ordering::SeqCst);
+        if was_paused {
+            self.notify.notify_waiters();
+        }
+        was_paused
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    /// Park the caller while paused, returning as soon as dispatch is resumed
+    /// (immediately when not paused). Registers the wakeup *before* the second
+    /// flag check so a concurrent `resume()`'s `notify_waiters()` can't slip
+    /// between the check and the await — the classic lost-wakeup race — and
+    /// re-loops in case of a spurious wake.
+    pub async fn wait_if_paused(&self) {
+        while self.paused.load(Ordering::SeqCst) {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.paused.load(Ordering::SeqCst) {
+                break;
+            }
+            notified.await;
+        }
+    }
+}
+
 /// Runs the generation queue worker loop. Processes one job at a time (FIFO),
 /// but uses a small bounded lookahead buffer to prefer jobs whose model is
 /// already loaded — minimizing model swaps when the queue interleaves models.
@@ -443,6 +504,9 @@ pub async fn run_queue_worker(
     let mut buffer: VecDeque<BufferedJob> = VecDeque::with_capacity(buffer_size);
 
     loop {
+        // Hold new-job dispatch while paused. A job already running finishes
+        // untouched — this only gates the pull of the *next* job.
+        state.queue_pause.wait_if_paused().await;
         if buffer.is_empty() {
             match job_rx.recv().await {
                 Some(j) => buffer.push_back(BufferedJob::new(j)),
@@ -1010,6 +1074,8 @@ async fn run_queue_dispatcher_with_tuning(
     let mut buffer: VecDeque<BufferedJob> = VecDeque::with_capacity(buffer_size);
 
     loop {
+        // Hold new-job dispatch while paused; in-flight worker jobs continue.
+        state.queue_pause.wait_if_paused().await;
         if buffer.is_empty() {
             match job_rx.recv().await {
                 Some(j) => buffer.push_back(BufferedJob::new(j)),
@@ -2664,5 +2730,124 @@ mod tests {
 
         drop(job_tx);
         dispatcher.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn paused_dispatcher_holds_new_jobs_until_resumed() {
+        let (worker0, rx0) = test_worker(0, 1);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(job_tx.clone());
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker0],
+            }),
+            8,
+        );
+
+        // Pause before the dispatcher runs — a submitted job must stay queued.
+        assert!(state.queue_pause.pause());
+        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
+
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let job = crate::state::GenerationJob {
+            id: "paused-job".to_string(),
+            request: fake_request("flux-dev:q4"),
+            progress_tx: None,
+            result_tx,
+            output_dir: None,
+        };
+        let _position = queue.submit(job, 8).await.unwrap();
+
+        // While paused the worker never receives the job.
+        assert!(
+            rx0.recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "paused dispatcher must not hand a job to a worker"
+        );
+
+        // Resume → the queued job dispatches.
+        assert!(state.queue_pause.resume());
+        let dispatched = rx0
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("resumed dispatcher should dispatch the queued job");
+        assert_eq!(dispatched.model, "flux-dev:q4");
+
+        drop(job_tx);
+        dispatcher.abort();
+    }
+}
+
+#[cfg(test)]
+mod queue_pause_tests {
+    use super::QueuePause;
+    use std::time::Duration;
+
+    #[test]
+    fn pause_and_resume_report_state_transitions() {
+        let gate = QueuePause::new();
+        assert!(!gate.is_paused());
+        assert!(gate.pause(), "first pause flips state");
+        assert!(gate.is_paused());
+        assert!(!gate.pause(), "second pause is a no-op transition");
+        assert!(gate.resume(), "first resume flips state");
+        assert!(!gate.is_paused());
+        assert!(!gate.resume(), "second resume is a no-op transition");
+    }
+
+    #[tokio::test]
+    async fn wait_if_paused_returns_immediately_when_not_paused() {
+        let gate = QueuePause::new();
+        // Not paused → the await resolves without needing a resume.
+        tokio::time::timeout(Duration::from_secs(1), gate.wait_if_paused())
+            .await
+            .expect("wait_if_paused must not block when the gate is open");
+    }
+
+    #[tokio::test]
+    async fn wait_if_paused_blocks_until_resumed() {
+        let gate = QueuePause::new();
+        assert!(gate.pause());
+
+        let waiter = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.wait_if_paused().await })
+        };
+
+        // While paused the waiter must stay parked.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "waiter must block while paused");
+
+        // Resume wakes it via notify_waiters().
+        assert!(gate.resume());
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter must unblock within the timeout after resume")
+            .expect("waiter task must not panic");
+    }
+
+    #[tokio::test]
+    async fn resume_wakes_every_gated_waiter() {
+        // notify_waiters (not notify_one) so all dispatch loops proceed.
+        let gate = QueuePause::new();
+        assert!(gate.pause());
+
+        let waiters: Vec<_> = (0..3)
+            .map(|_| {
+                let gate = gate.clone();
+                tokio::spawn(async move { gate.wait_if_paused().await })
+            })
+            .collect();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(gate.resume());
+
+        for waiter in waiters {
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("every gated waiter must wake on a single resume")
+                .expect("waiter task must not panic");
+        }
     }
 }

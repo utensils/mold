@@ -100,6 +100,7 @@ const destinations = [
   { route: "/chains", label: "Chains", key: "⌘3" },
   { route: "/models", label: "Models", key: "⌘4" },
   { route: "/history", label: "History", key: "⌘5" },
+  { route: "/jobs", label: "Jobs", key: "⌘6" },
   { route: "/runpod", label: "RunPod", key: "" },
 ];
 
