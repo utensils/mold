@@ -177,16 +177,16 @@ export function railOrder(jobs: Job[]): Job[] {
 
 /**
  * Run `tasks` with at most `limit` in flight at once, resolving with each
- * task's result in task order. A rejected task is swallowed (its slot is left
- * empty) so one failure never stalls the pool — batch siblings surface
- * failures through their own job status, not this promise. Pure/exported for
- * tests.
+ * task's result in task order. A rejected task is swallowed (its slot resolves
+ * to `undefined`) so one failure never stalls the pool — batch siblings
+ * surface failures through their own job status, not this promise.
+ * Pure/exported for tests.
  */
 export async function runWithConcurrency<T>(
   tasks: Array<() => Promise<T>>,
   limit = 2,
-): Promise<T[]> {
-  const results = new Array<T>(tasks.length);
+): Promise<Array<T | undefined>> {
+  const results = new Array<T | undefined>(tasks.length);
   let cursor = 0;
   const runner = async (): Promise<void> => {
     while (cursor < tasks.length) {

@@ -60,6 +60,14 @@ export const useGalleryStore = defineStore("gallery", {
         if (refetchTimer) clearTimeout(refetchTimer);
         refetchTimer = setTimeout(() => {
           refetchTimer = null;
+          // Re-check at fire time: the user may have switched to the local
+          // source, or a fetch may already be in flight — re-debounce rather
+          // than racing it.
+          if (this.source !== "engine") return;
+          if (this.loading) {
+            this.applyAdded(ev);
+            return;
+          }
           void this.fetch();
         }, REFETCH_DEBOUNCE_MS);
         return;

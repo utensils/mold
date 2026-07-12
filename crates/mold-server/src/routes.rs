@@ -3488,9 +3488,11 @@ async fn stream_events(
 fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
     match serde_json::to_string(ev) {
         Ok(data) => SseEvent::default().event("event").data(data),
+        // json! escapes the error text — quotes/newlines in `e` must not
+        // produce an invalid JSON frame.
         Err(e) => SseEvent::default()
             .event("error")
-            .data(format!("{{\"message\":\"serialize failed: {e}\"}}")),
+            .data(serde_json::json!({ "message": format!("serialize failed: {e}") }).to_string()),
     }
 }
 
