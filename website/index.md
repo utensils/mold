@@ -16,7 +16,7 @@ hero:
       text: Get Started
       link: /guide/
     - theme: alt
-      text: Download for Mac
+      text: Download for Mac (Apple Silicon)
       link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
     - theme: alt
       text: View Models
@@ -44,6 +44,8 @@ features:
     title: Linux NVIDIA + macOS Metal
     details: Single binary built on candle. NVIDIA GPUs on Linux via CUDA, Apple
       Silicon on macOS via Metal. No Python, no libtorch, no ONNX.
+    link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
+    linkText: Download the macOS desktop app
   - icon:
       src: /icons/server.svg
     title: Client-Server
