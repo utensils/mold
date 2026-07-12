@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useToastStore } from "../../stores/toasts";
 import { ApiError } from "../../lib/api/client";
@@ -9,6 +9,7 @@ import {
   catalogPullLabel,
   catalogSizeInfo,
   catalogSizeLabel,
+  sortInstalledFirst,
 } from "../../lib/catalog";
 import type { CatalogEntry } from "../../lib/api/types";
 
@@ -33,6 +34,11 @@ const error = ref<string | null>(null);
 const pulling = ref<Set<string>>(new Set());
 
 let debounce: ReturnType<typeof setTimeout> | null = null;
+
+// What you already have surfaces first; the divider marks where "available"
+// begins so installed models are visible at a glance.
+const displayEntries = computed(() => sortInstalledFirst(entries.value));
+const installedCount = computed(() => entries.value.filter((e) => e.installed).length);
 
 async function runSearch(reset: boolean) {
   if (reset) {
@@ -138,45 +144,65 @@ onMounted(async () => {
       <template v-else>Search the catalog to find models.</template>
     </div>
 
-    <!-- Result cards -->
+    <!-- Result cards, installed first -->
     <div v-else class="grid grid-cols-2 gap-2">
-      <div
-        v-for="entry in entries"
-        :key="entry.id"
-        class="border-edge flex flex-col gap-1.5 rounded-chrome border bg-bath p-3 transition-colors duration-100 hover:bg-bench"
-      >
-        <div class="flex items-start justify-between gap-2">
-          <span class="truncate text-body text-ink" :title="entry.name">{{ entry.name }}</span>
-          <span
-            class="border-edge data-mono shrink-0 rounded-full border px-1.5 text-caption text-ink-2"
-          >
-            {{ entry.family }}
-          </span>
+      <template v-for="(entry, index) in displayEntries" :key="entry.id">
+        <div
+          v-if="installedCount > 0 && index === 0"
+          class="col-span-2 flex items-center gap-2"
+          data-test="installed-divider"
+        >
+          <span class="edge-code">Installed</span>
+          <div class="border-edge h-px flex-1 border-t" />
         </div>
-        <span v-if="entry.author" class="truncate text-caption text-ink-3">{{ entry.author }}</span>
+        <div
+          v-if="
+            installedCount > 0 && installedCount < displayEntries.length && index === installedCount
+          "
+          class="col-span-2 flex items-center gap-2"
+          data-test="available-divider"
+        >
+          <span class="edge-code">Available</span>
+          <div class="border-edge h-px flex-1 border-t" />
+        </div>
+        <div
+          class="border-edge flex flex-col gap-1.5 rounded-chrome border bg-bath p-3 transition-colors duration-100 hover:bg-bench"
+        >
+          <div class="flex items-start justify-between gap-2">
+            <span class="truncate text-body text-ink" :title="entry.name">{{ entry.name }}</span>
+            <span
+              class="border-edge data-mono shrink-0 rounded-full border px-1.5 text-caption text-ink-2"
+            >
+              {{ entry.family }}
+            </span>
+          </div>
+          <span v-if="entry.author" class="truncate text-caption text-ink-3">{{
+            entry.author
+          }}</span>
 
-        <div class="data-mono text-caption text-ink-2">
-          {{ catalogSizeLabel(catalogSizeInfo(entry)) }}
-        </div>
-        <div v-if="catalogFetchCaption(catalogSizeInfo(entry))" class="text-caption text-ink-3">
-          {{ catalogFetchCaption(catalogSizeInfo(entry)) }}
-        </div>
+          <div class="data-mono text-caption text-ink-2">
+            {{ catalogSizeLabel(catalogSizeInfo(entry)) }}
+          </div>
+          <div v-if="catalogFetchCaption(catalogSizeInfo(entry))" class="text-caption text-ink-3">
+            {{ catalogFetchCaption(catalogSizeInfo(entry)) }}
+          </div>
 
-        <div class="mt-1 flex justify-end">
-          <span v-if="entry.installed" class="data-mono text-caption text-halide">
-            ● installed
-          </span>
-          <button
-            v-else
-            type="button"
-            class="border-edge h-7 rounded-control border px-2.5 text-caption text-safelight transition-colors duration-100 hover:border-safelight active:translate-y-px disabled:opacity-50"
-            :disabled="pulling.has(entry.id)"
-            @click="pull(entry)"
-          >
-            {{ pulling.has(entry.id) ? "Pulling…" : catalogPullLabel(catalogSizeInfo(entry)) }}
-          </button>
+          <div class="mt-1 flex justify-end">
+            <span v-if="entry.installed" class="data-mono text-caption text-halide">
+              ● installed
+            </span>
+            <button
+              v-else
+              type="button"
+              class="border-edge h-7 rounded-control border px-2.5 text-caption text-safelight transition-colors duration-100 hover:border-safelight active:translate-y-px disabled:opacity-50"
+              :disabled="pulling.has(entry.id)"
+              @click="pull(entry)"
+            >
+              {{ pulling.has(entry.id) ? "Pulling…" : catalogPullLabel(catalogSizeInfo(entry)) }}
+            </button>
+          </div>
         </div>
-      </div>
+      </template>
     </div>
 
     <button

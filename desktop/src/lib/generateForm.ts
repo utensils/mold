@@ -46,6 +46,11 @@ export interface FormKeyframe {
   image: PickedImage;
 }
 
+/** Whether the current seed field means "roll fresh" or "locked". */
+export function seedMode(seed: string): "random" | "fixed" {
+  return seed.trim() === "" ? "random" : "fixed";
+}
+
 export interface GenerateForm {
   prompt: string;
   /** Original prompt before an expand; sent as `original_prompt` and used for undo. */
@@ -63,6 +68,8 @@ export interface GenerateForm {
   cfgPlus: boolean;
   batchSize: number;
   outputFormat: OutputFormat;
+  /** Post-generate upscaler model name; empty = off. */
+  upscaleModel: string;
   strength: number;
   /** base64, no data-URI prefix. */
   sourceImage: string | null;
@@ -103,6 +110,7 @@ export function newGenerateForm(): GenerateForm {
     cfgPlus: false,
     batchSize: 1,
     outputFormat: "png",
+    upscaleModel: "",
     strength: 0.75,
     sourceImage: null,
     maskImage: null,
@@ -210,6 +218,9 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   }
 
   if (caps.supportsLora && loras.length) req.loras = loras;
+
+  // Post-generate upscale is image-only (the server skips it for video).
+  if (!caps.supportsVideo && form.upscaleModel) req.upscale_model = form.upscaleModel;
 
   if (caps.supportsVideo) {
     req.frames = form.frames;

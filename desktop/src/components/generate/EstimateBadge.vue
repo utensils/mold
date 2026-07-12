@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { onUnmounted, ref, watch } from "vue";
 import type { GenerateRequest } from "../../lib/api/types";
-import { classifyFit, estimateGeneration, type EstimateFit } from "../../lib/api/estimate";
-import { formatGB } from "../../lib/format";
+import {
+  classifyFit,
+  ESTIMATE_TOOLTIP,
+  estimateGeneration,
+  estimateLabel,
+  type EstimateFit,
+} from "../../lib/api/estimate";
 
 const props = defineProps<{ request: GenerateRequest | null }>();
 
-const fit = ref<EstimateFit>("unknown");
+type BadgeState = EstimateFit | "unavailable";
+const fit = ref<BadgeState>("unknown");
 const text = ref("");
 const visible = ref(false);
 let timer: ReturnType<typeof setTimeout> | null = null;
@@ -18,17 +24,19 @@ async function run(req: GenerateRequest) {
     const est = await estimateGeneration(req);
     if (mine !== token) return;
     fit.value = classifyFit(est);
-    const peak = formatGB(est.peak_memory_bytes);
-    const total = est.available_memory_bytes != null ? formatGB(est.available_memory_bytes) : null;
-    if (fit.value === "fits")
-      text.value = total ? `Fits · est. ${peak} of ${total}` : `Est. ${peak}`;
-    else if (fit.value === "tight") text.value = "Tight — close other apps";
-    else if (fit.value === "wont-fit") text.value = "Won't fit on this GPU";
-    else text.value = `Est. ${peak}`;
+    text.value = estimateLabel(
+      fit.value,
+      est.peak_memory_bytes,
+      est.available_memory_bytes ?? null,
+    );
     visible.value = true;
   } catch {
-    // Estimate is advisory — hide silently on any endpoint error.
-    if (mine === token) visible.value = false;
+    // Advisory, but say so instead of vanishing — a silently missing badge
+    // reads as "everything fits".
+    if (mine !== token) return;
+    fit.value = "unavailable";
+    text.value = "VRAM · estimate unavailable";
+    visible.value = true;
   }
 }
 
@@ -57,10 +65,12 @@ onUnmounted(() => {
     class="edge-code"
     role="status"
     aria-live="polite"
+    :title="ESTIMATE_TOOLTIP"
     :class="{
       'text-halide': fit === 'fits' || fit === 'unknown',
       'text-safelight': fit === 'tight',
       'text-stop': fit === 'wont-fit',
+      'text-ink-3': fit === 'unavailable',
     }"
   >
     {{ text }}

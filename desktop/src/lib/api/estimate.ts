@@ -29,3 +29,33 @@ export function classifyFit(est: GenerationMemoryEstimate): EstimateFit {
   if (est.peak_memory_bytes > available * 0.92) return "tight";
   return "fits";
 }
+
+const gb = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+
+/**
+ * Badge copy. Every string leads with "VRAM" so the reader knows what is
+ * being estimated — the old bare "Fits · est. 2.3 GB" read as a mystery.
+ */
+export function estimateLabel(
+  fit: EstimateFit,
+  peakBytes: number,
+  availableBytes: number | null,
+): string {
+  switch (fit) {
+    case "fits":
+      return availableBytes !== null
+        ? `VRAM · fits — est. ${gb(peakBytes)} of ${gb(availableBytes)}`
+        : `VRAM · est. ${gb(peakBytes)}`;
+    case "tight":
+      return "VRAM · tight — close other apps";
+    case "wont-fit":
+      return "VRAM · won't fit on this GPU";
+    default:
+      return `VRAM · est. ${gb(peakBytes)}`;
+  }
+}
+
+/** Plain-language tooltip for the badge. */
+export const ESTIMATE_TOOLTIP =
+  "Preflight estimate of peak GPU memory (VRAM) this print needs, versus the " +
+  "connected engine's available memory. Advisory — actual use varies.";

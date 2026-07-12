@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
+  estimatedPodCost,
   isNetworkVolumeDatacenter,
   podGpuName,
+  podHardwareSummary,
   podProxyUrl,
   runPodRegionLabel,
   type RunPodCreateInput,
@@ -725,8 +727,17 @@ onBeforeUnmount(() => {
                 <p class="data-mono truncate text-caption text-ink-3">
                   {{ podGpuName(pod) }} · {{ pod.machine?.location ?? "Placement pending" }} ·
                   {{ money(pod.costPerHr) }}/hr<span v-if="pod.uptimeSeconds">
-                    · {{ uptime(pod.uptimeSeconds) }}</span
+                    · {{ uptime(pod.uptimeSeconds) }} · ≈{{
+                      money(estimatedPodCost(pod.costPerHr, pod.uptimeSeconds))
+                    }}
+                    this session</span
                   >
+                </p>
+                <p
+                  v-if="podHardwareSummary(pod)"
+                  class="data-mono truncate text-caption text-ink-3"
+                >
+                  {{ podHardwareSummary(pod) }}
                 </p>
                 <p v-if="pod.networkVolume" class="data-mono truncate text-caption text-ink-3">
                   {{ pod.networkVolume.name }} · {{ pod.networkVolume.size }} GB network volume

@@ -1,22 +1,57 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { GenerateForm, PickedImage } from "../../lib/generateForm";
+import { seedMode, type GenerateForm, type PickedImage } from "../../lib/generateForm";
 import type {
   Ltx2PipelineMode,
   Ltx2SpatialUpscale,
   Ltx2TemporalUpscale,
+  ModelEntry,
 } from "../../lib/api/types";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../../lib/capabilities";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
 import { fileToBase64 } from "../../lib/image";
+import { matchPreset, presetsForFamily } from "../../lib/resolutions";
 import { randomSeed } from "../../stores/generation";
 import ImagePickerModal from "./ImagePickerModal.vue";
 
-const props = defineProps<{ form: GenerateForm }>();
+const props = withDefaults(
+  defineProps<{
+    form: GenerateForm;
+    /** Seed of the most recent finished print — powers "use last seed". */
+    lastSeed?: number | null;
+    /** Installed/known still-image upscalers for the post-generate select. */
+    upscalers?: ModelEntry[];
+  }>(),
+  { lastSeed: null, upscalers: () => [] },
+);
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const formats = computed(() => outputFormatsForFamily(props.form.family));
 const framesError = computed(() => frames8n1Error(props.form.frames));
+
+// ── Size presets ────────────────────────────────────────────────────────────
+const presets = computed(() => presetsForFamily(props.form.family));
+const presetValue = computed(
+  () => matchPreset(props.form.width, props.form.height, props.form.family)?.label ?? "custom",
+);
+function applyPreset(event: Event) {
+  const label = (event.target as HTMLSelectElement).value;
+  const preset = presets.value.find((p) => p.label === label);
+  if (!preset) return; // "Custom" — keep whatever the inputs say
+  props.form.width = preset.width;
+  props.form.height = preset.height;
+}
+
+// ── Seed mode ───────────────────────────────────────────────────────────────
+const currentSeedMode = computed(() => seedMode(props.form.seed));
+function setSeedMode(mode: "random" | "fixed") {
+  if (mode === "random") {
+    props.form.seed = "";
+  } else if (seedMode(props.form.seed) === "random") {
+    // Locking with nothing entered picks up the last print's seed, else rolls.
+    props.form.seed = String(props.lastSeed ?? randomSeed());
+  }
+}
 
 // ── LTX-2 advanced video (ltx2 only) ──────────────────────────────────────
 const advancedOpen = ref(false);
@@ -134,19 +169,31 @@ const schedulerLabel: Record<string, string> = {
 
     <!-- Size -->
     <label class="text-caption text-ink-2">Size</label>
-    <div class="mt-1 flex items-center gap-1.5">
+    <select
+      data-test="size-preset"
+      class="border-edge data-mono mt-1 h-7 w-full min-w-0 rounded-control border bg-bath px-1.5 text-ink"
+      :value="presetValue"
+      aria-label="Common sizes"
+      @change="applyPreset"
+    >
+      <option v-for="preset in presets" :key="preset.label" :value="preset.label">
+        {{ preset.label }}
+      </option>
+      <option value="custom">Custom…</option>
+    </select>
+    <div class="mt-1.5 flex min-w-0 items-center gap-1.5">
       <input
         v-model.number="form.width"
         type="number"
         step="16"
         min="64"
         aria-label="Width"
-        class="border-edge data-mono h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
+        class="border-edge data-mono h-7 w-full min-w-0 rounded-control border bg-bath px-1.5 text-ink"
         @change="snapWidth"
       />
       <button
         type="button"
-        class="text-ink-3 hover:text-ink"
+        class="shrink-0 text-ink-3 hover:text-ink"
         title="Swap width and height"
         aria-label="Swap width and height"
         @click="swapSize"
@@ -159,7 +206,7 @@ const schedulerLabel: Record<string, string> = {
         step="16"
         min="64"
         aria-label="Height"
-        class="border-edge data-mono h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
+        class="border-edge data-mono h-7 w-full min-w-0 rounded-control border bg-bath px-1.5 text-ink"
         @change="snapHeight"
       />
     </div>
@@ -201,27 +248,72 @@ const schedulerLabel: Record<string, string> = {
       <input v-model="form.cfgPlus" type="checkbox" class="accent-[var(--safelight)]" />
     </label>
 
-    <!-- Seed -->
+    <!-- Seed: the mode is explicit so "am I re-rolling or locked?" is
+         answerable at a glance instead of implied by an empty field. -->
     <label class="mt-3 text-caption text-ink-2">Seed</label>
-    <div class="mt-1 flex items-center gap-1.5">
+    <div
+      class="border-edge mt-1 flex rounded-control border bg-bath p-0.5"
+      role="group"
+      aria-label="Seed mode"
+    >
+      <button
+        type="button"
+        data-test="seed-mode-random"
+        :aria-pressed="currentSeedMode === 'random'"
+        class="flex-1 rounded-control px-2 py-1 text-caption transition-colors"
+        :class="
+          currentSeedMode === 'random' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'
+        "
+        @click="setSeedMode('random')"
+      >
+        ⚄ Random
+      </button>
+      <button
+        type="button"
+        data-test="seed-mode-fixed"
+        :aria-pressed="currentSeedMode === 'fixed'"
+        class="flex-1 rounded-control px-2 py-1 text-caption transition-colors"
+        :class="
+          currentSeedMode === 'fixed' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'
+        "
+        @click="setSeedMode('fixed')"
+      >
+        🔒 Fixed
+      </button>
+    </div>
+    <div v-if="currentSeedMode === 'fixed'" class="mt-1.5 flex min-w-0 items-center gap-1.5">
       <input
         v-model="form.seed"
         data-selectable
+        data-test="seed-input"
         type="text"
         inputmode="numeric"
-        placeholder="Random"
-        class="border-edge data-mono h-7 w-full rounded-control border bg-bath px-1.5 text-ink placeholder:text-ink-3"
+        aria-label="Seed value"
+        class="border-edge data-mono h-7 w-full min-w-0 rounded-control border bg-bath px-1.5 text-ink placeholder:text-ink-3"
       />
       <button
         type="button"
-        class="text-ink-3 hover:text-ink"
-        title="Randomize seed"
-        aria-label="Randomize seed"
+        class="shrink-0 text-ink-3 hover:text-ink"
+        title="Reroll this seed"
+        aria-label="Reroll this seed"
         @click="randomize"
       >
         ⟳
       </button>
     </div>
+    <p v-else class="mt-1 text-caption text-ink-3">
+      New seed every print<template v-if="lastSeed !== null">
+        ·
+        <button
+          type="button"
+          data-test="lock-last-seed"
+          class="text-halide hover:underline"
+          @click="form.seed = String(lastSeed)"
+        >
+          lock last ({{ lastSeed }})
+        </button></template
+      >
+    </p>
 
     <!-- Scheduler (sd15/sdxl only) -->
     <template v-if="caps.supportsScheduler">
@@ -495,6 +587,22 @@ const schedulerLabel: Record<string, string> = {
         @pick="onKeyframePick"
         @close="keyframePickerOpen = false"
       />
+    </template>
+
+    <!-- Post-generate upscale (still images; the server auto-pulls the
+         upscaler model on first use and runs it after the print develops) -->
+    <template v-if="!caps.supportsVideo && upscalers.length">
+      <label class="mt-3 text-caption text-ink-2">Upscale</label>
+      <select
+        v-model="form.upscaleModel"
+        data-test="upscale-select"
+        class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+      >
+        <option value="">Off</option>
+        <option v-for="u in upscalers" :key="u.name" :value="u.name">
+          {{ u.name }}{{ u.downloaded ? "" : " (downloads on first use)" }}
+        </option>
+      </select>
     </template>
 
     <!-- Output format -->

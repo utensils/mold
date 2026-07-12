@@ -203,6 +203,17 @@ wire types as the CLI and web UI:
   without forgetting your preference. The network list uses the operating
   system's native DNS-SD browser on macOS, so advertised `_mold._tcp` services
   share the same cache and interface handling as Finder and `dns-sd`.
+- **Generation controls** — the Size block quick-selects common, per-family
+  resolutions (with manual width/height for anything else); Seed is an explicit
+  **Random | Fixed** toggle with one-click "lock last seed"; the model picker
+  marks each model's source (Hugging Face / Civitai / local) and ends in
+  **Browse all models →** straight into the catalog, installed models first;
+  the VRAM badge states plainly what fits ("VRAM · fits — est. 2.3 GB of
+  64.0 GB").
+- **Upscaling** — pick a Real-ESRGAN model in the Print panel to upscale every
+  print as it develops (the engine pulls the model on first use), or
+  right-click any gallery image → **Upscale**; the result lands in this Mac's
+  gallery.
 - **Jobs (⌘6)** — a queue console for every connected host: the full
   server-side queue (other clients' jobs included), live thumbnails and step
   progress for this app's own jobs, per-job cancel, **Pause/Resume** of a

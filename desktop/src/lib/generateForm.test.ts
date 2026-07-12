@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyModelDefaults, buildRequest, newGenerateForm } from "./generateForm";
+import { applyModelDefaults, buildRequest, newGenerateForm, seedMode } from "./generateForm";
 import type { ModelEntry } from "./api/types";
 
 function ltx2Model(): ModelEntry {
@@ -23,6 +23,33 @@ function ltx2Form() {
   applyModelDefaults(form, ltx2Model());
   return form;
 }
+
+describe("seedMode", () => {
+  it("derives random from an empty field and fixed from any number", () => {
+    expect(seedMode("")).toBe("random");
+    expect(seedMode("   ")).toBe("random");
+    expect(seedMode("42")).toBe("fixed");
+  });
+});
+
+describe("buildRequest — post-generate upscale", () => {
+  it("ships upscale_model for image families and omits it when off", () => {
+    const form = newGenerateForm();
+    form.model = "flux2-klein";
+    form.family = "flux2";
+    form.prompt = "a cat";
+    expect(buildRequest(form).upscale_model).toBeUndefined();
+    form.upscaleModel = "real-esrgan-x4plus";
+    expect(buildRequest(form).upscale_model).toBe("real-esrgan-x4plus");
+  });
+
+  it("never ships upscale_model for video families", () => {
+    const form = ltx2Form();
+    form.prompt = "a ship";
+    form.upscaleModel = "real-esrgan-x4plus";
+    expect(buildRequest(form).upscale_model).toBeUndefined();
+  });
+});
 
 describe("newGenerateForm advanced-video defaults", () => {
   it("starts with the LTX-2 advanced fields empty (optional-safe)", () => {
