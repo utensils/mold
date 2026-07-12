@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-12
+
 ### Added
 
 - **Direct desktop-app download link.** Releases now also attach the DMG under the stable name `Mold-macos-arm64.dmg`, so `https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg` always fetches the newest signed build (backfilled onto v0.15.0). The website links it from the homepage hero (**Download for Mac**) and a new **Download** section in the desktop guide.
@@ -853,7 +855,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/utensils/mold/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/utensils/mold/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/utensils/mold/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/utensils/mold/compare/v0.13.0...v0.13.1
