@@ -39,7 +39,7 @@ jq -n --arg current "$current" '
       {name: "Mold_\($version)_aarch64.dmg", createdAt: $created}
     ];
   {
-    assets:
+    assets: (
       ([range(101; 113)]
         | map(. as $run
           | "0.16.1-nightly.\($run)" as $version
@@ -50,6 +50,7 @@ jq -n --arg current "$current" '
         {name: "mold-aarch64-apple-darwin.tar.gz", createdAt: "2026-07-12T12:01:00Z"},
         {name: "Mold_0.16.1_aarch64.dmg", createdAt: "2026-07-12T12:01:00Z"}
       ]
+    )
   }
 ' > "$MOCK_GH_ASSETS"
 
