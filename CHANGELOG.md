@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Release binaries now embed the real web UI.** The GitHub-release tarballs (and the AUR `mold-ai` source package) were built from a bare checkout where `web/dist` doesn't exist, so `mold serve` from any released binary through v0.15.0 served the inline placeholder page instead of the gallery SPA. The release build jobs and the PKGBUILD now run `scripts/ensure-web-dist.sh` before cargo, and `mold-server`'s build script emits a loud `cargo:warning` whenever a release-profile build falls back to the placeholder. Docker images were unaffected (their build already had a dedicated web stage).
 - **FlakeHub publishing failed on v0.15.0** — the flake source archive outgrew FlakeHub's 75 MB limit. The two LTX gallery demos on the website were 23 MB animated WebPs each; they are now 135 KB VP9 `webm` videos (same frames, same size, autoplaying loop), shrinking the tracked tree by ~46 MB so tagged releases publish to FlakeHub again. v0.15.0 itself is not on FlakeHub; `nix run github:utensils/mold/v0.15.0` is unaffected.
 
 ## [0.15.0] - 2026-07-11

@@ -81,6 +81,16 @@ fn resolve_web_dist(crate_dir: &Path, out_dir: &Path) -> PathBuf {
 }
 
 fn write_stub(out_dir: &Path) -> PathBuf {
+    // A release binary without the real SPA is almost always a packaging
+    // mistake (this shipped placeholder-only tarballs through v0.15.0), so
+    // make it loud. Debug/check builds stay quiet — building Rust before the
+    // SPA is normal in development.
+    if env::var("PROFILE").as_deref() == Ok("release") {
+        println!(
+            "cargo:warning=mold-server: embedding placeholder web UI — web/dist is missing and \
+             MOLD_WEB_DIST is unset; run scripts/ensure-web-dist.sh first to embed the real SPA"
+        );
+    }
     let stub = out_dir.join("web-stub");
     fs::create_dir_all(&stub).expect("create web stub dir");
     fs::write(stub.join("index.html"), PLACEHOLDER_INDEX_HTML).expect("write stub index.html");
