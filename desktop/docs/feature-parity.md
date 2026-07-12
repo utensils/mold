@@ -129,6 +129,7 @@ Desktop parity: `source_image` / `mask_image` are surfaced by `SourceImageWell.v
 - **Metadata display** (web `Metadata.vue`, TUI info panel): full generation params from embedded chunk.
 - **Filtering / columns**: TUI gallery has configurable columns (`tui.gallery_columns`), view mode (`tui.view_mode`), centered aspect-correct thumbnails (Kitty/Sixel/iTerm2 protocol path — must stay centered). Web `GalleryFeed` with cards + detail drawer.
 - Gallery writes happen in server (queue upsert + background reconcile), CLI (`record_local_save`), TUI (`gallery_scan`). DB additive; embedded metadata always written.
+- **Live updates**: the desktop subscribes app-wide to `GET /api/events` (`events` store) and inserts/removes gallery tiles in place from `gallery_added` / `gallery_removed` frames — the Gallery view stays current while generations run anywhere (this window, another client, the queue). Older servers without the endpoint (`capabilities.events` absent) fall back to polling `GET /api/gallery` every 5 s while jobs are pending. Web SPA still refreshes on its own generation completions only.
 
 ---
 
