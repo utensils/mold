@@ -1,6 +1,6 @@
 [package]
 name = "mold-desktop"
-version = "0.15.0"
+version = "0.16.0"
 description = "Mold — native desktop app for local AI image/video generation"
 authors = ["James Brink <brink.james@gmail.com>"]
 license = "MIT"
@@ -45,9 +45,9 @@ reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "blocking",
 ] }
-mold-core = { path = "../../crates/mold-core", package = "mold-ai-core", version = "0.15.0" }
-mold-db = { path = "../../crates/mold-db", package = "mold-ai-db", version = "0.15.0" }
-mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.15.0", features = [
+mold-core = { path = "../../crates/mold-core", package = "mold-ai-core", version = "0.16.0" }
+mold-db = { path = "../../crates/mold-db", package = "mold-ai-db", version = "0.16.0" }
+mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.16.0", features = [
   "expand",
   "mp4",
   "mdns",
