@@ -233,11 +233,13 @@ jobs:
           name: mold-x86_64-unknown-linux-gnu-cuda-sm120
           path: mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
 
-  # Signed + notarized desktop app (DMG + .app zip) — tags only. Notarization
-  # costs minutes per run, so the rolling `latest` prerelease skips it.
+  # Signed + notarized stable desktop app and Tauri updater payload — tags only.
+  # Main-branch desktop nightlies are gated and published by desktop.yml.
   build-desktop-dmg:
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/desktop-distribution.yml
+    with:
+      channel: stable
     secrets: inherit
 
   # Docker image — build and push to GHCR
@@ -381,6 +383,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-macos, build-linux-sm89, build-linux-sm120, build-desktop-dmg]
     runs-on: ubuntu-latest
+    concurrency:
+      group: stable-release-publication
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -390,6 +395,66 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Install updater verification tooling
+        run: sudo apt-get update && sudo apt-get install -y minisign
+
+      - name: Verify desktop updater signature
+        run: |
+          set -euo pipefail
+          payload=$(find artifacts -maxdepth 1 -name 'Mold_*_aarch64.app.tar.gz' -print -quit)
+          if [[ -z "$payload" || ! -f "$payload.sig" ]]; then
+            echo "::error::stable updater payload or signature is missing"
+            exit 1
+          fi
+          scripts/verify-desktop-updater-signature.sh \
+            --artifact "$payload" \
+            --signature "$payload.sig" \
+            --config desktop/src-tauri/tauri.conf.json
+
+      - name: Protect the stable channel pointer
+        id: stable-pointer
+        env:
+          CANDIDATE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          candidate="${CANDIDATE_TAG#v}"
+          latest_json="$RUNNER_TEMP/current-latest-release.json"
+          http_status=$(curl --silent --show-error --location \
+            --output "$latest_json" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/latest")
+
+          case "$http_status" in
+            200)
+              current_tag=$(jq -er '.tag_name' "$latest_json")
+              current="${current_tag#v}"
+              make_latest=$(scripts/select-desktop-stable-latest.sh "$candidate" "$current")
+              ;;
+            404)
+              current_tag=""
+              make_latest=true
+              ;;
+            *)
+              echo "::error::GitHub latest-release lookup returned HTTP $http_status"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "make_latest=$make_latest"
+            echo "current_tag=$current_tag"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$make_latest" == true ]]; then
+            echo "Stable $CANDIDATE_TAG may advance releases/latest (current: ${current_tag:-none})."
+          else
+            echo "::notice::Publishing older stable $CANDIDATE_TAG without moving releases/latest from $current_tag."
+          fi
 
       # The website links to releases/latest/download/Mold-macos-arm64.dmg, so
       # every release must carry the DMG under that stable name alongside the
@@ -404,13 +469,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
-          make_latest: true
+          make_latest: ${{ steps.stable-pointer.outputs.make_latest }}
           files: |
             artifacts/mold-aarch64-apple-darwin.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
             artifacts/*.dmg
             artifacts/Mold.app.zip
+            artifacts/Mold_*_aarch64.app.tar.gz
+            artifacts/Mold_*_aarch64.app.tar.gz.sig
+            artifacts/mold-desktop-stable.json
             artifacts/SHA256SUMS
           generate_release_notes: true
           body: |
@@ -442,6 +510,66 @@ jobs:
             ## Desktop app (macOS)
 
             `Mold-macos-arm64.dmg` (also attached with its versioned name) — signed, notarized, and stapled. Drag Mold to Applications; no quarantine dance needed. Stable link to the newest build: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
+
+      - name: Verify public stable updater manifest
+        env:
+          VERSION: ${{ github.ref_name }}
+          MAKE_LATEST: ${{ steps.stable-pointer.outputs.make_latest }}
+          PREVIOUS_LATEST_TAG: ${{ steps.stable-pointer.outputs.current_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          local_manifest="artifacts/mold-desktop-stable.json"
+          signature_path=$(find artifacts -maxdepth 1 -name 'Mold_*_aarch64.app.tar.gz.sig' -print -quit)
+          if [[ ! -f "$local_manifest" || -z "$signature_path" ]]; then
+            echo "::error::stable updater manifest or signature is missing"
+            exit 1
+          fi
+
+          payload_url=$(jq -r '.platforms["darwin-aarch64"].url' "$local_manifest")
+          expected_signature=$(tr -d '\r\n' < "$signature_path")
+          if [[ "$MAKE_LATEST" == true ]]; then
+            manifest_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/mold-desktop-stable.json"
+          else
+            latest_tag=$(curl -fsSL \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/latest" \
+              | jq -er '.tag_name')
+            if [[ "$latest_tag" != "$PREVIOUS_LATEST_TAG" ]]; then
+              echo "::error::older stable publication moved releases/latest from $PREVIOUS_LATEST_TAG to $latest_tag"
+              exit 1
+            fi
+            manifest_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$VERSION/mold-desktop-stable.json"
+          fi
+          remote_manifest="$RUNNER_TEMP/mold-desktop-stable.json"
+          ready=false
+          for attempt in $(seq 1 20); do
+            if curl -fsSL "$manifest_url" -o "$remote_manifest" \
+              && jq -e \
+                --arg version "$version" \
+                --arg url "$payload_url" \
+                --arg signature "$expected_signature" \
+                '.version == $version
+                  and .platforms["darwin-aarch64"].url == $url
+                  and .platforms["darwin-aarch64"].signature == $signature' \
+                "$remote_manifest" > /dev/null \
+              && curl -fsIL "$payload_url" > /dev/null; then
+              ready=true
+              break
+            fi
+            if [[ "$attempt" -lt 20 ]]; then
+              echo "Stable updater assets not anonymously available yet (attempt $attempt/20); retrying in 15s"
+              sleep 15
+            fi
+          done
+          if [[ "$ready" != true ]]; then
+            echo "::error::stable updater manifest failed anonymous verification"
+            exit 1
+          fi
+          echo "Verified stable updater manifest: $manifest_url"
 
   # Publish to crates.io on v* tags
   publish:

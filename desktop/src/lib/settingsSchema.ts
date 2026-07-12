@@ -15,6 +15,7 @@ export type SectionId =
   | "expansion"
   | "accounts"
   | "app"
+  | "updates"
   | "profiles"
   | "advanced"
   | "about";
@@ -31,6 +32,7 @@ export const SECTIONS: SectionInfo[] = [
   { id: "expansion", label: "Prompt expansion" },
   { id: "accounts", label: "Accounts & tokens" },
   { id: "app", label: "Appearance & app" },
+  { id: "updates", label: "Updates" },
   { id: "profiles", label: "Profiles" },
   { id: "advanced", label: "Advanced" },
   { id: "about", label: "About" },

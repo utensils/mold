@@ -18,6 +18,7 @@ vi.mock("../lib/ipc", () => ({
       runpodIncludeHfToken: true,
       runpodNetworkVolumeId: "nv-models",
       uiScalePercent: 120,
+      updateChannel: "nightly",
     }),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
   },
@@ -54,6 +55,7 @@ describe("appPrefs store", () => {
     const prefs = useAppPrefsStore();
     expect(prefs.themeFamily).toBe("mold");
     expect(prefs.theme).toBe("system");
+    expect(prefs.updateChannel).toBe("stable");
   });
 
   it("init loads settings and stamps the theme on the root element", async () => {
@@ -66,6 +68,7 @@ describe("appPrefs store", () => {
     expect(prefs.runpodIncludeHfToken).toBe(true);
     expect(prefs.runpodNetworkVolumeId).toBe("nv-models");
     expect(prefs.uiScalePercent).toBe(120);
+    expect(prefs.updateChannel).toBe("nightly");
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.dataset.themeFamily).toBe("mold");
   });
@@ -94,6 +97,15 @@ describe("appPrefs store", () => {
     await prefs.update({ runpodIncludeHfToken: false });
     expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
       expect.objectContaining({ runpodIncludeHfToken: false }),
+    );
+  });
+
+  it("persists the selected desktop update channel", async () => {
+    const prefs = useAppPrefsStore();
+    await prefs.init();
+    await prefs.update({ updateChannel: "stable" });
+    expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ updateChannel: "stable" }),
     );
   });
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import TitleBar from "./components/shell/TitleBar.vue";
 import NavRail from "./components/shell/NavRail.vue";
@@ -15,6 +15,7 @@ import { useEventsStore } from "./stores/events";
 import { useGenerationStore } from "./stores/generation";
 import { useToastStore } from "./stores/toasts";
 import { useUiStore } from "./stores/ui";
+import { useUpdaterStore } from "./stores/updater";
 
 const router = useRouter();
 const sidebarOpen = ref(true);
@@ -35,6 +36,7 @@ watch(
 const generation = useGenerationStore();
 const toasts = useToastStore();
 const ui = useUiStore();
+const updater = useUpdaterStore();
 
 function onKeydown(e: KeyboardEvent) {
   const action = resolveShellShortcut(e);
@@ -84,6 +86,9 @@ async function listenForMenu() {
     switch (id) {
       case "settings":
         return void router.push("/settings");
+      case "check-for-updates":
+        void router.push({ path: "/settings", query: { section: "updates" } });
+        return void updater.check();
       case "new-generation":
         ui.newGeneration();
         return void router.push("/generate");
@@ -133,6 +138,12 @@ function suppressNativeContextMenu(e: Event) {
   e.preventDefault();
 }
 
+async function waitForVisibleShellPaint(): Promise<void> {
+  await nextTick();
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+}
+
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("contextmenu", suppressNativeContextMenu);
@@ -143,7 +154,10 @@ onMounted(async () => {
     await router.replace(prefs.lastRoute).catch(() => {});
   }
   router.afterEach((to) => void appPrefs.rememberRoute(to.path));
-  void connection.init();
+  // Recovery reconciliation starts before the engine, while the network check
+  // remains background-only and never decides candidate health.
+  const updaterStartup = updater.init();
+  const connectionStartup = connection.init();
   void listenForMenu();
   // The window starts hidden (tauri.conf.json visible:false) to avoid a
   // white flash; reveal it once the shell has mounted. No-op in a browser.
@@ -153,6 +167,11 @@ onMounted(async () => {
     await appWindow.maximize();
     await appWindow.show();
   }
+  await Promise.all([updaterStartup, connectionStartup]).catch(() => {});
+  await waitForVisibleShellPaint();
+  // The health token starts a backend probation window only after preferences,
+  // connection startup, and two visible shell frames have completed.
+  await updater.confirmReady().catch(() => {});
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);

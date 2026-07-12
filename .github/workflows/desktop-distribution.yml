@@ -1,16 +1,48 @@
 name: Desktop distribution
 
-# Builds the signed + notarized + stapled macOS desktop app (DMG + .app zip).
-# Called from release.yml on v* tags so the DMG ships on the GitHub release,
-# and runnable standalone via workflow_dispatch for testing the signing path.
+# Builds the signed + notarized + stapled macOS desktop app, including the
+# signed Tauri updater archive. Stable builds use the package version; nightly
+# builds use a monotonically increasing next-patch prerelease version.
 on:
   workflow_call:
+    inputs:
+      channel:
+        description: Desktop update channel to build
+        required: true
+        type: string
+    outputs:
+      version:
+        description: Version embedded in the desktop bundle and updater manifest
+        value: ${{ jobs.distribution.outputs.version }}
+      updater_artifact_name:
+        description: Version-unique updater payload name
+        value: ${{ jobs.distribution.outputs.updater_artifact_name }}
+      dmg_name:
+        description: Version-unique DMG name
+        value: ${{ jobs.distribution.outputs.dmg_name }}
+      manifest_name:
+        description: Channel manifest name
+        value: ${{ jobs.distribution.outputs.manifest_name }}
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Desktop update channel to build
+        required: true
+        default: nightly
+        type: choice
+        options:
+          - nightly
+          - stable
 
 jobs:
   distribution:
     name: Signed + notarized distribution
     runs-on: macos-14
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      updater_artifact_name: ${{ steps.release.outputs.updater_artifact_name }}
+      dmg_name: ${{ steps.release.outputs.dmg_name }}
+      manifest_name: ${{ steps.release.outputs.manifest_name }}
     defaults:
       run:
         working-directory: desktop
@@ -21,21 +53,87 @@ jobs:
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
-          key: desktop-distribution
+          key: desktop-distribution-${{ inputs.channel }}
       - run: bun install --frozen-lockfile
+      - name: Install updater verification tooling
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install minisign
+
+      - name: Resolve channel version and artifact names
+        id: release
+        working-directory: .
+        env:
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          if [[ "$CHANNEL" != "stable" && "$CHANNEL" != "nightly" ]]; then
+            echo "::error::channel must be stable or nightly"
+            exit 1
+          fi
+
+          workspace_version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          desktop_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' desktop/src-tauri/Cargo.toml | head -1)
+          if [[ -z "$workspace_version" || "$workspace_version" != "$desktop_version" ]]; then
+            echo "::error::workspace ($workspace_version) and desktop ($desktop_version) versions differ"
+            exit 1
+          fi
+
+          # Full main-history count is deterministic across reruns and shared by
+          # Stable/Nightly. Encode it into Apple's 4.2.2 component limits.
+          commit_count=$(git rev-list --count HEAD)
+          bundle_version=$(scripts/create-desktop-bundle-version.sh "$commit_count")
+
+          if [[ "$CHANNEL" == "stable" ]]; then
+            version="$desktop_version"
+            release_tag="v$version"
+            if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "$release_tag" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match desktop version $version"
+              exit 1
+            fi
+          else
+            version=$(scripts/create-desktop-nightly-version.sh \
+              "$desktop_version" "$commit_count")
+            release_tag="latest"
+          fi
+
+          updater_artifact_name="Mold_${version}_aarch64.app.tar.gz"
+          dmg_name="Mold_${version}_aarch64.dmg"
+          manifest_name="mold-desktop-$CHANNEL.json"
+          workflow_artifact_name="mold-desktop-macos-$CHANNEL"
+
+          {
+            echo "version=$version"
+            echo "release_tag=$release_tag"
+            echo "updater_artifact_name=$updater_artifact_name"
+            echo "dmg_name=$dmg_name"
+            echo "manifest_name=$manifest_name"
+            echo "workflow_artifact_name=$workflow_artifact_name"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "MOLD_DESKTOP_CHANNEL=$CHANNEL"
+            echo "MOLD_DESKTOP_VERSION=$version"
+            echo "MOLD_DESKTOP_BUNDLE_VERSION=$bundle_version"
+            echo "MOLD_DESKTOP_RELEASE_TAG=$release_tag"
+            echo "MOLD_UPDATER_ARTIFACT_NAME=$updater_artifact_name"
+            echo "MOLD_DESKTOP_DMG_NAME=$dmg_name"
+            echo "MOLD_UPDATER_MANIFEST_NAME=$manifest_name"
+          } >> "$GITHUB_ENV"
 
       - name: Require signing and notarization secrets
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_ISSUER APPLE_API_KEY APPLE_API_PRIVATE_KEY; do
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_ISSUER APPLE_API_KEY APPLE_API_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
             if [ -z "${!name:-}" ]; then
               echo "::error::Missing repository secret $name"
               exit 1
@@ -72,7 +170,24 @@ jobs:
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
       - name: Build, sign, notarize, and staple
-        run: bunx tauri build --features metal --bundles app,dmg --ci
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          updater_config="$RUNNER_TEMP/tauri-updater.json"
+          jq -n \
+            --arg version "$MOLD_DESKTOP_VERSION" \
+            --arg bundle_version "$MOLD_DESKTOP_BUNDLE_VERSION" \
+            '{
+              version: $version,
+              bundle: {
+                createUpdaterArtifacts: true,
+                macOS: {bundleVersion: $bundle_version}
+              }
+            }' \
+            > "$updater_config"
+          bunx tauri build --features metal --bundles app,dmg --ci --config "$updater_config"
 
       - name: Notarize and staple DMG
         working-directory: .
@@ -87,16 +202,53 @@ jobs:
           set -euo pipefail
           app="desktop/src-tauri/target/release/bundle/macos/Mold.app"
           dmg=$(find desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)
+          updater=$(find desktop/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app.tar.gz' -print -quit)
+          if [[ -z "$dmg" || -z "$updater" || ! -f "$updater.sig" ]]; then
+            echo "::error::missing DMG, updater payload, or updater signature"
+            exit 1
+          fi
           scripts/verify-desktop-release.sh "$app" "$dmg"
+          scripts/verify-desktop-updater-signature.sh \
+            --artifact "$updater" \
+            --signature "$updater.sig" \
+            --config desktop/src-tauri/tauri.conf.json
+
+          unpacked=$(mktemp -d)
+          trap 'rm -rf "$unpacked"' EXIT
+          tar -xzf "$updater" -C "$unpacked"
+          archived_app=$(find "$unpacked" -maxdepth 2 -type d -name Mold.app -print -quit)
+          if [[ -z "$archived_app" ]]; then
+            echo "::error::Mold.app missing from updater payload"
+            exit 1
+          fi
+          scripts/verify-desktop-release.sh "$archived_app"
+
           mkdir -p desktop/dist
           ditto -c -k --sequesterRsrc --keepParent "$app" desktop/dist/Mold.app.zip
-          cp "$dmg" desktop/dist/
+          cp "$dmg" "desktop/dist/$MOLD_DESKTOP_DMG_NAME"
+          cp "$updater" "desktop/dist/$MOLD_UPDATER_ARTIFACT_NAME"
+          cp "$updater.sig" "desktop/dist/$MOLD_UPDATER_ARTIFACT_NAME.sig"
+
+          notes="Mold desktop $MOLD_DESKTOP_VERSION."
+          if [[ "$MOLD_DESKTOP_CHANNEL" == "nightly" ]]; then
+            notes="Nightly from main ${GITHUB_SHA:0:12}."
+          fi
+          scripts/create-desktop-update-manifest.sh \
+            --channel "$MOLD_DESKTOP_CHANNEL" \
+            --version "$MOLD_DESKTOP_VERSION" \
+            --artifact "desktop/dist/$MOLD_UPDATER_ARTIFACT_NAME" \
+            --signature "desktop/dist/$MOLD_UPDATER_ARTIFACT_NAME.sig" \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-tag "$MOLD_DESKTOP_RELEASE_TAG" \
+            --output "desktop/dist/$MOLD_UPDATER_MANIFEST_NAME" \
+            --notes "$notes"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: mold-desktop-macos
+          name: ${{ steps.release.outputs.workflow_artifact_name }}
           path: desktop/dist/*
           if-no-files-found: error
+          retention-days: 14
 
       - name: Remove temporary signing keychain
         if: always()

@@ -55,5 +55,13 @@
       "entitlements": "Entitlements.plist"
     },
     "createUpdaterArtifacts": false
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdFODFBNDVCOTJDQTUyOApSV1FvcFN5NVJScm9CNVJTUi8rcUFWR3FWWThCbVd0YUhOMkpsTWpaZFVpak91T1M5NncvYzBWRQo=",
+      "endpoints": [
+        "https://github.com/utensils/mold/releases/latest/download/mold-desktop-stable.json"
+      ]
+    }
   }
 }

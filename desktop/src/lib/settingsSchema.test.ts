@@ -5,6 +5,7 @@ import {
   matchesSearch,
   schemaFor,
   sectionForConfigKey,
+  SECTIONS,
 } from "./settingsSchema";
 
 describe("settings schema", () => {
@@ -12,6 +13,10 @@ describe("settings schema", () => {
     expect(sectionForConfigKey("models_dir")).toBe("engine");
     expect(sectionForConfigKey("default_model")).toBe("generation");
     expect(sectionForConfigKey("expand.temperature")).toBe("expansion");
+  });
+
+  it("gives desktop updates a dedicated settings section", () => {
+    expect(SECTIONS.find((section) => section.id === "updates")?.label).toBe("Updates");
   });
 
   it("unknown keys fall through to advanced — future engine keys must surface", () => {
