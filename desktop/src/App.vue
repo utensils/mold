@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import TitleBar from "./components/shell/TitleBar.vue";
 import NavRail from "./components/shell/NavRail.vue";
@@ -11,6 +11,7 @@ import { resolveShellShortcut } from "./lib/shortcuts";
 import { useAppPrefsStore } from "./stores/appPrefs";
 import { useConnectionStore } from "./stores/connection";
 import { useContextMenuStore } from "./stores/contextMenu";
+import { useEventsStore } from "./stores/events";
 import { useGenerationStore } from "./stores/generation";
 import { useToastStore } from "./stores/toasts";
 import { useUiStore } from "./stores/ui";
@@ -20,6 +21,17 @@ const sidebarOpen = ref(true);
 const appPrefs = useAppPrefsStore();
 const connection = useConnectionStore();
 const contextMenu = useContextMenuStore();
+const events = useEventsStore();
+
+// App-wide server-event subscription (live gallery). Re-probe whenever the
+// engine target changes — a different host may not support /api/events.
+watch(
+  () => [connection.ready, connection.baseUrl] as const,
+  ([ready]) => {
+    if (ready) void events.resubscribe();
+    else events.unsubscribe();
+  },
+);
 const generation = useGenerationStore();
 const toasts = useToastStore();
 const ui = useUiStore();

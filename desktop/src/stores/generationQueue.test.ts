@@ -70,11 +70,13 @@ describe("generation queueing", () => {
     expect(store.jobs[1]!.queuePosition).toBe(1);
   });
 
-  it("batch siblings all enter the queue immediately", () => {
+  it("creates every batch sibling but holds at most two streams open", () => {
     const store = useGenerationStore();
     const { jobs } = store.submitBatch({ ...req, seed: 100 }, 3);
     expect(jobs).toHaveLength(3);
-    expect(openStreams).toHaveLength(3);
+    // All three jobs exist immediately, but the connection cap keeps only two
+    // SSE streams open at once so the browser's per-host budget isn't drained.
+    expect(openStreams).toHaveLength(2);
     expect(jobs.map((j) => j.batchId)).toEqual([
       jobs[0]!.batchId,
       jobs[0]!.batchId,

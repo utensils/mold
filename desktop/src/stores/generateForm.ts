@@ -1,0 +1,38 @@
+import { defineStore } from "pinia";
+import { applyModelDefaults, newGenerateForm } from "../lib/generateForm";
+import type { ModelEntry } from "../lib/api/types";
+
+/**
+ * Holds the Generate workspace form outside any component so it survives
+ * navigation — `GenerateView` unmounts on every route change and a
+ * component-local `reactive()` would take the model, prompt, and params with
+ * it. Pinia state is reactive, so the SSE/closure-mutation rule is satisfied.
+ */
+export const useGenerateFormStore = defineStore("generateForm", {
+  state: () => ({ form: newGenerateForm() }),
+  actions: {
+    /** Pick a model, applying its defaults and pruning unsupported fields. */
+    applyModel(m: ModelEntry) {
+      applyModelDefaults(this.form, m);
+    },
+    /**
+     * ⌘N — clear the composer for a fresh print, keeping the model and its
+     * shape/params. Mirrors the fields the GenerateView ⌘N watcher cleared.
+     */
+    clearComposer() {
+      this.form.prompt = "";
+      this.form.originalPrompt = null;
+      this.form.negativePrompt = "";
+      this.form.seed = "";
+      this.form.sourceImage = null;
+      this.form.maskImage = null;
+    },
+    /**
+     * Reset every field to defaults. `Object.assign` preserves the form's
+     * object identity — the view and child panels hold references to it.
+     */
+    resetAll() {
+      Object.assign(this.form, newGenerateForm());
+    },
+  },
+});
