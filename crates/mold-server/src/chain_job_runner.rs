@@ -85,6 +85,10 @@ pub struct RunnerDeps {
     pub job_locks: Arc<JobMutationLocks>,
     pub claims: Arc<EphemeralClaims>,
     pub output_dir: Option<PathBuf>,
+    /// Server-wide `GET /api/events` broadcast (distinct from the
+    /// chain-scoped `events: JobEventBus` above) so finalized chain outputs
+    /// emit `gallery_added`. `None` in unit tests that don't assert on it.
+    pub server_events: Option<Arc<crate::events::EventBroadcaster>>,
 }
 
 pub(crate) struct CreateJobParams {
@@ -1551,6 +1555,7 @@ fn finalize_job(
                 &metadata,
                 None,
                 Some(db),
+                deps.server_events.as_deref(),
             );
         }
     }
@@ -2576,6 +2581,7 @@ mod tests {
             job_locks: Arc::new(JobMutationLocks::new()),
             claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
+            server_events: None,
         }
     }
 
@@ -2757,6 +2763,7 @@ mod tests {
             job_locks: Arc::new(JobMutationLocks::new()),
             claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
+            server_events: None,
         };
 
         execute_job(&deps, &row, 0).unwrap();
@@ -3531,6 +3538,7 @@ mod tests {
             job_locks: Arc::new(JobMutationLocks::new()),
             claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
+            server_events: None,
         };
 
         execute_job(&deps, &row, 0).unwrap();
@@ -3988,6 +3996,7 @@ mod tests {
             job_locks: Arc::new(JobMutationLocks::new()),
             claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
+            server_events: None,
         };
         let handle = spawn_runner(deps);
 

@@ -2812,6 +2812,14 @@ pub struct CatalogCapabilities {
     pub families: Vec<String>,
 }
 
+/// Whether the server exposes the `GET /api/events` broadcast stream.
+/// Clients must feature-detect before subscribing — SSE clients that
+/// auto-retry would otherwise hammer a 404 on older servers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EventsCapabilities {
+    pub available: bool,
+}
+
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
 /// the shape extensible — future areas (inpainting, upscaling modes, etc.)
 /// can add their own sub-structs without churning existing fields.
@@ -2819,6 +2827,10 @@ pub struct CatalogCapabilities {
 pub struct ServerCapabilities {
     pub gallery: GalleryCapabilities,
     pub catalog: CatalogCapabilities,
+    /// Absent on older servers — `#[serde(default)]` keeps deserialization
+    /// of their responses working (events.available = false).
+    #[serde(default)]
+    pub events: EventsCapabilities,
 }
 
 /// One prompt-history row returned by `GET /api/history`. Deliberately a
@@ -3058,6 +3070,51 @@ pub enum DownloadEvent {
     },
 }
 
+/// Server-wide lifecycle events streamed by `GET /api/events`. One broadcast
+/// channel carries every generation job's lifecycle plus gallery mutations so
+/// a client can observe the whole server over a single SSE connection —
+/// per-job `POST /api/generate/stream` remains the progress/result channel.
+///
+/// Internally tagged like [`DownloadEvent`]; keep
+/// `#[serde(tag = "type", rename_all = "snake_case")]` stable — the desktop
+/// app's `ServerEvent` union in `types.ts` depends on this exact shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServerEvent {
+    JobQueued {
+        id: String,
+        model: String,
+    },
+    JobStarted {
+        id: String,
+        model: String,
+        /// GPU ordinal on multi-GPU servers; absent on single-GPU.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu: Option<usize>,
+    },
+    /// The job left the queue for *any* reason — completed, errored, was
+    /// cancelled, or its client disconnected. Outcome-aware clients keep
+    /// using their per-job stream; `gallery_added` is the durable success
+    /// signal.
+    JobEnded {
+        id: String,
+    },
+    /// A new output landed in the gallery. `image` carries the full gallery
+    /// row when the metadata DB recorded it (clients can insert without a
+    /// refetch); `None` when the DB is disabled — refetch `/api/gallery`.
+    /// Boxed to keep the enum small (clippy::large_enum_variant); the wire
+    /// shape is unchanged.
+    GalleryAdded {
+        filename: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<Box<GalleryImage>>,
+    },
+    /// An output was deleted via `DELETE /api/gallery/image/:filename`.
+    GalleryRemoved {
+        filename: String,
+    },
+}
+
 /// Listing returned from `GET /api/downloads`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadsListing {
@@ -3069,6 +3126,105 @@ pub struct DownloadsListing {
     pub active: Option<DownloadJob>,
     pub queued: Vec<DownloadJob>,
     pub history: Vec<DownloadJob>,
+}
+
+#[cfg(test)]
+mod server_event_tests {
+    use super::*;
+
+    #[test]
+    fn job_events_serialize_with_snake_case_tags() {
+        let queued = ServerEvent::JobQueued {
+            id: "j1".into(),
+            model: "flux-dev:q4".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&queued).unwrap(),
+            r#"{"type":"job_queued","id":"j1","model":"flux-dev:q4"}"#
+        );
+
+        let ended = ServerEvent::JobEnded { id: "j1".into() };
+        assert_eq!(
+            serde_json::to_string(&ended).unwrap(),
+            r#"{"type":"job_ended","id":"j1"}"#
+        );
+    }
+
+    #[test]
+    fn job_started_omits_gpu_when_none() {
+        let single = ServerEvent::JobStarted {
+            id: "j1".into(),
+            model: "sdxl".into(),
+            gpu: None,
+        };
+        let wire = serde_json::to_string(&single).unwrap();
+        assert!(
+            !wire.contains("gpu"),
+            "gpu must be omitted when None: {wire}"
+        );
+
+        let multi = ServerEvent::JobStarted {
+            id: "j1".into(),
+            model: "sdxl".into(),
+            gpu: Some(1),
+        };
+        assert!(serde_json::to_string(&multi)
+            .unwrap()
+            .contains(r#""gpu":1"#));
+    }
+
+    #[test]
+    fn gallery_added_omits_image_when_db_disabled() {
+        let no_row = ServerEvent::GalleryAdded {
+            filename: "cat.png".into(),
+            image: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&no_row).unwrap(),
+            r#"{"type":"gallery_added","filename":"cat.png"}"#
+        );
+    }
+
+    #[test]
+    fn gallery_added_round_trips_with_image_row() {
+        let metadata: OutputMetadata = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","seed":7,"steps":4,"guidance":3.5,"width":1024,"height":1024,"version":"test"}"#,
+        )
+        .unwrap();
+        let ev = ServerEvent::GalleryAdded {
+            filename: "cat.png".into(),
+            image: Some(Box::new(GalleryImage {
+                filename: "cat.png".into(),
+                metadata,
+                timestamp: 1_700_000_000,
+                format: Some(OutputFormat::Png),
+                size_bytes: Some(123),
+                metadata_synthetic: false,
+            })),
+        };
+        let wire = serde_json::to_string(&ev).unwrap();
+        let back: ServerEvent = serde_json::from_str(&wire).unwrap();
+        match back {
+            ServerEvent::GalleryAdded {
+                filename,
+                image: Some(img),
+            } => {
+                assert_eq!(filename, "cat.png");
+                assert_eq!(img.timestamp, 1_700_000_000);
+            }
+            other => panic!("expected gallery_added with image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capabilities_without_events_field_deserializes_as_unavailable() {
+        // An older server's /api/capabilities response has no `events` key.
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":false,"families":[]}}"#,
+        )
+        .unwrap();
+        assert!(!caps.events.available);
+    }
 }
 
 #[cfg(test)]
