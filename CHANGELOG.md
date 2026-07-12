@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-12
+
 ### Changed
 
 - **CI is path-aware.** A `changes` job classifies each push/PR diff; the Rust workspace gates (`rust`, `coverage`) only run when `crates/**`, `Cargo.toml`, `Cargo.lock`, or `ci.yml` changed, and `docs` / `web` / `nix-web` gate on their own surfaces. Docs-only changes no longer compile the workspace twice. Required checks stay job-level `if:` skips (which branch protection counts as passing) — never `on.paths` filters, which would leave them "Expected" forever. The desktop workflow's main-push trigger now uses the same path filters as its PR trigger.
@@ -857,7 +859,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/utensils/mold/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/utensils/mold/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/utensils/mold/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/utensils/mold/compare/v0.13.0...v0.13.1
