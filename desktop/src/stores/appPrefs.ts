@@ -64,7 +64,13 @@ export const useAppPrefsStore = defineStore("appPrefs", {
       return this.settings;
     },
     async update(patch: Partial<AppSettings>): Promise<void> {
-      const current = this.settings ?? (await ipc.appSettingsGet());
+      // Always merge onto the FRESH on-disk settings, never the in-memory
+      // snapshot: other writers (the hosts store's saved-host persistence,
+      // Rust's set_remote_host) write directly to settings.json, and
+      // spreading a stale snapshot here would silently erase their fields
+      // (saved hosts, reconnect list, remote mode) on the next theme toggle
+      // or route change.
+      const current = await ipc.appSettingsGet();
       this.settings = { ...current, ...patch };
       applyTheme(this.settings.theme, this.settings.themeFamily);
       const normalizedScale = await applyUiScale(this.settings.uiScalePercent);
@@ -78,7 +84,9 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     /** Remember the route for restore-on-launch without churning the theme. */
     async rememberRoute(route: string): Promise<void> {
       if (!this.settings || this.settings.lastRoute === route) return;
-      this.settings = { ...this.settings, lastRoute: route };
+      // Same fresh-merge rule as update() — this runs on every navigation.
+      const current = await ipc.appSettingsGet();
+      this.settings = { ...current, lastRoute: route };
       await ipc.appSettingsSet(this.settings);
     },
   },

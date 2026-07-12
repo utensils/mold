@@ -26,6 +26,8 @@ export interface Job {
   model: string;
   width: number;
   height: number;
+  /** Guidance the job was submitted with — reuse must not rewrite it. */
+  guidance: number;
   /** Seed driving the Develop grain — requested seed or a stand-in until seed_used arrives. */
   visualSeed: string;
   status: JobStatus;
@@ -53,6 +55,7 @@ export function newJob(req: GenerateRequest): Job {
     model: req.model,
     width: req.width,
     height: req.height,
+    guidance: req.guidance ?? 1.0,
     visualSeed: req.seed !== undefined ? String(req.seed) : `${req.model}·${req.prompt}`,
     status: "queued",
     queuePosition: null,
@@ -294,6 +297,17 @@ export const useGenerationStore = defineStore("generation", {
           job.hostId = route.hostId;
           job.hostLabel = route.label;
           targets.set(job.clientId, route.target);
+        } else {
+          // Unrouted jobs snapshot the PRIMARY target at submit time too:
+          // queued batch siblings open their streams later, and cancels
+          // resolve later still — both must hit the host the job was
+          // submitted to, not whatever the primary happens to be then.
+          try {
+            targets.set(job.clientId, currentTarget());
+          } catch {
+            // No live connection — the stream will fail with the same
+            // directed error the old path produced.
+          }
         }
         return job;
       });
