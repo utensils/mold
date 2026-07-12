@@ -3068,7 +3068,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3113,7 +3113,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-catalog"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "mold-ai-core",
  "reqwest",
@@ -3129,7 +3129,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-core"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3155,7 +3155,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-db"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "hostname",
@@ -3174,7 +3174,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-discord"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "mold-ai-core",
@@ -3189,7 +3189,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-inference"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3222,7 +3222,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-server"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3271,7 +3271,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-tui"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "crossterm 0.28.1",
