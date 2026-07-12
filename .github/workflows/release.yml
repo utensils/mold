@@ -45,6 +45,14 @@ jobs:
           key: macos-release
           cache-on-failure: true
 
+      - uses: oven-sh/setup-bun@v2
+
+      # Build the web SPA before cargo so mold-server's build.rs embeds the
+      # real gallery UI instead of the placeholder stub (web/dist is
+      # gitignored, so a bare checkout has nothing to embed).
+      - name: Build embedded web SPA
+        run: ./scripts/ensure-web-dist.sh
+
       - name: Build (Metal)
         run: cargo build --release -p mold-ai --features metal,preview,discord,expand,tui,webp,mp4,metrics,mdns
 
@@ -123,6 +131,11 @@ jobs:
           key: linux-cuda-sm89-release
           cache-on-failure: true
 
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build embedded web SPA
+        run: ./scripts/ensure-web-dist.sh
+
       - name: Build (CUDA sm_89)
         env:
           CUDA_COMPUTE_CAP: "89"
@@ -200,6 +213,11 @@ jobs:
         with:
           key: linux-cuda-sm120-release
           cache-on-failure: true
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build embedded web SPA
+        run: ./scripts/ensure-web-dist.sh
 
       - name: Build (CUDA sm_120)
         env:
