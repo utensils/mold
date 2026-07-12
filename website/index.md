@@ -44,6 +44,8 @@ features:
     title: Linux NVIDIA + macOS Metal
     details: Single binary built on candle. NVIDIA GPUs on Linux via CUDA, Apple
       Silicon on macOS via Metal. No Python, no libtorch, no ONNX.
+    link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
+    linkText: Download the macOS desktop app
   - icon:
       src: /icons/server.svg
     title: Client-Server
