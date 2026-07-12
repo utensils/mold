@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-12
+
 ### Added
 
 - **`GET /api/events` — server-wide lifecycle event stream (SSE).** One connection now observes every generation job's lifecycle (`job_queued` / `job_started` / `job_ended`, emitted from the job registry so no submit, promote, cancel, or terminal path is missed) plus gallery mutations (`gallery_added` with the full gallery row when the metadata DB recorded it, `gallery_removed` on delete — including finalized chain outputs). Deltas only: clients bootstrap from `GET /api/queue` + `GET /api/gallery` after subscribing. Feature-detect via the new `events.available` field on `GET /api/capabilities`; the per-job `POST /api/generate/stream` contract is unchanged.
@@ -871,7 +873,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/utensils/mold/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/utensils/mold/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/utensils/mold/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/utensils/mold/compare/v0.13.1...v0.14.0
