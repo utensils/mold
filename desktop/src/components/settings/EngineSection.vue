@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import ConfigSettingRow from "./ConfigSettingRow.vue";
-import { ipc, type DiscoveredHost, type HostTest } from "../../lib/ipc";
+import { ipc, type DiscoveredHost, type HostTest, type SavedHost } from "../../lib/ipc";
 import { addressLabel, prepareHosts, versionLabel } from "../../lib/discovery";
+import { timeAgo } from "../../lib/format";
 import { useConnectionStore } from "../../stores/connection";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
@@ -42,13 +43,52 @@ async function scan() {
   }
 }
 
+// Remembered hosts (most recent first).
+const savedHosts = ref<SavedHost[]>([]);
+const forgetPendingId = ref<string | null>(null);
+
 onMounted(async () => {
   const settings = await ipc.appSettingsGet();
   remoteUrl.value = settings.remoteUrl ?? "";
-  // Keychain first; legacy settings.json field for files written before S4.
+  savedHosts.value = settings.savedHosts ?? [];
+  // Secret store first; legacy settings.json field for files written before S4.
   remoteKey.value = (await ipc.secretGet("remote-api-key")) ?? settings.remoteApiKey ?? "";
   void scan();
 });
+
+function savedHostLabel(host: SavedHost): string {
+  return host.name ?? host.url.replace(/^https?:\/\//, "");
+}
+
+/** Reconnect a remembered host with its own stored key. */
+async function connectSaved(host: SavedHost) {
+  switching.value = true;
+  switchError.value = null;
+  try {
+    const key = await ipc.secretGet(`remote-api-key.${host.id}`);
+    await conn.useRemote(host.url, key, host.name);
+    savedHosts.value = (await ipc.appSettingsGet()).savedHosts ?? [];
+    void config.load();
+  } catch (err) {
+    switchError.value = String(err);
+  } finally {
+    switching.value = false;
+  }
+}
+
+/** Two-step inline confirm, matching the app's destructive-action pattern. */
+async function forgetSaved(host: SavedHost) {
+  if (forgetPendingId.value !== host.id) {
+    forgetPendingId.value = host.id;
+    return;
+  }
+  forgetPendingId.value = null;
+  try {
+    savedHosts.value = await ipc.forgetRemoteHost(host.id);
+  } catch (err) {
+    toasts.push(String(err), "error");
+  }
+}
 
 // When a remote connection drops (server moved, laptop roamed), re-scan so the
 // user can re-select the same server at its new address without hunting.
@@ -73,6 +113,11 @@ async function useDiscovered(host: DiscoveredHost) {
   await testConnection();
 }
 
+/** mDNS instance name for the URL in the form, to label the saved host. */
+function discoveredName(url: string): string | null {
+  return discovered.value.find((h) => h.url === url)?.name ?? null;
+}
+
 async function testConnection() {
   testing.value = true;
   testResult.value = null;
@@ -87,7 +132,8 @@ async function useRemote() {
   switching.value = true;
   switchError.value = null;
   try {
-    await conn.useRemote(remoteUrl.value, remoteKey.value || null);
+    await conn.useRemote(remoteUrl.value, remoteKey.value || null, discoveredName(remoteUrl.value));
+    savedHosts.value = (await ipc.appSettingsGet()).savedHosts ?? [];
     void config.load();
   } catch (err) {
     switchError.value = String(err);
@@ -194,7 +240,7 @@ async function restartEngine() {
 
         <label class="mt-3 block text-caption text-ink-2" for="remote-key">
           API key
-          <span class="edge-code ml-1">KEYCHAIN</span>
+          <span class="ml-1 text-ink-3">— stored only on this Mac</span>
         </label>
         <input
           id="remote-key"
@@ -228,6 +274,48 @@ async function restartEngine() {
             Use this host
           </button>
           <span v-if="switchError" class="text-caption text-stop">{{ switchError }}</span>
+        </div>
+
+        <div v-if="savedHosts.length" class="border-edge mt-4 border-t pt-4">
+          <span class="text-caption text-ink-2">Recent hosts</span>
+          <ul class="mt-2 space-y-1.5">
+            <li
+              v-for="saved in savedHosts"
+              :key="saved.id"
+              class="border-edge flex items-center gap-3 rounded-control border bg-bath px-3 py-2"
+            >
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="truncate text-body text-ink">{{ savedHostLabel(saved) }}</span>
+                  <span v-if="conn.baseUrl === saved.url" class="edge-code">CONNECTED</span>
+                </div>
+                <div class="data-mono mt-0.5 truncate text-caption text-ink-3">
+                  {{ saved.url
+                  }}<template v-if="saved.lastUsedMs"> · {{ timeAgo(saved.lastUsedMs) }}</template>
+                </div>
+              </div>
+              <button
+                v-if="conn.baseUrl !== saved.url"
+                type="button"
+                data-test="saved-host-connect"
+                class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+                :disabled="switching"
+                @click="connectSaved(saved)"
+              >
+                Connect
+              </button>
+              <button
+                type="button"
+                data-test="saved-host-forget"
+                class="h-7 shrink-0 rounded-control px-2.5 text-body"
+                :class="forgetPendingId === saved.id ? 'text-stop' : 'text-ink-3 hover:text-ink-2'"
+                @click="forgetSaved(saved)"
+                @blur="forgetPendingId = null"
+              >
+                {{ forgetPendingId === saved.id ? "Forget?" : "Forget" }}
+              </button>
+            </li>
+          </ul>
         </div>
 
         <div class="border-edge mt-4 border-t pt-4">

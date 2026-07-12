@@ -70,7 +70,7 @@ export interface RunPodNetworkVolumeUpdateInput {
 
 export interface RunPodOverview {
   configured: boolean;
-  credentialSource: "keychain" | "environment" | "config" | null;
+  credentialSource: "app" | "environment" | "config" | null;
   account: RunPodAccount | null;
   pods: RunPodPod[];
   gpus: RunPodGpu[];

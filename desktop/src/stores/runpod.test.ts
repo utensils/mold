@@ -5,7 +5,7 @@ vi.mock("../lib/ipc", () => ({
   ipc: {
     runpodOverview: vi.fn().mockResolvedValue({
       configured: true,
-      credentialSource: "keychain",
+      credentialSource: "app",
       account: null,
       pods: [],
       gpus: [],

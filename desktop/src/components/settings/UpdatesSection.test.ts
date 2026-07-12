@@ -41,6 +41,7 @@ beforeEach(() => {
     runpodNetworkVolumeId: null,
     uiScalePercent: 100,
     updateChannel: "stable",
+    savedHosts: [],
   };
 });
 

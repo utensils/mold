@@ -56,6 +56,31 @@ impl Conn {
     }
 }
 
+/// Stable slug identifying a host, derived from its normalized URL. Used as
+/// the saved-host id and as the per-host secret-name suffix
+/// (`remote-api-key.<id>`), so it must only contain allowlist-safe bytes.
+pub fn host_id(url: &str) -> String {
+    let stripped = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let mut id = String::with_capacity(stripped.len());
+    let mut last_dash = true; // trim leading separators
+    for c in stripped.chars() {
+        if c.is_ascii_alphanumeric() {
+            id.push(c.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            id.push('-');
+            last_dash = true;
+        }
+    }
+    while id.ends_with('-') {
+        id.pop();
+    }
+    id
+}
+
 /// Normalize a user-entered host: default scheme/port, strip trailing slashes.
 pub fn normalize_host_url(input: &str) -> Result<String, String> {
     let trimmed = input.trim().trim_end_matches('/');
@@ -99,6 +124,19 @@ mod tests {
             base_url: "http://127.0.0.1:7680".into(),
         };
         assert_eq!(external.info("k").api_key, None);
+    }
+
+    #[test]
+    fn host_ids_are_stable_slugs() {
+        assert_eq!(host_id("http://hal9000:7680"), "hal9000-7680");
+        assert_eq!(host_id("https://mold.example.com"), "mold-example-com");
+        assert_eq!(
+            host_id("https://abc123-7680.proxy.runpod.net"),
+            "abc123-7680-proxy-runpod-net"
+        );
+        // Same host, same id — scheme and case don't matter.
+        assert_eq!(host_id("http://Studio.local:7680"), "studio-local-7680");
+        assert_eq!(host_id("studio.local:7680"), "studio-local-7680");
     }
 
     #[test]

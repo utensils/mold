@@ -303,7 +303,7 @@ onBeforeUnmount(() => {
         </h1>
         <p class="mt-2 max-w-md text-body text-ink-2">
           Paste a RunPod API key to launch, stop, and connect to Mold instances from this app. The
-          key is stored in the macOS Keychain.
+          key is stored only on this Mac.
         </p>
         <label class="mt-5 block text-caption font-medium text-ink" for="runpod-api-key">
           RunPod API key
@@ -486,7 +486,7 @@ onBeforeUnmount(() => {
           Uses the Mold CUDA image matched to the selected GPU and exposes the server on port 7680.
         </p>
         <button
-          v-if="runpod.overview.credentialSource === 'keychain'"
+          v-if="runpod.overview.credentialSource === 'app'"
           type="button"
           class="mt-5 text-caption text-ink-3 hover:text-stop"
           @click="runpod.disconnect()"

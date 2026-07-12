@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "./connection";
+import { useToastStore } from "./toasts";
 import { ipc } from "../lib/ipc";
 
 vi.mock("../lib/ipc", () => ({
@@ -36,6 +37,7 @@ const defaults = {
   runpodNetworkVolumeId: null,
   uiScalePercent: 100,
   updateChannel: "stable" as const,
+  savedHosts: [],
 };
 
 beforeEach(() => {
@@ -65,6 +67,38 @@ describe("connection store", () => {
     await store.init();
     expect(mocked.setRemoteHost).toHaveBeenCalledWith(remote.baseUrl, null);
     expect(store.mode).toBe("remote");
+  });
+
+  it("falls back to the local engine when the saved remote host is unreachable", async () => {
+    mocked.appSettingsGet.mockResolvedValue({
+      ...defaults,
+      mode: "remote",
+      remoteUrl: remote.baseUrl,
+    });
+    mocked.setRemoteHost.mockRejectedValue("Can't reach http://studio.local:7680");
+    mocked.startLocalEngine.mockResolvedValue(local);
+    const store = useConnectionStore();
+    await store.init();
+    // Launch must never dead-end on an unreachable host: fall back cleanly.
+    expect(store.ready).toBe(true);
+    expect(store.mode).toBe("local");
+    const toasts = useToastStore();
+    expect(toasts.items.map((t) => t.message).join(" ")).toContain("studio.local");
+  });
+
+  it("keeps the remote preference for the next launch after falling back", async () => {
+    mocked.appSettingsGet.mockResolvedValue({
+      ...defaults,
+      mode: "remote",
+      remoteUrl: remote.baseUrl,
+    });
+    mocked.setRemoteHost.mockRejectedValue("unreachable");
+    mocked.startLocalEngine.mockResolvedValue(local);
+    const store = useConnectionStore();
+    await store.init();
+    // The fallback is for this session only — settings.mode stays "remote"
+    // so the preferred host is retried on the next launch.
+    expect(mocked.appSettingsSet).not.toHaveBeenCalled();
   });
 
   it("surfaces engine-start failures as error state", async () => {

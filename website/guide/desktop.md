@@ -68,8 +68,8 @@ surface powers it, so anything the app does maps to a documented endpoint.
   cross-section search: Engine (connection, native folder pickers for the
   models/output directories), Performance (the `MOLD_*` engine knobs as real
   controls, applied on engine restart), Generation defaults, a Prompt
-  expansion form, Accounts & tokens (Hugging Face / Civitai keys in the macOS
-  Keychain in signed builds and an owner-only local file in debug builds,
+  expansion form, Accounts & tokens (Hugging Face / Civitai keys in an
+  owner-only local file under the app's data directory — no Keychain prompts —
   exported to the engine as `HF_TOKEN`/`CIVITAI_TOKEN`), Appearance
   (the website-aligned Mold palette by default or the original Safelight,
   each with System/Dark/Light; media never inverts), Profiles (switch or create), and
@@ -193,12 +193,16 @@ wire types as the CLI and web UI:
 - **Existing server** — auto-detects a running `mold serve` on
   `localhost:7680`.
 - **Remote host** — point it at a remote GPU box (e.g. a Linux CUDA machine for
-  LTX-2), configured in Settings → Engine, with the API key stored in the macOS
-  Keychain in signed builds (the owner-only debug secret store is used during
-  local development). A bare hostname is enough: `hal9000` expands to
-  `http://hal9000:7680`. The network list uses the operating system's native
-  DNS-SD browser on macOS, so advertised `_mold._tcp` services share the same
-  cache and interface handling as Finder and `dns-sd`.
+  LTX-2), configured in Settings → Engine, with the API key stored in an
+  owner-only file under the app's data directory (never the macOS Keychain, so
+  connecting never triggers Keychain prompts). A bare hostname is enough:
+  `hal9000` expands to `http://hal9000:7680`. Hosts you connect to are
+  remembered as **Recent hosts** for one-click reconnect, each with its own
+  stored key, and the last-used host is restored on launch — if it is
+  unreachable the app falls back to the built-in engine for that session
+  without forgetting your preference. The network list uses the operating
+  system's native DNS-SD browser on macOS, so advertised `_mold._tcp` services
+  share the same cache and interface handling as Finder and `dns-sd`.
 
 ## Development
 

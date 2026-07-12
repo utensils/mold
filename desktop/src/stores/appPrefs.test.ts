@@ -19,6 +19,7 @@ vi.mock("../lib/ipc", () => ({
       runpodNetworkVolumeId: "nv-models",
       uiScalePercent: 120,
       updateChannel: "nightly",
+      savedHosts: [],
     }),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
   },

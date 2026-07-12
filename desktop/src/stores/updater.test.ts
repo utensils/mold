@@ -44,6 +44,7 @@ function settings(updateChannel: AppSettings["updateChannel"] = "stable"): AppSe
     runpodNetworkVolumeId: null,
     uiScalePercent: 100,
     updateChannel,
+    savedHosts: [],
   };
 }
 

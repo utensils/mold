@@ -21,7 +21,7 @@ async function save() {
   present.value = true;
   editing.value = false;
   draft.value = "";
-  toasts.push("Saved to Keychain");
+  toasts.push("Saved");
 }
 
 async function clear() {

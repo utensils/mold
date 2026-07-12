@@ -257,14 +257,16 @@ Flat, fast, keyboard-first list over `prompt_history` (recent/search). ↩ Use f
 - **Profiles:** switcher at the top of the tab (`profile.active`), create/duplicate; a Halide banner notes "Settings marked ⌂ are per-profile."
 - **Expansion tab:** backend (local qwen3-expand / OpenAI-compatible URL), model, temperature/top-p/max-tokens, thinking toggle, and per-family word-limit/style-notes overrides in an editable table; system/batch prompt editors in mono with placeholder chips (`{WORD_LIMIT}`, `{MODEL_NOTES}`).
 - **Advanced:** device placement grid (component × auto/cpu/gpu:N — mirrors `DevicePlacement`, persisted via the placement endpoints), text-encoder variant pickers, offload/eager toggles, queue size, cache size, artifact TTL, "Open config.toml", "Open logs".
-- Remote API keys use the **macOS Keychain** in signed builds and the
-  owner-only debug secret file in local development, never ordinary settings.
+- Remote API keys live in the app's **owner-only secret file**
+  (`secrets.json`, mode 0600, allowlisted names), never ordinary settings and
+  never the macOS Keychain — Keychain access re-prompts on every ad-hoc dev
+  rebuild and after signed updates, which users experience as nagging.
 
 ---
 
 ### 4.7 RunPod — the remote bench
 
-The RunPod workspace keeps provisioning in the app: secure API setup, balance and active hourly spend, GPU stock, cloud/datacenter/storage choices, live pod status, console handoff, lifecycle controls, and **Use in Mold** to connect the engine to `https://<pod>-7680.proxy.runpod.net`. Network volumes can be created, selected, renamed/grown, and deleted in place; selection persists, volume-backed launches visibly lock to Secure Cloud and the volume datacenter, and destructive deletion names the permanent-data risk. Poll status every ten seconds while the screen is open without replacing button labels or flashing a loading state. Destructive delete uses an inline two-step confirmation. Keys entered in signed builds go to Keychain; debug builds use the owner-only local secret store so changing ad-hoc signatures do not repeatedly prompt. Existing CLI environment/config credentials continue to work and are identified as externally managed.
+The RunPod workspace keeps provisioning in the app: secure API setup, balance and active hourly spend, GPU stock, cloud/datacenter/storage choices, live pod status, console handoff, lifecycle controls, and **Use in Mold** to connect the engine to `https://<pod>-7680.proxy.runpod.net`. Network volumes can be created, selected, renamed/grown, and deleted in place; selection persists, volume-backed launches visibly lock to Secure Cloud and the volume datacenter, and destructive deletion names the permanent-data risk. Poll status every ten seconds while the screen is open without replacing button labels or flashing a loading state. Destructive delete uses an inline two-step confirmation. Keys go to the app's owner-only local secret store (no Keychain, no permission prompts). Existing CLI environment/config credentials continue to work and are identified as externally managed.
 
 While a remote engine is selected, Gallery uses a standard two-tab location switch: **Remote** shows that engine's output and **This Mac** reads the configured local output directory through a restricted native media protocol. Switching gallery location never changes the generation engine.
 
@@ -325,7 +327,7 @@ Everything else is small and mechanical:
 - **Drag-out:** gallery tiles/lightbox → Finder, Mail, Photoshop (real file paths).
 - **Notifications** (tauri-plugin-notification): "Generated — lighthouse at dusk" with thumbnail on job complete _when the app is backgrounded_; "Chain finished · 243 frames" ; "Pull complete — flux-dev:q8". Clicking focuses the relevant item.
 - **Dock:** badge = queue count; a subtle determinate progress overlay on the dock icon during a running chain; dock menu: New Generation, Pause Queue(–), 3 recent prints.
-- Native services: window state restore, full-screen support, standard text editing (dictation/emoji work in the composer), system appearance sync, Keychain for signed-build API keys, and an owner-only secret store for debug builds.
+- Native services: window state restore, full-screen support, standard text editing (dictation/emoji work in the composer), system appearance sync, and an owner-only local secret store for API keys (deliberately not the Keychain — no permission prompts).
 
 ---
 
