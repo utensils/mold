@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI is path-aware.** A `changes` job classifies each push/PR diff; the Rust workspace gates (`rust`, `coverage`) only run when `crates/**`, `Cargo.toml`, `Cargo.lock`, or `ci.yml` changed, and `docs` / `web` / `nix-web` gate on their own surfaces. Docs-only changes no longer compile the workspace twice. Required checks stay job-level `if:` skips (which branch protection counts as passing) — never `on.paths` filters, which would leave them "Expected" forever. The desktop workflow's main-push trigger now uses the same path filters as its PR trigger.
+
 ### Added
 
 - **Direct desktop-app download link.** Releases now also attach the DMG under the stable name `Mold-macos-arm64.dmg`, so `https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg` always fetches the newest signed build (backfilled onto v0.15.0). The website links it from the homepage hero (**Download for Mac**) and a new **Download** section in the desktop guide.

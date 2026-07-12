@@ -3,9 +3,23 @@ name: Desktop
 # CI for the experimental Tauri desktop app (desktop/). The root ci.yml is
 # untouched by this surface: desktop/src-tauri is excluded from the cargo
 # workspace, so --workspace gates never see it.
+# These jobs are NOT required status checks, so plain `paths` trigger filters
+# are safe here (a filtered-out run reports nothing and blocks nothing) — the
+# required checks in ci.yml use job-level `if:` gating instead.
 on:
   push:
     branches: [main]
+    paths:
+      - "desktop/**"
+      - "crates/mold-core/**"
+      - "crates/mold-catalog/**"
+      - "crates/mold-db/**"
+      - "crates/mold-inference/**"
+      - "crates/mold-server/**"
+      - "flake.nix"
+      - "Cargo.toml"
+      - ".github/workflows/desktop.yml"
+      - "scripts/verify-desktop-release.sh"
   pull_request:
     paths:
       - "desktop/**"

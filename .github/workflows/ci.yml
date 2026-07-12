@@ -15,9 +15,53 @@ env:
 #
 # Cache strategy: jobs that compile the same features share a cache key.
 # Only main-branch pushes save caches; PRs read from main's cache.
+#
+# Path-aware gating: the `changes` job classifies the diff, and each gate only
+# runs when its surface actually changed — a docs-only PR no longer compiles
+# the Rust workspace twice. This MUST stay as job-level `if:` conditions, NOT
+# `on.<event>.paths` filters: rust/coverage/docs/web are required status
+# checks, and a workflow that never triggers leaves them "Expected — waiting"
+# forever (blocking every docs-only PR and the release-plz PR). A job skipped
+# by `if:` reports "skipped", which branch protection counts as passing.
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      website: ${{ steps.filter.outputs.website }}
+      web: ${{ steps.filter.outputs.web }}
+      nix: ${{ steps.filter.outputs.nix }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            website:
+              - 'website/**'
+              - '.github/workflows/ci.yml'
+            web:
+              - 'web/**'
+              - '.github/workflows/ci.yml'
+            nix:
+              - 'web/**'
+              - 'flake.nix'
+              - 'flake.lock'
+              - 'nix/**'
+              - '.github/workflows/ci.yml'
+
   docs:
+    needs: changes
+    if: needs.changes.outputs.website == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -38,6 +82,8 @@ jobs:
         run: bun run build
 
   web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -58,6 +104,8 @@ jobs:
         run: bun run build
 
   nix-web:
+    needs: changes
+    if: needs.changes.outputs.nix == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -66,6 +114,8 @@ jobs:
         run: nix build .#mold-web --print-build-logs
 
   rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -107,6 +157,8 @@ jobs:
         run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
 
   coverage:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
