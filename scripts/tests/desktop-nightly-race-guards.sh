@@ -10,13 +10,21 @@ fail() {
 }
 
 grep -Fq \
-  "group: desktop-\${{ github.event_name == 'push' && github.run_attempt == 1 && 'primary' || github.run_id }}" \
+  "group: desktop-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.run_attempt == 1 && 'primary' || github.run_id }}" \
   "$workflow" \
-  || fail "workflow-level concurrency does not isolate reruns from primary pushes"
+  || fail "workflow-level concurrency does not isolate PRs, reruns, and primary pushes"
 
 workflow_concurrency="$(sed -n '/^concurrency:/,/^permissions:/p' "$workflow")"
-grep -Fq 'cancel-in-progress: false' <<< "$workflow_concurrency" \
-  || fail "workflow-level concurrency still cancels live primary runs"
+grep -Fq "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" <<< "$workflow_concurrency" \
+  || fail "workflow-level concurrency does not cancel only superseded PR runs"
+
+rust_job="$(sed -n '/^  desktop-rust:/,/^  desktop-nightly:/p' "$workflow")"
+grep -Fq 'name: Fast bundle proof (debug .app)' <<< "$rust_job" \
+  || fail "PR bundle proof is not clearly marked as a fast debug build"
+grep -Fq "if: github.event_name != 'push'" <<< "$rust_job" \
+  || fail "redundant unsigned bundle proof still runs before main Nightly distribution"
+grep -Fq 'run: bunx tauri build --debug --bundles app --ci' <<< "$rust_job" \
+  || fail "PR bundle proof does not reuse debug test artifacts"
 
 publisher_header="$(sed -n '/^  publish-desktop-nightly:/,/^    steps:/p' "$workflow")"
 grep -Fq 'group: desktop-nightly-publication' <<< "$publisher_header" \

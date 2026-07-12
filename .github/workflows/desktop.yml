@@ -71,10 +71,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # First-attempt pushes share one primary lane. Reruns and manual runs use
-  # their run ID so they cannot cancel or replace a live primary build.
-  group: desktop-${{ github.event_name == 'push' && github.run_attempt == 1 && 'primary' || github.run_id }}
-  cancel-in-progress: false
+  # Superseded PR commits cancel within their own PR. First-attempt main pushes
+  # stay in one non-canceling primary lane; reruns/manual runs remain isolated.
+  group: desktop-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.run_attempt == 1 && 'primary' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -111,7 +111,7 @@ jobs:
       - run: bun run build
 
   desktop-rust:
-    name: Rust (fmt, clippy, test, bundle)
+    name: Rust (fmt, clippy, test)
     runs-on: macos-14
     defaults:
       run:
@@ -127,12 +127,15 @@ jobs:
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       # CPU-only: the metal feature is deliberately off in CI.
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - name: Bundle proof (unsigned .app)
-        run: bunx tauri build --bundles app --ci
+      # Reuse the test-profile artifacts for a fast PR packaging smoke test.
+      # Main immediately runs the real signed/notarized release build below.
+      - name: Fast bundle proof (debug .app)
+        if: github.event_name != 'push'
+        run: bunx tauri build --debug --bundles app --ci
 
   # Every desktop-relevant main commit that passes both CI jobs becomes a
   # signed, notarized nightly. The updater-artifact overlay stays isolated
-  # from the unsigned PR bundle proof above.
+  # from the fast debug PR bundle proof above.
   desktop-nightly:
     name: Build nightly distribution
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
