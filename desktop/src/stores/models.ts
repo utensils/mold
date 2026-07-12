@@ -17,6 +17,9 @@ export const useModelStore = defineStore("models", {
   }),
   getters: {
     installed: (s) => s.all.filter((m) => m.downloaded && isGenerationModel(m)),
+    /** Still-image upscalers for the post-generate select (any download state —
+     *  the server auto-pulls on first use). */
+    upscalers: (s) => s.all.filter((m) => m.family === "upscaler" || m.family === "real-esrgan"),
     byFamily(): Map<string, ModelEntry[]> {
       const groups = new Map<string, ModelEntry[]>();
       for (const m of this.installed) {

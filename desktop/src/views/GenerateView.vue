@@ -10,6 +10,8 @@ import SourceImageWell from "../components/generate/SourceImageWell.vue";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
 import HostSelector from "../components/generate/HostSelector.vue";
+import SourceGlyph from "../components/generate/SourceGlyph.vue";
+import { modelSource } from "../lib/modelSource";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostsStore } from "../stores/hosts";
 import { useConnectionStore } from "../stores/connection";
@@ -25,6 +27,7 @@ import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { buildRequest } from "../lib/generateForm";
 import type { GenerationTemplate } from "../lib/generationTemplates";
+import { autoGrowRows } from "../lib/autogrow";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCycler";
 import { fetchHistory } from "../lib/api/history";
 import { formatGB } from "../lib/format";
@@ -63,6 +66,13 @@ const selectedModel = computed<ModelEntry | null>(
 
 /** The request the estimate badge previews — null until a model is chosen. */
 const estimateRequest = computed(() => (form.model ? buildRequest(form) : null));
+
+/** Preflight against the host the batch will actually route to. */
+const estimateTarget = computed(() =>
+  hosts.multiHost
+    ? (hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null)?.target ?? null)
+    : null,
+);
 
 const buttonLabel = computed(() =>
   generation.pending.length > 0 ? `Generate (+${generation.pending.length} queued)` : "Generate",
@@ -215,6 +225,18 @@ async function generate() {
 // ↑/↓ cycle recent prompts (shell-history style) when the caret is on the
 // composer's first/last line, so multi-line editing keeps native arrows.
 const cycler = new PromptCycler();
+
+/** The composer grows with its content (capped) instead of scrolling at 2 rows. */
+function growPrompt() {
+  if (promptEl.value) autoGrowRows(promptEl.value);
+}
+// Programmatic prompt changes (history cycling, expand, templates) resize too.
+watch(
+  () => form.prompt,
+  () => void nextTick(growPrompt),
+  { flush: "post" },
+);
+onMounted(() => growPrompt());
 
 async function loadPromptHistory() {
   try {
@@ -449,9 +471,12 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
           placeholder="Describe the print — a lighthouse at dusk, kodak portra…"
           class="w-full resize-none bg-transparent text-body-lg text-ink outline-none placeholder:text-ink-3"
           @keydown="onComposerKeydown"
-          @input="cycler.reset()"
+          @input="
+            cycler.reset();
+            growPrompt();
+          "
         />
-        <div class="mt-2 flex items-center justify-between gap-2">
+        <div class="mt-2 flex min-w-0 flex-wrap items-center justify-between gap-2">
           <ExpandControl
             ref="expandControl"
             :prompt="form.prompt"
@@ -460,7 +485,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
             @restore="onExpandRestore"
           />
           <div class="flex items-center gap-3">
-            <EstimateBadge :request="estimateRequest" />
+            <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
             <button
               type="button"
               class="h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-60"
@@ -475,8 +500,11 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
       </div>
     </div>
 
-    <!-- Inspector -->
-    <aside class="border-edge overflow-y-auto border-l bg-bench p-4">
+    <!-- Inspector. overflow-x-hidden is load-bearing: with only overflow-y
+         set, any child momentarily wider than the 320px column during a
+         window resize computes overflow-x to auto and grows a horizontal
+         scrollbar under the prompt area. -->
+    <aside class="border-edge overflow-x-hidden overflow-y-auto border-l bg-bench p-4">
       <HostSelector />
       <div class="mb-2 flex items-center gap-2">
         <span class="edge-code">Model</span>
@@ -503,10 +531,11 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
               v-for="m in list"
               :key="m.name"
               type="button"
-              class="flex w-full items-center justify-between px-2 py-1.5 text-left text-body text-ink-2 hover:bg-bath hover:text-ink"
+              class="flex w-full items-center gap-2 px-2 py-1.5 text-left text-body text-ink-2 hover:bg-bath hover:text-ink"
               @click="pickModel(m)"
             >
-              <span class="truncate">{{ m.name }}</span>
+              <SourceGlyph :source="modelSource(m)" class="text-ink-3" />
+              <span class="min-w-0 flex-1 truncate">{{ m.name }}</span>
               <span
                 class="ml-2 h-1.5 w-1.5 shrink-0 rounded-full"
                 :class="m.is_loaded ? 'bg-safelight' : 'bg-transparent'"
@@ -514,10 +543,26 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
               />
             </button>
           </template>
+          <button
+            type="button"
+            data-test="browse-catalog"
+            class="border-edge flex w-full items-center border-t px-2 py-2 text-left text-body text-halide hover:bg-bath"
+            @click="
+              pickerOpen = false;
+              void router.push('/models?tab=catalog');
+            "
+          >
+            Browse all models →
+          </button>
         </div>
       </div>
 
-      <ParamPanel :form="form" class="mt-5" />
+      <ParamPanel
+        :form="form"
+        :last-seed="generation.lastSeedUsed"
+        :upscalers="models.upscalers"
+        class="mt-5"
+      />
       <SourceImageWell :form="form" />
       <LoraStack
         v-if="caps.supportsLora"

@@ -184,6 +184,8 @@ export interface GenerateRequest {
   lora?: LoraWeight;
   expand?: boolean;
   original_prompt?: string;
+  /** Post-generate upscaler model (e.g. "real-esrgan-x4plus"); image-only. */
+  upscale_model?: string;
   // Video families (ltx-video / ltx2). Frame count must be 8n+1.
   frames?: number;
   fps?: number;

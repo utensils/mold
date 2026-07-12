@@ -181,6 +181,23 @@ export const podGpuName = (pod: RunPodPod): string =>
   pod.gpu?.id ??
   "GPU details unavailable";
 
+/** Cost of the session so far: uptime × hourly rate, floored at zero. */
+export function estimatedPodCost(costPerHr: number, uptimeSeconds: number): number {
+  if (!(costPerHr > 0) || !(uptimeSeconds > 0)) return 0;
+  return (uptimeSeconds / 3600) * costPerHr;
+}
+
+/** One-line hardware summary ("2× GPU · 16 vCPU · 62 GB RAM · 40 GB disk"). */
+export function podHardwareSummary(pod: RunPodPod): string {
+  const parts: string[] = [];
+  if (pod.gpuCount > 1) parts.push(`${pod.gpuCount}× GPU`);
+  if (pod.vcpuCount > 0) parts.push(`${pod.vcpuCount} vCPU`);
+  if (pod.memoryInGb > 0) parts.push(`${pod.memoryInGb} GB RAM`);
+  if (pod.volumeInGb > 0) parts.push(`${pod.volumeInGb} GB disk`);
+  if (pod.machine?.dataCenterId) parts.push(pod.machine.dataCenterId);
+  return parts.join(" · ");
+}
+
 export const emptyRunPodOverview = (): RunPodOverview => ({
   configured: false,
   credentialSource: null,

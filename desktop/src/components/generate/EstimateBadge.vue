@@ -1,12 +1,23 @@
 <script setup lang="ts">
 import { onUnmounted, ref, watch } from "vue";
+import type { ApiTarget } from "../../lib/api/client";
 import type { GenerateRequest } from "../../lib/api/types";
-import { classifyFit, estimateGeneration, type EstimateFit } from "../../lib/api/estimate";
-import { formatGB } from "../../lib/format";
+import {
+  classifyFit,
+  ESTIMATE_TOOLTIP,
+  estimateGeneration,
+  estimateLabel,
+  type EstimateFit,
+} from "../../lib/api/estimate";
 
-const props = defineProps<{ request: GenerateRequest | null }>();
+const props = defineProps<{
+  request: GenerateRequest | null;
+  /** Host the batch will route to; null/absent = the primary connection. */
+  target?: ApiTarget | null;
+}>();
 
-const fit = ref<EstimateFit>("unknown");
+type BadgeState = EstimateFit | "unavailable";
+const fit = ref<BadgeState>("unknown");
 const text = ref("");
 const visible = ref(false);
 let timer: ReturnType<typeof setTimeout> | null = null;
@@ -15,27 +26,30 @@ let token = 0;
 async function run(req: GenerateRequest) {
   const mine = ++token;
   try {
-    const est = await estimateGeneration(req);
+    const est = await estimateGeneration(req, props.target);
     if (mine !== token) return;
     fit.value = classifyFit(est);
-    const peak = formatGB(est.peak_memory_bytes);
-    const total = est.available_memory_bytes != null ? formatGB(est.available_memory_bytes) : null;
-    if (fit.value === "fits")
-      text.value = total ? `Fits · est. ${peak} of ${total}` : `Est. ${peak}`;
-    else if (fit.value === "tight") text.value = "Tight — close other apps";
-    else if (fit.value === "wont-fit") text.value = "Won't fit on this GPU";
-    else text.value = `Est. ${peak}`;
+    text.value = estimateLabel(
+      fit.value,
+      est.peak_memory_bytes,
+      est.available_memory_bytes ?? null,
+    );
     visible.value = true;
   } catch {
-    // Estimate is advisory — hide silently on any endpoint error.
-    if (mine === token) visible.value = false;
+    // Advisory, but say so instead of vanishing — a silently missing badge
+    // reads as "everything fits".
+    if (mine !== token) return;
+    fit.value = "unavailable";
+    text.value = "VRAM · estimate unavailable";
+    visible.value = true;
   }
 }
 
-// Debounced 600ms; only estimates when a model is selected.
+// Debounced 600ms; only estimates when a model is selected. Re-runs when the
+// routed host changes — a different GPU means a different verdict.
 watch(
-  () => props.request,
-  (req) => {
+  () => [props.request, props.target] as const,
+  ([req]) => {
     if (timer) clearTimeout(timer);
     if (!req || !req.model) {
       visible.value = false;
@@ -57,10 +71,12 @@ onUnmounted(() => {
     class="edge-code"
     role="status"
     aria-live="polite"
+    :title="ESTIMATE_TOOLTIP"
     :class="{
       'text-halide': fit === 'fits' || fit === 'unknown',
       'text-safelight': fit === 'tight',
       'text-stop': fit === 'wont-fit',
+      'text-ink-3': fit === 'unavailable',
     }"
   >
     {{ text }}

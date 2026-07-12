@@ -58,3 +58,14 @@ export function catalogPullLabel(info: CatalogSizeInfo): string {
 export function isCatalogId(id: string): boolean {
   return id.startsWith("cv:") || id.startsWith("hf:");
 }
+
+/**
+ * Installed entries surface first (stable within each group) so "what do I
+ * already have?" is answered at the top of the catalog instead of scattered
+ * through the ranking.
+ */
+export function sortInstalledFirst<T extends { installed?: boolean }>(entries: T[]): T[] {
+  const installed = entries.filter((e) => e.installed);
+  const available = entries.filter((e) => !e.installed);
+  return [...installed, ...available];
+}

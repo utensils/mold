@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import InstalledTab from "../components/models/InstalledTab.vue";
 import CatalogTab from "../components/models/CatalogTab.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
@@ -12,9 +13,11 @@ import { modelDiskBytes } from "../lib/models";
 const conn = useConnectionStore();
 const models = useModelStore();
 const downloads = useDownloadsStore();
+const route = useRoute();
 
 type Tab = "installed" | "catalog";
-const tab = ref<Tab>("installed");
+// "Browse all models" deep-links straight into the catalog (/models?tab=catalog).
+const tab = ref<Tab>(route.query.tab === "catalog" ? "catalog" : "installed");
 const query = ref("");
 const searchEl = ref<HTMLInputElement | null>(null);
 

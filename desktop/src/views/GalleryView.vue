@@ -10,6 +10,7 @@ import { galleryMediaPath, type GallerySource } from "../lib/gallery/media";
 import { formatBytes } from "../lib/format";
 import { useConnectionStore } from "../stores/connection";
 import { useGalleryStore } from "../stores/gallery";
+import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
@@ -23,6 +24,7 @@ const PAD = 16;
 const router = useRouter();
 const conn = useConnectionStore();
 const gallery = useGalleryStore();
+const models = useModelStore();
 const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
 const toasts = useToastStore();
@@ -34,21 +36,94 @@ const canReveal = computed(
 /** Remote prints can be pulled into this Mac's gallery on demand. */
 const canSaveLocally = computed(() => gallery.source === "engine" && conn.mode === "remote");
 
+async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/** Authed source bytes for an engine-gallery item, as base64. */
+async function fetchItemBase64(item: GalleryImage): Promise<string> {
+  const { apiFetch } = await import("../lib/api/client");
+  const blob = await apiFetch(`/api/gallery/image/${encodeURIComponent(item.filename)}`).then((r) =>
+    r.blob(),
+  );
+  return blobToBase64(blob);
+}
+
 async function saveToThisMac(item: GalleryImage) {
   try {
-    const { apiFetch } = await import("../lib/api/client");
-    const blob = await apiFetch(`/api/gallery/image/${encodeURIComponent(item.filename)}`).then(
-      (r) => r.blob(),
-    );
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    let binary = "";
-    for (let i = 0; i < bytes.length; i += 0x8000) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    }
-    const saved = await ipc.saveOutputBytes(item.filename, btoa(binary));
+    const saved = await ipc.saveOutputBytes(item.filename, await fetchItemBase64(item));
     toasts.push(`Saved to this Mac — ${saved}`);
   } catch (err) {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
+  }
+}
+
+// ── Upscale (Real-ESRGAN via the engine; result saved to this Mac) ─────────
+const upscalingFilename = ref<string | null>(null);
+
+/** First known upscaler; the server auto-pulls it on first use. */
+const upscalerModel = computed(() => models.upscalers[0]?.name ?? "real-esrgan-x4plus");
+
+/**
+ * Run the upscaler over the stream endpoint: its `complete` event carries
+ * the result as base64, unlike the plain endpoint whose `image` is an
+ * ImageData object with a JSON byte array. Resolves with the base64 image.
+ */
+async function streamUpscale(image: string): Promise<string> {
+  const { sseStream } = await import("../lib/api/sse");
+  return new Promise<string>((resolve, reject) => {
+    const abort = new AbortController();
+    let settled = false;
+    void sseStream("/api/upscale/stream", {
+      method: "POST",
+      body: { model: upscalerModel.value, image, output_format: "png" },
+      signal: abort.signal,
+      retry: false,
+      onEvent: (event, data) => {
+        try {
+          if (event === "complete") {
+            settled = true;
+            resolve((JSON.parse(data) as { image: string }).image);
+          } else if (event === "error") {
+            settled = true;
+            const parsed = JSON.parse(data) as { message?: string; error?: string };
+            reject(new Error(parsed.message ?? parsed.error ?? data));
+          }
+        } catch (err) {
+          settled = true;
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      },
+      onClose: (err) => {
+        if (!settled) reject(err ?? new Error("The upscale stream ended without a result."));
+      },
+    });
+  });
+}
+
+async function upscaleItem(item: GalleryImage) {
+  if (upscalingFilename.value) return;
+  upscalingFilename.value = item.filename;
+  toasts.push(`Upscaling with ${upscalerModel.value}…`);
+  try {
+    const upscaled = await streamUpscale(await fetchItemBase64(item));
+    // The upscale endpoints don't persist server-side — the local save IS
+    // the durable copy.
+    const stem = item.filename.replace(/\.[^.]+$/, "");
+    const saved = await ipc.saveOutputBytes(`${stem}-upscaled.png`, upscaled);
+    toasts.push(`Upscaled — saved to this Mac as ${saved}`);
+    // On a local/external connection the engine gallery reads the same
+    // output dir the save just wrote to — refresh whatever is on screen.
+    void gallery.fetch();
+  } catch (err) {
+    toasts.push(err instanceof Error ? err.message : String(err), "error");
+  } finally {
+    upscalingFilename.value = null;
   }
 }
 
@@ -88,6 +163,11 @@ function tileMenu(item: GalleryImage): MenuEntry[] {
       action: () => void copyImage(item),
     },
     { separator: true },
+    {
+      label: upscalingFilename.value === item.filename ? "Upscaling…" : "Upscale",
+      disabled: isVideo(item) || gallery.source !== "engine" || upscalingFilename.value !== null,
+      action: () => void upscaleItem(item),
+    },
     {
       label: "Save to this Mac",
       disabled: !canSaveLocally.value,

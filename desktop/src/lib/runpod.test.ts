@@ -8,6 +8,8 @@ import {
   runPodRegionLabel,
   type RunPodGpu,
   type RunPodPod,
+  estimatedPodCost,
+  podHardwareSummary,
 } from "./runpod";
 
 const gpu = (displayName: string, stockStatus: string | null, memoryInGb: number): RunPodGpu => ({
@@ -80,5 +82,38 @@ describe("RunPod presentation helpers", () => {
         'RunPod /networkvolumes 500 Internal Server Error: {"error":"create network volume: Data center \\"CA-MTL-1\\" not found or does not support network volumes. Available data centers: CA-MTL-3, EU-RO-1.","status":500}',
       ),
     ).toBe("CA-MTL-1 does not support network volumes. Choose a supported region and try again.");
+  });
+});
+
+describe("estimatedPodCost", () => {
+  it("multiplies uptime by the hourly rate", () => {
+    expect(estimatedPodCost(0.44, 3600)).toBeCloseTo(0.44);
+    expect(estimatedPodCost(1.2, 5400)).toBeCloseTo(1.8);
+  });
+
+  it("floors at zero for missing rates or fresh pods", () => {
+    expect(estimatedPodCost(0, 3600)).toBe(0);
+    expect(estimatedPodCost(0.44, 0)).toBe(0);
+  });
+});
+
+describe("podHardwareSummary", () => {
+  it("summarizes the useful hardware facts and skips unknowns", () => {
+    const pod = {
+      gpuCount: 2,
+      vcpuCount: 16,
+      memoryInGb: 62,
+      volumeInGb: 40,
+      machine: { dataCenterId: "EU-RO-1", gpuDisplayName: null, gpuTypeId: null, location: null },
+    } as never;
+    expect(podHardwareSummary(pod)).toBe("2× GPU · 16 vCPU · 62 GB RAM · 40 GB disk · EU-RO-1");
+    const sparse = {
+      gpuCount: 1,
+      vcpuCount: 0,
+      memoryInGb: 0,
+      volumeInGb: 0,
+      machine: null,
+    } as never;
+    expect(podHardwareSummary(sparse)).toBe("");
   });
 });

@@ -297,6 +297,14 @@ export const useGenerationStore = defineStore("generation", {
     pending(state): Job[] {
       return state.jobs.filter((j) => j.status !== "complete" && j.status !== "error");
     },
+    /** Seed of the most recent finished print — powers "lock last seed". */
+    lastSeedUsed(state): number | null {
+      for (let i = state.jobs.length - 1; i >= 0; i--) {
+        const result = state.jobs[i]!.result;
+        if (result) return result.seed_used;
+      }
+      return null;
+    },
   },
   actions: {
     /**

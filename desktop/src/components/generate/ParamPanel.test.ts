@@ -102,3 +102,125 @@ describe("ParamPanel — LTX-2 advanced disclosure", () => {
     expect(form.spatialUpscale).toBeNull();
   });
 });
+
+describe("ParamPanel — size presets", () => {
+  it("applies a preset to width and height and reads back as that preset", async () => {
+    const form = formFor("sdxl");
+    const wrapper = mount(ParamPanel, { props: { form } });
+    await wrapper.get("[data-test='size-preset']").setValue("3:4 · 896×1152");
+    expect(form.width).toBe(896);
+    expect(form.height).toBe(1152);
+    expect((wrapper.get("[data-test='size-preset']").element as HTMLSelectElement).value).toBe(
+      "3:4 · 896×1152",
+    );
+  });
+
+  it("shows Custom when the manual inputs leave the preset list", async () => {
+    const form = formFor("sdxl");
+    form.width = 1000;
+    form.height = 1000;
+    const wrapper = mount(ParamPanel, { props: { form } });
+    expect((wrapper.get("[data-test='size-preset']").element as HTMLSelectElement).value).toBe(
+      "custom",
+    );
+  });
+});
+
+describe("ParamPanel — seed mode", () => {
+  it("starts Random with an empty seed and hides the input", () => {
+    const wrapper = mount(ParamPanel, { props: { form: formFor("flux") } });
+    expect(wrapper.get("[data-test='seed-mode-random']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.find("[data-test='seed-input']").exists()).toBe(false);
+    expect(wrapper.text()).toContain("New seed every print");
+  });
+
+  it("switching to Fixed fills the field (last seed preferred) and locks it", async () => {
+    const form = formFor("flux");
+    const wrapper = mount(ParamPanel, { props: { form, lastSeed: 1234 } });
+    await wrapper.get("[data-test='seed-mode-fixed']").trigger("click");
+    expect(form.seed).toBe("1234");
+    expect(wrapper.get("[data-test='seed-mode-fixed']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.find("[data-test='seed-input']").exists()).toBe(true);
+  });
+
+  it("lock-last shortcut jumps straight from Random to that seed", async () => {
+    const form = formFor("flux");
+    const wrapper = mount(ParamPanel, { props: { form, lastSeed: 77 } });
+    await wrapper.get("[data-test='lock-last-seed']").trigger("click");
+    expect(form.seed).toBe("77");
+    expect(wrapper.get("[data-test='seed-mode-fixed']").attributes("aria-pressed")).toBe("true");
+  });
+
+  it("switching back to Random clears the seed", async () => {
+    const form = formFor("flux");
+    form.seed = "42";
+    const wrapper = mount(ParamPanel, { props: { form } });
+    await wrapper.get("[data-test='seed-mode-random']").trigger("click");
+    expect(form.seed).toBe("");
+  });
+});
+
+describe("ParamPanel — post-generate upscale", () => {
+  const upscaler = {
+    name: "real-esrgan-x4plus",
+    family: "upscaler",
+    size_gb: 0.06,
+    is_loaded: false,
+    hf_repo: "r",
+    default_steps: 1,
+    default_guidance: 1,
+    default_width: 0,
+    default_height: 0,
+    description: "",
+    downloaded: false,
+  };
+
+  it("offers Off plus the known upscalers for image families", async () => {
+    const form = formFor("flux");
+    const wrapper = mount(ParamPanel, { props: { form, upscalers: [upscaler] } });
+    const select = wrapper.get("[data-test='upscale-select']");
+    expect(select.findAll("option").map((o) => o.text())).toEqual([
+      "Off",
+      "real-esrgan-x4plus (downloads on first use)",
+    ]);
+    await select.setValue("real-esrgan-x4plus");
+    expect(form.upscaleModel).toBe("real-esrgan-x4plus");
+  });
+
+  it("hides the control for video families and when no upscalers exist", () => {
+    expect(
+      mount(ParamPanel, { props: { form: formFor("ltx2"), upscalers: [upscaler] } })
+        .find("[data-test='upscale-select']")
+        .exists(),
+    ).toBe(false);
+    expect(
+      mount(ParamPanel, { props: { form: formFor("flux") } })
+        .find("[data-test='upscale-select']")
+        .exists(),
+    ).toBe(false);
+  });
+});
+
+describe("ParamPanel — seed mode edge cases", () => {
+  it("clearing the field in Fixed mode keeps the input mounted with a hint", async () => {
+    const form = formFor("flux");
+    form.seed = "42";
+    const wrapper = mount(ParamPanel, { props: { form } });
+    await wrapper.get("[data-test='seed-input']").setValue("");
+    // The input must NOT unmount mid-edit, and the mode stays Fixed…
+    expect(wrapper.find("[data-test='seed-input']").exists()).toBe(true);
+    expect(wrapper.get("[data-test='seed-mode-fixed']").attributes("aria-pressed")).toBe("true");
+    // …with an honest note that the wire will treat it as random.
+    expect(wrapper.get("[data-test='seed-hint']").text()).toContain("random seed will be used");
+  });
+
+  it("non-numeric seed text warns instead of silently generating random", async () => {
+    const form = formFor("flux");
+    form.seed = "42";
+    const wrapper = mount(ParamPanel, { props: { form } });
+    await wrapper.get("[data-test='seed-input']").setValue("banana");
+    expect(wrapper.get("[data-test='seed-hint']").text()).toContain("Not a number");
+    await wrapper.get("[data-test='seed-input']").setValue("1234");
+    expect(wrapper.find("[data-test='seed-hint']").exists()).toBe(false);
+  });
+});

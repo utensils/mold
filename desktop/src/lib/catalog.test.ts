@@ -5,6 +5,7 @@ import {
   catalogSizeInfo,
   catalogSizeLabel,
   isCatalogId,
+  sortInstalledFirst,
 } from "./catalog";
 import type { CatalogEntry } from "./api/types";
 
@@ -81,5 +82,17 @@ describe("isCatalogId", () => {
     expect(isCatalogId("cv:8001")).toBe(true);
     expect(isCatalogId("hf:author/model")).toBe(true);
     expect(isCatalogId("flux-dev:q8")).toBe(false);
+  });
+});
+
+describe("sortInstalledFirst", () => {
+  it("floats installed entries while preserving relative order in both groups", () => {
+    const entries = [
+      { id: "a", installed: false },
+      { id: "b", installed: true },
+      { id: "c", installed: false },
+      { id: "d", installed: true },
+    ];
+    expect(sortInstalledFirst(entries).map((e) => e.id)).toEqual(["b", "d", "a", "c"]);
   });
 });
