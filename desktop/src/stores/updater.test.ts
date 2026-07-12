@@ -6,6 +6,7 @@ const installPendingUpdate = vi.fn();
 const takeUpdateRecovery = vi.fn();
 const confirmUpdateHealthy = vi.fn();
 const appSettingsSet = vi.fn();
+const appSettingsGet = vi.fn();
 let progressListener: ((event: unknown) => void) | null = null;
 
 vi.mock("../lib/ipc", () => ({
@@ -21,6 +22,7 @@ vi.mock("../lib/ipc", () => ({
       });
     },
     appSettingsSet: (...args: unknown[]) => appSettingsSet(...args),
+    appSettingsGet: (...args: unknown[]) => appSettingsGet(...args),
   },
 }));
 
@@ -45,6 +47,8 @@ function settings(updateChannel: AppSettings["updateChannel"] = "stable"): AppSe
     uiScalePercent: 100,
     updateChannel,
     savedHosts: [],
+    connectedHostIds: [],
+    generateTargetHost: null,
   };
 }
 
@@ -62,6 +66,8 @@ function checkResult(overrides: Partial<UpdateCheckResult> = {}): UpdateCheckRes
 beforeEach(() => {
   setActivePinia(createPinia());
   useAppPrefsStore().settings = settings();
+  appSettingsGet.mockReset();
+  appSettingsGet.mockImplementation(() => Promise.resolve(settings()));
   progressListener = null;
   checkForUpdates.mockReset();
   checkForUpdates.mockResolvedValue(checkResult());

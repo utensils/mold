@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { RouterLink, useRouter } from "vue-router";
 import DevelopCanvas from "../../lib/develop/DevelopCanvas.vue";
 import {
@@ -11,13 +11,88 @@ import {
 } from "../../stores/generation";
 import { useComposerStore } from "../../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
+import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
+import { hostIdFromUrl } from "../../lib/hosts";
+import { ipc, type DiscoveredHost } from "../../lib/ipc";
 
 const router = useRouter();
 const generation = useGenerationStore();
 const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
+const hosts = useHostsStore();
 const toasts = useToastStore();
+
+// Quiet background mDNS scan so nearby `mold serve` instances surface in the
+// rail without a trip to Settings.
+const discovered = ref<DiscoveredHost[]>([]);
+let scanTimer: ReturnType<typeof setInterval> | null = null;
+
+async function scanNetwork() {
+  try {
+    discovered.value = await ipc.discoverServers();
+  } catch {
+    // Discovery is best-effort; the section simply stays as-is.
+  }
+}
+
+onMounted(() => {
+  void scanNetwork();
+  scanTimer = setInterval(() => void scanNetwork(), 60_000);
+});
+onUnmounted(() => {
+  if (scanTimer) clearInterval(scanTimer);
+});
+
+/** Detected on the network but not connected (and not this machine). */
+const detectedHosts = computed(() => {
+  const connected = new Set(hosts.all.map((h) => h.id));
+  return discovered.value.filter((d) => !d.isThisMachine && !connected.has(hostIdFromUrl(d.url)));
+});
+
+function hostDot(host: HostView): string {
+  switch (host.status) {
+    case "ready":
+      return "bg-safelight";
+    case "connecting":
+      return "bg-halide animate-pulse";
+    default:
+      return "bg-stop";
+  }
+}
+
+/** Connect a detected host in place when its key is already stored. */
+async function connectDetected(host: DiscoveredHost) {
+  const id = hostIdFromUrl(host.url);
+  const key = await ipc.secretGet(`remote-api-key.${id}`);
+  if (host.authRequired && !key) {
+    toasts.push(`${host.name} needs an API key — add it in Settings → Engine.`);
+    void router.push("/settings");
+    return;
+  }
+  try {
+    await hosts.connect(host.url, key, host.name);
+    toasts.push(`Connected to ${host.name}`);
+  } catch (err) {
+    toasts.push(String(err), "error");
+  }
+}
+
+function hostMenu(host: HostView): MenuEntry[] {
+  if (host.primary) {
+    return [{ label: "Manage in Settings", action: () => void router.push("/settings") }];
+  }
+  const entries: MenuEntry[] = [];
+  if (host.status === "error") {
+    entries.push({ label: "Reconnect", action: () => void hosts.reconnect(host.id) });
+  }
+  entries.push({
+    label: "Disconnect",
+    danger: true,
+    action: () => void hosts.disconnect(host.id),
+  });
+  return entries;
+}
 
 const destinations = [
   { route: "/generate", label: "Generate", key: "⌘1" },
@@ -78,7 +153,7 @@ function jobMenu(job: Job): MenuEntry[] {
           width: job.width,
           height: job.height,
           steps: job.total,
-          guidance: 1.0,
+          guidance: job.guidance,
         });
         void router.push("/generate");
       },
@@ -114,6 +189,52 @@ function jobMenu(job: Job): MenuEntry[] {
         {{ d.key }}
       </kbd>
     </RouterLink>
+
+    <div class="mx-4 mt-4 mb-1 flex items-center gap-2">
+      <span class="edge-code">HOSTS</span>
+      <div class="border-edge h-px flex-1 border-t" />
+    </div>
+    <div data-test="hosts-section">
+      <div
+        v-for="host in hosts.all"
+        :key="host.id"
+        data-test="host-row"
+        class="mx-2 flex h-7 items-center gap-2 rounded-control px-2.5 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
+        :title="host.baseUrl ?? undefined"
+        @contextmenu.prevent="contextMenu.open($event, hostMenu(host))"
+      >
+        <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="hostDot(host)" />
+        <span class="min-w-0 truncate text-caption text-ink-2">{{ host.label }}</span>
+        <span v-if="host.queueDepth !== null" class="edge-code ml-auto shrink-0">
+          {{ host.queueDepth }}
+        </span>
+      </div>
+      <div
+        v-for="d in detectedHosts"
+        :key="d.url"
+        data-test="detected-host-row"
+        class="mx-2 flex h-7 items-center gap-2 rounded-control px-2.5"
+        :title="d.url"
+      >
+        <span class="border-edge h-1.5 w-1.5 shrink-0 rounded-full border" />
+        <span class="min-w-0 truncate text-caption text-ink-3">{{ d.name }}</span>
+        <button
+          type="button"
+          data-test="detected-host-connect"
+          class="ml-auto shrink-0 rounded-control px-1 text-caption text-ink-3 hover:text-ink"
+          :aria-label="`Connect to ${d.name}`"
+          @click="connectDetected(d)"
+        >
+          +
+        </button>
+      </div>
+      <p
+        v-if="hosts.all.length === 0 && detectedHosts.length === 0"
+        class="mx-4 text-caption text-ink-3"
+      >
+        No hosts
+      </p>
+    </div>
 
     <div class="mx-4 mt-4 mb-1 flex items-center gap-2">
       <span class="edge-code">JOBS</span>
@@ -154,7 +275,9 @@ function jobMenu(job: Job): MenuEntry[] {
           />
         </div>
         <div class="min-w-0">
-          <div class="truncate text-caption text-ink-2" :title="job.prompt">{{ job.model }}</div>
+          <div class="truncate text-caption text-ink-2" :title="job.prompt">
+            {{ job.model }}<template v-if="job.hostLabel"> · {{ job.hostLabel }}</template>
+          </div>
           <div class="edge-code" :class="job.status === 'error' ? 'text-stop' : ''">
             {{ statusCode(job) }}
           </div>

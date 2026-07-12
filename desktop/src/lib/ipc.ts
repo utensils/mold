@@ -87,6 +87,10 @@ export interface AppSettings {
   updateChannel: UpdateChannel;
   /** Remote hosts the app remembers, most recently used first. */
   savedHosts: SavedHost[];
+  /** Additional hosts (beyond the primary connection) to reconnect at boot. */
+  connectedHostIds: string[];
+  /** Sticky generation-target host id; null routes automatically. */
+  generateTargetHost: string | null;
 }
 
 export interface HostTest {
@@ -137,6 +141,8 @@ const browserFallbackSettings = (): AppSettings => ({
   uiScalePercent: 100,
   updateChannel: "stable",
   savedHosts: [],
+  connectedHostIds: [],
+  generateTargetHost: null,
 });
 
 export const ipc = {

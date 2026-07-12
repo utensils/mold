@@ -42,6 +42,8 @@ beforeEach(() => {
     uiScalePercent: 100,
     updateChannel: "stable",
     savedHosts: [],
+    connectedHostIds: [],
+    generateTargetHost: null,
   };
 });
 

@@ -203,6 +203,15 @@ wire types as the CLI and web UI:
   without forgetting your preference. The network list uses the operating
   system's native DNS-SD browser on macOS, so advertised `_mold._tcp` services
   share the same cache and interface handling as Finder and `dns-sd`.
+- **Several hosts at once** — beyond the primary engine, any number of extra
+  hosts can be live simultaneously (**Add as extra host** in Settings →
+  Engine, or the **+** next to a detected server in the sidebar's HOSTS
+  section). With more than one live host, the Generate inspector grows a
+  **Host** selector: pick one explicitly, or leave it on **Auto** to route
+  each batch to the least-busy host by live queue depth. Jobs stream
+  progress from — and cancel against — the host they queued on, so a long
+  LTX-2 render on a CUDA box never blocks quick local prints. Extra
+  connections are remembered and restored on the next launch.
 
 ## Development
 

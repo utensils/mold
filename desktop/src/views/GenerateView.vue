@@ -9,6 +9,9 @@ import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
 import SourceImageWell from "../components/generate/SourceImageWell.vue";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
+import HostSelector from "../components/generate/HostSelector.vue";
+import { useAppPrefsStore } from "../stores/appPrefs";
+import { useHostsStore } from "../stores/hosts";
 import { useConnectionStore } from "../stores/connection";
 import { useGenerationStore, jobPhase, jobProgress, type Job } from "../stores/generation";
 import { useGenerateFormStore } from "../stores/generateForm";
@@ -31,6 +34,8 @@ import { fitAspectRatio } from "../lib/fitAspectRatio";
 
 const router = useRouter();
 const conn = useConnectionStore();
+const hosts = useHostsStore();
+const appPrefs = useAppPrefsStore();
 const generation = useGenerationStore();
 const gallery = useGalleryStore();
 const models = useModelStore();
@@ -180,9 +185,19 @@ async function generate() {
   if (!form.prompt.trim() || !form.model) return;
   const request = buildRequest(form);
   const batch = caps.value.forcesBatchSizeOne ? 1 : form.batchSize;
+  // With multiple live hosts, route the batch (sticky pick or Auto = least
+  // busy). A pinned host that went away is an error, not a silent reroute.
+  let route = null;
+  if (hosts.multiHost) {
+    route = hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null);
+    if (!route) {
+      toasts.push("The selected host isn't reachable — pick another host.", "error");
+      return;
+    }
+  }
   // Submitting while another print develops queues server-side; each job
   // snapshots its own model + params, so tweaking the form afterwards is safe.
-  const { settled } = generation.submitBatch(request, batch);
+  const { settled } = generation.submitBatch(request, batch, route);
   void loadPromptHistory();
   const done = await settled;
   const ok = done.filter((s) => s.status === "complete").length;
@@ -462,6 +477,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
 
     <!-- Inspector -->
     <aside class="border-edge overflow-y-auto border-l bg-bench p-4">
+      <HostSelector />
       <div class="mb-2 flex items-center gap-2">
         <span class="edge-code">Model</span>
         <div class="border-edge h-px flex-1 border-t" />

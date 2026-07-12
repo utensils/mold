@@ -12,6 +12,7 @@ import { useAppPrefsStore } from "./stores/appPrefs";
 import { useConnectionStore } from "./stores/connection";
 import { useContextMenuStore } from "./stores/contextMenu";
 import { useEventsStore } from "./stores/events";
+import { useHostsStore } from "./stores/hosts";
 import { useGenerationStore } from "./stores/generation";
 import { useToastStore } from "./stores/toasts";
 import { useUiStore } from "./stores/ui";
@@ -23,6 +24,7 @@ const appPrefs = useAppPrefsStore();
 const connection = useConnectionStore();
 const contextMenu = useContextMenuStore();
 const events = useEventsStore();
+const hostsStore = useHostsStore();
 
 // App-wide server-event subscription (live gallery). Re-probe whenever the
 // engine target changes — a different host may not support /api/events.
@@ -168,6 +170,9 @@ onMounted(async () => {
     await appWindow.show();
   }
   await Promise.all([updaterStartup, connectionStartup]).catch(() => {});
+  // Extra hosts reconnect after the primary connection settles; failures
+  // surface as sidebar rows + a toast, never as a blocked launch.
+  void hostsStore.init();
   await waitForVisibleShellPaint();
   // The health token starts a backend probation window only after preferences,
   // connection startup, and two visible shell frames have completed.
