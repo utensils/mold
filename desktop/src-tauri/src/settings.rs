@@ -90,6 +90,25 @@ pub fn upsert_saved_host(
     hosts.truncate(MAX_SAVED_HOSTS);
 }
 
+/// Drop `id` from the saved list — and when it is also the persisted primary
+/// remote, clear that preference too, otherwise the next launch would
+/// reconnect via `remote_url` and re-save the host, making Forget a no-op
+/// for the active host. Returns true when the primary preference was cleared
+/// (the caller must also clear the shared `remote-api-key` secret).
+pub fn forget_host(settings: &mut AppSettings, id: &str) -> bool {
+    settings.saved_hosts.retain(|h| h.id != id);
+    let was_primary = settings
+        .remote_url
+        .as_deref()
+        .is_some_and(|url| crate::connection::host_id(url) == id);
+    if was_primary {
+        settings.remote_url = None;
+        settings.remote_api_key = None;
+        settings.mode = ConnectionMode::Local;
+    }
+    was_primary
+}
+
 fn legacy_theme_family() -> ThemeFamily {
     ThemeFamily::Safelight
 }
@@ -248,6 +267,48 @@ mod tests {
         let path = path_in(&dir);
         std::fs::write(&path, r#"{"mode":"remote","remoteUrl":"http://h:1"}"#).unwrap();
         assert!(load(&path).saved_hosts.is_empty());
+    }
+
+    #[test]
+    fn forget_host_clears_the_primary_remote_preference_too() {
+        let mut settings = AppSettings {
+            mode: ConnectionMode::Remote,
+            remote_url: Some("http://hal9000:7680".into()),
+            remote_api_key: Some("legacy".into()),
+            saved_hosts: vec![SavedHost {
+                id: "hal9000-7680".into(),
+                name: None,
+                url: "http://hal9000:7680".into(),
+                last_used_ms: Some(1),
+            }],
+            ..AppSettings::default()
+        };
+        // Forgetting the ACTIVE host must clear the reconnect preference —
+        // otherwise the next launch re-saves it and Forget is a no-op.
+        assert!(forget_host(&mut settings, "hal9000-7680"));
+        assert!(settings.saved_hosts.is_empty());
+        assert_eq!(settings.remote_url, None);
+        assert_eq!(settings.remote_api_key, None);
+        assert_eq!(settings.mode, ConnectionMode::Local);
+    }
+
+    #[test]
+    fn forget_host_leaves_the_primary_alone_for_other_hosts() {
+        let mut settings = AppSettings {
+            mode: ConnectionMode::Remote,
+            remote_url: Some("http://hal9000:7680".into()),
+            saved_hosts: vec![SavedHost {
+                id: "studio-local-7680".into(),
+                name: None,
+                url: "http://studio.local:7680".into(),
+                last_used_ms: Some(1),
+            }],
+            ..AppSettings::default()
+        };
+        assert!(!forget_host(&mut settings, "studio-local-7680"));
+        assert!(settings.saved_hosts.is_empty());
+        assert_eq!(settings.remote_url.as_deref(), Some("http://hal9000:7680"));
+        assert_eq!(settings.mode, ConnectionMode::Remote);
     }
 
     #[test]
