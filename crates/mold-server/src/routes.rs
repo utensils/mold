@@ -195,6 +195,7 @@ use crate::queue::clean_error_message;
         crate::routes_config::put_config_profile,
         health,
         capabilities_chain_limits,
+        stream_events,
         crate::routes_chain::generate_chain,
         crate::routes_chain::generate_chain_stream,
         crate::routes_chain_jobs::create_chain_job,
@@ -365,6 +366,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/upscale/stream", post(upscale_stream))
         .route("/api/resources", get(get_resources))
         .route("/api/resources/stream", get(get_resources_stream))
+        .route("/api/events", get(stream_events))
         .route("/api/status", get(server_status))
         .route("/api/queue", get(list_queue))
         .route(
@@ -2369,6 +2371,7 @@ async fn server_capabilities() -> Json<mold_core::ServerCapabilities> {
                 .map(|f| f.as_str().to_string())
                 .collect::<Vec<_>>(),
         },
+        events: mold_core::EventsCapabilities { available: true },
     })
 }
 
@@ -2720,39 +2723,55 @@ async fn delete_gallery_image(
         return Err(ApiError::validation("invalid filename"));
     }
 
-    let path = output_dir.join(&clean_name);
-    if path.is_file() {
-        std::fs::remove_file(&path)
-            .map_err(|e| ApiError::internal(format!("failed to delete image: {e}")))?;
-    }
-
-    // Also remove server-side thumbnail (both legacy no-suffix and current
-    // `.png`-suffixed cache layouts) and the animated preview sidecar so
-    // `/api/gallery/preview/:filename` doesn't keep serving the GIF after
-    // the source MP4 is gone.
-    let thumb_dir = server_thumbnail_dir();
-    let _ = std::fs::remove_file(thumb_dir.join(&clean_name));
-    let _ = std::fs::remove_file(thumb_dir.join(format!("{clean_name}.png")));
-    let _ = std::fs::remove_file(
-        server_preview_gif_dir().join(mold_core::media_paths::preview_gif_filename(&clean_name)),
-    );
-
-    // Drop the matching metadata row if the DB is enabled. Errors here are
-    // logged — they don't roll back the disk delete since the file is the
-    // source of truth and reconciliation will re-sync on the next restart.
-    if let Some(db) = state.metadata_db.as_ref().as_ref() {
-        match db.delete(&output_dir, &clean_name) {
-            Ok(true) => {}
-            Ok(false) => tracing::debug!(
-                "delete: no metadata row for {}",
-                output_dir.join(&clean_name).display()
-            ),
-            Err(e) => tracing::warn!(
-                "metadata DB delete failed for {}: {e:#}",
-                output_dir.join(&clean_name).display()
-            ),
+    // File removal + DB delete are blocking syscalls / a synchronous SQLite
+    // call — run the whole batch on the blocking pool so a slow disk can't
+    // stall an async worker thread mid-generation.
+    let db = state.metadata_db.clone();
+    let name = clean_name.clone();
+    let dir = output_dir.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
+        let path = dir.join(&name);
+        if path.is_file() {
+            std::fs::remove_file(&path)
+                .map_err(|e| ApiError::internal(format!("failed to delete image: {e}")))?;
         }
-    }
+
+        // Also remove server-side thumbnail (both legacy no-suffix and current
+        // `.png`-suffixed cache layouts) and the animated preview sidecar so
+        // `/api/gallery/preview/:filename` doesn't keep serving the GIF after
+        // the source MP4 is gone.
+        let thumb_dir = server_thumbnail_dir();
+        let _ = std::fs::remove_file(thumb_dir.join(&name));
+        let _ = std::fs::remove_file(thumb_dir.join(format!("{name}.png")));
+        let _ = std::fs::remove_file(
+            server_preview_gif_dir().join(mold_core::media_paths::preview_gif_filename(&name)),
+        );
+
+        // Drop the matching metadata row if the DB is enabled. Errors here are
+        // logged — they don't roll back the disk delete since the file is the
+        // source of truth and reconciliation will re-sync on the next restart.
+        if let Some(db) = db.as_ref().as_ref() {
+            match db.delete(&dir, &name) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::debug!("delete: no metadata row for {}", dir.join(&name).display())
+                }
+                Err(e) => tracing::warn!(
+                    "metadata DB delete failed for {}: {e:#}",
+                    dir.join(&name).display()
+                ),
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("gallery delete task failed: {e}")))??;
+
+    state
+        .events
+        .publish(mold_core::ServerEvent::GalleryRemoved {
+            filename: clean_name,
+        });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -3423,6 +3442,57 @@ fn snapshot_to_sse(snap: &ResourceSnapshot) -> SseEvent {
         Err(e) => SseEvent::default()
             .event("error")
             .data(format!("{{\"message\":\"serialize failed: {e}\"}}")),
+    }
+}
+
+/// `GET /api/events` — SSE stream of server-wide [`mold_core::ServerEvent`]s:
+/// job lifecycle (queued/started/ended, mirrored off the job registry) and
+/// gallery mutations (added/removed). One connection observes the whole
+/// server, so clients don't need a held stream per job to know when the
+/// gallery changed. Deltas only — bootstrap current state from
+/// `GET /api/queue` + `GET /api/gallery` after subscribing. Event name:
+/// `event`. Feature-detect via `capabilities.events.available`.
+#[utoipa::path(
+    get,
+    path = "/api/events",
+    tag = "server",
+    responses(
+        (status = 200, description = "SSE stream of server lifecycle events", content_type = "text/event-stream")
+    )
+)]
+async fn stream_events(
+    State(state): State<AppState>,
+) -> Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>> {
+    use tokio_stream::wrappers::BroadcastStream;
+
+    let rx = state.events.subscribe();
+    let stream = async_stream::stream! {
+        let mut bs = BroadcastStream::new(rx);
+        while let Some(item) = bs.next().await {
+            match item {
+                Ok(ev) => yield Ok::<_, Infallible>(server_event_to_sse(&ev)),
+                // Lagged receivers skip the gap; REST endpoints are the
+                // recovery path for anything missed.
+                Err(_lagged) => continue,
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
+fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
+    match serde_json::to_string(ev) {
+        Ok(data) => SseEvent::default().event("event").data(data),
+        // json! escapes the error text — quotes/newlines in `e` must not
+        // produce an invalid JSON frame.
+        Err(e) => SseEvent::default()
+            .event("error")
+            .data(serde_json::json!({ "message": format!("serialize failed: {e}") }).to_string()),
     }
 }
 

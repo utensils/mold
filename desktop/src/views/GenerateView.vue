@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import DevelopCanvas from "../lib/develop/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
@@ -11,6 +11,7 @@ import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useGenerationStore, jobPhase, jobProgress, type Job } from "../stores/generation";
+import { useGenerateFormStore } from "../stores/generateForm";
 import { useGalleryStore } from "../stores/gallery";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
@@ -19,7 +20,7 @@ import { copyBase64ImageToClipboard } from "../lib/clipboard";
 import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
-import { applyModelDefaults, buildRequest, newGenerateForm } from "../lib/generateForm";
+import { buildRequest } from "../lib/generateForm";
 import type { GenerationTemplate } from "../lib/generationTemplates";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCycler";
 import { fetchHistory } from "../lib/api/history";
@@ -38,7 +39,10 @@ const toasts = useToastStore();
 const ui = useUiStore();
 const contextMenu = useContextMenuStore();
 
-const form = reactive(newGenerateForm());
+// Store-backed so the model, prompt, and params survive navigating away and
+// back — this view unmounts on every route change.
+const formStore = useGenerateFormStore();
+const form = formStore.form;
 const promptEl = ref<HTMLTextAreaElement | null>(null);
 const previewRegion = ref<HTMLDivElement | null>(null);
 const previewFrameSize = ref({ width: 0, height: 0 });
@@ -93,7 +97,7 @@ const edgeCode = computed(() => {
 });
 
 function pickModel(m: ModelEntry) {
-  applyModelDefaults(form, m);
+  formStore.applyModel(m);
   pickerOpen.value = false;
 }
 
@@ -231,12 +235,15 @@ function onComposerKeydown(e: KeyboardEvent) {
   }
 }
 
+// Auto-select a default model only when none is set. With the form persisted
+// in a store, the `!form.model` guard now means "the first ever visit" — a
+// remount after the user chose a model leaves their choice untouched.
 watch(
   () => models.installed,
   (installed) => {
     if (!form.model && installed.length > 0) {
       const preferred = installed.find((m) => m.family === "flux") ?? installed[0]!;
-      applyModelDefaults(form, preferred);
+      formStore.applyModel(preferred);
     }
   },
   { immediate: true },
@@ -277,12 +284,7 @@ watch(() => composer.prefill, applyPrefill, { immediate: true });
 watch(
   () => ui.newGenerationTick,
   () => {
-    form.prompt = "";
-    form.originalPrompt = null;
-    form.negativePrompt = "";
-    form.seed = "";
-    form.sourceImage = null;
-    form.maskImage = null;
+    formStore.clearComposer();
     void nextTick(() => promptEl.value?.focus());
   },
 );

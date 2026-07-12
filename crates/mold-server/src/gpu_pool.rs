@@ -151,6 +151,9 @@ pub struct GpuJob {
     /// and remove the entry on completion / error. Cheap clone — registry is
     /// behind an `Arc<RwLock>` internally.
     pub registry: crate::job_registry::SharedJobRegistry,
+    /// Server-wide event broadcast so the worker's save path can emit
+    /// `gallery_added` alongside the DB upsert (mirrors `AppState.events`).
+    pub events: Arc<crate::events::EventBroadcaster>,
 }
 
 /// Pool of GPU workers with placement strategy.

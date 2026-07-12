@@ -5,6 +5,7 @@ pub mod chain_limits;
 pub mod test_support;
 // Agent A (downloads)
 pub mod downloads;
+pub mod events;
 pub mod gpu_pool;
 pub mod gpu_worker;
 pub mod job_registry;
@@ -326,6 +327,7 @@ pub async fn run_server(
             job_locks: std::sync::Arc::new(chain_job_runner::JobMutationLocks::new()),
             claims: std::sync::Arc::new(chain_job_runner::EphemeralClaims::default()),
             output_dir,
+            server_events: Some(state.events.clone()),
         };
         state.chain_jobs = Some(std::sync::Arc::new(chain_job_runner::spawn_runner(deps)));
     }

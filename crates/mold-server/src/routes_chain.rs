@@ -303,6 +303,7 @@ fn shim_build_response_and_cleanup(
             &metadata,
             Some(generation_time_ms as i64),
             Some(db),
+            Some(&state.events),
         );
     }
 
@@ -1431,6 +1432,7 @@ mod tests {
             job_locks: Arc::new(crate::chain_job_runner::JobMutationLocks::new()),
             claims: Arc::new(crate::chain_job_runner::EphemeralClaims::default()),
             output_dir: None,
+            server_events: None,
         };
         let handle = crate::chain_job_runner::spawn_runner(deps);
         let mut state = AppState::for_tests();

@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use mold_inference::shared_pool::SharedPool;
 
 use crate::downloads::DownloadQueue;
+use crate::events::EventBroadcaster;
 use crate::gpu_pool::GpuPool;
 use crate::job_registry::{JobRegistry, SharedJobRegistry};
 use crate::model_cache::ModelCache;
@@ -171,6 +172,10 @@ pub struct AppState {
     pub downloads: Arc<DownloadQueue>,
     /// Always-on resource telemetry (Agent B).
     pub resources: Arc<ResourceBroadcaster>,
+    /// Server-wide lifecycle broadcast backing `GET /api/events` — job
+    /// queued/started/ended (mirrored by `job_registry`) plus gallery
+    /// added/removed. One SSE connection observes the whole server.
+    pub events: Arc<EventBroadcaster>,
     // ── Catalog (live HF + Civitai) ─────────────────────────────────────────
     /// In-process TTL cache backing `/api/catalog/search`.
     pub catalog_live_cache: mold_catalog::live::LiveCache,
@@ -298,6 +303,7 @@ impl AppState {
     ) -> Self {
         let mut cache = ModelCache::new(resolve_max_cached_models());
         cache.insert(engine, 0);
+        let events = EventBroadcaster::new();
         Self {
             gpu_pool,
             queue_capacity,
@@ -308,7 +314,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
-            job_registry: JobRegistry::new(),
+            job_registry: JobRegistry::with_events(events.clone()),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -316,6 +322,7 @@ impl AppState {
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
+            events,
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -329,6 +336,7 @@ impl AppState {
         gpu_pool: Arc<GpuPool>,
         queue_capacity: usize,
     ) -> Self {
+        let events = EventBroadcaster::new();
         Self {
             gpu_pool,
             queue_capacity,
@@ -339,7 +347,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
-            job_registry: JobRegistry::new(),
+            job_registry: JobRegistry::with_events(events.clone()),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -347,6 +355,7 @@ impl AppState {
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
+            events,
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -375,6 +384,7 @@ impl AppState {
         let queue = QueueHandle::new(tx);
         let mut cache = ModelCache::new(resolve_max_cached_models());
         cache.insert(Box::new(engine), 0);
+        let events = EventBroadcaster::new();
         Self {
             gpu_pool: Self::empty_gpu_pool(),
             queue_capacity: 200,
@@ -385,7 +395,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
-            job_registry: JobRegistry::new(),
+            job_registry: JobRegistry::with_events(events.clone()),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -393,6 +403,7 @@ impl AppState {
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
+            events,
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -408,6 +419,7 @@ impl AppState {
         let queue = QueueHandle::new(tx);
         let mut cache = ModelCache::new(resolve_max_cached_models());
         cache.insert(Box::new(engine), 0);
+        let events = EventBroadcaster::new();
         let state = Self {
             gpu_pool: Self::empty_gpu_pool(),
             queue_capacity: 200,
@@ -418,7 +430,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
-            job_registry: JobRegistry::new(),
+            job_registry: JobRegistry::with_events(events.clone()),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -426,6 +438,7 @@ impl AppState {
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
+            events,
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -439,6 +452,7 @@ impl AppState {
     pub fn for_tests() -> Self {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = QueueHandle::new(tx);
+        let events = EventBroadcaster::new();
         Self {
             gpu_pool: Arc::new(GpuPool {
                 workers: Vec::new(),
@@ -451,7 +465,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
-            job_registry: JobRegistry::new(),
+            job_registry: JobRegistry::with_events(events.clone()),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -459,6 +473,7 @@ impl AppState {
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
+            events,
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),

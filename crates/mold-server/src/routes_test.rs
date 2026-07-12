@@ -2878,6 +2878,7 @@ mod tests {
             chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
+            events: crate::events::EventBroadcaster::new(),
             catalog_live_cache: mold_catalog::live::LiveCache::new(
                 std::time::Duration::from_secs(300),
                 64,
@@ -2938,6 +2939,7 @@ mod tests {
             chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
+            events: crate::events::EventBroadcaster::new(),
             catalog_live_cache: mold_catalog::live::LiveCache::new(
                 std::time::Duration::from_secs(300),
                 64,
@@ -3201,6 +3203,7 @@ mod tests {
             chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
+            events: crate::events::EventBroadcaster::new(),
             catalog_live_cache: mold_catalog::live::LiveCache::new(
                 std::time::Duration::from_secs(300),
                 64,
@@ -4100,6 +4103,123 @@ mod tests {
         assert!(!target.exists(), "file should be removed from disk");
         let db_after = db_handle_for_assert.as_ref().as_ref().unwrap();
         assert_eq!(db_after.count().unwrap(), 0, "DB row should be gone");
+    }
+
+    /// Gallery delete must announce itself on the server-wide event stream
+    /// so clients displaying the gallery drop the tile without a refetch.
+    #[tokio::test]
+    async fn gallery_delete_emits_gallery_removed_event() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("doomed.png"), vec![0u8; 16]).unwrap();
+
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let mut events_rx = state.events.subscribe();
+        let app = app_with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/gallery/image/doomed.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        match events_rx.try_recv().unwrap() {
+            mold_core::ServerEvent::GalleryRemoved { filename } => {
+                assert_eq!(filename, "doomed.png");
+            }
+            other => panic!("expected gallery_removed, got {other:?}"),
+        }
+    }
+
+    // ── GET /api/events ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_api_events_streams_published_server_events() {
+        use futures::StreamExt as _;
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state.clone());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("text/event-stream"),
+            "expected SSE content-type, got: {ct}"
+        );
+
+        // Publish AFTER subscribing (SSE response already established) —
+        // registering on the job registry must surface as a job_queued frame.
+        let state_for_send = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            state_for_send.job_registry.register("j1", "flux-dev:q4");
+        });
+
+        let mut body = res.into_body().into_data_stream();
+        let mut saw_queued = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(300), body.next()).await {
+                Ok(Some(Ok(bytes))) => {
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    if text.contains("\"type\":\"job_queued\"") && text.contains("\"id\":\"j1\"") {
+                        saw_queued = true;
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        assert!(saw_queued, "did not observe a job_queued SSE event");
+    }
+
+    #[tokio::test]
+    async fn capabilities_reports_events_available() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["events"]["available"], true);
     }
 
     #[tokio::test]

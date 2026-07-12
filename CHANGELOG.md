@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /api/events` — server-wide lifecycle event stream (SSE).** One connection now observes every generation job's lifecycle (`job_queued` / `job_started` / `job_ended`, emitted from the job registry so no submit, promote, cancel, or terminal path is missed) plus gallery mutations (`gallery_added` with the full gallery row when the metadata DB recorded it, `gallery_removed` on delete — including finalized chain outputs). Deltas only: clients bootstrap from `GET /api/queue` + `GET /api/gallery` after subscribing. Feature-detect via the new `events.available` field on `GET /api/capabilities`; the per-job `POST /api/generate/stream` contract is unchanged.
+
+### Fixed
+
+- **Desktop: the gallery updates live while generating.** The Gallery view previously only refreshed on mount or after a generation completed *in the Generate view*, so prints landed silently while you watched the gallery (especially against a remote server or the queue). The app now subscribes app-wide to `GET /api/events` and inserts/removes gallery tiles in place; on older servers without the endpoint it falls back to polling every 5 s while jobs are pending.
+- **Desktop: Generate form survives navigation.** Model selection, prompt, and all parameters now live in a store instead of the view, so switching to Gallery/Models/Settings and back no longer resets them (the default-model auto-select only runs on a truly pristine form).
+- **Desktop: model downloads and gallery calls no longer stall behind big batches.** Each batch sibling used to hold its own SSE connection for its entire run; combined with the downloads and resources streams a batch of 4+ exhausted the browser's ~6-per-host HTTP/1.1 connection budget, queueing every other API call behind it — observed as "downloads/gallery are blocked while generating". Batch siblings now open at most two streams at a time (all jobs are still created and sequenced immediately).
+- **Server: gallery delete no longer blocks an async worker thread.** `DELETE /api/gallery/image/:name` ran its file removals and the SQLite row delete directly on the async runtime; they now run on the blocking pool.
+
 ## [0.16.0] - 2026-07-12
 
 ### Changed

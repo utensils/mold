@@ -514,6 +514,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                 }
                 let generation_time_ms = response.generation_time_ms as i64;
                 let db = job.metadata_db.as_ref().as_ref();
+                let events = Some(job.events.as_ref());
                 if let Some(ref video) = response.video {
                     save_video_to_dir(
                         dir,
@@ -524,6 +525,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                         &metadata,
                         Some(generation_time_ms),
                         db,
+                        events,
                     );
                 } else {
                     save_image_to_dir(
@@ -534,6 +536,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                         Some(&metadata),
                         Some(generation_time_ms),
                         db,
+                        events,
                     );
                 }
             }
@@ -1223,6 +1226,7 @@ mod tests {
             metadata_db: Arc::new(None),
             queue: QueueHandle::new(queue_tx),
             registry: JobRegistry::new(),
+            events: crate::events::EventBroadcaster::new(),
         }
     }
 

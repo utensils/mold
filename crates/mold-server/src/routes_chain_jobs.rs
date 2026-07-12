@@ -778,6 +778,7 @@ mod tests {
             job_locks: Arc::new(crate::chain_job_runner::JobMutationLocks::new()),
             claims: Arc::new(crate::chain_job_runner::EphemeralClaims::default()),
             output_dir: None,
+            server_events: None,
         };
         let state = state_with(db, crate::chain_job_runner::spawn_runner(deps));
 

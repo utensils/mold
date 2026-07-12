@@ -90,6 +90,7 @@ fn clear_active_generation(state: &AppState) {
 /// per-GPU worker (`gpu_worker.rs`). Keep these on one helper so the DB
 /// upsert can never silently regress on one path while the other keeps
 /// working.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn save_image_to_dir(
     dir: &std::path::Path,
     img: &mold_core::ImageData,
@@ -98,6 +99,7 @@ pub(crate) fn save_image_to_dir(
     metadata: Option<&OutputMetadata>,
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
 ) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
@@ -115,8 +117,9 @@ pub(crate) fn save_image_to_dir(
             return;
         }
     }
+    let mut image_row = None;
     if let (Some(db), Some(meta)) = (db, metadata) {
-        mold_db::persist::record_saved_output(
+        image_row = mold_db::persist::record_saved_output_returning(
             db,
             dir,
             &filename,
@@ -128,7 +131,16 @@ pub(crate) fn save_image_to_dir(
                 generation_time_ms,
                 backend: Some(mold_inference::compiled_backend_label()),
             },
-        );
+        )
+        .map(|rec| Box::new(rec.to_gallery_image()));
+    }
+    // Emit even without a DB row — `image: None` tells clients to refetch
+    // `/api/gallery` instead of inserting in place.
+    if let Some(events) = events {
+        events.publish(mold_core::ServerEvent::GalleryAdded {
+            filename,
+            image: image_row,
+        });
     }
 }
 
@@ -151,6 +163,7 @@ pub(crate) fn save_video_to_dir(
     metadata: &OutputMetadata,
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
 ) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
@@ -167,8 +180,9 @@ pub(crate) fn save_video_to_dir(
     if !gif_preview.is_empty() {
         save_video_preview_gif(&filename, gif_preview);
     }
+    let mut image_row = None;
     if let Some(db) = db {
-        mold_db::persist::record_saved_output(
+        image_row = mold_db::persist::record_saved_output_returning(
             db,
             dir,
             &filename,
@@ -180,7 +194,14 @@ pub(crate) fn save_video_to_dir(
                 generation_time_ms,
                 backend: Some(mold_inference::compiled_backend_label()),
             },
-        );
+        )
+        .map(|rec| Box::new(rec.to_gallery_image()));
+    }
+    if let Some(events) = events {
+        events.publish(mold_core::ServerEvent::GalleryAdded {
+            filename,
+            image: image_row,
+        });
     }
 }
 
@@ -862,6 +883,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                     apply_output_dimensions_to_metadata(&mut metadata, &img);
                 }
                 let db = state.metadata_db.clone();
+                let events = state.events.clone();
                 if let Some(ref video) = response.video {
                     let video_data = video.data.clone();
                     let video_gif_preview = video.gif_preview.clone();
@@ -877,6 +899,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                             &video_metadata,
                             Some(generation_time_ms),
                             db.as_ref().as_ref(),
+                            Some(&events),
                         );
                     });
                 } else {
@@ -891,6 +914,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                             Some(&metadata_clone),
                             Some(generation_time_ms),
                             db.as_ref().as_ref(),
+                            Some(&events),
                         );
                     });
                 }
@@ -1066,6 +1090,7 @@ async fn run_queue_dispatcher_with_tuning(
             metadata_db: state.metadata_db.clone(),
             queue: state.queue.clone(),
             registry: state.job_registry.clone(),
+            events: state.events.clone(),
         });
 
         let mut skip: Vec<usize> = if preferred_gpu.is_none() {
@@ -1336,7 +1361,16 @@ mod tests {
         let nested = tmp.path().join("sub/output");
         assert!(!nested.exists());
 
-        save_image_to_dir(&nested, &fake_image(), "flux-dev:q4", 1, None, None, None);
+        save_image_to_dir(
+            &nested,
+            &fake_image(),
+            "flux-dev:q4",
+            1,
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert!(nested.exists(), "save should mkdir -p");
         let entries: Vec<_> = std::fs::read_dir(&nested).unwrap().collect();
@@ -1356,7 +1390,7 @@ mod tests {
         img.format = OutputFormat::Jpeg;
         img.data = vec![0xFF, 0xD8, 0xFF, 0xE0]; // JPEG magic
 
-        save_image_to_dir(tmp.path(), &img, "sdxl", 4, None, None, None);
+        save_image_to_dir(tmp.path(), &img, "sdxl", 4, None, None, None, None);
 
         let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
         let name = entries[0]
@@ -1386,6 +1420,7 @@ mod tests {
             Some(&meta),
             Some(1234),
             Some(&db),
+            None,
         );
 
         let rows = db.list(Some(tmp.path())).unwrap();
@@ -1413,6 +1448,7 @@ mod tests {
             None, // ← metadata absent
             Some(1234),
             Some(&db),
+            None,
         );
 
         // File still on disk, but no DB row recorded — both gates must hold
@@ -1433,7 +1469,116 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
+    }
+
+    #[test]
+    fn save_image_to_dir_emits_gallery_added_with_row_when_db_records() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let req = fake_request("flux-dev:q4");
+        let meta = OutputMetadata::from_generate_request(&req, 42, None, "test-version");
+        let events = crate::events::EventBroadcaster::new();
+        let mut rx = events.subscribe();
+
+        save_image_to_dir(
+            tmp.path(),
+            &fake_image(),
+            "flux-dev:q4",
+            1,
+            Some(&meta),
+            Some(1234),
+            Some(&db),
+            Some(&events),
+        );
+
+        match rx.try_recv().unwrap() {
+            mold_core::ServerEvent::GalleryAdded { filename, image } => {
+                assert!(filename.ends_with(".png"), "{filename}");
+                let img = image.expect("DB recorded — event must carry the gallery row");
+                assert_eq!(img.filename, filename);
+                assert_eq!(img.metadata.prompt, "a cat");
+            }
+            other => panic!("expected gallery_added, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn save_image_to_dir_emits_gallery_added_without_row_when_db_absent() {
+        let tmp = TempDir::new().unwrap();
+        let events = crate::events::EventBroadcaster::new();
+        let mut rx = events.subscribe();
+
+        save_image_to_dir(
+            tmp.path(),
+            &fake_image(),
+            "flux-dev:q4",
+            1,
+            None,
+            None,
+            None, // no DB
+            Some(&events),
+        );
+
+        match rx.try_recv().unwrap() {
+            mold_core::ServerEvent::GalleryAdded { image, .. } => {
+                assert!(image.is_none(), "no DB → clients must refetch");
+            }
+            other => panic!("expected gallery_added, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn save_image_to_dir_emits_nothing_on_write_failure() {
+        let events = crate::events::EventBroadcaster::new();
+        let mut rx = events.subscribe();
+
+        save_image_to_dir(
+            std::path::Path::new("/dev/null/cant-mkdir-here"),
+            &fake_image(),
+            "test",
+            1,
+            None,
+            None,
+            None,
+            Some(&events),
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "failed save must not announce a gallery entry"
+        );
+    }
+
+    #[test]
+    fn save_video_to_dir_emits_gallery_added() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let req = fake_request("ltx-video:fp16");
+        let meta = OutputMetadata::from_generate_request(&req, 1, None, "v");
+        let events = crate::events::EventBroadcaster::new();
+        let mut rx = events.subscribe();
+
+        save_video_to_dir(
+            tmp.path(),
+            b"fake mp4 bytes",
+            b"",
+            OutputFormat::Mp4,
+            "ltx-video:fp16",
+            &meta,
+            Some(5000),
+            Some(&db),
+            Some(&events),
+        );
+
+        match rx.try_recv().unwrap() {
+            mold_core::ServerEvent::GalleryAdded { filename, image } => {
+                assert!(filename.ends_with(".mp4"), "{filename}");
+                assert!(image.is_some());
+            }
+            other => panic!("expected gallery_added, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1458,6 +1603,7 @@ mod tests {
             &meta,
             Some(5000),
             Some(&db),
+            None,
         );
 
         let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
@@ -1494,6 +1640,7 @@ mod tests {
             &meta,
             None,
             None,
+            None,
         );
 
         let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
@@ -1518,6 +1665,7 @@ mod tests {
             OutputFormat::Mp4,
             "test",
             &meta,
+            None,
             None,
             None,
         );
@@ -1852,6 +2000,7 @@ mod tests {
             metadata_db: state.metadata_db.clone(),
             queue: state.queue.clone(),
             registry: state.job_registry.clone(),
+            events: state.events.clone(),
         };
         worker.job_tx.send(filler_job).unwrap();
 

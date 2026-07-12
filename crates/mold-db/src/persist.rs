@@ -34,6 +34,19 @@ pub fn record_saved_output(
     on_disk: &Path,
     params: &OutputRecordParams<'_>,
 ) -> bool {
+    record_saved_output_returning(db, output_dir, filename, on_disk, params).is_some()
+}
+
+/// Like [`record_saved_output`] but returns the upserted record so callers
+/// can project it further (the server turns it into a `GalleryImage` for
+/// the `gallery_added` broadcast event). `None` on upsert failure.
+pub fn record_saved_output_returning(
+    db: &MetadataDb,
+    output_dir: &Path,
+    filename: &str,
+    on_disk: &Path,
+    params: &OutputRecordParams<'_>,
+) -> Option<GenerationRecord> {
     let mut rec = GenerationRecord::from_save(
         output_dir,
         filename,
@@ -48,9 +61,9 @@ pub fn record_saved_output(
     rec.backend = params.backend.map(|s| s.to_string());
     if let Err(e) = db.upsert(&rec) {
         tracing::warn!("metadata DB upsert failed for {}: {e:#}", rec.filename);
-        return false;
+        return None;
     }
-    true
+    Some(rec)
 }
 
 /// Best-effort hostname for the `hostname` DB column. Falls back to `None`.
@@ -114,5 +127,35 @@ mod tests {
             "{}",
             got.created_at_ms
         );
+    }
+
+    #[test]
+    fn record_saved_output_returning_yields_a_gallery_projectable_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mold-flux-dev-q4-1700000000001.png");
+        std::fs::write(&file, b"fake-bytes").unwrap();
+        let db = MetadataDb::open(&dir.path().join("mold.db")).unwrap();
+
+        let rec = record_saved_output_returning(
+            &db,
+            dir.path(),
+            "mold-flux-dev-q4-1700000000001.png",
+            &file,
+            &OutputRecordParams {
+                format: OutputFormat::Png,
+                metadata: &metadata(),
+                source: RecordSource::Server,
+                generation_time_ms: Some(1_200),
+                backend: Some("metal"),
+            },
+        )
+        .expect("upsert should succeed");
+
+        let img = rec.to_gallery_image();
+        assert_eq!(img.filename, "mold-flux-dev-q4-1700000000001.png");
+        assert_eq!(img.format, Some(OutputFormat::Png));
+        assert_eq!(img.size_bytes, Some(b"fake-bytes".len() as u64));
+        assert_eq!(img.metadata.prompt, "a stoic owl");
+        assert!(img.timestamp > 0);
     }
 }

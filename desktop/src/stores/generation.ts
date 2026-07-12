@@ -175,6 +175,34 @@ export function railOrder(jobs: Job[]): Job[] {
   });
 }
 
+/**
+ * Run `tasks` with at most `limit` in flight at once, resolving with each
+ * task's result in task order. A rejected task is swallowed (its slot resolves
+ * to `undefined`) so one failure never stalls the pool — batch siblings
+ * surface failures through their own job status, not this promise.
+ * Pure/exported for tests.
+ */
+export async function runWithConcurrency<T>(
+  tasks: Array<() => Promise<T>>,
+  limit = 2,
+): Promise<Array<T | undefined>> {
+  const results = new Array<T | undefined>(tasks.length);
+  let cursor = 0;
+  const runner = async (): Promise<void> => {
+    while (cursor < tasks.length) {
+      const index = cursor++;
+      try {
+        results[index] = await tasks[index]!();
+      } catch {
+        /* swallow — a failed task must not stall its siblings */
+      }
+    }
+  };
+  const width = Math.min(Math.max(1, limit), tasks.length);
+  await Promise.all(Array.from({ length: width }, runner));
+  return results;
+}
+
 const MIME: Record<string, string> = {
   png: "image/png",
   jpeg: "image/jpeg",
@@ -231,9 +259,12 @@ export const useGenerationStore = defineStore("generation", {
   },
   actions: {
     /**
-     * Submit a batch: all siblings enter the server queue immediately with
-     * seeds `base + i`, each streaming its own progress. Returns the created
-     * jobs plus a promise resolving when every sibling settles.
+     * Submit a batch: every sibling is created with seeds `base + i`, but at
+     * most two hold an SSE stream open at once. A browser's per-host HTTP/1.1
+     * budget is ~6 connections; uncapped, a large batch would exhaust it and
+     * starve the gallery/download requests behind the held-open streams. Later
+     * siblings simply wait their turn in the pool. Returns the created jobs
+     * plus a promise resolving when every sibling settles.
      */
     submitBatch(req: GenerateRequest, batchSize: number): { jobs: Job[]; settled: Promise<Job[]> } {
       const size = Math.max(1, Math.floor(batchSize));
@@ -245,7 +276,12 @@ export const useGenerationStore = defineStore("generation", {
         job.batchId = batchId;
         return job;
       });
-      const settled = Promise.all(jobs.map((job, i) => this.streamJob(job, plans[i]!))).then(() => {
+      const tasks = jobs.map((job, i) => () => {
+        // A sibling cancelled while it waited its turn never opens a stream.
+        if (job.status === "error") return Promise.resolve();
+        return this.streamJob(job, plans[i]!);
+      });
+      const settled = runWithConcurrency(tasks, 2).then(() => {
         // Background notification (the view toasts in the foreground).
         const failed = jobs.find((s) => s.status === "error");
         if (jobs.some((s) => s.status === "complete")) notifyGenerated(req.prompt);

@@ -42,6 +42,8 @@ export interface ServerStatus {
 export interface ServerCapabilities {
   gallery: { can_delete: boolean };
   catalog?: { available: boolean; families: string[] } | null;
+  /** Absent on servers that predate `GET /api/events`. */
+  events?: { available: boolean } | null;
 }
 
 // ── Models ───────────────────────────────────────────────────────────────
@@ -356,6 +358,22 @@ export interface CreateDownloadResponse {
   id: string;
   position: number;
 }
+
+// ── Server events ─────────────────────────────────────────────────────────
+
+/**
+ * `GET /api/events` frames (internally tagged, `type` discriminant) —
+ * server-wide job lifecycle + gallery mutations over one SSE connection.
+ * Mirrors mold-core `ServerEvent`; feature-detect via
+ * `ServerCapabilities.events`. Deltas only — bootstrap from `GET /api/queue`
+ * + `GET /api/gallery`.
+ */
+export type ServerEvent =
+  | { type: "job_queued"; id: string; model: string }
+  | { type: "job_started"; id: string; model: string; gpu?: number | null }
+  | { type: "job_ended"; id: string }
+  | { type: "gallery_added"; filename: string; image?: GalleryImage | null }
+  | { type: "gallery_removed"; filename: string };
 
 // ── Catalog ───────────────────────────────────────────────────────────────
 

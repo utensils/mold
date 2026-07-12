@@ -15,6 +15,8 @@
 //! is the source of truth for those. Anything in here is currently queued or
 //! actively running on some worker.
 
+use crate::events::EventBroadcaster;
+use mold_core::ServerEvent;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -97,6 +99,11 @@ pub enum QueuedJobCancelError {
 /// state rather than propagating the panic into the dispatcher hot path.
 pub struct JobRegistry {
     inner: RwLock<Vec<EntryInternal>>,
+    /// Optional lifecycle broadcast (`GET /api/events`). Emitting from the
+    /// registry — rather than each call site — guarantees every submit /
+    /// promote / terminal path produces exactly one event. `None` keeps
+    /// event-less construction (tests) cheap.
+    events: Option<Arc<EventBroadcaster>>,
 }
 
 /// Cheap-cloneable handle. Workers and routes pass this around by value.
@@ -106,7 +113,26 @@ impl JobRegistry {
     pub fn new() -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
+            events: None,
         })
+    }
+
+    /// Like [`JobRegistry::new`] but mirrors every lifecycle change onto the
+    /// server-wide event broadcast.
+    pub fn with_events(events: Arc<EventBroadcaster>) -> SharedJobRegistry {
+        Arc::new(Self {
+            inner: RwLock::new(Vec::new()),
+            events: Some(events),
+        })
+    }
+
+    /// Publish outside the registry lock — callers must have dropped the
+    /// write guard first so a slow broadcast can never extend the critical
+    /// section.
+    fn emit(&self, event: ServerEvent) {
+        if let Some(events) = &self.events {
+            events.publish(event);
+        }
     }
 
     /// Insert a freshly-submitted job at the tail in `Queued` state.
@@ -132,17 +158,22 @@ impl JobRegistry {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
+        let id = id.into();
+        let model = model.into();
         let cancel = Arc::new(Notify::new());
-        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        entries.push(EntryInternal {
-            id: id.into(),
-            model: model.into(),
-            state: JobLifecycle::Queued,
-            started_at_unix_ms,
-            gpu: None,
-            target_gpu,
-            cancel: cancel.clone(),
-        });
+        {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            entries.push(EntryInternal {
+                id: id.clone(),
+                model: model.clone(),
+                state: JobLifecycle::Queued,
+                started_at_unix_ms,
+                gpu: None,
+                target_gpu,
+                cancel: cancel.clone(),
+            });
+        }
+        self.emit(ServerEvent::JobQueued { id, model });
         cancel
     }
 
@@ -156,26 +187,39 @@ impl JobRegistry {
     /// promoted. (A worker that already dequeued the job before the cancel
     /// landed will observe the closed result channel and skip it.)
     pub fn cancel_queued(&self, id: &str) -> Result<(), QueuedJobCancelError> {
-        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let Some(pos) = entries.iter().position(|e| e.id == id) else {
-            return Err(QueuedJobCancelError::NotFound);
-        };
-        if entries[pos].state == JobLifecycle::Running {
-            return Err(QueuedJobCancelError::AlreadyRunning);
+        {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let Some(pos) = entries.iter().position(|e| e.id == id) else {
+                return Err(QueuedJobCancelError::NotFound);
+            };
+            if entries[pos].state == JobLifecycle::Running {
+                return Err(QueuedJobCancelError::AlreadyRunning);
+            }
+            let entry = entries.remove(pos);
+            entry.cancel.notify_one();
         }
-        let entry = entries.remove(pos);
-        entry.cancel.notify_one();
+        self.emit(ServerEvent::JobEnded { id: id.to_string() });
         Ok(())
     }
 
     /// Promote a registry entry from `Queued` to `Running`. No-op if `id`
     /// isn't present (the entry may have been removed concurrently).
     pub fn mark_running(&self, id: &str, gpu: Option<usize>) {
-        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
-            e.state = JobLifecycle::Running;
-            e.gpu = gpu;
-            e.target_gpu = None;
+        let model = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            entries.iter_mut().find(|e| e.id == id).map(|e| {
+                e.state = JobLifecycle::Running;
+                e.gpu = gpu;
+                e.target_gpu = None;
+                e.model.clone()
+            })
+        };
+        if let Some(model) = model {
+            self.emit(ServerEvent::JobStarted {
+                id: id.to_string(),
+                model,
+                gpu,
+            });
         }
     }
 
@@ -221,8 +265,18 @@ impl JobRegistry {
         if id.is_empty() {
             return;
         }
-        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        entries.retain(|e| e.id != id);
+        let removed = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let before = entries.len();
+            entries.retain(|e| e.id != id);
+            entries.len() != before
+        };
+        // `remove` is called on every terminal path and is deliberately
+        // idempotent — only the call that actually dropped the entry emits,
+        // so subscribers see exactly one `job_ended` per job.
+        if removed {
+            self.emit(ServerEvent::JobEnded { id: id.to_string() });
+        }
     }
 
     /// Snapshot the registry as a wire-shaped listing. Positions are assigned
@@ -412,5 +466,86 @@ mod tests {
         let json2 = serde_json::to_string(&snap2.entries[0]).unwrap();
         assert!(json2.contains(r#""state":"running""#));
         assert!(json2.contains(r#""gpu":0"#));
+    }
+
+    mod event_emission {
+        use super::*;
+        use crate::events::EventBroadcaster;
+        use mold_core::ServerEvent;
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        fn wired() -> (
+            SharedJobRegistry,
+            tokio::sync::broadcast::Receiver<ServerEvent>,
+        ) {
+            let events = EventBroadcaster::new();
+            let rx = events.subscribe();
+            (JobRegistry::with_events(events), rx)
+        }
+
+        #[test]
+        fn register_emits_job_queued() {
+            let (reg, mut rx) = wired();
+            reg.register("a", "flux-dev:fp16");
+            match rx.try_recv().unwrap() {
+                ServerEvent::JobQueued { id, model } => {
+                    assert_eq!(id, "a");
+                    assert_eq!(model, "flux-dev:fp16");
+                }
+                other => panic!("expected job_queued, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn mark_running_emits_job_started_with_model_and_gpu() {
+            let (reg, mut rx) = wired();
+            reg.register("a", "flux-dev:fp16");
+            let _ = rx.try_recv(); // drain job_queued
+            reg.mark_running("a", Some(1));
+            match rx.try_recv().unwrap() {
+                ServerEvent::JobStarted { id, model, gpu } => {
+                    assert_eq!(id, "a");
+                    assert_eq!(model, "flux-dev:fp16");
+                    assert_eq!(gpu, Some(1));
+                }
+                other => panic!("expected job_started, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn mark_running_unknown_id_emits_nothing() {
+            let (reg, mut rx) = wired();
+            reg.mark_running("ghost", None);
+            assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        }
+
+        #[test]
+        fn remove_emits_job_ended_exactly_once_across_double_call() {
+            let (reg, mut rx) = wired();
+            reg.register("a", "flux-dev:fp16");
+            let _ = rx.try_recv(); // drain job_queued
+            reg.remove("a");
+            reg.remove("a"); // idempotent second call on another terminal path
+            match rx.try_recv().unwrap() {
+                ServerEvent::JobEnded { id } => assert_eq!(id, "a"),
+                other => panic!("expected job_ended, got {other:?}"),
+            }
+            assert!(
+                matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+                "second remove must not emit a duplicate job_ended"
+            );
+        }
+
+        #[test]
+        fn cancel_queued_emits_job_ended() {
+            let (reg, mut rx) = wired();
+            reg.register("a", "flux-dev:fp16");
+            let _ = rx.try_recv(); // drain job_queued
+            reg.cancel_queued("a").unwrap();
+            match rx.try_recv().unwrap() {
+                ServerEvent::JobEnded { id } => assert_eq!(id, "a"),
+                other => panic!("expected job_ended, got {other:?}"),
+            }
+        }
     }
 }
