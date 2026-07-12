@@ -200,3 +200,27 @@ describe("ParamPanel — post-generate upscale", () => {
     ).toBe(false);
   });
 });
+
+describe("ParamPanel — seed mode edge cases", () => {
+  it("clearing the field in Fixed mode keeps the input mounted with a hint", async () => {
+    const form = formFor("flux");
+    form.seed = "42";
+    const wrapper = mount(ParamPanel, { props: { form } });
+    await wrapper.get("[data-test='seed-input']").setValue("");
+    // The input must NOT unmount mid-edit, and the mode stays Fixed…
+    expect(wrapper.find("[data-test='seed-input']").exists()).toBe(true);
+    expect(wrapper.get("[data-test='seed-mode-fixed']").attributes("aria-pressed")).toBe("true");
+    // …with an honest note that the wire will treat it as random.
+    expect(wrapper.get("[data-test='seed-hint']").text()).toContain("random seed will be used");
+  });
+
+  it("non-numeric seed text warns instead of silently generating random", async () => {
+    const form = formFor("flux");
+    form.seed = "42";
+    const wrapper = mount(ParamPanel, { props: { form } });
+    await wrapper.get("[data-test='seed-input']").setValue("banana");
+    expect(wrapper.get("[data-test='seed-hint']").text()).toContain("Not a number");
+    await wrapper.get("[data-test='seed-input']").setValue("1234");
+    expect(wrapper.find("[data-test='seed-hint']").exists()).toBe(false);
+  });
+});

@@ -67,6 +67,13 @@ const selectedModel = computed<ModelEntry | null>(
 /** The request the estimate badge previews — null until a model is chosen. */
 const estimateRequest = computed(() => (form.model ? buildRequest(form) : null));
 
+/** Preflight against the host the batch will actually route to. */
+const estimateTarget = computed(() =>
+  hosts.multiHost
+    ? (hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null)?.target ?? null)
+    : null,
+);
+
 const buttonLabel = computed(() =>
   generation.pending.length > 0 ? `Generate (+${generation.pending.length} queued)` : "Generate",
 );
@@ -478,7 +485,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
             @restore="onExpandRestore"
           />
           <div class="flex items-center gap-3">
-            <EstimateBadge :request="estimateRequest" />
+            <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
             <button
               type="button"
               class="h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-60"

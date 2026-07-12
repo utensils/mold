@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onUnmounted, ref, watch } from "vue";
+import type { ApiTarget } from "../../lib/api/client";
 import type { GenerateRequest } from "../../lib/api/types";
 import {
   classifyFit,
@@ -9,7 +10,11 @@ import {
   type EstimateFit,
 } from "../../lib/api/estimate";
 
-const props = defineProps<{ request: GenerateRequest | null }>();
+const props = defineProps<{
+  request: GenerateRequest | null;
+  /** Host the batch will route to; null/absent = the primary connection. */
+  target?: ApiTarget | null;
+}>();
 
 type BadgeState = EstimateFit | "unavailable";
 const fit = ref<BadgeState>("unknown");
@@ -21,7 +26,7 @@ let token = 0;
 async function run(req: GenerateRequest) {
   const mine = ++token;
   try {
-    const est = await estimateGeneration(req);
+    const est = await estimateGeneration(req, props.target);
     if (mine !== token) return;
     fit.value = classifyFit(est);
     text.value = estimateLabel(
@@ -40,10 +45,11 @@ async function run(req: GenerateRequest) {
   }
 }
 
-// Debounced 600ms; only estimates when a model is selected.
+// Debounced 600ms; only estimates when a model is selected. Re-runs when the
+// routed host changes — a different GPU means a different verdict.
 watch(
-  () => props.request,
-  (req) => {
+  () => [props.request, props.target] as const,
+  ([req]) => {
     if (timer) clearTimeout(timer);
     if (!req || !req.model) {
       visible.value = false;

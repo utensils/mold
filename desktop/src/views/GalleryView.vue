@@ -69,23 +69,57 @@ const upscalingFilename = ref<string | null>(null);
 /** First known upscaler; the server auto-pulls it on first use. */
 const upscalerModel = computed(() => models.upscalers[0]?.name ?? "real-esrgan-x4plus");
 
+/**
+ * Run the upscaler over the stream endpoint: its `complete` event carries
+ * the result as base64, unlike the plain endpoint whose `image` is an
+ * ImageData object with a JSON byte array. Resolves with the base64 image.
+ */
+async function streamUpscale(image: string): Promise<string> {
+  const { sseStream } = await import("../lib/api/sse");
+  return new Promise<string>((resolve, reject) => {
+    const abort = new AbortController();
+    let settled = false;
+    void sseStream("/api/upscale/stream", {
+      method: "POST",
+      body: { model: upscalerModel.value, image, output_format: "png" },
+      signal: abort.signal,
+      retry: false,
+      onEvent: (event, data) => {
+        try {
+          if (event === "complete") {
+            settled = true;
+            resolve((JSON.parse(data) as { image: string }).image);
+          } else if (event === "error") {
+            settled = true;
+            const parsed = JSON.parse(data) as { message?: string; error?: string };
+            reject(new Error(parsed.message ?? parsed.error ?? data));
+          }
+        } catch (err) {
+          settled = true;
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      },
+      onClose: (err) => {
+        if (!settled) reject(err ?? new Error("The upscale stream ended without a result."));
+      },
+    });
+  });
+}
+
 async function upscaleItem(item: GalleryImage) {
   if (upscalingFilename.value) return;
   upscalingFilename.value = item.filename;
   toasts.push(`Upscaling with ${upscalerModel.value}…`);
   try {
-    const { apiJson } = await import("../lib/api/client");
-    const image = await fetchItemBase64(item);
-    const result = await apiJson<{ image: string; format: string }>("/api/upscale", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: upscalerModel.value, image, output_format: "png" }),
-    });
-    // /api/upscale doesn't persist server-side — the local save IS the copy.
+    const upscaled = await streamUpscale(await fetchItemBase64(item));
+    // The upscale endpoints don't persist server-side — the local save IS
+    // the durable copy.
     const stem = item.filename.replace(/\.[^.]+$/, "");
-    const saved = await ipc.saveOutputBytes(`${stem}-upscaled.png`, result.image);
+    const saved = await ipc.saveOutputBytes(`${stem}-upscaled.png`, upscaled);
     toasts.push(`Upscaled — saved to this Mac as ${saved}`);
-    if (gallery.source === "local") void gallery.fetch();
+    // On a local/external connection the engine gallery reads the same
+    // output dir the save just wrote to — refresh whatever is on screen.
+    void gallery.fetch();
   } catch (err) {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
   } finally {

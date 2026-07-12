@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { seedMode, type GenerateForm, type PickedImage } from "../../lib/generateForm";
 import type {
   Ltx2PipelineMode,
@@ -43,8 +43,20 @@ function applyPreset(event: Event) {
 }
 
 // ── Seed mode ───────────────────────────────────────────────────────────────
-const currentSeedMode = computed(() => seedMode(props.form.seed));
+// The segmented control owns its own mode instead of deriving it from the
+// field: deriving would unmount the input the instant the user clears it
+// mid-edit, yanking focus and silently flipping to Random.
+const uiSeedMode = ref<"random" | "fixed">(seedMode(props.form.seed));
+watch(
+  () => props.form.seed,
+  (seed) => {
+    // External numeric writes (reuse settings, lock-last) flip to Fixed;
+    // a cleared field while editing stays Fixed with a hint.
+    if (seedMode(seed) === "fixed") uiSeedMode.value = "fixed";
+  },
+);
 function setSeedMode(mode: "random" | "fixed") {
+  uiSeedMode.value = mode;
   if (mode === "random") {
     props.form.seed = "";
   } else if (seedMode(props.form.seed) === "random") {
@@ -52,6 +64,14 @@ function setSeedMode(mode: "random" | "fixed") {
     props.form.seed = String(props.lastSeed ?? randomSeed());
   }
 }
+/** The wire drops anything non-numeric — say so instead of lying "Fixed". */
+const seedHint = computed(() => {
+  if (uiSeedMode.value !== "fixed") return null;
+  const raw = props.form.seed.trim();
+  if (raw === "") return "Empty — a random seed will be used.";
+  if (!Number.isFinite(Number(raw))) return "Not a number — a random seed will be used.";
+  return null;
+});
 
 // ── LTX-2 advanced video (ltx2 only) ──────────────────────────────────────
 const advancedOpen = ref(false);
@@ -259,10 +279,10 @@ const schedulerLabel: Record<string, string> = {
       <button
         type="button"
         data-test="seed-mode-random"
-        :aria-pressed="currentSeedMode === 'random'"
+        :aria-pressed="uiSeedMode === 'random'"
         class="flex-1 rounded-control px-2 py-1 text-caption transition-colors"
         :class="
-          currentSeedMode === 'random' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'
+          uiSeedMode === 'random' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'
         "
         @click="setSeedMode('random')"
       >
@@ -271,17 +291,17 @@ const schedulerLabel: Record<string, string> = {
       <button
         type="button"
         data-test="seed-mode-fixed"
-        :aria-pressed="currentSeedMode === 'fixed'"
+        :aria-pressed="uiSeedMode === 'fixed'"
         class="flex-1 rounded-control px-2 py-1 text-caption transition-colors"
         :class="
-          currentSeedMode === 'fixed' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'
+          uiSeedMode === 'fixed' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'
         "
         @click="setSeedMode('fixed')"
       >
         🔒 Fixed
       </button>
     </div>
-    <div v-if="currentSeedMode === 'fixed'" class="mt-1.5 flex min-w-0 items-center gap-1.5">
+    <div v-if="uiSeedMode === 'fixed'" class="mt-1.5 flex min-w-0 items-center gap-1.5">
       <input
         v-model="form.seed"
         data-selectable
@@ -301,7 +321,10 @@ const schedulerLabel: Record<string, string> = {
         ⟳
       </button>
     </div>
-    <p v-else class="mt-1 text-caption text-ink-3">
+    <p v-if="seedHint" data-test="seed-hint" class="mt-1 text-caption text-safelight">
+      {{ seedHint }}
+    </p>
+    <p v-if="uiSeedMode === 'random'" class="mt-1 text-caption text-ink-3">
       New seed every print<template v-if="lastSeed !== null">
         ·
         <button
