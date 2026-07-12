@@ -542,13 +542,13 @@ data: {"type":"gallery_removed","filename":"mold-flux-dev-q4-1752300000000.png"}
 
 Event semantics:
 
-| `type` | Meaning |
-| --- | --- |
-| `job_queued` | A generation was accepted into the queue (`id`, `model`). |
-| `job_started` | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU. |
-| `job_ended` | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal. |
-| `gallery_added` | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
-| `gallery_removed` | An output was deleted via `DELETE /api/gallery/image/:name`. |
+| `type`            | Meaning                                                                                                                                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `job_queued`      | A generation was accepted into the queue (`id`, `model`).                                                                                                                                         |
+| `job_started`     | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                         |
+| `job_ended`       | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                 |
+| `gallery_added`   | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
+| `gallery_removed` | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                      |
 
 The stream carries **deltas only** — there is no initial snapshot. Subscribe
 first, then bootstrap current state from `GET /api/queue` and
