@@ -481,7 +481,9 @@ pub async fn set_remote_host(
 }
 
 /// Drop a host from the saved list and delete its stored API key. Does not
-/// touch the live connection.
+/// touch the live connection, but if the host is also the persisted primary
+/// remote, the remote preference (and its shared key) is cleared too — the
+/// next launch must not resurrect a host the user just forgot.
 #[tauri::command]
 pub async fn forget_remote_host(
     state: tauri::State<'_, AppState>,
@@ -492,11 +494,17 @@ pub async fn forget_remote_host(
         .secrets
         .clear(&format!("remote-api-key.{id}"))
         .map_err(|e| e.to_string())?;
-    let updated = {
+    let (updated, was_primary) = {
         let mut current = store.current.lock().expect("settings mutex");
-        current.saved_hosts.retain(|h| h.id != id);
-        current.clone()
+        let was_primary = settings::forget_host(&mut current, &id);
+        (current.clone(), was_primary)
     };
+    if was_primary {
+        state
+            .secrets
+            .clear("remote-api-key")
+            .map_err(|e| e.to_string())?;
+    }
     settings::save(&store.path, &updated).map_err(|e| e.to_string())?;
     Ok(updated.saved_hosts)
 }
