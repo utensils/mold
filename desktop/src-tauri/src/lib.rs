@@ -72,6 +72,7 @@ pub fn run() {
             commands::start_local_engine,
             commands::stop_local_engine,
             commands::set_remote_host,
+            commands::forget_remote_host,
             commands::test_remote_host,
             commands::discover_servers,
             commands::get_output_dir,

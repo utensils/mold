@@ -58,6 +58,15 @@ export interface UpdateRecovery {
   backupPath?: string | null;
 }
 
+/** A remote host the app has connected to before (most recent first). */
+export interface SavedHost {
+  /** URL-derived slug; its API key lives at secret `remote-api-key.<id>`. */
+  id: string;
+  name: string | null;
+  url: string;
+  lastUsedMs: number | null;
+}
+
 export interface AppSettings {
   mode: "local" | "remote" | "off";
   remoteUrl: string | null;
@@ -76,6 +85,8 @@ export interface AppSettings {
   uiScalePercent: number;
   /** Signed desktop release stream. Nightly follows builds from main. */
   updateChannel: UpdateChannel;
+  /** Remote hosts the app remembers, most recently used first. */
+  savedHosts: SavedHost[];
 }
 
 export interface HostTest {
@@ -125,6 +136,7 @@ const browserFallbackSettings = (): AppSettings => ({
   runpodNetworkVolumeId: null,
   uiScalePercent: 100,
   updateChannel: "stable",
+  savedHosts: [],
 });
 
 export const ipc = {
@@ -140,9 +152,14 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve(browserFallbackConnection());
     return invoke<ConnectionInfo>("stop_local_engine");
   },
-  setRemoteHost(url: string, apiKey: string | null): Promise<ConnectionInfo> {
+  setRemoteHost(url: string, apiKey: string | null, name?: string | null): Promise<ConnectionInfo> {
     if (!inTauri()) return Promise.resolve(browserFallbackConnection());
-    return invoke<ConnectionInfo>("set_remote_host", { url, apiKey });
+    return invoke<ConnectionInfo>("set_remote_host", { url, apiKey, name: name ?? null });
+  },
+  /** Drop a host from the saved list and delete its stored API key. */
+  forgetRemoteHost(id: string): Promise<SavedHost[]> {
+    if (!inTauri()) return Promise.resolve([]);
+    return invoke<SavedHost[]>("forget_remote_host", { id });
   },
   testRemoteHost(url: string, apiKey: string | null): Promise<HostTest> {
     if (!inTauri()) return Promise.resolve({ ok: true, version: null, error: null });
@@ -266,7 +283,7 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("runpod_delete", { id });
   },
-  /** Keychain-backed secrets (file fallback in dev). Names are allowlisted. */
+  /** Secrets in an owner-only local file (secrets.json). Names are allowlisted. */
   secretGet(name: SecretName): Promise<string | null> {
     if (!inTauri()) return Promise.resolve(null);
     return invoke<string | null>("secret_get", { name });
@@ -288,4 +305,5 @@ export const ipc = {
   },
 };
 
-export type SecretName = "hf-token" | "civitai-token" | "remote-api-key" | "runpod-api-key";
+export type SecretName =
+  "hf-token" | "civitai-token" | "remote-api-key" | "runpod-api-key" | `remote-api-key.${string}`;

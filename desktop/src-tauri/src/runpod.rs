@@ -95,14 +95,14 @@ fn client(state: &AppState) -> Result<Option<(RunPodClient, &'static str)>, Stri
             "environment",
         )));
     }
-    let keychain = state
+    let stored = state
         .secrets
         .get("runpod-api-key")
         .map_err(|e| e.to_string())?
         .filter(|key| !key.is_empty());
     let configured = config.runpod.api_key.clone().filter(|key| !key.is_empty());
-    let Some((key, source)) = keychain
-        .map(|key| (key, "keychain"))
+    let Some((key, source)) = stored
+        .map(|key| (key, "app"))
         .or_else(|| configured.map(|key| (key, "config")))
     else {
         return Ok(None);

@@ -23,3 +23,16 @@ export function percent(used: number, total: number): number {
   if (total <= 0) return 0;
   return Math.min(100, Math.max(0, (used / total) * 100));
 }
+
+/** Compact relative timestamp for MRU lists ("just now", "5m ago", "3d ago"). */
+export function timeAgo(thenMs: number, nowMs: number = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((nowMs - thenMs) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(thenMs).toLocaleDateString();
+}

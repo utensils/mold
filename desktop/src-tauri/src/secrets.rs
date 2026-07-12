@@ -1,13 +1,12 @@
-//! Secrets: macOS Keychain via `keyring`, with a JSON-file fallback for
-//! unsigned dev builds (ad-hoc signatures make the Keychain re-prompt on
-//! every rebuild) and for tests. Names are constrained to a small allowlist
-//! so the IPC surface can't be used as an arbitrary Keychain browser.
+//! Secrets: an owner-only (0600) `secrets.json` under the app data dir.
+//! Plain files instead of the macOS Keychain — Keychain access prompts on
+//! every ad-hoc rebuild in dev, and repeatedly interrupts users in release
+//! builds after updates. Names are constrained to a small allowlist so the
+//! IPC surface can't be used as an arbitrary secret browser.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-
-const SERVICE: &str = "com.utensils.mold";
 
 /// Secrets the webview may read/write. Anything else is rejected.
 pub const ALLOWED: &[&str] = &[
@@ -17,88 +16,65 @@ pub const ALLOWED: &[&str] = &[
     "runpod-api-key",
 ];
 
+/// Per-host remote keys use `remote-api-key.<host-id>`. The suffix is a slug
+/// derived from the host URL (see `connection::host_id`).
+const PER_HOST_PREFIX: &str = "remote-api-key.";
+
 pub struct SecretStore {
-    /// Try the OS keychain first; on any error fall back to the file store.
-    use_keyring: bool,
-    fallback_path: PathBuf,
+    path: PathBuf,
     cache: Mutex<Option<HashMap<String, String>>>,
 }
 
 impl SecretStore {
     pub fn new(app_data_dir: PathBuf) -> Self {
         Self {
-            // Ad-hoc development signatures get a new identity on every
-            // rebuild, which makes macOS prompt for every Keychain access.
-            // Release builds are stably signed and continue to use Keychain.
-            use_keyring: !cfg!(debug_assertions),
-            fallback_path: app_data_dir.join("secrets.json"),
+            path: app_data_dir.join("secrets.json"),
             cache: Mutex::new(None),
         }
     }
 
-    /// File-only store (tests, headless CI).
-    pub fn file_only(app_data_dir: PathBuf) -> Self {
-        Self {
-            use_keyring: false,
-            ..Self::new(app_data_dir)
-        }
-    }
-
     fn check_name(name: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(ALLOWED.contains(&name), "unknown secret name: {name}");
-        Ok(())
+        if ALLOWED.contains(&name) {
+            return Ok(());
+        }
+        if let Some(suffix) = name.strip_prefix(PER_HOST_PREFIX) {
+            anyhow::ensure!(
+                !suffix.is_empty()
+                    && suffix
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'),
+                "invalid per-host secret name: {name}"
+            );
+            return Ok(());
+        }
+        anyhow::bail!("unknown secret name: {name}")
     }
 
     pub fn get(&self, name: &str) -> anyhow::Result<Option<String>> {
         Self::check_name(name)?;
-        if self.use_keyring {
-            match keyring::Entry::new(SERVICE, name).and_then(|e| e.get_password()) {
-                Ok(v) => return Ok(Some(v)),
-                Err(keyring::Error::NoEntry) => return Ok(self.file_get(name)),
-                Err(e) => {
-                    tracing::warn!("keychain read failed for {name} ({e}); using file store");
-                }
-            }
-        }
-        Ok(self.file_get(name))
+        Ok(self.load().get(name).cloned())
     }
 
     pub fn set(&self, name: &str, value: &str) -> anyhow::Result<()> {
         Self::check_name(name)?;
-        if self.use_keyring {
-            match keyring::Entry::new(SERVICE, name).and_then(|e| e.set_password(value)) {
-                Ok(()) => {
-                    // A value may linger in the fallback from a dev build.
-                    let _ = self.file_clear(name);
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::warn!("keychain write failed for {name} ({e}); using file store");
-                }
-            }
-        }
-        self.file_set(name, value)
+        let mut map = self.load();
+        map.insert(name.to_string(), value.to_string());
+        self.save(map)
     }
 
     pub fn clear(&self, name: &str) -> anyhow::Result<()> {
         Self::check_name(name)?;
-        if self.use_keyring {
-            match keyring::Entry::new(SERVICE, name).and_then(|e| e.delete_credential()) {
-                Ok(()) | Err(keyring::Error::NoEntry) => {}
-                Err(e) => tracing::warn!("keychain delete failed for {name}: {e}"),
-            }
-        }
-        self.file_clear(name)
+        let mut map = self.load();
+        map.remove(name);
+        self.save(map)
     }
 
-    // ── file fallback ─────────────────────────────────────────────────────
-
-    fn load_file(&self) -> HashMap<String, String> {
+    fn load(&self) -> HashMap<String, String> {
         let mut cache = self.cache.lock().expect("secrets cache");
         if let Some(map) = cache.as_ref() {
             return map.clone();
         }
-        let map: HashMap<String, String> = std::fs::read_to_string(&self.fallback_path)
+        let map: HashMap<String, String> = std::fs::read_to_string(&self.path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
@@ -106,37 +82,21 @@ impl SecretStore {
         map
     }
 
-    fn save_file(&self, map: HashMap<String, String>) -> anyhow::Result<()> {
-        if let Some(dir) = self.fallback_path.parent() {
+    fn save(&self, map: HashMap<String, String>) -> anyhow::Result<()> {
+        if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = self.fallback_path.with_extension("json.tmp");
+        let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&map)?)?;
-        // Plaintext fallback: owner-only, whatever the umask says.
+        // Owner-only: these are plaintext credentials.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
         }
-        std::fs::rename(&tmp, &self.fallback_path)?;
+        std::fs::rename(&tmp, &self.path)?;
         *self.cache.lock().expect("secrets cache") = Some(map);
         Ok(())
-    }
-
-    fn file_get(&self, name: &str) -> Option<String> {
-        self.load_file().get(name).cloned()
-    }
-
-    fn file_set(&self, name: &str, value: &str) -> anyhow::Result<()> {
-        let mut map = self.load_file();
-        map.insert(name.to_string(), value.to_string());
-        self.save_file(map)
-    }
-
-    fn file_clear(&self, name: &str) -> anyhow::Result<()> {
-        let mut map = self.load_file();
-        map.remove(name);
-        self.save_file(map)
     }
 }
 
@@ -146,7 +106,7 @@ mod tests {
 
     fn store() -> (SecretStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        (SecretStore::file_only(dir.path().to_path_buf()), dir)
+        (SecretStore::new(dir.path().to_path_buf()), dir)
     }
 
     #[test]
@@ -169,20 +129,47 @@ mod tests {
     }
 
     #[test]
+    fn allows_per_host_remote_key_names() {
+        let (s, _dir) = store();
+        s.set("remote-api-key.hal9000-7680", "k1").unwrap();
+        assert_eq!(
+            s.get("remote-api-key.hal9000-7680").unwrap().as_deref(),
+            Some("k1")
+        );
+        s.clear("remote-api-key.hal9000-7680").unwrap();
+        assert_eq!(s.get("remote-api-key.hal9000-7680").unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_malformed_per_host_names() {
+        let (s, _dir) = store();
+        // Empty suffix, path traversal, and other prefixes must all fail.
+        assert!(s.set("remote-api-key.", "x").is_err());
+        assert!(s.set("remote-api-key./etc/passwd", "x").is_err());
+        assert!(s.set("hf-token.evil", "x").is_err());
+    }
+
+    #[test]
     fn persists_across_instances() {
         let dir = tempfile::tempdir().unwrap();
-        SecretStore::file_only(dir.path().to_path_buf())
+        SecretStore::new(dir.path().to_path_buf())
             .set("civitai-token", "cv_1")
             .unwrap();
-        let again = SecretStore::file_only(dir.path().to_path_buf());
+        let again = SecretStore::new(dir.path().to_path_buf());
         assert_eq!(again.get("civitai-token").unwrap().as_deref(), Some("cv_1"));
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(unix)]
     #[test]
-    fn debug_builds_do_not_touch_keychain() {
+    fn secrets_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let store = SecretStore::new(dir.path().to_path_buf());
-        assert!(!store.use_keyring);
+        let s = SecretStore::new(dir.path().to_path_buf());
+        s.set("hf-token", "hf_abc").unwrap();
+        let mode = std::fs::metadata(dir.path().join("secrets.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

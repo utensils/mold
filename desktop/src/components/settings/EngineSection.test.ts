@@ -2,19 +2,28 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import EngineSection from "./EngineSection.vue";
-import type { DiscoveredHost } from "../../lib/ipc";
+import type { DiscoveredHost, SavedHost } from "../../lib/ipc";
 import { useConnectionStore } from "../../stores/connection";
 
 const discoverServers = vi.fn<() => Promise<DiscoveredHost[]>>();
 const testRemoteHost = vi.fn().mockResolvedValue({ ok: true, version: "0.14.0", error: null });
+const setRemoteHost = vi
+  .fn()
+  .mockResolvedValue({ mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null });
+const secretGet = vi.fn().mockResolvedValue(null);
+const forgetRemoteHost = vi.fn().mockResolvedValue([]);
+let savedHosts: SavedHost[] = [];
 
 vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
   ipc: {
-    appSettingsGet: () => Promise.resolve({ remoteUrl: "", remoteApiKey: null, mode: "local" }),
-    secretGet: () => Promise.resolve(null),
+    appSettingsGet: () =>
+      Promise.resolve({ remoteUrl: "", remoteApiKey: null, mode: "local", savedHosts }),
+    secretGet: (...a: unknown[]) => secretGet(...a),
     discoverServers: (...a: unknown[]) => discoverServers(...(a as [])),
     testRemoteHost: (...a: unknown[]) => testRemoteHost(...a),
+    setRemoteHost: (...a: unknown[]) => setRemoteHost(...a),
+    forgetRemoteHost: (...a: unknown[]) => forgetRemoteHost(...a),
     getConnection: () => Promise.resolve({ mode: "off", baseUrl: null, apiKey: null }),
   },
 }));
@@ -45,6 +54,11 @@ async function mountSection() {
 beforeEach(() => {
   discoverServers.mockReset();
   testRemoteHost.mockClear();
+  setRemoteHost.mockClear();
+  secretGet.mockClear();
+  secretGet.mockResolvedValue(null);
+  forgetRemoteHost.mockClear();
+  savedHosts = [];
 });
 
 describe("EngineSection discovery", () => {
@@ -117,5 +131,63 @@ describe("EngineSection discovery", () => {
     await scanBtn!.trigger("click");
     await flushPromises();
     expect(discoverServers).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("EngineSection recent hosts", () => {
+  const saved: SavedHost = {
+    id: "hal9000-7680",
+    name: "hal9000",
+    url: "http://hal9000:7680",
+    lastUsedMs: Date.now() - 3_600_000,
+  };
+
+  it("renders remembered hosts with their last-used time", async () => {
+    savedHosts = [saved];
+    discoverServers.mockResolvedValue([]);
+    const wrapper = await mountSection();
+    const text = wrapper.text();
+    expect(text).toContain("Recent hosts");
+    expect(text).toContain("hal9000");
+    expect(text).toContain("1h ago");
+  });
+
+  it("hides the section when nothing is remembered", async () => {
+    discoverServers.mockResolvedValue([]);
+    const wrapper = await mountSection();
+    expect(wrapper.text()).not.toContain("Recent hosts");
+  });
+
+  it("Connect uses the host's own stored API key", async () => {
+    savedHosts = [saved];
+    secretGet.mockResolvedValue("per-host-key");
+    discoverServers.mockResolvedValue([]);
+    const wrapper = await mountSection();
+    const connectBtn = wrapper
+      .findAll("[data-test='saved-host-connect']")
+      .find((b) => b.text() === "Connect");
+    await connectBtn!.trigger("click");
+    await flushPromises();
+    expect(secretGet).toHaveBeenCalledWith("remote-api-key.hal9000-7680");
+    expect(setRemoteHost).toHaveBeenCalledWith("http://hal9000:7680", "per-host-key", "hal9000");
+  });
+
+  it("Forget is a two-step confirm that drops the host", async () => {
+    savedHosts = [saved];
+    discoverServers.mockResolvedValue([]);
+    const wrapper = await mountSection();
+    const forgetBtn = wrapper.get("[data-test='saved-host-forget']");
+    await forgetBtn.trigger("click");
+    expect(forgetRemoteHost).not.toHaveBeenCalled();
+    expect(forgetBtn.text()).toContain("Forget?");
+    await forgetBtn.trigger("click");
+    await flushPromises();
+    expect(forgetRemoteHost).toHaveBeenCalledWith("hal9000-7680");
+  });
+
+  it("no longer advertises the Keychain", async () => {
+    discoverServers.mockResolvedValue([]);
+    const wrapper = await mountSection();
+    expect(wrapper.text()).not.toContain("KEYCHAIN");
   });
 });

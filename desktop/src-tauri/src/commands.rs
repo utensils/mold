@@ -5,9 +5,9 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::Manager;
 
-use crate::connection::{normalize_host_url, Conn, ConnectionInfo};
+use crate::connection::{host_id, normalize_host_url, Conn, ConnectionInfo};
 use crate::server;
-use crate::settings::{self, AppSettings, ConnectionMode};
+use crate::settings::{self, upsert_saved_host, AppSettings, ConnectionMode, SavedHost};
 
 pub struct SettingsStore {
     pub path: PathBuf,
@@ -416,13 +416,15 @@ pub async fn discover_servers(timeout_ms: Option<u64>) -> Result<Vec<DiscoveredH
         .collect())
 }
 
-/// Switch to a remote host (validates first) and persist it in app settings.
+/// Switch to a remote host (validates first) and persist it in app settings,
+/// remembering it in the most-recently-used host list.
 #[tauri::command]
 pub async fn set_remote_host(
     state: tauri::State<'_, AppState>,
     store: tauri::State<'_, SettingsStore>,
     url: String,
     api_key: Option<String>,
+    name: Option<String>,
 ) -> Result<ConnectionInfo, String> {
     let url = normalize_host_url(&url)?;
     let test = probe_host(&url, api_key.as_deref()).await;
@@ -436,27 +438,67 @@ pub async fn set_remote_host(
         api_key: api_key.clone(),
     };
 
-    // The key lives in the Keychain; the legacy plaintext slot is wiped so
-    // old settings.json files converge on first save.
+    // Keys live in the secret store: the shared slot feeds the current
+    // connection, the per-host slot lets saved hosts reconnect later. The
+    // legacy plaintext settings slot is wiped so old files converge.
+    let id = host_id(&url);
     match api_key.as_deref().filter(|k| !k.is_empty()) {
-        Some(key) => state
-            .secrets
-            .set("remote-api-key", key)
-            .map_err(|e| e.to_string())?,
-        None => state
-            .secrets
-            .clear("remote-api-key")
-            .map_err(|e| e.to_string())?,
+        Some(key) => {
+            state
+                .secrets
+                .set("remote-api-key", key)
+                .map_err(|e| e.to_string())?;
+            state
+                .secrets
+                .set(&format!("remote-api-key.{id}"), key)
+                .map_err(|e| e.to_string())?;
+        }
+        None => {
+            state
+                .secrets
+                .clear("remote-api-key")
+                .map_err(|e| e.to_string())?;
+            state
+                .secrets
+                .clear(&format!("remote-api-key.{id}"))
+                .map_err(|e| e.to_string())?;
+        }
     }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let updated = {
         let mut current = store.current.lock().expect("settings mutex");
         current.mode = ConnectionMode::Remote;
-        current.remote_url = Some(url);
+        current.remote_url = Some(url.clone());
         current.remote_api_key = None;
+        upsert_saved_host(&mut current.saved_hosts, &id, &url, name, now_ms);
         current.clone()
     };
     settings::save(&store.path, &updated).map_err(|e| e.to_string())?;
     Ok(conn.info(&state.local_api_key))
+}
+
+/// Drop a host from the saved list and delete its stored API key. Does not
+/// touch the live connection.
+#[tauri::command]
+pub async fn forget_remote_host(
+    state: tauri::State<'_, AppState>,
+    store: tauri::State<'_, SettingsStore>,
+    id: String,
+) -> Result<Vec<SavedHost>, String> {
+    state
+        .secrets
+        .clear(&format!("remote-api-key.{id}"))
+        .map_err(|e| e.to_string())?;
+    let updated = {
+        let mut current = store.current.lock().expect("settings mutex");
+        current.saved_hosts.retain(|h| h.id != id);
+        current.clone()
+    };
+    settings::save(&store.path, &updated).map_err(|e| e.to_string())?;
+    Ok(updated.saved_hosts)
 }
 
 /// Open the engine's log directory in Finder.
@@ -498,7 +540,7 @@ mod tests {
     #[test]
     fn engine_environment_sets_and_clears_knobs_and_tokens() {
         let dir = tempfile::tempdir().unwrap();
-        let secrets = crate::secrets::SecretStore::file_only(dir.path().to_path_buf());
+        let secrets = crate::secrets::SecretStore::new(dir.path().to_path_buf());
         secrets.set("hf-token", "hf_test_token").unwrap();
 
         let mut env = std::collections::HashMap::new();
