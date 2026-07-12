@@ -1,5 +1,5 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { apiHeaders, currentTarget } from "./client";
+import { apiHeaders, currentTarget, type ApiTarget } from "./client";
 
 /**
  * SSE over fetch, everywhere — native EventSource can't send X-Api-Key and
@@ -14,10 +14,12 @@ export interface StreamOptions {
   onClose?: (error: Error | null) => void;
   /** Retry transient drops (default true for GET snapshots-first streams). */
   retry?: boolean;
+  /** Explicit host; defaults to the primary connection. */
+  target?: ApiTarget;
 }
 
 export async function sseStream(path: string, options: StreamOptions): Promise<void> {
-  const target = currentTarget();
+  const target = options.target ?? currentTarget();
   const headers = apiHeaders(target, { Accept: "text/event-stream" });
   const method = options.method ?? "GET";
   let body: string | undefined;

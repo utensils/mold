@@ -96,7 +96,9 @@ Native macOS single window, `titleBarStyle: Overlay`, `hiddenTitle: true`, traff
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Sidebar** (208px, native sidebar vibrancy, collapsible ⌘\): five destinations + Settings, plus a live **Jobs** section — miniature Develop chips for every in-flight job (from `/api/queue` + SSE). It is navigation _and_ ambient status.
+- **Sidebar** (208px, native sidebar vibrancy, collapsible ⌘\): five destinations + Settings, plus a live **Hosts** section and a live **Jobs** section. It is navigation _and_ ambient status.
+  - **Hosts:** every connected host (primary + extras) as a row — status dot (Safelight ready / Halide connecting / Stop error), label, live queue depth — plus mold servers detected on the network (mDNS) with a one-click `+` connect. Right-click an extra for Reconnect/Disconnect. Multi-host is client-side: jobs stream from and cancel against the host they queued on, and the Generate inspector's **Host** selector (visible with >1 live host) offers Auto (least busy, by live queue depth) or an explicit sticky pick.
+  - **Jobs:** miniature Develop chips for every in-flight job (from `/api/queue` + SSE), labeled with their host when routed off the primary.
 - **The Bench rail** (28px, bottom, Bath): always-on telemetry from `/api/resources/stream` (1 Hz) — GPU name, VRAM meter (Halide fill, warms to Safelight while a job runs, Stop at >92%), RAM, queue depth, and the engine mode chip (`⌁ local` embedded engine / `⇄ studio.local:7680` remote). Clicking the VRAM meter opens a resources popover with per-GPU detail and loaded-model residency (Gpu / Parked / Unloaded).
 - **Command palette (⌘K):** navigation, actions ("Pull flux-dev:q8", "Cancel all queued", "Switch to remote engine"), model search, and prompt-history search in one field. Elevation-2, the one blurred surface besides the sidebar.
 - **Movement model:** sidebar click or ⌘1–⌘5; deep links everywhere (gallery item → "Reuse settings" → Generate prefilled; queue chip → owning screen; chain stage → Chains editor). Back/forward via ⌘[ / ⌘].

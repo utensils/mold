@@ -20,6 +20,8 @@ vi.mock("../lib/ipc", () => ({
       uiScalePercent: 120,
       updateChannel: "nightly",
       savedHosts: [],
+      connectedHostIds: [],
+      generateTargetHost: null,
     }),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
   },

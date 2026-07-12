@@ -117,6 +117,10 @@ pub struct AppSettings {
     pub update_channel: UpdateChannel,
     /// Remote hosts the app has connected to, most recent first.
     pub saved_hosts: Vec<SavedHost>,
+    /// Additional hosts (beyond the primary connection) to reconnect at boot.
+    pub connected_host_ids: Vec<String>,
+    /// Sticky generation-target host id; `None` routes automatically.
+    pub generate_target_host: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -137,6 +141,8 @@ impl Default for AppSettings {
             ui_scale_percent: 100,
             update_channel: UpdateChannel::Stable,
             saved_hosts: Vec::new(),
+            connected_host_ids: Vec::new(),
+            generate_target_host: None,
         }
     }
 }
@@ -199,9 +205,21 @@ mod tests {
                 url: "http://hal9000:7680".into(),
                 last_used_ms: Some(1_700_000_000_000),
             }],
+            connected_host_ids: vec!["hal9000-7680".into()],
+            generate_target_host: Some("hal9000-7680".into()),
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path), settings);
+    }
+
+    #[test]
+    fn legacy_settings_json_defaults_to_auto_routing_and_no_extra_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(&path, r#"{"mode":"local"}"#).unwrap();
+        let loaded = load(&path);
+        assert!(loaded.connected_host_ids.is_empty());
+        assert_eq!(loaded.generate_target_host, None);
     }
 
     #[test]

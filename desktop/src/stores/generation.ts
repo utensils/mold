@@ -1,10 +1,17 @@
 import { reactive } from "vue";
 import { defineStore } from "pinia";
-import { apiFetch, ApiError } from "../lib/api/client";
+import { apiFetchTo, currentTarget, ApiError, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import type { CompleteEvent, GenerateRequest, ProgressEvent } from "../lib/api/types";
 import type { DevelopPhase } from "../lib/develop/grain";
+
+/** Where a batch runs — mirrors `HostRoute` from the hosts store. */
+export interface JobRoute {
+  hostId: string;
+  label: string;
+  target: ApiTarget;
+}
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
 
@@ -32,6 +39,9 @@ export interface Job {
   /** Object URL of the latest live latent preview (small PNG, upscaled by CSS). */
   previewUrl: string | null;
   result: CompleteEvent | null;
+  /** Host this job queued on; null = the primary connection. */
+  hostId: string | null;
+  hostLabel: string | null;
 }
 
 export function newJob(req: GenerateRequest): Job {
@@ -53,6 +63,8 @@ export function newJob(req: GenerateRequest): Job {
     resultUrl: null,
     previewUrl: null,
     result: null,
+    hostId: null,
+    hostLabel: null,
   };
 }
 
@@ -266,7 +278,11 @@ export const useGenerationStore = defineStore("generation", {
      * siblings simply wait their turn in the pool. Returns the created jobs
      * plus a promise resolving when every sibling settles.
      */
-    submitBatch(req: GenerateRequest, batchSize: number): { jobs: Job[]; settled: Promise<Job[]> } {
+    submitBatch(
+      req: GenerateRequest,
+      batchSize: number,
+      route: JobRoute | null = null,
+    ): { jobs: Job[]; settled: Promise<Job[]> } {
       const size = Math.max(1, Math.floor(batchSize));
       const baseSeed = resolveBaseSeed(req.seed);
       const plans = planBatchRequests(req, size, baseSeed);
@@ -274,6 +290,11 @@ export const useGenerationStore = defineStore("generation", {
       const jobs = plans.map((plan) => {
         const job = this.startJob(plan);
         job.batchId = batchId;
+        if (route) {
+          job.hostId = route.hostId;
+          job.hostLabel = route.label;
+          targets.set(job.clientId, route.target);
+        }
         return job;
       });
       const tasks = jobs.map((job, i) => () => {
@@ -311,7 +332,11 @@ export const useGenerationStore = defineStore("generation", {
       if (!job || job.status === "complete" || job.status === "error") return;
       if (job.id) {
         try {
-          await apiFetch(`/api/queue/${encodeURIComponent(job.id)}`, { method: "DELETE" });
+          await apiFetchTo(
+            targets.get(job.clientId) ?? currentTarget(),
+            `/api/queue/${encodeURIComponent(job.id)}`,
+            { method: "DELETE" },
+          );
         } catch (err) {
           if (!(err instanceof ApiError && (err.status === 409 || err.status === 404))) throw err;
         }
@@ -340,6 +365,7 @@ export const useGenerationStore = defineStore("generation", {
         if (!drop.has(job.clientId)) continue;
         if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
         if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
+        targets.delete(job.clientId);
       }
       this.jobs = this.jobs.filter((j) => !drop.has(j.clientId));
     },
@@ -351,6 +377,7 @@ export const useGenerationStore = defineStore("generation", {
         if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
       }
       aborts.clear();
+      targets.clear();
       this.jobs = [];
     },
     startJob(req: GenerateRequest): Job {
@@ -366,11 +393,13 @@ export const useGenerationStore = defineStore("generation", {
     async streamJob(job: Job, req: GenerateRequest): Promise<void> {
       const abort = new AbortController();
       aborts.set(job.clientId, abort);
+      const target = targets.get(job.clientId);
       await sseStream("/api/generate/stream", {
         method: "POST",
         body: req,
         signal: abort.signal,
         retry: false,
+        ...(target ? { target } : {}),
         onEvent: (event, data) => {
           const current = job;
           try {
@@ -419,3 +448,10 @@ export const useGenerationStore = defineStore("generation", {
  * process-local plumbing, not renderable state.
  */
 const aborts = new Map<number, AbortController>();
+
+/**
+ * Per-job API targets for multi-host routing, keyed by clientId. Kept out of
+ * Pinia state (they carry API keys and are plumbing, not renderable state);
+ * jobs without an entry use the primary connection.
+ */
+const targets = new Map<number, ApiTarget>();

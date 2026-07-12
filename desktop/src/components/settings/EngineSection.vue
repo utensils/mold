@@ -5,10 +5,12 @@ import { ipc, type DiscoveredHost, type HostTest, type SavedHost } from "../../l
 import { addressLabel, prepareHosts, versionLabel } from "../../lib/discovery";
 import { timeAgo } from "../../lib/format";
 import { useConnectionStore } from "../../stores/connection";
+import { useHostsStore } from "../../stores/hosts";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
 
 const conn = useConnectionStore();
+const hosts = useHostsStore();
 const config = useSettingsConfigStore();
 const toasts = useToastStore();
 
@@ -135,6 +137,25 @@ async function useRemote() {
     await conn.useRemote(remoteUrl.value, remoteKey.value || null, discoveredName(remoteUrl.value));
     savedHosts.value = (await ipc.appSettingsGet()).savedHosts ?? [];
     void config.load();
+  } catch (err) {
+    switchError.value = String(err);
+  } finally {
+    switching.value = false;
+  }
+}
+
+/** Connect without switching: the host joins the multi-host pool. */
+async function addExtraHost() {
+  switching.value = true;
+  switchError.value = null;
+  try {
+    const host = await hosts.connect(
+      remoteUrl.value,
+      remoteKey.value || null,
+      discoveredName(remoteUrl.value),
+    );
+    savedHosts.value = (await ipc.appSettingsGet()).savedHosts ?? [];
+    toasts.push(`Connected to ${host.label} — pick it in the Generate view.`);
   } catch (err) {
     switchError.value = String(err);
   } finally {
@@ -272,6 +293,16 @@ async function restartEngine() {
             @click="useRemote"
           >
             Use this host
+          </button>
+          <button
+            type="button"
+            data-test="add-extra-host"
+            class="border-edge h-8 rounded-control border px-3 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+            :disabled="switching || !remoteUrl"
+            title="Connect without switching — queue jobs on several hosts at once"
+            @click="addExtraHost"
+          >
+            Add as extra host
           </button>
           <span v-if="switchError" class="text-caption text-stop">{{ switchError }}</span>
         </div>

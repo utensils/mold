@@ -18,6 +18,8 @@ vi.mock("../lib/api/sse", () => ({
 }));
 vi.mock("../lib/api/client", () => ({
   apiFetch: vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))),
+  apiFetchTo: vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))),
+  currentTarget: () => ({ baseUrl: "http://primary:7680", apiKey: null }),
   ApiError: class ApiError extends Error {
     constructor(
       message: string,
@@ -94,8 +96,12 @@ describe("generation queueing", () => {
       JSON.stringify({ type: "queued", position: 1, id: "job-1" }),
     );
     await store.cancel(store.jobs[0]!.clientId);
-    const { apiFetch } = await import("../lib/api/client");
-    expect(vi.mocked(apiFetch)).toHaveBeenCalledWith("/api/queue/job-1", { method: "DELETE" });
+    const { apiFetchTo } = await import("../lib/api/client");
+    expect(vi.mocked(apiFetchTo)).toHaveBeenCalledWith(
+      { baseUrl: "http://primary:7680", apiKey: null },
+      "/api/queue/job-1",
+      { method: "DELETE" },
+    );
     expect(store.jobs[0]!.status).toBe("error");
     expect(store.jobs[0]!.error).toBe("Cancelled");
   });

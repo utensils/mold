@@ -31,8 +31,12 @@ export function apiHeaders(target: ApiTarget, extra?: HeadersInit): Headers {
   return headers;
 }
 
-export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const target = currentTarget();
+/** Fetch against an explicit host — multi-host callers name their target. */
+export async function apiFetchTo(
+  target: ApiTarget,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
   const response = await fetch(`${target.baseUrl}${path}`, {
     ...init,
     headers: apiHeaders(target, init.headers),
@@ -51,6 +55,19 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
     throw new ApiError(detail, response.status, body);
   }
   return response;
+}
+
+export async function apiJsonTo<T>(
+  target: ApiTarget,
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const response = await apiFetchTo(target, path, init);
+  return (await response.json()) as T;
+}
+
+export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  return apiFetchTo(currentTarget(), path, init);
 }
 
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {

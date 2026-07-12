@@ -38,6 +38,8 @@ const defaults = {
   uiScalePercent: 100,
   updateChannel: "stable" as const,
   savedHosts: [],
+  connectedHostIds: [],
+  generateTargetHost: null,
 };
 
 beforeEach(() => {

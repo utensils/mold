@@ -45,6 +45,8 @@ function settings(updateChannel: AppSettings["updateChannel"] = "stable"): AppSe
     uiScalePercent: 100,
     updateChannel,
     savedHosts: [],
+    connectedHostIds: [],
+    generateTargetHost: null,
   };
 }
 
