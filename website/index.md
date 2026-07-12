@@ -16,6 +16,9 @@ hero:
       text: Get Started
       link: /guide/
     - theme: alt
+      text: Download for Mac
+      link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
+    - theme: alt
       text: View Models
       link: /models/
     - theme: alt

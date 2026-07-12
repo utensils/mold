@@ -162,6 +162,8 @@ for full subcommand reference (`doctor`, `gpus`, `network-volume`, `list`,
 
 ### Native macOS desktop
 
+**[Download the signed DMG](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** (Apple Silicon; notarized and stapled — drag to Applications).
+
 The experimental Tauri desktop app in `desktop/` embeds the Metal engine or
 connects to any local/remote `mold serve`. It includes Generate, a local/remote
 Gallery, parallel model downloads with real cancellation, chains, model

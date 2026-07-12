@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Direct desktop-app download link.** Releases now also attach the DMG under the stable name `Mold-macos-arm64.dmg`, so `https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg` always fetches the newest signed build (backfilled onto v0.15.0). The website links it from the homepage hero (**Download for Mac**) and a new **Download** section in the desktop guide.
+
 ### Fixed
 
 - **FlakeHub publishing failed on v0.15.0** — the flake source archive outgrew FlakeHub's 75 MB limit. The two LTX gallery demos on the website were 23 MB animated WebPs each; they are now 135 KB VP9 `webm` videos (same frames, same size, autoplaying loop), shrinking the tracked tree by ~46 MB so tagged releases publish to FlakeHub again. v0.15.0 itself is not on FlakeHub; `nix run github:utensils/mold/v0.15.0` is unaffected.

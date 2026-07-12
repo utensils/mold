@@ -7,9 +7,19 @@ developed.
 
 ::: warning Experimental
 The desktop app lives in `desktop/` and is under active development. It is
-macOS-first (Apple Silicon, Metal) and not yet part of a tagged release. Build
-it from source with the devshell commands below.
+macOS-first (Apple Silicon, Metal).
 :::
+
+## Download
+
+Every tagged release ships a signed, notarized, stapled DMG:
+
+**[⬇ Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
+
+Open the DMG and drag **Mold** to Applications — no quarantine dance needed.
+Version-pinned DMGs and `SHA256SUMS` are on the
+[releases page](https://github.com/utensils/mold/releases). You can also build
+from source with the devshell commands below.
 
 ## What it is
 

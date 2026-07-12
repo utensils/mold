@@ -313,7 +313,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: cd artifacts && sha256sum *.tar.gz > SHA256SUMS
+        run: cd artifacts && sha256sum ./*.tar.gz > SHA256SUMS
 
       - name: Create/update release
         uses: softprops/action-gh-release@v2
@@ -373,8 +373,14 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # The website links to releases/latest/download/Mold-macos-arm64.dmg, so
+      # every release must carry the DMG under that stable name alongside the
+      # versioned Mold_x.y.z_aarch64.dmg.
+      - name: Stable-named desktop DMG
+        run: cp artifacts/Mold_*_aarch64.dmg artifacts/Mold-macos-arm64.dmg
+
       - name: Generate checksums
-        run: cd artifacts && sha256sum *.tar.gz *.dmg *.zip > SHA256SUMS
+        run: cd artifacts && sha256sum ./*.tar.gz ./*.dmg ./*.zip > SHA256SUMS
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -417,7 +423,7 @@ jobs:
 
             ## Desktop app (macOS)
 
-            `Mold_*_aarch64.dmg` — signed, notarized, and stapled. Drag Mold to Applications; no quarantine dance needed.
+            `Mold-macos-arm64.dmg` (also attached with its versioned name) — signed, notarized, and stapled. Drag Mold to Applications; no quarantine dance needed. Stable link to the newest build: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
 
   # Publish to crates.io on v* tags
   publish:
