@@ -7,6 +7,8 @@ import BenchRail from "./components/shell/BenchRail.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
+import { dockBadgeValue } from "./lib/dockBadge";
+import { ipc } from "./lib/ipc";
 import { resolveShellShortcut } from "./lib/shortcuts";
 import { useAppPrefsStore } from "./stores/appPrefs";
 import { useConnectionStore } from "./stores/connection";
@@ -39,6 +41,13 @@ const generation = useGenerationStore();
 const toasts = useToastStore();
 const ui = useUiStore();
 const updater = useUpdaterStore();
+
+// Dock badge mirrors THIS app's active jobs, event-driven (no poll lag) and
+// cleared the moment the last job settles.
+watch(
+  () => [generation.pending.length, appPrefs.dockBadge] as const,
+  ([pending, enabled]) => void ipc.setDockBadge(dockBadgeValue(pending, enabled)),
+);
 
 function onKeydown(e: KeyboardEvent) {
   const action = resolveShellShortcut(e);

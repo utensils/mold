@@ -40,6 +40,7 @@ const defaults = {
   savedHosts: [],
   connectedHostIds: [],
   generateTargetHost: null,
+  saveRemoteOutputs: true,
 };
 
 beforeEach(() => {

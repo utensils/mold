@@ -4,6 +4,8 @@ import { sseStream } from "../lib/api/sse";
 import type { ServerEvent } from "../lib/api/types";
 import { useGalleryStore } from "./gallery";
 import { useGenerationStore } from "./generation";
+import { useHostsStore } from "./hosts";
+import { useJobsStore } from "./jobs";
 
 /** Old-server fallback: refetch cadence while the queue is non-empty. */
 const POLL_INTERVAL_MS = 5_000;
@@ -79,6 +81,15 @@ export const useEventsStore = defineStore("events", {
         case "gallery_removed":
           gallery.applyRemoved(ev.filename);
           break;
+        // Queue pause state broadcast — another client (or this one) toggled
+        // the primary host's queue; keep the Jobs view chip in sync live.
+        case "queue_paused":
+        case "queue_resumed": {
+          const primary = useHostsStore().primaryHost;
+          const queue = primary ? useJobsStore().queues[primary.id] : undefined;
+          if (queue) queue.paused = ev.type === "queue_paused";
+          break;
+        }
         // job_* frames: the generation store tracks its own jobs via their
         // per-job streams; queue-wide UI can subscribe here later.
         default:

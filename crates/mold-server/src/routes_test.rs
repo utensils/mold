@@ -944,6 +944,148 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn pause_and_resume_toggle_queue_paused_in_status() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let app = app_with_state(state);
+
+        // Idle server reports not-paused.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["queue_paused"], false);
+
+        // Pause → 200 {"paused": true} → status reflects it.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/queue/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["paused"], true);
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["queue_paused"], true);
+
+        // Resume → 200 {"paused": false} → status cleared.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/queue/resume")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["paused"], false);
+
+        let resp = app
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["queue_paused"], false);
+    }
+
+    #[tokio::test]
+    async fn pause_publishes_queue_paused_event_once_per_transition() {
+        // Keep `state` in scope so its EventBroadcaster (and thus the
+        // subscriber) outlives the router across both requests.
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state.clone());
+
+        // First pause flips state → one queue_paused event.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/queue/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        match events.try_recv() {
+            Ok(mold_core::ServerEvent::QueuePaused) => {}
+            other => panic!("expected queue_paused, got {other:?}"),
+        }
+
+        // Idempotent second pause is a no-op → no duplicate event.
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::post("/api/queue/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "second pause must not emit a duplicate queue_paused event"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_queue_cancels_all_queued_and_reports_count() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        state.job_registry.register("bbbb", "sdxl:q8");
+        state.job_registry.register("cccc", "ltx-video:q8");
+        // A running job must survive the bulk cancel.
+        state.job_registry.mark_running("cccc", Some(0));
+
+        let app = app_with_state(state);
+        let resp = app
+            .clone()
+            .oneshot(Request::delete("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["cancelled"], 2);
+
+        let resp = app
+            .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        let entries = body["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["id"], "cccc");
+        assert_eq!(entries[0]["state"], "running");
+    }
+
+    #[tokio::test]
+    async fn capabilities_reports_queue_controls_available() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["queue"]["can_pause"], true);
+        assert_eq!(body["queue"]["can_cancel_all"], true);
+    }
+
     /// Poll the registry until the submitted job shows up (the generate
     /// handler registers before submit, so this resolves almost instantly).
     async fn wait_for_registered_job(state: &AppState) -> String {
@@ -2869,6 +3011,7 @@ mod tests {
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             job_registry: crate::job_registry::JobRegistry::new(),
+            queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
             )),
@@ -2930,6 +3073,7 @@ mod tests {
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             job_registry: crate::job_registry::JobRegistry::new(),
+            queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
             )),
@@ -3194,6 +3338,7 @@ mod tests {
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             job_registry: crate::job_registry::JobRegistry::new(),
+            queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
             )),

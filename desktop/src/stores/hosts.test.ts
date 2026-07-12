@@ -47,6 +47,7 @@ function settings(overrides: Record<string, unknown> = {}) {
     savedHosts: [] as SavedHost[],
     connectedHostIds: [] as string[],
     generateTargetHost: null,
+    saveRemoteOutputs: true,
     ...overrides,
   };
 }

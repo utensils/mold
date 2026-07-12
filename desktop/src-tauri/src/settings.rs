@@ -145,6 +145,9 @@ pub struct AppSettings {
     pub connected_host_ids: Vec<String>,
     /// Sticky generation-target host id; `None` routes automatically.
     pub generate_target_host: Option<String>,
+    /// Also save generations from remote hosts into this Mac's gallery.
+    #[serde(default = "default_true")]
+    pub save_remote_outputs: bool,
 }
 
 impl Default for AppSettings {
@@ -167,6 +170,7 @@ impl Default for AppSettings {
             saved_hosts: Vec::new(),
             connected_host_ids: Vec::new(),
             generate_target_host: None,
+            save_remote_outputs: true,
         }
     }
 }
@@ -231,9 +235,20 @@ mod tests {
             }],
             connected_host_ids: vec!["hal9000-7680".into()],
             generate_target_host: Some("hal9000-7680".into()),
+            save_remote_outputs: false,
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path), settings);
+    }
+
+    #[test]
+    fn legacy_settings_json_defaults_to_saving_remote_outputs() {
+        // Files written before the pref existed must load with the local
+        // save ON — silently losing remote prints is the worse failure.
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(&path, r#"{"mode":"remote"}"#).unwrap();
+        assert!(load(&path).save_remote_outputs);
     }
 
     #[test]

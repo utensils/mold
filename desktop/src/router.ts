@@ -9,6 +9,7 @@ export const router = createRouter({
     { path: "/chains", name: "chains", component: () => import("./views/ChainsView.vue") },
     { path: "/models", name: "models", component: () => import("./views/ModelsView.vue") },
     { path: "/history", name: "history", component: () => import("./views/HistoryView.vue") },
+    { path: "/jobs", name: "jobs", component: () => import("./views/JobsView.vue") },
     { path: "/runpod", name: "runpod", component: () => import("./views/RunPodView.vue") },
     { path: "/settings", name: "settings", component: () => import("./views/SettingsView.vue") },
   ],

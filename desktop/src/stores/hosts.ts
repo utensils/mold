@@ -43,6 +43,7 @@ interface HostTelemetry {
 export interface HostRoute {
   hostId: string;
   label: string;
+  kind: "local" | "remote";
   target: ApiTarget;
 }
 
@@ -216,6 +217,7 @@ export const useHostsStore = defineStore("hosts", {
       return {
         hostId: chosen.id,
         label: chosen.label,
+        kind: chosen.kind,
         target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
       };
     },

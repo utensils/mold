@@ -809,6 +809,7 @@ mod tests {
             gpus: None,
             queue_depth: None,
             queue_capacity: None,
+            queue_paused: None,
         };
         let embed = format_server_status(&status);
         assert_eq!(embed.title, "Server Status");
@@ -840,6 +841,7 @@ mod tests {
             gpus: None,
             queue_depth: None,
             queue_capacity: None,
+            queue_paused: None,
         };
         let embed = format_server_status(&status);
         assert!(embed

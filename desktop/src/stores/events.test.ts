@@ -92,6 +92,27 @@ describe("event routing", () => {
     events.apply({ type: "job_started", id: "j", model: "m" });
     events.apply({ type: "job_ended", id: "j" });
   });
+
+  it("mirrors queue pause broadcasts onto the primary host's jobs snapshot", async () => {
+    const { useConnectionStore } = await import("./connection");
+    const { useJobsStore } = await import("./jobs");
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:1", apiKey: null };
+    conn.status = "ready";
+    const jobs = useJobsStore();
+    jobs.queues["local"] = {
+      hostId: "local",
+      entries: [],
+      paused: false,
+      caps: { canPause: true, canCancelAll: true },
+      error: null,
+    };
+    const events = useEventsStore();
+    events.apply({ type: "queue_paused" });
+    expect(jobs.queues["local"]?.paused).toBe(true);
+    events.apply({ type: "queue_resumed" });
+    expect(jobs.queues["local"]?.paused).toBe(false);
+  });
 });
 
 describe("old-server fallback poller", () => {

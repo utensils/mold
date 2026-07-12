@@ -85,6 +85,7 @@ pub fn run() {
             updater::confirm_update_healthy,
             gallery::local_gallery_list,
             gallery::local_gallery_delete,
+            gallery::save_output_bytes,
             clipboard::clipboard_write_image,
             commands::secret_get,
             commands::secret_set,

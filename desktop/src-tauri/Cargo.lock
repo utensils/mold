@@ -3923,6 +3923,7 @@ name = "mold-desktop"
 version = "0.16.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "flate2",
  "hostname",
  "if-addrs",

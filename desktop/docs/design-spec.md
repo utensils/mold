@@ -98,7 +98,7 @@ Native macOS single window, `titleBarStyle: Overlay`, `hiddenTitle: true`, traff
 
 - **Sidebar** (208px, native sidebar vibrancy, collapsible ⌘\): five destinations + Settings, plus a live **Hosts** section and a live **Jobs** section. It is navigation _and_ ambient status.
   - **Hosts:** every connected host (primary + extras) as a row — status dot (Safelight ready / Halide connecting / Stop error), label, live queue depth — plus mold servers detected on the network (mDNS) with a one-click `+` connect. Right-click an extra for Reconnect/Disconnect. Multi-host is client-side: jobs stream from and cancel against the host they queued on, and the Generate inspector's **Host** selector (visible with >1 live host) offers Auto (least busy, by live queue depth) or an explicit sticky pick.
-  - **Jobs:** miniature Develop chips for every in-flight job (from `/api/queue` + SSE), labeled with their host when routed off the primary.
+  - **Jobs:** miniature Develop chips for every in-flight job (from `/api/queue` + SSE), labeled with their host when routed off the primary. The full queue console is the **Jobs view (⌘6)**: per-host sections showing the whole server queue (other clients' rows marked `OTHER CLIENT`), Pause/Resume + two-step Cancel all (feature-detected via `/api/capabilities.queue`), per-job cancel, and this session's finished prints with one-click reuse.
 - **The Bench rail** (28px, bottom, Bath): always-on telemetry from `/api/resources/stream` (1 Hz) — GPU name, VRAM meter (Halide fill, warms to Safelight while a job runs, Stop at >92%), RAM, queue depth, and the engine mode chip (`⌁ local` embedded engine / `⇄ studio.local:7680` remote). Clicking the VRAM meter opens a resources popover with per-GPU detail and loaded-model residency (Gpu / Parked / Unloaded).
 - **Command palette (⌘K):** navigation, actions ("Pull flux-dev:q8", "Cancel all queued", "Switch to remote engine"), model search, and prompt-history search in one field. Elevation-2, the one blurred surface besides the sidebar.
 - **Movement model:** sidebar click or ⌘1–⌘5; deep links everywhere (gallery item → "Reuse settings" → Generate prefilled; queue chip → owning screen; chain stage → Chains editor). Back/forward via ⌘[ / ⌘].
@@ -238,7 +238,7 @@ A horizontal **filmstrip timeline** where transitions are _splices_ — grounded
 │  …                                                                         │
 ```
 
-Flat, fast, keyboard-first list over `prompt_history` (recent/search). ↩ Use fills the Generate composer (and switches model if still installed; otherwise offers the pull). ↑/↓ in the Generate composer also cycles history inline (TUI parity); ⌘K searches history too. _Clear…_ maps to `trim_to`/`clear` with a count confirm.
+Two lenses behind a segmented toggle. **Runs** (default): every finished generation from the gallery DB as a day-grouped run log — 48px thumbnail, prompt, model, dimensions, seed, step count, time; click reuses the FULL settings (seed included); right-click offers Reuse settings / Copy prompt / Copy seed / Show in Gallery. **Prompts**: the flat, fast, keyboard-first list over `prompt_history` (recent/search) for prompts whose outputs are gone. ↩ Use fills the Generate composer (and switches model if still installed; otherwise offers the pull). ↑/↓ in the Generate composer also cycles history inline (TUI parity); ⌘K searches history too. _Clear…_ maps to `trim_to`/`clear` with a count confirm and only affects the prompt log.
 
 ### 4.6 Settings — the two stores, honestly
 
@@ -328,7 +328,7 @@ Everything else is small and mechanical:
 - **Drag-in:** any image dropped anywhere targets the labeled Source/Mask/Control wells (§4.1); `.toml` files dropped open in Chains; multiple images onto qwen-edit fill the tray in drop order.
 - **Drag-out:** gallery tiles/lightbox → Finder, Mail, Photoshop (real file paths).
 - **Notifications** (tauri-plugin-notification): "Generated — lighthouse at dusk" with thumbnail on job complete _when the app is backgrounded_; "Chain finished · 243 frames" ; "Pull complete — flux-dev:q8". Clicking focuses the relevant item.
-- **Dock:** badge = queue count; a subtle determinate progress overlay on the dock icon during a running chain; dock menu: New Generation, Pause Queue(–), 3 recent prints.
+- **Dock:** badge = THIS app's active job count, event-driven from the generation store (never the whole engine's queue depth — a shared or remote engine runs other clients' work, and badging those numbers reads as "my app is busy" when it isn't); cleared the moment the last job settles. A subtle determinate progress overlay during a running chain and a dock menu (New Generation, Pause Queue, recent prints) remain aspirational.
 - Native services: window state restore, full-screen support, standard text editing (dictation/emoji work in the composer), system appearance sync, and an owner-only local secret store for API keys (deliberately not the Keychain — no permission prompts).
 
 ---

@@ -8308,6 +8308,7 @@ mod tests {
             gpus: None,
             queue_depth: None,
             queue_capacity: None,
+            queue_paused: None,
         };
         ri.update_from_server_status(status);
         assert_eq!(ri.memory_line.as_deref(), Some("VRAM: 16.0 GB free"));
@@ -8335,6 +8336,7 @@ mod tests {
                 gpus: None,
                 queue_depth: None,
                 queue_capacity: None,
+                queue_paused: None,
             }),
             ..Default::default()
         };
@@ -8362,6 +8364,7 @@ mod tests {
             gpus: None,
             queue_depth: None,
             queue_capacity: None,
+            queue_paused: None,
         };
         let _event = BackgroundEvent::ServerStatusUpdate(Some(Box::new(status)));
         // None variant for server-unreachable
@@ -9302,6 +9305,7 @@ mod tests {
             gpus: None,
             queue_depth: None,
             queue_capacity: None,
+            queue_paused: None,
         });
 
         app.sync_resource_info_mode();
@@ -9367,6 +9371,7 @@ mod tests {
             gpus: None,
             queue_depth: None,
             queue_capacity: None,
+            queue_paused: None,
         };
 
         let _ = app
@@ -9403,6 +9408,7 @@ mod tests {
                 gpus: None,
                 queue_depth: None,
                 queue_capacity: None,
+                queue_paused: None,
             });
         assert!(app.resource_info.server_status.is_some());
 

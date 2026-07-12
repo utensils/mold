@@ -2,35 +2,115 @@
 import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import EmptyState from "../components/shell/EmptyState.vue";
+import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { clearHistory, fetchHistory, groupByDay, type HistoryEntry } from "../lib/api/history";
+import { galleryMediaPath } from "../lib/gallery/media";
 import { useConnectionStore } from "../stores/connection";
 import { useComposerStore } from "../stores/composer";
+import { useGalleryStore } from "../stores/gallery";
 import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { applyModelDefaults, newGenerateForm } from "../lib/generateForm";
+import type { GalleryImage } from "../lib/api/types";
 
 const router = useRouter();
 const conn = useConnectionStore();
 const composer = useComposerStore();
+const gallery = useGalleryStore();
 const models = useModelStore();
 const toasts = useToastStore();
 const contextMenu = useContextMenuStore();
 
-function rowMenu(entry: HistoryEntry): MenuEntry[] {
+/**
+ * Two lenses on the past: Runs (every finished generation with its print,
+ * settings, and seed — the gallery DB is the source of truth) and Prompts
+ * (the prompt log, including prompts whose outputs are gone).
+ */
+const tab = ref<"runs" | "prompts">("runs");
+const query = ref("");
+
+// ── Runs (gallery-backed) ───────────────────────────────────────────────────
+
+const runs = computed<GalleryImage[]>(() => {
+  const q = query.value.trim().toLowerCase();
+  const items = gallery.items;
+  if (!q) return items;
+  return items.filter(
+    (img) =>
+      img.metadata.prompt.toLowerCase().includes(q) || img.metadata.model.toLowerCase().includes(q),
+  );
+});
+
+/** Day buckets, reusing the prompt-log grouping via the shared shape. */
+const runGroups = computed(() => {
+  const pseudo = runs.value.map((img) => ({
+    prompt: img.filename,
+    model: img.metadata.model,
+    used_at: img.timestamp * 1000,
+  }));
+  const groups = groupByDay(pseudo);
+  const byFilename = new Map(runs.value.map((img) => [img.filename, img]));
+  return groups.map((g) => ({
+    label: g.label,
+    runs: g.entries.map((e) => byFilename.get(e.prompt)!).filter(Boolean),
+  }));
+});
+
+function runTime(img: GalleryImage): string {
+  return new Date(img.timestamp * 1000).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function useRun(img: GalleryImage) {
+  const m = img.metadata;
+  const installed = models.installed.find((entry) => entry.name === m.model);
+  composer.set({
+    prompt: m.prompt,
+    model: installed ? m.model : newGenerateForm().model,
+    seed: m.seed,
+    width: m.width,
+    height: m.height,
+    steps: m.steps,
+    guidance: m.guidance,
+  });
+  void router.push("/generate");
+}
+
+function runMenu(img: GalleryImage): MenuEntry[] {
   return [
-    { label: "Use prompt", action: () => use(entry) },
+    { label: "Reuse settings", action: () => useRun(img) },
     {
       label: "Copy prompt",
       action: () => {
-        void navigator.clipboard.writeText(entry.prompt).then(() => toasts.push("Copied"));
+        void navigator.clipboard.writeText(img.metadata.prompt).then(() => toasts.push("Copied"));
       },
     },
+    {
+      label: "Copy seed",
+      action: () => {
+        void navigator.clipboard
+          .writeText(String(img.metadata.seed))
+          .then(() => toasts.push("Copied seed"));
+      },
+    },
+    { label: "Show in Gallery", action: () => void router.push("/gallery") },
   ];
 }
 
+watch(
+  () => conn.ready,
+  (ready) => {
+    if (ready && !gallery.loaded) void gallery.fetch();
+  },
+  { immediate: true },
+);
+
+// ── Prompts (the existing log) ──────────────────────────────────────────────
+
 const entries = ref<HistoryEntry[]>([]);
-const query = ref("");
 const loaded = ref(false);
 const unavailable = ref(false);
 const confirmingClear = ref(false);
@@ -54,18 +134,20 @@ async function load() {
 let debounce: ReturnType<typeof setTimeout> | null = null;
 watch(query, () => {
   if (debounce) clearTimeout(debounce);
-  debounce = setTimeout(load, 250);
+  debounce = setTimeout(() => {
+    if (tab.value === "prompts") void load();
+  }, 250);
 });
 
 watch(
-  () => conn.ready,
-  (ready) => {
-    if (ready) void load();
+  [() => conn.ready, tab],
+  ([ready, current]) => {
+    if (ready && current === "prompts") void load();
   },
   { immediate: true },
 );
 
-function use(entry: HistoryEntry) {
+function usePrompt(entry: HistoryEntry) {
   const installed = models.installed.find((m) => m.name === entry.model);
   const form = newGenerateForm();
   if (installed) applyModelDefaults(form, installed);
@@ -79,6 +161,18 @@ function use(entry: HistoryEntry) {
     guidance: form.guidance,
   });
   void router.push("/generate");
+}
+
+function promptMenu(entry: HistoryEntry): MenuEntry[] {
+  return [
+    { label: "Use prompt", action: () => usePrompt(entry) },
+    {
+      label: "Copy prompt",
+      action: () => {
+        void navigator.clipboard.writeText(entry.prompt).then(() => toasts.push("Copied"));
+      },
+    },
+  ];
 }
 
 async function clearAll() {
@@ -100,30 +194,46 @@ const timeOf = (e: HistoryEntry) =>
 </script>
 
 <template>
-  <EmptyState
-    v-if="loaded && unavailable"
-    headline="History isn't available"
-    detail="This engine doesn't expose prompt history — it may predate the history API or run without its database."
-  />
-  <EmptyState
-    v-else-if="loaded && entries.length === 0 && !query"
-    headline="No prompts yet"
-    detail="Every prompt you develop is kept here to reuse."
-  />
-
-  <div v-else class="flex h-full flex-col">
+  <div class="flex h-full flex-col">
     <header class="border-edge flex h-11 items-center gap-3 border-b px-4">
       <span class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
         History
       </span>
+      <div
+        class="border-edge flex rounded-control border bg-bath p-0.5"
+        role="group"
+        aria-label="History view"
+      >
+        <button
+          type="button"
+          data-test="tab-runs"
+          :aria-pressed="tab === 'runs'"
+          class="rounded-control px-2.5 py-1 text-body transition-colors"
+          :class="tab === 'runs' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'"
+          @click="tab = 'runs'"
+        >
+          Runs
+        </button>
+        <button
+          type="button"
+          data-test="tab-prompts"
+          :aria-pressed="tab === 'prompts'"
+          class="rounded-control px-2.5 py-1 text-body transition-colors"
+          :class="tab === 'prompts' ? 'bg-bench text-ink shadow-sm' : 'text-ink-2 hover:text-ink'"
+          @click="tab = 'prompts'"
+        >
+          Prompts
+        </button>
+      </div>
       <input
         v-model="query"
         data-selectable
         type="search"
-        placeholder="Search prompts…"
+        :placeholder="tab === 'runs' ? 'Search runs…' : 'Search prompts…'"
         class="border-edge ml-auto h-7 w-64 rounded-control border bg-bath px-2 text-body text-ink placeholder:text-ink-3"
       />
       <button
+        v-if="tab === 'prompts'"
         type="button"
         class="border-edge h-7 rounded-control border px-2.5 text-body transition-colors duration-100"
         :class="
@@ -138,7 +248,69 @@ const timeOf = (e: HistoryEntry) =>
       </button>
     </header>
 
-    <div class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+    <!-- Runs: every finished generation with print + settings -->
+    <div v-if="tab === 'runs'" class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <EmptyState
+        v-if="gallery.loaded && runs.length === 0 && !query"
+        headline="No runs yet"
+        detail="Every print you develop shows up here with its settings and seed."
+      />
+      <p v-else-if="query && runs.length === 0" class="mt-6 text-center text-body text-ink-2">
+        No runs match “{{ query }}”.
+      </p>
+      <template v-for="group in runGroups" :key="group.label">
+        <div class="mt-3 mb-1 flex items-center gap-2 first:mt-0">
+          <span class="edge-code">{{ group.label.toUpperCase() }}</span>
+          <div class="border-edge h-px flex-1 border-t" />
+        </div>
+        <button
+          v-for="img in group.runs"
+          :key="img.filename"
+          type="button"
+          data-test="run-row"
+          class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bench"
+          @click="useRun(img)"
+          @contextmenu="contextMenu.open($event, runMenu(img))"
+        >
+          <div
+            class="h-12 w-12 shrink-0 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_14%,transparent)] bg-print-surface"
+          >
+            <AuthedMedia
+              :path="galleryMediaPath(img.filename, gallery.source, true)"
+              :alt="img.metadata.prompt"
+            />
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-body text-ink" :title="img.metadata.prompt">
+              {{ img.metadata.prompt }}
+            </div>
+            <div class="data-mono mt-0.5 truncate text-caption text-ink-3">
+              {{ img.metadata.model }} · {{ img.metadata.width }}×{{ img.metadata.height }} · S
+              {{ img.metadata.seed }} · {{ img.metadata.steps }} steps
+            </div>
+          </div>
+          <span class="data-mono shrink-0 text-caption text-ink-3">{{ runTime(img) }}</span>
+          <span
+            class="shrink-0 text-caption text-safelight opacity-0 transition-opacity duration-100 group-hover:opacity-100"
+          >
+            ↩ Reuse
+          </span>
+        </button>
+      </template>
+    </div>
+
+    <!-- Prompts: the raw prompt log -->
+    <div v-else class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <EmptyState
+        v-if="loaded && unavailable"
+        headline="Prompt history isn't available"
+        detail="This engine doesn't expose prompt history — it may predate the history API or run without its database."
+      />
+      <EmptyState
+        v-else-if="loaded && entries.length === 0 && !query"
+        headline="No prompts yet"
+        detail="Every prompt you develop is kept here to reuse."
+      />
       <template v-for="group in groups" :key="group.label">
         <div class="mt-3 mb-1 flex items-center gap-2 first:mt-0">
           <span class="edge-code">{{ group.label.toUpperCase() }}</span>
@@ -149,8 +321,8 @@ const timeOf = (e: HistoryEntry) =>
           :key="`${group.label}-${i}`"
           type="button"
           class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bench"
-          @click="use(entry)"
-          @contextmenu="contextMenu.open($event, rowMenu(entry))"
+          @click="usePrompt(entry)"
+          @contextmenu="contextMenu.open($event, promptMenu(entry))"
         >
           <span class="min-w-0 flex-1 truncate text-body text-ink" :title="entry.prompt">
             {{ entry.prompt }}
@@ -163,10 +335,13 @@ const timeOf = (e: HistoryEntry) =>
             ↩ Use
           </span>
         </button>
-        <p v-if="query && entries.length === 0" class="mt-6 text-center text-body text-ink-2">
-          No prompts match “{{ query }}”.
-        </p>
       </template>
+      <p
+        v-if="query && entries.length === 0 && !unavailable"
+        class="mt-6 text-center text-body text-ink-2"
+      >
+        No prompts match “{{ query }}”.
+      </p>
     </div>
   </div>
 </template>

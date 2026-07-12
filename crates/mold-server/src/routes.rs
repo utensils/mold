@@ -185,6 +185,9 @@ use crate::queue::clean_error_message;
         list_queue,
         patch_queue_job,
         cancel_queue_job,
+        pause_queue,
+        resume_queue,
+        cancel_all_queue,
         list_history,
         delete_history,
         crate::routes_config::list_config,
@@ -248,6 +251,8 @@ use crate::queue::clean_error_message;
         mold_core::ModelRemovalResponse,
         mold_core::KeptComponent,
         QueuePatchRequest,
+        QueuePauseResponse,
+        QueueCancelAllResponse,
         mold_core::HistoryEntry,
         mold_core::HistoryListing,
         mold_core::ConfigEntry,
@@ -368,7 +373,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/events", get(stream_events))
         .route("/api/status", get(server_status))
-        .route("/api/queue", get(list_queue))
+        .route("/api/queue", get(list_queue).delete(cancel_all_queue))
+        .route("/api/queue/pause", post(pause_queue))
+        .route("/api/queue/resume", post(resume_queue))
         .route(
             "/api/queue/:id",
             patch(patch_queue_job).delete(cancel_queue_job),
@@ -2126,6 +2133,7 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         gpus: if has_gpus { Some(gpu_statuses) } else { None },
         queue_depth: Some(state.queue.pending()),
         queue_capacity: Some(state.queue_capacity),
+        queue_paused: Some(state.queue_pause.is_paused()),
     })
 }
 
@@ -2246,6 +2254,71 @@ async fn cancel_queue_job(
         ),
     })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Response of `POST /api/queue/pause` and `POST /api/queue/resume` — the
+/// resulting pause state (`true` after pause, `false` after resume).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct QueuePauseResponse {
+    paused: bool,
+}
+
+/// Response of `DELETE /api/queue` — how many queued jobs were cancelled.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct QueueCancelAllResponse {
+    cancelled: usize,
+}
+
+/// Pause dispatch of new generation jobs. The job currently running on a
+/// worker finishes; only the *next* job is held. Idempotent — repeat pauses
+/// return `{"paused": true}` without re-emitting the `queue_paused` event.
+#[utoipa::path(
+    post,
+    path = "/api/queue/pause",
+    tag = "queue",
+    responses(
+        (status = 200, description = "Queue dispatch paused", body = QueuePauseResponse),
+    )
+)]
+async fn pause_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> {
+    if state.queue_pause.pause() {
+        state.events.publish(mold_core::ServerEvent::QueuePaused);
+    }
+    Json(QueuePauseResponse { paused: true })
+}
+
+/// Resume dispatch of new generation jobs. Idempotent — repeat resumes return
+/// `{"paused": false}` without re-emitting the `queue_resumed` event.
+#[utoipa::path(
+    post,
+    path = "/api/queue/resume",
+    tag = "queue",
+    responses(
+        (status = 200, description = "Queue dispatch resumed", body = QueuePauseResponse),
+    )
+)]
+async fn resume_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> {
+    if state.queue_pause.resume() {
+        state.events.publish(mold_core::ServerEvent::QueueResumed);
+    }
+    Json(QueuePauseResponse { paused: false })
+}
+
+/// Cancel every still-queued generation job. Running jobs are left untouched
+/// (same rule as `DELETE /api/queue/:id`). Returns the number of jobs
+/// cancelled; each waiting client observes the same cancellation signal as a
+/// single-job cancel.
+#[utoipa::path(
+    delete,
+    path = "/api/queue",
+    tag = "queue",
+    responses(
+        (status = 200, description = "Queued jobs cancelled", body = QueueCancelAllResponse),
+    )
+)]
+async fn cancel_all_queue(State(state): State<AppState>) -> Json<QueueCancelAllResponse> {
+    let cancelled = state.job_registry.cancel_all_queued();
+    Json(QueueCancelAllResponse { cancelled })
 }
 
 // ── /api/history ─────────────────────────────────────────────────────────────
@@ -2372,6 +2445,10 @@ async fn server_capabilities() -> Json<mold_core::ServerCapabilities> {
                 .collect::<Vec<_>>(),
         },
         events: mold_core::EventsCapabilities { available: true },
+        queue: mold_core::QueueCapabilities {
+            can_pause: true,
+            can_cancel_all: true,
+        },
     })
 }
 

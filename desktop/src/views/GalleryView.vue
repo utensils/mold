@@ -31,6 +31,27 @@ const canReveal = computed(
   () => gallery.source === "local" || conn.mode === "local" || conn.mode === "external",
 );
 
+/** Remote prints can be pulled into this Mac's gallery on demand. */
+const canSaveLocally = computed(() => gallery.source === "engine" && conn.mode === "remote");
+
+async function saveToThisMac(item: GalleryImage) {
+  try {
+    const { apiFetch } = await import("../lib/api/client");
+    const blob = await apiFetch(`/api/gallery/image/${encodeURIComponent(item.filename)}`).then(
+      (r) => r.blob(),
+    );
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    const saved = await ipc.saveOutputBytes(item.filename, btoa(binary));
+    toasts.push(`Saved to this Mac — ${saved}`);
+  } catch (err) {
+    toasts.push(err instanceof Error ? err.message : String(err), "error");
+  }
+}
+
 function tileMenu(item: GalleryImage): MenuEntry[] {
   const m = item.metadata;
   return [
@@ -67,6 +88,11 @@ function tileMenu(item: GalleryImage): MenuEntry[] {
       action: () => void copyImage(item),
     },
     { separator: true },
+    {
+      label: "Save to this Mac",
+      disabled: !canSaveLocally.value,
+      action: () => void saveToThisMac(item),
+    },
     {
       label: "Reveal in Finder",
       disabled: !canReveal.value,

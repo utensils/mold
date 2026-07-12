@@ -49,6 +49,7 @@ function settings(updateChannel: AppSettings["updateChannel"] = "stable"): AppSe
     savedHosts: [],
     connectedHostIds: [],
     generateTargetHost: null,
+    saveRemoteOutputs: true,
   };
 }
 

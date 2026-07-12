@@ -11,12 +11,13 @@ const key = (k: string, mods: Partial<Parameters<typeof resolveShellShortcut>[0]
 });
 
 describe("resolveShellShortcut", () => {
-  it("maps ⌘1–⌘5 and ⌘, to the five screens plus settings", () => {
+  it("maps ⌘1–⌘6 and ⌘, to the six screens plus settings", () => {
     expect(resolveShellShortcut(key("1"))).toEqual({ kind: "navigate", route: "/generate" });
     expect(resolveShellShortcut(key("2"))).toEqual({ kind: "navigate", route: "/gallery" });
     expect(resolveShellShortcut(key("3"))).toEqual({ kind: "navigate", route: "/chains" });
     expect(resolveShellShortcut(key("4"))).toEqual({ kind: "navigate", route: "/models" });
     expect(resolveShellShortcut(key("5"))).toEqual({ kind: "navigate", route: "/history" });
+    expect(resolveShellShortcut(key("6"))).toEqual({ kind: "navigate", route: "/jobs" });
     expect(resolveShellShortcut(key(","))).toEqual({ kind: "navigate", route: "/settings" });
   });
 
@@ -59,6 +60,6 @@ describe("resolveShellShortcut", () => {
   });
 
   it("covers every navigation route exactly once", () => {
-    expect(new Set(Object.values(NAV_ROUTES)).size).toBe(6);
+    expect(new Set(Object.values(NAV_ROUTES)).size).toBe(7);
   });
 });
