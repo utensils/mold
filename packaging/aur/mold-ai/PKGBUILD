@@ -29,6 +29,7 @@ makedepends=(
   'clang'
   'lld'
   'nasm'
+  'bun'
 )
 
 provides=("${pkgname}=${pkgver}")
@@ -45,6 +46,10 @@ prepare() {
   cd "mold-${pkgver}"
   export CARGO_HOME="${srcdir}/cargo-home"
   cargo fetch --locked
+  # Build the web SPA here (prepare may use the network for `bun install`;
+  # build() runs --offline) so mold-server's build.rs embeds the real
+  # gallery UI instead of the placeholder stub.
+  ./scripts/ensure-web-dist.sh
 }
 
 build() {
