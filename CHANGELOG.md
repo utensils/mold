@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Desktop post-generation upscaling now auto-downloads on multi-GPU hosts.** A first-use Real-ESRGAN selection is pulled and configured by the remote server before its queue dispatches the generation to a GPU worker, matching the existing single-worker and standalone-upscale behavior instead of briefly failing with “upscaler model … is not downloaded.”
+
 ## [0.17.0] - 2026-07-13
 
 ### Fixed
