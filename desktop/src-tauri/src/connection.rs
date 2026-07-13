@@ -1,17 +1,19 @@
 //! Connection state machine: which engine the webview talks to.
 //!
-//! `Local` is the embedded in-process engine; `External` is a mold server the
-//! user already runs on this machine (detected on the well-known port, used
-//! instead of embedding to avoid two download drivers/model caches sharing
-//! mold.db); `Remote` is a network host.
+//! The selected primary connection is intentionally separate from the local
+//! server lifecycle. `Local` selects the desktop-owned embedded server;
+//! `External` selects a mold server the user already runs on this machine;
+//! `Remote` selects a network host. The actual embedded handle lives in
+//! `commands::AppState::local_server`, so switching to `Remote` leaves this Mac
+//! online for multi-host routing and LAN discovery.
 
 use serde::Serialize;
 
-use crate::server::EngineHandle;
-
 pub enum Conn {
     Off,
-    Local(EngineHandle),
+    Local {
+        base_url: String,
+    },
     External {
         base_url: String,
     },
@@ -37,15 +39,15 @@ impl Conn {
                 base_url: None,
                 api_key: None,
             },
-            Conn::Local(engine) => ConnectionInfo {
+            Conn::Local { base_url } => ConnectionInfo {
                 mode: "local",
-                base_url: Some(engine.base_url()),
+                base_url: Some(base_url.clone()),
                 api_key: Some(local_api_key.to_string()),
             },
             Conn::External { base_url } => ConnectionInfo {
                 mode: "external",
                 base_url: Some(base_url.clone()),
-                api_key: None,
+                api_key: Some(local_api_key.to_string()),
             },
             Conn::Remote { url, api_key } => ConnectionInfo {
                 mode: "remote",
@@ -123,7 +125,11 @@ mod tests {
         let external = Conn::External {
             base_url: "http://127.0.0.1:7680".into(),
         };
-        assert_eq!(external.info("k").api_key, None);
+        assert_eq!(external.info("k").api_key.as_deref(), Some("k"));
+        let local = Conn::Local {
+            base_url: "http://127.0.0.1:49152".into(),
+        };
+        assert_eq!(local.info("k").api_key.as_deref(), Some("k"));
     }
 
     #[test]

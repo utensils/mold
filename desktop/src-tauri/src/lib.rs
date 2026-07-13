@@ -24,16 +24,6 @@ pub fn run() {
         config.resolved_log_dir(),
     );
 
-    // Key for the embedded engine, exported before any thread exists
-    // (mold-server's auth layer reads the env once). A user-set MOLD_API_KEY
-    // is honored — their CLI keeps working against the embedded engine —
-    // otherwise an ephemeral per-launch key locks the loopback port down.
-    let local_api_key = std::env::var("MOLD_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    std::env::set_var("MOLD_API_KEY", &local_api_key);
-
     tauri::Builder::default()
         .register_uri_scheme_protocol("mold-local", |_context, request| {
             gallery::protocol_response(request)
@@ -56,10 +46,16 @@ pub fn run() {
             app.manage(commands::SettingsStore::load(app.handle())?);
             app.manage(updater::UpdaterState::default());
             let app_data = app.path().app_data_dir()?;
+            let secrets = secrets::SecretStore::new(app_data);
+            let local_api_key = secrets.local_server_api_key()?;
+            // mold-server reads auth from the environment when the server
+            // thread starts. Resolve and export the persistent key first.
+            std::env::set_var("MOLD_API_KEY", &local_api_key);
             app.manage(commands::AppState {
                 conn: tokio::sync::Mutex::new(connection::Conn::Off),
+                local_server: tokio::sync::Mutex::new(commands::LocalServer::Off),
                 local_api_key,
-                secrets: secrets::SecretStore::new(app_data),
+                secrets,
             });
             // Keep the tracing appender alive for the app's lifetime.
             app.manage(log_guard);
@@ -69,6 +65,7 @@ pub fn run() {
             commands::app_settings_get,
             commands::app_settings_set,
             commands::get_connection,
+            commands::ensure_local_server,
             commands::start_local_engine,
             commands::stop_local_engine,
             commands::set_remote_host,
@@ -105,16 +102,13 @@ pub fn run() {
                 // resumable, so a hard exit is acceptable as fallback.
                 let state = window.state::<commands::AppState>();
                 let engine = {
-                    let mut conn = match state.conn.try_lock() {
-                        Ok(conn) => conn,
+                    let mut local = match state.local_server.try_lock() {
+                        Ok(local) => local,
                         Err(_) => return,
                     };
-                    match std::mem::replace(&mut *conn, connection::Conn::Off) {
-                        connection::Conn::Local(engine) => Some(engine),
-                        other => {
-                            *conn = other;
-                            None
-                        }
+                    match std::mem::replace(&mut *local, commands::LocalServer::Off) {
+                        commands::LocalServer::Embedded(engine) => Some(engine),
+                        commands::LocalServer::External { .. } | commands::LocalServer::Off => None,
                     }
                 };
                 if let Some(engine) = engine {

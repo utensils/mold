@@ -23,6 +23,14 @@ const testing = ref(false);
 const switching = ref(false);
 const switchError = ref<string | null>(null);
 const restarting = computed(() => conn.status === "starting");
+const localKeyVisible = ref(false);
+const localApiKey = computed(() => conn.localInfo?.apiKey ?? "");
+
+async function copyLocalApiKey() {
+  if (!localApiKey.value) return;
+  await navigator.clipboard.writeText(localApiKey.value);
+  toasts.push("This Mac API key copied");
+}
 
 // LAN discovery ("On your network").
 const discovered = ref<DiscoveredHost[]>([]);
@@ -235,6 +243,51 @@ async function restartEngine() {
         >
           {{ restarting ? "Restarting…" : "Restart" }}
         </button>
+      </div>
+
+      <div class="border-edge mt-4 border-t pt-4">
+        <div class="flex items-start gap-3">
+          <div class="min-w-0 flex-1">
+            <span class="text-caption text-ink-2">This Mac API key</span>
+            <p class="mt-1 text-caption text-ink-3">
+              Use this key when another Mold app connects to this Mac over the network.
+            </p>
+            <div class="mt-2 flex items-center gap-2">
+              <code
+                class="border-edge data-mono rounded-control border bg-bath px-2 py-1 text-caption text-ink-2"
+              >
+                {{
+                  localApiKey
+                    ? localKeyVisible
+                      ? localApiKey
+                      : "••••••••••••••••"
+                    : "Local server unavailable"
+                }}
+              </code>
+              <button
+                v-if="localApiKey"
+                type="button"
+                data-test="reveal-local-api-key"
+                class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+                @click="localKeyVisible = !localKeyVisible"
+              >
+                {{ localKeyVisible ? "Hide" : "Reveal" }}
+              </button>
+              <button
+                v-if="localApiKey"
+                type="button"
+                data-test="copy-local-api-key"
+                class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+                @click="copyLocalApiKey"
+              >
+                Copy
+              </button>
+            </div>
+            <p v-if="conn.localError" class="mt-2 text-caption text-stop">
+              {{ conn.localError }}
+            </p>
+          </div>
+        </div>
       </div>
 
       <div class="border-edge mt-4 border-t pt-4">

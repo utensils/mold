@@ -4,11 +4,16 @@ import { mount, flushPromises } from "@vue/test-utils";
 import GenerateView from "./GenerateView.vue";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useModelStore } from "../stores/models";
+import { useConnectionStore } from "../stores/connection";
+import { useHostModelsStore } from "../stores/hostModels";
+import { useHostsStore } from "../stores/hosts";
 import type { ModelEntry } from "../lib/api/types";
 
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+const apiJsonTo = vi.fn();
 vi.mock("../lib/api/client", () => ({
   apiJson: vi.fn(() => Promise.resolve([])),
+  apiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
   apiFetch: vi.fn(),
 }));
 vi.mock("../lib/ipc", () => ({ ipc: {} }));
@@ -28,7 +33,11 @@ function mountView() {
 }
 
 describe("GenerateView form persistence", () => {
-  beforeEach(() => setActivePinia(createPinia()));
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    apiJsonTo.mockReset();
+    apiJsonTo.mockResolvedValue([]);
+  });
   afterEach(() => (document.body.innerHTML = ""));
 
   it("retains the prompt and model across unmount and remount", async () => {
@@ -59,5 +68,44 @@ describe("GenerateView form persistence", () => {
 
     // The immediate auto-select watch must respect the existing choice.
     expect(store.form.model).toBe("flux-schnell:q8");
+  });
+
+  it("renders the workbench and auto-selects a model installed only on a remote host", async () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" };
+    conn.status = "ready";
+    const hosts = useHostsStore();
+    hosts.initialized = true;
+    hosts.extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: "remote-key",
+      status: "ready",
+      error: null,
+    });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve(target.baseUrl.includes("hal9000") ? [model] : []),
+    );
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="generate-layout"]').exists()).toBe(true);
+    expect(useGenerateFormStore().form.model).toBe("flux-dev:q8");
+    expect(useHostModelsStore().hostsFor("flux-dev:q8")).toEqual(["hal9000-7680"]);
+  });
+
+  it("shows starter cards only after every connected host reports no models", async () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" };
+    conn.status = "ready";
+    useHostsStore().initialized = true;
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(wrapper.findComponent({ name: "StarterCards" }).exists()).toBe(true);
+    expect(wrapper.find('[data-test="generate-layout"]').exists()).toBe(false);
   });
 });

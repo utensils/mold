@@ -189,8 +189,12 @@ for the full component list and semantics.
 The app talks to a `mold-ai-server` over localhost HTTP + SSE using the same
 wire types as the CLI and web UI:
 
-- **Built-in engine** — embeds the server in-process and runs on Metal, so no
-  separate `mold serve` is required.
+- **Built-in engine and LAN server** — embeds the server in-process and runs on
+  Metal, so no separate `mold serve` is required. It listens on port 7680,
+  advertises itself over mDNS, and remains online as **This Mac** even when a
+  remote host is primary. Settings → Engine exposes the persistent per-Mac API
+  key that another Mold client needs to connect. If an unrelated process owns
+  7680, Mold uses and advertises an ephemeral port instead.
 - **Existing server** — auto-detects a running `mold serve` on
   `localhost:7680`.
 - **Remote host** — point it at a remote GPU box (e.g. a Linux CUDA machine for
@@ -247,6 +251,12 @@ wire types as the CLI and web UI:
   stream progress from — and cancel against — the host they queued on, so a
   long LTX-2 render on a CUDA box never blocks quick local prints. Extra
   connections are remembered and restored on the next launch.
+
+  The Generate workspace waits for those remembered hosts and their model
+  inventories before deciding the machine is empty. The “pull your first
+  model” screen appears only when every connected host reports zero installed
+  generation models; a remote-only model is selected and routed without a
+  local download.
 
 ## Development
 

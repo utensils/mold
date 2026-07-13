@@ -164,8 +164,12 @@ for full subcommand reference (`doctor`, `gpus`, `network-volume`, `list`,
 
 **[Download the signed DMG](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** (Apple Silicon; notarized and stapled — drag to Applications).
 
-The experimental Tauri desktop app in `desktop/` embeds the Metal engine or
-connects to any local/remote `mold serve`. It includes Generate, a local/remote
+The experimental Tauri desktop app in `desktop/` embeds the Metal engine and
+keeps it available as an authenticated, mDNS-discoverable LAN server even when
+the app uses a remote primary. It can also reuse any local `mold serve` already
+on port 7680. Connected-host models form one picker, so a model installed only
+on a remote box can be selected and routed there without a local download. It
+includes Generate, a local/remote
 Gallery, parallel model downloads with real cancellation, chains, model
 catalog browsing, history, and a full settings bench. Its RunPod workspace can
 launch and manage pods and persistent network volumes without leaving the app.

@@ -8,6 +8,7 @@ const secretGet = vi.fn().mockResolvedValue(null);
 const secretSet = vi.fn().mockResolvedValue(undefined);
 const testRemoteHost = vi.fn();
 const startLocalEngine = vi.fn();
+const ensureLocalServer = vi.fn();
 
 vi.mock("../lib/ipc", () => ({
   inTauri: () => false,
@@ -18,6 +19,7 @@ vi.mock("../lib/ipc", () => ({
     secretSet: (...a: unknown[]) => secretSet(...a),
     testRemoteHost: (...a: unknown[]) => testRemoteHost(...a),
     startLocalEngine: (...a: unknown[]) => startLocalEngine(...a),
+    ensureLocalServer: (...a: unknown[]) => ensureLocalServer(...a),
   },
 }));
 
@@ -96,6 +98,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   secretGet.mockResolvedValue(null);
   secretSet.mockResolvedValue(undefined);
+  ensureLocalServer.mockResolvedValue({
+    kind: "embedded",
+    baseUrl: "http://127.0.0.1:49152",
+    apiKey: "k",
+    port: 49152,
+  });
   installSettings(settings());
   apiJsonTo.mockResolvedValue({ queue_depth: 0, queue_capacity: 8, version: null });
   const conn = useConnectionStore();
@@ -114,6 +122,30 @@ describe("hosts store", () => {
       status: "ready",
       baseUrl: "http://127.0.0.1:49152",
     });
+  });
+
+  it("keeps This Mac routable when a remote host is primary", () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: "remote-key" };
+    conn.localInfo = {
+      kind: "embedded",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+      port: 7680,
+    };
+    conn.localStatus = "ready";
+
+    const hosts = useHostsStore();
+    expect(hosts.all.map((host) => host.id)).toEqual(["hal9000-7680", "local"]);
+    expect(hosts.all[1]).toMatchObject({
+      label: "This Mac",
+      kind: "local",
+      primary: false,
+      status: "ready",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    });
+    expect(hosts.resolveRoute("local")?.hostId).toBe("local");
   });
 
   it("reconnects remembered extra hosts at boot with their own keys", async () => {
