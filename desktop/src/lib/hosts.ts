@@ -48,3 +48,19 @@ export function pickAutoHost<T extends RoutableHost>(hosts: T[]): T | null {
     return best;
   });
 }
+
+/**
+ * Which host the status bar should mirror: the host of the most recently
+ * submitted still-live job (the bar follows the action), else the primary.
+ * Jobs without a routed host (single-host submissions) run on the primary.
+ */
+export function pickDisplayHost(
+  liveJobHostIds: ReadonlyArray<string | null>,
+  primaryId: string,
+): string {
+  for (let i = liveJobHostIds.length - 1; i >= 0; i--) {
+    const id = liveJobHostIds[i];
+    if (id) return id;
+  }
+  return primaryId;
+}
