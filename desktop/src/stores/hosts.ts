@@ -3,6 +3,7 @@ import { apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { hostIdFromUrl, normalizeHostUrl, pickAutoHost } from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
 import type { ServerStatus } from "../lib/api/types";
+import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useToastStore } from "./toasts";
 
@@ -58,6 +59,8 @@ export const useHostsStore = defineStore("hosts", {
   state: () => ({
     extras: [] as ExtraHost[],
     telemetry: {} as Record<string, HostTelemetry>,
+    /** Friendly names from savedHosts, so the primary can be renamed too. */
+    names: {} as Record<string, string>,
     pollTimer: null as ReturnType<typeof setInterval> | null,
     initialized: false,
   }),
@@ -71,7 +74,9 @@ export const useHostsStore = defineStore("hosts", {
       const t = state.telemetry[id];
       return {
         id,
-        label: remote ? conn.info.baseUrl.replace(/^https?:\/\//, "") : "This Mac",
+        label: remote
+          ? (state.names[id] ?? conn.info.baseUrl.replace(/^https?:\/\//, ""))
+          : "This Mac",
         kind: remote ? "remote" : "local",
         baseUrl: conn.info.baseUrl,
         apiKey: conn.info.apiKey,
@@ -120,10 +125,30 @@ export const useHostsStore = defineStore("hosts", {
       this.initialized = true;
       try {
         const settings = await ipc.appSettingsGet();
+        for (const saved of settings.savedHosts) {
+          if (saved.name) this.names[saved.id] = saved.name;
+        }
         for (const id of settings.connectedHostIds) {
           const saved = settings.savedHosts.find((h) => h.id === id);
           if (!saved) continue;
+          // Already listed (e.g. adopted after a failed primary reconnect) —
+          // don't duplicate the row or re-probe it.
+          if (this.extras.some((h) => h.id === id)) continue;
           const key = await ipc.secretGet(`remote-api-key.${id}`);
+          // Shadowed by the live primary: same server, already connected.
+          // List it (so switching the primary away mid-session keeps the
+          // host around) but skip the redundant probe; `all` hides the row.
+          if (id === this.primaryHost?.id) {
+            this.extras.push({
+              id,
+              label: saved.name ?? saved.url.replace(/^https?:\/\//, ""),
+              url: saved.url,
+              apiKey: key,
+              status: "ready",
+              error: null,
+            });
+            continue;
+          }
           const extra: ExtraHost = {
             id,
             label: saved.name ?? saved.url.replace(/^https?:\/\//, ""),
@@ -180,10 +205,78 @@ export const useHostsStore = defineStore("hosts", {
       this.extras = this.extras.filter((h) => h.id !== id);
       delete this.telemetry[id];
       const settings = await ipc.appSettingsGet();
+      // A sticky generation target pointing at the removed host would only
+      // linger as a dead preference (resolveRoute already falls back to
+      // Auto) — clear it alongside the reconnect entry.
+      const clearedTarget = settings.generateTargetHost === id;
       await ipc.appSettingsSet({
         ...settings,
         connectedHostIds: settings.connectedHostIds.filter((h) => h !== id),
+        generateTargetHost: clearedTarget ? null : settings.generateTargetHost,
       });
+      if (clearedTarget) {
+        // Keep the in-memory prefs snapshot coherent (HostSelector reads it).
+        const prefs = useAppPrefsStore();
+        if (prefs.settings) prefs.settings = { ...prefs.settings, generateTargetHost: null };
+      }
+    },
+    /**
+     * List a host that could not be reached (e.g. the persisted primary at
+     * launch) as an errored extra, so it stays visible in the sidebar for
+     * one-click reconnect instead of silently vanishing. The regular refresh
+     * poll self-heals it the moment the host answers again.
+     */
+    adopt(id: string, url: string, apiKey: string | null, label?: string | null) {
+      if (this.extras.some((h) => h.id === id)) return;
+      this.extras.push({
+        id,
+        label: label ?? this.names[id] ?? url.replace(/^https?:\/\//, ""),
+        url,
+        apiKey,
+        status: "error",
+        error: "Unreachable at launch",
+      });
+    },
+    /**
+     * Keep a remote primary live as an extra while the app returns to the
+     * built-in engine. Order matters: `connect()` deliberately no-ops while
+     * the host is still the primary, so the engine switch happens first.
+     */
+    async demoteToExtra(host: {
+      id: string;
+      baseUrl: string | null;
+      apiKey: string | null;
+      label: string;
+    }) {
+      const conn = useConnectionStore();
+      await conn.useLocal();
+      if (!host.baseUrl) return;
+      try {
+        await this.connect(host.baseUrl, host.apiKey, host.label);
+      } catch {
+        // Unreachable right now — the saved entry still allows reconnect.
+      }
+    },
+    /** Give a host a friendly name (sidebar, host selector, Recent hosts). */
+    async rename(id: string, name: string) {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      this.names[id] = trimmed;
+      const extra = this.extras.find((h) => h.id === id);
+      if (extra) extra.label = trimmed;
+      const settings = await ipc.appSettingsGet();
+      const known = settings.savedHosts.some((h) => h.id === id);
+      // An adopted host whose MRU entry was pruned still deserves a sticky
+      // name — re-insert it so the rename survives relaunch.
+      const savedHosts = known
+        ? settings.savedHosts.map((h) => (h.id === id ? { ...h, name: trimmed } : h))
+        : extra
+          ? [
+              { id, name: trimmed, url: extra.url, lastUsedMs: Date.now() },
+              ...settings.savedHosts,
+            ].slice(0, MAX_SAVED_HOSTS)
+          : settings.savedHosts;
+      await ipc.appSettingsSet({ ...settings, savedHosts });
     },
     /** Retry a failed extra host in place. */
     async reconnect(id: string) {
