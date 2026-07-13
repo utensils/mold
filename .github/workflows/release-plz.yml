@@ -44,6 +44,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Run release-plz release-pr
+        id: release-plz
         uses: release-plz/action@v0.5
         with:
           command: release-pr
@@ -53,26 +54,47 @@ jobs:
       - name: Sync release PR (changelog promotion + desktop version)
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_PR_JSON: ${{ steps.release-plz.outputs.pr }}
         run: |
           set -euo pipefail
-          branch=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
-            --json headRefName --jq '[.[].headRefName | select(startswith("release-plz-"))][0] // empty')
-          if [ -z "$branch" ]; then
-            echo "No open release-plz PR; nothing to sync."
+          if [ -z "$RELEASE_PR_JSON" ]; then
+            echo "release-plz returned no PR; nothing to sync."
+            exit 0
+          fi
+          number=$(jq -r '.number // empty' <<< "$RELEASE_PR_JSON")
+          branch=$(jq -r '.head_branch // empty' <<< "$RELEASE_PR_JSON")
+          if [ -z "$number" ] || [ -z "$branch" ]; then
+            echo "release-plz did not create or update a PR; nothing to sync."
             exit 0
           fi
           git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             "+refs/heads/$branch:refs/heads/$branch"
           git checkout "$branch"
           scripts/release/sync-release-pr.sh
-          if git diff --quiet; then
-            echo "Release PR already in sync."
-            exit 0
+          if ! git diff --quiet; then
+            git config user.name "release-plz-mold[bot]"
+            git config user.email "302347651+release-plz-mold[bot]@users.noreply.github.com"
+            git commit -am "chore(release): promote changelog and sync desktop version"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$branch"
+          else
+            echo "Release PR files already in sync."
           fi
-          git config user.name "mold Release Bot"
-          git config user.email "brink.james@gmail.com"
-          git commit -am "chore(release): promote changelog and sync desktop version"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$branch"
+
+          current_body=$(mktemp)
+          rendered_body=$(mktemp)
+          trap 'rm -f "$current_body" "$rendered_body"' EXIT
+          gh pr view "$number" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$current_body"
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "error: could not read [workspace.package] version from Cargo.toml" >&2
+            exit 1
+          fi
+          scripts/release/render-release-pr-body.sh CHANGELOG.md "$version" "$current_body" > "$rendered_body"
+          if ! cmp -s "$current_body" "$rendered_body"; then
+            gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$rendered_body"
+          else
+            echo "Release PR body already in sync."
+          fi
 
   # After the release PR merges, creates and pushes the vX.Y.Z tag, which
   # triggers release.yml (binaries, desktop DMG, GitHub release, crates.io,

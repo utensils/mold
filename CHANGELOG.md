@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release PRs now show the curated changelog and update in place.** The release-plz follow-up step injects the promoted version section into the PR body, targets the exact PR returned by the action, and attributes its sync commit to the GitHub App bot. This replaces the empty changelog disclosure and prevents each push to `main` from closing and recreating the release PR as if a maintainer had edited its history.
+
 ### Changed
 
 - **Desktop: API keys and tokens moved out of the macOS Keychain.** Hugging Face, Civitai, remote-host, and RunPod keys now live in an owner-only (0600) `secrets.json` under the app's data directory — the same store debug builds already used — so the app never triggers macOS Keychain permission prompts again. Existing Keychain entries are left untouched and are no longer read; re-enter keys once in Settings. Secret names stay allowlisted, now including per-host `remote-api-key.<host-id>` slots.
