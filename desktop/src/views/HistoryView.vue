@@ -123,8 +123,8 @@ function runMenu(img: GalleryImage): MenuEntry[] {
 
 // (Re)fetch whenever the gallery's source set changes — mount, the
 // connection coming up, hosts joining mid-session. History must be complete
-// even if the Gallery view was never opened; already-settled buckets are
-// left alone (gallery.loaded goes false only when a source lacks one).
+// even if the Gallery view was never opened. (A source joining refetches
+// every bucket — fetchAll doesn't skip settled ones; cheap and rare.)
 watch(
   () => gallery.sources.map((s) => s.key).join("|"),
   () => {
@@ -152,6 +152,9 @@ const promptEntries = ref<HostHistoryEntry[]>([]);
 const supportedHostIds = ref<string[]>([]);
 const loaded = ref(false);
 const unavailable = ref(false);
+/** All hosts failed, but at least one looked like a network blip — show
+ *  "couldn't reach" instead of wrongly blaming old servers. */
+const unreachable = ref(false);
 const confirmingClear = ref(false);
 
 /** The chip filter applies here too ("local" = the built-in engine's id;
@@ -164,14 +167,23 @@ const visiblePrompts = computed<HostHistoryEntry[]>(() =>
 
 const groups = computed(() => groupByDay(visiblePrompts.value));
 
+/** The chip filter points at the This-Mac IPC bucket, which is a gallery
+ *  source but not a history source (only exists with a remote primary). */
+const filterIsLocalOnlyBucket = computed(
+  () => gallery.filter !== "all" && !historyHosts.value.some((h) => h.hostId === gallery.filter),
+);
+
 async function load() {
   const targets = historyHosts.value;
   const listing = await fetchHistoryAll(targets, query.value);
   promptEntries.value = listing.entries;
   supportedHostIds.value = listing.supportedHostIds;
   // 404 = a server that predates the history API; 503 = DB off. Only when
-  // EVERY host is like that is history truly unavailable.
-  unavailable.value = targets.length > 0 && listing.supportedHostIds.length === 0;
+  // EVERY host is like that is history truly unavailable; a fan-out where
+  // something merely didn't answer is a reachability problem instead.
+  const allFailed = targets.length > 0 && listing.supportedHostIds.length === 0;
+  unreachable.value = allFailed && listing.unreachableHostIds.length > 0;
+  unavailable.value = allFailed && !unreachable.value;
   loaded.value = true;
 }
 
@@ -387,13 +399,23 @@ const timeOf = (e: HistoryEntry) =>
     <!-- Prompts: the raw prompt log, merged across every ready host -->
     <div v-else class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
       <EmptyState
-        v-if="loaded && unavailable"
+        v-if="loaded && unreachable"
+        headline="Couldn't reach any host"
+        detail="The prompt log lives on each engine — reconnect and it reloads on its own."
+      />
+      <EmptyState
+        v-else-if="loaded && unavailable"
         headline="Prompt history isn't available"
         :detail="
           historyHosts.length > 1
             ? 'None of the connected engines expose prompt history — they may predate the history API or run without their database.'
             : 'This engine doesn\'t expose prompt history — it may predate the history API or run without its database.'
         "
+      />
+      <EmptyState
+        v-else-if="loaded && filterIsLocalOnlyBucket"
+        headline="This Mac keeps prints, not prompts"
+        detail="Prompts are tracked by each engine — pick a host chip (or All) to see them."
       />
       <EmptyState
         v-else-if="loaded && visiblePrompts.length === 0 && !query"

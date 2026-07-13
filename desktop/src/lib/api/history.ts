@@ -1,4 +1,4 @@
-import { apiFetchTo, apiJsonTo, currentTarget, type ApiTarget } from "./client";
+import { ApiError, apiFetchTo, apiJsonTo, currentTarget, type ApiTarget } from "./client";
 
 export interface HistoryEntry {
   prompt: string;
@@ -25,6 +25,10 @@ export interface MultiHostHistory {
   entries: HostHistoryEntry[];
   /** Hosts whose GET /api/history succeeded — i.e. that support history. */
   supportedHostIds: string[];
+  /** Hosts that failed with something OTHER than 404/503 — a network blip,
+   *  not a server that lacks the history API. Lets the empty state say
+   *  "couldn't reach" instead of wrongly blaming old servers. */
+  unreachableHostIds: string[];
 }
 
 /** Fetch one host's prompt log. */
@@ -63,16 +67,23 @@ export async function fetchHistoryAll(
   );
   const entries: HostHistoryEntry[] = [];
   const supportedHostIds: string[] = [];
-  for (const result of results) {
-    if (result.status !== "fulfilled") continue;
+  const unreachableHostIds: string[] = [];
+  results.forEach((result, i) => {
+    if (result.status !== "fulfilled") {
+      // 404/503 = the server genuinely lacks the history API (or runs with
+      // the DB off); anything else is a transient reachability failure.
+      const status = result.reason instanceof ApiError ? result.reason.status : 0;
+      if (status !== 404 && status !== 503) unreachableHostIds.push(hostTargets[i]!.hostId);
+      return;
+    }
     const { host } = result.value;
     supportedHostIds.push(host.hostId);
     for (const entry of result.value.entries) {
       entries.push({ ...entry, hostId: host.hostId, hostLabel: host.label });
     }
-  }
+  });
   entries.sort((a, b) => b.used_at - a.used_at);
-  return { entries, supportedHostIds };
+  return { entries, supportedHostIds, unreachableHostIds };
 }
 
 /** Clear one host's prompt log. */

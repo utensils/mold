@@ -3,7 +3,9 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
 
-const fetchHistoryAll = vi.fn().mockResolvedValue({ entries: [], supportedHostIds: [] });
+const fetchHistoryAll = vi
+  .fn()
+  .mockResolvedValue({ entries: [], supportedHostIds: [], unreachableHostIds: [] });
 const clearHistoryOn = vi.fn().mockResolvedValue(undefined);
 vi.mock("../lib/api/history", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api/history")>();
@@ -114,7 +116,7 @@ const promptEntry = (prompt: string, hostId: string, hostLabel: string, used_at:
 
 beforeEach(() => {
   vi.clearAllMocks();
-  fetchHistoryAll.mockResolvedValue({ entries: [], supportedHostIds: [] });
+  fetchHistoryAll.mockResolvedValue({ entries: [], supportedHostIds: [], unreachableHostIds: [] });
   clearHistoryOn.mockResolvedValue(undefined);
 });
 
@@ -226,7 +228,11 @@ describe("HistoryView multi-host", () => {
   });
 
   it("shows the unavailable state only when no host supports history", async () => {
-    fetchHistoryAll.mockResolvedValue({ entries: [], supportedHostIds: [] });
+    fetchHistoryAll.mockResolvedValue({
+      entries: [],
+      supportedHostIds: [],
+      unreachableHostIds: [],
+    });
     const wrapper = await mountView({ extra: true });
     await wrapper.get("[data-test='tab-prompts']").trigger("click");
     await flushPromises();
@@ -235,6 +241,7 @@ describe("HistoryView multi-host", () => {
     fetchHistoryAll.mockResolvedValue({
       entries: [promptEntry("kept", "local", "This Mac", 1_000)],
       supportedHostIds: ["local"],
+      unreachableHostIds: [],
     });
     const other = await mountView({ extra: true });
     await other.get("[data-test='tab-prompts']").trigger("click");

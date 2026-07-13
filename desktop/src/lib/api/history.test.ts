@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { apiJsonTo, type ApiTarget } from "./client";
+import { ApiError, apiJsonTo, type ApiTarget } from "./client";
 import {
   clearScope,
   fetchHistoryAll,
@@ -9,6 +9,14 @@ import {
 } from "./history";
 
 vi.mock("./client", () => ({
+  ApiError: class ApiError extends Error {
+    constructor(
+      message: string,
+      public readonly status: number,
+    ) {
+      super(message);
+    }
+  },
   apiJsonTo: vi.fn(),
   apiFetchTo: vi.fn(),
   currentTarget: vi.fn(),
@@ -107,19 +115,28 @@ describe("fetchHistoryAll", () => {
   it("silently skips a host that fails (404/503 on older servers)", async () => {
     vi.mocked(apiJsonTo).mockImplementation((target, _path) =>
       (target as ApiTarget).baseUrl === hal.target.baseUrl
-        ? Promise.reject(new Error("HISTORY_UNAVAILABLE"))
+        ? Promise.reject(new ApiError("HISTORY_UNAVAILABLE", 404))
         : (Promise.resolve({ entries: [entry("kept", "2026-07-08T18:00:00")] }) as never),
     );
     const res = await fetchHistoryAll([local, hal], "");
     expect(res.entries.map((e) => e.prompt)).toEqual(["kept"]);
     expect(res.supportedHostIds).toEqual(["local"]);
+    expect(res.unreachableHostIds).toEqual([]);
   });
 
   it("is empty with no supported hosts when every host fails", async () => {
-    vi.mocked(apiJsonTo).mockRejectedValue(new Error("HISTORY_UNAVAILABLE"));
+    vi.mocked(apiJsonTo).mockRejectedValue(new ApiError("HISTORY_UNAVAILABLE", 404));
     const res = await fetchHistoryAll([local, hal], "");
     expect(res.entries).toEqual([]);
     expect(res.supportedHostIds).toEqual([]);
+    expect(res.unreachableHostIds).toEqual([]);
+  });
+
+  it("classifies non-404/503 failures as unreachable, not unsupported", async () => {
+    vi.mocked(apiJsonTo).mockRejectedValue(new TypeError("fetch failed"));
+    const res = await fetchHistoryAll([local, hal], "");
+    expect(res.supportedHostIds).toEqual([]);
+    expect(res.unreachableHostIds).toEqual(["local", "hal9000-7680"]);
   });
 
   it("handles an empty host list", async () => {
