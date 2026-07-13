@@ -512,9 +512,31 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
             />
             <div
               v-if="!job"
-              class="absolute inset-0 flex items-center justify-center text-caption text-ink-3"
+              data-test="empty-canvas"
+              class="absolute inset-0 flex items-center justify-center p-6 text-center"
             >
-              The print develops here
+              <div class="flex max-w-64 flex-col items-center">
+                <div
+                  class="border-halide/40 mb-4 flex h-20 w-24 items-center justify-center rounded-media border bg-[color-mix(in_srgb,var(--halide)_7%,transparent)]"
+                  aria-hidden="true"
+                >
+                  <svg
+                    viewBox="0 0 48 40"
+                    class="h-10 w-12 text-halide/70"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                  >
+                    <rect x="4" y="4" width="40" height="32" rx="1" />
+                    <circle cx="33" cy="13" r="3" />
+                    <path d="m9 31 10-11 7 7 5-5 8 9" />
+                  </svg>
+                </div>
+                <div class="font-display text-display-sm font-semibold text-ink">No print yet</div>
+                <p class="mt-1 text-caption text-ink-2">
+                  Choose a model, describe your print, then generate.
+                </p>
+              </div>
             </div>
             <div
               v-if="job && (job.status === 'denoising' || job.status === 'finishing')"

@@ -10,7 +10,12 @@ import type {
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../../lib/capabilities";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
 import { fileToBase64 } from "../../lib/image";
-import { matchPreset, presetsForFamily } from "../../lib/resolutions";
+import {
+  aspectRatioLabel,
+  matchPreset,
+  orientationLabel,
+  presetsForFamily,
+} from "../../lib/resolutions";
 import { randomSeed } from "../../stores/generation";
 import ImagePickerModal from "./ImagePickerModal.vue";
 
@@ -34,6 +39,14 @@ const presets = computed(() => presetsForFamily(props.form.family));
 const presetValue = computed(
   () => matchPreset(props.form.width, props.form.height, props.form.family)?.label ?? "custom",
 );
+const aspectLabel = computed(() =>
+  aspectRatioLabel(props.form.width, props.form.height, props.form.family),
+);
+const orientation = computed(() => orientationLabel(props.form.width, props.form.height));
+const aspectShapeStyle = computed(() => ({
+  aspectRatio: `${props.form.width} / ${props.form.height}`,
+  ...(props.form.width > props.form.height ? { width: "30px" } : { height: "26px" }),
+}));
 function applyPreset(event: Event) {
   const label = (event.target as HTMLSelectElement).value;
   const preset = presets.value.find((p) => p.label === label);
@@ -229,6 +242,24 @@ const schedulerLabel: Record<string, string> = {
         class="border-edge data-mono h-7 w-full min-w-0 rounded-control border bg-bath px-1.5 text-ink"
         @change="snapHeight"
       />
+    </div>
+    <div
+      data-test="aspect-helper"
+      class="border-edge mt-2 flex items-center gap-2 rounded-control border bg-bath px-2 py-1.5"
+      role="status"
+      aria-live="polite"
+    >
+      <div class="flex h-8 w-10 shrink-0 items-center justify-center" aria-hidden="true">
+        <div
+          data-test="aspect-shape"
+          class="border-halide/70 max-h-[26px] max-w-[30px] border bg-[color-mix(in_srgb,var(--halide)_12%,transparent)]"
+          :style="aspectShapeStyle"
+        />
+      </div>
+      <div class="min-w-0 leading-tight">
+        <div class="data-mono text-ink">{{ aspectLabel }}</div>
+        <div class="text-caption text-ink-2">{{ orientation }}</div>
+      </div>
     </div>
 
     <!-- Steps -->

@@ -14,7 +14,6 @@ describe("GenerateView layout", () => {
     expect(classesFor("generate-workbench")).toContain("overflow-hidden");
     expect(classesFor("generate-composer")).toContain("shrink-0");
   });
-
   it("keeps full model names visible in the picker", () => {
     expect(classesFor("selected-model-name")).not.toContain("truncate");
     expect(classesFor("selected-model-name")).toContain("break-all");
@@ -22,5 +21,11 @@ describe("GenerateView layout", () => {
     expect(classesFor("model-option-name")).toContain("break-all");
     expect(classesFor("model-availability")).toContain("whitespace-normal");
     expect(classesFor("model-availability")).toContain("break-all");
+  });
+
+  it("renders an instructive blank-canvas placeholder before the first print", () => {
+    expect(source).toContain('data-test="empty-canvas"');
+    expect(source).toContain("No print yet");
+    expect(source).toContain("Choose a model, describe your print, then generate.");
   });
 });

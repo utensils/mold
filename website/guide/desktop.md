@@ -204,7 +204,8 @@ wire types as the CLI and web UI:
   system's native DNS-SD browser on macOS, so advertised `_mold._tcp` services
   share the same cache and interface handling as Finder and `dns-sd`.
 - **Generation controls** — the Size block quick-selects common, per-family
-  resolutions (with manual width/height for anything else); Seed is an explicit
+  model-native resolutions (with manual width/height for anything else) and a
+  live aspect-ratio/orientation diagram; Seed is an explicit
   **Random | Fixed** toggle with one-click "lock last seed"; the model picker
   marks each model's source (Hugging Face / Civitai / local) and ends in
   **Browse all models →** straight into the catalog, installed models first;

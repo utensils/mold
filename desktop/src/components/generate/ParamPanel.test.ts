@@ -124,6 +124,22 @@ describe("ParamPanel — size presets", () => {
       "custom",
     );
   });
+
+  it("shows a live visual aspect and orientation helper", () => {
+    const form = formFor("qwen-image-edit");
+    form.width = 1328;
+    form.height = 1328;
+    const wrapper = mount(ParamPanel, { props: { form } });
+    expect(wrapper.get("[data-test='aspect-helper']").text()).toContain("1:1");
+    expect(wrapper.get("[data-test='aspect-helper']").text()).toContain("Square");
+    expect(wrapper.get("[data-test='aspect-shape']").attributes("style")).toContain(
+      "aspect-ratio: 1328 / 1328",
+    );
+    expect(wrapper.get("[data-test='aspect-shape']").attributes("style")).toContain("height: 26px");
+    expect(wrapper.get("[data-test='aspect-shape']").attributes("style")).not.toContain(
+      "width: 30px",
+    );
+  });
 });
 
 describe("ParamPanel — seed mode", () => {
