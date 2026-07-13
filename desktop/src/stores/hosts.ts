@@ -3,6 +3,7 @@ import { apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { hostIdFromUrl, normalizeHostUrl, pickAutoHost } from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
 import type { ServerStatus } from "../lib/api/types";
+import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useToastStore } from "./toasts";
 
@@ -134,6 +135,20 @@ export const useHostsStore = defineStore("hosts", {
           // don't duplicate the row or re-probe it.
           if (this.extras.some((h) => h.id === id)) continue;
           const key = await ipc.secretGet(`remote-api-key.${id}`);
+          // Shadowed by the live primary: same server, already connected.
+          // List it (so switching the primary away mid-session keeps the
+          // host around) but skip the redundant probe; `all` hides the row.
+          if (id === this.primaryHost?.id) {
+            this.extras.push({
+              id,
+              label: saved.name ?? saved.url.replace(/^https?:\/\//, ""),
+              url: saved.url,
+              apiKey: key,
+              status: "ready",
+              error: null,
+            });
+            continue;
+          }
           const extra: ExtraHost = {
             id,
             label: saved.name ?? saved.url.replace(/^https?:\/\//, ""),
@@ -190,10 +205,20 @@ export const useHostsStore = defineStore("hosts", {
       this.extras = this.extras.filter((h) => h.id !== id);
       delete this.telemetry[id];
       const settings = await ipc.appSettingsGet();
+      // A sticky generation target pointing at the removed host would only
+      // linger as a dead preference (resolveRoute already falls back to
+      // Auto) — clear it alongside the reconnect entry.
+      const clearedTarget = settings.generateTargetHost === id;
       await ipc.appSettingsSet({
         ...settings,
         connectedHostIds: settings.connectedHostIds.filter((h) => h !== id),
+        generateTargetHost: clearedTarget ? null : settings.generateTargetHost,
       });
+      if (clearedTarget) {
+        // Keep the in-memory prefs snapshot coherent (HostSelector reads it).
+        const prefs = useAppPrefsStore();
+        if (prefs.settings) prefs.settings = { ...prefs.settings, generateTargetHost: null };
+      }
     },
     /**
      * List a host that could not be reached (e.g. the persisted primary at
@@ -240,10 +265,18 @@ export const useHostsStore = defineStore("hosts", {
       const extra = this.extras.find((h) => h.id === id);
       if (extra) extra.label = trimmed;
       const settings = await ipc.appSettingsGet();
-      await ipc.appSettingsSet({
-        ...settings,
-        savedHosts: settings.savedHosts.map((h) => (h.id === id ? { ...h, name: trimmed } : h)),
-      });
+      const known = settings.savedHosts.some((h) => h.id === id);
+      // An adopted host whose MRU entry was pruned still deserves a sticky
+      // name — re-insert it so the rename survives relaunch.
+      const savedHosts = known
+        ? settings.savedHosts.map((h) => (h.id === id ? { ...h, name: trimmed } : h))
+        : extra
+          ? [
+              { id, name: trimmed, url: extra.url, lastUsedMs: Date.now() },
+              ...settings.savedHosts,
+            ].slice(0, MAX_SAVED_HOSTS)
+          : settings.savedHosts;
+      await ipc.appSettingsSet({ ...settings, savedHosts });
     },
     /** Retry a failed extra host in place. */
     async reconnect(id: string) {

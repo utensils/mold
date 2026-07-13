@@ -234,6 +234,41 @@ describe("hosts store", () => {
     expect(hosts.primaryHost?.label).toBe("render box");
   });
 
+  it("init() lists a host shadowed by the primary without re-probing it", async () => {
+    // Review follow-up: the primary's id now lands in connectedHostIds, so
+    // init used to burn a testRemoteHost probe on a server the app is
+    // already connected to. The row still exists (so switching the primary
+    // away mid-session keeps the host live) but stays hidden and unprobed.
+    const conn = useConnectionStore();
+    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
+    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
+    const hosts = useHostsStore();
+    await hosts.init();
+    expect(testRemoteHost).not.toHaveBeenCalled();
+    expect(hosts.extras.find((h) => h.id === hal.id)?.status).toBe("ready");
+    // Hidden while shadowed by the primary.
+    expect(hosts.all.filter((h) => h.id === hal.id)).toHaveLength(1);
+  });
+
+  it("disconnect() clears a sticky generation target pointing at the removed host", async () => {
+    installSettings(settings({ generateTargetHost: "hal9000-7680" }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+    await hosts.disconnect("hal9000-7680");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.generateTargetHost).toBeNull();
+  });
+
+  it("rename() persists even when the saved-hosts entry was pruned", async () => {
+    installSettings(settings({ savedHosts: [], connectedHostIds: [] }));
+    const hosts = useHostsStore();
+    hosts.adopt(hal.id, hal.url, null, null);
+    await hosts.rename(hal.id, "render box");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.savedHosts[0]).toMatchObject({ id: hal.id, url: hal.url, name: "render box" });
+  });
+
   it("demoteToExtra switches to built-in first, then keeps the host live as an extra", async () => {
     // Regression (Copilot review): connect() early-returns while the host is
     // still the primary, so the engine switch must happen before the re-add.

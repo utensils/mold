@@ -131,7 +131,8 @@ function hostMenu(host: HostView): MenuEntry[] {
   entries.push({
     label: "Copy URL",
     disabled: !host.baseUrl,
-    action: () => void navigator.clipboard.writeText(host.baseUrl ?? ""),
+    action: () =>
+      void navigator.clipboard.writeText(host.baseUrl ?? "").then(() => toasts.push("Copied")),
   });
   if (host.kind === "remote") {
     entries.push({
