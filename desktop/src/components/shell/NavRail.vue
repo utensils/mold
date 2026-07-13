@@ -12,7 +12,6 @@ import {
 import RenameDialog from "./RenameDialog.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useComposerStore } from "../../stores/composer";
-import { useConnectionStore } from "../../stores/connection";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
@@ -21,7 +20,6 @@ import { ipc, type DiscoveredHost } from "../../lib/ipc";
 
 const router = useRouter();
 const appPrefs = useAppPrefsStore();
-const conn = useConnectionStore();
 const generation = useGenerationStore();
 const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
@@ -91,7 +89,7 @@ async function openHostUrl(url: string) {
     const { openUrl } = await import("@tauri-apps/plugin-opener");
     await openUrl(url);
   } catch {
-    window.open(url, "_blank");
+    window.open(url, "_blank", "noopener");
   }
 }
 
@@ -101,16 +99,6 @@ async function forgetHost(host: HostView) {
   await hosts.disconnect(host.id);
   await ipc.forgetRemoteHost(host.id);
   toasts.push(`Forgot ${host.label}`);
-}
-
-/** Keep the host live as an extra while the primary returns to built-in. */
-async function switchToBuiltIn(host: HostView) {
-  try {
-    if (host.baseUrl) await hosts.connect(host.baseUrl, host.apiKey, host.label);
-  } catch {
-    // Unreachable right now — the saved entry still allows reconnect later.
-  }
-  await conn.useLocal();
 }
 
 function onRenameSave(name: string) {
@@ -158,7 +146,7 @@ function hostMenu(host: HostView): MenuEntry[] {
     if (host.kind === "remote") {
       entries.push({
         label: "Switch to built-in engine",
-        action: () => void switchToBuiltIn(host),
+        action: () => void hosts.demoteToExtra(host),
       });
     }
     entries.push({ label: "Manage in Settings", action: () => void router.push("/settings") });
