@@ -292,6 +292,20 @@ describe("remove", () => {
 });
 
 describe("refreshHost", () => {
+  it("a primary-bucket delete also evicts the default primary cache slots", async () => {
+    // ImagePickerModal/StageCard render primary media without a cacheKey.
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("a.png", 1)]);
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 200 }) as never);
+
+    await gallery.remove("local", "a.png");
+
+    const keys = vi.mocked(evictMedia).mock.calls.map(([, key]) => key);
+    expect(keys).toContain("local");
+    expect(keys).toContain(undefined);
+  });
+
   it("evicts cached media for prints that vanished out-of-band on refetch", async () => {
     // Copilot review on #393: refetch replaced items without releasing the
     // removed prints' blob URLs — a leak when another client deletes.

@@ -330,9 +330,10 @@ watch(
   () => route.query.host,
   (host) => {
     if (host === undefined) return;
-    const key = typeof host === "string" ? host : null;
-    gallery.filter =
-      key && (key === "all" || gallery.sources.some((s) => s.key === key)) ? key : "all";
+    // Verbatim: `filtered` falls back to All while the key's source doesn't
+    // exist yet (e.g. the host is still connecting) and narrows on its own
+    // the moment the source appears.
+    gallery.filter = typeof host === "string" && host ? host : "all";
   },
   { immediate: true },
 );
