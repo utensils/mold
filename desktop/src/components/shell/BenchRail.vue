@@ -1,21 +1,55 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useConnectionStore } from "../../stores/connection";
+import { useGenerationStore } from "../../stores/generation";
+import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import { apiJson } from "../../lib/api/client";
 import { sseStream } from "../../lib/api/sse";
 import { formatGB, percent, vramLevel } from "../../lib/format";
+import { pickDisplayHost } from "../../lib/hosts";
 import { shouldRestartEmbeddedEngine } from "../../lib/connectionRecovery";
 import type { ResourceSnapshot, ServerStatus } from "../../lib/api/types";
 
 const conn = useConnectionStore();
+const generation = useGenerationStore();
+const hosts = useHostsStore();
 const snapshot = ref<ResourceSnapshot | null>(null);
 const status = ref<ServerStatus | null>(null);
 
-let abort: AbortController | null = null;
+let resourceAbort: AbortController | null = null;
 let statusTimer: ReturnType<typeof setInterval> | null = null;
 
-const gpu = computed(() => snapshot.value?.gpus[0] ?? null);
+/**
+ * The bar follows the action: while a routed job is live, it mirrors THAT
+ * host (chip, VRAM, queue, models) and reverts to the primary once the last
+ * remote job settles. The embedded-engine recovery poll below stays bound to
+ * the primary connection no matter what is displayed.
+ */
+const displayHost = computed(() => {
+  const liveIds = generation.jobs
+    .filter((j) => j.status !== "complete" && j.status !== "error")
+    .map((j) => j.hostId);
+  const primaryId = hosts.primaryHost?.id ?? "local";
+  const id = pickDisplayHost(liveIds, primaryId);
+  return hosts.all.find((h) => h.id === id) ?? hosts.primaryHost;
+});
+const displayingRemote = computed(() => !!displayHost.value && !displayHost.value.primary);
+
+/** MB-based `/api/status` GPU summary as a snapshot-shaped fallback, for
+ *  display hosts whose resources stream is unavailable (older servers). */
+const telemetryGpu = computed(() => {
+  if (!displayingRemote.value) return null;
+  const info = hosts.telemetry[displayHost.value!.id]?.gpuInfo;
+  if (!info) return null;
+  return {
+    name: info.name,
+    vram_total: info.vram_total_mb * 1024 * 1024,
+    vram_used: info.vram_used_mb * 1024 * 1024,
+  };
+});
+
+const gpu = computed(() => snapshot.value?.gpus[0] ?? telemetryGpu.value);
 const vramPct = computed(() =>
   gpu.value ? percent(gpu.value.vram_used, gpu.value.vram_total) : 0,
 );
@@ -26,6 +60,7 @@ const vramCritical = computed(
 const engineChip = computed(() => {
   if (conn.status === "starting") return "⌁ starting…";
   if (conn.status === "error") return "⌁ engine error";
+  if (displayingRemote.value) return `⇄ ${displayHost.value!.label}`;
   switch (conn.mode) {
     case "local":
       return "⌁ local";
@@ -38,8 +73,27 @@ const engineChip = computed(() => {
   }
 });
 
+/** Queue + loaded models for whichever host the bar is displaying. */
+const displayStatus = computed(() => {
+  if (displayingRemote.value) {
+    const t = hosts.telemetry[displayHost.value!.id];
+    return {
+      modelsLoaded: t?.modelsLoaded ?? [],
+      queueDepth: t?.queueDepth ?? null,
+      queueCapacity: t?.queueCapacity ?? null,
+    };
+  }
+  return {
+    modelsLoaded: status.value?.models_loaded ?? [],
+    queueDepth: status.value?.queue_depth ?? null,
+    queueCapacity: status.value?.queue_capacity ?? null,
+  };
+});
+
 let statusFailures = 0;
 
+/** PRIMARY-only status poll — this drives embedded-engine recovery and must
+ *  never be re-targeted at the display host. */
 async function refreshStatus() {
   if (!conn.ready) return;
   try {
@@ -62,11 +116,18 @@ async function refreshStatus() {
   }
 }
 
-function startTelemetry() {
-  stopTelemetry();
-  abort = new AbortController();
+/** Live VRAM/RAM for the DISPLAY host; reopened whenever it changes. */
+function startResourceStream() {
+  resourceAbort?.abort();
+  resourceAbort = new AbortController();
+  snapshot.value = null;
+  const host = displayHost.value;
   void sseStream("/api/resources/stream", {
-    signal: abort.signal,
+    signal: resourceAbort.signal,
+    // Default (primary) target unless the bar is following a remote host.
+    ...(displayingRemote.value && host?.baseUrl
+      ? { target: { baseUrl: host.baseUrl, apiKey: host.apiKey } }
+      : {}),
     onEvent(event, data) {
       if (event === "snapshot") {
         try {
@@ -77,13 +138,18 @@ function startTelemetry() {
       }
     },
   });
+}
+
+function startTelemetry() {
+  stopTelemetry();
+  startResourceStream();
   void refreshStatus();
   statusTimer = setInterval(refreshStatus, 10_000);
 }
 
 function stopTelemetry() {
-  abort?.abort();
-  abort = null;
+  resourceAbort?.abort();
+  resourceAbort = null;
   if (statusTimer) clearInterval(statusTimer);
   statusTimer = null;
   snapshot.value = null;
@@ -93,6 +159,14 @@ function stopTelemetry() {
 watch(
   () => conn.ready,
   (ready) => (ready ? startTelemetry() : stopTelemetry()),
+);
+// Only the resources stream follows the display host; the status poll stays
+// on the primary (recovery invariant).
+watch(
+  () => displayHost.value?.id,
+  () => {
+    if (conn.ready) startResourceStream();
+  },
 );
 onMounted(() => {
   if (conn.ready) startTelemetry();
@@ -108,8 +182,16 @@ onUnmounted(stopTelemetry);
   >
     <span
       class="data-mono"
-      :class="conn.status === 'error' ? 'text-stop' : conn.ready ? 'text-ink-2' : 'text-ink-3'"
-      :title="conn.error ?? conn.baseUrl ?? undefined"
+      :class="
+        conn.status === 'error'
+          ? 'text-stop'
+          : displayingRemote
+            ? 'text-halide'
+            : conn.ready
+              ? 'text-ink-2'
+              : 'text-ink-3'
+      "
+      :title="conn.error ?? displayHost?.baseUrl ?? conn.baseUrl ?? undefined"
       role="status"
       aria-live="polite"
     >
@@ -136,12 +218,12 @@ onUnmounted(stopTelemetry);
     </span>
 
     <div class="flex-1" />
-    <span v-if="status?.models_loaded?.length" class="data-mono text-ink-3">
-      {{ status.models_loaded.join(" · ") }}
+    <span v-if="displayStatus.modelsLoaded.length" class="data-mono text-ink-3">
+      {{ displayStatus.modelsLoaded.join(" · ") }}
     </span>
     <span class="edge-code">
-      QUEUE {{ status?.queue_depth ?? "—"
-      }}<template v-if="status?.queue_capacity">/{{ status.queue_capacity }}</template>
+      QUEUE {{ displayStatus.queueDepth ?? "—"
+      }}<template v-if="displayStatus.queueCapacity">/{{ displayStatus.queueCapacity }}</template>
     </span>
   </footer>
 </template>

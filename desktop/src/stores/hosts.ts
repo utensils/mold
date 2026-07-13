@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { hostIdFromUrl, normalizeHostUrl, pickAutoHost } from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
-import type { ServerStatus } from "../lib/api/types";
+import type { GpuInfo, ServerStatus } from "../lib/api/types";
 import { useConnectionStore } from "./connection";
 import { useToastStore } from "./toasts";
 
@@ -37,6 +37,11 @@ interface HostTelemetry {
   queueDepth: number | null;
   queueCapacity: number | null;
   version: string | null;
+  /** Loaded-model names from `/api/status` (absent before the first poll). */
+  modelsLoaded?: string[];
+  /** GPU summary from `/api/status`; the status bar's fallback when a host's
+   *  resources stream is unavailable. */
+  gpuInfo?: GpuInfo | null;
 }
 
 /** Where a batch will run: resolved just before submit. */
@@ -295,6 +300,8 @@ export const useHostsStore = defineStore("hosts", {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
               version: status.version ?? null,
+              modelsLoaded: status.models_loaded ?? [],
+              gpuInfo: status.gpu_info ?? null,
             };
             const extra = this.extras.find((h) => h.id === host.id);
             if (extra && extra.status !== "ready") {
