@@ -45,6 +45,8 @@ beforeEach(() => {
     connectedHostIds: [],
     generateTargetHost: null,
     saveRemoteOutputs: true,
+    navRailWidth: null,
+    generateParamsWidth: null,
   };
 });
 

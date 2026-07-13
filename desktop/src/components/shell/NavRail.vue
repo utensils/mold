@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { RouterLink, useRouter } from "vue-router";
 import DevelopCanvas from "../../lib/develop/DevelopCanvas.vue";
+import PanelResizeHandle from "./PanelResizeHandle.vue";
 import {
   useGenerationStore,
   jobPhase,
@@ -16,6 +17,7 @@ import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import { hostIdFromUrl } from "../../lib/hosts";
+import { dragWidth } from "../../lib/panelResize";
 import { ipc, type DiscoveredHost } from "../../lib/ipc";
 
 const router = useRouter();
@@ -25,6 +27,28 @@ const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
 const hosts = useHostsStore();
 const toasts = useToastStore();
+
+// Live width while dragging the right-edge handle; null follows the
+// persisted preference (appPrefs.navRailWidth). Persistence happens only on
+// commit, never per pointermove.
+const draftRailWidth = ref<number | null>(null);
+const railWidth = computed(() => draftRailWidth.value ?? appPrefs.navRailWidth);
+
+function onRailResize(dx: number) {
+  draftRailWidth.value = dragWidth("navRail", appPrefs.navRailWidth, dx, "right");
+}
+
+async function onRailCommit() {
+  const width = draftRailWidth.value;
+  if (width === null) return;
+  if (width !== appPrefs.navRailWidth) await appPrefs.update({ navRailWidth: width });
+  draftRailWidth.value = null;
+}
+
+function onRailReset() {
+  draftRailWidth.value = null;
+  void appPrefs.update({ navRailWidth: null });
+}
 
 // Quiet background mDNS scan so nearby `mold serve` instances surface in the
 // rail without a trip to Settings.
@@ -250,7 +274,18 @@ function jobMenu(job: Job): MenuEntry[] {
 </script>
 
 <template>
-  <nav class="border-edge flex w-[208px] flex-col border-r bg-bench pt-2 pb-2" aria-label="Primary">
+  <nav
+    class="border-edge relative flex flex-col border-r bg-bench pt-2 pb-2"
+    :style="{ width: `${railWidth}px` }"
+    aria-label="Primary"
+  >
+    <PanelResizeHandle
+      class="absolute inset-y-0 -right-0.5 z-10"
+      label="Resize sidebar"
+      @resize="onRailResize"
+      @commit="onRailCommit"
+      @reset="onRailReset"
+    />
     <RouterLink
       v-for="d in destinations"
       :key="d.route"

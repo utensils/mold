@@ -11,8 +11,10 @@ import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
 import HostSelector from "../components/generate/HostSelector.vue";
 import SourceGlyph from "../components/generate/SourceGlyph.vue";
+import PanelResizeHandle from "../components/shell/PanelResizeHandle.vue";
 import { modelSource } from "../lib/modelSource";
 import { modelAvailabilityTag } from "../lib/hosts";
+import { dragWidth } from "../lib/panelResize";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
@@ -59,6 +61,27 @@ const previewRegion = ref<HTMLDivElement | null>(null);
 const previewFrameSize = ref({ width: 0, height: 0 });
 const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
 const pickerOpen = ref(false);
+
+// Live inspector width while dragging its left-edge handle; null follows the
+// persisted preference (appPrefs.generateParamsWidth). Persist only on commit.
+const draftAsideWidth = ref<number | null>(null);
+const asideWidth = computed(() => draftAsideWidth.value ?? appPrefs.generateParamsWidth);
+
+function onAsideResize(dx: number) {
+  draftAsideWidth.value = dragWidth("generateParams", appPrefs.generateParamsWidth, dx, "left");
+}
+
+async function onAsideCommit() {
+  const width = draftAsideWidth.value;
+  if (width === null) return;
+  if (width !== appPrefs.generateParamsWidth) await appPrefs.update({ generateParamsWidth: width });
+  draftAsideWidth.value = null;
+}
+
+function onAsideReset() {
+  draftAsideWidth.value = null;
+  void appPrefs.update({ generateParamsWidth: null });
+}
 
 const job = computed(() => generation.active);
 const siblings = computed(() => generation.siblings);
@@ -434,7 +457,8 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
   <div
     v-else
     data-test="generate-layout"
-    class="grid h-full min-h-0 grid-cols-[1fr_320px] overflow-hidden"
+    class="relative grid h-full min-h-0 overflow-hidden"
+    :style="{ gridTemplateColumns: `1fr ${asideWidth}px` }"
   >
     <!-- Canvas + composer -->
     <div data-test="generate-workbench" class="flex min-h-0 min-w-0 flex-col overflow-hidden p-6">
@@ -645,5 +669,16 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
       />
       <TemplatesPanel :form="form" @load="loadTemplate" />
     </aside>
+
+    <!-- The aside scrolls, so its resize handle lives on the (relative) grid
+         container, pinned to the column boundary and straddling the border. -->
+    <PanelResizeHandle
+      class="absolute inset-y-0 z-10 translate-x-1/2"
+      :style="{ right: `${asideWidth}px` }"
+      label="Resize inspector"
+      @resize="onAsideResize"
+      @commit="onAsideCommit"
+      @reset="onAsideReset"
+    />
   </div>
 </template>
