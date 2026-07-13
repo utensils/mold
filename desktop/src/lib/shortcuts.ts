@@ -54,7 +54,8 @@ export function allowsNativeSelectAll(el: Element | null): boolean {
   if (tag === "input") return TEXT_INPUT_TYPES.has((el as HTMLInputElement).type || "text");
   if (tag === "textarea") return true;
   if ((el as HTMLElement).isContentEditable) return true;
-  return el.closest?.("[data-selectable], [contenteditable='true']") != null;
+  // isContentEditable above already covers contenteditable subtrees.
+  return el.closest?.("[data-selectable]") != null;
 }
 
 /**
