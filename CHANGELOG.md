@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Desktop post-generation upscaling now auto-downloads on multi-GPU hosts.** A first-use Real-ESRGAN selection is pulled and configured by the remote server before its queue dispatches the generation to a GPU worker, matching the existing single-worker and standalone-upscale behavior instead of briefly failing with “upscaler model … is not downloaded.”
 - **Desktop: model names stay fully readable in the Generate picker.** Long installed-model names now wrap instead of ending in an ellipsis, with multi-host availability moved to a secondary line so it no longer crowds out the model identity. The selected model control also grows when needed rather than clipping its value.
+- **Desktop generation sizes now recognize model-native recommendations.** Qwen-Image and Qwen-Image-Edit expose their full recommended bucket list, including native 1328×1328, instead of calling those defaults Custom. The Size control also shows a live aspect-ratio/orientation diagram for preset and custom dimensions, and the empty Generate canvas now presents a clear first-print placeholder instead of an ambiguous black surface.
 
 ## [0.17.0] - 2026-07-13
 
