@@ -121,10 +121,12 @@ const stickyHostMissingModel = computed<string | null>(() => {
   return host.label;
 });
 
-// Availability data is demand-driven: fetch when the picker opens and when
-// the set of ready hosts changes (no global timers).
+// Availability data is demand-driven: fetch on mount / when the set of ready
+// hosts changes, and force-fresh whenever the picker opens (a model pulled on
+// an extra host by another client shows up the moment the user looks). No
+// global timers.
 watch(pickerOpen, (open) => {
-  if (open) void hostModels.refresh();
+  if (open) void hostModels.refresh(true);
 });
 watch(
   () =>
@@ -133,6 +135,9 @@ watch(
       .map((h) => h.id)
       .join("\n"),
   () => void hostModels.refresh(),
+  // immediate: routing must be model-aware on the FIRST Generate click, not
+  // only after the picker has been opened once (peer review on #390).
+  { immediate: true },
 );
 
 const buttonLabel = computed(() =>

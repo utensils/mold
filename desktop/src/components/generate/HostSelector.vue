@@ -6,8 +6,8 @@ import { useHostsStore, type HostView } from "../../stores/hosts";
 /**
  * Where the next batch runs. Only rendered with more than one live host;
  * the pick is sticky across launches (null = Auto, the least-busy host;
- * "capable" = the strongest GPU — a sentinel that can't collide with the
- * URL-derived host ids).
+ * "capable" = the strongest GPU — a reserved id, like "local"; a real host
+ * would have to be literally named `capable` on port 80 to collide).
  */
 const hosts = useHostsStore();
 const prefs = useAppPrefsStore();
