@@ -235,10 +235,15 @@ wire types as the CLI and web UI:
   hosts can be live simultaneously (**Add as extra host** in Settings →
   Engine, or the **+** next to a detected server in the sidebar's HOSTS
   section). With more than one live host, the Generate inspector grows a
-  **Host** selector: pick one explicitly, or leave it on **Auto** to route
-  each batch to the least-busy host by live queue depth. Jobs stream
-  progress from — and cancel against — the host they queued on, so a long
-  LTX-2 render on a CUDA box never blocks quick local prints. Extra
+  **Host** selector: pick one explicitly, leave it on **Auto** to route
+  each batch to the least-busy host by live queue depth, or choose **Most
+  capable** to always target the strongest GPU (CUDA over Metal, then most
+  VRAM, then shallowest queue). Both automatic modes prefer hosts that
+  already have the selected model installed, and the model picker lists
+  every connected host's models — one that only lives on an extra host is
+  tagged with the host that has it, and routing there just works. Jobs
+  stream progress from — and cancel against — the host they queued on, so a
+  long LTX-2 render on a CUDA box never blocks quick local prints. Extra
   connections are remembered and restored on the next launch.
 
 ## Development

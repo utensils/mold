@@ -911,6 +911,11 @@ pub struct GpuInfo {
     pub vram_total_mb: u64,
     #[schema(example = 8192)]
     pub vram_used_mb: u64,
+    /// Compute backend driving this GPU. Additive: absent from older peers
+    /// (≤ 0.16), and `None` is elided so older clients keep the old shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "cuda")]
+    pub backend: Option<GpuBackend>,
 }
 
 /// GPU selection for multi-GPU setups.
@@ -2755,6 +2760,40 @@ mod tests {
         let metal = serde_json::to_string(&GpuBackend::Metal).unwrap();
         assert_eq!(cuda, "\"cuda\"");
         assert_eq!(metal, "\"metal\"");
+    }
+
+    #[test]
+    fn gpu_info_without_backend_still_deserializes() {
+        // Older peers (≤ 0.16) emit GpuInfo without `backend` — the field is
+        // additive and must default to None.
+        let legacy: GpuInfo = serde_json::from_str(
+            r#"{"name":"NVIDIA GeForce RTX 4090","vram_total_mb":24564,"vram_used_mb":8192}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.name, "NVIDIA GeForce RTX 4090");
+        assert_eq!(legacy.backend, None);
+    }
+
+    #[test]
+    fn gpu_info_backend_none_is_skipped_and_some_roundtrips() {
+        let legacy = GpuInfo {
+            name: "NVIDIA GeForce RTX 4090".to_string(),
+            vram_total_mb: 24564,
+            vram_used_mb: 8192,
+            backend: None,
+        };
+        // None is elided so older clients keep seeing the exact old shape.
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert!(!json.contains("backend"), "json was: {json}");
+
+        let tagged = GpuInfo {
+            backend: Some(GpuBackend::Cuda),
+            ..legacy
+        };
+        let json = serde_json::to_string(&tagged).unwrap();
+        assert!(json.contains("\"backend\":\"cuda\""), "json was: {json}");
+        let back: GpuInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.backend, Some(GpuBackend::Cuda));
     }
 
     #[test]
