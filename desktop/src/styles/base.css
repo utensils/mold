@@ -39,6 +39,7 @@ body {
   font-size: var(--text-body);
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
   user-select: none;
   cursor: default;
 }
@@ -47,6 +48,7 @@ body {
 input,
 textarea,
 [data-selectable] {
+  -webkit-user-select: text;
   user-select: text;
   cursor: auto;
 }
