@@ -281,7 +281,7 @@ function jobMenu(job: Job): MenuEntry[] {
   >
     <PanelResizeHandle
       class="absolute inset-y-0 -right-0.5 z-10"
-      ariaLabel="Resize sidebar"
+      label="Resize sidebar"
       @resize="onRailResize"
       @commit="onRailCommit"
       @reset="onRailReset"

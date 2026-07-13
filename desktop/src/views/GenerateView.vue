@@ -602,7 +602,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
     <PanelResizeHandle
       class="absolute inset-y-0 z-10 translate-x-1/2"
       :style="{ right: `${asideWidth}px` }"
-      ariaLabel="Resize inspector"
+      label="Resize inspector"
       @resize="onAsideResize"
       @commit="onAsideCommit"
       @reset="onAsideReset"

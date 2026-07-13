@@ -3,7 +3,7 @@ import { mount } from "@vue/test-utils";
 import PanelResizeHandle from "./PanelResizeHandle.vue";
 
 function mountHandle() {
-  return mount(PanelResizeHandle, { props: { ariaLabel: "Resize sidebar" } });
+  return mount(PanelResizeHandle, { props: { label: "Resize sidebar" } });
 }
 
 describe("PanelResizeHandle a11y", () => {
@@ -24,19 +24,19 @@ describe("PanelResizeHandle drag lifecycle", () => {
     expect(wrapper.emitted("resize")).toBeUndefined();
 
     await wrapper.trigger("pointerdown", { button: 0, pointerId: 1, clientX: 100 });
-    await wrapper.trigger("pointermove", { clientX: 130 });
-    await wrapper.trigger("pointermove", { clientX: 90 });
+    await wrapper.trigger("pointermove", { buttons: 1, clientX: 130 });
+    await wrapper.trigger("pointermove", { buttons: 1, clientX: 90 });
     expect(wrapper.emitted("resize")).toEqual([[30], [-10]]);
   });
 
   it("emits commit on pointerup and stops tracking moves", async () => {
     const wrapper = mountHandle();
     await wrapper.trigger("pointerdown", { button: 0, pointerId: 1, clientX: 100 });
-    await wrapper.trigger("pointermove", { clientX: 140 });
+    await wrapper.trigger("pointermove", { buttons: 1, clientX: 140 });
     await wrapper.trigger("pointerup", { pointerId: 1 });
     expect(wrapper.emitted("commit")).toHaveLength(1);
 
-    await wrapper.trigger("pointermove", { clientX: 300 });
+    await wrapper.trigger("pointermove", { buttons: 1, clientX: 300 });
     expect(wrapper.emitted("resize")).toEqual([[40]]);
   });
 
@@ -51,6 +51,17 @@ describe("PanelResizeHandle drag lifecycle", () => {
     const wrapper = mountHandle();
     await wrapper.trigger("pointerdown", { button: 2, pointerId: 1, clientX: 100 });
     await wrapper.trigger("pointermove", { clientX: 130 });
+    expect(wrapper.emitted("resize")).toBeUndefined();
+  });
+
+  it("self-heals a lost pointer capture (all buttons already up)", async () => {
+    const wrapper = mountHandle();
+    await wrapper.trigger("pointerdown", { button: 0, pointerId: 1, clientX: 100 });
+    await wrapper.trigger("pointermove", { clientX: 130, buttons: 0 });
+    // No phantom resize; the drag ends and commits once.
+    expect(wrapper.emitted("resize")).toBeUndefined();
+    expect(wrapper.emitted("commit")).toHaveLength(1);
+    await wrapper.trigger("pointermove", { clientX: 150, buttons: 0 });
     expect(wrapper.emitted("resize")).toBeUndefined();
   });
 

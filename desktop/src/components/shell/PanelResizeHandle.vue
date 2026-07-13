@@ -4,10 +4,16 @@ import { ref } from "vue";
 /**
  * Thin vertical drag handle for resizable panels. Emits raw horizontal
  * deltas from the pointerdown origin — the parent owns the width math
- * (lib/panelResize.ts) and persistence. The parent also positions it
- * (typically `absolute inset-y-0` on a panel edge).
+ * (lib/panelResize.ts) and persistence.
+ *
+ * Contract: the CALLER must position the root (e.g. `absolute inset-y-0`
+ * on a panel edge) — the widened `::after` hit strip anchors to that
+ * positioned root; an unpositioned instance would anchor the strip to the
+ * nearest positioned ancestor instead.
  */
-defineProps<{ ariaLabel: string }>();
+// `label` (not `ariaLabel`): a prop named like the reserved aria attribute
+// invites kebab/camel binding confusion at call sites.
+defineProps<{ label: string }>();
 
 const emit = defineEmits<{
   resize: [dx: number];
@@ -34,6 +40,9 @@ function onPointerDown(e: PointerEvent) {
 
 function onPointerMove(e: PointerEvent) {
   if (!dragging.value) return;
+  // Self-heal a lost capture: if every button is already up, the pointerup
+  // never reached us — end the drag instead of emitting phantom resizes.
+  if (e.buttons === 0) return onPointerEnd(e);
   emit("resize", e.clientX - startX);
 }
 
@@ -54,7 +63,7 @@ function onPointerEnd(e: PointerEvent) {
   <div
     role="separator"
     aria-orientation="vertical"
-    :aria-label="ariaLabel"
+    :aria-label="label"
     class="w-1 shrink-0 touch-none cursor-col-resize transition-colors duration-100 after:absolute after:inset-y-0 after:-inset-x-1 after:content-['']"
     :class="
       dragging
