@@ -25,6 +25,11 @@ fn preferred_linux_gdk_backend(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn preferred_linux_dmabuf_setting(configured: Option<&str>) -> Option<&'static str> {
+    configured.is_none().then_some("1")
+}
+
 pub fn run() {
     #[cfg(target_os = "linux")]
     if let Some(backend) = preferred_linux_gdk_backend(
@@ -35,6 +40,16 @@ pub fn run() {
         // WebKitGTK can hit compositor protocol errors on some Wayland stacks.
         // XWayland is widely available and users can still override GDK_BACKEND.
         std::env::set_var("GDK_BACKEND", backend);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(setting) = preferred_linux_dmabuf_setting(
+        std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER")
+            .ok()
+            .as_deref(),
+    ) {
+        // WebKitGTK's DMA-BUF renderer can create a native shell but leave the
+        // webview blank when GBM allocation fails under NVIDIA compositors.
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", setting);
     }
 
     // One-shot config.toml → DB migration + DB overlay on Config::load,
@@ -155,7 +170,7 @@ pub fn run() {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::preferred_linux_gdk_backend;
+    use super::{preferred_linux_dmabuf_setting, preferred_linux_gdk_backend};
 
     #[test]
     fn linux_prefers_xwayland_when_both_displays_are_available() {
@@ -171,5 +186,11 @@ mod tests {
             preferred_linux_gdk_backend(Some("wayland-1"), None, None),
             None
         );
+    }
+
+    #[test]
+    fn linux_disables_webkit_dmabuf_unless_explicitly_configured() {
+        assert_eq!(preferred_linux_dmabuf_setting(None), Some("1"));
+        assert_eq!(preferred_linux_dmabuf_setting(Some("0")), None);
     }
 }

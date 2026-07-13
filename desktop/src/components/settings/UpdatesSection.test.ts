@@ -134,6 +134,8 @@ describe("UpdatesSection", () => {
     const { updater, wrapper } = mountSection();
     updater.phase = "unsupported";
     await wrapper.vm.$nextTick();
-    expect(wrapper.text()).toContain("Automatic updates are currently available only in signed macOS builds");
+    expect(wrapper.text()).toContain(
+      "Automatic updates are currently available only in signed macOS builds",
+    );
   });
 });

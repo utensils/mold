@@ -158,6 +158,17 @@
             [ pkgs.openssl ] ++ lib.optionals isLinux desktopLinuxBuildInputs
           );
 
+          desktopLinuxRuntimeInputs = lib.closePropagation (
+            desktopLinuxBuildInputs
+            ++ (with pkgs; [
+              atk
+              cairo
+              gdk-pixbuf
+              glib
+              pango
+            ])
+          );
+
           desktopPkgConfigPath = lib.concatStringsSep ":" [
             (lib.makeSearchPath "lib/pkgconfig" (map lib.getDev desktopPkgConfigInputs))
             (lib.makeSearchPath "share/pkgconfig" (map lib.getDev desktopPkgConfigInputs))
@@ -638,6 +649,29 @@
               export MOLD_TEST_RPATH
               assertMoldRunpath
             '';
+          }
+          // lib.optionalAttrs isLinux {
+            desktop-runtime-closure = pkgs.runCommand "mold-desktop-runtime-closure-check" { } ''
+              set -eu
+              runtime_path=${lib.escapeShellArg (lib.makeLibraryPath desktopLinuxRuntimeInputs)}
+              for library in libgdk_pixbuf-2.0.so.0 libcairo.so.2 libglib-2.0.so.0 libgio-2.0.so.0; do
+                found=
+                old_ifs=$IFS
+                IFS=:
+                for directory in $runtime_path; do
+                  if [ -e "$directory/$library" ]; then
+                    found=1
+                    break
+                  fi
+                done
+                IFS=$old_ifs
+                if [ -z "$found" ]; then
+                  echo "desktop runtime closure is missing $library" >&2
+                  exit 1
+                fi
+              done
+              touch "$out"
+            '';
           };
 
           apps.default = {
@@ -761,7 +795,7 @@
                   # the stub and fail at runtime with CUDA_ERROR_STUB_LIBRARY.
                   "/run/opengl-driver/lib:"
                   + lib.makeLibraryPath (
-                    desktopLinuxBuildInputs
+                    desktopLinuxRuntimeInputs
                     ++ [
                       pkgs.stdenv.cc.cc.lib
                       pkgs.cudaPackages.cuda_cudart
@@ -777,7 +811,7 @@
                 value =
                   "/run/opengl-driver/lib:"
                   + lib.makeLibraryPath (
-                    desktopLinuxBuildInputs
+                    desktopLinuxRuntimeInputs
                     ++ [
                       pkgs.stdenv.cc.cc.lib
                       pkgs.cudaPackages.cuda_cudart
