@@ -194,14 +194,16 @@ onMounted(async () => {
     await appWindow.maximize();
     await appWindow.show();
   }
-  await Promise.all([updaterStartup, connectionStartup]).catch(() => {});
+  // Recovery ownership must settle before health confirmation, but engine and
+  // remote-host startup are independent of whether this app build can boot.
+  // Do not let a slow 30-second engine probe race the rollback watchdog.
+  await updaterStartup.catch(() => {});
+  await waitForVisibleShellPaint();
+  await updater.confirmReady().catch(() => {});
+  await connectionStartup.catch(() => {});
   // Extra hosts reconnect after the primary connection settles; failures
   // surface as sidebar rows + a toast, never as a blocked launch.
   void hostsStore.init();
-  await waitForVisibleShellPaint();
-  // The health token starts a backend probation window only after preferences,
-  // connection startup, and two visible shell frames have completed.
-  await updater.confirmReady().catch(() => {});
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
