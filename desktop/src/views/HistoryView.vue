@@ -3,11 +3,21 @@ import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import EmptyState from "../components/shell/EmptyState.vue";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
-import { clearHistory, fetchHistory, groupByDay, type HistoryEntry } from "../lib/api/history";
+import HostFilterChips from "../components/shell/HostFilterChips.vue";
+import {
+  clearHistoryOn,
+  clearScope,
+  fetchHistoryAll,
+  groupByDay,
+  type HistoryEntry,
+  type HistoryHostTarget,
+  type HostHistoryEntry,
+} from "../lib/api/history";
 import { galleryMediaPath } from "../lib/gallery/media";
 import { useConnectionStore } from "../stores/connection";
 import { useComposerStore } from "../stores/composer";
 import { useGalleryStore } from "../stores/gallery";
+import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
@@ -19,6 +29,7 @@ const router = useRouter();
 const conn = useConnectionStore();
 const composer = useComposerStore();
 const gallery = useGalleryStore();
+const hosts = useHostsStore();
 const models = useModelStore();
 const toasts = useToastStore();
 const contextMenu = useContextMenuStore();
@@ -31,11 +42,16 @@ const contextMenu = useContextMenuStore();
 const tab = ref<"runs" | "prompts">("runs");
 const query = ref("");
 
+/** The Gallery's chip filter narrows both tabs; row chips only in All view. */
+const showChips = computed(() => gallery.chipCounts.length > 1);
+const showBadges = computed(() => gallery.filter === "all" && gallery.chipCounts.length > 1);
+
 // ── Runs (gallery-backed, merged across every connected host) ──────────────
 
 const runs = computed<MergedPrint[]>(() => {
   const q = query.value.trim().toLowerCase();
-  const entries = gallery.merged;
+  // Same filtered set the Gallery renders, so the two views can't drift.
+  const entries = gallery.filtered;
   if (!q) return entries;
   return entries.filter(
     (e) =>
@@ -105,35 +121,55 @@ function runMenu(img: GalleryImage): MenuEntry[] {
   ];
 }
 
+// (Re)fetch whenever the gallery's source set changes — mount, the
+// connection coming up, hosts joining mid-session. History must be complete
+// even if the Gallery view was never opened; already-settled buckets are
+// left alone (gallery.loaded goes false only when a source lacks one).
 watch(
-  () => conn.ready,
-  (ready) => {
-    if (ready && !gallery.loaded) void gallery.fetchAll();
+  () => gallery.sources.map((s) => s.key).join("|"),
+  () => {
+    if (!gallery.loaded) void gallery.fetchAll();
   },
   { immediate: true },
 );
 
-// ── Prompts (the existing log) ──────────────────────────────────────────────
+// ── Prompts (the prompt log, fanned out over every ready host) ─────────────
 
-const entries = ref<HistoryEntry[]>([]);
+/** Hosts the prompt log reads from: every ready host, primary included. */
+const historyHosts = computed<HistoryHostTarget[]>(() =>
+  hosts.all.flatMap((h) =>
+    h.status === "ready" && h.baseUrl
+      ? [{ hostId: h.id, label: h.label, target: { baseUrl: h.baseUrl, apiKey: h.apiKey } }]
+      : [],
+  ),
+);
+
+const promptEntries = ref<HostHistoryEntry[]>([]);
+/** Hosts whose GET /api/history succeeded on the last load. */
+const supportedHostIds = ref<string[]>([]);
 const loaded = ref(false);
 const unavailable = ref(false);
 const confirmingClear = ref(false);
 
-const groups = computed(() => groupByDay(entries.value));
+/** The chip filter applies here too ("local" = the built-in engine's id;
+ *  a remote primary's This-Mac IPC bucket has no prompt log — empty). */
+const visiblePrompts = computed<HostHistoryEntry[]>(() =>
+  gallery.filter === "all"
+    ? promptEntries.value
+    : promptEntries.value.filter((e) => e.hostId === gallery.filter),
+);
+
+const groups = computed(() => groupByDay(visiblePrompts.value));
 
 async function load() {
-  try {
-    entries.value = await fetchHistory(query.value);
-    loaded.value = true;
-    unavailable.value = false;
-  } catch (err) {
-    // 404 = talking to a server that predates the history API; 503 = DB off.
-    unavailable.value = true;
-    loaded.value = true;
-    entries.value = [];
-    void err;
-  }
+  const targets = historyHosts.value;
+  const listing = await fetchHistoryAll(targets, query.value);
+  promptEntries.value = listing.entries;
+  supportedHostIds.value = listing.supportedHostIds;
+  // 404 = a server that predates the history API; 503 = DB off. Only when
+  // EVERY host is like that is history truly unavailable.
+  unavailable.value = targets.length > 0 && listing.supportedHostIds.length === 0;
+  loaded.value = true;
 }
 
 let debounce: ReturnType<typeof setTimeout> | null = null;
@@ -145,7 +181,7 @@ watch(query, () => {
 });
 
 watch(
-  [() => conn.ready, tab],
+  [() => conn.ready, tab, () => historyHosts.value.map((h) => h.hostId).join("|")],
   ([ready, current]) => {
     if (ready && current === "prompts") void load();
   },
@@ -180,13 +216,28 @@ function promptMenu(entry: HistoryEntry): MenuEntry[] {
   ];
 }
 
+/** Clear respects the chip filter: one host, or every history-capable host. */
+const clearTargets = computed<HistoryHostTarget[]>(() =>
+  clearScope(
+    gallery.filter,
+    historyHosts.value.filter((h) => supportedHostIds.value.includes(h.hostId)),
+  ),
+);
+
+const clearLabel = computed(() => {
+  if (!confirmingClear.value) return "Clear…";
+  const scope = clearTargets.value;
+  const suffix = scope.length > 1 ? ` on ${scope.map((h) => h.label).join(", ")}` : "";
+  return `Clear ${visiblePrompts.value.length} prompts${suffix}?`;
+});
+
 async function clearAll() {
   if (!confirmingClear.value) {
     confirmingClear.value = true;
     return;
   }
   confirmingClear.value = false;
-  await clearHistory();
+  await Promise.allSettled(clearTargets.value.map((h) => clearHistoryOn(h.target)));
   toasts.push("Cleared history");
   await load();
 }
@@ -240,6 +291,7 @@ const timeOf = (e: HistoryEntry) =>
       <button
         v-if="tab === 'prompts'"
         type="button"
+        data-test="clear-history"
         class="border-edge h-7 rounded-control border px-2.5 text-body transition-colors duration-100"
         :class="
           confirmingClear
@@ -249,9 +301,14 @@ const timeOf = (e: HistoryEntry) =>
         @blur="confirmingClear = false"
         @click="clearAll"
       >
-        {{ confirmingClear ? `Clear ${entries.length} prompts?` : "Clear…" }}
+        {{ clearLabel }}
       </button>
     </header>
+
+    <!-- One origin filter for both tabs — the same chips the Gallery uses -->
+    <div v-if="showChips" class="border-edge flex items-center border-b px-4 py-2">
+      <HostFilterChips v-model="gallery.filter" :chips="gallery.chipCounts" />
+    </div>
 
     <!-- Runs: every finished generation with print + settings -->
     <div v-if="tab === 'runs'" class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
@@ -300,6 +357,13 @@ const timeOf = (e: HistoryEntry) =>
               · S {{ entry.item.metadata.seed }} · {{ entry.item.metadata.steps }} steps
             </div>
           </div>
+          <span
+            v-if="showBadges"
+            data-test="host-badge"
+            class="edge-code max-w-32 shrink-0 truncate"
+          >
+            {{ entry.hostLabel }}
+          </span>
           <span class="data-mono shrink-0 text-caption text-ink-3">{{ runTime(entry.item) }}</span>
           <span
             class="shrink-0 text-caption text-safelight opacity-0 transition-opacity duration-100 group-hover:opacity-100"
@@ -310,15 +374,19 @@ const timeOf = (e: HistoryEntry) =>
       </template>
     </div>
 
-    <!-- Prompts: the raw prompt log -->
+    <!-- Prompts: the raw prompt log, merged across every ready host -->
     <div v-else class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
       <EmptyState
         v-if="loaded && unavailable"
         headline="Prompt history isn't available"
-        detail="This engine doesn't expose prompt history — it may predate the history API or run without its database."
+        :detail="
+          historyHosts.length > 1
+            ? 'None of the connected engines expose prompt history — they may predate the history API or run without their database.'
+            : 'This engine doesn\'t expose prompt history — it may predate the history API or run without its database.'
+        "
       />
       <EmptyState
-        v-else-if="loaded && entries.length === 0 && !query"
+        v-else-if="loaded && visiblePrompts.length === 0 && !query"
         headline="No prompts yet"
         detail="Every prompt you develop is kept here to reuse."
       />
@@ -331,12 +399,20 @@ const timeOf = (e: HistoryEntry) =>
           v-for="(entry, i) in group.entries"
           :key="`${group.label}-${i}`"
           type="button"
+          data-test="prompt-row"
           class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bench"
           @click="usePrompt(entry)"
           @contextmenu="contextMenu.open($event, promptMenu(entry))"
         >
           <span class="min-w-0 flex-1 truncate text-body text-ink" :title="entry.prompt">
             {{ entry.prompt }}
+          </span>
+          <span
+            v-if="showBadges"
+            data-test="host-badge"
+            class="edge-code max-w-32 shrink-0 truncate"
+          >
+            {{ entry.hostLabel }}
           </span>
           <span class="data-mono shrink-0 text-caption text-ink-3">{{ entry.model }}</span>
           <span class="data-mono shrink-0 text-caption text-ink-3">{{ timeOf(entry) }}</span>
@@ -348,7 +424,7 @@ const timeOf = (e: HistoryEntry) =>
         </button>
       </template>
       <p
-        v-if="query && entries.length === 0 && !unavailable"
+        v-if="query && visiblePrompts.length === 0 && !unavailable"
         class="mt-6 text-center text-body text-ink-2"
       >
         No prompts match “{{ query }}”.
