@@ -7,7 +7,9 @@ use tauri::Manager;
 
 use crate::connection::{host_id, normalize_host_url, Conn, ConnectionInfo};
 use crate::server;
-use crate::settings::{self, upsert_saved_host, AppSettings, ConnectionMode, SavedHost};
+use crate::settings::{
+    self, remember_connected_host, upsert_saved_host, AppSettings, ConnectionMode, SavedHost,
+};
 
 pub struct SettingsStore {
     pub path: PathBuf,
@@ -474,6 +476,10 @@ pub async fn set_remote_host(
         current.remote_url = Some(url.clone());
         current.remote_api_key = None;
         upsert_saved_host(&mut current.saved_hosts, &id, &url, name, now_ms);
+        // The primary also joins the boot-reconnect set: switching to another
+        // host (or falling back to the built-in engine) must not make this
+        // one vanish on the next launch.
+        remember_connected_host(&mut current, &id);
         current.clone()
     };
     settings::save(&store.path, &updated).map_err(|e| e.to_string())?;

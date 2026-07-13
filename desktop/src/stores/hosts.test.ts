@@ -7,6 +7,7 @@ const appSettingsSet = vi.fn().mockResolvedValue(undefined);
 const secretGet = vi.fn().mockResolvedValue(null);
 const secretSet = vi.fn().mockResolvedValue(undefined);
 const testRemoteHost = vi.fn();
+const startLocalEngine = vi.fn();
 
 vi.mock("../lib/ipc", () => ({
   inTauri: () => false,
@@ -16,6 +17,7 @@ vi.mock("../lib/ipc", () => ({
     secretGet: (...a: unknown[]) => secretGet(...a),
     secretSet: (...a: unknown[]) => secretSet(...a),
     testRemoteHost: (...a: unknown[]) => testRemoteHost(...a),
+    startLocalEngine: (...a: unknown[]) => startLocalEngine(...a),
   },
 }));
 
@@ -191,13 +193,115 @@ describe("hosts store", () => {
     expect(persisted.savedHosts[0]).toMatchObject({ id: "hal9000-7680", name: "hal9000" });
   });
 
+  it("adopt() lists an unreachable host as an errored extra, idempotently", () => {
+    const hosts = useHostsStore();
+    hosts.adopt("hal9000-7680", "http://hal9000:7680", "key", "hal9000");
+    hosts.adopt("hal9000-7680", "http://hal9000:7680", "key", "hal9000");
+    expect(hosts.extras).toHaveLength(1);
+    const row = hosts.all.find((h) => h.id === "hal9000-7680");
+    expect(row).toMatchObject({ status: "error", primary: false, apiKey: "key" });
+    expect(row?.label).toBe("hal9000");
+  });
+
+  it("init() does not duplicate a host that was already adopted", async () => {
+    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    hosts.adopt(hal.id, hal.url, null, null);
+    await hosts.init();
+    expect(hosts.extras.filter((h) => h.id === hal.id)).toHaveLength(1);
+  });
+
+  it("rename() updates the live label and the saved entry", async () => {
+    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.rename(hal.id, "  render box  ");
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("render box");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.savedHosts[0]).toMatchObject({ id: hal.id, name: "render box" });
+  });
+
+  it("labels a remote primary with its saved friendly name", async () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
+    installSettings(settings({ savedHosts: [hal] }));
+    const hosts = useHostsStore();
+    await hosts.init();
+    expect(hosts.primaryHost?.label).toBe("hal9000");
+    await hosts.rename(hal.id, "render box");
+    expect(hosts.primaryHost?.label).toBe("render box");
+  });
+
+  it("init() lists a host shadowed by the primary without re-probing it", async () => {
+    // Review follow-up: the primary's id now lands in connectedHostIds, so
+    // init used to burn a testRemoteHost probe on a server the app is
+    // already connected to. The row still exists (so switching the primary
+    // away mid-session keeps the host live) but stays hidden and unprobed.
+    const conn = useConnectionStore();
+    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
+    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
+    const hosts = useHostsStore();
+    await hosts.init();
+    expect(testRemoteHost).not.toHaveBeenCalled();
+    expect(hosts.extras.find((h) => h.id === hal.id)?.status).toBe("ready");
+    // Hidden while shadowed by the primary.
+    expect(hosts.all.filter((h) => h.id === hal.id)).toHaveLength(1);
+  });
+
+  it("disconnect() clears a sticky generation target pointing at the removed host", async () => {
+    installSettings(settings({ generateTargetHost: "hal9000-7680" }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+    await hosts.disconnect("hal9000-7680");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.generateTargetHost).toBeNull();
+  });
+
+  it("rename() persists even when the saved-hosts entry was pruned", async () => {
+    installSettings(settings({ savedHosts: [], connectedHostIds: [] }));
+    const hosts = useHostsStore();
+    hosts.adopt(hal.id, hal.url, null, null);
+    await hosts.rename(hal.id, "render box");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.savedHosts[0]).toMatchObject({ id: hal.id, url: hal.url, name: "render box" });
+  });
+
+  it("demoteToExtra switches to built-in first, then keeps the host live as an extra", async () => {
+    // Regression (Copilot review): connect() early-returns while the host is
+    // still the primary, so the engine switch must happen before the re-add.
+    const conn = useConnectionStore();
+    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: "key" };
+    startLocalEngine.mockImplementation(() => {
+      conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+      return Promise.resolve(conn.info);
+    });
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.demoteToExtra(hosts.primaryHost!);
+    expect(conn.mode).toBe("local");
+    const row = hosts.all.find((h) => h.id === "hal9000-7680");
+    expect(row).toMatchObject({ primary: false, status: "ready", apiKey: "key" });
+  });
+
   it("refresh() pulls queue telemetry from every host", async () => {
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
-    apiJsonTo.mockResolvedValue({ queue_depth: 2, queue_capacity: 8, version: "0.16.0" });
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 2,
+      queue_capacity: 8,
+      version: "0.16.0",
+      models_loaded: ["flux2-klein:q4"],
+      gpu_info: { name: "NVIDIA GeForce RTX 4090", vram_total_mb: 24564, vram_used_mb: 8192 },
+    });
     const hosts = useHostsStore();
     await hosts.connect("hal9000", null, null);
     await hosts.refresh();
     expect(hosts.telemetry["local"]?.queueDepth).toBe(2);
     expect(hosts.telemetry["hal9000-7680"]?.queueDepth).toBe(2);
+    // The status-bar fallback data rides the same poll.
+    expect(hosts.telemetry["hal9000-7680"]?.modelsLoaded).toEqual(["flux2-klein:q4"]);
+    expect(hosts.telemetry["hal9000-7680"]?.gpuInfo?.vram_total_mb).toBe(24564);
   });
 });
