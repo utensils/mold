@@ -495,7 +495,10 @@ Single-file format detection is key-based (reads safetensors header only).
 
 **Internals:** `mold-catalog::live` is the proxy + cache; `live::fetch_civitai_version`
 and `live::fetch_hf_repo` resolve single ids to a `CatalogEntry` with a
-fully-rendered `DownloadRecipe`. Per-install **`mold-catalog.json`
+fully-rendered `DownloadRecipe`. Entries carry an additive `page_url`
+(HF repo page / Civitai `models/{modelId}?modelVersionId={vid}` page;
+`None` when uncomposable — e.g. a version-detail body without `modelId`).
+Per-install **`mold-catalog.json`
 sidecars** sit next to each downloaded primary file and back the LoRA
 picker's "what's installed" list — sidecars travel with the model
 file, so a copy to another mold install retains trigger words.

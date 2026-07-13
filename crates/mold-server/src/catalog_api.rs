@@ -829,6 +829,7 @@ fn live_entry_to_wire(
         "updated_at": entry.updated_at,
         "added_at": entry.added_at,
         "trained_words": entry.trained_words,
+        "page_url": entry.page_url,
     })
 }
 

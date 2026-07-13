@@ -63,6 +63,12 @@ Use the returned installed `path` or catalog `id` in generation clients that
 accept LoRA references. The MCP `list_loras` tool also reads the installed
 catalog route when the legacy LoRA endpoint is not available.
 
+Search and single-entry responses include a `page_url` field pointing at the
+entry's human-facing model page — `https://huggingface.co/{repo}` for Hugging
+Face entries, `https://civitai.com/models/{modelId}?modelVersionId={versionId}`
+for Civitai entries. It is additive (older clients can ignore it) and may be
+`null` when the upstream response doesn't carry enough context to compose it.
+
 ## Tokens
 
 | Variable        | Purpose                                                     |

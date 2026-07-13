@@ -451,6 +451,39 @@ async fn fetch_civitai_version_normalizes_single_id() {
         entry.download_recipe.files[0].url,
         "https://civitai.example/x.safetensors?format=SafeTensor"
     );
+    // The model-version detail body above has no `modelId`, so the model
+    // page can't be composed — the entry must stay usable with no link.
+    assert_eq!(entry.page_url, None);
+}
+
+#[tokio::test]
+async fn fetch_civitai_version_builds_page_url_from_model_id() {
+    // Same shape as CV_VERSION_DETAIL but with the top-level `modelId`
+    // Civitai actually sends — that's what lets a single-version fetch
+    // link back to the parent model page.
+    let body = CV_VERSION_DETAIL.replacen(
+        "{\n    \"id\": 8001,",
+        "{\n    \"modelId\": 9001,\n    \"id\": 8001,",
+        1,
+    );
+    assert!(body.contains("modelId"), "fixture rewrite must apply");
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/model-versions/8001"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let entry = fetch_civitai_version(&server.uri(), "8001", None)
+        .await
+        .expect("single-id fetch");
+    assert_eq!(entry.id.0, "cv:8001");
+    assert_eq!(
+        entry.page_url.as_deref(),
+        Some("https://civitai.com/models/9001?modelVersionId=8001")
+    );
 }
 
 #[tokio::test]
@@ -529,6 +562,11 @@ async fn hf_search_drops_non_mold_repos() {
     assert_eq!(entries[0].family, Family::Flux);
     // Recipe is empty by design — filled in lazily at download time.
     assert!(entries[0].download_recipe.files.is_empty());
+    // Search-summary rows still know their repo page.
+    assert_eq!(
+        entries[0].page_url.as_deref(),
+        Some("https://huggingface.co/black-forest-labs/FLUX.1-dev")
+    );
 }
 
 #[tokio::test]

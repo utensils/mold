@@ -31,6 +31,11 @@ fn hf_flux_dev_normalizes() {
     assert_eq!(entry.likes, 12_300);
     assert!(!entry.nsfw);
     assert!(!entry.download_recipe.files.is_empty());
+    assert_eq!(
+        entry.page_url.as_deref(),
+        Some("https://huggingface.co/black-forest-labs/FLUX.1-dev"),
+        "HF entries link to the repo page"
+    );
 }
 
 #[test]
@@ -58,6 +63,12 @@ fn civitai_juggernaut_normalizes_as_sdxl_single_file() {
         Some("ABC123")
     );
     assert!(entry.thumbnail_url.as_deref().is_some());
+    // Model page = parent model id + the chosen version, so the browser
+    // lands on the exact version the catalog row represents.
+    assert_eq!(
+        entry.page_url.as_deref(),
+        Some("https://civitai.com/models/133005?modelVersionId=618692")
+    );
 }
 
 #[test]

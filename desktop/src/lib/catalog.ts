@@ -60,6 +60,25 @@ export function isCatalogId(id: string): boolean {
 }
 
 /**
+ * Human-facing model page for a catalog entry, or null when none exists.
+ *
+ * New servers send `page_url` on the wire; prefer it. For older servers the
+ * HF page is recoverable from the repo id (`source_id`, falling back to the
+ * `hf:`-stripped catalog id), except for `hf:companion/*` pseudo-ids whose
+ * path is a curated bundle name, not a repo. Civitai model pages need the
+ * parent model id which the old wire never carried — no link beats a 404.
+ */
+export function catalogPageUrl(
+  entry: Pick<CatalogEntry, "id" | "source_id" | "page_url">,
+): string | null {
+  if (entry.page_url) return entry.page_url;
+  if (!entry.id.startsWith("hf:")) return null;
+  const repo = entry.source_id || entry.id.slice("hf:".length);
+  if (!entry.source_id && repo.startsWith("companion/")) return null;
+  return `https://huggingface.co/${repo}`;
+}
+
+/**
  * Installed entries surface first (stable within each group) so "what do I
  * already have?" is answered at the top of the catalog instead of scattered
  * through the ranking.

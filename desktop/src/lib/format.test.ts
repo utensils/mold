@@ -1,10 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { formatGB, percent, timeAgo, vramLevel } from "./format";
+import { formatCount, formatGB, percent, timeAgo, vramLevel } from "./format";
 
 describe("formatGB", () => {
   it("formats decimal gigabytes with one decimal", () => {
     expect(formatGB(38_200_000_000)).toBe("38.2 GB");
     expect(formatGB(0)).toBe("0.0 GB");
+  });
+});
+
+describe("formatCount", () => {
+  it("passes small counts through", () => {
+    expect(formatCount(0)).toBe("0");
+    expect(formatCount(999)).toBe("999");
+  });
+
+  it("compacts thousands and millions with one trimmed decimal", () => {
+    expect(formatCount(12_300)).toBe("12.3k");
+    expect(formatCount(1_000)).toBe("1k");
+    expect(formatCount(4_200_000)).toBe("4.2M");
+    expect(formatCount(950_000)).toBe("950k");
+  });
+
+  it("rolls the unit over when rounding reaches the next magnitude", () => {
+    // 999_950 / 1000 rounds to "1000.0" — that must render as 1M, not 1000k.
+    expect(formatCount(999_950)).toBe("1M");
+    expect(formatCount(999_449)).toBe("999.4k");
   });
 });
 

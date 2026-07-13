@@ -11,6 +11,19 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
+/** Compact counts for card metadata: 999 → "999", 12_300 → "12.3k", 4_200_000 → "4.2M". */
+export function formatCount(count: number): string {
+  const compact = (value: number, suffix: string): string =>
+    `${value.toFixed(1).replace(/\.0$/, "")}${suffix}`;
+  // The unit is chosen from the ROUNDED mantissa, so 999_950 (whose k
+  // mantissa rounds to "1000.0") rolls over to "1M" instead of "1000k".
+  if (count >= 1_000_000 || Number((count / 1_000).toFixed(1)) >= 1_000) {
+    return compact(count / 1_000_000, "M");
+  }
+  if (count >= 1_000) return compact(count / 1_000, "k");
+  return String(count);
+}
+
 export type MeterLevel = "ok" | "critical";
 
 /** VRAM meter turns Stop-red past 92% (design spec §3, the Bench rail). */
