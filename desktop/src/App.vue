@@ -9,7 +9,7 @@ import CommandPalette from "./components/shell/CommandPalette.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
 import { dockBadgeValue } from "./lib/dockBadge";
 import { ipc } from "./lib/ipc";
-import { resolveShellShortcut } from "./lib/shortcuts";
+import { allowsNativeSelectAll, isSelectAllChord, resolveShellShortcut } from "./lib/shortcuts";
 import { useAppPrefsStore } from "./stores/appPrefs";
 import { useConnectionStore } from "./stores/connection";
 import { useContextMenuStore } from "./stores/contextMenu";
@@ -50,6 +50,12 @@ watch(
 );
 
 function onKeydown(e: KeyboardEvent) {
+  // WebKit honors ⌘A even under `user-select: none`, painting the whole app
+  // chrome as selected. Editable fields keep their native in-field Select All.
+  if (isSelectAllChord(e) && !allowsNativeSelectAll(document.activeElement)) {
+    e.preventDefault();
+    return;
+  }
   const action = resolveShellShortcut(e);
   if (!action) return;
   e.preventDefault();
@@ -149,6 +155,15 @@ function suppressNativeContextMenu(e: Event) {
   e.preventDefault();
 }
 
+/**
+ * Belt-and-braces companion to `user-select: none`: WebKit can still start a
+ * selection on chrome (e.g. a drag that began in a selectable region), so
+ * refuse selection at the source unless the target opted in.
+ */
+function suppressChromeSelection(e: Event) {
+  if (!allowsNativeSelectAll(e.target as Element | null)) e.preventDefault();
+}
+
 async function waitForVisibleShellPaint(): Promise<void> {
   await nextTick();
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -158,6 +173,7 @@ async function waitForVisibleShellPaint(): Promise<void> {
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("contextmenu", suppressNativeContextMenu);
+  window.addEventListener("selectstart", suppressChromeSelection);
   // Prefs first: theme lands before the window is shown, and restore-last-view
   // navigates before the default route paints.
   const prefs = await appPrefs.init().catch(() => null);
@@ -190,6 +206,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("contextmenu", suppressNativeContextMenu);
+  window.removeEventListener("selectstart", suppressChromeSelection);
 });
 </script>
 

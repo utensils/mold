@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { NAV_ROUTES, resolveShellShortcut } from "./shortcuts";
+import {
+  NAV_ROUTES,
+  allowsNativeSelectAll,
+  isSelectAllChord,
+  resolveShellShortcut,
+} from "./shortcuts";
 
 const key = (k: string, mods: Partial<Parameters<typeof resolveShellShortcut>[0]> = {}) => ({
   key: k,
@@ -61,5 +66,65 @@ describe("resolveShellShortcut", () => {
 
   it("covers every navigation route exactly once", () => {
     expect(new Set(Object.values(NAV_ROUTES)).size).toBe(7);
+  });
+});
+
+describe("isSelectAllChord", () => {
+  it("recognizes plain ⌘A in either case", () => {
+    expect(isSelectAllChord(key("a"))).toBe(true);
+    expect(isSelectAllChord(key("A"))).toBe(true);
+  });
+
+  it("rejects other keys and extra modifiers", () => {
+    expect(isSelectAllChord(key("a", { metaKey: false }))).toBe(false);
+    expect(isSelectAllChord(key("a", { shiftKey: true }))).toBe(false);
+    expect(isSelectAllChord(key("a", { altKey: true }))).toBe(false);
+    expect(isSelectAllChord(key("a", { ctrlKey: true }))).toBe(false);
+    expect(isSelectAllChord(key("b"))).toBe(false);
+  });
+});
+
+describe("allowsNativeSelectAll", () => {
+  it("denies when nothing has focus or focus sits on chrome", () => {
+    expect(allowsNativeSelectAll(null)).toBe(false);
+    expect(allowsNativeSelectAll(document.body)).toBe(false);
+    const div = document.createElement("div");
+    document.body.appendChild(div);
+    expect(allowsNativeSelectAll(div)).toBe(false);
+  });
+
+  it("allows text-entry inputs and textareas", () => {
+    expect(allowsNativeSelectAll(document.createElement("input"))).toBe(true);
+    expect(allowsNativeSelectAll(document.createElement("textarea"))).toBe(true);
+    for (const type of ["text", "search", "url", "tel", "email", "password", "number"]) {
+      const input = document.createElement("input");
+      input.type = type;
+      expect(allowsNativeSelectAll(input), type).toBe(true);
+    }
+  });
+
+  it("denies non-text inputs — a focused checkbox must not re-enable chrome select-all", () => {
+    for (const type of ["checkbox", "radio", "range", "file", "button", "submit", "color"]) {
+      const input = document.createElement("input");
+      input.type = type;
+      document.body.appendChild(input);
+      expect(allowsNativeSelectAll(input), type).toBe(false);
+    }
+  });
+
+  it("allows contenteditable elements", () => {
+    const div = document.createElement("div");
+    div.setAttribute("contenteditable", "true");
+    document.body.appendChild(div);
+    expect(allowsNativeSelectAll(div)).toBe(true);
+  });
+
+  it("allows anything inside an opted-in [data-selectable] region", () => {
+    const region = document.createElement("section");
+    region.setAttribute("data-selectable", "");
+    const child = document.createElement("span");
+    region.appendChild(child);
+    document.body.appendChild(region);
+    expect(allowsNativeSelectAll(child)).toBe(true);
   });
 });

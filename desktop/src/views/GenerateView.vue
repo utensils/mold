@@ -469,7 +469,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
           rows="2"
           aria-label="Prompt"
           placeholder="Describe the print — a lighthouse at dusk, kodak portra…"
-          class="w-full resize-none bg-transparent text-body-lg text-ink outline-none placeholder:text-ink-3"
+          class="w-full resize-none overflow-x-hidden bg-transparent text-body-lg text-ink outline-none placeholder:text-ink-3"
           @keydown="onComposerKeydown"
           @input="
             cycler.reset();
