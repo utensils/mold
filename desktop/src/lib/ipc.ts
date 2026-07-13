@@ -93,6 +93,10 @@ export interface AppSettings {
   generateTargetHost: string | null;
   /** Also save generations from remote hosts into this Mac's gallery. */
   saveRemoteOutputs: boolean;
+  /** Persisted sidebar width in px; null uses the panel default. */
+  navRailWidth: number | null;
+  /** Persisted Generate-inspector width in px; null uses the panel default. */
+  generateParamsWidth: number | null;
 }
 
 export interface HostTest {
@@ -146,6 +150,8 @@ const browserFallbackSettings = (): AppSettings => ({
   connectedHostIds: [],
   generateTargetHost: null,
   saveRemoteOutputs: true,
+  navRailWidth: null,
+  generateParamsWidth: null,
 });
 
 export const ipc = {
