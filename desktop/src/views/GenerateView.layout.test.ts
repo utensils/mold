@@ -20,5 +20,7 @@ describe("GenerateView layout", () => {
     expect(classesFor("selected-model-name")).toContain("break-all");
     expect(classesFor("model-option-name")).not.toContain("truncate");
     expect(classesFor("model-option-name")).toContain("break-all");
+    expect(classesFor("model-availability")).toContain("whitespace-normal");
+    expect(classesFor("model-availability")).toContain("break-all");
   });
 });

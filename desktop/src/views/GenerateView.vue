@@ -635,7 +635,11 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
                 >
                   {{ m.name }}
                 </span>
-                <span v-if="availabilityTag(m)" class="edge-code mt-0.5 block">
+                <span
+                  v-if="availabilityTag(m)"
+                  data-test="model-availability"
+                  class="edge-code mt-0.5 block break-all whitespace-normal"
+                >
                   {{ availabilityTag(m) }}
                 </span>
               </span>
