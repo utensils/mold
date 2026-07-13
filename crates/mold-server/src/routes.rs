@@ -10,8 +10,9 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    types::GpuSelection, ActiveGenerationStatus, GenerateRequest, GpuInfo, GpuWorkerState,
-    ModelInfoExtended, ResourceSnapshot, ServerStatus, SseErrorEvent, SseProgressEvent,
+    types::GpuSelection, ActiveGenerationStatus, GenerateRequest, GpuBackend, GpuInfo,
+    GpuWorkerState, ModelInfoExtended, ResourceSnapshot, ServerStatus, SseErrorEvent,
+    SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -3290,6 +3291,10 @@ async fn scalar_docs() -> impl IntoResponse {
 // ── GPU info ──────────────────────────────────────────────────────────────────
 
 fn query_gpu_info() -> Option<GpuInfo> {
+    query_cuda_gpu_info().or_else(query_metal_gpu_info)
+}
+
+fn query_cuda_gpu_info() -> Option<GpuInfo> {
     let nvidia_smi = if std::path::Path::new("/run/current-system/sw/bin/nvidia-smi").exists() {
         "/run/current-system/sw/bin/nvidia-smi"
     } else {
@@ -3319,6 +3324,23 @@ fn query_gpu_info() -> Option<GpuInfo> {
         name: parts[0].to_string(),
         vram_total_mb: parts[1].parse().ok()?,
         vram_used_mb: parts[2].parse().ok()?,
+        backend: Some(GpuBackend::Cuda),
+    })
+}
+
+/// Metal fallback (macOS only elsewhere returns an empty snapshot): unified
+/// memory means "VRAM" is the addressable system RAM — same convention as
+/// `/api/resources`. Gives Macs a non-null `gpu_info` so clients can rank
+/// hosts by backend/VRAM without a resources stream.
+fn query_metal_gpu_info() -> Option<GpuInfo> {
+    let gpu = crate::resources::metal_snapshot().into_iter().next()?;
+    Some(GpuInfo {
+        name: gpu.name,
+        // Resource snapshots are bytes; GpuInfo is MB (1 MB = 1_000_000,
+        // matching `parse_nvidia_smi_line`).
+        vram_total_mb: gpu.vram_total / 1_000_000,
+        vram_used_mb: gpu.vram_used / 1_000_000,
+        backend: Some(GpuBackend::Metal),
     })
 }
 
