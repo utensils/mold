@@ -170,6 +170,17 @@ pub struct CatalogEntry {
     /// keep deserializing without needing a migration pass on the JSON.
     #[serde(default)]
     pub trained_words: Vec<String>,
+    /// Human-facing model page: `https://huggingface.co/{repo}` for HF,
+    /// `https://civitai.com/models/{modelId}?modelVersionId={versionId}`
+    /// for Civitai. `None` when the upstream response doesn't carry
+    /// enough context to compose it (e.g. a Civitai model-version detail
+    /// without `modelId`).
+    ///
+    /// `serde(default)` keeps pre-existing JSON (shards, cached wire
+    /// bodies) deserializing — same back-compat mechanism as
+    /// `trained_words` above.
+    #[serde(default)]
+    pub page_url: Option<String>,
 }
 
 /// On-disk shard format. One file per family in `data/catalog/`.

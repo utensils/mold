@@ -588,6 +588,7 @@ mod tests {
             updated_at: None,
             added_at: 0,
             trained_words: vec![],
+            page_url: None,
         }
     }
 

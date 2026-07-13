@@ -114,6 +114,10 @@ async fn live_search_returns_normalized_civitai_rows() {
         "no sidecar yet → not installed"
     );
     assert_eq!(entries[0]["trained_words"][0], "live trigger");
+    assert_eq!(
+        entries[0]["page_url"], "https://civitai.com/models/9001?modelVersionId=8001",
+        "wire rows carry the model page link"
+    );
 }
 
 #[tokio::test]
@@ -240,6 +244,7 @@ async fn live_search_marks_installed_when_sidecar_and_file_present() {
         updated_at: None,
         added_at: 0,
         trained_words: vec!["live trigger".into()],
+        page_url: None,
     };
     let sidecar = sidecar_from_entry(&entry, "x.safetensors".into());
     write_sidecar(&cv_dir.join(SIDECAR_FILENAME), &sidecar).unwrap();

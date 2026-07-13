@@ -399,14 +399,20 @@ export interface CatalogCompanionDetail {
 export interface CatalogEntry {
   id: string;
   source: string;
+  /** Upstream id without the `hf:`/`cv:` prefix — the HF repo id or Civitai version id. */
+  source_id?: string | null;
   name: string;
   author?: string | null;
   family: string;
   kind: string;
   size_bytes?: number | null;
+  download_count?: number | null;
+  likes?: number | null;
   nsfw: boolean;
   installed: boolean;
   thumbnail_url?: string | null;
+  /** Human-facing model page. Additive wire field — absent on older servers. */
+  page_url?: string | null;
   trained_words?: string[];
   companions?: string[];
   companion_details?: CatalogCompanionDetail[];

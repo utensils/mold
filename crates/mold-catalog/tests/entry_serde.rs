@@ -48,6 +48,7 @@ fn sample_entry() -> CatalogEntry {
         updated_at: Some(1_710_000_000),
         added_at: 1_720_000_000,
         trained_words: vec!["cinematic".into(), "studio lighting".into()],
+        page_url: Some("https://huggingface.co/black-forest-labs/FLUX.1-dev".into()),
     }
 }
 
@@ -57,6 +58,18 @@ fn catalog_entry_round_trips() {
     let s = serde_json::to_string_pretty(&entry).unwrap();
     let back: CatalogEntry = serde_json::from_str(&s).unwrap();
     assert_eq!(entry, back);
+}
+
+#[test]
+fn entry_without_page_url_still_deserializes() {
+    // Back-compat: shards and cached wire JSON written before `page_url`
+    // existed must keep deserializing (same mechanism as `trained_words`).
+    let mut value = serde_json::to_value(sample_entry()).unwrap();
+    let obj = value.as_object_mut().unwrap();
+    assert!(obj.remove("page_url").is_some(), "field must serialize");
+    let back: CatalogEntry = serde_json::from_value(value).unwrap();
+    assert_eq!(back.page_url, None);
+    assert_eq!(back.id.as_str(), "hf:black-forest-labs/FLUX.1-dev");
 }
 
 #[test]
