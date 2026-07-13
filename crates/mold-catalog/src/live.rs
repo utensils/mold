@@ -31,7 +31,7 @@ use crate::entry::{
 use crate::families::Family;
 use crate::normalizer::{
     from_civitai, from_civitai_search_entries, from_hf, CivitaiItem, CivitaiVersion, HfDetail,
-    HfTreeEntry,
+    HfTreeEntry, HF_RAW,
 };
 
 /// Request shape for [`search`]. Hash-equal opts hit the same cache key,
@@ -362,10 +362,7 @@ fn companion_to_entry(companion: &Companion, family: Family, tokenizer: bool) ->
         .files
         .iter()
         .map(|file| RecipeFile {
-            url: format!(
-                "https://huggingface.co/{}/resolve/main/{file}",
-                companion.repo
-            ),
+            url: format!("{HF_RAW}/{}/resolve/main/{file}", companion.repo),
             dest: format!("{{family}}/{}/{file}", companion.canonical_name),
             sha256: None,
             size_bytes: None,
@@ -422,7 +419,7 @@ fn companion_to_entry(companion: &Companion, family: Family, tokenizer: bool) ->
         trained_words: Vec::new(),
         // Component bundles are curated slices of a real HF repo — link
         // to that repo, same as any other HF-sourced row.
-        page_url: Some(format!("https://huggingface.co/{}", companion.repo)),
+        page_url: Some(format!("{HF_RAW}/{}", companion.repo)),
     }
 }
 
@@ -721,7 +718,7 @@ fn hf_summary_to_entry(hit: HfSearchHit, family: Family, family_role: FamilyRole
         updated_at: parse_iso(hit.last_modified.as_deref()),
         added_at: now,
         trained_words: Vec::new(),
-        page_url: Some(format!("https://huggingface.co/{}", hit.id)),
+        page_url: Some(format!("{HF_RAW}/{}", hit.id)),
     }
 }
 

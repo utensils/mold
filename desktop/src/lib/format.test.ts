@@ -20,6 +20,12 @@ describe("formatCount", () => {
     expect(formatCount(4_200_000)).toBe("4.2M");
     expect(formatCount(950_000)).toBe("950k");
   });
+
+  it("rolls the unit over when rounding reaches the next magnitude", () => {
+    // 999_950 / 1000 rounds to "1000.0" — that must render as 1M, not 1000k.
+    expect(formatCount(999_950)).toBe("1M");
+    expect(formatCount(999_449)).toBe("999.4k");
+  });
 });
 
 describe("vramLevel", () => {

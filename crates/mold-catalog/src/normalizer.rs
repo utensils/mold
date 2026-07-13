@@ -57,7 +57,9 @@ pub enum NormalizeError {
     EmptyTree,
 }
 
-const HF_RAW: &str = "https://huggingface.co";
+/// Canonical Hugging Face host — shared base for `resolve/main` file URLs
+/// and human-facing `page_url` composition (also used by `live.rs`).
+pub(crate) const HF_RAW: &str = "https://huggingface.co";
 
 /// Map Civitai's `type` string (per `/api/v1/models` schema) to the
 /// catalog's `Kind`. Returning `None` drops the entry entirely — used for

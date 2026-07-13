@@ -7,11 +7,12 @@
  * the id goes RAW in the path (colons and slashes are part of the wildcard
  * route match, same as `startCatalogDownload`).
  *
- * Results are memoized per id for the session so scrolling back through
+ * Successes are memoized per id for the session so scrolling back through
  * results never refetches, and lookups are capped at 4 in flight so a page
  * of 24 HF rows doesn't burst two dozen upstream tree fetches at once.
- * Failures resolve (and stay cached) as null — an unknown size renders as
- * "no size line", never as an error state.
+ * Failures resolve as null ("no size line", never an error state) but are
+ * NOT cached — a transient upstream hiccup shouldn't hide sizes for the
+ * whole session, so a later render retries.
  */
 import { apiJson } from "./api/client";
 import type { CatalogEntry } from "./api/types";
@@ -45,8 +46,6 @@ async function fetchSizeBytes(id: string): Promise<number | null> {
   try {
     const detail = await apiJson<CatalogEntry>(`/api/catalog/${id}`);
     return detail.size_bytes ?? null;
-  } catch {
-    return null;
   } finally {
     release();
   }
@@ -57,7 +56,13 @@ export function resolveEntrySize(entry: CatalogEntry): Promise<number | null> {
   if (entry.size_bytes != null) return Promise.resolve(entry.size_bytes);
   const hit = cache.get(entry.id);
   if (hit) return hit;
-  const pending = fetchSizeBytes(entry.id);
+  const pending = fetchSizeBytes(entry.id).catch(() => {
+    // Concurrent callers share this in-flight promise, but the failure is
+    // evicted so the next render retries instead of staying blank all
+    // session.
+    cache.delete(entry.id);
+    return null;
+  });
   cache.set(entry.id, pending);
   return pending;
 }

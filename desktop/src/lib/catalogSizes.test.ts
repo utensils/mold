@@ -57,11 +57,20 @@ describe("resolveEntrySize", () => {
     expect(apiJsonMock).toHaveBeenCalledTimes(1);
   });
 
-  it("resolves null on failure and caches the failure", async () => {
-    apiJsonMock.mockRejectedValue(new Error("upstream 502"));
+  it("resolves null on failure without caching it — a later render retries", async () => {
+    apiJsonMock.mockRejectedValueOnce(new Error("upstream 502"));
+    apiJsonMock.mockResolvedValueOnce(entry({ size_bytes: 55 }));
     const e = entry({ id: "cv:9999" });
     expect(await resolveEntrySize(e)).toBeNull();
-    expect(await resolveEntrySize(e)).toBeNull();
+    expect(await resolveEntrySize(e)).toBe(55);
+    expect(apiJsonMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares one in-flight fetch between concurrent callers even when it fails", async () => {
+    apiJsonMock.mockRejectedValue(new Error("upstream 502"));
+    const e = entry({ id: "cv:9998" });
+    const [a, b] = await Promise.all([resolveEntrySize(e), resolveEntrySize(e)]);
+    expect([a, b]).toEqual([null, null]);
     expect(apiJsonMock).toHaveBeenCalledTimes(1);
   });
 

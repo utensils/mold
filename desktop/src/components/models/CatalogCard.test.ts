@@ -53,6 +53,14 @@ describe("CatalogCard", () => {
     expect(wrapper.get("img").attributes("src")).toBe("https://image.civitai.example/thumb.jpeg");
   });
 
+  it("drops the thumbnail block entirely when the image fails to load", async () => {
+    const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
+    await flushPromises();
+    await wrapper.get("img").trigger("error");
+    expect(wrapper.find("img").exists()).toBe(false);
+    expect(wrapper.find(".grain-shimmer").exists()).toBe(false);
+  });
+
   it("shows a size skeleton while resolving, then the resolved SIZE line", async () => {
     let release: (value: number | null) => void = () => {};
     resolveEntrySizeMock.mockImplementation(

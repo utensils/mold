@@ -15,7 +15,11 @@ export function formatBytes(bytes: number): string {
 export function formatCount(count: number): string {
   const compact = (value: number, suffix: string): string =>
     `${value.toFixed(1).replace(/\.0$/, "")}${suffix}`;
-  if (count >= 1_000_000) return compact(count / 1_000_000, "M");
+  // The unit is chosen from the ROUNDED mantissa, so 999_950 (whose k
+  // mantissa rounds to "1000.0") rolls over to "1M" instead of "1000k".
+  if (count >= 1_000_000 || Number((count / 1_000).toFixed(1)) >= 1_000) {
+    return compact(count / 1_000_000, "M");
+  }
   if (count >= 1_000) return compact(count / 1_000, "k");
   return String(count);
 }

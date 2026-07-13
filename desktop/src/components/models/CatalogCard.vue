@@ -55,6 +55,8 @@ const counts = computed(() => {
 });
 
 const thumbLoaded = ref(false);
+/** A failed thumbnail drops the whole image block — no broken-image box. */
+const thumbFailed = ref(false);
 
 function openPage(): void {
   if (pageUrl.value) void openExternal(pageUrl.value);
@@ -66,9 +68,10 @@ function openPage(): void {
     class="border-edge flex flex-col gap-1.5 rounded-chrome border bg-bath p-3 transition-colors duration-100 hover:bg-bench"
     data-test="catalog-card"
   >
-    <!-- Civitai preview image (public URL); shimmer placeholder while it loads. -->
+    <!-- Civitai preview image (public URL); shimmer placeholder while it
+         loads, dropped entirely if it fails. -->
     <div
-      v-if="entry.thumbnail_url"
+      v-if="entry.thumbnail_url && !thumbFailed"
       class="relative -mx-3 -mt-3 mb-0.5 aspect-[5/3] overflow-hidden rounded-t-chrome"
     >
       <div v-if="!thumbLoaded" class="grain-shimmer absolute inset-0" aria-hidden="true" />
@@ -78,7 +81,7 @@ function openPage(): void {
         loading="lazy"
         class="h-full w-full object-cover"
         @load="thumbLoaded = true"
-        @error="thumbLoaded = true"
+        @error="thumbFailed = true"
       />
     </div>
 
