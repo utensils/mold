@@ -74,6 +74,15 @@ pub(crate) fn resolve_installed_catalog_paths_for_worker(
 pub(crate) type DownloadProgressCallback =
     Arc<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>;
 
+pub(crate) fn configured_upscaler_weights_exist(config: &Config, model: &str) -> bool {
+    let canonical = mold_core::manifest::resolve_model_name(model);
+    config
+        .models
+        .get(&canonical)
+        .and_then(|model| model.transformer.as_ref())
+        .is_some_and(|path| Path::new(path).is_file())
+}
+
 pub(crate) enum PullStatus {
     AlreadyAvailable,
     Pulled,
@@ -1125,9 +1134,14 @@ pub(crate) async fn pull_model(
 
     let _guard = state.pull_lock.lock().await;
 
+    let manifest =
+        mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(model))
+            .expect("manifest was validated before acquiring the pull lock");
     {
         let config = refresh_config(state).await;
-        if config.manifest_model_is_downloaded(model) {
+        if config.manifest_model_is_downloaded(model)
+            && (!manifest.is_upscaler() || configured_upscaler_weights_exist(&config, model))
+        {
             return Ok(PullStatus::AlreadyAvailable);
         }
     }
