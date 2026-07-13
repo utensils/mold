@@ -135,6 +135,10 @@ describe("ParamPanel — size presets", () => {
     expect(wrapper.get("[data-test='aspect-shape']").attributes("style")).toContain(
       "aspect-ratio: 1328 / 1328",
     );
+    expect(wrapper.get("[data-test='aspect-shape']").attributes("style")).toContain("height: 26px");
+    expect(wrapper.get("[data-test='aspect-shape']").attributes("style")).not.toContain(
+      "width: 30px",
+    );
   });
 });
 

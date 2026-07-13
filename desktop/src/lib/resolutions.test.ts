@@ -39,14 +39,25 @@ describe("resolution presets", () => {
   });
 
   it("keeps the desktop Qwen buckets aligned with the core recommendations", () => {
+    const expected = [
+      ["1:1", 1328, 1328],
+      ["1:1", 1024, 1024],
+      ["9:7", 1152, 896],
+      ["7:9", 896, 1152],
+      ["19:13", 1216, 832],
+      ["13:19", 832, 1216],
+      ["7:4", 1344, 768],
+      ["4:7", 768, 1344],
+      ["≈16:9", 1664, 928],
+      ["≈9:16", 928, 1664],
+      ["1:1", 768, 768],
+      ["1:1", 512, 512],
+    ];
     for (const family of ["qwen-image", "qwen-image-edit"]) {
       expect(matchPreset(1328, 1328, family)?.aspect).toBe("1:1");
-      expect(presetsForFamily(family)).toContainEqual({
-        label: "1:1 · 1328×1328",
-        aspect: "1:1",
-        width: 1328,
-        height: 1328,
-      });
+      expect(
+        presetsForFamily(family).map(({ aspect, width, height }) => [aspect, width, height]),
+      ).toEqual(expected);
     }
   });
 

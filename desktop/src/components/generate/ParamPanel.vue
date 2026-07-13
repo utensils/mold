@@ -45,7 +45,7 @@ const aspectLabel = computed(() =>
 const orientation = computed(() => orientationLabel(props.form.width, props.form.height));
 const aspectShapeStyle = computed(() => ({
   aspectRatio: `${props.form.width} / ${props.form.height}`,
-  ...(props.form.width >= props.form.height ? { width: "30px" } : { height: "26px" }),
+  ...(props.form.width > props.form.height ? { width: "30px" } : { height: "26px" }),
 }));
 function applyPreset(event: Event) {
   const label = (event.target as HTMLSelectElement).value;
