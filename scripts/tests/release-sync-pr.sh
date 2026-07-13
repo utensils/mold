@@ -4,6 +4,9 @@
 set -euo pipefail
 
 script="$(cd "$(dirname "$0")/../release" && pwd)/sync-release-pr.sh"
+render_script="$(cd "$(dirname "$0")/../release" && pwd)/render-release-pr-body.sh"
+workflow="$(cd "$(dirname "$0")/../.." && pwd)/.github/workflows/release-plz.yml"
+ci_workflow="$(cd "$(dirname "$0")/../.." && pwd)/.github/workflows/ci.yml"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
@@ -108,3 +111,39 @@ diff -r "$tmp.before" "$tmp" > /dev/null || fail "second run was not a no-op"
 rm -rf "$tmp.before"
 
 echo "PASS: sync-release-pr"
+
+# The promoted release notes must also replace release-plz's empty changelog
+# placeholder in the PR body without disturbing its package summary/footer.
+cat > "$tmp/pr-body.md" <<'EOF'
+## 🤖 New release
+
+* `mold-ai`: 0.14.0 -> 0.15.0
+
+<details><summary><i><b>Changelog</b></i></summary><p>
+
+
+</p></details>
+
+---
+This PR was generated with release-plz.
+EOF
+
+"$render_script" "$tmp/CHANGELOG.md" 0.15.0 "$tmp/pr-body.md" > "$tmp/rendered-body.md"
+
+# The literal backticks are Markdown, not shell.
+# shellcheck disable=SC2016
+grep -q '^\* `mold-ai`: 0.14.0 -> 0.15.0$' "$tmp/rendered-body.md" || fail "PR package summary was lost"
+grep -q '^- A new thing\.$' "$tmp/rendered-body.md" || fail "promoted changelog entry missing from PR body"
+grep -q '^This PR was generated with release-plz\.$' "$tmp/rendered-body.md" || fail "PR footer was lost"
+test "$(grep -c 'A new thing' "$tmp/rendered-body.md")" -eq 1 || fail "PR changelog entry duplicated"
+
+# The workflow must operate on release-plz's exact output and keep every
+# follow-up commit attributable to the GitHub App bot. A human-attributed
+# second commit makes release-plz close/recreate the PR on the next push.
+grep -q 'id: release-plz' "$workflow" || fail "release-plz step has no id"
+grep -q 'steps.release-plz.outputs.pr' "$workflow" || fail "workflow does not use the exact release-plz PR output"
+grep -q '302347651+release-plz-mold\[bot\]@users.noreply.github.com' "$workflow" || fail "follow-up commit is not attributed to the app bot"
+grep -q 'render-release-pr-body.sh' "$workflow" || fail "workflow does not populate the PR changelog body"
+grep -q 'bash scripts/tests/release-sync-pr.sh' "$ci_workflow" || fail "CI does not exercise release PR synchronization"
+
+echo "PASS: release PR body sync"
