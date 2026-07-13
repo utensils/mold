@@ -2,10 +2,13 @@
 import { computed, reactive, ref } from "vue";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
+import SourceGlyph from "../generate/SourceGlyph.vue";
 import { groupInstalledModels, modelDiskBytes, quantTag } from "../../lib/models";
+import { modelSource } from "../../lib/modelSource";
 import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../../lib/api/models";
 import { ApiError } from "../../lib/api/client";
 import { formatGB, percent } from "../../lib/format";
+import { openExternal } from "../../lib/openExternal";
 import type { ModelComponentStatus, ModelEntry } from "../../lib/api/types";
 
 const props = defineProps<{ query?: string }>();
@@ -143,6 +146,7 @@ function componentList(name: string): ModelComponentStatus[] {
               :title="m.is_loaded ? 'On GPU' : 'Cold'"
               :aria-label="m.is_loaded ? 'On GPU' : 'Cold'"
             />
+            <SourceGlyph :source="modelSource(m)" class="text-ink-3" />
             <span class="truncate text-body text-ink" :title="m.name">{{ m.name }}</span>
             <span
               v-if="quantTag(m.name)"
@@ -150,6 +154,31 @@ function componentList(name: string): ModelComponentStatus[] {
             >
               {{ quantTag(m.name) }}
             </span>
+            <button
+              v-if="m.hf_repo"
+              type="button"
+              class="shrink-0 text-ink-3 transition-colors duration-100 hover:text-ink"
+              :aria-label="`Open ${m.name} on Hugging Face`"
+              title="Open on Hugging Face"
+              data-test="model-page-link"
+              @click="void openExternal(`https://huggingface.co/${m.hf_repo}`)"
+            >
+              <svg
+                viewBox="0 0 12 12"
+                width="11"
+                height="11"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M8.5 6.75v2.75a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1h2.75" />
+                <path d="M7 1.5h3.5V5" />
+                <path d="M10.5 1.5 5.75 6.25" />
+              </svg>
+            </button>
 
             <!-- disk usage bar -->
             <div class="ml-auto flex w-40 items-center gap-2">

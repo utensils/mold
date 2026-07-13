@@ -31,7 +31,7 @@ use crate::entry::{
 use crate::families::Family;
 use crate::normalizer::{
     from_civitai, from_civitai_search_entries, from_hf, CivitaiItem, CivitaiVersion, HfDetail,
-    HfTreeEntry,
+    HfTreeEntry, HF_RAW,
 };
 
 /// Request shape for [`search`]. Hash-equal opts hit the same cache key,
@@ -362,10 +362,7 @@ fn companion_to_entry(companion: &Companion, family: Family, tokenizer: bool) ->
         .files
         .iter()
         .map(|file| RecipeFile {
-            url: format!(
-                "https://huggingface.co/{}/resolve/main/{file}",
-                companion.repo
-            ),
+            url: format!("{HF_RAW}/{}/resolve/main/{file}", companion.repo),
             dest: format!("{{family}}/{}/{file}", companion.canonical_name),
             sha256: None,
             size_bytes: None,
@@ -420,6 +417,9 @@ fn companion_to_entry(companion: &Companion, family: Family, tokenizer: bool) ->
         updated_at: None,
         added_at: now,
         trained_words: Vec::new(),
+        // Component bundles are curated slices of a real HF repo — link
+        // to that repo, same as any other HF-sourced row.
+        page_url: Some(format!("{HF_RAW}/{}", companion.repo)),
     }
 }
 
@@ -718,6 +718,7 @@ fn hf_summary_to_entry(hit: HfSearchHit, family: Family, family_role: FamilyRole
         updated_at: parse_iso(hit.last_modified.as_deref()),
         added_at: now,
         trained_words: Vec::new(),
+        page_url: Some(format!("{HF_RAW}/{}", hit.id)),
     }
 }
 
@@ -806,6 +807,12 @@ pub fn family_from_hf(
 /// the parent's metadata, instead of being nested inside it.
 #[derive(Clone, Debug, Deserialize)]
 struct CivitaiVersionDetail {
+    /// Parent model id — present on the live `/api/v1/model-versions/{id}`
+    /// response but absent from older cached bodies and fixtures, so it
+    /// must stay optional. When present it lets the normalized entry
+    /// carry a model page URL.
+    #[serde(default, rename = "modelId")]
+    model_id: Option<u64>,
     #[serde(flatten)]
     version: CivitaiVersion,
     model: CivitaiVersionModel,
@@ -857,7 +864,9 @@ pub async fn fetch_civitai_version(
     let detail: CivitaiVersionDetail = serde_json::from_str(&body)?;
 
     let item = CivitaiItem {
-        id: 0,
+        // `from_civitai` composes the model page URL from this id and
+        // skips it when 0 — the sentinel for "upstream omitted modelId".
+        id: detail.model_id.unwrap_or(0),
         name: detail.model.name,
         kind: detail.model.kind,
         nsfw: detail.model.nsfw,
@@ -968,6 +977,38 @@ pub async fn fetch_hf_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const VERSION_DETAIL_BODY: &str = r#"{
+        "id": 8001,
+        "name": "v1",
+        "baseModel": "Flux.1 D",
+        "baseModelType": "Standard",
+        "files": [],
+        "images": [],
+        "model": { "name": "Test", "type": "LORA", "nsfw": false, "tags": [] }
+    }"#;
+
+    #[test]
+    fn civitai_version_detail_deserializes_with_model_id() {
+        let body = format!(
+            "{}{}",
+            r#"{ "modelId": 9001,"#,
+            VERSION_DETAIL_BODY.trim_start().trim_start_matches('{')
+        );
+        let detail: CivitaiVersionDetail = serde_json::from_str(&body).expect("with modelId");
+        assert_eq!(detail.model_id, Some(9001));
+        assert_eq!(detail.version.id, 8001);
+    }
+
+    #[test]
+    fn civitai_version_detail_deserializes_without_model_id() {
+        // Older cached bodies / test fixtures omit `modelId`; the field
+        // must default to None instead of failing the whole fetch.
+        let detail: CivitaiVersionDetail =
+            serde_json::from_str(VERSION_DETAIL_BODY).expect("without modelId");
+        assert_eq!(detail.model_id, None);
+        assert_eq!(detail.version.id, 8001);
+    }
 
     #[tokio::test]
     async fn fetch_entry_by_id_rejects_non_catalog_shape() {

@@ -57,7 +57,9 @@ pub enum NormalizeError {
     EmptyTree,
 }
 
-const HF_RAW: &str = "https://huggingface.co";
+/// Canonical Hugging Face host — shared base for `resolve/main` file URLs
+/// and human-facing `page_url` composition (also used by `live.rs`).
+pub(crate) const HF_RAW: &str = "https://huggingface.co";
 
 /// Map Civitai's `type` string (per `/api/v1/models` schema) to the
 /// catalog's `Kind`. Returning `None` drops the entry entirely — used for
@@ -255,6 +257,7 @@ pub fn from_hf(
         // brittle scrape. Empty here is the right default; civitai is
         // where 99% of LoRA trigger phrases live anyway.
         trained_words: Vec::new(),
+        page_url: Some(format!("{HF_RAW}/{}", detail.id)),
     })
 }
 
@@ -422,6 +425,17 @@ fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<
 
     let trained_words = version.trained_words.clone();
 
+    // The single-version detail path synthesizes a CivitaiItem with id 0
+    // when the upstream body lacks `modelId` — no parent id means no
+    // model page to point at, so leave the link off rather than compose
+    // a URL to civitai.com/models/0.
+    let page_url = (item.id != 0).then(|| {
+        format!(
+            "https://civitai.com/models/{}?modelVersionId={}",
+            item.id, version.id
+        )
+    });
+
     Some(CatalogEntry {
         id: CatalogId::from(format!("cv:{}", version.id)),
         source: Source::Civitai,
@@ -452,6 +466,7 @@ fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<
         updated_at: None,
         added_at: now,
         trained_words,
+        page_url,
     })
 }
 
