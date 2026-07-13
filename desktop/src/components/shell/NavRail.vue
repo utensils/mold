@@ -10,6 +10,7 @@ import {
   railOrder,
   type Job,
 } from "../../stores/generation";
+import RenameDialog from "./RenameDialog.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useComposerStore } from "../../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
@@ -104,11 +105,78 @@ async function connectDetected(host: DiscoveredHost) {
   }
 }
 
-function hostMenu(host: HostView): MenuEntry[] {
-  if (host.primary) {
-    return [{ label: "Manage in Settings", action: () => void router.push("/settings") }];
+const renameTarget = ref<HostView | null>(null);
+
+/** Open the host's web UI in the default browser. */
+async function openHostUrl(url: string) {
+  try {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+  } catch {
+    window.open(url, "_blank", "noopener");
   }
+}
+
+/** Drop the host AND its saved entry + stored API key (recoverable only by
+ *  re-adding it). Disconnect alone keeps both for later reconnect. */
+async function forgetHost(host: HostView) {
+  await hosts.disconnect(host.id);
+  await ipc.forgetRemoteHost(host.id);
+  toasts.push(`Forgot ${host.label}`);
+}
+
+function onRenameSave(name: string) {
+  const host = renameTarget.value;
+  renameTarget.value = null;
+  if (host) void hosts.rename(host.id, name);
+}
+
+function hostMenu(host: HostView): MenuEntry[] {
   const entries: MenuEntry[] = [];
+  const isTarget = (appPrefs.settings?.generateTargetHost ?? null) === host.id;
+  if (isTarget) {
+    entries.push({
+      label: "Route automatically",
+      action: () => void appPrefs.update({ generateTargetHost: null }),
+    });
+  } else {
+    entries.push({
+      label: "Set as generation target",
+      disabled: host.status !== "ready",
+      action: () => void appPrefs.update({ generateTargetHost: host.id }),
+    });
+  }
+  entries.push({ separator: true });
+  entries.push({
+    label: "Open web UI",
+    disabled: !host.baseUrl,
+    action: () => void openHostUrl(host.baseUrl ?? ""),
+  });
+  entries.push({
+    label: "Copy URL",
+    disabled: !host.baseUrl,
+    action: () =>
+      void navigator.clipboard.writeText(host.baseUrl ?? "").then(() => toasts.push("Copied")),
+  });
+  if (host.kind === "remote") {
+    entries.push({
+      label: "Rename…",
+      action: () => {
+        renameTarget.value = host;
+      },
+    });
+  }
+  entries.push({ separator: true });
+  if (host.primary) {
+    if (host.kind === "remote") {
+      entries.push({
+        label: "Switch to built-in engine",
+        action: () => void hosts.demoteToExtra(host),
+      });
+    }
+    entries.push({ label: "Manage in Settings", action: () => void router.push("/settings") });
+    return entries;
+  }
   if (host.status === "error") {
     entries.push({ label: "Reconnect", action: () => void hosts.reconnect(host.id) });
   }
@@ -116,6 +184,11 @@ function hostMenu(host: HostView): MenuEntry[] {
     label: "Disconnect",
     danger: true,
     action: () => void hosts.disconnect(host.id),
+  });
+  entries.push({
+    label: "Forget",
+    danger: true,
+    action: () => void forgetHost(host),
   });
   return entries;
 }
@@ -334,5 +407,13 @@ function jobMenu(job: Job): MenuEntry[] {
       <span class="font-medium">Settings</span>
       <kbd class="kbd-hint text-ink-3">⌘,</kbd>
     </RouterLink>
+
+    <RenameDialog
+      :open="!!renameTarget"
+      title="Rename host"
+      :initial="renameTarget?.label ?? ''"
+      @save="onRenameSave"
+      @cancel="renameTarget = null"
+    />
   </nav>
 </template>

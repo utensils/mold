@@ -90,6 +90,15 @@ pub fn upsert_saved_host(
     hosts.truncate(MAX_SAVED_HOSTS);
 }
 
+/// Add `id` to the boot-reconnect set (idempotent). Every host in use —
+/// whether picked as the primary ("Use this host") or added as an extra —
+/// goes through this, so the whole set is restored on the next launch.
+pub fn remember_connected_host(settings: &mut AppSettings, id: &str) {
+    if !settings.connected_host_ids.iter().any(|h| h == id) {
+        settings.connected_host_ids.push(id.to_string());
+    }
+}
+
 /// Drop `id` from the saved list — and when it is also the persisted primary
 /// remote, clear that preference too, otherwise the next launch would
 /// reconnect via `remote_url` and re-save the host, making Forget a no-op
@@ -97,6 +106,8 @@ pub fn upsert_saved_host(
 /// (the caller must also clear the shared `remote-api-key` secret).
 pub fn forget_host(settings: &mut AppSettings, id: &str) -> bool {
     settings.saved_hosts.retain(|h| h.id != id);
+    // The boot-reconnect set must not resurrect a forgotten host.
+    settings.connected_host_ids.retain(|h| h != id);
     let was_primary = settings
         .remote_url
         .as_deref()
@@ -287,6 +298,29 @@ mod tests {
         let path = path_in(&dir);
         std::fs::write(&path, r#"{"mode":"remote","remoteUrl":"http://h:1"}"#).unwrap();
         assert!(load(&path).saved_hosts.is_empty());
+    }
+
+    #[test]
+    fn remember_connected_host_is_idempotent() {
+        let mut settings = AppSettings::default();
+        remember_connected_host(&mut settings, "hal9000-7680");
+        remember_connected_host(&mut settings, "hal9000-7680");
+        remember_connected_host(&mut settings, "studio-local-7680");
+        assert_eq!(
+            settings.connected_host_ids,
+            vec!["hal9000-7680", "studio-local-7680"]
+        );
+    }
+
+    #[test]
+    fn forget_host_removes_the_boot_reconnect_entry() {
+        let mut settings = AppSettings {
+            connected_host_ids: vec!["hal9000-7680".into(), "studio-local-7680".into()],
+            ..AppSettings::default()
+        };
+        forget_host(&mut settings, "hal9000-7680");
+        // A forgotten host must not resurrect as an extra on the next boot.
+        assert_eq!(settings.connected_host_ids, vec!["studio-local-7680"]);
     }
 
     #[test]

@@ -21,6 +21,9 @@ docs/superpowers/specs/*
 .playwright-mcp/
 .direnv/
 
+# Stray tool caches at the repo root (nothing here should ever install deps)
+/node_modules/
+
 # Website
 website/node_modules/
 website/.vitepress/cache/

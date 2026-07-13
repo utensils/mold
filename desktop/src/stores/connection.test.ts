@@ -106,6 +106,24 @@ describe("connection store", () => {
     expect(mocked.appSettingsSet).not.toHaveBeenCalled();
   });
 
+  it("keeps an unreachable saved remote visible as an errored extra host", async () => {
+    mocked.appSettingsGet.mockResolvedValue({
+      ...defaults,
+      mode: "remote",
+      remoteUrl: remote.baseUrl,
+      savedHosts: [{ id: "studio-local-7680", name: "studio", url: remote.baseUrl, lastUsedMs: 1 }],
+    });
+    mocked.setRemoteHost.mockRejectedValue("unreachable");
+    mocked.startLocalEngine.mockResolvedValue(local);
+    const store = useConnectionStore();
+    await store.init();
+    // The preferred host must not silently vanish from the sidebar — it stays
+    // listed as an errored row the refresh poll (or a click) can reconnect.
+    const { useHostsStore } = await import("./hosts");
+    const row = useHostsStore().extras.find((h) => h.id === "studio-local-7680");
+    expect(row).toMatchObject({ status: "error", url: remote.baseUrl, label: "studio" });
+  });
+
   it("surfaces engine-start failures as error state", async () => {
     mocked.appSettingsGet.mockResolvedValue(defaults);
     mocked.startLocalEngine.mockRejectedValue("The engine didn't start.");
