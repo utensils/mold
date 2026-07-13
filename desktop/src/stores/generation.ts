@@ -6,6 +6,8 @@ import { ipc } from "../lib/ipc";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
+import { useGalleryStore } from "./gallery";
+import { useHostsStore } from "./hosts";
 import type { CompleteEvent, GenerateRequest, ProgressEvent } from "../lib/api/types";
 import type { DevelopPhase } from "../lib/develop/grain";
 
@@ -479,10 +481,19 @@ export const useGenerationStore = defineStore("generation", {
                   complete.seed_used,
                   complete.format,
                 );
-                ipc.saveOutputBytes(filename, complete.image).catch((err) => {
-                  console.warn("local save of remote output failed:", err);
-                });
+                ipc
+                  .saveOutputBytes(filename, complete.image)
+                  .then(() => void useGalleryStore().refreshHost("local"))
+                  .catch((err) => {
+                    console.warn("local save of remote output failed:", err);
+                  });
               }
+              // Nudge the unified gallery's bucket for the host this print
+              // landed on. refreshHost only refetches already-loaded buckets
+              // — a background completion must not force-load a gallery
+              // bucket the user never opened.
+              const originHostId = current.hostId ?? useHostsStore().primaryHost?.id ?? null;
+              if (originHostId) void useGalleryStore().refreshHost(originHostId);
             } else if (event === "error") {
               current.status = "error";
               try {

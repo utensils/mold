@@ -14,6 +14,7 @@ import RenameDialog from "./RenameDialog.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useComposerStore } from "../../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
+import { useGalleryStore } from "../../stores/gallery";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import { hostIdFromUrl } from "../../lib/hosts";
@@ -146,6 +147,15 @@ function hostMenu(host: HostView): MenuEntry[] {
       action: () => void appPrefs.update({ generateTargetHost: host.id }),
     });
   }
+  entries.push({
+    label: "View gallery",
+    action: () => {
+      // Direct set: pushing an unchanged ?host= query is a no-op navigation,
+      // so the view's watcher alone can't re-apply the filter.
+      useGalleryStore().filter = host.id;
+      void router.push({ path: "/gallery", query: { host: host.id } });
+    },
+  });
   entries.push({ separator: true });
   entries.push({
     label: "Open web UI",
