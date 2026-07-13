@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { hostIdFromUrl, normalizeHostUrl, pickAutoHost, type RoutableHost } from "./hosts";
+import {
+  hostIdFromUrl,
+  normalizeHostUrl,
+  pickAutoHost,
+  pickDisplayHost,
+  type RoutableHost,
+} from "./hosts";
 
 describe("hostIdFromUrl", () => {
   it("mirrors the Rust host_id slugs exactly", () => {
@@ -59,5 +65,21 @@ describe("pickAutoHost", () => {
   it("returns null when nothing is ready", () => {
     expect(pickAutoHost([host({ status: "error" })])).toBeNull();
     expect(pickAutoHost([])).toBeNull();
+  });
+});
+
+describe("pickDisplayHost", () => {
+  it("returns the primary when nothing is generating", () => {
+    expect(pickDisplayHost([], "local")).toBe("local");
+  });
+
+  it("follows the most recently submitted live job's host", () => {
+    expect(pickDisplayHost(["local", "hal9000-7680"], "local")).toBe("hal9000-7680");
+    expect(pickDisplayHost(["hal9000-7680", "local"], "local")).toBe("local");
+  });
+
+  it("skips jobs without a routed host (single-host submissions)", () => {
+    expect(pickDisplayHost(["hal9000-7680", null], "local")).toBe("hal9000-7680");
+    expect(pickDisplayHost([null, null], "local")).toBe("local");
   });
 });

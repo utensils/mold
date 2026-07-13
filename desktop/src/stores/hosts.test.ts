@@ -290,11 +290,20 @@ describe("hosts store", () => {
 
   it("refresh() pulls queue telemetry from every host", async () => {
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
-    apiJsonTo.mockResolvedValue({ queue_depth: 2, queue_capacity: 8, version: "0.16.0" });
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 2,
+      queue_capacity: 8,
+      version: "0.16.0",
+      models_loaded: ["flux2-klein:q4"],
+      gpu_info: { name: "NVIDIA GeForce RTX 4090", vram_total_mb: 24564, vram_used_mb: 8192 },
+    });
     const hosts = useHostsStore();
     await hosts.connect("hal9000", null, null);
     await hosts.refresh();
     expect(hosts.telemetry["local"]?.queueDepth).toBe(2);
     expect(hosts.telemetry["hal9000-7680"]?.queueDepth).toBe(2);
+    // The status-bar fallback data rides the same poll.
+    expect(hosts.telemetry["hal9000-7680"]?.modelsLoaded).toEqual(["flux2-klein:q4"]);
+    expect(hosts.telemetry["hal9000-7680"]?.gpuInfo?.vram_total_mb).toBe(24564);
   });
 });
