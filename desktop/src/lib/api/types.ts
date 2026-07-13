@@ -28,6 +28,13 @@ export interface ResourceSnapshot {
   system_ram: RamSnapshot;
 }
 
+/** `/api/status` GPU summary (MB units, unlike GpuSnapshot's bytes). */
+export interface GpuInfo {
+  name: string;
+  vram_total_mb: number;
+  vram_used_mb: number;
+}
+
 export interface ServerStatus {
   version: string;
   git_sha?: string | null;
@@ -35,6 +42,7 @@ export interface ServerStatus {
   busy?: boolean;
   uptime_secs: number;
   hostname?: string | null;
+  gpu_info?: GpuInfo | null;
   queue_depth?: number | null;
   queue_capacity?: number | null;
 }
