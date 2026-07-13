@@ -138,6 +138,8 @@ Desktop parity: `upscale_model` is surfaced by the "Upscale" select in `ParamPan
 
 **Prompt history** (`prompt_history` table): `push`, `recent(limit)`, `search(query,limit)`, `count`, `trim_to(keep)`, `clear`. Entry = `{prompt, model, timestamp}`. TUI: HistoryPrev/HistoryNext/SearchHistory actions.
 
+- **Unified multi-host history (desktop only)**: the History view merges every connected host. The **Runs** tab reads the unified gallery store (`gallery.filtered`) with the same `HostFilterChips` filter and per-row host chips as the Gallery; thumbnails authenticate against their origin host. The **Prompts** tab fans `GET /api/history` out over every ready host (`fetchHistoryAll` — `Promise.allSettled`, entries tagged `hostId`/`hostLabel`, merged newest-first); hosts that 404/503 (`HISTORY_UNAVAILABLE`, pre-history servers) are skipped, and the unavailable empty-state shows only when no host supports history. **Clear** follows the active chip via `clearScope`: the one filtered host, or every history-capable host under All (confirm step names them).
+
 **Prompt expansion** (`mold expand`, `POST /api/expand`, web `ExpandModal.vue`): LLM expands a short prompt into detailed generation prompt(s), model-aware style.
 
 - CLI: `mold expand "<prompt>" --model --variations N --json --backend --expand-model`.

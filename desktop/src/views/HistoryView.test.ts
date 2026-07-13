@@ -3,13 +3,18 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
 
-const fetchHistory = vi.fn().mockResolvedValue([]);
+const fetchHistoryAll = vi
+  .fn()
+  .mockResolvedValue({ entries: [], supportedHostIds: [], unreachableHostIds: [] });
+const clearHistoryOn = vi.fn().mockResolvedValue(undefined);
 vi.mock("../lib/api/history", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api/history")>();
   return {
     ...actual,
-    fetchHistory: (...a: unknown[]) => fetchHistory(...a),
+    fetchHistory: vi.fn().mockResolvedValue([]),
+    fetchHistoryAll: (...a: unknown[]) => fetchHistoryAll(...a),
     clearHistory: vi.fn().mockResolvedValue(undefined),
+    clearHistoryOn: (...a: unknown[]) => clearHistoryOn(...a),
   };
 });
 vi.mock("../lib/api/client", () => ({
@@ -29,6 +34,7 @@ vi.mock("../lib/ipc", () => ({
 import HistoryView from "./HistoryView.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useGalleryStore } from "../stores/gallery";
+import { useHostsStore } from "../stores/hosts";
 import { useComposerStore } from "../stores/composer";
 import type { GalleryImage } from "../lib/api/types";
 
@@ -52,7 +58,7 @@ function run(filename: string, prompt: string, timestamp: number): GalleryImage 
 
 let router: Router;
 
-async function mountView() {
+async function mountView({ extra = false } = {}) {
   router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -77,6 +83,22 @@ async function mountView() {
     error: null,
     loaded: true,
   };
+  if (extra) {
+    useHostsStore().extras.push({
+      id: "okra-7680",
+      label: "okra",
+      url: "http://okra:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+    });
+    gallery.buckets["okra-7680"] = {
+      items: [run("o.png", "a remote heron", 1_700_000_050)],
+      loading: false,
+      error: null,
+      loaded: true,
+    };
+  }
   const wrapper = mount(HistoryView, {
     global: { plugins: [pinia, router], stubs: { AuthedMedia: stub } },
   });
@@ -84,9 +106,18 @@ async function mountView() {
   return wrapper;
 }
 
+const promptEntry = (prompt: string, hostId: string, hostLabel: string, used_at: number) => ({
+  prompt,
+  model: "flux2-klein",
+  used_at,
+  hostId,
+  hostLabel,
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
-  fetchHistory.mockResolvedValue([]);
+  fetchHistoryAll.mockResolvedValue({ entries: [], supportedHostIds: [], unreachableHostIds: [] });
+  clearHistoryOn.mockResolvedValue(undefined);
 });
 
 describe("HistoryView runs", () => {
@@ -126,9 +157,137 @@ describe("HistoryView runs", () => {
 
   it("loads the prompt log only when that tab is opened", async () => {
     const wrapper = await mountView();
-    expect(fetchHistory).not.toHaveBeenCalled();
+    expect(fetchHistoryAll).not.toHaveBeenCalled();
     await wrapper.get("[data-test='tab-prompts']").trigger("click");
     await flushPromises();
-    expect(fetchHistory).toHaveBeenCalled();
+    expect(fetchHistoryAll).toHaveBeenCalled();
+  });
+});
+
+describe("HistoryView multi-host", () => {
+  it("shows no host chips with a single source", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.find("[role='tablist']").exists()).toBe(false);
+    expect(wrapper.findAll("[data-test='host-badge']")).toHaveLength(0);
+  });
+
+  it("shows filter chips and per-row host chips when several hosts are live", async () => {
+    const wrapper = await mountView({ extra: true });
+    expect(wrapper.find("[role='tablist']").exists()).toBe(true);
+    const rows = wrapper.findAll("[data-test='run-row']");
+    expect(rows).toHaveLength(3);
+    const badges = wrapper.findAll("[data-test='host-badge']");
+    expect(badges.map((b) => b.text())).toEqual(["This Mac", "okra", "This Mac"]);
+  });
+
+  it("the chip filter narrows the runs list and hides row chips", async () => {
+    const wrapper = await mountView({ extra: true });
+    useGalleryStore().filter = "okra-7680";
+    await flushPromises();
+    const rows = wrapper.findAll("[data-test='run-row']");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.text()).toContain("a remote heron");
+    expect(wrapper.findAll("[data-test='host-badge']")).toHaveLength(0);
+  });
+
+  it("fans the prompt log out over every ready host and tags rows", async () => {
+    fetchHistoryAll.mockResolvedValue({
+      entries: [
+        promptEntry("local prompt", "local", "This Mac", 2_000),
+        promptEntry("remote prompt", "okra-7680", "okra", 1_000),
+      ],
+      supportedHostIds: ["local", "okra-7680"],
+    });
+    const wrapper = await mountView({ extra: true });
+    await wrapper.get("[data-test='tab-prompts']").trigger("click");
+    await flushPromises();
+    const targets = fetchHistoryAll.mock.calls[0]![0] as Array<{ hostId: string }>;
+    expect(targets.map((t) => t.hostId)).toEqual(["local", "okra-7680"]);
+    const rows = wrapper.findAll("[data-test='prompt-row']");
+    expect(rows).toHaveLength(2);
+    const badges = wrapper.findAll("[data-test='host-badge']");
+    expect(badges.map((b) => b.text())).toEqual(["This Mac", "okra"]);
+  });
+
+  it("the chip filter narrows the prompt log too", async () => {
+    fetchHistoryAll.mockResolvedValue({
+      entries: [
+        promptEntry("local prompt", "local", "This Mac", 2_000),
+        promptEntry("remote prompt", "okra-7680", "okra", 1_000),
+      ],
+      supportedHostIds: ["local", "okra-7680"],
+    });
+    const wrapper = await mountView({ extra: true });
+    await wrapper.get("[data-test='tab-prompts']").trigger("click");
+    await flushPromises();
+    useGalleryStore().filter = "okra-7680";
+    await flushPromises();
+    const rows = wrapper.findAll("[data-test='prompt-row']");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.text()).toContain("remote prompt");
+  });
+
+  it("shows the unavailable state only when no host supports history", async () => {
+    fetchHistoryAll.mockResolvedValue({
+      entries: [],
+      supportedHostIds: [],
+      unreachableHostIds: [],
+    });
+    const wrapper = await mountView({ extra: true });
+    await wrapper.get("[data-test='tab-prompts']").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Prompt history isn't available");
+
+    fetchHistoryAll.mockResolvedValue({
+      entries: [promptEntry("kept", "local", "This Mac", 1_000)],
+      supportedHostIds: ["local"],
+      unreachableHostIds: [],
+    });
+    const other = await mountView({ extra: true });
+    await other.get("[data-test='tab-prompts']").trigger("click");
+    await flushPromises();
+    expect(other.text()).not.toContain("Prompt history isn't available");
+  });
+
+  it("clears only the filtered host", async () => {
+    fetchHistoryAll.mockResolvedValue({
+      entries: [
+        promptEntry("local prompt", "local", "This Mac", 2_000),
+        promptEntry("remote prompt", "okra-7680", "okra", 1_000),
+      ],
+      supportedHostIds: ["local", "okra-7680"],
+    });
+    const wrapper = await mountView({ extra: true });
+    await wrapper.get("[data-test='tab-prompts']").trigger("click");
+    await flushPromises();
+    useGalleryStore().filter = "okra-7680";
+    await flushPromises();
+    await wrapper.get("[data-test='clear-history']").trigger("click");
+    await wrapper.get("[data-test='clear-history']").trigger("click");
+    await flushPromises();
+    expect(clearHistoryOn).toHaveBeenCalledTimes(1);
+    expect(clearHistoryOn).toHaveBeenCalledWith({ baseUrl: "http://okra:7680", apiKey: null });
+  });
+
+  it("clearing All names every history-capable host and hits them all", async () => {
+    fetchHistoryAll.mockResolvedValue({
+      entries: [
+        promptEntry("local prompt", "local", "This Mac", 2_000),
+        promptEntry("remote prompt", "okra-7680", "okra", 1_000),
+      ],
+      supportedHostIds: ["local", "okra-7680"],
+    });
+    const wrapper = await mountView({ extra: true });
+    await wrapper.get("[data-test='tab-prompts']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='clear-history']").trigger("click");
+    const label = wrapper.get("[data-test='clear-history']").text();
+    expect(label).toContain("This Mac");
+    expect(label).toContain("okra");
+    await wrapper.get("[data-test='clear-history']").trigger("click");
+    await flushPromises();
+    expect(clearHistoryOn).toHaveBeenCalledTimes(2);
+    expect(clearHistoryOn).toHaveBeenCalledWith({ baseUrl: "http://x", apiKey: null });
+    expect(clearHistoryOn).toHaveBeenCalledWith({ baseUrl: "http://okra:7680", apiKey: null });
   });
 });
