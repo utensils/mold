@@ -19,15 +19,28 @@ vi.mock("../lib/ipc", () => ({
 vi.mock("../lib/api/client", () => ({
   apiJson: vi.fn().mockResolvedValue([]),
   apiFetch: vi.fn(),
+  apiJsonTo: vi.fn().mockResolvedValue([]),
+  apiFetchTo: vi.fn(),
   ApiError: class ApiError extends Error {},
 }));
 
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import { sseStream } from "../lib/api/sse";
-import { apiJson } from "../lib/api/client";
+import { apiJsonTo } from "../lib/api/client";
+import { useConnectionStore } from "./connection";
 
 const caps = (available: boolean) =>
   ({ gallery: { can_delete: true }, events: { available } }) as never;
+
+/** Local primary ("local" host id) with a loaded gallery bucket. */
+function connectWithBucket() {
+  const conn = useConnectionStore();
+  conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+  conn.status = "ready";
+  const gallery = useGalleryStore();
+  gallery.buckets["local"] = { items: [], loading: false, error: null, loaded: true };
+  return gallery;
+}
 
 beforeEach(() => {
   setActivePinia(createPinia());
@@ -68,21 +81,19 @@ describe("events subscription", () => {
 });
 
 describe("event routing", () => {
-  it("routes gallery_added and gallery_removed into the gallery store", () => {
+  it("routes gallery_added and gallery_removed into the primary bucket", () => {
     const events = useEventsStore();
-    const gallery = useGalleryStore();
-    gallery.source = "engine";
-    gallery.loaded = true;
+    const gallery = connectWithBucket();
 
     events.apply({
       type: "gallery_added",
       filename: "new.png",
       image: { filename: "new.png", timestamp: 5, metadata: { prompt: "p" } } as never,
     });
-    expect(gallery.items.map((i) => i.filename)).toEqual(["new.png"]);
+    expect(gallery.buckets["local"]!.items.map((i) => i.filename)).toEqual(["new.png"]);
 
     events.apply({ type: "gallery_removed", filename: "new.png" });
-    expect(gallery.items).toHaveLength(0);
+    expect(gallery.buckets["local"]!.items).toHaveLength(0);
   });
 
   it("ignores job lifecycle frames", () => {
@@ -121,24 +132,22 @@ describe("old-server fallback poller", () => {
     try {
       vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(false));
       const events = useEventsStore();
-      const gallery = useGalleryStore();
       const generation = useGenerationStore();
-      gallery.source = "engine";
-      gallery.loaded = true;
+      connectWithBucket();
 
       await events.subscribe();
 
       // Queue busy → each tick refetches.
       generation.jobs.push({ status: "developing" } as never);
       await vi.advanceTimersByTimeAsync(5_100);
-      expect(apiJson).toHaveBeenCalledTimes(1);
+      expect(apiJsonTo).toHaveBeenCalledTimes(1);
 
       // Queue drains → exactly one trailing refetch, then quiet.
       generation.jobs.length = 0;
       await vi.advanceTimersByTimeAsync(5_100);
-      expect(apiJson).toHaveBeenCalledTimes(2);
+      expect(apiJsonTo).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(10_200);
-      expect(apiJson).toHaveBeenCalledTimes(2);
+      expect(apiJsonTo).toHaveBeenCalledTimes(2);
 
       events.unsubscribe();
     } finally {
@@ -151,14 +160,12 @@ describe("old-server fallback poller", () => {
     try {
       vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(false));
       const events = useEventsStore();
-      const gallery = useGalleryStore();
-      gallery.source = "engine";
-      gallery.loaded = true;
+      connectWithBucket();
 
       await events.subscribe();
       await vi.advanceTimersByTimeAsync(20_000);
 
-      expect(apiJson).not.toHaveBeenCalled();
+      expect(apiJsonTo).not.toHaveBeenCalled();
       events.unsubscribe();
     } finally {
       vi.useRealTimers();

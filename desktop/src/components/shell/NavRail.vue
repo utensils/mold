@@ -146,6 +146,10 @@ function hostMenu(host: HostView): MenuEntry[] {
       action: () => void appPrefs.update({ generateTargetHost: host.id }),
     });
   }
+  entries.push({
+    label: "View gallery",
+    action: () => void router.push({ path: "/gallery", query: { host: host.id } }),
+  });
   entries.push({ separator: true });
   entries.push({
     label: "Open web UI",

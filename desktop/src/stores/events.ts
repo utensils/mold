@@ -98,19 +98,21 @@ export const useEventsStore = defineStore("events", {
     },
     /**
      * Old-server fallback: while any generation is pending, refetch the
-     * engine gallery every few seconds, plus once more when the queue
-     * drains so the last print always lands.
+     * primary host's gallery bucket every few seconds, plus once more when
+     * the queue drains so the last print always lands.
      */
     startPolling() {
       let wasPending = false;
       const tick = () => {
         const generation = useGenerationStore();
         const gallery = useGalleryStore();
+        const primaryId = useHostsStore().primaryHost?.id ?? null;
+        const bucket = primaryId ? gallery.buckets[primaryId] : undefined;
         const pending = generation.pending.length > 0;
-        const shouldFetch =
-          gallery.loaded && gallery.source === "engine" && (pending || wasPending);
+        const shouldFetch = pending || wasPending;
         wasPending = pending;
-        if (shouldFetch && !gallery.loading) void gallery.fetch();
+        if (!shouldFetch || !primaryId || !bucket?.loaded || bucket.loading) return;
+        void gallery.fetchBucket(primaryId);
       };
       this.pollTimer = setInterval(tick, POLL_INTERVAL_MS);
     },

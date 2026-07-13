@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
 import { authedMediaUrl } from "../../lib/gallery/media";
+import type { ApiTarget } from "../../lib/api/client";
 
 const props = withDefaults(
   defineProps<{
@@ -8,8 +9,12 @@ const props = withDefaults(
     video?: boolean;
     alt?: string;
     controls?: boolean;
+    /** Explicit host to fetch from; defaults to the primary connection. */
+    target?: ApiTarget | null;
+    /** Blob-cache bucket, usually the origin host id. */
+    cacheKey?: string | null;
   }>(),
-  { video: false, alt: "", controls: false },
+  { video: false, alt: "", controls: false, target: null, cacheKey: null },
 );
 
 const src = ref<string | null>(null);
@@ -19,13 +24,16 @@ async function load() {
   src.value = null;
   failed.value = false;
   try {
-    src.value = await authedMediaUrl(props.path);
+    src.value = await authedMediaUrl(props.path, {
+      ...(props.target ? { target: props.target } : {}),
+      ...(props.cacheKey ? { cacheKey: props.cacheKey } : {}),
+    });
   } catch {
     failed.value = true;
   }
 }
 
-watch(() => props.path, load);
+watch(() => [props.path, props.cacheKey], load);
 onMounted(load);
 </script>
 

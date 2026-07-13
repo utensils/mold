@@ -1,40 +1,51 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
+import HostFilterChips from "../components/shell/HostFilterChips.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
-import { galleryMediaPath, type GallerySource } from "../lib/gallery/media";
+import { galleryMediaPath, mediaPath } from "../lib/gallery/media";
 import { formatBytes } from "../lib/format";
-import { useConnectionStore } from "../stores/connection";
-import { useGalleryStore } from "../stores/gallery";
+import { apiFetch, apiFetchTo, type ApiTarget } from "../lib/api/client";
+import { useGalleryStore, type MergedPrint } from "../stores/gallery";
+import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
-import { ipc } from "../lib/ipc";
+import { inTauri, ipc } from "../lib/ipc";
 import { copyImageBytesToClipboard } from "../lib/clipboard";
 import type { GalleryImage } from "../lib/api/types";
 
 const GAP = 8;
 const PAD = 16;
+/** Extra hosts have no SSE — their buckets poll while the view is open. */
+const EXTRA_POLL_MS = 15_000;
 
 const router = useRouter();
-const conn = useConnectionStore();
+const route = useRoute();
 const gallery = useGalleryStore();
+const hosts = useHostsStore();
 const models = useModelStore();
 const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
 const toasts = useToastStore();
 
-const canReveal = computed(
-  () => gallery.source === "local" || conn.mode === "local" || conn.mode === "external",
-);
+const primaryId = computed(() => hosts.primaryHost?.id ?? null);
 
-/** Remote prints can be pulled into this Mac's gallery on demand. */
-const canSaveLocally = computed(() => gallery.source === "engine" && conn.mode === "remote");
+const targetFor = (entry: MergedPrint): ApiTarget | null => gallery.targetOf(entry.sourceKey);
+
+/** Reveal works for files on this Mac: the IPC bucket, or a local-kind
+ *  (built-in/external) engine whose output dir is this machine's. */
+const canReveal = (entry: MergedPrint) =>
+  entry.sourceKey === "local" || gallery.hostFor(entry.sourceKey)?.kind === "local";
+
+/** Prints on a remote host can be pulled into this Mac's gallery. */
+const canSaveLocally = (entry: MergedPrint) =>
+  inTauri() && gallery.hostFor(entry.sourceKey)?.kind === "remote";
 
 async function blobToBase64(blob: Blob): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -45,19 +56,19 @@ async function blobToBase64(blob: Blob): Promise<string> {
   return btoa(binary);
 }
 
-/** Authed source bytes for an engine-gallery item, as base64. */
-async function fetchItemBase64(item: GalleryImage): Promise<string> {
-  const { apiFetch } = await import("../lib/api/client");
-  const blob = await apiFetch(`/api/gallery/image/${encodeURIComponent(item.filename)}`).then((r) =>
-    r.blob(),
-  );
+/** Authed source bytes for a host-gallery item, as base64 (origin-aware). */
+async function fetchItemBase64(entry: MergedPrint): Promise<string> {
+  const path = mediaPath(entry.item.filename);
+  const target = targetFor(entry);
+  const blob = await (target ? apiFetchTo(target, path) : apiFetch(path)).then((r) => r.blob());
   return blobToBase64(blob);
 }
 
-async function saveToThisMac(item: GalleryImage) {
+async function saveToThisMac(entry: MergedPrint) {
   try {
-    const saved = await ipc.saveOutputBytes(item.filename, await fetchItemBase64(item));
+    const saved = await ipc.saveOutputBytes(entry.item.filename, await fetchItemBase64(entry));
     toasts.push(`Saved to this Mac — ${saved}`);
+    void gallery.refreshHost("local");
   } catch (err) {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
   }
@@ -106,20 +117,23 @@ async function streamUpscale(image: string): Promise<string> {
   });
 }
 
-async function upscaleItem(item: GalleryImage) {
+async function upscaleItem(entry: MergedPrint) {
   if (upscalingFilename.value) return;
-  upscalingFilename.value = item.filename;
+  upscalingFilename.value = entry.item.filename;
   toasts.push(`Upscaling with ${upscalerModel.value}…`);
   try {
-    const upscaled = await streamUpscale(await fetchItemBase64(item));
+    const upscaled = await streamUpscale(await fetchItemBase64(entry));
     // The upscale endpoints don't persist server-side — the local save IS
     // the durable copy.
-    const stem = item.filename.replace(/\.[^.]+$/, "");
+    const stem = entry.item.filename.replace(/\.[^.]+$/, "");
     const saved = await ipc.saveOutputBytes(`${stem}-upscaled.png`, upscaled);
     toasts.push(`Upscaled — saved to this Mac as ${saved}`);
-    // On a local/external connection the engine gallery reads the same
-    // output dir the save just wrote to — refresh whatever is on screen.
-    void gallery.fetch();
+    // The save landed in this Mac's output dir: on a local/external primary
+    // the engine bucket reads that same dir; on a remote primary it's the
+    // IPC bucket. Refresh whichever of the two is loaded.
+    for (const key of new Set([primaryId.value, "local"])) {
+      if (key) void gallery.refreshHost(key);
+    }
   } catch (err) {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
   } finally {
@@ -127,7 +141,8 @@ async function upscaleItem(item: GalleryImage) {
   }
 }
 
-function tileMenu(item: GalleryImage): MenuEntry[] {
+function tileMenu(entry: MergedPrint): MenuEntry[] {
+  const item = entry.item;
   const m = item.metadata;
   return [
     {
@@ -160,22 +175,25 @@ function tileMenu(item: GalleryImage): MenuEntry[] {
     {
       label: "Copy image",
       disabled: isVideo(item),
-      action: () => void copyImage(item),
+      action: () => void copyImage(entry),
     },
     { separator: true },
     {
       label: upscalingFilename.value === item.filename ? "Upscaling…" : "Upscale",
-      disabled: isVideo(item) || gallery.source !== "engine" || upscalingFilename.value !== null,
-      action: () => void upscaleItem(item),
+      // Upscale runs on the PRIMARY engine only for now — routing it to the
+      // item's origin host is a follow-up.
+      disabled:
+        isVideo(item) || entry.sourceKey !== primaryId.value || upscalingFilename.value !== null,
+      action: () => void upscaleItem(entry),
     },
     {
       label: "Save to this Mac",
-      disabled: !canSaveLocally.value,
-      action: () => void saveToThisMac(item),
+      disabled: !canSaveLocally(entry),
+      action: () => void saveToThisMac(entry),
     },
     {
       label: "Reveal in Finder",
-      disabled: !canReveal.value,
+      disabled: !canReveal(entry),
       action: () =>
         void ipc.revealOutputFile(item.filename).catch((e) => {
           toasts.push(e instanceof Error ? e.message : String(e), "error");
@@ -186,7 +204,7 @@ function tileMenu(item: GalleryImage): MenuEntry[] {
       label: "Delete",
       danger: true,
       action: () => {
-        selected.value = item.filename;
+        select(entry);
         void removeSelected().then(() => toasts.push("Deleted"));
       },
     },
@@ -195,20 +213,29 @@ function tileMenu(item: GalleryImage): MenuEntry[] {
 
 const scrollEl = ref<HTMLElement | null>(null);
 const containerWidth = ref(0);
-const selected = ref<string | null>(null);
+const selected = ref<{ sourceKey: string; filename: string } | null>(null);
 const lightboxOpen = ref(false);
 const rowHeight = ref(180);
 
 let resizeObserver: ResizeObserver | null = null;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-const rows = computed(() =>
-  layoutJustifiedRows(
-    gallery.items,
+/** Justified layout over the filtered merged set; each laid tile keeps its
+ *  merged entry so origin (badge, target, actions) travels with it. */
+const rows = computed(() => {
+  const entries = gallery.filtered;
+  const laidRows = layoutJustifiedRows(
+    entries.map((e) => e.item),
     Math.max(0, containerWidth.value - PAD * 2),
     rowHeight.value,
     GAP,
-  ),
-);
+  );
+  let cursor = 0;
+  return laidRows.map((r) => ({
+    height: r.height,
+    items: r.items.map((laid) => ({ ...laid, entry: entries[cursor++]! })),
+  }));
+});
 
 const virtualizer = useVirtualizer(
   computed(() => ({
@@ -219,19 +246,38 @@ const virtualizer = useVirtualizer(
   })),
 );
 
-const totalBytes = computed(() => gallery.items.reduce((sum, i) => sum + (i.size_bytes ?? 0), 0));
+const showBadges = computed(() => gallery.filter === "all" && gallery.chipCounts.length > 1);
 
-const selectedIndex = computed(() => gallery.items.findIndex((i) => i.filename === selected.value));
-const selectedItem = computed<GalleryImage | null>(
-  () => gallery.items[selectedIndex.value] ?? null,
+const isSelected = (entry: MergedPrint) =>
+  selected.value !== null &&
+  selected.value.sourceKey === entry.sourceKey &&
+  selected.value.filename === entry.item.filename;
+
+function select(entry: MergedPrint) {
+  selected.value = { sourceKey: entry.sourceKey, filename: entry.item.filename };
+}
+
+const selectedIndex = computed(() => gallery.filtered.findIndex((e) => isSelected(e)));
+const selectedEntry = computed<MergedPrint | null>(
+  () => gallery.filtered[selectedIndex.value] ?? null,
 );
 
 const isVideo = (i: GalleryImage) =>
   i.format === "mp4" || i.filename.endsWith(".mp4") || !!i.metadata.video_frames;
 
-async function copyImage(item: GalleryImage) {
+async function copyImage(entry: MergedPrint) {
   try {
-    await copyImageBytesToClipboard(galleryMediaPath(item.filename, gallery.source));
+    const path = galleryMediaPath(entry.item.filename, gallery.mediaSourceOf(entry.sourceKey));
+    const target = targetFor(entry);
+    await copyImageBytesToClipboard(
+      path,
+      target
+        ? {
+            fetchImage: async (p) =>
+              new Uint8Array(await (await apiFetchTo(target, p)).arrayBuffer()),
+          }
+        : undefined,
+    );
     toasts.push("Image copied");
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
@@ -239,12 +285,13 @@ async function copyImage(item: GalleryImage) {
 }
 
 function moveSelection(delta: number) {
-  if (gallery.items.length === 0) return;
+  const entries = gallery.filtered;
+  if (entries.length === 0) return;
   const next = Math.min(
-    gallery.items.length - 1,
+    entries.length - 1,
     Math.max(0, (selectedIndex.value === -1 ? 0 : selectedIndex.value) + delta),
   );
-  selected.value = gallery.items[next]!.filename;
+  select(entries[next]!);
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -264,36 +311,43 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 async function removeSelected() {
-  const item = selectedItem.value;
-  if (!item) return;
+  const entry = selectedEntry.value;
+  if (!entry) return;
   const index = selectedIndex.value;
-  await gallery.remove(item.filename);
-  if (gallery.items.length === 0) {
+  await gallery.remove(entry.sourceKey, entry.item.filename);
+  const remaining = gallery.filtered;
+  if (remaining.length === 0) {
     lightboxOpen.value = false;
     selected.value = null;
   } else {
-    selected.value = gallery.items[Math.min(index, gallery.items.length - 1)]!.filename;
+    select(remaining[Math.min(index, remaining.length - 1)]!);
   }
 }
 
-async function switchSource(source: GallerySource) {
-  if (source === gallery.source) return;
-  selected.value = null;
-  lightboxOpen.value = false;
-  await gallery.fetch(source);
-}
-
+// Deep link: /gallery?host=<bucket key> pre-picks a chip ("local" = This
+// Mac's key in every mode). Plain /gallery keeps the session filter.
 watch(
-  () => [conn.ready, conn.mode] as const,
-  ([ready, mode]) => {
-    if (!ready) return;
-    void gallery.fetch(mode === "remote" ? gallery.source : "engine");
+  () => route.query.host,
+  (host) => {
+    if (host === undefined) return;
+    const key = typeof host === "string" ? host : null;
+    gallery.filter =
+      key && (key === "all" || gallery.sources.some((s) => s.key === key)) ? key : "all";
   },
+  { immediate: true },
+);
+
+// (Re)fetch whenever the set of sources changes — covers mount, the
+// connection coming up, and hosts joining or leaving mid-session.
+watch(
+  () => gallery.sources.map((s) => s.key).join("|"),
+  () => void gallery.fetchAll(),
   { immediate: true },
 );
 
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
+  pollTimer = setInterval(() => void gallery.pollExtras(), EXTRA_POLL_MS);
   if (scrollEl.value) {
     containerWidth.value = scrollEl.value.clientWidth;
     resizeObserver = new ResizeObserver((entries) => {
@@ -304,6 +358,8 @@ onMounted(() => {
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
   resizeObserver?.disconnect();
 });
 </script>
@@ -315,43 +371,25 @@ onUnmounted(() => {
         Gallery
       </span>
       <span class="data-mono text-caption text-ink-3">
-        {{ gallery.items.length }} prints · {{ formatBytes(totalBytes) }}
+        {{ gallery.filtered.length }} prints · {{ formatBytes(gallery.totalBytes) }}
       </span>
-      <div
-        v-if="conn.mode === 'remote'"
-        class="border-edge ml-2 flex rounded-control border bg-bath p-0.5"
-        role="tablist"
-        aria-label="Gallery location"
-      >
-        <button
-          v-for="option in [
-            ['engine', 'Remote'],
-            ['local', 'This Mac'],
-          ] as const"
-          :key="option[0]"
-          type="button"
-          role="tab"
-          class="rounded-control px-2.5 py-1 text-caption transition-colors"
-          :class="
-            gallery.source === option[0]
-              ? 'bg-bench font-medium text-ink shadow-sm'
-              : 'text-ink-3 hover:text-ink'
-          "
-          :aria-selected="gallery.source === option[0]"
-          @click="switchSource(option[0])"
-        >
-          {{ option[1] }}
-        </button>
-      </div>
-      <span v-if="gallery.error" class="ml-auto text-caption text-stop">{{ gallery.error }}</span>
+      <HostFilterChips
+        v-if="gallery.chipCounts.length > 1"
+        v-model="gallery.filter"
+        class="ml-2"
+        :chips="gallery.chipCounts"
+      />
+      <span v-if="gallery.firstError" class="ml-auto text-caption text-stop">
+        {{ gallery.firstError }}
+      </span>
     </header>
 
     <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto" style="contain: strict">
       <EmptyState
-        v-if="gallery.loaded && gallery.items.length === 0"
+        v-if="gallery.loaded && gallery.filtered.length === 0"
         headline="No prints here yet"
         :detail="
-          gallery.source === 'local'
+          gallery.filter === 'local'
             ? 'Generations saved on this Mac will appear here.'
             : 'Generate one and it lands here.'
         "
@@ -371,28 +409,36 @@ onUnmounted(() => {
         >
           <button
             v-for="laid in rows[vrow.index]?.items ?? []"
-            :key="laid.item.filename"
+            :key="`${laid.entry.sourceKey}::${laid.item.filename}`"
             type="button"
             class="group relative shrink-0 overflow-hidden rounded-media border transition-shadow duration-100"
             :class="
-              selected === laid.item.filename
+              isSelected(laid.entry)
                 ? 'border-transparent ring-2 ring-safelight'
                 : 'border-[color-mix(in_srgb,var(--rebate)_14%,transparent)]'
             "
             :style="{ width: `${laid.width}px`, height: `${laid.height}px` }"
-            @click="selected = laid.item.filename"
+            @click="select(laid.entry)"
             @contextmenu="
-              selected = laid.item.filename;
-              contextMenu.open($event, tileMenu(laid.item));
+              select(laid.entry);
+              contextMenu.open($event, tileMenu(laid.entry));
             "
             @dblclick="
-              selected = laid.item.filename;
+              select(laid.entry);
               lightboxOpen = true;
             "
           >
             <AuthedMedia
-              :path="galleryMediaPath(laid.item.filename, gallery.source, true)"
-              :video="gallery.source === 'local' && isVideo(laid.item)"
+              :path="
+                galleryMediaPath(
+                  laid.item.filename,
+                  gallery.mediaSourceOf(laid.entry.sourceKey),
+                  true,
+                )
+              "
+              :target="targetFor(laid.entry)"
+              :cache-key="laid.entry.sourceKey"
+              :video="gallery.mediaSourceOf(laid.entry.sourceKey) === 'local' && isVideo(laid.item)"
               :alt="laid.item.metadata.prompt"
             />
             <span
@@ -400,6 +446,13 @@ onUnmounted(() => {
               class="absolute top-1.5 right-1.5 rounded-control bg-black/55 px-1 text-caption text-rebate"
             >
               ▶
+            </span>
+            <span
+              v-if="showBadges"
+              data-test="host-badge"
+              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/55 px-1 !text-rebate"
+            >
+              {{ laid.entry.hostLabel }}
             </span>
             <span
               class="edge-code absolute right-0 bottom-0 left-0 translate-y-full bg-black/60 px-1.5 py-0.5 text-left transition-transform duration-100 group-hover:translate-y-0"
@@ -412,13 +465,16 @@ onUnmounted(() => {
     </div>
 
     <Lightbox
-      v-if="lightboxOpen && selectedItem"
-      :item="selectedItem"
+      v-if="lightboxOpen && selectedEntry"
+      :item="selectedEntry.item"
       :index="selectedIndex"
-      :count="gallery.items.length"
-      :video="isVideo(selectedItem)"
-      :source="gallery.source"
-      :can-reveal="canReveal"
+      :count="gallery.filtered.length"
+      :video="isVideo(selectedEntry.item)"
+      :source="gallery.mediaSourceOf(selectedEntry.sourceKey)"
+      :target="targetFor(selectedEntry)"
+      :cache-key="selectedEntry.sourceKey"
+      :host-label="selectedEntry.hostLabel"
+      :can-reveal="canReveal(selectedEntry)"
       @close="lightboxOpen = false"
       @prev="moveSelection(-1)"
       @next="moveSelection(1)"

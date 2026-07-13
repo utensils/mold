@@ -8,6 +8,7 @@ vi.mock("../lib/api/sse", () => ({
 }));
 
 const apiFetchTo = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+const apiJsonTo = vi.fn().mockResolvedValue([]);
 vi.mock("../lib/api/client", () => ({
   ApiError: class ApiError extends Error {
     constructor(
@@ -18,6 +19,7 @@ vi.mock("../lib/api/client", () => ({
     }
   },
   apiFetchTo: (...a: unknown[]) => apiFetchTo(...a),
+  apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
   currentTarget: () => ({ baseUrl: "http://primary:7680", apiKey: "pk" }),
 }));
 
@@ -27,15 +29,19 @@ vi.mock("../lib/notify", () => ({
 }));
 
 const saveOutputBytes = vi.fn().mockResolvedValue("saved.png");
+const localGalleryList = vi.fn().mockResolvedValue([]);
 vi.mock("../lib/ipc", () => ({
   inTauri: () => true,
   ipc: {
     saveOutputBytes: (...a: unknown[]) => saveOutputBytes(...a),
+    localGalleryList: (...a: unknown[]) => localGalleryList(...a),
   },
 }));
 
 import { useGenerationStore, suggestOutputFilename } from "./generation";
 import { useAppPrefsStore } from "./appPrefs";
+import { useGalleryStore } from "./gallery";
+import { useHostsStore } from "./hosts";
 
 function request(): GenerateRequest {
   return { prompt: "a cat", model: "flux2-klein", width: 512, height: 512, steps: 4 };
@@ -123,6 +129,52 @@ describe("generation store multi-host routing", () => {
     useAppPrefsStore().settings = { saveRemoteOutputs: false } as never;
     await store.submitBatch(request(), 1, halRoute).settled;
     expect(saveOutputBytes).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the origin host's loaded gallery bucket when a routed job completes", async () => {
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("complete", completeFrame());
+        return Promise.resolve();
+      },
+    );
+    useHostsStore().extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: "hk",
+      status: "ready",
+      error: null,
+    });
+    const gallery = useGalleryStore();
+    gallery.buckets["hal9000-7680"] = { items: [], loading: false, error: null, loaded: true };
+    // The auto local save also refreshes this Mac's loaded bucket.
+    gallery.buckets["local"] = { items: [], loading: false, error: null, loaded: true };
+
+    const store = useGenerationStore();
+    await store.submitBatch(request(), 1, halRoute).settled;
+
+    await vi.waitFor(() => {
+      expect(apiJsonTo).toHaveBeenCalledWith(
+        { baseUrl: "http://hal9000:7680", apiKey: "hk" },
+        "/api/gallery",
+      );
+      expect(localGalleryList).toHaveBeenCalled();
+    });
+  });
+
+  it("never force-loads gallery buckets from a background completion", async () => {
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("complete", completeFrame());
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    await store.submitBatch(request(), 1, halRoute).settled;
+    await Promise.resolve();
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(useGalleryStore().buckets["hal9000-7680"]).toBeUndefined();
   });
 
   it("cancels a routed job against its own host", async () => {
