@@ -191,6 +191,47 @@ describe("hosts store", () => {
     expect(persisted.savedHosts[0]).toMatchObject({ id: "hal9000-7680", name: "hal9000" });
   });
 
+  it("adopt() lists an unreachable host as an errored extra, idempotently", () => {
+    const hosts = useHostsStore();
+    hosts.adopt("hal9000-7680", "http://hal9000:7680", "key", "hal9000");
+    hosts.adopt("hal9000-7680", "http://hal9000:7680", "key", "hal9000");
+    expect(hosts.extras).toHaveLength(1);
+    const row = hosts.all.find((h) => h.id === "hal9000-7680");
+    expect(row).toMatchObject({ status: "error", primary: false, apiKey: "key" });
+    expect(row?.label).toBe("hal9000");
+  });
+
+  it("init() does not duplicate a host that was already adopted", async () => {
+    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    hosts.adopt(hal.id, hal.url, null, null);
+    await hosts.init();
+    expect(hosts.extras.filter((h) => h.id === hal.id)).toHaveLength(1);
+  });
+
+  it("rename() updates the live label and the saved entry", async () => {
+    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.rename(hal.id, "  render box  ");
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("render box");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.savedHosts[0]).toMatchObject({ id: hal.id, name: "render box" });
+  });
+
+  it("labels a remote primary with its saved friendly name", async () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
+    installSettings(settings({ savedHosts: [hal] }));
+    const hosts = useHostsStore();
+    await hosts.init();
+    expect(hosts.primaryHost?.label).toBe("hal9000");
+    await hosts.rename(hal.id, "render box");
+    expect(hosts.primaryHost?.label).toBe("render box");
+  });
+
   it("refresh() pulls queue telemetry from every host", async () => {
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
     apiJsonTo.mockResolvedValue({ queue_depth: 2, queue_capacity: 8, version: "0.16.0" });

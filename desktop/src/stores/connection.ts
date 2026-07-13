@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { hostIdFromUrl } from "../lib/hosts";
 import { ipc, type ConnectionInfo } from "../lib/ipc";
 import { useToastStore } from "./toasts";
 
@@ -55,6 +56,13 @@ export const useConnectionStore = defineStore("connection", {
               `Couldn't reach ${hostLabel(settings.remoteUrl)} — using the built-in engine.`,
               "error",
             );
+            // The unreachable host stays visible as an errored sidebar row;
+            // the hosts poll self-heals it when the server answers again.
+            // (Dynamic import: the hosts store statically imports this one.)
+            const id = hostIdFromUrl(settings.remoteUrl);
+            const saved = settings.savedHosts.find((h) => h.id === id);
+            const { useHostsStore } = await import("./hosts");
+            useHostsStore().adopt(id, settings.remoteUrl, remoteKey, saved?.name ?? null);
             this.info = await ipc.startLocalEngine();
           }
         } else {

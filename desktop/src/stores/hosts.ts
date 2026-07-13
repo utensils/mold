@@ -58,6 +58,8 @@ export const useHostsStore = defineStore("hosts", {
   state: () => ({
     extras: [] as ExtraHost[],
     telemetry: {} as Record<string, HostTelemetry>,
+    /** Friendly names from savedHosts, so the primary can be renamed too. */
+    names: {} as Record<string, string>,
     pollTimer: null as ReturnType<typeof setInterval> | null,
     initialized: false,
   }),
@@ -71,7 +73,9 @@ export const useHostsStore = defineStore("hosts", {
       const t = state.telemetry[id];
       return {
         id,
-        label: remote ? conn.info.baseUrl.replace(/^https?:\/\//, "") : "This Mac",
+        label: remote
+          ? (state.names[id] ?? conn.info.baseUrl.replace(/^https?:\/\//, ""))
+          : "This Mac",
         kind: remote ? "remote" : "local",
         baseUrl: conn.info.baseUrl,
         apiKey: conn.info.apiKey,
@@ -120,9 +124,15 @@ export const useHostsStore = defineStore("hosts", {
       this.initialized = true;
       try {
         const settings = await ipc.appSettingsGet();
+        for (const saved of settings.savedHosts) {
+          if (saved.name) this.names[saved.id] = saved.name;
+        }
         for (const id of settings.connectedHostIds) {
           const saved = settings.savedHosts.find((h) => h.id === id);
           if (!saved) continue;
+          // Already listed (e.g. adopted after a failed primary reconnect) —
+          // don't duplicate the row or re-probe it.
+          if (this.extras.some((h) => h.id === id)) continue;
           const key = await ipc.secretGet(`remote-api-key.${id}`);
           const extra: ExtraHost = {
             id,
@@ -183,6 +193,36 @@ export const useHostsStore = defineStore("hosts", {
       await ipc.appSettingsSet({
         ...settings,
         connectedHostIds: settings.connectedHostIds.filter((h) => h !== id),
+      });
+    },
+    /**
+     * List a host that could not be reached (e.g. the persisted primary at
+     * launch) as an errored extra, so it stays visible in the sidebar for
+     * one-click reconnect instead of silently vanishing. The regular refresh
+     * poll self-heals it the moment the host answers again.
+     */
+    adopt(id: string, url: string, apiKey: string | null, label?: string | null) {
+      if (this.extras.some((h) => h.id === id)) return;
+      this.extras.push({
+        id,
+        label: label ?? this.names[id] ?? url.replace(/^https?:\/\//, ""),
+        url,
+        apiKey,
+        status: "error",
+        error: "Unreachable at launch",
+      });
+    },
+    /** Give a host a friendly name (sidebar, host selector, Recent hosts). */
+    async rename(id: string, name: string) {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      this.names[id] = trimmed;
+      const extra = this.extras.find((h) => h.id === id);
+      if (extra) extra.label = trimmed;
+      const settings = await ipc.appSettingsGet();
+      await ipc.appSettingsSet({
+        ...settings,
+        savedHosts: settings.savedHosts.map((h) => (h.id === id ? { ...h, name: trimmed } : h)),
       });
     },
     /** Retry a failed extra host in place. */
