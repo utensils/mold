@@ -128,7 +128,10 @@ function runMenu(img: GalleryImage): MenuEntry[] {
 watch(
   () => gallery.sources.map((s) => s.key).join("|"),
   () => {
-    if (!gallery.loaded) void gallery.fetchAll();
+    // Guard on a non-empty source set: during connection init / an engine
+    // switch, sources is briefly empty and fetchAll's syncBuckets would wipe
+    // already-fetched buckets and evict their cached media for nothing.
+    if (gallery.sources.length > 0 && !gallery.loaded) void gallery.fetchAll();
   },
   { immediate: true },
 );
@@ -237,7 +240,14 @@ async function clearAll() {
     return;
   }
   confirmingClear.value = false;
-  await Promise.allSettled(clearTargets.value.map((h) => clearHistoryOn(h.target)));
+  const targets = clearTargets.value;
+  // The This-Mac chip (or an unpopulated support set) has nothing to clear —
+  // a success toast there would be a lie.
+  if (targets.length === 0) {
+    toasts.push("Nothing to clear here");
+    return;
+  }
+  await Promise.allSettled(targets.map((h) => clearHistoryOn(h.target)));
   toasts.push("Cleared history");
   await load();
 }
