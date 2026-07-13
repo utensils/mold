@@ -109,6 +109,27 @@ describe("BenchRail host-aware display", () => {
     expect(last?.target?.baseUrl).toBe("http://hal9000:7680");
   });
 
+  it("reverts to the primary when the last routed job settles", async () => {
+    const wrapper = mountRail();
+    addRemoteHost();
+    const generation = useGenerationStore();
+    generation.jobs.push({
+      clientId: 1,
+      status: "denoising",
+      hostId: "hal9000-7680",
+      hostLabel: "hal9000",
+    } as never);
+    await flushPromises();
+    expect(wrapper.text()).toContain("hal9000");
+    generation.jobs[0]!.status = "complete" as never;
+    await flushPromises();
+    // Chip and queue fall back to the primary...
+    expect(wrapper.text()).toContain("local");
+    expect(wrapper.text()).toContain("QUEUE 0/200");
+    // ...and the resources stream re-targets the primary (no explicit target).
+    expect(streamCalls.at(-1)?.target ?? null).toBeNull();
+  });
+
   it("keeps polling the PRIMARY status for engine recovery while displaying a remote host", async () => {
     mountRail();
     addRemoteHost();

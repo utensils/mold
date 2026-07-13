@@ -45,10 +45,13 @@ const telemetryGpu = computed(() => {
   if (!host) return null;
   const info = displayingRemote.value ? hosts.telemetry[host.id]?.gpuInfo : status.value?.gpu_info;
   if (!info) return null;
+  // Decimal MB, matching formatGB (/1e9) and the server's resources path
+  // ("1 MiB = 1_000_000 for display consistency with the rest of mold") —
+  // binary here would show ~5% more VRAM than the live stream.
   return {
     name: info.name,
-    vram_total: info.vram_total_mb * 1024 * 1024,
-    vram_used: info.vram_used_mb * 1024 * 1024,
+    vram_total: info.vram_total_mb * 1_000_000,
+    vram_used: info.vram_used_mb * 1_000_000,
   };
 });
 
