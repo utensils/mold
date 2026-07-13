@@ -37,10 +37,13 @@ const displayHost = computed(() => {
 const displayingRemote = computed(() => !!displayHost.value && !displayHost.value.primary);
 
 /** MB-based `/api/status` GPU summary as a snapshot-shaped fallback, for
- *  display hosts whose resources stream is unavailable (older servers). */
+ *  display hosts whose resources stream is unavailable (older servers).
+ *  Covers the primary too — a remote primary on an old server would
+ *  otherwise show no GPU at all despite `gpu_info` sitting in `status`. */
 const telemetryGpu = computed(() => {
-  if (!displayingRemote.value) return null;
-  const info = hosts.telemetry[displayHost.value!.id]?.gpuInfo;
+  const host = displayHost.value;
+  if (!host) return null;
+  const info = displayingRemote.value ? hosts.telemetry[host.id]?.gpuInfo : status.value?.gpu_info;
   if (!info) return null;
   return {
     name: info.name,

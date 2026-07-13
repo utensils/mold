@@ -124,6 +124,20 @@ describe("BenchRail host-aware display", () => {
     expect(apiJson).toHaveBeenCalledWith("/api/status");
   });
 
+  it("falls back to the status gpu_info for a primary whose resources stream is silent", async () => {
+    apiJson.mockResolvedValue({
+      version: "0.16.0",
+      models_loaded: [],
+      uptime_secs: 1,
+      queue_depth: 0,
+      queue_capacity: 200,
+      gpu_info: { name: "Apple M3 Ultra", vram_total_mb: 196608, vram_used_mb: 32768 },
+    });
+    const wrapper = mountRail();
+    await flushPromises();
+    expect(wrapper.text()).toContain("Apple M3 Ultra");
+  });
+
   it("falls back to telemetry VRAM when the remote resources stream is silent", async () => {
     const wrapper = mountRail();
     addRemoteHost();
