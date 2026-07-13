@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-13
+
 ### Changed
 
 - **Desktop: API keys and tokens moved out of the macOS Keychain.** Hugging Face, Civitai, remote-host, and RunPod keys now live in an owner-only (0600) `secrets.json` under the app's data directory — the same store debug builds already used — so the app never triggers macOS Keychain permission prompts again. Existing Keychain entries are left untouched and are no longer read; re-enter keys once in Settings. Secret names stay allowlisted, now including per-host `remote-api-key.<host-id>` slots.
@@ -887,7 +889,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/utensils/mold/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/utensils/mold/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/utensils/mold/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/utensils/mold/compare/v0.13.1...v0.14.0
