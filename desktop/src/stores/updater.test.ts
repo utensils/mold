@@ -50,6 +50,8 @@ function settings(updateChannel: AppSettings["updateChannel"] = "stable"): AppSe
     connectedHostIds: [],
     generateTargetHost: null,
     saveRemoteOutputs: true,
+    navRailWidth: null,
+    generateParamsWidth: null,
   };
 }
 

@@ -10,7 +10,11 @@ rust-version = "1.85"
 
 # This crate is deliberately its own cargo root (see the root Cargo.toml
 # [workspace] exclude): the Tauri dependency tree must not enter the CUDA
-# workspace, its lockfile, or the `--workspace` CI gates.
+# workspace, its lockfile, or the `--workspace` CI gates. The empty table
+# below makes that standalone-root status explicit so cargo never walks up
+# to the outer workspace (git worktrees under .claude/worktrees otherwise
+# escape the path-based exclude).
+[workspace]
 
 [lib]
 name = "mold_desktop_lib"

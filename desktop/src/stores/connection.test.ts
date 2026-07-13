@@ -41,6 +41,8 @@ const defaults = {
   connectedHostIds: [],
   generateTargetHost: null,
   saveRemoteOutputs: true,
+  navRailWidth: null,
+  generateParamsWidth: null,
 };
 
 beforeEach(() => {

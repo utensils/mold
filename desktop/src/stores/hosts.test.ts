@@ -50,6 +50,8 @@ function settings(overrides: Record<string, unknown> = {}) {
     connectedHostIds: [] as string[],
     generateTargetHost: null,
     saveRemoteOutputs: true,
+    navRailWidth: null,
+    generateParamsWidth: null,
     ...overrides,
   };
 }
