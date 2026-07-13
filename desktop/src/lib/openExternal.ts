@@ -24,6 +24,6 @@ export async function openExternal(url: string): Promise<void> {
     const { openUrl } = await import("@tauri-apps/plugin-opener");
     await openUrl(url);
   } else {
-    window.open(url, "_blank", "noopener");
+    window.open(url, "_blank", "noopener,noreferrer");
   }
 }

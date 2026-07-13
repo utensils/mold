@@ -161,7 +161,7 @@ function componentList(name: string): ModelComponentStatus[] {
               :aria-label="`Open ${m.name} on Hugging Face`"
               title="Open on Hugging Face"
               data-test="model-page-link"
-              @click="openExternal(`https://huggingface.co/${m.hf_repo}`)"
+              @click="void openExternal(`https://huggingface.co/${m.hf_repo}`)"
             >
               <svg
                 viewBox="0 0 12 12"

@@ -29,7 +29,7 @@ describe("openExternal", () => {
     expect(openSpy).toHaveBeenCalledWith(
       "https://huggingface.co/black-forest-labs/FLUX.1-dev",
       "_blank",
-      "noopener",
+      "noopener,noreferrer",
     );
   });
 
