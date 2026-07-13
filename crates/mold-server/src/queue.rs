@@ -213,6 +213,113 @@ fn requested_post_upscale_model(req: &mold_core::GenerateRequest) -> Option<&str
         .filter(|m| !m.is_empty())
 }
 
+fn post_upscale_model_to_pull(
+    config: &mold_core::Config,
+    req: &mold_core::GenerateRequest,
+) -> Result<Option<String>, String> {
+    let Some(requested) = requested_post_upscale_model(req) else {
+        return Ok(None);
+    };
+    let model_name = mold_core::manifest::resolve_model_name(requested);
+    if model_manager::configured_upscaler_weights_exist(config, &model_name) {
+        return Ok(None);
+    }
+    if mold_core::manifest::find_manifest(&model_name).is_none() {
+        return Err(format!("unknown upscaler model '{model_name}'"));
+    }
+    Ok(Some(model_name))
+}
+
+async fn ensure_post_upscale_model_downloaded(
+    state: &AppState,
+    req: &mold_core::GenerateRequest,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+) -> Result<(), String> {
+    let model_to_pull = {
+        let config = state.config.read().await;
+        post_upscale_model_to_pull(&config, req)?
+    };
+    let Some(model_name) = model_to_pull else {
+        return Ok(());
+    };
+
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(SseMessage::Progress(SseProgressEvent::StageStart {
+            name: format!("Downloading upscaler {model_name}"),
+        }));
+    }
+    let progress = progress_tx.cloned().map(|tx| {
+        Arc::new(move |event: mold_core::download::DownloadProgressEvent| {
+            let event = match event {
+                mold_core::download::DownloadProgressEvent::Status { message } => {
+                    SseProgressEvent::Info { message }
+                }
+                mold_core::download::DownloadProgressEvent::FileStart {
+                    filename,
+                    file_index,
+                    total_files,
+                    size_bytes,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
+                } => SseProgressEvent::DownloadProgress {
+                    filename,
+                    file_index,
+                    total_files,
+                    bytes_downloaded: 0,
+                    bytes_total: size_bytes,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
+                },
+                mold_core::download::DownloadProgressEvent::FileProgress {
+                    filename,
+                    file_index,
+                    bytes_downloaded,
+                    bytes_total,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
+                } => SseProgressEvent::DownloadProgress {
+                    filename,
+                    file_index,
+                    total_files: 0,
+                    bytes_downloaded,
+                    bytes_total,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
+                },
+                mold_core::download::DownloadProgressEvent::FileDone {
+                    filename,
+                    file_index,
+                    total_files,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
+                } => SseProgressEvent::DownloadDone {
+                    filename,
+                    file_index,
+                    total_files,
+                    batch_bytes_downloaded,
+                    batch_bytes_total,
+                    batch_elapsed_ms,
+                },
+            };
+            let _ = tx.send(SseMessage::Progress(event));
+        }) as model_manager::DownloadProgressCallback
+    });
+    model_manager::pull_model(state, &model_name, progress)
+        .await
+        .map_err(|e| format!("failed to pull upscaler model: {}", e.error))?;
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(SseMessage::Progress(SseProgressEvent::PullComplete {
+            model: model_name,
+        }));
+    }
+    Ok(())
+}
+
 pub(crate) fn apply_output_dimensions_to_metadata(metadata: &mut OutputMetadata, img: &ImageData) {
     metadata.apply_output_dimensions(img.width, img.height);
 }
@@ -1152,6 +1259,32 @@ async fn run_queue_dispatcher_with_tuning(
             continue;
         }
 
+        // Multi-GPU workers are synchronous threads and cannot pull missing
+        // assets themselves. Resolve a first-use post-generation upscaler at
+        // this async boundary, on the server/host that accepted the job,
+        // before handing it to the selected GPU.
+        if let Err(err_msg) =
+            ensure_post_upscale_model_downloaded(&state, &job.request, job.progress_tx.as_ref())
+                .await
+        {
+            tracing::warn!(
+                model = %model_name,
+                upscaler = ?job.request.upscale_model,
+                "{err_msg}"
+            );
+            if let Some(tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: err_msg.clone(),
+                }));
+            }
+            let _ = job.result_tx.send(Err(err_msg));
+            state.queue.decrement();
+            state.job_registry.remove(&job_id);
+            #[cfg(feature = "metrics")]
+            crate::metrics::record_queue_depth(state.queue.pending());
+            continue;
+        }
+
         // Build the GpuJob once; the retry loop moves it between attempts.
         let mut gpu_job = Some(GpuJob {
             id: job.id.clone(),
@@ -1391,6 +1524,41 @@ mod tests {
             height: 512,
             index: 0,
         }
+    }
+
+    #[test]
+    fn multi_gpu_dispatch_identifies_missing_post_upscaler_for_auto_pull() {
+        let mut req = fake_request("flux-dev:q4");
+        req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+
+        assert_eq!(
+            post_upscale_model_to_pull(&mold_core::Config::default(), &req).unwrap(),
+            Some("real-esrgan-x4plus:fp16".to_string())
+        );
+
+        let tmp = TempDir::new().unwrap();
+        let weights = tmp.path().join("realesrgan.safetensors");
+        std::fs::write(&weights, b"test weights").unwrap();
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "real-esrgan-x4plus:fp16".to_string(),
+            ModelConfig {
+                transformer: Some(weights.display().to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(post_upscale_model_to_pull(&config, &req).unwrap(), None);
+
+        config
+            .models
+            .get_mut("real-esrgan-x4plus:fp16")
+            .unwrap()
+            .transformer = Some(tmp.path().join("missing.safetensors").display().to_string());
+        assert_eq!(
+            post_upscale_model_to_pull(&config, &req).unwrap(),
+            Some("real-esrgan-x4plus:fp16".to_string()),
+            "stale config paths should trigger a repair pull"
+        );
     }
 
     fn test_worker(
