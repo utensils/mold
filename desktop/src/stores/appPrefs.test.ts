@@ -23,6 +23,8 @@ vi.mock("../lib/ipc", () => ({
       connectedHostIds: [],
       generateTargetHost: null,
       saveRemoteOutputs: true,
+      navRailWidth: null,
+      generateParamsWidth: null,
     }),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
   },
@@ -180,6 +182,86 @@ describe("appPrefs concurrent-writer safety", () => {
     await prefs.rememberRoute("/jobs");
     expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
       expect.objectContaining({ lastRoute: "/jobs", connectedHostIds: ["hal9000-7680"] }),
+    );
+  });
+});
+
+describe("appPrefs panel widths", () => {
+  function panelSettings(overrides: Record<string, unknown> = {}) {
+    return {
+      mode: "local",
+      remoteUrl: null,
+      remoteApiKey: null,
+      lastRoute: null,
+      engineEnv: {},
+      theme: "system",
+      themeFamily: "mold",
+      notifications: true,
+      dockBadge: true,
+      restoreLastRoute: false,
+      runpodIncludeHfToken: false,
+      runpodNetworkVolumeId: null,
+      uiScalePercent: 100,
+      updateChannel: "stable",
+      savedHosts: [],
+      connectedHostIds: [],
+      generateTargetHost: null,
+      saveRemoteOutputs: true,
+      navRailWidth: null,
+      generateParamsWidth: null,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it("defaults to the PANEL_LIMITS defaults before settings load", () => {
+    const prefs = useAppPrefsStore();
+    expect(prefs.navRailWidth).toBe(208);
+    expect(prefs.generateParamsWidth).toBe(320);
+  });
+
+  it("defaults to the PANEL_LIMITS defaults when the persisted values are null", async () => {
+    vi.mocked(ipc.appSettingsGet).mockResolvedValue(panelSettings() as never);
+    const prefs = useAppPrefsStore();
+    await prefs.init();
+    expect(prefs.navRailWidth).toBe(208);
+    expect(prefs.generateParamsWidth).toBe(320);
+  });
+
+  it("reflects persisted widths", async () => {
+    vi.mocked(ipc.appSettingsGet).mockResolvedValue(
+      panelSettings({ navRailWidth: 260, generateParamsWidth: 400 }) as never,
+    );
+    const prefs = useAppPrefsStore();
+    await prefs.init();
+    expect(prefs.navRailWidth).toBe(260);
+    expect(prefs.generateParamsWidth).toBe(400);
+  });
+
+  it("clamps absurd persisted widths into the panel limits", async () => {
+    vi.mocked(ipc.appSettingsGet).mockResolvedValue(
+      panelSettings({ navRailWidth: 9000, generateParamsWidth: 4 }) as never,
+    );
+    const prefs = useAppPrefsStore();
+    await prefs.init();
+    expect(prefs.navRailWidth).toBe(320);
+    expect(prefs.generateParamsWidth).toBe(280);
+  });
+
+  it("persists a committed width and a null reset through update()", async () => {
+    vi.mocked(ipc.appSettingsGet).mockResolvedValue(panelSettings() as never);
+    const prefs = useAppPrefsStore();
+    await prefs.init();
+    await prefs.update({ navRailWidth: 260 });
+    expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ navRailWidth: 260 }),
+    );
+    await prefs.update({ generateParamsWidth: null });
+    expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ generateParamsWidth: null }),
     );
   });
 });

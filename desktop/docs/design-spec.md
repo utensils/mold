@@ -96,7 +96,7 @@ Native macOS single window, `titleBarStyle: Overlay`, `hiddenTitle: true`, traff
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Sidebar** (208px, native sidebar vibrancy, collapsible ⌘\): five destinations + Settings, plus a live **Hosts** section and a live **Jobs** section. It is navigation _and_ ambient status.
+- **Sidebar** (208px default, drag-resizable 160–320px via its right-edge divider — width persists, double-click resets — native sidebar vibrancy, collapsible ⌘\): five destinations + Settings, plus a live **Hosts** section and a live **Jobs** section. It is navigation _and_ ambient status.
   - **Hosts:** every connected host (primary + extras) as a row — status dot (Safelight ready / Halide connecting / Stop error), label, live queue depth — plus mold servers detected on the network (mDNS) with a one-click `+` connect. Right-click an extra for Reconnect/Disconnect. Multi-host is client-side: jobs stream from and cancel against the host they queued on, and the Generate inspector's **Host** selector (visible with >1 live host) offers Auto (least busy, by live queue depth) or an explicit sticky pick.
   - **Jobs:** miniature Develop chips for every in-flight job (from `/api/queue` + SSE), labeled with their host when routed off the primary. The full queue console is the **Jobs view (⌘6)**: per-host sections showing the whole server queue (other clients' rows marked `OTHER CLIENT`), Pause/Resume + two-step Cancel all (feature-detected via `/api/capabilities.queue`), per-job cancel, and this session's finished prints with one-click reuse.
 - **The Bench rail** (28px, bottom, Bath): always-on telemetry from `/api/resources/stream` (1 Hz) — GPU name, VRAM meter (Halide fill, warms to Safelight while a job runs, Stop at >92%), RAM, queue depth, and the engine mode chip (`⌁ local` embedded engine / `⇄ studio.local:7680` remote). Clicking the VRAM meter opens a resources popover with per-GPU detail and loaded-model residency (Gpu / Parked / Unloaded).
@@ -114,7 +114,7 @@ height of the canvas region for every output aspect ratio. Portrait or extreme
 custom dimensions may shrink the print, but may never push the prompt composer
 or Generate action outside the window.
 
-Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector** (right, 320px, resizable).
+Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector** (right, 320px default, drag-resizable 280–480px via its left-edge divider — width persists, double-click resets).
 
 ```
 ├──────────┬──────────────────────────────────────────────┬──────────────────┤

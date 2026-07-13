@@ -148,6 +148,10 @@ pub struct AppSettings {
     /// Also save generations from remote hosts into this Mac's gallery.
     #[serde(default = "default_true")]
     pub save_remote_outputs: bool,
+    /// Persisted sidebar width in px; `None` uses the panel default.
+    pub nav_rail_width: Option<u32>,
+    /// Persisted Generate-inspector width in px; `None` uses the panel default.
+    pub generate_params_width: Option<u32>,
 }
 
 impl Default for AppSettings {
@@ -171,6 +175,8 @@ impl Default for AppSettings {
             connected_host_ids: Vec::new(),
             generate_target_host: None,
             save_remote_outputs: true,
+            nav_rail_width: None,
+            generate_params_width: None,
         }
     }
 }
@@ -236,9 +242,23 @@ mod tests {
             connected_host_ids: vec!["hal9000-7680".into()],
             generate_target_host: Some("hal9000-7680".into()),
             save_remote_outputs: false,
+            nav_rail_width: Some(240),
+            generate_params_width: Some(360),
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path), settings);
+    }
+
+    #[test]
+    fn legacy_settings_json_defaults_to_no_panel_widths() {
+        // Files written before the resizable panels existed must load with
+        // both widths unset so the UI falls back to each panel's default.
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(&path, r#"{"mode":"local","uiScalePercent":110}"#).unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.nav_rail_width, None);
+        assert_eq!(loaded.generate_params_width, None);
     }
 
     #[test]

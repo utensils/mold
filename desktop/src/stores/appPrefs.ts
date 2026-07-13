@@ -7,6 +7,7 @@ import {
   type UpdateChannel,
 } from "../lib/ipc";
 import { applyUiScale, nextUiScale, type UiScaleDirection } from "../lib/uiScale";
+import { normalizePanelWidth } from "../lib/panelResize";
 
 /**
  * Resolve what `data-theme` should be on the root element. Pure — exported
@@ -52,6 +53,9 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     updateChannel: (s): UpdateChannel => s.settings?.updateChannel ?? "stable",
     engineEnv: (s): Record<string, string> => s.settings?.engineEnv ?? {},
     saveRemoteOutputs: (s) => s.settings?.saveRemoteOutputs ?? true,
+    navRailWidth: (s) => normalizePanelWidth("navRail", s.settings?.navRailWidth),
+    generateParamsWidth: (s) =>
+      normalizePanelWidth("generateParams", s.settings?.generateParamsWidth),
   },
   actions: {
     async init(): Promise<AppSettings> {
