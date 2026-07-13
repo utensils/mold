@@ -23,4 +23,16 @@ describe("autoGrowRows", () => {
     expect(el.style.height).toBe("160px");
     expect(el.style.overflowY).toBe("auto");
   });
+
+  it("always clips horizontal overflow (WebKit UA default is auto)", () => {
+    // Subpixel width rounding under webview zoom can otherwise surface a
+    // phantom horizontal scrollbar even on an empty textarea.
+    const short = textarea(60);
+    autoGrowRows(short, 8);
+    expect(short.style.overflowX).toBe("hidden");
+
+    const tall = textarea(400);
+    autoGrowRows(tall, 8);
+    expect(tall.style.overflowX).toBe("hidden");
+  });
 });
