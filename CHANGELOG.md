@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-13
+
 ### Fixed
 
 - **Release PRs now show the curated changelog and update in place.** The release-plz follow-up step injects the promoted version section into the PR body, targets the exact PR returned by the action, and attributes its sync commit to the GitHub App bot. This replaces the empty changelog disclosure and prevents each push to `main` from closing and recreating the release PR as if a maintainer had edited its history.
@@ -901,7 +903,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/utensils/mold/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/utensils/mold/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/utensils/mold/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/utensils/mold/compare/v0.13.1...v0.14.0
