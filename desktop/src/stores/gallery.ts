@@ -100,7 +100,7 @@ export const useGalleryStore = defineStore("gallery", {
       if (!this.sources.some((s) => s.key === this.filter)) return this.merged;
       return this.merged.filter((e) => e.sourceKey === this.filter);
     },
-    /** All + per-source chips for the gallery header. */
+    /** Per-source chips for the gallery header (HostFilterChips adds All). */
     chipCounts(): GalleryChip[] {
       return this.sources.map((s) => ({
         key: s.key,
@@ -177,6 +177,16 @@ export const useGalleryStore = defineStore("gallery", {
         if (target) items = await apiJsonTo<GalleryImage[]>(target, "/api/gallery");
         else if (key === "local") items = await ipc.localGalleryList();
         else throw new Error("Host is not connected.");
+        // Prints that vanished out-of-band (deleted by another client) must
+        // release their cached blob URLs — the media cache only evicts on
+        // explicit remove()/host teardown otherwise.
+        const source = this.mediaSourceOf(key);
+        const next = new Set(items.map((i) => i.filename));
+        for (const old of bucket.items) {
+          if (next.has(old.filename)) continue;
+          evictMedia(galleryMediaPath(old.filename, source, true), key);
+          evictMedia(galleryMediaPath(old.filename, source), key);
+        }
         // Newest first, like a print drawer.
         bucket.items = items.sort((a, b) => b.timestamp - a.timestamp);
         bucket.loaded = true;

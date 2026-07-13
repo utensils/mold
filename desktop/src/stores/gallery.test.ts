@@ -292,6 +292,23 @@ describe("remove", () => {
 });
 
 describe("refreshHost", () => {
+  it("evicts cached media for prints that vanished out-of-band on refetch", async () => {
+    // Copilot review on #393: refetch replaced items without releasing the
+    // removed prints' blob URLs — a leak when another client deletes.
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("gone.png", 1), img("kept.png", 2)]);
+    vi.mocked(apiJsonTo).mockResolvedValue([img("kept.png", 2)]);
+
+    await gallery.fetchBucket("local");
+
+    const evicted = vi.mocked(evictMedia).mock.calls;
+    expect(
+      evicted.some(([path, key]) => String(path).includes("gone.png") && key === "local"),
+    ).toBe(true);
+    expect(evicted.some(([path]) => String(path).includes("kept.png"))).toBe(false);
+  });
+
   it("refetches an already-loaded bucket", async () => {
     connectLocal();
     const gallery = useGalleryStore();
