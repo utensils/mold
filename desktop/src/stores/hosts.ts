@@ -83,7 +83,7 @@ export const useHostsStore = defineStore("hosts", {
         id,
         label: remote
           ? (state.names[id] ?? conn.info.baseUrl.replace(/^https?:\/\//, ""))
-          : "This Mac",
+          : "This device",
         kind: remote ? "remote" : "local",
         baseUrl: conn.info.baseUrl,
         apiKey: conn.info.apiKey,

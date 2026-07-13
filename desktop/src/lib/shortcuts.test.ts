@@ -64,6 +64,12 @@ describe("resolveShellShortcut", () => {
     expect(resolveShellShortcut(key("x"))).toBeNull();
   });
 
+  it("uses Ctrl on Linux and rejects Meta-only shortcuts", () => {
+    const linuxKey = key("k", { metaKey: false, ctrlKey: true });
+    expect(resolveShellShortcut(linuxKey, "linux")).toEqual({ kind: "command-palette" });
+    expect(resolveShellShortcut(key("k"), "linux")).toBeNull();
+  });
+
   it("covers every navigation route exactly once", () => {
     expect(new Set(Object.values(NAV_ROUTES)).size).toBe(7);
   });

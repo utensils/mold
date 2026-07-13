@@ -4,6 +4,7 @@ import SelectControl from "./SelectControl.vue";
 import ToggleControl from "./ToggleControl.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import type { Theme, ThemeFamily } from "../../lib/ipc";
+import { shortcutLabel } from "../../lib/platform";
 
 const prefs = useAppPrefsStore();
 
@@ -39,7 +40,7 @@ const UI_SCALES = [80, 90, 100, 110, 120, 130].map((value) => ({
     </SettingRow>
     <SettingRow
       label="Appearance"
-      help="Follow macOS or keep the selected theme light or dark. Prints and previews never invert."
+      help="Follow the operating system or keep the selected theme light or dark. Prints and previews never invert."
     >
       <SelectControl
         :model-value="prefs.theme"
@@ -50,7 +51,7 @@ const UI_SCALES = [80, 90, 100, 110, 120, 130].map((value) => ({
     </SettingRow>
     <SettingRow
       label="Interface size"
-      help="Scale the complete interface, including menus and overlays. Use ⌘+, ⌘−, or ⌘0 at any time."
+      :help="`Scale the complete interface, including menus and overlays. Use ${shortcutLabel('+')}, ${shortcutLabel('−')}, or ${shortcutLabel('0')} at any time.`"
     >
       <SelectControl
         :model-value="String(prefs.uiScalePercent)"
@@ -69,16 +70,16 @@ const UI_SCALES = [80, 90, 100, 110, 120, 130].map((value) => ({
         @commit="(v) => prefs.update({ notifications: v })"
       />
     </SettingRow>
-    <SettingRow label="Dock badge" help="Show this app's active job count on the Dock icon.">
+    <SettingRow label="App badge" help="Show this app's active job count on its launcher icon.">
       <ToggleControl
         :model-value="prefs.dockBadge"
-        aria-label="Dock badge"
+        aria-label="App badge"
         @commit="(v) => prefs.update({ dockBadge: v })"
       />
     </SettingRow>
     <SettingRow
       label="Save remote prints locally"
-      help="Also save generations from remote hosts and RunPod into this Mac's gallery."
+      help="Also save generations from remote hosts and RunPod into this device's gallery."
     >
       <ToggleControl
         :model-value="prefs.saveRemoteOutputs"

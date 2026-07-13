@@ -12,7 +12,31 @@ pub mod updater;
 
 use tauri::Manager;
 
+#[cfg(target_os = "linux")]
+fn preferred_linux_gdk_backend(
+    wayland_display: Option<&str>,
+    x11_display: Option<&str>,
+    configured_backend: Option<&str>,
+) -> Option<&'static str> {
+    if configured_backend.is_none() && wayland_display.is_some() && x11_display.is_some() {
+        Some("x11")
+    } else {
+        None
+    }
+}
+
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    if let Some(backend) = preferred_linux_gdk_backend(
+        std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+        std::env::var("DISPLAY").ok().as_deref(),
+        std::env::var("GDK_BACKEND").ok().as_deref(),
+    ) {
+        // WebKitGTK can hit compositor protocol errors on some Wayland stacks.
+        // XWayland is widely available and users can still override GDK_BACKEND.
+        std::env::set_var("GDK_BACKEND", backend);
+    }
+
     // One-shot config.toml → DB migration + DB overlay on Config::load,
     // exactly like every other mold binary's main().
     mold_db::config_sync::install_config_post_load_hook();
@@ -127,4 +151,25 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running mold desktop");
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::preferred_linux_gdk_backend;
+
+    #[test]
+    fn linux_prefers_xwayland_when_both_displays_are_available() {
+        assert_eq!(
+            preferred_linux_gdk_backend(Some("wayland-1"), Some(":0"), None),
+            Some("x11")
+        );
+        assert_eq!(
+            preferred_linux_gdk_backend(Some("wayland-1"), Some(":0"), Some("wayland")),
+            None
+        );
+        assert_eq!(
+            preferred_linux_gdk_backend(Some("wayland-1"), None, None),
+            None
+        );
+    }
 }

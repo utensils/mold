@@ -9,6 +9,7 @@ import { useModelStore } from "../stores/models";
 import { useDownloadsStore } from "../stores/downloads";
 import { formatGB } from "../lib/format";
 import { modelDiskBytes } from "../lib/models";
+import { primaryModifierPressed } from "../lib/platform";
 
 const conn = useConnectionStore();
 const models = useModelStore();
@@ -27,7 +28,7 @@ const installedBytes = computed(() =>
 );
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === "f" && e.metaKey && !e.ctrlKey && !e.altKey) {
+  if (e.key === "f" && primaryModifierPressed(e) && !e.altKey) {
     e.preventDefault();
     searchEl.value?.focus();
   }

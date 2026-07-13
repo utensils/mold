@@ -1,8 +1,9 @@
 /**
- * Global keyboard map (macOS). Navigation uses ⌘1–⌘5 and ⌘, per the design
- * spec; the shell installs a single keydown listener and resolves it here so
- * the map stays testable as data.
+ * Global keyboard map. The shell installs a single keydown listener and
+ * resolves it here so the map stays testable as data.
  */
+
+import { CURRENT_PLATFORM, type DesktopPlatform } from "./platform";
 
 export const NAV_ROUTES: Readonly<Record<string, string>> = {
   "1": "/generate",
@@ -60,12 +61,18 @@ export function allowsNativeSelectAll(el: Element | null): boolean {
 
 /**
  * Resolve a keydown into a shell-level action, or null if unhandled. Requires
- * ⌘ and no ctrl/alt. The only ⇧⌘ combo is ⇧⌘C (copy seed); every other action
- * is plain ⌘. Route-scoped actions (such as randomize seed) are resolved
- * here but gated by the current route in the shell.
+ * the platform primary modifier and no Alt. Route-scoped actions (such as
+ * randomize seed) are resolved here but gated by the current route in the shell.
  */
-export function resolveShellShortcut(e: KeyLike): ShellAction | null {
-  if (!e.metaKey || e.ctrlKey || e.altKey) return null;
+export function resolveShellShortcut(
+  e: KeyLike,
+  platform: DesktopPlatform = CURRENT_PLATFORM,
+): ShellAction | null {
+  const primaryPressed =
+    platform === "linux" || platform === "windows"
+      ? e.ctrlKey && !e.metaKey
+      : e.metaKey && !e.ctrlKey;
+  if (!primaryPressed || e.altKey) return null;
   // `+` is Shift+= on standard keyboards, so recognize zoom before the
   // general shifted-shortcut gate below.
   if (e.key === "+") return { kind: "ui-scale", direction: "in" };

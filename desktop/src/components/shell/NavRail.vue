@@ -20,6 +20,7 @@ import { useToastStore } from "../../stores/toasts";
 import { hostIdFromUrl } from "../../lib/hosts";
 import { dragWidth } from "../../lib/panelResize";
 import { ipc, type DiscoveredHost } from "../../lib/ipc";
+import { shortcutLabel } from "../../lib/platform";
 
 const router = useRouter();
 const appPrefs = useAppPrefsStore();
@@ -204,12 +205,12 @@ function hostMenu(host: HostView): MenuEntry[] {
 }
 
 const destinations = [
-  { route: "/generate", label: "Generate", key: "⌘1" },
-  { route: "/gallery", label: "Gallery", key: "⌘2" },
-  { route: "/chains", label: "Chains", key: "⌘3" },
-  { route: "/models", label: "Models", key: "⌘4" },
-  { route: "/history", label: "History", key: "⌘5" },
-  { route: "/jobs", label: "Jobs", key: "⌘6" },
+  { route: "/generate", label: "Generate", key: shortcutLabel("1") },
+  { route: "/gallery", label: "Gallery", key: shortcutLabel("2") },
+  { route: "/chains", label: "Chains", key: shortcutLabel("3") },
+  { route: "/models", label: "Models", key: shortcutLabel("4") },
+  { route: "/history", label: "History", key: shortcutLabel("5") },
+  { route: "/jobs", label: "Jobs", key: shortcutLabel("6") },
   { route: "/runpod", label: "RunPod", key: "" },
 ];
 
@@ -415,7 +416,7 @@ function jobMenu(job: Job): MenuEntry[] {
       active-class="!text-ink bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)]"
     >
       <span class="font-medium">Settings</span>
-      <kbd class="kbd-hint text-ink-3">⌘,</kbd>
+      <kbd class="kbd-hint text-ink-3">{{ shortcutLabel(",") }}</kbd>
     </RouterLink>
 
     <RenameDialog

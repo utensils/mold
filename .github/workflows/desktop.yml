@@ -111,7 +111,7 @@ jobs:
       - run: bun run build
 
   desktop-rust:
-    name: Rust (fmt, clippy, test)
+    name: macOS Rust (fmt, clippy, test)
     runs-on: macos-14
     defaults:
       run:
@@ -133,13 +133,76 @@ jobs:
         if: github.event_name != 'push'
         run: bunx tauri build --debug --bundles app --ci
 
+  desktop-linux:
+    name: Linux CUDA AppImage
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      CUDA_COMPUTE_CAP: "89"
+      LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          sudo apt-get clean
+      - name: Install Tauri and media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang lld nasm pkg-config patchelf file wget curl xvfb libfuse2 \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
+      - uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.8.1"
+          method: local
+          log-file-suffix: desktop-sm89
+          linux-local-args: '["--toolkit"]'
+          use-github-cache: false
+          use-local-cache: false
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          key: desktop-linux-sm89
+          cache-on-failure: true
+      - run: bun install --frozen-lockfile
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Build CUDA AppImage
+        run: bunx tauri build --features cuda --bundles appimage --ci
+      - name: Launch AppImage under Xvfb
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
+          test -n "$appimage"
+          chmod +x "$appimage"
+          xvfb-run -a env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$appimage" --appimage-extract-and-run &
+          pid=$!
+          sleep 15
+          kill -0 "$pid"
+          kill "$pid"
+          wait "$pid" || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mold-desktop-linux-appimage-sm89
+          path: desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
   # Every desktop-relevant main commit that passes both CI jobs becomes a
   # signed, notarized nightly. The updater-artifact overlay stays isolated
   # from the fast debug PR bundle proof above.
   desktop-nightly:
     name: Build nightly distribution
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [desktop-frontend, desktop-rust]
+    needs: [desktop-frontend, desktop-rust, desktop-linux]
     uses: ./.github/workflows/desktop-distribution.yml
     with:
       channel: nightly

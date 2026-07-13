@@ -8,7 +8,7 @@ const emit = defineEmits<{ (e: "browse"): void }>();
 
 const downloads = useDownloadsStore();
 
-// Curated for Apple Silicon — small enough to pull and run on a Mac's GPU.
+// Small enough to pull and run on common local GPUs.
 const STARTERS = [
   { model: "flux2-klein:q4", label: "smallest · 2.4 GB weights" },
   { model: "flux-schnell:q8", label: "fast 4-step" },
@@ -35,7 +35,7 @@ async function pull(model: string) {
       Develop your first print.
     </h1>
     <p class="mt-2 max-w-md text-center text-body-lg text-ink-2">
-      mold runs models locally on your Mac's GPU. Pull one to start.
+      mold runs models locally on this device's GPU. Pull one to start.
     </p>
 
     <div class="mt-8 grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-3">

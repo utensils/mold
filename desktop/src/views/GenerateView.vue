@@ -43,6 +43,7 @@ import { formatGB } from "../lib/format";
 import { randomSeed } from "../stores/generation";
 import type { ModelEntry } from "../lib/api/types";
 import { fitAspectRatio } from "../lib/fitAspectRatio";
+import { primaryModifierPressed, shortcutLabel } from "../lib/platform";
 
 const router = useRouter();
 const conn = useConnectionStore();
@@ -362,10 +363,10 @@ function cycleHistory(direction: "prev" | "next") {
 }
 
 function onComposerKeydown(e: KeyboardEvent) {
-  if (e.key === "Enter" && e.metaKey) {
+  if (e.key === "Enter" && primaryModifierPressed(e)) {
     e.preventDefault();
     void generate();
-  } else if ((e.key === "e" || e.key === "E") && e.metaKey) {
+  } else if ((e.key === "e" || e.key === "E") && primaryModifierPressed(e)) {
     e.preventDefault();
     expandControl.value?.expand();
   } else if (e.key === "ArrowUp" && promptEl.value && caretOnFirstLine(promptEl.value)) {
@@ -619,7 +620,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
               @click="generate"
             >
               {{ buttonLabel }}
-              <kbd class="kbd-hint ml-1.5 opacity-70">⌘↩</kbd>
+              <kbd class="kbd-hint ml-1.5 opacity-70">{{ shortcutLabel("↩") }}</kbd>
             </button>
           </div>
         </div>

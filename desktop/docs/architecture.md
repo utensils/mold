@@ -1,6 +1,6 @@
 # mold Desktop — Tauri 2 Implementation Plan
 
-A brand-new macOS-first (Apple Silicon / Metal) desktop app for mold with full feature parity against the web SPA, a completely new design, living on one long-running experimental branch. All decisions below are final picks with justification.
+A native macOS (Apple Silicon / Metal) and x86_64 Linux (CUDA) desktop app for mold with full feature parity against the web SPA and a shared Safelight design. The backend and frontend stay platform-neutral; Tauri platform configs own window chrome and bundle details.
 
 ---
 
@@ -47,7 +47,7 @@ resolver = "2"
 **Pick (and why Vue again despite "don't copy the design"):** the mandate is new _design_, not new _framework_. Vue 3.5 lets us port two hard-won assets verbatim: the per-family capability matrix (`web/src/lib/generateCapabilities.ts` — the exact enable/disable logic for 11 families × 10 capabilities) and the typed API-layer knowledge in `web/src/lib/api.ts`/`useCatalog.ts`. It keeps one frontend language across the repo (Vue/Vite/Tailwind v4/vue-tsc/vitest all already proven in `web/` and in the bun2nix build). React would buy nothing here and cost a parallel toolchain. **No component library** — fully custom design system (tokens + primitives), per the "fully new, beautifully designed" mandate.
 
 - **Bundler:** Vite 7 (`^7.1`), `@vitejs/plugin-vue ^6`, dev server on **port 1430** (avoid web/'s 5173 and Aethon's 1420).
-- **Styling:** Tailwind v4 (`^4.2`, `@tailwindcss/vite`) with a custom token layer (CSS variables for surface/ink/accent, light+dark). System font stack (`-apple-system`), 13px base density, native macOS feel: three-pane layout — left nav rail (Generate / Gallery / Jobs / Models / Settings), center workspace, right inspector (parameters). Title bar is an overlay drag region with inline toolbar.
+- **Styling:** Tailwind v4 (`^4.2`, `@tailwindcss/vite`) with a custom token layer (CSS variables for surface/ink/accent, light+dark). The compact three-pane layout is shared; macOS uses overlay traffic-light chrome and Linux uses native decorations. Shortcut labels and primary modifiers are selected at build time.
 - **State:** Pinia `^3` for app/session state (connection, generation form, queue mirror, composer drafts). **Server state via `@tanstack/vue-query ^5`** (gallery, models, catalog search with its 5-min server cache, chain jobs, settings) — gives retries, cache invalidation on SSE events, and stale-while-revalidate for the gallery.
 - **Virtualized gallery:** `@tanstack/vue-virtual ^3` — virtualize rows of a CSS-grid (justified thumbnails, 256px server thumbs), `useVirtualizer` with dynamic row height. Thousands of items stay smooth.
 - **Video:** native `<video>` pointed at `GET /api/gallery/image/:filename` — the endpoint already supports HTTP Range (206), which WKWebView requires for scrubbing. Thumbnails/GIF previews from the existing endpoints. Loading `http://127.0.0.1` media from the `tauri://` origin is permitted by the CSP below.

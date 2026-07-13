@@ -1,10 +1,19 @@
-//! Native macOS menu bar (design spec §7). Custom items emit a `menu`
+//! Native desktop menu bar. Custom items emit a `menu`
 //! event with their id; the frontend maps ids onto the same actions the
 //! keyboard shortcuts use. Text-editing works because Edit keeps the
 //! predefined clipboard items.
 
 use tauri::menu::{AboutMetadata, Menu, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Runtime};
+
+fn accelerator(key: &str) -> String {
+    let modifier = if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Ctrl"
+    };
+    format!("{modifier}+{key}")
+}
 
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let about = AboutMetadata {
@@ -24,7 +33,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .separator()
         .item(
             &MenuItemBuilder::with_id("settings", "Settings…")
-                .accelerator("Cmd+,")
+                .accelerator(accelerator(","))
                 .build(app)?,
         )
         .separator()
@@ -40,7 +49,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let file = SubmenuBuilder::new(app, "File")
         .item(
             &MenuItemBuilder::with_id("new-generation", "New Generation")
-                .accelerator("Cmd+N")
+                .accelerator(accelerator("N"))
                 .build(app)?,
         )
         .item(&MenuItemBuilder::with_id("new-chain", "New Chain").build(app)?)
@@ -61,23 +70,23 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let generate = SubmenuBuilder::new(app, "Generate")
         .item(
             &MenuItemBuilder::with_id("generate", "Generate")
-                .accelerator("Cmd+Return")
+                .accelerator(accelerator("Return"))
                 .build(app)?,
         )
         .item(
             &MenuItemBuilder::with_id("expand-prompt", "Expand Prompt")
-                .accelerator("Cmd+E")
+                .accelerator(accelerator("E"))
                 .build(app)?,
         )
         .item(
             &MenuItemBuilder::with_id("randomize-seed", "Randomize Seed")
-                .accelerator("Cmd+R")
+                .accelerator(accelerator("R"))
                 .build(app)?,
         )
         .separator()
         .item(
             &MenuItemBuilder::with_id("cancel-job", "Cancel Job")
-                .accelerator("Cmd+.")
+                .accelerator(accelerator("."))
                 .build(app)?,
         )
         .build()?;
@@ -85,54 +94,54 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let view = SubmenuBuilder::new(app, "View")
         .item(
             &MenuItemBuilder::with_id("nav:/generate", "Generate")
-                .accelerator("Cmd+1")
+                .accelerator(accelerator("1"))
                 .build(app)?,
         )
         .item(
             &MenuItemBuilder::with_id("nav:/gallery", "Gallery")
-                .accelerator("Cmd+2")
+                .accelerator(accelerator("2"))
                 .build(app)?,
         )
         .item(
             &MenuItemBuilder::with_id("nav:/chains", "Chains")
-                .accelerator("Cmd+3")
+                .accelerator(accelerator("3"))
                 .build(app)?,
         )
         .item(
             &MenuItemBuilder::with_id("nav:/models", "Models")
-                .accelerator("Cmd+4")
+                .accelerator(accelerator("4"))
                 .build(app)?,
         )
         .item(
             &MenuItemBuilder::with_id("nav:/history", "History")
-                .accelerator("Cmd+5")
+                .accelerator(accelerator("5"))
                 .build(app)?,
         )
         .item(
             &MenuItemBuilder::with_id("nav:/jobs", "Jobs")
-                .accelerator("Cmd+6")
+                .accelerator(accelerator("6"))
                 .build(app)?,
         )
         .separator()
         .item(
             &MenuItemBuilder::with_id("toggle-sidebar", "Toggle Sidebar")
-                .accelerator("Cmd+\\")
+                .accelerator(accelerator("\\"))
                 .build(app)?,
         )
         .separator()
         .item(
             &MenuItemBuilder::with_id("actual-size", "Actual Size")
-                .accelerator("Cmd+0")
+                .accelerator(accelerator("0"))
                 .build(app)?,
         )
         .item(
             &MenuItemBuilder::with_id("zoom-in", "Zoom In")
-                .accelerator("Cmd+=")
+                .accelerator(accelerator("="))
                 .build(app)?,
         )
         .item(
             &MenuItemBuilder::with_id("zoom-out", "Zoom Out")
-                .accelerator("Cmd+-")
+                .accelerator(accelerator("-"))
                 .build(app)?,
         )
         .separator()
@@ -171,4 +180,19 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     });
 
     Ok(menu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accelerator;
+
+    #[test]
+    fn uses_the_platform_primary_modifier() {
+        let expected = if cfg!(target_os = "macos") {
+            "Cmd+K"
+        } else {
+            "Ctrl+K"
+        };
+        assert_eq!(accelerator("K"), expected);
+    }
 }

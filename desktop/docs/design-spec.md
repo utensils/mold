@@ -74,7 +74,7 @@ Failed jobs "stop-bathe": grain freezes and desaturates to Stop-tinted, never di
 
 ## 3. App shell & navigation
 
-Native macOS single window, `titleBarStyle: Overlay`, `hiddenTitle: true`, traffic lights inset at (14, 19) over the vibrancy sidebar (the proven Aethon config). Minimum window 1080×700; default 1360×860.
+Native single window, minimum 1080×700 and default 1360×860. macOS uses `titleBarStyle: Overlay`, `hiddenTitle: true`, and traffic lights inset at (14, 19); Linux keeps native window-manager decorations and removes the traffic-light inset from the app toolbar.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐

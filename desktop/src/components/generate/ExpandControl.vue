@@ -5,6 +5,7 @@ import { ApiError } from "../../lib/api/client";
 import { startCatalogDownload } from "../../lib/api/catalog";
 import { parseMissingExpandModel } from "../../lib/expandErrors";
 import { useToastStore } from "../../stores/toasts";
+import { shortcutLabel } from "../../lib/platform";
 
 const props = defineProps<{ prompt: string; family: string }>();
 const emit = defineEmits<{
@@ -79,7 +80,7 @@ defineExpose({ expand });
       @click="expand"
     >
       {{ running ? "Expanding…" : "Expand" }}
-      <kbd v-if="!running" class="kbd-hint ml-1 opacity-70">⌘E</kbd>
+      <kbd v-if="!running" class="kbd-hint ml-1 opacity-70">{{ shortcutLabel("E") }}</kbd>
     </button>
     <button
       v-if="missingModel"

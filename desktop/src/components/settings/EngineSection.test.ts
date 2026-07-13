@@ -90,7 +90,7 @@ describe("EngineSection discovery", () => {
     const text = wrapper.text();
     expect(text).toContain("hal9000-7680");
     expect(text).toContain("studio-7680");
-    expect(text).toContain("THIS MAC");
+    expect(text).toContain("THIS DEVICE");
     expect(text).toContain("KEY");
   });
 

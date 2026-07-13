@@ -192,7 +192,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
       action: () => void saveToThisMac(entry),
     },
     {
-      label: "Reveal in Finder",
+      label: "Reveal in file manager",
       disabled: !canReveal(entry),
       action: () =>
         void ipc.revealOutputFile(item.filename).catch((e) => {

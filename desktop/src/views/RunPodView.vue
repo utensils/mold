@@ -305,7 +305,7 @@ onBeforeUnmount(() => {
         </h1>
         <p class="mt-2 max-w-md text-body text-ink-2">
           Paste a RunPod API key to launch, stop, and connect to Mold instances from this app. The
-          key is stored only on this Mac.
+          key is stored only on this device.
         </p>
         <label class="mt-5 block text-caption font-medium text-ink" for="runpod-api-key">
           RunPod API key

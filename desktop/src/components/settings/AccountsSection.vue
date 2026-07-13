@@ -7,7 +7,7 @@ import SecretControl from "./SecretControl.vue";
   <div>
     <SettingRow
       label="Hugging Face token"
-      help="Needed for gated models (FLUX.1-dev license, private repos). Stored only on this Mac and passed to the engine as HF_TOKEN."
+      help="Needed for gated models (FLUX.1-dev license, private repos). Stored only on this device and passed to the engine as HF_TOKEN."
     >
       <SecretControl name="hf-token" placeholder="hf_…" />
     </SettingRow>
