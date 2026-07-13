@@ -21,7 +21,6 @@ import { useHostsStore } from "../stores/hosts";
 import { useConnectionStore } from "../stores/connection";
 import { useGenerationStore, jobPhase, jobProgress, type Job } from "../stores/generation";
 import { useGenerateFormStore } from "../stores/generateForm";
-import { useGalleryStore } from "../stores/gallery";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
@@ -45,7 +44,6 @@ const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const appPrefs = useAppPrefsStore();
 const generation = useGenerationStore();
-const gallery = useGalleryStore();
 const models = useModelStore();
 const composer = useComposerStore();
 const toasts = useToastStore();
@@ -306,7 +304,8 @@ async function generate() {
     toasts.push(
       ok === 1 ? "Generated — saved to Gallery" : `Generated ${ok} prints — saved to Gallery`,
     );
-    void gallery.fetch();
+    // Gallery refresh is handled by the generation store's complete hook
+    // (per-origin bucket) plus the SSE / fallback-poll paths.
   } else if (failed?.error && failed.error !== "Cancelled") {
     toasts.push(failed.error, "error");
   }

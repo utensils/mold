@@ -9,6 +9,7 @@ import { useToastStore } from "../../stores/toasts";
 import { useUiStore } from "../../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { copyImageBytesToClipboard } from "../../lib/clipboard";
+import type { ApiTarget } from "../../lib/api/client";
 import type { GalleryImage } from "../../lib/api/types";
 
 const props = withDefaults(
@@ -18,9 +19,15 @@ const props = withDefaults(
     count: number;
     video: boolean;
     source?: GallerySource;
+    /** Origin host to fetch media from; null = the primary connection. */
+    target?: ApiTarget | null;
+    /** Blob-cache bucket, usually the origin host id. */
+    cacheKey?: string | null;
+    /** Origin host's friendly name for the metadata block. */
+    hostLabel?: string | null;
     canReveal?: boolean;
   }>(),
-  { source: "engine", canReveal: false },
+  { source: "host", target: null, cacheKey: null, hostLabel: null, canReveal: false },
 );
 const emit = defineEmits<{ close: []; prev: []; next: []; delete: [] }>();
 
@@ -93,7 +100,18 @@ async function copy(text: string) {
 
 async function copyImage() {
   try {
-    await copyImageBytesToClipboard(galleryMediaPath(props.item.filename, props.source));
+    const target = props.target;
+    await copyImageBytesToClipboard(
+      galleryMediaPath(props.item.filename, props.source),
+      target
+        ? {
+            fetchImage: async (p) => {
+              const { apiFetchTo } = await import("../../lib/api/client");
+              return new Uint8Array(await (await apiFetchTo(target, p)).arrayBuffer());
+            },
+          }
+        : undefined,
+    );
     toasts.push("Image copied");
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
@@ -154,6 +172,8 @@ function onDelete() {
       >
         <AuthedMedia
           :path="galleryMediaPath(item.filename, source)"
+          :target="target"
+          :cache-key="cacheKey"
           :video="video"
           :controls="video"
           :alt="meta.prompt"
@@ -217,6 +237,10 @@ function onDelete() {
         <div class="flex justify-between gap-2">
           <dt class="text-caption text-ink-3">Created</dt>
           <dd class="text-caption text-ink">{{ when }}</dd>
+        </div>
+        <div v-if="hostLabel" class="flex justify-between gap-2" data-test="lightbox-host">
+          <dt class="text-caption text-ink-3">Host</dt>
+          <dd class="data-mono truncate text-caption text-ink">{{ hostLabel }}</dd>
         </div>
       </dl>
       <span v-if="item.metadata_synthetic" class="edge-code mt-2">SYNTHETIC METADATA</span>

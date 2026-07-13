@@ -67,11 +67,16 @@ async function mountView() {
   conn.info = { mode: "local", baseUrl: "http://x", apiKey: null };
   conn.status = "ready";
   const gallery = useGalleryStore();
-  gallery.items = [
-    run("a.png", "a lighthouse at dusk", 1_700_000_100),
-    run("b.png", "a stoic owl", 1_700_000_000),
-  ];
-  gallery.loaded = true;
+  // Local primary → one bucket, key "local" (the built-in engine's host id).
+  gallery.buckets["local"] = {
+    items: [
+      run("a.png", "a lighthouse at dusk", 1_700_000_100),
+      run("b.png", "a stoic owl", 1_700_000_000),
+    ],
+    loading: false,
+    error: null,
+    loaded: true,
+  };
   const wrapper = mount(HistoryView, {
     global: { plugins: [pinia, router], stubs: { AuthedMedia: stub } },
   });

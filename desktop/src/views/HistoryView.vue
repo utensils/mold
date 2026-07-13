@@ -12,6 +12,7 @@ import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { applyModelDefaults, newGenerateForm } from "../lib/generateForm";
+import type { MergedPrint } from "../stores/gallery";
 import type { GalleryImage } from "../lib/api/types";
 
 const router = useRouter();
@@ -30,30 +31,34 @@ const contextMenu = useContextMenuStore();
 const tab = ref<"runs" | "prompts">("runs");
 const query = ref("");
 
-// ── Runs (gallery-backed) ───────────────────────────────────────────────────
+// ── Runs (gallery-backed, merged across every connected host) ──────────────
 
-const runs = computed<GalleryImage[]>(() => {
+const runs = computed<MergedPrint[]>(() => {
   const q = query.value.trim().toLowerCase();
-  const items = gallery.items;
-  if (!q) return items;
-  return items.filter(
-    (img) =>
-      img.metadata.prompt.toLowerCase().includes(q) || img.metadata.model.toLowerCase().includes(q),
+  const entries = gallery.merged;
+  if (!q) return entries;
+  return entries.filter(
+    (e) =>
+      e.item.metadata.prompt.toLowerCase().includes(q) ||
+      e.item.metadata.model.toLowerCase().includes(q),
   );
 });
 
-/** Day buckets, reusing the prompt-log grouping via the shared shape. */
+/** Day buckets, reusing the prompt-log grouping via the shared shape. The
+ *  grouping key carries the origin so same-named prints on two hosts stay
+ *  distinct rows. */
+const runKey = (e: MergedPrint) => `${e.sourceKey}\u0000${e.item.filename}`;
 const runGroups = computed(() => {
-  const pseudo = runs.value.map((img) => ({
-    prompt: img.filename,
-    model: img.metadata.model,
-    used_at: img.timestamp * 1000,
+  const pseudo = runs.value.map((e) => ({
+    prompt: runKey(e),
+    model: e.item.metadata.model,
+    used_at: e.item.timestamp * 1000,
   }));
   const groups = groupByDay(pseudo);
-  const byFilename = new Map(runs.value.map((img) => [img.filename, img]));
+  const byKey = new Map(runs.value.map((e) => [runKey(e), e]));
   return groups.map((g) => ({
     label: g.label,
-    runs: g.entries.map((e) => byFilename.get(e.prompt)!).filter(Boolean),
+    runs: g.entries.map((e) => byKey.get(e.prompt)!).filter(Boolean),
   }));
 });
 
@@ -103,7 +108,7 @@ function runMenu(img: GalleryImage): MenuEntry[] {
 watch(
   () => conn.ready,
   (ready) => {
-    if (ready && !gallery.loaded) void gallery.fetch();
+    if (ready && !gallery.loaded) void gallery.fetchAll();
   },
   { immediate: true },
 );
@@ -264,32 +269,38 @@ const timeOf = (e: HistoryEntry) =>
           <div class="border-edge h-px flex-1 border-t" />
         </div>
         <button
-          v-for="img in group.runs"
-          :key="img.filename"
+          v-for="entry in group.runs"
+          :key="runKey(entry)"
           type="button"
           data-test="run-row"
           class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bench"
-          @click="useRun(img)"
-          @contextmenu="contextMenu.open($event, runMenu(img))"
+          @click="useRun(entry.item)"
+          @contextmenu="contextMenu.open($event, runMenu(entry.item))"
         >
           <div
             class="h-12 w-12 shrink-0 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_14%,transparent)] bg-print-surface"
           >
             <AuthedMedia
-              :path="galleryMediaPath(img.filename, gallery.source, true)"
-              :alt="img.metadata.prompt"
+              :path="
+                galleryMediaPath(entry.item.filename, gallery.mediaSourceOf(entry.sourceKey), true)
+              "
+              :target="gallery.targetOf(entry.sourceKey)"
+              :cache-key="entry.sourceKey"
+              :alt="entry.item.metadata.prompt"
             />
           </div>
           <div class="min-w-0 flex-1">
-            <div class="truncate text-body text-ink" :title="img.metadata.prompt">
-              {{ img.metadata.prompt }}
+            <div class="truncate text-body text-ink" :title="entry.item.metadata.prompt">
+              {{ entry.item.metadata.prompt }}
             </div>
             <div class="data-mono mt-0.5 truncate text-caption text-ink-3">
-              {{ img.metadata.model }} · {{ img.metadata.width }}×{{ img.metadata.height }} · S
-              {{ img.metadata.seed }} · {{ img.metadata.steps }} steps
+              {{ entry.item.metadata.model }} · {{ entry.item.metadata.width }}×{{
+                entry.item.metadata.height
+              }}
+              · S {{ entry.item.metadata.seed }} · {{ entry.item.metadata.steps }} steps
             </div>
           </div>
-          <span class="data-mono shrink-0 text-caption text-ink-3">{{ runTime(img) }}</span>
+          <span class="data-mono shrink-0 text-caption text-ink-3">{{ runTime(entry.item) }}</span>
           <span
             class="shrink-0 text-caption text-safelight opacity-0 transition-opacity duration-100 group-hover:opacity-100"
           >

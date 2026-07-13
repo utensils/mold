@@ -21,8 +21,10 @@ function makeRouter(): Router {
   });
 }
 
+let router: Router;
+
 async function mountAt(path: string) {
-  const router = makeRouter();
+  router = makeRouter();
   router.push(path);
   await router.isReady();
   const pinia = createPinia();
@@ -99,12 +101,42 @@ describe("NavRail host context menu", () => {
     await rows[1]!.trigger("contextmenu");
     const labels = menuLabels();
     expect(labels).toContain("Set as generation target");
+    expect(labels).toContain("View gallery");
     expect(labels).toContain("Open web UI");
     expect(labels).toContain("Copy URL");
     expect(labels).toContain("Rename…");
     expect(labels).toContain("Disconnect");
     expect(labels).toContain("Forget");
     expect(labels).not.toContain("Reconnect");
+    // View gallery sits right under the routing entry.
+    expect(labels.indexOf("View gallery")).toBe(labels.indexOf("Set as generation target") + 1);
+  });
+
+  it("View gallery deep-links to the host-filtered gallery", async () => {
+    const { wrapper } = await mountWithHosts();
+    const rows = wrapper.findAll("[data-test='host-row']");
+    await rows[1]!.trigger("contextmenu");
+    const entry = useContextMenuStore()
+      .entries.filter((e): e is MenuItem => !("separator" in e))
+      .find((e) => e.label === "View gallery");
+    entry?.action?.();
+    await flushPromises();
+    const route = router.currentRoute.value;
+    expect(route.path).toBe("/gallery");
+    expect(route.query.host).toBe("hal9000-7680");
+  });
+
+  it("the local primary gets View gallery too, keyed by its host id", async () => {
+    const { wrapper } = await mountWithHosts();
+    const rows = wrapper.findAll("[data-test='host-row']");
+    await rows[0]!.trigger("contextmenu");
+    const entry = useContextMenuStore()
+      .entries.filter((e): e is MenuItem => !("separator" in e))
+      .find((e) => e.label === "View gallery");
+    expect(entry).toBeDefined();
+    entry?.action?.();
+    await flushPromises();
+    expect(router.currentRoute.value.query.host).toBe("local");
   });
 
   it("offers reconnect for an errored extra", async () => {
