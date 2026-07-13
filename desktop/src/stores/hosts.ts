@@ -1,9 +1,10 @@
 import { defineStore } from "pinia";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
-import { hostIdFromUrl, normalizeHostUrl, pickAutoHost } from "../lib/hosts";
+import { hostIdFromUrl, normalizeHostUrl, pickAutoHost, pickMostCapableHost } from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
 import type { GpuInfo, ServerStatus } from "../lib/api/types";
 import { useConnectionStore } from "./connection";
+import { useHostModelsStore } from "./hostModels";
 import { useToastStore } from "./toasts";
 
 const POLL_INTERVAL_MS = 10_000;
@@ -260,24 +261,40 @@ export const useHostsStore = defineStore("hosts", {
       extra.error = test.ok ? null : test.error;
     },
     /**
-     * Resolve where a batch should run. `null` = Auto (least busy). An
-     * explicit pick that is CONNECTED but not ready resolves to null so the
-     * caller reports it instead of silently rerouting; a pick whose host is
-     * gone entirely (disconnected, forgotten) falls back to Auto — the
-     * selector already displays it as Auto, and a stale persisted id must
-     * never wedge every Generate click.
+     * Resolve where a batch should run. `null` = Auto (least busy);
+     * `"capable"` = strongest GPU (backend > VRAM > queue). Both are
+     * model-aware: when `modelName` is given and at least one ready host
+     * already has it installed (per the hostModels store), routing is
+     * restricted to those hosts — otherwise every ready host stays in play
+     * and the winner auto-pulls. An explicit pick that is CONNECTED but not
+     * ready resolves to null so the caller reports it instead of silently
+     * rerouting; a pick whose host is gone entirely (disconnected,
+     * forgotten) falls back to Auto — the selector already displays it as
+     * Auto, and a stale persisted id must never wedge every Generate click.
      */
-    resolveRoute(selection: string | null): HostRoute | null {
-      const routable = this.all.map((h) => ({
-        ...h,
-        kind: h.kind,
-        queueDepth: h.queueDepth,
-      }));
-      const exists = selection !== null && routable.some((h) => h.id === selection);
-      const chosen =
-        selection && exists
-          ? (routable.find((h) => h.id === selection && h.status === "ready") ?? null)
-          : pickAutoHost(routable);
+    resolveRoute(selection: string | null, modelName: string | null = null): HostRoute | null {
+      const routable = this.all.map((h) => {
+        const gpu = this.telemetry[h.id]?.gpuInfo ?? null;
+        return {
+          ...h,
+          gpu: gpu
+            ? { backend: gpu.backend ?? null, name: gpu.name, vramTotalMb: gpu.vram_total_mb }
+            : null,
+        };
+      });
+      const modelHostIds = modelName ? useHostModelsStore().hostsFor(modelName) : [];
+
+      let chosen: (typeof routable)[number] | null;
+      if (selection === "capable") {
+        chosen = pickMostCapableHost(routable, modelHostIds.length > 0 ? modelHostIds : null);
+      } else if (selection !== null && routable.some((h) => h.id === selection)) {
+        chosen = routable.find((h) => h.id === selection && h.status === "ready") ?? null;
+      } else {
+        const withModel = routable.filter(
+          (h) => h.status === "ready" && modelHostIds.includes(h.id),
+        );
+        chosen = pickAutoHost(withModel.length > 0 ? withModel : routable);
+      }
       if (!chosen?.baseUrl) return null;
       return {
         hostId: chosen.id,

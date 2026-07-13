@@ -70,14 +70,27 @@ describe("HostSelector", () => {
     expect(wrapper.find("[data-test='host-selector']").exists()).toBe(false);
   });
 
-  it("lists Auto plus every host with live queue depth", () => {
+  it("lists Auto and Most capable plus every host with live queue depth", () => {
     const wrapper = setup(true);
     const options = wrapper.findAll("option");
     expect(options.map((o) => o.text())).toEqual([
       "Auto — least busy",
+      "Most capable",
       "This Mac",
       "hal9000 · 2 queued",
     ]);
+  });
+
+  it("persists Most capable through the same sticky setting", async () => {
+    const wrapper = setup(true);
+    await wrapper.get("select").setValue("capable");
+    await flushPromises();
+    expect(appSettingsSet).toHaveBeenCalledWith(
+      expect.objectContaining({ generateTargetHost: "capable" }),
+    );
+    useAppPrefsStore().settings!.generateTargetHost = "capable";
+    await wrapper.vm.$nextTick();
+    expect((wrapper.get("select").element as HTMLSelectElement).value).toBe("capable");
   });
 
   it("persists the picked host and maps Auto back to null", async () => {

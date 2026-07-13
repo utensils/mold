@@ -12,7 +12,9 @@ import ExpandControl from "../components/generate/ExpandControl.vue";
 import HostSelector from "../components/generate/HostSelector.vue";
 import SourceGlyph from "../components/generate/SourceGlyph.vue";
 import { modelSource } from "../lib/modelSource";
+import { modelAvailabilityTag } from "../lib/hosts";
 import { useAppPrefsStore } from "../stores/appPrefs";
+import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useConnectionStore } from "../stores/connection";
 import { useGenerationStore, jobPhase, jobProgress, type Job } from "../stores/generation";
@@ -38,6 +40,7 @@ import { fitAspectRatio } from "../lib/fitAspectRatio";
 const router = useRouter();
 const conn = useConnectionStore();
 const hosts = useHostsStore();
+const hostModels = useHostModelsStore();
 const appPrefs = useAppPrefsStore();
 const generation = useGenerationStore();
 const gallery = useGalleryStore();
@@ -60,8 +63,13 @@ const pickerOpen = ref(false);
 const job = computed(() => generation.active);
 const siblings = computed(() => generation.siblings);
 const caps = computed(() => generationCapabilitiesForFamily(form.family));
+// Falls back to the union entry so a model that only exists on an extra host
+// still populates params/defaults after being picked.
 const selectedModel = computed<ModelEntry | null>(
-  () => models.installed.find((m) => m.name === form.model) ?? null,
+  () =>
+    models.installed.find((m) => m.name === form.model) ??
+    hostModels.unionInstalled.find((m) => m.name === form.model) ??
+    null,
 );
 
 /** The request the estimate badge previews — null until a model is chosen. */
@@ -70,8 +78,61 @@ const estimateRequest = computed(() => (form.model ? buildRequest(form) : null))
 /** Preflight against the host the batch will actually route to. */
 const estimateTarget = computed(() =>
   hosts.multiHost
-    ? (hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null)?.target ?? null)
+    ? (hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null, form.model || null)
+        ?.target ?? null)
     : null,
+);
+
+/**
+ * The picker's list: the primary's installed models merged with every model
+ * installed on an extra host, grouped by family (primary entries win the
+ * dedup so their defaults are used).
+ */
+const pickerFamilies = computed<Map<string, ModelEntry[]>>(() => {
+  const byName = new Map<string, ModelEntry>();
+  for (const m of models.installed) byName.set(m.name, m);
+  for (const m of hostModels.unionInstalled) if (!byName.has(m.name)) byName.set(m.name, m);
+  const groups = new Map<string, ModelEntry[]>();
+  for (const m of byName.values()) {
+    const list = groups.get(m.family) ?? [];
+    list.push(m);
+    groups.set(m.family, list);
+  }
+  return groups;
+});
+
+/** Subtle per-row tag for models that live only on non-primary hosts. */
+function availabilityTag(m: ModelEntry): string | null {
+  if (!hosts.multiHost) return null;
+  return modelAvailabilityTag(hostModels.hostsFor(m.name), hosts.all);
+}
+
+/**
+ * The sticky target host's label when it lacks the selected model (per the
+ * last availability snapshot) — the job will auto-pull the weights there.
+ */
+const stickyHostMissingModel = computed<string | null>(() => {
+  const sel = appPrefs.settings?.generateTargetHost ?? null;
+  if (!sel || sel === "capable" || !form.model) return null;
+  const host = hosts.all.find((h) => h.id === sel);
+  if (!host) return null;
+  const ids = hostModels.hostsFor(form.model);
+  if (ids.length === 0 || ids.includes(sel)) return null;
+  return host.label;
+});
+
+// Availability data is demand-driven: fetch when the picker opens and when
+// the set of ready hosts changes (no global timers).
+watch(pickerOpen, (open) => {
+  if (open) void hostModels.refresh();
+});
+watch(
+  () =>
+    hosts.all
+      .filter((h) => h.status === "ready")
+      .map((h) => h.id)
+      .join("\n"),
+  () => void hostModels.refresh(),
 );
 
 const buttonLabel = computed(() =>
@@ -195,11 +256,12 @@ async function generate() {
   if (!form.prompt.trim() || !form.model) return;
   const request = buildRequest(form);
   const batch = caps.value.forcesBatchSizeOne ? 1 : form.batchSize;
-  // With multiple live hosts, route the batch (sticky pick or Auto = least
-  // busy). A pinned host that went away is an error, not a silent reroute.
+  // With multiple live hosts, route the batch (sticky pick, Auto = least
+  // busy, or Most capable) — model-aware, so hosts that already have the
+  // weights win. A pinned host that went away is an error, not a reroute.
   let route = null;
   if (hosts.multiHost) {
-    route = hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null);
+    route = hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null, form.model || null);
     if (!route) {
       toasts.push("The selected host isn't reachable — pick another host.", "error");
       return;
@@ -525,7 +587,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
           v-if="pickerOpen"
           class="border-edge absolute z-10 mt-1 max-h-72 w-full overflow-y-auto rounded-chrome border bg-bench shadow-raised"
         >
-          <template v-for="[family, list] in models.byFamily" :key="family">
+          <template v-for="[family, list] in pickerFamilies" :key="family">
             <div class="edge-code px-2 pt-2 pb-1">{{ family.toUpperCase() }}</div>
             <button
               v-for="m in list"
@@ -536,6 +598,9 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
             >
               <SourceGlyph :source="modelSource(m)" class="text-ink-3" />
               <span class="min-w-0 flex-1 truncate">{{ m.name }}</span>
+              <span v-if="availabilityTag(m)" class="edge-code ml-2 shrink-0">
+                {{ availabilityTag(m) }}
+              </span>
               <span
                 class="ml-2 h-1.5 w-1.5 shrink-0 rounded-full"
                 :class="m.is_loaded ? 'bg-safelight' : 'bg-transparent'"
@@ -556,6 +621,9 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
           </button>
         </div>
       </div>
+      <p v-if="stickyHostMissingModel" class="mt-1.5 text-caption text-ink-3">
+        Not on {{ stickyHostMissingModel }} — will download there.
+      </p>
 
       <ParamPanel
         :form="form"

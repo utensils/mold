@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  backendRank,
   hostIdFromUrl,
+  inferBackendFromGpuName,
+  modelAvailabilityTag,
   normalizeHostUrl,
   pickAutoHost,
   pickDisplayHost,
+  pickMostCapableHost,
+  type CapableHost,
   type RoutableHost,
 } from "./hosts";
 
@@ -65,6 +70,185 @@ describe("pickAutoHost", () => {
   it("returns null when nothing is ready", () => {
     expect(pickAutoHost([host({ status: "error" })])).toBeNull();
     expect(pickAutoHost([])).toBeNull();
+  });
+});
+
+describe("inferBackendFromGpuName", () => {
+  it("classifies known GPU names", () => {
+    const table: Array<[string, string]> = [
+      ["NVIDIA GeForce RTX 4090", "cuda"],
+      ["RTX 3090", "cuda"],
+      ["GeForce GTX 1080 Ti", "cuda"],
+      ["Quadro P6000", "cuda"],
+      ["Tesla T4", "cuda"],
+      ["A100-SXM4-80GB", "cuda"],
+      ["H100 PCIe", "cuda"],
+      ["L40S", "cuda"],
+      ["Apple M3 Max", "metal"],
+      ["Apple Metal GPU", "metal"],
+      ["M1", "metal"],
+      ["M2 Ultra", "metal"],
+      ["m4 pro", "metal"],
+      ["AMD Radeon RX 7900", "cpu"],
+      ["llvmpipe", "cpu"],
+      ["", "cpu"],
+    ];
+    for (const [name, expected] of table) {
+      expect(inferBackendFromGpuName(name), name).toBe(expected);
+    }
+  });
+});
+
+describe("backendRank", () => {
+  it("ranks cuda > metal > cpu/unknown", () => {
+    expect(backendRank("cuda")).toBe(2);
+    expect(backendRank("metal")).toBe(1);
+    expect(backendRank("cpu")).toBe(0);
+    expect(backendRank(null)).toBe(0);
+    expect(backendRank(undefined)).toBe(0);
+  });
+
+  it("falls back to GPU-name inference when the backend is missing", () => {
+    expect(backendRank(null, "NVIDIA GeForce RTX 4090")).toBe(2);
+    expect(backendRank(undefined, "Apple M3 Max")).toBe(1);
+    expect(backendRank(null, "llvmpipe")).toBe(0);
+    expect(backendRank(null, null)).toBe(0);
+  });
+
+  it("prefers the explicit backend over the name", () => {
+    expect(backendRank("metal", "NVIDIA GeForce RTX 4090")).toBe(1);
+  });
+});
+
+function capable(overrides: Partial<CapableHost> & { id: string }): CapableHost {
+  return {
+    kind: "remote",
+    status: "ready",
+    queueDepth: 0,
+    gpu: null,
+    ...overrides,
+  };
+}
+
+describe("pickMostCapableHost", () => {
+  it("routes to the CUDA host even with a deeper queue than a Metal host", () => {
+    const mac = capable({
+      id: "mac",
+      kind: "local",
+      queueDepth: 0,
+      gpu: { backend: "metal", name: "Apple M3 Max", vramTotalMb: 65536 },
+    });
+    const cuda = capable({
+      id: "hal9000-7680",
+      queueDepth: 5,
+      gpu: { backend: "cuda", name: "NVIDIA GeForce RTX 4090", vramTotalMb: 24564 },
+    });
+    expect(pickMostCapableHost([mac, cuda], null)?.id).toBe("hal9000-7680");
+  });
+
+  it("breaks a backend tie by total VRAM, descending", () => {
+    const small = capable({
+      id: "small",
+      queueDepth: 0,
+      gpu: { backend: "cuda", name: "RTX 4090", vramTotalMb: 24564 },
+    });
+    const big = capable({
+      id: "big",
+      queueDepth: 3,
+      gpu: { backend: "cuda", name: "A100-SXM4-80GB", vramTotalMb: 81920 },
+    });
+    expect(pickMostCapableHost([small, big], null)?.id).toBe("big");
+  });
+
+  it("breaks a backend+VRAM tie by queue depth; unknown depth counts as busiest", () => {
+    const busy = capable({
+      id: "busy",
+      queueDepth: 4,
+      gpu: { backend: "cuda", name: "RTX 4090", vramTotalMb: 24564 },
+    });
+    const idle = capable({
+      id: "idle",
+      queueDepth: 1,
+      gpu: { backend: "cuda", name: "RTX 4090", vramTotalMb: 24564 },
+    });
+    const unknown = capable({
+      id: "unknown",
+      queueDepth: null,
+      gpu: { backend: "cuda", name: "RTX 4090", vramTotalMb: 24564 },
+    });
+    expect(pickMostCapableHost([busy, unknown, idle], null)?.id).toBe("idle");
+  });
+
+  it("restricts to ready hosts that have the model", () => {
+    const cudaWithout = capable({
+      id: "cuda",
+      gpu: { backend: "cuda", name: "RTX 4090", vramTotalMb: 24564 },
+    });
+    const metalWith = capable({
+      id: "mac",
+      gpu: { backend: "metal", name: "Apple M3 Max", vramTotalMb: 65536 },
+    });
+    expect(pickMostCapableHost([cudaWithout, metalWith], ["mac"])?.id).toBe("mac");
+  });
+
+  it("falls back to every ready host when none has the model", () => {
+    const cuda = capable({
+      id: "cuda",
+      gpu: { backend: "cuda", name: "RTX 4090", vramTotalMb: 24564 },
+    });
+    const metal = capable({
+      id: "mac",
+      gpu: { backend: "metal", name: "Apple M3 Max", vramTotalMb: 65536 },
+    });
+    expect(pickMostCapableHost([cuda, metal], ["gone-host"])?.id).toBe("cuda");
+  });
+
+  it("treats a missing gpu row as least capable but infers from the name when present", () => {
+    const bare = capable({ id: "bare", gpu: null });
+    const named = capable({
+      id: "named",
+      gpu: { name: "NVIDIA GeForce RTX 3060", vramTotalMb: null },
+    });
+    expect(pickMostCapableHost([bare, named], null)?.id).toBe("named");
+  });
+
+  it("prefers the local host only on a full tie", () => {
+    const local = capable({ id: "local", kind: "local", queueDepth: 1 });
+    const remote = capable({ id: "remote", queueDepth: 1 });
+    expect(pickMostCapableHost([remote, local], null)?.id).toBe("local");
+    const remoteIdle = capable({ id: "remote-idle", queueDepth: 0 });
+    expect(pickMostCapableHost([remoteIdle, local], null)?.id).toBe("remote-idle");
+  });
+
+  it("returns null when nothing is ready", () => {
+    expect(pickMostCapableHost([capable({ id: "down", status: "error" })], null)).toBeNull();
+    expect(pickMostCapableHost([], null)).toBeNull();
+  });
+});
+
+describe("modelAvailabilityTag", () => {
+  const fleet = [
+    { id: "local", label: "This Mac", primary: true },
+    { id: "hal9000-7680", label: "hal9000", primary: false },
+    { id: "bender-7680", label: "bender", primary: false },
+  ];
+
+  it("stays quiet when availability is unknown or the primary has the model", () => {
+    expect(modelAvailabilityTag([], fleet)).toBeNull();
+    expect(modelAvailabilityTag(["local"], fleet)).toBeNull();
+    expect(modelAvailabilityTag(["local", "hal9000-7680", "bender-7680"], fleet)).toBeNull();
+  });
+
+  it("names the single non-primary host that has the model", () => {
+    expect(modelAvailabilityTag(["hal9000-7680"], fleet)).toBe("hal9000");
+  });
+
+  it("counts hosts when several non-primary hosts have the model", () => {
+    expect(modelAvailabilityTag(["hal9000-7680", "bender-7680"], fleet)).toBe("2 hosts");
+  });
+
+  it("ignores host ids that are no longer connected", () => {
+    expect(modelAvailabilityTag(["gone-host"], fleet)).toBeNull();
   });
 });
 
