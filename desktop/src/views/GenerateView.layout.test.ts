@@ -14,4 +14,13 @@ describe("GenerateView layout", () => {
     expect(classesFor("generate-workbench")).toContain("overflow-hidden");
     expect(classesFor("generate-composer")).toContain("shrink-0");
   });
+
+  it("keeps full model names visible in the picker", () => {
+    expect(classesFor("selected-model-name")).not.toContain("truncate");
+    expect(classesFor("selected-model-name")).toContain("break-all");
+    expect(classesFor("model-option-name")).not.toContain("truncate");
+    expect(classesFor("model-option-name")).toContain("break-all");
+    expect(classesFor("model-availability")).toContain("whitespace-normal");
+    expect(classesFor("model-availability")).toContain("break-all");
+  });
 });

@@ -603,11 +603,13 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
       <div class="relative">
         <button
           type="button"
-          class="border-edge flex h-9 w-full items-center justify-between rounded-control border bg-bath px-2 text-body text-ink"
+          class="border-edge flex min-h-9 w-full items-center justify-between gap-2 rounded-control border bg-bath px-2 py-1.5 text-body text-ink"
           @click="pickerOpen = !pickerOpen"
         >
-          <span class="truncate">{{ selectedModel?.name ?? "Choose a model" }}</span>
-          <span v-if="selectedModel?.disk_usage_bytes" class="data-mono ml-2 text-ink-3">
+          <span data-test="selected-model-name" class="min-w-0 break-all text-left">{{
+            selectedModel?.name ?? "Choose a model"
+          }}</span>
+          <span v-if="selectedModel?.disk_usage_bytes" class="data-mono shrink-0 text-ink-3">
             {{ formatGB(selectedModel.disk_usage_bytes) }}
           </span>
         </button>
@@ -621,16 +623,28 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
               v-for="m in list"
               :key="m.name"
               type="button"
-              class="flex w-full items-center gap-2 px-2 py-1.5 text-left text-body text-ink-2 hover:bg-bath hover:text-ink"
+              class="flex w-full items-start gap-2 px-2 py-1.5 text-left text-body text-ink-2 hover:bg-bath hover:text-ink"
               @click="pickModel(m)"
             >
-              <SourceGlyph :source="modelSource(m)" class="text-ink-3" />
-              <span class="min-w-0 flex-1 truncate">{{ m.name }}</span>
-              <span v-if="availabilityTag(m)" class="edge-code ml-2 shrink-0">
-                {{ availabilityTag(m) }}
+              <SourceGlyph :source="modelSource(m)" class="mt-0.5 shrink-0 text-ink-3" />
+              <span class="min-w-0 flex-1">
+                <span
+                  data-test="model-option-name"
+                  class="block break-all text-ink"
+                  :title="m.name"
+                >
+                  {{ m.name }}
+                </span>
+                <span
+                  v-if="availabilityTag(m)"
+                  data-test="model-availability"
+                  class="edge-code mt-0.5 block break-all whitespace-normal"
+                >
+                  {{ availabilityTag(m) }}
+                </span>
               </span>
               <span
-                class="ml-2 h-1.5 w-1.5 shrink-0 rounded-full"
+                class="mt-2 h-1.5 w-1.5 shrink-0 rounded-full"
                 :class="m.is_loaded ? 'bg-safelight' : 'bg-transparent'"
                 :title="m.is_loaded ? 'On GPU' : ''"
               />
