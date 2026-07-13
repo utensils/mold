@@ -27,8 +27,26 @@ vi.mock("../lib/api/client", () => ({
 }));
 
 import { useConnectionStore } from "./connection";
+import { useHostModelsStore } from "./hostModels";
 import { useHostsStore } from "./hosts";
 import { useToastStore } from "./toasts";
+import type { ModelEntry } from "../lib/api/types";
+
+function installedModel(name: string): ModelEntry {
+  return {
+    name,
+    family: "flux",
+    size_gb: 12,
+    is_loaded: false,
+    hf_repo: "",
+    default_steps: 28,
+    default_guidance: 3.5,
+    default_width: 1024,
+    default_height: 1024,
+    description: "",
+    downloaded: true,
+  };
+}
 
 function settings(overrides: Record<string, unknown> = {}) {
   return {
@@ -169,6 +187,103 @@ describe("hosts store", () => {
     // Only the primary exists; a persisted pick for a forgotten host must
     // route like Auto instead of wedging every generate.
     expect(hosts.resolveRoute("vanished-host")?.hostId).toBe("local");
+  });
+
+  it('resolveRoute("capable") routes to the CUDA host over an idler Metal host', async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+    hosts.telemetry["local"] = {
+      queueDepth: 0,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: { name: "Apple M3 Max", vram_total_mb: 65536, vram_used_mb: 0, backend: "metal" },
+    };
+    hosts.telemetry["hal9000-7680"] = {
+      queueDepth: 5,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: {
+        name: "NVIDIA GeForce RTX 4090",
+        vram_total_mb: 24564,
+        vram_used_mb: 0,
+        backend: "cuda",
+      },
+    };
+    expect(hosts.resolveRoute("capable")?.hostId).toBe("hal9000-7680");
+  });
+
+  it('resolveRoute("capable") infers the backend from the GPU name on older servers', async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+    hosts.telemetry["local"] = { queueDepth: 0, queueCapacity: 8, version: null, gpuInfo: null };
+    hosts.telemetry["hal9000-7680"] = {
+      queueDepth: 5,
+      queueCapacity: 8,
+      version: null,
+      // No `backend` field — pre-0.17 server; the name still says CUDA.
+      gpuInfo: { name: "NVIDIA GeForce RTX 4090", vram_total_mb: 24564, vram_used_mb: 0 },
+    };
+    expect(hosts.resolveRoute("capable")?.hostId).toBe("hal9000-7680");
+  });
+
+  it('resolveRoute("capable") restricts to hosts that have the model', async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+    hosts.telemetry["hal9000-7680"] = {
+      queueDepth: 0,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: { name: "NVIDIA RTX 4090", vram_total_mb: 24564, vram_used_mb: 0, backend: "cuda" },
+    };
+    const hostModels = useHostModelsStore();
+    hostModels.byHost["local"] = {
+      entries: [installedModel("z-image:q8")],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    hostModels.byHost["hal9000-7680"] = {
+      entries: [installedModel("flux-dev:q8")],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    // The CUDA host doesn't have the model — the Metal-less local host does.
+    expect(hosts.resolveRoute("capable", "z-image:q8")?.hostId).toBe("local");
+  });
+
+  it("resolveRoute(null) with a model restricts Auto to hosts that have it", async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+    hosts.telemetry["local"] = { queueDepth: 0, queueCapacity: 8, version: null };
+    hosts.telemetry["hal9000-7680"] = { queueDepth: 3, queueCapacity: 8, version: null };
+    const hostModels = useHostModelsStore();
+    hostModels.byHost["hal9000-7680"] = {
+      entries: [installedModel("z-image:q8")],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    // hal9000 is busier but the only host with the model.
+    expect(hosts.resolveRoute(null, "z-image:q8")?.hostId).toBe("hal9000-7680");
+  });
+
+  it("resolveRoute(null) keeps least-busy routing when no host has the model", async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+    hosts.telemetry["local"] = { queueDepth: 0, queueCapacity: 8, version: null };
+    hosts.telemetry["hal9000-7680"] = { queueDepth: 3, queueCapacity: 8, version: null };
+    const hostModels = useHostModelsStore();
+    hostModels.byHost["local"] = {
+      entries: [installedModel("flux-dev:q8")],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    // Nobody reports the model — the router falls back to least busy, which
+    // will auto-pull it there.
+    expect(hosts.resolveRoute(null, "brand-new-model")?.hostId).toBe("local");
   });
 
   it("hides a loopback extra that points at the same server as the primary", async () => {

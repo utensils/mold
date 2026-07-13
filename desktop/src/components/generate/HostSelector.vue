@@ -5,13 +5,16 @@ import { useHostsStore, type HostView } from "../../stores/hosts";
 
 /**
  * Where the next batch runs. Only rendered with more than one live host;
- * the pick is sticky across launches (null = Auto, the least-busy host).
+ * the pick is sticky across launches (null = Auto, the least-busy host;
+ * "capable" = the strongest GPU — a sentinel that can't collide with the
+ * URL-derived host ids).
  */
 const hosts = useHostsStore();
 const prefs = useAppPrefsStore();
 
 const value = computed(() => {
   const sel = prefs.settings?.generateTargetHost ?? null;
+  if (sel === "capable") return "capable";
   // A persisted pick whose host is gone reads as Auto rather than a ghost.
   return sel && hosts.all.some((h) => h.id === sel) ? sel : "auto";
 });
@@ -40,6 +43,7 @@ function optionLabel(host: HostView): string {
       @change="onChange"
     >
       <option value="auto">Auto — least busy</option>
+      <option value="capable">Most capable</option>
       <option v-for="h in hosts.all" :key="h.id" :value="h.id" :disabled="h.status !== 'ready'">
         {{ optionLabel(h) }}
       </option>
