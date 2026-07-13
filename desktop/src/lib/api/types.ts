@@ -33,6 +33,8 @@ export interface GpuInfo {
   name: string;
   vram_total_mb: number;
   vram_used_mb: number;
+  /** "cuda" | "metal"; absent from servers ≤ 0.16 — infer from `name` then. */
+  backend?: string | null;
 }
 
 export interface ServerStatus {

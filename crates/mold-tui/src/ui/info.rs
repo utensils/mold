@@ -298,6 +298,7 @@ mod tests {
                 name: "NVIDIA RTX 4090".to_string(),
                 vram_total_mb: 24564,
                 vram_used_mb: 8192,
+                backend: None,
             }),
             uptime_secs: 3600,
             hostname: Some("hal9000".to_string()),
