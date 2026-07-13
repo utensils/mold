@@ -85,6 +85,10 @@ jobs:
           trap 'rm -f "$current_body" "$rendered_body"' EXIT
           gh pr view "$number" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$current_body"
           version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "error: could not read [workspace.package] version from Cargo.toml" >&2
+            exit 1
+          fi
           scripts/release/render-release-pr-body.sh CHANGELOG.md "$version" "$current_body" > "$rendered_body"
           if ! cmp -s "$current_body" "$rendered_body"; then
             gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$rendered_body"

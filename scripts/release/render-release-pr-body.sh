@@ -20,6 +20,7 @@ trap 'rm -f "$notes"' EXIT
 awk -v heading="## [$version]" '
   index($0, heading) == 1 { in_release = 1; next }
   in_release && /^## \[/ { exit }
+  in_release && /^\[Unreleased\]: / { exit }
   in_release { print }
 ' "$changelog" > "$notes"
 

@@ -137,6 +137,28 @@ grep -q '^- A new thing\.$' "$tmp/rendered-body.md" || fail "promoted changelog 
 grep -q '^This PR was generated with release-plz\.$' "$tmp/rendered-body.md" || fail "PR footer was lost"
 test "$(grep -c 'A new thing' "$tmp/rendered-body.md")" -eq 1 || fail "PR changelog entry duplicated"
 
+# A first release has no following version heading. Link-reference definitions
+# still belong to the changelog file, not the release notes embedded in the PR.
+cat > "$tmp/first-release-changelog.md" <<'EOF'
+# Changelog
+
+## [Unreleased]
+
+## [0.1.0] - 2026-07-13
+
+### Added
+
+- First release.
+
+[Unreleased]: https://github.com/utensils/mold/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/utensils/mold/releases/tag/v0.1.0
+EOF
+"$render_script" "$tmp/first-release-changelog.md" 0.1.0 "$tmp/pr-body.md" > "$tmp/first-release-body.md"
+grep -q '^- First release\.$' "$tmp/first-release-body.md" || fail "first-release notes missing from PR body"
+if grep -q '^\[Unreleased\]:' "$tmp/first-release-body.md"; then
+  fail "changelog link references leaked into first-release PR body"
+fi
+
 # The workflow must operate on release-plz's exact output and keep every
 # follow-up commit attributable to the GitHub App bot. A human-attributed
 # second commit makes release-plz close/recreate the PR on the next push.
@@ -144,6 +166,9 @@ grep -q 'id: release-plz' "$workflow" || fail "release-plz step has no id"
 grep -q 'steps.release-plz.outputs.pr' "$workflow" || fail "workflow does not use the exact release-plz PR output"
 grep -q '302347651+release-plz-mold\[bot\]@users.noreply.github.com' "$workflow" || fail "follow-up commit is not attributed to the app bot"
 grep -q 'render-release-pr-body.sh' "$workflow" || fail "workflow does not populate the PR changelog body"
+# The dollar sign is part of the workflow source being asserted.
+# shellcheck disable=SC2016
+grep -Fq 'if [ -z "$version" ]; then' "$workflow" || fail "workflow does not validate the workspace version"
 grep -q 'bash scripts/tests/release-sync-pr.sh' "$ci_workflow" || fail "CI does not exercise release PR synchronization"
 
 echo "PASS: release PR body sync"
