@@ -93,9 +93,23 @@ describe("allowsNativeSelectAll", () => {
     expect(allowsNativeSelectAll(div)).toBe(false);
   });
 
-  it("allows inputs and textareas", () => {
+  it("allows text-entry inputs and textareas", () => {
     expect(allowsNativeSelectAll(document.createElement("input"))).toBe(true);
     expect(allowsNativeSelectAll(document.createElement("textarea"))).toBe(true);
+    for (const type of ["text", "search", "url", "tel", "email", "password", "number"]) {
+      const input = document.createElement("input");
+      input.type = type;
+      expect(allowsNativeSelectAll(input), type).toBe(true);
+    }
+  });
+
+  it("denies non-text inputs — a focused checkbox must not re-enable chrome select-all", () => {
+    for (const type of ["checkbox", "radio", "range", "file", "button", "submit", "color"]) {
+      const input = document.createElement("input");
+      input.type = type;
+      document.body.appendChild(input);
+      expect(allowsNativeSelectAll(input), type).toBe(false);
+    }
   });
 
   it("allows contenteditable elements", () => {

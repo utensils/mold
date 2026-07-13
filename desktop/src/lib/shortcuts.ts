@@ -37,17 +37,22 @@ export function isSelectAllChord(e: KeyLike): boolean {
   return e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === "a" || e.key === "A");
 }
 
+/** Input types that hold selectable text (an unset `type` defaults to text). */
+const TEXT_INPUT_TYPES = new Set(["text", "search", "url", "tel", "email", "password", "number"]);
+
 /**
  * Whether the focused element should keep WebKit's native Select All.
  * `user-select: none` on <body> stops drag selection, but macOS WebKit still
  * honors ⌘A everywhere — which paints the whole app chrome as selected. The
  * shell intercepts ⌘A unless focus is genuinely editable or sits inside an
- * opted-in [data-selectable] region.
+ * opted-in [data-selectable] region. Non-text inputs (checkbox, range, …)
+ * are chrome, not text: they must not re-enable the global Select All.
  */
 export function allowsNativeSelectAll(el: Element | null): boolean {
   if (!el) return false;
   const tag = el.tagName?.toLowerCase();
-  if (tag === "input" || tag === "textarea") return true;
+  if (tag === "input") return TEXT_INPUT_TYPES.has((el as HTMLInputElement).type || "text");
+  if (tag === "textarea") return true;
   if ((el as HTMLElement).isContentEditable) return true;
   return el.closest?.("[data-selectable], [contenteditable='true']") != null;
 }
