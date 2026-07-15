@@ -111,13 +111,14 @@ Applications and reopen it first.
 
 Before installation, Mold persists a copy of the currently healthy `.app` and
 starts a supervisor from that backup. The supervisor survives replacement of
-the primary app, launches the candidate, and waits up to 60 seconds for the
-mounted interface's health handshake, then keeps watching the process through a
+the primary app, launches the candidate, and waits up to 15 seconds for the
+mounted interface to paint and complete its health handshake without waiting
+for engine or remote-host startup, then keeps watching the process through a
 10-second probation. An install failure, early candidate exit, or missing
-handshake restores and relaunches the backup. A shutdown during installation is
-reconciled on the next launch. The backup is removed only after probation; if
-automatic restoration itself fails, Settings shows the preserved recovery-app
-path and manual copy instructions.
+handshake restores and relaunches the backup with a recovery error. A shutdown
+during installation is reconciled on the next launch. The backup is removed
+only after probation; if automatic restoration itself fails, Settings shows the
+preserved recovery-app path and manual copy instructions.
 
 Switching from Nightly to Stable changes which manifest Mold checks, but never
 silently downgrades the installed app. If your nightly version is newer than the

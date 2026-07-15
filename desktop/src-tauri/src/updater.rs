@@ -22,7 +22,8 @@ const STABLE_ENDPOINT: &str =
 const NIGHTLY_ENDPOINT: &str =
     "https://github.com/utensils/mold/releases/download/latest/mold-desktop-nightly.json";
 const SUPERVISOR_ARG: &str = "--mold-update-supervisor";
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
+const HEALTH_TIMEOUT_SECS: u64 = 15;
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(HEALTH_TIMEOUT_SECS);
 const HEALTH_PROBATION: Duration = Duration::from_secs(10);
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(15);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -1399,6 +1400,10 @@ fn health_matches(transaction: &UpdateTransaction) -> bool {
         .unwrap_or(false)
 }
 
+fn frontend_health_timeout_message() -> String {
+    format!("the interface did not become healthy within {HEALTH_TIMEOUT_SECS} seconds")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SupervisorPoll {
     Rollback,
@@ -1498,10 +1503,7 @@ fn supervise_child(transaction: &mut UpdateTransaction, child: &mut Child) -> an
         if health_since.is_none() && now >= handshake_deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return rollback_after_failed_launch(
-                transaction,
-                "the interface did not become healthy within 60 seconds",
-            );
+            return rollback_after_failed_launch(transaction, &frontend_health_timeout_message());
         }
         std::thread::sleep(PARENT_POLL);
     }
@@ -1531,10 +1533,7 @@ fn supervise_external_candidate(
         }
         if health_since.is_none() && now >= handshake_deadline {
             terminate_process(pid);
-            return rollback_after_failed_launch(
-                transaction,
-                "the interface did not become healthy within 60 seconds",
-            );
+            return rollback_after_failed_launch(transaction, &frontend_health_timeout_message());
         }
         std::thread::sleep(PARENT_POLL);
     }
@@ -1769,6 +1768,15 @@ mod tests {
         assert_eq!(
             supervisor_poll(false, true, Some(started), started + HEALTH_PROBATION,),
             SupervisorPoll::Commit
+        );
+    }
+
+    #[test]
+    fn missing_frontend_health_fails_fast() {
+        assert!(HEALTH_TIMEOUT <= Duration::from_secs(15));
+        assert_eq!(
+            frontend_health_timeout_message(),
+            "the interface did not become healthy within 15 seconds"
         );
     }
 

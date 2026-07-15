@@ -9,12 +9,14 @@ describe("desktop updater integration", () => {
     );
   });
 
-  it("confirms updater health after connection startup and the native window is visible", () => {
+  it("confirms updater health after the native shell paints without waiting for engine startup", () => {
     expect(source).toContain("const connectionStartup = connection.init()");
-    expect(source).toContain("await Promise.all([updaterStartup, connectionStartup])");
     expect(source).toContain("await appWindow.show()");
     expect(source.indexOf("await updater.confirmReady()")).toBeGreaterThan(
       source.indexOf("await appWindow.show()"),
+    );
+    expect(source.indexOf("await updater.confirmReady()")).toBeLessThan(
+      source.indexOf("await connectionStartup"),
     );
   });
 
