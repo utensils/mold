@@ -38,15 +38,21 @@ async function notify(title: string, body?: string): Promise<void> {
   sendNotification(body != null ? { title, body } : { title });
 }
 
+function dispatchNotification(title: string, body?: string): void {
+  void notify(title, body).catch(() => {
+    /* notifications are best effort */
+  });
+}
+
 export function notifyGenerated(prompt: string): void {
-  void notify(`Generated — ${prompt.trim().slice(0, 40)}`);
+  dispatchNotification(`Generated — ${prompt.trim().slice(0, 40)}`);
 }
 export function notifyGenerationFailed(message: string): void {
-  void notify("Generation failed", message.slice(0, 80));
+  dispatchNotification("Generation failed", message.slice(0, 80));
 }
 export function notifyChainFinished(frames: number): void {
-  void notify(`Chain finished · ${frames} frames`);
+  dispatchNotification(`Chain finished · ${frames} frames`);
 }
 export function notifyPulled(model: string): void {
-  void notify(`Pulled ${model}`);
+  dispatchNotification(`Pulled ${model}`);
 }

@@ -50,4 +50,15 @@ describe("desktop notifications", () => {
       expect(sendNotification).toHaveBeenCalledWith({ title: "Generated — a deer at sunrise" }),
     );
   });
+
+  it("keeps notification delivery failures best effort", async () => {
+    sendNativeNotification.mockResolvedValue(false);
+    sendNotification.mockImplementationOnce(() => {
+      throw new Error("notification center unavailable");
+    });
+
+    notifyGenerated("a deer at sunrise");
+
+    await vi.waitFor(() => expect(sendNotification).toHaveBeenCalledOnce());
+  });
 });
