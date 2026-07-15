@@ -11,6 +11,7 @@ cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
 tool="$cache_dir/linuxdeploy-$arch.AppImage"
 real_tool="$cache_dir/linuxdeploy-$arch.real.AppImage"
 stamp="$cache_dir/linuxdeploy-$arch.mold-wrapper"
+linuxdeploy_sha256="e762bea85c8eb0d4b3508d46e5c1f037f717d0f9303ae3b4aafc8b04991fa1ef"
 
 mkdir -p "$cache_dir"
 
@@ -22,12 +23,21 @@ if [[ -f "$tool" && ! -f "$stamp" ]]; then
   fi
 fi
 
-if [[ ! -x "$real_tool" ]]; then
+download_linuxdeploy() {
   curl --fail --location --retry 3 \
     "https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy/linuxdeploy-$arch.AppImage" \
     --output "$real_tool"
   chmod +x "$real_tool"
+}
+
+if [[ ! -x "$real_tool" ]]; then
+  download_linuxdeploy
 fi
+if ! printf '%s  %s\n' "$linuxdeploy_sha256" "$real_tool" | sha256sum --check --status; then
+  rm -f "$real_tool"
+  download_linuxdeploy
+fi
+printf '%s  %s\n' "$linuxdeploy_sha256" "$real_tool" | sha256sum --check --status
 
 wrapper=$(mktemp "$cache_dir/.linuxdeploy-wrapper.XXXXXX")
 "${CC:-cc}" -O2 -x c -o "$wrapper" - <<'EOF'
@@ -44,7 +54,10 @@ int main(int argc, char **argv) {
   strcpy(real_tool, argv[0]);
   char *name = strrchr(real_tool, '/');
   name = name == NULL ? real_tool : name + 1;
-  strcpy(name, "linuxdeploy-x86_64.real.AppImage");
+  static const char real_name[] = "linuxdeploy-x86_64.real.AppImage";
+  size_t prefix_length = (size_t)(name - real_tool);
+  if (prefix_length + sizeof(real_name) > sizeof(real_tool)) return 126;
+  memcpy(name, real_name, sizeof(real_name));
 
   char **forwarded = calloc((size_t)argc + 3, sizeof(char *));
   if (forwarded == NULL) return 126;

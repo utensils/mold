@@ -144,6 +144,7 @@ jobs:
     env:
       CUDA_COMPUTE_CAP: "89"
       LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+      XDG_CACHE_HOME: /tmp/mold-desktop-cache-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - name: Free runner disk space
@@ -182,6 +183,28 @@ jobs:
         run: ../scripts/prepare-desktop-linuxdeploy.sh
       - name: Build CUDA AppImage
         run: bunx tauri build --features cuda --bundles appimage --ci -v
+      - name: Verify bundled CUDA libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
+          test -n "$appimage"
+          extract_dir=$(mktemp -d)
+          appimage=$(realpath "$appimage")
+          (cd "$extract_dir" && "$appimage" --appimage-extract >/dev/null)
+          root="$extract_dir/squashfs-root"
+
+          if find "$root" -name 'libcuda.so*' -print -quit | grep -q .; then
+            echo "unexpected bundled NVIDIA driver" >&2
+            exit 1
+          fi
+          for library in 'libcudart.so*' 'libcurand.so*' 'libcublas.so*' 'libcublasLt.so*'; do
+            if ! find "$root" -name "$library" -print -quit | grep -q .; then
+              echo "missing bundled $library" >&2
+              exit 1
+            fi
+          done
+          rm -rf "$extract_dir"
       - name: Launch AppImage under Xvfb
         shell: bash
         run: |
@@ -189,6 +212,10 @@ jobs:
           appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
           test -n "$appimage"
           chmod +x "$appimage"
+          mkdir -p src-tauri/target/smoke-driver
+          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so src-tauri/target/smoke-driver/libcuda.so.1
+          LD_LIBRARY_PATH="$(pwd)/src-tauri/target/smoke-driver:${LD_LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH
           xvfb-run -a bash -s -- "$appimage" <<'EOF'
           set -euo pipefail
           appimage=$1

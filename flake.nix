@@ -1091,6 +1091,7 @@
                     if isLinux then
                       ''
                         if [ -x /usr/bin/xdg-open ]; then
+                          export XDG_CACHE_HOME="''${MOLD_DESKTOP_CACHE_HOME:-''${XDG_CACHE_HOME:-$HOME/.cache}/mold-desktop}"
                           ../scripts/prepare-desktop-linuxdeploy.sh
                           cargo tauri build --features ${desktopFeature} --bundles appimage "$@"
                         else

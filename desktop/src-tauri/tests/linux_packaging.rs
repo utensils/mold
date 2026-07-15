@@ -35,6 +35,20 @@ fn appimage_excludes_the_host_cuda_driver() {
         2,
         "wrapper changes must trigger desktop CI for pushes and pull requests"
     );
+    assert!(
+        workflow.contains("XDG_CACHE_HOME: /tmp/mold-desktop-cache-${{ github.run_id }}"),
+        "Linux packaging must not replace tools in Tauri's shared user cache"
+    );
+    assert!(
+        workflow.contains("Verify bundled CUDA libraries")
+            && workflow.contains("unexpected bundled NVIDIA driver")
+            && workflow.contains("missing bundled $library"),
+        "CI must inspect the completed AppImage's CUDA library contents"
+    );
+    assert!(
+        workflow.contains("smoke-driver/libcuda.so.1"),
+        "the GPU-less CI launch needs a host-side CUDA driver stub"
+    );
 
     let script_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -49,6 +63,10 @@ fn appimage_excludes_the_host_cuda_driver() {
     assert!(
         script.contains("--appimage-extract-and-run"),
         "recursive linuxdeploy plugin calls must not require FUSE"
+    );
+    assert!(
+        script.contains("sha256sum --check"),
+        "downloaded linuxdeploy executables must be integrity checked"
     );
 }
 
