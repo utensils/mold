@@ -78,3 +78,39 @@ int main(int argc, char **argv) {
 EOF
 mv "$wrapper" "$tool"
 touch "$stamp"
+
+prepare_plugin() {
+  local name=$1
+  local url=$2
+  local sha256=$3
+  local invocation=$4
+  local replacement=$5
+  local destination="$cache_dir/$name"
+  local download
+  download=$(mktemp "$cache_dir/.$name.XXXXXX")
+  curl --fail --location --retry 3 "$url" --output "$download"
+  printf '%s  %s\n' "$sha256" "$download" | sha256sum --check --status
+  sed -i "s|$invocation|$replacement|" "$download"
+  if ! grep -Fq -- "--exclude-library='libcuda.so*'" "$download"; then
+    echo "failed to patch recursive linuxdeploy call in $name" >&2
+    exit 1
+  fi
+  chmod +x "$download"
+  mv "$download" "$destination"
+}
+
+# shellcheck disable=SC2016
+prepare_plugin \
+  "linuxdeploy-plugin-gtk.sh" \
+  "https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh" \
+  "cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a" \
+  '"$LINUXDEPLOY" --appdir="$APPDIR"' \
+  '"$LINUXDEPLOY" --exclude-library='\''libcuda.so*'\'' --appdir="$APPDIR"'
+
+# shellcheck disable=SC2016
+prepare_plugin \
+  "linuxdeploy-plugin-gstreamer.sh" \
+  "https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/master/linuxdeploy-plugin-gstreamer.sh" \
+  "c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94" \
+  '"$LINUXDEPLOY" --appdir "$APPDIR"' \
+  '"$LINUXDEPLOY" --exclude-library='\''libcuda.so*'\'' --appdir "$APPDIR"'

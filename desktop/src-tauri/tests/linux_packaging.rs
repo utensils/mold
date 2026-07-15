@@ -68,6 +68,12 @@ fn appimage_excludes_the_host_cuda_driver() {
         script.contains("sha256sum --check"),
         "downloaded linuxdeploy executables must be integrity checked"
     );
+    assert!(
+        script.contains("linuxdeploy-plugin-gtk.sh")
+            && script.contains("linuxdeploy-plugin-gstreamer.sh")
+            && script.contains("recursive linuxdeploy call"),
+        "linuxdeploy plugins must preserve the CUDA-driver exclusion"
+    );
 }
 
 #[test]
