@@ -13,7 +13,7 @@ description = "SQLite-backed metadata store for mold gallery items"
 name = "mold_db"
 
 [dependencies]
-mold-ai-core = { path = "../mold-core", version = "0.17.0" }
+mold-ai-core = { path = "../mold-core", version = "0.17.1" }
 anyhow = "1"
 hostname = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
