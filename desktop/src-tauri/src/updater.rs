@@ -7,6 +7,7 @@
 //! Only after every check passes does Mold atomically swap the app bundle.
 
 use std::path::{Component, Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ const NIGHTLY_ENDPOINT: &str =
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(15);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const EXPECTED_BUNDLE_IDENTIFIER: &str = "com.utensils.mold";
+#[cfg(target_os = "macos")]
 const LEGACY_HEALTH_TOKEN: &str = "MOLD_UPDATE_HEALTH_TOKEN";
 
 /// The release that introduces preflight-only updates can itself be launched
@@ -65,6 +67,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(not(target_os = "macos"))]
 pub fn retire_legacy_supervisor_if_present() {}
 
+#[cfg(any(target_os = "macos", test))]
 fn is_legacy_supervisor_path(path: &Path) -> bool {
     let display = path.to_string_lossy();
     display.contains("/updater/backup/Mold.app/Contents/MacOS/")
