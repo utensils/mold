@@ -186,6 +186,7 @@ async fn ensure_local_server_inner(
     };
     if let Some(base_url) = external_url {
         if server::is_mold_server(&base_url).await {
+            ensure_local_server_auth(&base_url, &state.local_api_key).await?;
             return Ok(local.info(&state.local_api_key).expect("external info"));
         }
         tracing::warn!(%base_url, "external local server disappeared; replacing it");
@@ -196,6 +197,7 @@ async fn ensure_local_server_inner(
     // wins over embedding another process on this Mac.
     let well_known = format!("http://127.0.0.1:{}", server::WELL_KNOWN_PORT);
     if server::is_mold_server(&well_known).await {
+        ensure_local_server_auth(&well_known, &state.local_api_key).await?;
         tracing::info!("using existing mold server at {well_known}");
         *local = LocalServer::External {
             base_url: well_known,
@@ -225,6 +227,15 @@ async fn ensure_local_server_inner(
     }
     *local = LocalServer::Embedded(engine);
     Ok(local.info(&state.local_api_key).expect("embedded info"))
+}
+
+async fn ensure_local_server_auth(base_url: &str, api_key: &str) -> Result<(), String> {
+    if server::accepts_api_key(base_url, api_key).await {
+        return Ok(());
+    }
+    Err(format!(
+        "A Mold server is already running at {base_url}, but it does not accept This Mac API key. Stop that server or restart it with the same MOLD_API_KEY."
+    ))
 }
 
 /// Ensure this Mac is serving Mold independently of whichever primary host the

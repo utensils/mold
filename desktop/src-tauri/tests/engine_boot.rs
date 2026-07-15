@@ -29,6 +29,8 @@ async fn engine_boots_authenticates_and_shuts_down() {
         "engine did not become healthy"
     );
     assert!(server::is_mold_server(&base).await);
+    assert!(server::accepts_api_key(&base, "desktop-test-key").await);
+    assert!(!server::accepts_api_key(&base, "different-key").await);
 
     let client = reqwest::Client::new();
 

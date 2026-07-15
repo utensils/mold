@@ -168,6 +168,21 @@ pub async fn is_mold_server(base_url: &str) -> bool {
     }
 }
 
+/// True when the server accepts the API key the desktop will hand to its
+/// local HTTP clients. Unauthenticated servers also return success here when
+/// a key is supplied, while a server owned by another key returns 401.
+pub async fn accepts_api_key(base_url: &str, api_key: &str) -> bool {
+    matches!(
+        reqwest::Client::new()
+            .get(format!("{base_url}/api/status"))
+            .header("X-Api-Key", api_key)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await,
+        Ok(resp) if resp.status().is_success()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
