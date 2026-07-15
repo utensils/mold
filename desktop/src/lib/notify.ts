@@ -3,7 +3,7 @@
  * get toasts instead, so every helper no-ops unless the window is hidden or
  * unfocused. In a plain browser (no Tauri) these are all no-ops.
  */
-import { inTauri } from "./ipc";
+import { inTauri, ipc } from "./ipc";
 import { useAppPrefsStore } from "../stores/appPrefs";
 
 let permissionResolved = false;
@@ -32,6 +32,7 @@ async function notify(title: string, body?: string): Promise<void> {
   } catch {
     /* store not ready (early boot) — default on */
   }
+  if (await ipc.sendNativeNotification(title, body)) return;
   if (!(await ensurePermission())) return;
   const { sendNotification } = await import("@tauri-apps/plugin-notification");
   sendNotification(body != null ? { title, body } : { title });
