@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { platformUi } from "./platform";
+import { platformUi, primaryModifierPressed } from "./platform";
 
 describe("platformUi", () => {
   it("uses Command conventions on macOS", () => {
@@ -20,5 +20,20 @@ describe("platformUi", () => {
       deviceLabel: "This device",
       fileManagerLabel: "file manager",
     });
+  });
+
+  it("uses the neutral Control conventions when the platform is unknown", () => {
+    expect(platformUi("unknown")).toMatchObject({
+      isMacOS: false,
+      modifier: "Control",
+      modifierLabel: "Ctrl+",
+      deviceLabel: "This device",
+    });
+  });
+});
+
+describe("primaryModifierPressed", () => {
+  it("rejects Alt-modified primary chords", () => {
+    expect(primaryModifierPressed({ metaKey: false, ctrlKey: true, altKey: true })).toBe(false);
   });
 });

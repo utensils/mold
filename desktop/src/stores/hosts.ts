@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { hostIdFromUrl, normalizeHostUrl, pickAutoHost, pickMostCapableHost } from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
+import { PLATFORM_UI } from "../lib/platform";
 import type { GpuInfo, ServerStatus } from "../lib/api/types";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
@@ -72,7 +73,7 @@ export const useHostsStore = defineStore("hosts", {
     initialized: false,
   }),
   getters: {
-    /** The primary connection as a host row ("This Mac" or the remote). */
+    /** The primary connection as a host row (this device or the remote). */
     primaryHost(state): HostView | null {
       const conn = useConnectionStore();
       if (!conn.info?.baseUrl) return null;
@@ -83,7 +84,7 @@ export const useHostsStore = defineStore("hosts", {
         id,
         label: remote
           ? (state.names[id] ?? conn.info.baseUrl.replace(/^https?:\/\//, ""))
-          : "This device",
+          : PLATFORM_UI.deviceLabel,
         kind: remote ? "remote" : "local",
         baseUrl: conn.info.baseUrl,
         apiKey: conn.info.apiKey,
@@ -106,7 +107,7 @@ export const useHostsStore = defineStore("hosts", {
       if (primary?.kind !== "local" && conn.localStatus !== "idle") {
         rows.push({
           id: "local",
-          label: "This Mac",
+          label: PLATFORM_UI.deviceLabel,
           kind: "local",
           baseUrl: conn.localInfo?.baseUrl ?? null,
           apiKey: conn.localInfo?.apiKey ?? null,

@@ -68,10 +68,7 @@ export function resolveShellShortcut(
   e: KeyLike,
   platform: DesktopPlatform = CURRENT_PLATFORM,
 ): ShellAction | null {
-  const primaryPressed =
-    platform === "linux" || platform === "windows"
-      ? e.ctrlKey && !e.metaKey
-      : e.metaKey && !e.ctrlKey;
+  const primaryPressed = platform === "macos" ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
   if (!primaryPressed || e.altKey) return null;
   // `+` is Shift+= on standard keyboards, so recognize zoom before the
   // general shifted-shortcut gate below.

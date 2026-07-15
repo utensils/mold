@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Desktop shortcuts and local-host labels now stay platform-consistent.** Browser previews use the same Ctrl shortcuts they display, Alt-modified Ctrl chords no longer trigger Generate composer actions, and the secondary local-engine row uses the same platform-neutral device label as the primary row on Linux.
 - **Desktop updates no longer roll back a working interface while the engine starts.** Candidate health is now confirmed as soon as the restored route and native shell have painted instead of waiting for the local engine or a remote host to finish its potentially slow startup probe. A candidate whose interface never boots is stopped and restored after 15 seconds rather than lingering for a full minute; the relaunched backup continues to show the concrete recovery error.
 - **Desktop post-generation upscaling now auto-downloads on multi-GPU hosts.** A first-use Real-ESRGAN selection is pulled and configured by the remote server before its queue dispatches the generation to a GPU worker, matching the existing single-worker and standalone-upscale behavior instead of briefly failing with “upscaler model … is not downloaded.”
 - **Desktop: model names stay fully readable in the Generate picker.** Long installed-model names now wrap instead of ending in an ellipsis, with multi-host availability moved to a secondary line so it no longer crowds out the model identity. The selected model control also grows when needed rather than clipping its value.

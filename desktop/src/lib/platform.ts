@@ -35,6 +35,9 @@ export function shortcutLabel(key: string): string {
   return `${PLATFORM_UI.modifierLabel}${key}`;
 }
 
-export function primaryModifierPressed(event: Pick<KeyboardEvent, "metaKey" | "ctrlKey">): boolean {
+export function primaryModifierPressed(
+  event: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "altKey">,
+): boolean {
+  if (event.altKey) return false;
   return PLATFORM_UI.isMacOS ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
 }
