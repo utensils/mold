@@ -22,6 +22,27 @@ fn appimage_ci_installs_tauri_linuxdeploy_runtime() {
 }
 
 #[test]
+fn appimage_ci_reserves_optimized_artifacts_for_main() {
+    let workflow = include_str!("../../../.github/workflows/desktop.yml");
+    assert!(
+        workflow.contains("DESKTOP_BUILD_PROFILE:")
+            && workflow.contains("github.event_name == 'pull_request' && 'debug' || 'release'")
+            && workflow.contains("build_args+=(--debug)"),
+        "pull requests must smoke a debug AppImage instead of rebuilding an optimized artifact"
+    );
+    assert!(
+        workflow.contains("if: github.event_name == 'push'")
+            && workflow.contains("mold-desktop-linux-appimage-sm89"),
+        "large optimized AppImage uploads must be limited to main pushes"
+    );
+    assert!(
+        workflow.contains("xdotool search --onlyvisible --pid")
+            && workflow.contains("xdotool search --onlyvisible --name '.'"),
+        "the isolated Xvfb smoke must not depend on an exact window title"
+    );
+}
+
+#[test]
 fn appimage_excludes_the_host_cuda_driver() {
     let workflow = include_str!("../../../.github/workflows/desktop.yml");
     assert!(

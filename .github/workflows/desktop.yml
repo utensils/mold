@@ -143,6 +143,7 @@ jobs:
         working-directory: desktop
     env:
       CUDA_COMPUTE_CAP: "89"
+      DESKTOP_BUILD_PROFILE: ${{ github.event_name == 'pull_request' && 'debug' || 'release' }}
       LIBRARY_PATH: /usr/local/cuda/lib64/stubs
       XDG_CACHE_HOME: /tmp/mold-desktop-cache-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -189,12 +190,19 @@ jobs:
           echo "LD_LIBRARY_PATH=$driver_stub_dir:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
           ../scripts/prepare-desktop-linuxdeploy.sh
       - name: Build CUDA AppImage
-        run: bunx tauri build --features cuda --bundles appimage --ci -v
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_args=()
+          if [[ "$DESKTOP_BUILD_PROFILE" == debug ]]; then
+            build_args+=(--debug)
+          fi
+          bunx tauri build --features cuda --bundles appimage --ci -v "${build_args[@]}"
       - name: Verify bundled CUDA libraries
         shell: bash
         run: |
           set -euo pipefail
-          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
+          appimage=$(find "src-tauri/target/$DESKTOP_BUILD_PROFILE/bundle/appimage" -name '*.AppImage' -print -quit)
           test -n "$appimage"
           extract_dir=$(mktemp -d)
           appimage=$(realpath "$appimage")
@@ -216,7 +224,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
+          appimage=$(find "src-tauri/target/$DESKTOP_BUILD_PROFILE/bundle/appimage" -name '*.AppImage' -print -quit)
           test -n "$appimage"
           chmod +x "$appimage"
           xvfb-run -a bash -s -- "$appimage" <<'EOF'
@@ -237,7 +245,10 @@ jobs:
           rendered=0
           for _ in $(seq 1 30); do
             kill -0 "$pid"
-            window=$(xdotool search --onlyvisible --name '^Mold$' 2>/dev/null | head -n 1 || true)
+            window=$(xdotool search --onlyvisible --pid "$pid" 2>/dev/null | head -n 1 || true)
+            if [[ -z "$window" ]]; then
+              window=$(xdotool search --onlyvisible --name '.' 2>/dev/null | head -n 1 || true)
+            fi
             if [[ -n "$window" ]]; then
               if import -window "$window" "$screenshot" && \
                 convert "$screenshot" -gravity south -crop '100%x95%+0+0' +repage "$body"; then
@@ -256,10 +267,14 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
+          name: mold-desktop-linux-smoke
+          path: desktop/src-tauri/target/mold-appimage-smoke.png
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
           name: mold-desktop-linux-appimage-sm89
-          path: |
-            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
-            desktop/src-tauri/target/mold-appimage-smoke.png
+          path: desktop/src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
 
   # Every desktop-relevant main commit that passes both CI jobs becomes a
