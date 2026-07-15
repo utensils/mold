@@ -152,7 +152,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential clang lld nasm pkg-config patchelf file wget curl xvfb libfuse2 \
+            build-essential clang lld nasm pkg-config patchelf file wget curl xvfb xdotool imagemagick libfuse2 \
             libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev \
             gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
@@ -175,6 +175,7 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features cuda -- -D warnings
       - name: Build CUDA AppImage
         run: bunx tauri build --features cuda --bundles appimage --ci
       - name: Launch AppImage under Xvfb
@@ -184,16 +185,47 @@ jobs:
           appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
           test -n "$appimage"
           chmod +x "$appimage"
-          xvfb-run -a env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$appimage" --appimage-extract-and-run &
+          xvfb-run -a bash -s -- "$appimage" <<'EOF'
+          set -euo pipefail
+          appimage=$1
+          screenshot=src-tauri/target/mold-appimage-smoke.png
+          body=src-tauri/target/mold-appimage-smoke-body.png
+
+          env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$appimage" --appimage-extract-and-run &
           pid=$!
-          sleep 15
-          kill -0 "$pid"
-          kill "$pid"
-          wait "$pid" || true
+          cleanup() {
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          window=
+          rendered=0
+          for _ in $(seq 1 30); do
+            kill -0 "$pid"
+            window=$(xdotool search --onlyvisible --name '^Mold$' 2>/dev/null | head -n 1 || true)
+            if [[ -n "$window" ]]; then
+              if import -window "$window" "$screenshot" && \
+                convert "$screenshot" -gravity south -crop '100%x95%+0+0' +repage "$body"; then
+                rendered=$(identify -format '%[fx:standard_deviation>0.03]' "$body")
+                if [[ "$rendered" == 1 ]]; then
+                  break
+                fi
+              fi
+            fi
+            sleep 1
+          done
+
+          test -n "$window"
+          test "$rendered" = 1
+          EOF
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: mold-desktop-linux-appimage-sm89
-          path: desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          path: |
+            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            desktop/src-tauri/target/mold-appimage-smoke.png
           if-no-files-found: error
 
   # Every desktop-relevant main commit that passes both CI jobs becomes a

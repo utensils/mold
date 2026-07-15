@@ -134,19 +134,20 @@ The checked-in config deliberately leaves `createUpdaterArtifacts` false so unsi
 
 ## 5. Dev workflow & Nix devshell
 
-**Devshell additions to `/Users/jamesbrink/Projects/utensils/mold/flake.nix`** (new category `desktop`; names shadow no builtins, matching the repo's existing style):
+The shared devshell exposes cross-platform desktop helpers:
 
-| Command         | Runs                                                                                                                                                              |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `desktop-dev`   | `cd desktop && bun install --frozen-lockfile && cargo tauri dev` (Vite HMR at :1430; `beforeDevCommand` handles the dev server)                                   |
-| `desktop-build` | `cd desktop && bun install --frozen-lockfile && cargo tauri build` — sources `.secrets/signing.env` if present (Aethon opt-in signing flow), else ad-hoc unsigned |
-| `desktop-check` | `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` (with `--manifest-path desktop/src-tauri/Cargo.toml`) + `vue-tsc -b` + `bun run lint`           |
-| `desktop-test`  | `cargo test --manifest-path desktop/src-tauri/Cargo.toml` + `bun run test` (vitest)                                                                               |
-| `desktop-ui`    | `cd desktop && bun run dev` (frontend-only in a browser against a running `mold serve` — fastest UI iteration loop)                                               |
+| Command            | Runs                                                                                                                             |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `desktop-dev`      | Installs locked frontend dependencies, clears a stale Vite listener, and runs Tauri with Metal on macOS or CUDA on Linux         |
+| `desktop-build`    | Builds the macOS application bundle or the native Linux desktop package and AppImage; optional signing secrets remain macOS-only |
+| `desktop-check`    | Runs Rust formatting and warning-denied clippy plus frontend format and type checks                                              |
+| `desktop-test`     | Runs the CPU-only Rust test suite, embedded-engine boot test, and frontend Vitest suite                                          |
+| `desktop-ui`       | Runs the frontend-only Vite server against a running `mold serve`                                                                |
+| `desktop-bun-lock` | Refreshes the Nix-pinned Bun dependency lock after `desktop/bun.lock` changes                                                    |
 
-**Packages added to devshell:** `cargo-tauri` (nixpkgs; Tauri 2.x CLI — verify `cargo tauri --version` ≥ 2.4 at setup), plus existing `bun`. macOS needs no webkit packages (system WKWebView). **Darwin gotcha carried from Aethon:** export `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/cc` and `RUSTC_LINKER=/usr/bin/cc` _scoped to desktop commands_ (mold's devshell doesn't currently pin these; Tauri's objc2/system-framework linking fails or produces Team-ID-rejected binaries with the Nix linker). Linux later: reuse Aethon's `linuxBuildInputs` list (webkitgtk_4_1, gtk3, libsoup_3, …) verbatim when that milestone arrives.
+The devshell includes `cargo-tauri`, Bun tooling, `lsof`, and ImageMagick. Linux adds WebKitGTK, GTK, Soup, GStreamer, CUDA, and the runtime library paths required by the launched binary. macOS uses system WKWebView and scopes the system C compiler linker variables to desktop commands so the existing Apple build and signing flow is unchanged.
 
-**Nix package `mold-desktop` (aarch64-darwin first):** Aethon's recipe — `rustPlatform.buildRustPackage` + `pkgs.cargo-tauri.hook`, `cargoRoot = "src-tauri"` (relative to `desktop/` source), `buildAndTestSubdir`, `cargoLock.lockFile = ./desktop/src-tauri/Cargo.lock`, frontend deps via **bun2nix** (`fetchBunDeps { bunNix = ./desktop/bun.nix; }` — consistent with `mold-web`, not Aethon's npm hooks), `darwinBuildInputs = []` (system libiconv), `tauriBuildFlags = ["--no-sign"]`, postInstall wrapping `Mold.app/Contents/MacOS/mold-desktop` into `$out/bin`. Adopt `scripts/verify-bundle.sh` (Mach-O scan for `/nix/store` leaks). This lands in M6 — dev workflow doesn't block on it.
+The flake exports `mold-desktop` for the platform default GPU target. Linux also exports `mold-desktop-sm120` for Blackwell and an AppImage through `desktop-build`; macOS keeps the existing application bundle, signing, and bundle-verification path. Frontend dependencies are pinned through bun2nix on both platforms.
 
 **Rust toolchain:** the devshell's existing `rust-bin.stable.latest`. If a toolchain/Tauri transitive-dep breakage appears (Aethon had to pin 1.92 because 1.95 broke icu_provider/objc2), pin **only** in the desktop package derivation, never the shared devshell toolchain.
 

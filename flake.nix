@@ -695,6 +695,7 @@
               pkgs.git
               pkgs.gh
               pkgs.jq
+              pkgs.lsof
               pkgs.viu
               pkgs.mpv
               pkgs.cargo-llvm-cov
