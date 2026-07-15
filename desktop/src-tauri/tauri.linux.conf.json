@@ -12,7 +12,7 @@
         "center": true,
         "maximized": true,
         "fullscreen": false,
-        "visible": false,
+        "visible": true,
         "decorations": true
       }
     ]
