@@ -20,3 +20,34 @@ fn appimage_ci_installs_tauri_linuxdeploy_runtime() {
         "Tauri linuxdeploy requires /usr/bin/xdg-open from xdg-utils"
     );
 }
+
+#[test]
+fn appimage_excludes_the_host_cuda_driver() {
+    let workflow = include_str!("../../../.github/workflows/desktop.yml");
+    assert!(
+        workflow.contains("../scripts/prepare-desktop-linuxdeploy.sh"),
+        "Linux CI must install the linuxdeploy CUDA-driver exclusion wrapper"
+    );
+    assert_eq!(
+        workflow
+            .matches("- \"scripts/prepare-desktop-linuxdeploy.sh\"")
+            .count(),
+        2,
+        "wrapper changes must trigger desktop CI for pushes and pull requests"
+    );
+
+    let script_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/prepare-desktop-linuxdeploy.sh"
+    );
+    let script = std::fs::read_to_string(script_path)
+        .expect("Linux bundles must provide the linuxdeploy wrapper setup script");
+    assert!(
+        script.contains("--exclude-library=libcuda.so*"),
+        "AppImages must use the host NVIDIA driver instead of bundling its toolkit stub"
+    );
+    assert!(
+        script.contains("--appimage-extract-and-run"),
+        "recursive linuxdeploy plugin calls must not require FUSE"
+    );
+}

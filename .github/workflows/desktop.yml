@@ -26,6 +26,7 @@ on:
       - "scripts/create-desktop-update-manifest.sh"
       - "scripts/fix-desktop-macos-linkage.sh"
       - "scripts/notarize-desktop-dmg.sh"
+      - "scripts/prepare-desktop-linuxdeploy.sh"
       - "scripts/prune-desktop-nightly-assets.sh"
       - "scripts/select-desktop-stable-latest.sh"
       - "scripts/tests/check-desktop-nightly-main-head.sh"
@@ -56,6 +57,7 @@ on:
       - "scripts/create-desktop-update-manifest.sh"
       - "scripts/fix-desktop-macos-linkage.sh"
       - "scripts/notarize-desktop-dmg.sh"
+      - "scripts/prepare-desktop-linuxdeploy.sh"
       - "scripts/prune-desktop-nightly-assets.sh"
       - "scripts/select-desktop-stable-latest.sh"
       - "scripts/tests/check-desktop-nightly-main-head.sh"
@@ -176,8 +178,10 @@ jobs:
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features cuda -- -D warnings
+      - name: Exclude the host CUDA driver from linuxdeploy
+        run: ../scripts/prepare-desktop-linuxdeploy.sh
       - name: Build CUDA AppImage
-        run: bunx tauri build --features cuda --bundles appimage --ci
+        run: bunx tauri build --features cuda --bundles appimage --ci -v
       - name: Launch AppImage under Xvfb
         shell: bash
         run: |

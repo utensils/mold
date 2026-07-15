@@ -696,6 +696,7 @@
               pkgs.gh
               pkgs.jq
               pkgs.lsof
+              pkgs.curl
               pkgs.viu
               pkgs.mpv
               pkgs.cargo-llvm-cov
@@ -1089,6 +1090,7 @@
                     if isLinux then
                       ''
                         if [ -x /usr/bin/xdg-open ]; then
+                          ../scripts/prepare-desktop-linuxdeploy.sh
                           cargo tauri build --features ${desktopFeature} --bundles appimage "$@"
                         else
                           # Tauri's downloaded linuxdeploy tools require an FHS
