@@ -136,20 +136,20 @@ release is published.
 
 ### Keyboard map
 
-| Shortcut     | Action                                  |
-| ------------ | --------------------------------------- |
-| Cmd/Ctrl+1–6, comma | Screens / Settings                |
-| Cmd/Ctrl+K    | Command palette                         |
-| Cmd/Ctrl+N    | New generation (clear composer, focus)  |
-| Cmd/Ctrl+Enter | Generate                               |
-| Cmd/Ctrl+E    | Expand prompt                           |
-| Cmd/Ctrl+R    | Randomize seed                          |
-| Cmd/Ctrl+.    | Cancel the running job                  |
-| Cmd/Ctrl+\    | Toggle sidebar                          |
-| Space        | Quick Look in Gallery                   |
-| ←/→, ⌫       | Gallery navigate / delete               |
-| Shift+Cmd/Ctrl+C | Copy seed (lightbox)                 |
-| Cmd/Ctrl+0 / + / − | Interface size reset/larger/smaller |
+| Shortcut            | Action                                 |
+| ------------------- | -------------------------------------- |
+| Cmd/Ctrl+1–6, comma | Screens / Settings                     |
+| Cmd/Ctrl+K          | Command palette                        |
+| Cmd/Ctrl+N          | New generation (clear composer, focus) |
+| Cmd/Ctrl+Enter      | Generate                               |
+| Cmd/Ctrl+E          | Expand prompt                          |
+| Cmd/Ctrl+R          | Randomize seed                         |
+| Cmd/Ctrl+.          | Cancel the running job                 |
+| Cmd/Ctrl+\          | Toggle sidebar                         |
+| Space               | Quick Look in Gallery                  |
+| ←/→, ⌫              | Gallery navigate / delete              |
+| Shift+Cmd/Ctrl+C    | Copy seed (lightbox)                   |
+| Cmd/Ctrl+0 / + / −  | Interface size reset/larger/smaller    |
 
 Interface scaling applies to the complete app, including fixed overlays and
 right-click menus. Choose 80–130% from **Settings → Appearance & app → Interface size**, or
