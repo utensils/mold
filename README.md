@@ -268,7 +268,7 @@ requests without changing server config.
 ## Features
 
 - **txt2img, img2img, multimodal edit, inpainting** — full generation pipeline
-- **Image upscaling** — Real-ESRGAN super-resolution (2x/4x) via `mold upscale`, server API, or TUI; first use auto-downloads the upscaler on the host running the job
+- **Image upscaling** — Real-ESRGAN super-resolution (2x/4x) via `mold upscale`, server API, or TUI; first use auto-downloads the upscaler on the host running the job, and post-generation upscale retains both original and upscaled gallery artifacts
 - **LoRA adapters** — FLUX, Flux.2, LTX-2, SD1.5, SD3/SD3.5, SDXL,
   Qwen-Image, Qwen-Image-Edit, and Z-Image
 - **ControlNet** — canny, depth, openpose (SD1.5)

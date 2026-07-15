@@ -1,8 +1,8 @@
 use crate::gpu_pool::{ActiveGeneration, GpuJob, GpuWorker};
 use crate::model_cache::ModelResidency;
 use crate::queue::{
-    apply_output_dimensions_to_metadata, apply_upscale_response_to_image_generation,
-    build_sse_complete_event, clean_error_message, save_image_to_dir, save_video_to_dir,
+    apply_upscale_response_to_image_generation, build_sse_complete_event, clean_error_message,
+    save_generated_image_outputs, save_video_to_dir, settle_post_generation_upscale,
 };
 use crate::state::{GenerationJobResult, SseMessage};
 use mold_core::{
@@ -174,6 +174,12 @@ fn upscale_generated_image_on_worker(
         image: img.data.clone(),
         output_format: img.format,
         tile_size: None,
+        metadata: Some(OutputMetadata::from_generate_request(
+            &job.request,
+            response.seed_used,
+            None,
+            mold_core::build_info::version_string(),
+        )),
     };
     let upscaled = engine
         .upscale(&req)
@@ -465,6 +471,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
             } else {
                 unreachable!("checked above");
             };
+            let mut original_img = None;
 
             if response.video.is_none() {
                 if let Some(upscale_model) = job
@@ -474,23 +481,23 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                     .map(str::trim)
                     .filter(|m| !m.is_empty())
                 {
-                    match upscale_generated_image_on_worker(
+                    let upscale_result = upscale_generated_image_on_worker(
                         worker,
                         &job,
                         upscale_model,
                         img.clone(),
                         &mut response,
-                    ) {
-                        Ok(upscaled) => img = upscaled,
-                        Err(err_msg) => {
-                            if let Some(ref tx) = job.progress_tx {
-                                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                                    message: err_msg.clone(),
-                                }));
-                            }
-                            let _ = job.result_tx.send(Err(err_msg));
-                            return;
-                        }
+                    );
+                    let (output, preserved_original, upscale_error) =
+                        settle_post_generation_upscale(img, upscale_result);
+                    img = output;
+                    original_img = preserved_original;
+                    if let Some(error) = upscale_error {
+                        tracing::warn!(
+                            gpu = ordinal,
+                            %error,
+                            "post-generation upscale failed; keeping original image"
+                        );
                     }
                 }
             }
@@ -503,15 +510,12 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
             // invisible to /api/gallery until the next reconcile on
             // server restart.
             if let Some(ref dir) = job.output_dir {
-                let mut metadata = OutputMetadata::from_generate_request(
+                let metadata = OutputMetadata::from_generate_request(
                     &job.request,
                     response.seed_used,
                     None,
                     mold_core::build_info::version_string(),
                 );
-                if response.video.is_none() {
-                    apply_output_dimensions_to_metadata(&mut metadata, &img);
-                }
                 let generation_time_ms = response.generation_time_ms as i64;
                 let db = job.metadata_db.as_ref().as_ref();
                 let events = Some(job.events.as_ref());
@@ -528,12 +532,13 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                         events,
                     );
                 } else {
-                    save_image_to_dir(
+                    save_generated_image_outputs(
                         dir,
+                        original_img.as_ref(),
                         &img,
                         &job.model,
                         job.request.batch_size,
-                        Some(&metadata),
+                        &metadata,
                         Some(generation_time_ms),
                         db,
                         events,
@@ -547,7 +552,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
             // Discord bot silently degraded every LTX-Video / LTX-2 response
             // into an image attachment (the synthesized thumbnail PNG).
             if let Some(ref tx) = job.progress_tx {
-                let event = build_sse_complete_event(&response, &img);
+                let event = build_sse_complete_event(&response, &img, original_img.as_ref());
                 let _ = tx.send(SseMessage::Complete(event));
             }
 

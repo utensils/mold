@@ -271,6 +271,14 @@ Important fields:
 | `embed_metadata`                                    | override config/env metadata embedding for this request                                                                                          |
 | `upscale_model`                                     | post-generation Real-ESRGAN model applied before returning images                                                                                |
 
+When `upscale_model` is set, the server gallery retains both artifacts as
+`-original` and `-upscaled` files. The SSE `complete` event returns the
+upscaled image in `image` and includes additive `original_image`,
+`original_width`, and `original_height` fields so remote clients can mirror
+the pair. Gallery metadata exposes the saved file size in `width` / `height`
+and the reusable pre-upscale canvas in `generation_width` /
+`generation_height`.
+
 The exhaustive schema for enums and nested objects is served by the running
 server at `/api/docs` and `/api/openapi.json`.
 
@@ -848,6 +856,7 @@ curl -X POST http://localhost:7680/api/upscale \
 | `model`         | string | yes      | Upscaler model name (e.g. `real-esrgan-x4plus:fp16`)      |
 | `image`         | string | yes      | Base64-encoded input image (PNG or JPEG)                  |
 | `output_format` | string | no       | `png` (default) or `jpeg`                                 |
+| `metadata`      | object | no       | Generation metadata to embed in the upscaled output       |
 | `tile_size`     | number | no       | Tile size for memory-efficient processing (0 = no tiling) |
 
 **Response:** Raw image bytes (PNG or JPEG) with `Content-Type` header.

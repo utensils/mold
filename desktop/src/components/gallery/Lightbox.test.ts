@@ -9,6 +9,7 @@ vi.mock("../../lib/ipc", () => ({
 
 import Lightbox from "./Lightbox.vue";
 import { useContextMenuStore } from "../../stores/contextMenu";
+import { useComposerStore } from "../../stores/composer";
 import type { GalleryImage } from "../../lib/api/types";
 
 const item: GalleryImage = {
@@ -30,12 +31,36 @@ beforeEach(() => {
   setActivePinia(createPinia());
 });
 
-function mountLightbox() {
+function mountLightbox(selectedItem: GalleryImage = item) {
   return mount(Lightbox, {
-    props: { item, index: 0, count: 3, video: false },
+    props: { item: selectedItem, index: 0, count: 3, video: false },
     global: { stubs: { AuthedMedia: { template: "<div />" } } },
   });
 }
+
+describe("Lightbox reuse", () => {
+  it("restores generation dimensions instead of the upscaled raster", async () => {
+    const wrapper = mountLightbox({
+      ...item,
+      metadata: {
+        ...item.metadata,
+        width: 4096,
+        height: 4096,
+        generation_width: 1024,
+        generation_height: 1024,
+        upscale_model: "real-esrgan-x4plus:fp16",
+      },
+    });
+
+    await wrapper.get("button.bg-safelight").trigger("click");
+
+    expect(useComposerStore().prefill).toMatchObject({
+      width: 1024,
+      height: 1024,
+      upscaleModel: "real-esrgan-x4plus:fp16",
+    });
+  });
+});
 
 describe("Lightbox a11y", () => {
   it("is a labelled modal dialog", () => {

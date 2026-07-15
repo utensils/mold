@@ -1511,6 +1511,7 @@ impl App {
                 image: image_bytes,
                 output_format: mold_core::OutputFormat::Png,
                 tile_size: None,
+                metadata: None,
             };
 
             // Try server first — use SSE streaming for tile progress
@@ -4670,6 +4671,8 @@ impl App {
                             guidance: self.generate.params.guidance,
                             width: entry_width,
                             height: entry_height,
+                            generation_width: Some(entry_width),
+                            generation_height: Some(entry_height),
                             strength: if self.generate.params.source_image_path.is_some() {
                                 Some(self.generate.params.strength)
                             } else {
@@ -5029,6 +5032,18 @@ impl App {
                         guidance: source_meta.as_ref().map(|m| m.guidance).unwrap_or(0.0),
                         width: upscaled_w,
                         height: upscaled_h,
+                        generation_width: Some(
+                            source_meta
+                                .as_ref()
+                                .map(|m| m.generation_width.unwrap_or(m.width))
+                                .unwrap_or(original_width),
+                        ),
+                        generation_height: Some(
+                            source_meta
+                                .as_ref()
+                                .map(|m| m.generation_height.unwrap_or(m.height))
+                                .unwrap_or(original_height),
+                        ),
                         strength: None,
                         scheduler: source_meta.as_ref().and_then(|m| m.scheduler),
                         output_format: Some(mold_core::OutputFormat::Png),
@@ -5959,6 +5974,8 @@ mod tests {
                 guidance: 7.5,
                 width: 1024,
                 height: 1024,
+                generation_width: Some(1024),
+                generation_height: Some(1024),
                 strength: None,
                 scheduler: None,
                 output_format: Some(mold_core::OutputFormat::Png),
@@ -6002,6 +6019,8 @@ mod tests {
                 guidance: 0.0,
                 width: 512,
                 height: 512,
+                generation_width: Some(512),
+                generation_height: Some(512),
                 strength: None,
                 scheduler: None,
                 output_format: Some(mold_core::OutputFormat::Png),
@@ -6106,6 +6125,8 @@ mod tests {
             guidance: 7.5,
             width: 1024,
             height: 1024,
+            generation_width: Some(1024),
+            generation_height: Some(1024),
             strength: Some(0.75),
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Png),

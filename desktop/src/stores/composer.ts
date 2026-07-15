@@ -8,6 +8,7 @@ export interface ComposerPrefill {
   height: number;
   steps: number;
   guidance: number;
+  upscaleModel?: string;
 }
 
 /** Carries "Reuse settings" from the gallery into the Generate composer. */

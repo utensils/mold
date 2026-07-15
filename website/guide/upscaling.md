@@ -83,12 +83,7 @@ With the default 512px tiling, any GPU with 1 GB+ VRAM can upscale images of any
 
 ## Post-Generation Upscaling
 
-::: warning Coming Soon
-The `--upscale` flag is defined but not yet wired into the generation pipeline.
-Use the pipe workflow below instead.
-:::
-
-The `--upscale` flag on `mold run` will upscale images immediately after
+The `--upscale` flag on `mold run` upscales images immediately after
 generation:
 
 ```bash
@@ -97,7 +92,11 @@ mold run "a cat" \
 ```
 
 This will generate at the model's native resolution (e.g. 1024x1024) and then
-upscale it (to 4096x4096 at 4x). In the meantime, use piping:
+upscale it (to 4096x4096 at 4x). Both files are retained in the gallery with
+`-original` and `-upscaled` suffixes. Reusing either entry restores the native
+1024x1024 generation canvas and keeps the selected upscaler enabled.
+If post-generation upscaling fails, Mold keeps the successful original as a
+single gallery artifact instead of failing the entire generation.
 
 ## Piping
 

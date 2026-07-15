@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **macOS notifications now show the Mold app icon.** Bundled desktop builds supply their `icon.icns` as the notification identity image instead of relying on Tauri's bundle-ID lookup, which could leave completion notifications with a blank placeholder icon.
+- **Post-generation upscaling now preserves both artifacts and their reusable settings.** The server saves the original generated image and the upscaled result as distinct `-original` / `-upscaled` gallery entries on single- and multi-GPU hosts, and remote desktop auto-save mirrors both to This Mac. Gallery metadata still reports each file's real raster size, while **Reuse settings** restores the pre-upscale generation canvas instead of attempting to generate directly at 2x/4x dimensions. If the upscaler fails after generation, Mold now completes with the original image instead of discarding the successful output.
 
 ## [0.17.1] - 2026-07-15
 

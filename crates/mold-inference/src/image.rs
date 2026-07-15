@@ -50,10 +50,18 @@ pub(crate) fn encode_image(
     let rgb_image = image::RgbImage::from_raw(width, height, img_data)
         .ok_or_else(|| anyhow::anyhow!("failed to create image from tensor data"))?;
 
+    encode_rgb_image(&rgb_image, format, metadata)
+}
+
+pub(crate) fn encode_rgb_image(
+    rgb_image: &image::RgbImage,
+    format: OutputFormat,
+    metadata: Option<&OutputMetadata>,
+) -> Result<Vec<u8>> {
     let mut buf = std::io::Cursor::new(Vec::new());
     match format {
-        OutputFormat::Png => write_png(&rgb_image, &mut buf, metadata)?,
-        OutputFormat::Jpeg => write_jpeg(&rgb_image, &mut buf, metadata)?,
+        OutputFormat::Png => write_png(rgb_image, &mut buf, metadata)?,
+        OutputFormat::Jpeg => write_jpeg(rgb_image, &mut buf, metadata)?,
         OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4 => {
             anyhow::bail!("{format} encoding is not supported for single images")
         }
@@ -360,6 +368,8 @@ mod tests {
             guidance: 0.0,
             width: 4,
             height: 4,
+            generation_width: Some(4),
+            generation_height: Some(4),
             strength: None,
             scheduler: None,
             output_format: Some(OutputFormat::Png),
@@ -478,6 +488,8 @@ mod tests {
             guidance: 0.0,
             width: 1024,
             height: 1024,
+            generation_width: Some(1024),
+            generation_height: Some(1024),
             strength: None,
             scheduler: None,
             output_format: Some(OutputFormat::Png),
@@ -521,6 +533,8 @@ mod tests {
             guidance: 0.0,
             width: 4,
             height: 4,
+            generation_width: Some(4),
+            generation_height: Some(4),
             strength: None,
             scheduler: None,
             output_format: Some(OutputFormat::Jpeg),
@@ -657,6 +671,8 @@ mod tests {
             guidance: 7.5,
             width: 8,
             height: 8,
+            generation_width: Some(8),
+            generation_height: Some(8),
             strength: Some(0.6),
             scheduler: Some(mold_core::Scheduler::EulerAncestral),
             output_format: Some(OutputFormat::Jpeg),

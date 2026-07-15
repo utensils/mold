@@ -105,6 +105,8 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         guidance: 0.0,
         width: 0,
         height: 0,
+        generation_width: None,
+        generation_height: None,
         strength: None,
         scheduler: None,
         output_format: None,

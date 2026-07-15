@@ -439,6 +439,8 @@ mod tests {
             guidance: 0.0,
             width,
             height,
+            generation_width: Some(width),
+            generation_height: Some(height),
             strength: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Png),

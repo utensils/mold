@@ -77,6 +77,7 @@ pub async fn run(
         image: image_bytes,
         output_format: format,
         tile_size,
+        metadata: None,
     };
 
     // Try server first (unless --local)

@@ -82,7 +82,7 @@ fn clear_active_generation(state: &AppState) {
     *active = None;
 }
 
-/// Save an image to disk and (best-effort) record a row in the metadata DB.
+/// Test-facing single-image wrapper around the shared output persistence path.
 ///
 /// Errors writing to disk are logged and skipped. DB errors are also logged
 /// but do not fail the save — the file is the source of truth.
@@ -92,11 +92,37 @@ fn clear_active_generation(state: &AppState) {
 /// upsert can never silently regress on one path while the other keeps
 /// working.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn save_image_to_dir(
     dir: &std::path::Path,
     img: &mold_core::ImageData,
     model: &str,
     batch_size: u32,
+    metadata: Option<&OutputMetadata>,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
+) {
+    save_image_to_dir_with_suffix(
+        dir,
+        img,
+        model,
+        batch_size,
+        None,
+        metadata,
+        generation_time_ms,
+        db,
+        events,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn save_image_to_dir_with_suffix(
+    dir: &std::path::Path,
+    img: &mold_core::ImageData,
+    model: &str,
+    batch_size: u32,
+    suffix: Option<&str>,
     metadata: Option<&OutputMetadata>,
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
@@ -108,8 +134,14 @@ pub(crate) fn save_image_to_dir(
     }
     let timestamp_ms = mold_core::time::now_epoch_ms_u64();
     let ext = img.format.to_string();
-    let filename =
+    let mut filename =
         mold_core::default_output_filename(model, timestamp_ms, &ext, batch_size, img.index);
+    if let Some(suffix) = suffix {
+        filename = format!(
+            "{}-{suffix}.{ext}",
+            filename.trim_end_matches(&format!(".{ext}"))
+        );
+    }
     let path = dir.join(&filename);
     match std::fs::write(&path, &img.data) {
         Ok(()) => tracing::info!("saved image to {}", path.display()),
@@ -143,6 +175,48 @@ pub(crate) fn save_image_to_dir(
             image: image_row,
         });
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_generated_image_outputs(
+    dir: &std::path::Path,
+    original: Option<&ImageData>,
+    output: &ImageData,
+    model: &str,
+    batch_size: u32,
+    metadata: &OutputMetadata,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
+) {
+    if let Some(original) = original {
+        let mut original_metadata = metadata.clone();
+        apply_output_dimensions_to_metadata(&mut original_metadata, original);
+        save_image_to_dir_with_suffix(
+            dir,
+            original,
+            model,
+            batch_size,
+            Some("original"),
+            Some(&original_metadata),
+            generation_time_ms,
+            db,
+            events,
+        );
+    }
+    let mut output_metadata = metadata.clone();
+    apply_output_dimensions_to_metadata(&mut output_metadata, output);
+    save_image_to_dir_with_suffix(
+        dir,
+        output,
+        model,
+        batch_size,
+        original.map(|_| "upscaled"),
+        Some(&output_metadata),
+        generation_time_ms,
+        db,
+        events,
+    );
 }
 
 /// Save a video file to disk and (best-effort) record its metadata row.
@@ -345,9 +419,20 @@ pub(crate) fn apply_upscale_response_to_image_generation(
     })
 }
 
+pub(crate) fn settle_post_generation_upscale(
+    original: ImageData,
+    result: Result<ImageData, String>,
+) -> (ImageData, Option<ImageData>, Option<String>) {
+    match result {
+        Ok(upscaled) => (upscaled, Some(original), None),
+        Err(error) => (original, None, Some(error)),
+    }
+}
+
 async fn upscale_generated_image_on_single_worker(
     state: &AppState,
     req: &mold_core::GenerateRequest,
+    seed_used: u64,
     img: ImageData,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
 ) -> Result<ImageData, String> {
@@ -393,6 +478,12 @@ async fn upscale_generated_image_on_single_worker(
         image: img.data.clone(),
         output_format: img.format,
         tile_size: None,
+        metadata: Some(OutputMetadata::from_generate_request(
+            req,
+            seed_used,
+            None,
+            mold_core::build_info::version_string(),
+        )),
     };
     let upscaler_cache = state.upscaler_cache.clone();
     let progress_tx_for_blocking = progress_tx.cloned();
@@ -490,6 +581,7 @@ fn save_video_preview_gif_to(preview_dir: &std::path::Path, filename: &str, gif_
 pub(crate) fn build_sse_complete_event(
     response: &mold_core::GenerateResponse,
     img: &mold_core::ImageData,
+    original: Option<&mold_core::ImageData>,
 ) -> SseCompleteEvent {
     let b64 = base64::engine::general_purpose::STANDARD;
     if let Some(ref video) = response.video {
@@ -498,6 +590,9 @@ pub(crate) fn build_sse_complete_event(
             format: video.format,
             width: video.width,
             height: video.height,
+            original_image: None,
+            original_width: None,
+            original_height: None,
             seed_used: response.seed_used,
             generation_time_ms: response.generation_time_ms,
             model: response.model.clone(),
@@ -521,6 +616,9 @@ pub(crate) fn build_sse_complete_event(
             format: img.format,
             width: img.width,
             height: img.height,
+            original_image: original.map(|image| b64.encode(&image.data)),
+            original_width: original.map(|image| image.width),
+            original_height: original.map(|image| image.height),
             seed_used: response.seed_used,
             generation_time_ms: response.generation_time_ms,
             model: response.model.clone(),
@@ -1016,27 +1114,22 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             } else {
                 unreachable!("checked above");
             };
+            let mut original_img = None;
             if response.video.is_none() && requested_post_upscale_model(&job.request).is_some() {
-                match upscale_generated_image_on_single_worker(
+                let upscale_result = upscale_generated_image_on_single_worker(
                     state,
                     &job.request,
-                    img,
+                    response.seed_used,
+                    img.clone(),
                     job.progress_tx.as_ref(),
                 )
-                .await
-                {
-                    Ok(upscaled) => {
-                        img = upscaled;
-                    }
-                    Err(err_msg) => {
-                        if let Some(ref tx) = job.progress_tx {
-                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                                message: err_msg.clone(),
-                            }));
-                        }
-                        let _ = job.result_tx.send(Err(err_msg));
-                        return;
-                    }
+                .await;
+                let (output, preserved_original, upscale_error) =
+                    settle_post_generation_upscale(img, upscale_result);
+                img = output;
+                original_img = preserved_original;
+                if let Some(error) = upscale_error {
+                    tracing::warn!(%error, "post-generation upscale failed; keeping original image");
                 }
             }
 
@@ -1048,15 +1141,12 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                 let model = job.request.model.clone();
                 let batch_size = job.request.batch_size;
                 let generation_time_ms = response.generation_time_ms as i64;
-                let mut metadata = OutputMetadata::from_generate_request(
+                let metadata = OutputMetadata::from_generate_request(
                     &job.request,
                     response.seed_used,
                     None,
                     mold_core::build_info::version_string(),
                 );
-                if response.video.is_none() {
-                    apply_output_dimensions_to_metadata(&mut metadata, &img);
-                }
                 let db = state.metadata_db.clone();
                 let events = state.events.clone();
                 if let Some(ref video) = response.video {
@@ -1079,14 +1169,16 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                     });
                 } else {
                     let img_clone = img.clone();
+                    let original_clone = original_img.clone();
                     let metadata_clone = metadata.clone();
                     tokio::task::spawn_blocking(move || {
-                        save_image_to_dir(
+                        save_generated_image_outputs(
                             &dir,
+                            original_clone.as_ref(),
                             &img_clone,
                             &model,
                             batch_size,
-                            Some(&metadata_clone),
+                            &metadata_clone,
                             Some(generation_time_ms),
                             db.as_ref().as_ref(),
                             Some(&events),
@@ -1097,7 +1189,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 
             // Send SSE complete event
             if let Some(ref tx) = job.progress_tx {
-                let event = build_sse_complete_event(&response, &img);
+                let event = build_sse_complete_event(&response, &img, original_img.as_ref());
                 let _ = tx.send(SseMessage::Complete(event));
             }
 
@@ -1678,6 +1770,53 @@ mod tests {
     }
 
     #[test]
+    fn save_generated_image_outputs_persists_original_and_upscaled_dimensions() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut req = fake_request("flux-dev:q4");
+        req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+        let meta = OutputMetadata::from_generate_request(&req, 42, None, "test-version");
+        let original = fake_image();
+        let mut upscaled = fake_image();
+        upscaled.width = 2048;
+        upscaled.height = 2048;
+        upscaled.data = vec![4, 5, 6];
+
+        save_generated_image_outputs(
+            tmp.path(),
+            Some(&original),
+            &upscaled,
+            "flux-dev:q4",
+            1,
+            &meta,
+            Some(1234),
+            Some(&db),
+            None,
+        );
+
+        let rows = db.list(Some(tmp.path())).unwrap();
+        assert_eq!(rows.len(), 2);
+        let original_row = rows
+            .iter()
+            .find(|row| row.filename.contains("-original."))
+            .expect("original row");
+        let upscaled_row = rows
+            .iter()
+            .find(|row| row.filename.contains("-upscaled."))
+            .expect("upscaled row");
+        assert_eq!(
+            (original_row.metadata.width, original_row.metadata.height),
+            (512, 512)
+        );
+        assert_eq!(
+            (upscaled_row.metadata.width, upscaled_row.metadata.height),
+            (2048, 2048)
+        );
+        assert_eq!(upscaled_row.metadata.generation_width, Some(512));
+        assert_eq!(upscaled_row.metadata.generation_height, Some(512));
+    }
+
+    #[test]
     fn save_image_to_dir_skips_db_when_metadata_is_none() {
         let tmp = TempDir::new().unwrap();
         let db = MetadataDb::open_in_memory().unwrap();
@@ -1976,7 +2115,7 @@ mod tests {
             index: 0,
         };
 
-        let event = build_sse_complete_event(&resp, &thumb_img);
+        let event = build_sse_complete_event(&resp, &thumb_img, None);
 
         let b64 = base64::engine::general_purpose::STANDARD;
         assert_eq!(event.image, b64.encode(&video.data));
@@ -2017,7 +2156,7 @@ mod tests {
             seed_used: 0,
             gpu: None,
         };
-        let event = build_sse_complete_event(&resp, &fake_image());
+        let event = build_sse_complete_event(&resp, &fake_image(), None);
         assert!(event.video_gif_preview.is_none());
         assert!(!event.video_has_audio);
     }
@@ -2032,7 +2171,7 @@ mod tests {
             seed_used: 5,
             gpu: None,
         };
-        let event = build_sse_complete_event(&resp, &fake_image());
+        let event = build_sse_complete_event(&resp, &fake_image(), None);
         assert_eq!(event.format, OutputFormat::Png);
         assert!(event.video_frames.is_none());
         assert!(event.video_fps.is_none());
@@ -2072,7 +2211,10 @@ mod tests {
 
         let next = apply_upscale_response_to_image_generation(&req, &mut response, img, upscaled)
             .expect("image upscale should apply");
-        let event = build_sse_complete_event(&response, &next);
+        let event = build_sse_complete_event(&response, &next, Some(&fake_image()));
+        assert!(event.original_image.is_some());
+        assert_eq!(event.original_width, Some(512));
+        assert_eq!(event.original_height, Some(512));
         let mut metadata =
             OutputMetadata::from_generate_request(&req, response.seed_used, None, "test-version");
         apply_output_dimensions_to_metadata(&mut metadata, &next);
@@ -2083,10 +2225,25 @@ mod tests {
         assert_eq!(event.height, 2048);
         assert_eq!(metadata.width, 2048);
         assert_eq!(metadata.height, 2048);
+        assert_eq!(metadata.generation_width, Some(512));
+        assert_eq!(metadata.generation_height, Some(512));
         assert_eq!(
             metadata.upscale_model.as_deref(),
             Some("real-esrgan-x4plus:fp16")
         );
+    }
+
+    #[test]
+    fn failed_post_generation_upscale_keeps_only_the_original_output() {
+        let original = fake_image();
+        let (output, preserved_original, error) = settle_post_generation_upscale(
+            original.clone(),
+            Err("upscaler unavailable".to_string()),
+        );
+
+        assert_eq!(output.data, original.data);
+        assert!(preserved_original.is_none());
+        assert_eq!(error.as_deref(), Some("upscaler unavailable"));
     }
 
     #[test]
@@ -2144,7 +2301,7 @@ mod tests {
         let state = empty_test_state(mold_core::Config::default());
         let req = fake_request("flux-dev:q4");
 
-        let next = upscale_generated_image_on_single_worker(&state, &req, fake_image(), None)
+        let next = upscale_generated_image_on_single_worker(&state, &req, 5, fake_image(), None)
             .await
             .expect("missing upscale model should leave the image unchanged");
 
@@ -2163,6 +2320,7 @@ mod tests {
         let err = upscale_generated_image_on_single_worker(
             &state,
             &req,
+            5,
             fake_image(),
             Some(&progress_tx),
         )
@@ -2199,6 +2357,7 @@ mod tests {
         let err = upscale_generated_image_on_single_worker(
             &state,
             &req,
+            5,
             fake_image(),
             Some(&progress_tx),
         )

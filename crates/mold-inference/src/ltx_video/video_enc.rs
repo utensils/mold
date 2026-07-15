@@ -30,6 +30,8 @@ impl VideoMetadata {
             guidance: self.guidance,
             width: self.width,
             height: self.height,
+            generation_width: Some(self.width),
+            generation_height: Some(self.height),
             strength: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Apng),
