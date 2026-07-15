@@ -328,7 +328,7 @@ Everything else is small and mechanical:
 
 - **Drag-in:** any image dropped anywhere targets the labeled Source/Mask/Control wells (§4.1); `.toml` files dropped open in Chains; multiple images onto qwen-edit fill the tray in drop order.
 - **Drag-out:** gallery tiles/lightbox → Finder, Mail, Photoshop (real file paths).
-- **Notifications** (tauri-plugin-notification): "Generated — lighthouse at dusk" with thumbnail on job complete _when the app is backgrounded_; "Chain finished · 243 frames" ; "Pull complete — flux-dev:q8". Clicking focuses the relevant item.
+- **Notifications:** "Generated — lighthouse at dusk" with thumbnail on job complete _when the app is backgrounded_; "Chain finished · 243 frames" ; "Pull complete — flux-dev:q8". Bundled macOS builds send through the native identity-image path so Notification Center shows Mold's app icon; Tauri's notification plugin remains the cross-platform/development fallback. Clicking focuses the relevant item.
 - **Dock:** badge = THIS app's active job count, event-driven from the generation store (never the whole engine's queue depth — a shared or remote engine runs other clients' work, and badging those numbers reads as "my app is busy" when it isn't); cleared the moment the last job settles. A subtle determinate progress overlay during a running chain and a dock menu (New Generation, Pause Queue, recent prints) remain aspirational.
 - Native services: window state restore, full-screen support, standard text editing (dictation/emoji work in the composer), system appearance sync, and an owner-only local secret store for API keys (deliberately not the Keychain — no permission prompts).
 

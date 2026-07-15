@@ -3,6 +3,7 @@ pub mod commands;
 pub mod connection;
 pub mod gallery;
 pub mod menu;
+pub mod notifications;
 pub mod runpod;
 pub mod secrets;
 pub mod server;
@@ -74,6 +75,7 @@ pub fn run() {
             commands::discover_servers,
             commands::get_output_dir,
             commands::set_dock_badge,
+            notifications::send_native_notification,
             commands::reveal_output_file,
             commands::open_logs_dir,
             updater::check_for_updates,

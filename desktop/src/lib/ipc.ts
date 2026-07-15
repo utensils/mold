@@ -272,6 +272,13 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("set_dock_badge", { count }).catch(() => {});
   },
+  /** Use a platform-native notification when it can preserve Mold's app icon. */
+  sendNativeNotification(title: string, body?: string): Promise<boolean> {
+    if (!inTauri()) return Promise.resolve(false);
+    return invoke<boolean>("send_native_notification", { title, body: body ?? null }).catch(
+      () => false,
+    );
+  },
   /** Open the engine's log directory in Finder. */
   openLogsDir(): Promise<void> {
     if (!inTauri()) return Promise.resolve();

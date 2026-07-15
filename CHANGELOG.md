@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS notifications now show the Mold app icon.** Bundled desktop builds supply their `icon.icns` as the notification identity image instead of relying on Tauri's bundle-ID lookup, which could leave completion notifications with a blank placeholder icon.
+
 ## [0.17.1] - 2026-07-15
 
 ### Fixed
