@@ -152,7 +152,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential clang lld nasm pkg-config patchelf file wget curl xvfb xdotool imagemagick libfuse2 \
+            build-essential clang lld nasm pkg-config patchelf file wget curl xdg-utils xvfb xdotool imagemagick libfuse2 \
             libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev \
             gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
