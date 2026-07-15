@@ -353,7 +353,7 @@
           # Desktop app frontend (Vue SPA under desktop/), built like mold-web.
           mold-desktop-web = pkgs.stdenv.mkDerivation {
             pname = "mold-desktop-web";
-            version = "0.16.0";
+            version = "0.17.0";
             src = ./desktop;
             nativeBuildInputs = [ pkgs.bun2nix.hook ];
             bunDeps = pkgs.bun2nix.fetchBunDeps {
@@ -385,7 +385,7 @@
             computeCap:
             pkgs.rustPlatform.buildRustPackage {
               pname = "mold-desktop";
-              version = "0.16.0";
+              version = "0.17.0";
               src = craneLib.path ./.;
               cargoRoot = "desktop/src-tauri";
               buildAndTestSubdir = "desktop/src-tauri";
