@@ -62,6 +62,7 @@ jobs:
             release:
               - 'release-plz.toml'
               - 'scripts/release/**'
+              - 'scripts/tests/ci-coverage-disk-guard.sh'
               - 'scripts/tests/release-sync-pr.sh'
               - '.github/workflows/release-plz.yml'
               - '.github/workflows/ci.yml'
@@ -74,6 +75,8 @@ jobs:
       - uses: actions/checkout@v6
       - name: Test release PR synchronization
         run: bash scripts/tests/release-sync-pr.sh
+      - name: Test CI coverage disk guard
+        run: bash scripts/tests/ci-coverage-disk-guard.sh
 
   docs:
     needs: changes
@@ -181,6 +184,22 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          df -h
 
       - uses: dtolnay/rust-toolchain@stable
 
