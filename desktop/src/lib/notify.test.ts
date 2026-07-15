@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
   sendNotification,
 }));
 
-import { notifyGenerated } from "./notify";
+import { notifyGenerated, notifyUpdateAvailable } from "./notify";
 
 describe("desktop notifications", () => {
   beforeEach(() => {
@@ -48,6 +48,19 @@ describe("desktop notifications", () => {
 
     await vi.waitFor(() =>
       expect(sendNotification).toHaveBeenCalledWith({ title: "Generated — a deer at sunrise" }),
+    );
+  });
+
+  it("notifies backgrounded users when an update is available", async () => {
+    sendNativeNotification.mockResolvedValue(true);
+
+    notifyUpdateAvailable("0.18.0");
+
+    await vi.waitFor(() =>
+      expect(sendNativeNotification).toHaveBeenCalledWith(
+        "Mold 0.18.0 is available",
+        "Open Mold to update and restart.",
+      ),
     );
   });
 

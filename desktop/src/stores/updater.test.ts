@@ -3,18 +3,15 @@ import { createPinia, setActivePinia } from "pinia";
 
 const checkForUpdates = vi.fn();
 const installPendingUpdate = vi.fn();
-const takeUpdateRecovery = vi.fn();
-const confirmUpdateHealthy = vi.fn();
 const appSettingsSet = vi.fn();
 const appSettingsGet = vi.fn();
+const notifyUpdateAvailable = vi.fn();
 let progressListener: ((event: unknown) => void) | null = null;
 
 vi.mock("../lib/ipc", () => ({
   ipc: {
     checkForUpdates: (...args: unknown[]) => checkForUpdates(...args),
     installPendingUpdate: (...args: unknown[]) => installPendingUpdate(...args),
-    takeUpdateRecovery: (...args: unknown[]) => takeUpdateRecovery(...args),
-    confirmUpdateHealthy: (...args: unknown[]) => confirmUpdateHealthy(...args),
     onUpdaterProgress: (listener: (event: unknown) => void) => {
       progressListener = listener;
       return Promise.resolve(() => {
@@ -24,6 +21,10 @@ vi.mock("../lib/ipc", () => ({
     appSettingsSet: (...args: unknown[]) => appSettingsSet(...args),
     appSettingsGet: (...args: unknown[]) => appSettingsGet(...args),
   },
+}));
+
+vi.mock("../lib/notify", () => ({
+  notifyUpdateAvailable: (...args: unknown[]) => notifyUpdateAvailable(...args),
 }));
 
 import type { AppSettings, UpdateCheckResult, UpdateProgress } from "../lib/ipc";
@@ -76,21 +77,13 @@ beforeEach(() => {
   checkForUpdates.mockResolvedValue(checkResult());
   installPendingUpdate.mockReset();
   installPendingUpdate.mockResolvedValue(undefined);
-  takeUpdateRecovery.mockReset();
-  takeUpdateRecovery.mockResolvedValue(null);
-  confirmUpdateHealthy.mockReset();
-  confirmUpdateHealthy.mockResolvedValue(undefined);
   appSettingsSet.mockReset();
   appSettingsSet.mockResolvedValue(undefined);
+  notifyUpdateAvailable.mockReset();
 });
 
 describe("updater store", () => {
-  it("initializes recovery handling and performs a non-installing automatic check", async () => {
-    takeUpdateRecovery.mockResolvedValue({
-      restoredVersion: "0.16.0",
-      failedVersion: "0.17.0",
-      message: "The new app did not finish startup.",
-    });
+  it("performs a non-installing automatic check and exposes an update notification", async () => {
     checkForUpdates.mockResolvedValue(
       checkResult({
         candidate: {
@@ -107,103 +100,14 @@ describe("updater store", () => {
 
     await vi.waitFor(() => expect(updater.phase).toBe("available"));
 
-    expect(takeUpdateRecovery).toHaveBeenCalledOnce();
-    expect(confirmUpdateHealthy).not.toHaveBeenCalled();
     expect(checkForUpdates).toHaveBeenCalledWith("stable");
     expect(installPendingUpdate).not.toHaveBeenCalled();
     expect(updater.phase).toBe("available");
-    expect(updater.recovery?.restoredVersion).toBe("0.16.0");
+    expect(updater.shouldNotify).toBe(true);
+    expect(notifyUpdateAvailable).toHaveBeenCalledWith("0.17.0");
   });
 
-  it("confirms candidate health only when the shell declares critical startup ready", async () => {
-    const updater = useUpdaterStore();
-    await updater.init();
-
-    expect(confirmUpdateHealthy).not.toHaveBeenCalled();
-    await updater.confirmReady();
-    expect(confirmUpdateHealthy).toHaveBeenCalledOnce();
-  });
-
-  it("surfaces a missing-watchdog health rejection as terminal recovery", async () => {
-    confirmUpdateHealthy.mockRejectedValue({
-      code: "rollback",
-      message: "No rollback watchdog owns this process. Recovery: /tmp/Mold.app",
-      disposition: "rollback-failed",
-      retryable: false,
-    });
-    const updater = useUpdaterStore();
-
-    await updater.confirmReady();
-
-    expect(updater.phase).toBe("failed");
-    expect(updater.hasTerminalRecovery).toBe(true);
-    expect(updater.error?.message).toContain("/tmp/Mold.app");
-  });
-
-  it("does not let an in-flight check overwrite terminal recovery", async () => {
-    let resolve!: (result: UpdateCheckResult) => void;
-    checkForUpdates.mockReturnValue(new Promise<UpdateCheckResult>((done) => (resolve = done)));
-    confirmUpdateHealthy.mockRejectedValue({
-      code: "rollback",
-      message: "No rollback watchdog owns this process.",
-      disposition: "rollback-failed",
-      retryable: false,
-    });
-    const updater = useUpdaterStore();
-
-    const check = updater.check();
-    await updater.confirmReady();
-    resolve(checkResult());
-    await check;
-
-    expect(updater.phase).toBe("failed");
-    expect(updater.error?.disposition).toBe("rollback-failed");
-  });
-
-  it("surfaces recovery reconciliation failures and skips the network check", async () => {
-    takeUpdateRecovery.mockRejectedValue({
-      code: "rollback",
-      message: "The rollback watchdog could not start. Recovery: /tmp/Mold.app",
-      disposition: "rollback-failed",
-      retryable: false,
-    });
-    const updater = useUpdaterStore();
-
-    await updater.init();
-
-    expect(updater.phase).toBe("failed");
-    expect(updater.error?.disposition).toBe("rollback-failed");
-    expect(updater.error?.message).toContain("/tmp/Mold.app");
-    expect(checkForUpdates).not.toHaveBeenCalled();
-  });
-
-  it("treats rollback-failed recovery as terminal across channel and check controls", async () => {
-    takeUpdateRecovery.mockResolvedValue({
-      restoredVersion: "0.16.0",
-      failedVersion: "0.17.0",
-      message: "Manual recovery is required.",
-      rollbackFailed: true,
-      backupPath: "/tmp/Mold.app",
-    });
-    const updater = useUpdaterStore();
-
-    await updater.init();
-    await updater.check();
-    await updater.setChannel("nightly");
-
-    expect(updater.hasTerminalRecovery).toBe(true);
-    expect(checkForUpdates).not.toHaveBeenCalled();
-    expect(appSettingsSet).not.toHaveBeenCalled();
-    expect(useAppPrefsStore().updateChannel).toBe("stable");
-  });
-
-  it("clears a candidate after automatic rollback itself fails", async () => {
-    installPendingUpdate.mockRejectedValue({
-      code: "rollback",
-      message: "Automatic rollback failed. Recovery copy: /tmp/Mold.app",
-      disposition: "rollback-failed",
-      retryable: false,
-    });
+  it("dismisses only the currently announced update", async () => {
     const updater = useUpdaterStore();
     updater.candidate = {
       id: "candidate-1",
@@ -212,11 +116,16 @@ describe("updater store", () => {
       notes: null,
     };
     updater.phase = "available";
+    updater.dismissCandidate();
+    expect(updater.shouldNotify).toBe(false);
 
-    await updater.install();
-
-    expect(updater.error?.disposition).toBe("rollback-failed");
-    expect(updater.candidate).toBeNull();
+    updater.candidate = {
+      id: "candidate-2",
+      version: "0.18.0",
+      publishedAt: null,
+      notes: null,
+    };
+    expect(updater.shouldNotify).toBe(true);
   });
 
   it("transitions from checking to available and preserves release metadata", async () => {

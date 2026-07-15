@@ -47,22 +47,13 @@ export interface UpdateCheckResult {
   candidate: UpdateCandidate | null;
 }
 
-export type UpdateProgressPhase =
-  "downloading" | "verifying" | "staging" | "installing" | "rolling-back";
+export type UpdateProgressPhase = "downloading" | "verifying" | "staging" | "installing";
 
 export interface UpdateProgress {
   candidateId: string;
   phase: UpdateProgressPhase;
   downloadedBytes: number | null;
   totalBytes: number | null;
-}
-
-export interface UpdateRecovery {
-  restoredVersion: string;
-  failedVersion: string | null;
-  message: string;
-  rollbackFailed?: boolean;
-  backupPath?: string | null;
 }
 
 /** A remote host the app has connected to before (most recent first). */
@@ -227,14 +218,6 @@ export const ipc = {
   installPendingUpdate(candidateId: string): Promise<void> {
     if (!inTauri()) return Promise.reject(new Error("Updates require a signed desktop build."));
     return invoke<void>("install_pending_update", { candidateId });
-  },
-  takeUpdateRecovery(): Promise<UpdateRecovery | null> {
-    if (!inTauri()) return Promise.resolve(null);
-    return invoke<UpdateRecovery | null>("take_update_recovery");
-  },
-  confirmUpdateHealthy(): Promise<void> {
-    if (!inTauri()) return Promise.resolve();
-    return invoke<void>("confirm_update_healthy");
   },
   async onUpdaterProgress(listener: (progress: UpdateProgress) => void): Promise<() => void> {
     if (!inTauri()) return () => {};

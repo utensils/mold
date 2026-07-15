@@ -38,7 +38,7 @@ onMounted(() => void updater.init());
       <SelectControl
         :model-value="prefs.updateChannel"
         :options="CHANNELS"
-        :disabled="updater.isBusy || updater.hasTerminalRecovery"
+        :disabled="updater.isBusy"
         aria-label="Update channel"
         @commit="(value) => updater.setChannel(value as UpdateChannel)"
       />
@@ -48,51 +48,6 @@ onMounted(() => void updater.init());
       Nightly builds may contain regressions. Every build is still signature-verified before Mold
       installs it.
     </p>
-
-    <section
-      v-if="updater.recovery"
-      data-test="update-recovery"
-      role="status"
-      aria-live="polite"
-      class="border-halide/40 mt-4 rounded-chrome border bg-[color-mix(in_srgb,var(--halide)_8%,transparent)] p-3"
-    >
-      <div class="flex items-start gap-3">
-        <div class="min-w-0 flex-1">
-          <p
-            class="text-body font-semibold"
-            :class="updater.recovery.rollbackFailed ? 'text-stop' : 'text-halide'"
-          >
-            <template v-if="updater.recovery.rollbackFailed">
-              Automatic rollback needs attention
-            </template>
-            <template v-else>Mold {{ updater.recovery.restoredVersion }} was restored</template>
-          </p>
-          <p class="mt-1 text-caption text-ink-2">
-            <template v-if="!updater.recovery.rollbackFailed">
-              Update {{ updater.recovery.failedVersion ?? "unknown" }} could not start cleanly.
-            </template>
-            {{ updater.recovery.message }}
-          </p>
-          <div
-            v-if="updater.recovery.rollbackFailed && updater.recovery.backupPath"
-            class="mt-2 text-caption text-ink-2"
-          >
-            <p>Quit Mold. Copy the recovery app to Applications:</p>
-            <p data-selectable class="data-mono mt-1 break-all text-ink">
-              {{ updater.recovery.backupPath }}
-            </p>
-          </div>
-        </div>
-        <button
-          v-if="!updater.recovery.rollbackFailed"
-          type="button"
-          class="text-caption text-ink-2 hover:text-ink"
-          @click="updater.dismissRecovery()"
-        >
-          Dismiss
-        </button>
-      </div>
-    </section>
 
     <section
       class="border-edge mt-4 rounded-chrome border bg-bench p-4"
@@ -114,7 +69,7 @@ onMounted(() => void updater.init());
           v-if="['idle', 'up-to-date'].includes(updater.phase)"
           type="button"
           class="border-edge h-8 shrink-0 rounded-control border px-3 text-body text-ink-2 hover:text-ink disabled:opacity-50"
-          :disabled="updater.isBusy || updater.hasTerminalRecovery"
+          :disabled="updater.isBusy"
           @click="updater.check()"
         >
           Check for updates
@@ -201,7 +156,7 @@ onMounted(() => void updater.init());
         Verifying the update signature…
       </p>
       <p v-else-if="updater.phase === 'staging'" class="mt-4 text-caption text-ink-2" role="status">
-        Preparing the verified app bundle…
+        Running complete signature, identity, Gatekeeper, and install-location checks…
       </p>
       <p
         v-else-if="updater.phase === 'installing'"
@@ -210,15 +165,6 @@ onMounted(() => void updater.init());
       >
         Installing the update and restarting Mold…
       </p>
-      <p
-        v-else-if="updater.phase === 'rolling-back'"
-        class="mt-4 text-caption text-stop"
-        role="status"
-        aria-live="assertive"
-      >
-        The update could not be installed. Restoring the previous version…
-      </p>
-
       <div
         v-else-if="updater.phase === 'failed' && updater.error"
         class="border-stop/40 mt-4 rounded-control border bg-stop/10 p-3"
@@ -227,14 +173,8 @@ onMounted(() => void updater.init());
         <p class="text-body font-semibold text-stop">Mold couldn’t update</p>
         <p data-selectable class="mt-1 text-caption text-ink-2">{{ updater.error.message }}</p>
         <p class="mt-2 text-caption text-ink-3">
-          <template v-if="updater.error.disposition === 'rolled-back'">
-            The previous version was restored.
-          </template>
-          <template v-else-if="updater.error.disposition === 'rollback-failed'">
-            Automatic rollback failed. Follow the recovery path above or in the error details.
-          </template>
-          <template v-else-if="updater.currentVersion">
-            Mold {{ updater.currentVersion }} is still installed. No app files were changed.
+          <template v-if="updater.currentVersion">
+            Mold {{ updater.currentVersion }} remains installed because the update did not complete.
           </template>
           <template v-else>The installed app was not changed.</template>
         </p>
@@ -248,7 +188,6 @@ onMounted(() => void updater.init());
             {{ candidate ? "Try update again" : "Check again" }}
           </button>
           <button
-            v-if="updater.error.disposition !== 'rollback-failed'"
             type="button"
             class="h-7 px-1 text-caption text-ink-3 hover:text-ink"
             @click="updater.clearError()"

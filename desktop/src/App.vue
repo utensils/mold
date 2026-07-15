@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import TitleBar from "./components/shell/TitleBar.vue";
 import NavRail from "./components/shell/NavRail.vue";
@@ -7,6 +7,7 @@ import BenchRail from "./components/shell/BenchRail.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
+import UpdateBanner from "./components/shell/UpdateBanner.vue";
 import { dockBadgeValue } from "./lib/dockBadge";
 import { ipc } from "./lib/ipc";
 import { allowsNativeSelectAll, isSelectAllChord, resolveShellShortcut } from "./lib/shortcuts";
@@ -164,12 +165,6 @@ function suppressChromeSelection(e: Event) {
   if (!allowsNativeSelectAll(e.target as Element | null)) e.preventDefault();
 }
 
-async function waitForVisibleShellPaint(): Promise<void> {
-  await nextTick();
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-}
-
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("contextmenu", suppressNativeContextMenu);
@@ -181,9 +176,8 @@ onMounted(async () => {
     await router.replace(prefs.lastRoute).catch(() => {});
   }
   router.afterEach((to) => void appPrefs.rememberRoute(to.path));
-  // Recovery reconciliation starts before the engine, while the network check
-  // remains background-only and never decides candidate health.
-  const updaterStartup = updater.init();
+  // Check in the background after preferences select the correct channel.
+  void updater.init();
   const connectionStartup = connection.init();
   void listenForMenu();
   // The window starts hidden (tauri.conf.json visible:false) to avoid a
@@ -194,12 +188,6 @@ onMounted(async () => {
     await appWindow.maximize();
     await appWindow.show();
   }
-  // Recovery ownership must settle before health confirmation, but engine and
-  // remote-host startup are independent of whether this app build can boot.
-  // Do not let a slow 30-second engine probe race the rollback watchdog.
-  await updaterStartup.catch(() => {});
-  await waitForVisibleShellPaint();
-  await updater.confirmReady().catch(() => {});
   await connectionStartup.catch(() => {});
   // Extra hosts reconnect after the primary connection settles; failures
   // surface as sidebar rows + a toast, never as a blocked launch.
@@ -213,15 +201,16 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="grid h-full grid-rows-[44px_1fr_28px]">
-    <TitleBar />
-    <div class="grid min-h-0 grid-cols-[auto_1fr]">
+  <div class="flex h-full flex-col">
+    <TitleBar class="h-11 shrink-0" />
+    <UpdateBanner />
+    <div class="grid min-h-0 flex-1 grid-cols-[auto_1fr]">
       <NavRail v-if="sidebarOpen" />
       <main class="min-h-0 min-w-0 overflow-hidden">
         <router-view />
       </main>
     </div>
-    <BenchRail />
+    <BenchRail class="h-7 shrink-0" />
     <Toasts />
     <CommandPalette />
     <ContextMenu />

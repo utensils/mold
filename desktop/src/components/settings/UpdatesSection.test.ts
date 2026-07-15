@@ -5,8 +5,6 @@ import { createPinia, setActivePinia } from "pinia";
 vi.mock("../../lib/ipc", () => ({
   ipc: {
     onUpdaterProgress: () => Promise.resolve(() => {}),
-    takeUpdateRecovery: () => Promise.resolve(null),
-    confirmUpdateHealthy: () => Promise.resolve(),
     checkForUpdates: () =>
       Promise.resolve({
         supported: true,
@@ -116,43 +114,20 @@ describe("UpdatesSection", () => {
 
     const alert = wrapper.get("[role='alert']");
     expect(alert.text()).toContain("The update signature is invalid.");
-    expect(alert.text()).toContain("Mold 0.16.0 is still installed. No app files were changed.");
+    expect(alert.text()).toContain(
+      "Mold 0.16.0 remains installed because the update did not complete.",
+    );
     expect(alert.find("[data-selectable]").exists()).toBe(true);
   });
 
-  it("announces a recovered prior version with the failed version for context", async () => {
+  it("describes complete preflight verification before installation", async () => {
     const { updater, wrapper } = mountSection();
-    updater.recovery = {
-      restoredVersion: "0.16.0",
-      failedVersion: "0.17.0",
-      message: "Mold restored the previous version after startup failed.",
-    };
+    updater.phase = "staging";
     await wrapper.vm.$nextTick();
 
-    const recovery = wrapper.get("[data-test='update-recovery']");
-    expect(recovery.attributes("role")).toBe("status");
-    expect(recovery.text()).toContain("Mold 0.16.0 was restored");
-    expect(recovery.text()).toContain("0.17.0");
-  });
-
-  it("shows the preserved backup path and manual recovery action when rollback fails", async () => {
-    const { updater, wrapper } = mountSection();
-    updater.recovery = {
-      restoredVersion: "0.16.0",
-      failedVersion: "0.17.0",
-      message: "Automatic rollback could not replace the installed app.",
-      rollbackFailed: true,
-      backupPath: "/Users/me/Library/Application Support/Mold/updater/backup/Mold.app",
-    };
-    await wrapper.vm.$nextTick();
-
-    const recovery = wrapper.get("[data-test='update-recovery']");
-    expect(recovery.text()).toContain("Automatic rollback needs attention");
-    expect(recovery.text()).toContain("Copy the recovery app to Applications");
-    expect(recovery.text()).toContain("/Users/me/Library/Application Support");
-    expect(recovery.text()).not.toContain("Dismiss");
-    expect(wrapper.get("select[aria-label='Update channel']").attributes("disabled")).toBeDefined();
-    expect(wrapper.get("button").attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain(
+      "Running complete signature, identity, Gatekeeper, and install-location checks",
+    );
   });
 
   it("explains that browser and unsigned builds cannot self-update", async () => {
