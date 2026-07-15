@@ -136,14 +136,13 @@ jobs:
         run: bunx tauri build --debug --bundles app --ci
 
   desktop-linux:
-    name: Linux CUDA AppImage
+    name: Linux (clippy, test; main AppImage)
     runs-on: ubuntu-22.04
     defaults:
       run:
         working-directory: desktop
     env:
       CUDA_COMPUTE_CAP: "89"
-      DESKTOP_BUILD_PROFILE: ${{ github.event_name == 'pull_request' && 'debug' || 'release' }}
       LIBRARY_PATH: /usr/local/cuda/lib64/stubs
       XDG_CACHE_HOME: /tmp/mold-desktop-cache-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -152,16 +151,23 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
           sudo apt-get clean
-      - name: Install Tauri and media dependencies
+      - name: Install Tauri build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential clang lld nasm pkg-config patchelf file wget curl xdg-utils xvfb xdotool openbox imagemagick libfuse2 \
+            build-essential clang lld nasm pkg-config \
             libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - name: Install AppImage smoke dependencies
+        if: github.event_name == 'push'
+        run: |
+          sudo apt-get install -y \
+            patchelf file wget curl xdg-utils xvfb xdotool openbox dbus-x11 imagemagick libfuse2 \
             gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
-      - uses: Jimver/cuda-toolkit@v0.2.35
+      - name: Install CUDA toolkit for AppImage
+        if: github.event_name == 'push'
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: "12.8.1"
           method: local
@@ -179,8 +185,10 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features cuda -- -D warnings
+      - if: github.event_name == 'push'
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features cuda -- -D warnings
       - name: Prepare linuxdeploy and the CI driver stub
+        if: github.event_name == 'push'
         shell: bash
         run: |
           set -euo pipefail
@@ -189,20 +197,18 @@ jobs:
           ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$driver_stub_dir/libcuda.so.1"
           echo "LD_LIBRARY_PATH=$driver_stub_dir:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
           ../scripts/prepare-desktop-linuxdeploy.sh
-      - name: Build CUDA AppImage
+      - name: Build optimized CUDA AppImage
+        if: github.event_name == 'push'
         shell: bash
         run: |
           set -euo pipefail
-          build_args=()
-          if [[ "$DESKTOP_BUILD_PROFILE" == debug ]]; then
-            build_args+=(--debug)
-          fi
-          bunx tauri build --features cuda --bundles appimage --ci -v "${build_args[@]}"
+          bunx tauri build --features cuda --bundles appimage --ci -v
       - name: Verify bundled CUDA libraries
+        if: github.event_name == 'push'
         shell: bash
         run: |
           set -euo pipefail
-          appimage=$(find "src-tauri/target/$DESKTOP_BUILD_PROFILE/bundle/appimage" -name '*.AppImage' -print -quit)
+          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
           test -n "$appimage"
           extract_dir=$(mktemp -d)
           appimage=$(realpath "$appimage")
@@ -221,13 +227,14 @@ jobs:
           done
           rm -rf "$extract_dir"
       - name: Launch AppImage under Xvfb
+        if: github.event_name == 'push'
         shell: bash
         run: |
           set -euo pipefail
-          appimage=$(find "src-tauri/target/$DESKTOP_BUILD_PROFILE/bundle/appimage" -name '*.AppImage' -print -quit)
+          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
           test -n "$appimage"
           chmod +x "$appimage"
-          xvfb-run -a bash -s -- "$appimage" <<'EOF'
+          xvfb-run -a dbus-run-session -- bash -s -- "$appimage" <<'EOF'
           set -euo pipefail
           appimage=$1
           screenshot=src-tauri/target/mold-appimage-smoke.png
@@ -270,7 +277,7 @@ jobs:
           test "$rendered" = 1
           EOF
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: github.event_name == 'push' && always()
         with:
           name: mold-desktop-linux-smoke
           path: desktop/src-tauri/target/mold-appimage-smoke.png

@@ -2,39 +2,38 @@
 fn appimage_ci_installs_tauri_linuxdeploy_runtime() {
     let workflow = include_str!("../../../.github/workflows/desktop.yml");
     let linux_job = workflow
-        .split("- name: Install Tauri and media dependencies")
+        .split("desktop-linux:")
         .nth(1)
-        .expect("desktop workflow must define the Linux dependency step");
-    let apt_packages = linux_job
-        .split("sudo apt-get install -y")
-        .nth(1)
-        .expect("desktop workflow must install Linux packaging dependencies")
-        .split("- uses: Jimver/cuda-toolkit")
-        .next()
-        .expect("CUDA setup must follow Linux packaging dependencies");
+        .expect("desktop workflow must define the Linux job");
 
     assert!(
-        apt_packages
+        linux_job
             .split_whitespace()
             .any(|package| package == "xdg-utils"),
         "Tauri linuxdeploy requires /usr/bin/xdg-open from xdg-utils"
     );
     assert!(
-        apt_packages
+        linux_job
             .split_whitespace()
             .any(|package| package == "openbox"),
         "the Xvfb launch needs a window manager for Tauri's maximize/show lifecycle"
     );
+    assert!(
+        linux_job
+            .split_whitespace()
+            .any(|package| package == "dbus-x11"),
+        "the AppImage smoke needs a D-Bus session for native desktop plugins"
+    );
 }
 
 #[test]
-fn appimage_ci_reserves_optimized_artifacts_for_main() {
+fn appimage_ci_reserves_distribution_work_for_main() {
     let workflow = include_str!("../../../.github/workflows/desktop.yml");
     assert!(
-        workflow.contains("DESKTOP_BUILD_PROFILE:")
-            && workflow.contains("github.event_name == 'pull_request' && 'debug' || 'release'")
-            && workflow.contains("build_args+=(--debug)"),
-        "pull requests must smoke a debug AppImage instead of rebuilding an optimized artifact"
+        workflow.contains("Install CUDA toolkit for AppImage")
+            && workflow.contains("Build optimized CUDA AppImage")
+            && workflow.matches("if: github.event_name == 'push'").count() >= 8,
+        "CUDA distribution and smoke steps must be limited to main pushes"
     );
     assert!(
         workflow.contains("if: github.event_name == 'push'")
@@ -44,7 +43,8 @@ fn appimage_ci_reserves_optimized_artifacts_for_main() {
     assert!(
         workflow.contains("xdotool search --onlyvisible --pid")
             && workflow.contains("xdotool search --onlyvisible --name '.'")
-            && workflow.contains("openbox >/tmp/mold-openbox.log"),
+            && workflow.contains("openbox >/tmp/mold-openbox.log")
+            && workflow.contains("dbus-run-session -- bash"),
         "the isolated Xvfb smoke must not depend on an exact window title"
     );
 }
