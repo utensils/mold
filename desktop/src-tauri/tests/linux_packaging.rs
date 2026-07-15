@@ -46,8 +46,8 @@ fn appimage_excludes_the_host_cuda_driver() {
         "CI must inspect the completed AppImage's CUDA library contents"
     );
     assert!(
-        workflow.contains("smoke-driver/libcuda.so.1"),
-        "the GPU-less CI launch needs a host-side CUDA driver stub"
+        workflow.contains("libcuda.so.1") && workflow.contains("GITHUB_ENV"),
+        "GPU-less CI packaging and launch need a host-side CUDA driver stub"
     );
 
     let script_path = concat!(

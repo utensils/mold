@@ -179,8 +179,15 @@ jobs:
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features cuda -- -D warnings
-      - name: Exclude the host CUDA driver from linuxdeploy
-        run: ../scripts/prepare-desktop-linuxdeploy.sh
+      - name: Prepare linuxdeploy and the CI driver stub
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver_stub_dir="$RUNNER_TEMP/mold-smoke-driver"
+          mkdir -p "$driver_stub_dir"
+          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$driver_stub_dir/libcuda.so.1"
+          echo "LD_LIBRARY_PATH=$driver_stub_dir:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          ../scripts/prepare-desktop-linuxdeploy.sh
       - name: Build CUDA AppImage
         run: bunx tauri build --features cuda --bundles appimage --ci -v
       - name: Verify bundled CUDA libraries
@@ -212,10 +219,6 @@ jobs:
           appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
           test -n "$appimage"
           chmod +x "$appimage"
-          mkdir -p src-tauri/target/smoke-driver
-          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so src-tauri/target/smoke-driver/libcuda.so.1
-          LD_LIBRARY_PATH="$(pwd)/src-tauri/target/smoke-driver:${LD_LIBRARY_PATH:-}"
-          export LD_LIBRARY_PATH
           xvfb-run -a bash -s -- "$appimage" <<'EOF'
           set -euo pipefail
           appimage=$1
