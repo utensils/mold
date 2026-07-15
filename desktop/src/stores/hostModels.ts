@@ -25,6 +25,7 @@ export type UnionModelEntry = ModelEntry & { hostIds: string[] };
 export const useHostModelsStore = defineStore("hostModels", {
   state: () => ({
     byHost: {} as Record<string, HostModelList>,
+    loading: false,
   }),
   getters: {
     /** Downloaded generation models on one host — mirrors `useModelStore.installed`. */
@@ -53,6 +54,12 @@ export const useHostModelsStore = defineStore("hostModels", {
     hostsFor(): (name: string) => string[] {
       return (name) => this.unionInstalled.find((m) => m.name === name)?.hostIds ?? [];
     },
+    allReadyHostsFetched(state): boolean {
+      const hosts = useHostsStore();
+      return hosts.all
+        .filter((host) => host.status === "ready")
+        .every((host) => (state.byHost[host.id]?.fetchedAt ?? 0) > 0);
+    },
   },
   actions: {
     /**
@@ -63,28 +70,33 @@ export const useHostModelsStore = defineStore("hostModels", {
     async refresh(force = false) {
       const hosts = useHostsStore();
       const now = Date.now();
-      await Promise.all(
-        hosts.all
-          .filter((h) => h.status === "ready" && h.baseUrl)
-          .filter((h) => force || now - (this.byHost[h.id]?.fetchedAt ?? 0) >= STALE_MS)
-          .map(async (h) => {
-            try {
-              const entries = await apiJsonTo<ModelEntry[]>(
-                { baseUrl: h.baseUrl!, apiKey: h.apiKey },
-                "/api/models",
-              );
-              this.byHost[h.id] = { entries, fetchedAt: Date.now(), error: null };
-            } catch (err) {
-              const prev = this.byHost[h.id];
-              this.byHost[h.id] = {
-                entries: prev?.entries ?? [],
-                // Keep the old fetchedAt so the next refresh retries.
-                fetchedAt: prev?.fetchedAt ?? 0,
-                error: String(err),
-              };
-            }
-          }),
-      );
+      const pending = hosts.all
+        .filter((h) => h.status === "ready" && h.baseUrl)
+        .filter((h) => force || now - (this.byHost[h.id]?.fetchedAt ?? 0) >= STALE_MS)
+        .map(async (h) => {
+          try {
+            const entries = await apiJsonTo<ModelEntry[]>(
+              { baseUrl: h.baseUrl!, apiKey: h.apiKey },
+              "/api/models",
+            );
+            this.byHost[h.id] = { entries, fetchedAt: Date.now(), error: null };
+          } catch (err) {
+            const prev = this.byHost[h.id];
+            this.byHost[h.id] = {
+              entries: prev?.entries ?? [],
+              // Keep the old fetchedAt so the next refresh retries.
+              fetchedAt: prev?.fetchedAt ?? 0,
+              error: String(err),
+            };
+          }
+        });
+      if (pending.length === 0) return;
+      this.loading = true;
+      try {
+        await Promise.all(pending);
+      } finally {
+        this.loading = false;
+      }
     },
   },
 });

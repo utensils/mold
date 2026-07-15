@@ -68,6 +68,7 @@ export const useHostsStore = defineStore("hosts", {
     /** Friendly names from savedHosts, so the primary can be renamed too. */
     names: {} as Record<string, string>,
     pollTimer: null as ReturnType<typeof setInterval> | null,
+    initializing: false,
     initialized: false,
   }),
   getters: {
@@ -101,8 +102,29 @@ export const useHostsStore = defineStore("hosts", {
     all(state): HostView[] {
       const primary = this.primaryHost;
       const rows: HostView[] = primary ? [primary] : [];
+      const conn = useConnectionStore();
+      if (primary?.kind !== "local" && conn.localStatus !== "idle") {
+        rows.push({
+          id: "local",
+          label: "This Mac",
+          kind: "local",
+          baseUrl: conn.localInfo?.baseUrl ?? null,
+          apiKey: conn.localInfo?.apiKey ?? null,
+          status:
+            conn.localStatus === "ready"
+              ? "ready"
+              : conn.localStatus === "starting"
+                ? "connecting"
+                : "error",
+          primary: false,
+          queueDepth: state.telemetry.local?.queueDepth ?? null,
+          queueCapacity: state.telemetry.local?.queueCapacity ?? null,
+          version: state.telemetry.local?.version ?? null,
+        });
+      }
       for (const extra of state.extras) {
-        if (extra.id === primary?.id || extra.url === primary?.baseUrl) continue;
+        if (rows.some((row) => row.id === extra.id || (row.baseUrl && row.baseUrl === extra.url)))
+          continue;
         const t = state.telemetry[extra.id];
         rows.push({
           id: extra.id,
@@ -127,8 +149,8 @@ export const useHostsStore = defineStore("hosts", {
   actions: {
     /** Reconnect remembered extra hosts. Never blocks or fails the boot. */
     async init() {
-      if (this.initialized) return;
-      this.initialized = true;
+      if (this.initialized || this.initializing) return;
+      this.initializing = true;
       try {
         const settings = await ipc.appSettingsGet();
         for (const saved of settings.savedHosts) {
@@ -179,6 +201,9 @@ export const useHostsStore = defineStore("hosts", {
         }
       } catch {
         // Settings unreadable — multi-host simply starts empty.
+      } finally {
+        this.initializing = false;
+        this.initialized = true;
       }
       this.startPolling();
     },
@@ -363,6 +388,14 @@ export const useHostsStore = defineStore("hosts", {
             if (extra) {
               extra.status = "error";
               extra.error = String(err);
+            }
+            if (host.id === "local") {
+              const conn = useConnectionStore();
+              conn.localStatus = "error";
+              conn.localError = String(err);
+              // The native lifecycle distinguishes a dead embedded engine (or
+              // vanished external server) and brings this Mac back online.
+              void conn.ensureLocal(true);
             }
             delete this.telemetry[host.id];
           }

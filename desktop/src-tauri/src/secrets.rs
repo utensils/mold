@@ -14,7 +14,10 @@ pub const ALLOWED: &[&str] = &[
     "civitai-token",
     "remote-api-key",
     "runpod-api-key",
+    "desktop-local-api-key",
 ];
+
+pub const DESKTOP_LOCAL_API_KEY: &str = "desktop-local-api-key";
 
 /// Per-host remote keys use `remote-api-key.<host-id>`. The suffix is a slug
 /// derived from the host URL (see `connection::host_id`).
@@ -81,6 +84,28 @@ impl SecretStore {
         let loaded = Self::loaded(&self.path, &mut guard);
         loaded.map.remove(name);
         Self::save(&self.path, loaded)
+    }
+
+    /// Stable credential for the desktop-owned LAN server. An explicit
+    /// `MOLD_API_KEY` remains the highest-precedence operator override;
+    /// otherwise the generated UUID survives app updates and relaunches in the
+    /// owner-only secrets file.
+    pub fn local_server_api_key(&self) -> anyhow::Result<String> {
+        if let Some(key) = std::env::var("MOLD_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+        {
+            return Ok(key);
+        }
+        if let Some(key) = self
+            .get(DESKTOP_LOCAL_API_KEY)?
+            .filter(|key| !key.is_empty())
+        {
+            return Ok(key);
+        }
+        let key = uuid::Uuid::new_v4().to_string();
+        self.set(DESKTOP_LOCAL_API_KEY, &key)?;
+        Ok(key)
     }
 
     fn loaded<'a>(path: &PathBuf, guard: &'a mut Option<Loaded>) -> &'a mut Loaded {
@@ -191,6 +216,29 @@ mod tests {
             .unwrap();
         let again = SecretStore::new(dir.path().to_path_buf());
         assert_eq!(again.get("civitai-token").unwrap().as_deref(), Some("cv_1"));
+    }
+
+    #[test]
+    fn local_server_key_is_generated_once_and_persists() {
+        std::env::remove_var("MOLD_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        let first = SecretStore::new(dir.path().to_path_buf())
+            .local_server_api_key()
+            .unwrap();
+        let second = SecretStore::new(dir.path().to_path_buf())
+            .local_server_api_key()
+            .unwrap();
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+    }
+
+    #[test]
+    fn environment_overrides_the_persisted_local_server_key() {
+        let (store, _dir) = store();
+        store.set(DESKTOP_LOCAL_API_KEY, "stored").unwrap();
+        std::env::set_var("MOLD_API_KEY", "operator-key");
+        assert_eq!(store.local_server_api_key().unwrap(), "operator-key");
+        std::env::remove_var("MOLD_API_KEY");
     }
 
     #[test]

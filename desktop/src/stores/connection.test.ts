@@ -9,6 +9,7 @@ vi.mock("../lib/ipc", () => ({
   ipc: {
     appSettingsGet: vi.fn(),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
+    ensureLocalServer: vi.fn(),
     startLocalEngine: vi.fn(),
     stopLocalEngine: vi.fn(),
     setRemoteHost: vi.fn(),
@@ -22,6 +23,12 @@ const mocked = vi.mocked(ipc);
 
 const local = { mode: "local" as const, baseUrl: "http://127.0.0.1:49152", apiKey: "k" };
 const remote = { mode: "remote" as const, baseUrl: "http://studio.local:7680", apiKey: null };
+const localServer = {
+  kind: "embedded" as const,
+  baseUrl: "http://127.0.0.1:7680",
+  apiKey: "local-key",
+  port: 7680,
+};
 const defaults = {
   mode: "local" as const,
   remoteUrl: null,
@@ -48,6 +55,7 @@ const defaults = {
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
+  mocked.ensureLocalServer.mockResolvedValue(localServer);
 });
 
 describe("connection store", () => {
@@ -72,6 +80,26 @@ describe("connection store", () => {
     await store.init();
     expect(mocked.setRemoteHost).toHaveBeenCalledWith(remote.baseUrl, null);
     expect(store.mode).toBe("remote");
+    expect(store.localInfo).toEqual(localServer);
+    expect(store.localStatus).toBe("ready");
+  });
+
+  it("keeps a usable remote primary when the local server fails to start", async () => {
+    mocked.appSettingsGet.mockResolvedValue({
+      ...defaults,
+      mode: "remote",
+      remoteUrl: remote.baseUrl,
+    });
+    mocked.ensureLocalServer.mockRejectedValue("No local port available");
+    mocked.setRemoteHost.mockResolvedValue(remote);
+
+    const store = useConnectionStore();
+    await store.init();
+
+    expect(store.mode).toBe("remote");
+    expect(store.ready).toBe(true);
+    expect(store.localStatus).toBe("error");
+    expect(store.localError).toContain("No local port available");
   });
 
   it("falls back to the local engine when the saved remote host is unreachable", async () => {

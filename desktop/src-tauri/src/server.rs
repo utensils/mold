@@ -10,6 +10,7 @@ use mold_core::types::GpuSelection;
 pub const DEFAULT_QUEUE_SIZE: usize = 200;
 /// Port a user-run `mold serve` listens on by default.
 pub const WELL_KNOWN_PORT: u16 = 7680;
+pub const LAN_BIND: &str = "0.0.0.0";
 
 pub struct EngineHandle {
     pub port: u16,
@@ -45,14 +46,30 @@ impl EngineHandle {
     }
 }
 
-/// Reserve a loopback port by binding to :0 and reading the assignment.
+/// Reserve a port on `bind` by binding to :0 and reading the assignment.
 ///
 /// TOCTOU caveat: the listener is dropped before `run_server` rebinds it.
 /// Upstream fix tracked as U1 (`run_server_with_listener`) in
 /// desktop/docs/architecture.md.
-pub fn allocate_port() -> anyhow::Result<u16> {
-    let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+pub fn allocate_port(bind: &str) -> anyhow::Result<u16> {
+    let probe = std::net::TcpListener::bind((bind, 0))?;
     Ok(probe.local_addr()?.port())
+}
+
+/// Prefer the conventional LAN port. If something other than Mold owns it,
+/// fall back to an ephemeral port that mDNS will advertise.
+pub fn available_server_port(bind: &str) -> anyhow::Result<u16> {
+    available_server_port_for(bind, WELL_KNOWN_PORT)
+}
+
+fn available_server_port_for(bind: &str, preferred: u16) -> anyhow::Result<u16> {
+    match std::net::TcpListener::bind((bind, preferred)) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(preferred)
+        }
+        Err(_) => allocate_port(bind),
+    }
 }
 
 fn queue_size() -> usize {
@@ -65,11 +82,13 @@ fn queue_size() -> usize {
 /// Spawn the embedded engine. The API key must already be exported as
 /// `MOLD_API_KEY` (done once at app startup, before any threads exist).
 pub fn start_engine(
+    bind: &str,
+    port: u16,
     models_dir: PathBuf,
     gpu_selection: GpuSelection,
 ) -> anyhow::Result<EngineHandle> {
     std::fs::create_dir_all(&models_dir)?;
-    let port = allocate_port()?;
+    let bind = bind.to_string();
     let dir = models_dir.clone();
     let size = queue_size();
     let thread = std::thread::Builder::new()
@@ -81,7 +100,7 @@ pub fn start_engine(
                 .build()
                 .expect("engine tokio runtime");
             match rt.block_on(mold_server::run_server(
-                "127.0.0.1",
+                &bind,
                 port,
                 dir,
                 gpu_selection,
@@ -149,19 +168,51 @@ pub async fn is_mold_server(base_url: &str) -> bool {
     }
 }
 
+/// True when the server accepts the API key the desktop will hand to its
+/// local HTTP clients. Unauthenticated servers also return success here when
+/// a key is supplied, while a server owned by another key returns 401.
+pub async fn accepts_api_key(base_url: &str, api_key: &str) -> bool {
+    matches!(
+        reqwest::Client::new()
+            .get(format!("{base_url}/api/status"))
+            .header("X-Api-Key", api_key)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await,
+        Ok(resp) if resp.status().is_success()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn allocates_distinct_nonzero_ports() {
-        let a = allocate_port().unwrap();
-        let b = allocate_port().unwrap();
+        let a = allocate_port("127.0.0.1").unwrap();
+        let b = allocate_port("127.0.0.1").unwrap();
         assert_ne!(a, 0);
         assert_ne!(b, 0);
         // Not guaranteed distinct by the OS, but freshly-released ephemeral
         // ports are not immediately reused on macOS/Linux.
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn prefers_well_known_port_when_available() {
+        let preferred = allocate_port("127.0.0.1").unwrap();
+        let port = available_server_port_for("127.0.0.1", preferred).unwrap();
+        assert_eq!(port, preferred);
+    }
+
+    #[test]
+    fn falls_back_when_well_known_port_is_occupied() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied = listener.local_addr().unwrap().port();
+        let port = available_server_port_for("127.0.0.1", occupied).unwrap();
+        assert_ne!(port, occupied);
+        assert_ne!(port, 0);
+        drop(listener);
     }
 
     #[test]

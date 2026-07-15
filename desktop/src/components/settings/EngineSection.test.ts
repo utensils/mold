@@ -94,6 +94,28 @@ describe("EngineSection discovery", () => {
     expect(text).toContain("KEY");
   });
 
+  it("reveals and copies the desktop local-server API key", async () => {
+    discoverServers.mockResolvedValue([]);
+    const wrapper = await mountSection();
+    const conn = useConnectionStore();
+    conn.localInfo = {
+      kind: "embedded",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "desktop-secret",
+      port: 7680,
+    };
+    conn.localStatus = "ready";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+    await wrapper.vm.$nextTick();
+    expect(wrapper.text()).not.toContain("desktop-secret");
+    await wrapper.get('[data-test="reveal-local-api-key"]').trigger("click");
+    expect(wrapper.text()).toContain("desktop-secret");
+    await wrapper.get('[data-test="copy-local-api-key"]').trigger("click");
+    expect(writeText).toHaveBeenCalledWith("desktop-secret");
+  });
+
   it("shows an empty message when nothing is found", async () => {
     discoverServers.mockResolvedValue([]);
     const wrapper = await mountSection();

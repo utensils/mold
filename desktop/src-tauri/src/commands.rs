@@ -26,10 +26,48 @@ impl SettingsStore {
 
 pub struct AppState {
     pub conn: tokio::sync::Mutex<Conn>,
-    /// Ephemeral per-launch key for the embedded engine; exported as
-    /// MOLD_API_KEY at startup so only this app can drive the loopback server.
+    pub local_server: tokio::sync::Mutex<LocalServer>,
+    /// Persistent per-install key for the desktop-owned LAN server; exported
+    /// as MOLD_API_KEY before the embedded engine starts.
     pub local_api_key: String,
     pub secrets: crate::secrets::SecretStore,
+}
+
+pub enum LocalServer {
+    Off,
+    Embedded(server::EngineHandle),
+    External { base_url: String },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalServerInfo {
+    pub kind: &'static str,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub port: u16,
+}
+
+impl LocalServer {
+    fn info(&self, api_key: &str) -> Option<LocalServerInfo> {
+        let (kind, base_url, port) = match self {
+            LocalServer::Off => return None,
+            LocalServer::Embedded(engine) => ("embedded", engine.base_url(), engine.port),
+            LocalServer::External { base_url } => {
+                let port = reqwest::Url::parse(base_url)
+                    .ok()
+                    .and_then(|url| url.port_or_known_default())
+                    .unwrap_or(server::WELL_KNOWN_PORT);
+                ("external", base_url.clone(), port)
+            }
+        };
+        Some(LocalServerInfo {
+            kind,
+            base_url,
+            api_key: Some(api_key.to_string()),
+            port,
+        })
+    }
 }
 
 /// Env knobs the Settings Performance section may set on the embedded
@@ -129,36 +167,42 @@ pub async fn reveal_output_file(
         .map_err(|e| e.to_string())
 }
 
-/// Bring a local engine online. Prefers a mold server the user already runs
-/// on the well-known port (avoids two engines sharing mold.db and the models
-/// dir); otherwise embeds one on an ephemeral loopback port.
-#[tauri::command]
-pub async fn start_local_engine(
-    state: tauri::State<'_, AppState>,
-    store: tauri::State<'_, SettingsStore>,
-) -> Result<ConnectionInfo, String> {
-    let mut conn = state.conn.lock().await;
-    match &*conn {
-        // A dead engine thread (crash or shutdown) falls through to a
-        // fresh start instead of returning a base URL nothing answers.
-        Conn::Local(engine) if engine.is_alive() => {
-            return Ok(conn.info(&state.local_api_key));
+async fn ensure_local_server_inner(
+    state: &AppState,
+    store: &SettingsStore,
+) -> Result<LocalServerInfo, String> {
+    let mut local = state.local_server.lock().await;
+    let external_url = match &*local {
+        LocalServer::Embedded(engine) if engine.is_alive() => {
+            return Ok(local.info(&state.local_api_key).expect("embedded info"));
         }
-        Conn::Local(_) => {
+        LocalServer::Embedded(_) => {
             tracing::warn!("embedded engine thread is gone; restarting");
-            *conn = Conn::Off;
+            *local = LocalServer::Off;
+            None
         }
-        Conn::External { .. } => return Ok(conn.info(&state.local_api_key)),
-        _ => {}
+        LocalServer::External { base_url } => Some(base_url.clone()),
+        LocalServer::Off => None,
+    };
+    if let Some(base_url) = external_url {
+        if server::is_mold_server(&base_url).await {
+            ensure_local_server_auth(&base_url, &state.local_api_key).await?;
+            return Ok(local.info(&state.local_api_key).expect("external info"));
+        }
+        tracing::warn!(%base_url, "external local server disappeared; replacing it");
+        *local = LocalServer::Off;
     }
 
+    // A user-run server owns the shared model directory and metadata DB, so it
+    // wins over embedding another process on this Mac.
     let well_known = format!("http://127.0.0.1:{}", server::WELL_KNOWN_PORT);
     if server::is_mold_server(&well_known).await {
+        ensure_local_server_auth(&well_known, &state.local_api_key).await?;
         tracing::info!("using existing mold server at {well_known}");
-        *conn = Conn::External {
+        *local = LocalServer::External {
             base_url: well_known,
         };
-        return Ok(conn.info(&state.local_api_key));
+        return Ok(local.info(&state.local_api_key).expect("external info"));
     }
 
     let config = mold_core::Config::load_or_default();
@@ -173,12 +217,55 @@ pub async fn start_local_engine(
             .clone(),
         &state.secrets,
     );
-    let engine = server::start_engine(models_dir, gpu_selection).map_err(|e| format!("{e:#}"))?;
+    let port = server::available_server_port(server::LAN_BIND).map_err(|e| format!("{e:#}"))?;
+    let engine = server::start_engine(server::LAN_BIND, port, models_dir, gpu_selection)
+        .map_err(|e| format!("{e:#}"))?;
     let base_url = engine.base_url();
     if !server::wait_healthy(&base_url, Duration::from_secs(30)).await {
+        engine.join(Duration::from_secs(1));
         return Err("The engine didn't start. Check the logs (~/.mold/logs).".into());
     }
-    *conn = Conn::Local(engine);
+    *local = LocalServer::Embedded(engine);
+    Ok(local.info(&state.local_api_key).expect("embedded info"))
+}
+
+async fn ensure_local_server_auth(base_url: &str, api_key: &str) -> Result<(), String> {
+    if server::accepts_api_key(base_url, api_key).await {
+        return Ok(());
+    }
+    Err(format!(
+        "A Mold server is already running at {base_url}, but it does not accept This Mac API key. Stop that server or restart it with the same MOLD_API_KEY."
+    ))
+}
+
+/// Ensure this Mac is serving Mold independently of whichever primary host the
+/// UI currently uses. The embedded server binds to the LAN and advertises over
+/// mDNS; the returned URL remains loopback for the local webview.
+#[tauri::command]
+pub async fn ensure_local_server(
+    state: tauri::State<'_, AppState>,
+    store: tauri::State<'_, SettingsStore>,
+) -> Result<LocalServerInfo, String> {
+    ensure_local_server_inner(&state, &store).await
+}
+
+/// Bring the local server online and select it as the primary connection.
+#[tauri::command]
+pub async fn start_local_engine(
+    state: tauri::State<'_, AppState>,
+    store: tauri::State<'_, SettingsStore>,
+) -> Result<ConnectionInfo, String> {
+    let local = ensure_local_server_inner(&state, &store).await?;
+    let mut conn = state.conn.lock().await;
+    *conn = if local.kind == "embedded" {
+        Conn::Local {
+            base_url: local.base_url,
+        }
+    } else {
+        Conn::External {
+            base_url: local.base_url,
+        }
+    };
     Ok(conn.info(&state.local_api_key))
 }
 
@@ -186,11 +273,14 @@ pub async fn start_local_engine(
 pub async fn stop_local_engine(
     state: tauri::State<'_, AppState>,
 ) -> Result<ConnectionInfo, String> {
-    let mut conn = state.conn.lock().await;
-    if let Conn::Local(_) = &*conn {
-        let Conn::Local(engine) = std::mem::replace(&mut *conn, Conn::Off) else {
-            unreachable!()
-        };
+    let engine = {
+        let mut local = state.local_server.lock().await;
+        match std::mem::replace(&mut *local, LocalServer::Off) {
+            LocalServer::Embedded(engine) => Some(engine),
+            LocalServer::External { .. } | LocalServer::Off => None,
+        }
+    };
+    if let Some(engine) = engine {
         let shutdown_url = format!("{}/api/shutdown", engine.base_url());
         let _ = reqwest::Client::new()
             .post(&shutdown_url)
@@ -201,10 +291,16 @@ pub async fn stop_local_engine(
         tauri::async_runtime::spawn_blocking(move || engine.join(Duration::from_secs(5)))
             .await
             .map_err(|e| e.to_string())?;
-    } else {
+    }
+    let mut conn = state.conn.lock().await;
+    if primary_uses_local_server(&conn) {
         *conn = Conn::Off;
     }
     Ok(conn.info(&state.local_api_key))
+}
+
+fn primary_uses_local_server(conn: &Conn) -> bool {
+    matches!(conn, Conn::Local { .. } | Conn::External { .. })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -550,6 +646,20 @@ pub fn secret_clear(state: tauri::State<'_, AppState>, name: String) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_primary_does_not_own_the_local_server_lifecycle() {
+        assert!(!primary_uses_local_server(&Conn::Remote {
+            url: "http://hal9000:7680".into(),
+            api_key: None,
+        }));
+        assert!(primary_uses_local_server(&Conn::Local {
+            base_url: "http://127.0.0.1:7680".into(),
+        }));
+        assert!(primary_uses_local_server(&Conn::External {
+            base_url: "http://127.0.0.1:7680".into(),
+        }));
+    }
 
     #[test]
     fn engine_environment_sets_and_clears_knobs_and_tokens() {

@@ -205,6 +205,7 @@ Desktop parity: `upscale_model` is surfaced by the "Upscale" select in `ParamPan
 ## 10. Remote vs local modes
 
 - **Remote** (default): HTTP to `MOLD_HOST` (default `http://localhost:7680`). SSE streaming with blocking fallback.
+- **Desktop local server:** the desktop always keeps this Mac online independently of the selected primary. It reuses an existing local server or starts an authenticated wildcard-bound server on port 7680 (advertised ephemeral fallback on conflict), publishes `_mold._tcp`, and exposes its persistent API key in Settings. When a remote is primary, This Mac remains a routable host and its models participate in the installed-model union; the first-model screen appears only after all connected hosts report zero installed generation models.
 - **Local fallback**: server unreachable → local GPU (auto-pulls missing model).
 - **Forced local**: `--local` skips server (requires GPU-feature build; errors gracefully otherwise).
 - **Server**: `mold serve` (`--port`/`MOLD_PORT`, `--bind`, `--models-dir`, `--log-format json|…`, `--log-file`, `--gpus`, `--queue-size`, `--discord`). Managed daemon: `mold server start|status|stop` (`--port`, `--bind`, `--models-dir`, `--log-file`). Auth via `MOLD_API_KEY`; CORS `MOLD_CORS_ORIGIN`; rate limit `MOLD_RATE_LIMIT`/`_BURST`. `GET /api/resources` + `/stream` (GPU/VRAM/CPU live), `/api/capabilities`, `/api/status`, `/health`, `/api/openapi.json`, `/api/docs` (Scalar), `POST /api/shutdown`.

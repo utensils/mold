@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import {
+  findInstalledModel,
+  mergeInstalledModels,
+  preferredInstalledModel,
+  shouldShowStarterCards,
+} from "../lib/generateModels";
 import DevelopCanvas from "../lib/develop/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
 import ParamPanel from "../components/generate/ParamPanel.vue";
@@ -84,13 +90,24 @@ function onAsideReset() {
 const job = computed(() => generation.active);
 const siblings = computed(() => generation.siblings);
 const caps = computed(() => generationCapabilitiesForFamily(form.family));
+const installedModels = computed(() =>
+  mergeInstalledModels(models.installed, hostModels.unionInstalled),
+);
 // Falls back to the union entry so a model that only exists on an extra host
 // still populates params/defaults after being picked.
-const selectedModel = computed<ModelEntry | null>(
-  () =>
-    models.installed.find((m) => m.name === form.model) ??
-    hostModels.unionInstalled.find((m) => m.name === form.model) ??
-    null,
+const selectedModel = computed<ModelEntry | null>(() =>
+  findInstalledModel(installedModels.value, form.model),
+);
+
+const showStarterCards = computed(() =>
+  shouldShowStarterCards({
+    connectionReady: conn.ready,
+    primaryLoading: models.loading,
+    hostsInitialized: hosts.initialized,
+    hostModelsLoading: hostModels.loading,
+    allReadyHostsFetched: hostModels.allReadyHostsFetched,
+    installed: installedModels.value,
+  }),
 );
 
 /** The request the estimate badge previews — null until a model is chosen. */
@@ -111,8 +128,7 @@ const estimateTarget = computed(() =>
  */
 const pickerFamilies = computed<Map<string, ModelEntry[]>>(() => {
   const byName = new Map<string, ModelEntry>();
-  for (const m of models.installed) byName.set(m.name, m);
-  for (const m of hostModels.unionInstalled) if (!byName.has(m.name)) byName.set(m.name, m);
+  for (const m of installedModels.value) byName.set(m.name, m);
   const groups = new Map<string, ModelEntry[]>();
   for (const m of byName.values()) {
     const list = groups.get(m.family) ?? [];
@@ -207,7 +223,7 @@ function loadTemplate(template: GenerationTemplate) {
   // Base64 media was stripped on save; buildRequest's pruneRequestForFamily
   // still guards anything the (possibly different) family can't use.
   Object.assign(form, template.form);
-  if (form.model && !models.installed.some((m) => m.name === form.model)) {
+  if (form.model && !findInstalledModel(installedModels.value, form.model)) {
     toasts.push(`Model "${form.model}" isn't installed — settings applied anyway.`);
   }
   if (template.mediaReferences.length > 0) {
@@ -365,11 +381,11 @@ function onComposerKeydown(e: KeyboardEvent) {
 // in a store, the `!form.model` guard now means "the first ever visit" — a
 // remount after the user chose a model leaves their choice untouched.
 watch(
-  () => models.installed,
+  () => installedModels.value,
   (installed) => {
     if (!form.model && installed.length > 0) {
-      const preferred = installed.find((m) => m.family === "flux") ?? installed[0]!;
-      formStore.applyModel(preferred);
+      const preferred = preferredInstalledModel(installed);
+      if (preferred) formStore.applyModel(preferred);
     }
   },
   { immediate: true },
@@ -397,7 +413,7 @@ function applyPrefill() {
   form.height = prefill.height;
   form.steps = prefill.steps;
   form.guidance = prefill.guidance;
-  const m = models.installed.find((x) => x.name === prefill.model);
+  const m = findInstalledModel(installedModels.value, prefill.model);
   if (m) form.family = m.family;
   void nextTick(() => promptEl.value?.focus());
 }
@@ -448,10 +464,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
 </script>
 
 <template>
-  <StarterCards
-    v-if="conn.ready && !models.loading && models.installed.length === 0"
-    @browse="router.push('/models')"
-  />
+  <StarterCards v-if="showStarterCards" @browse="router.push('/models')" />
 
   <div
     v-else

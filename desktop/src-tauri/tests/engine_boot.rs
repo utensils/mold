@@ -14,7 +14,10 @@ async fn engine_boots_authenticates_and_shuts_down() {
     std::env::set_var("MOLD_DB_PATH", state_dir.path().join("mold.db"));
     std::env::set_var("MOLD_API_KEY", "desktop-test-key");
 
+    let port = server::allocate_port("127.0.0.1").unwrap();
     let engine = server::start_engine(
+        "127.0.0.1",
+        port,
         models_dir.path().to_path_buf(),
         mold_core::types::GpuSelection::All,
     )
@@ -26,6 +29,8 @@ async fn engine_boots_authenticates_and_shuts_down() {
         "engine did not become healthy"
     );
     assert!(server::is_mold_server(&base).await);
+    assert!(server::accepts_api_key(&base, "desktop-test-key").await);
+    assert!(!server::accepts_api_key(&base, "different-key").await);
 
     let client = reqwest::Client::new();
 

@@ -24,7 +24,7 @@ resolver = "2"
 
 ## 2. Backend integration — DECISION: embed `mold-ai-server` in-process, plus first-class remote mode; **all app data flows over HTTP+SSE in both modes**
 
-**Pick:** The Tauri process links `mold-server` (package `mold-ai-server`) with `metal` (+ `expand`, `webp`, `mp4`) features and spawns `mold_server::run_server("127.0.0.1", port, models_dir, GpuSelection::All, queue_size)` on a dedicated thread with its own tokio runtime. The webview then talks plain HTTP + SSE to `http://127.0.0.1:<port>` — the identical wire contract used when the user points the app at a remote `MOLD_HOST`.
+**Pick:** The Tauri process links `mold-server` (package `mold-ai-server`) with `metal` (+ `expand`, `webp`, `mp4`) features and keeps a local server online independently of the selected primary host. It reuses a Mold server already answering on `localhost:7680`; otherwise it spawns `mold_server::run_server("0.0.0.0", port, models_dir, GpuSelection::All, queue_size)` on a dedicated thread with its own tokio runtime. The webview still uses `http://127.0.0.1:<port>`, while other machines reach the advertised LAN address. Local and remote hosts share the same HTTP + SSE wire contract.
 
 **Why not sidecar / external server:**
 
@@ -34,13 +34,13 @@ resolver = "2"
 
 **Runtime/threading:** do _not_ run the server on Tauri's async runtime. `run_server` is a long-lived `async fn` that installs global state (`Config::install_runtime_models_dir_override`, SIGPIPE handling) and blocks until shutdown; give it its own `tokio::runtime::Runtime` on a named thread (`mold-server`). Generation work already goes through `spawn_blocking` + per-GPU workers internally. Tauri's own commands stay on `tauri::async_runtime`.
 
-**Port selection:** bind a `std::net::TcpListener` to `127.0.0.1:0`, read the port, drop it, pass that port to `run_server`. Tiny TOCTOU race, acceptable for v1; **upstream fix in M1** (see Risks §8): add `run_server_with_listener(listener, ...) -> ServerHandle` to mold-server so the app gets the bound addr + a shutdown handle without the race.
+**Port selection:** prefer `0.0.0.0:7680` so the desktop server has the conventional address. If an unrelated process occupies 7680, reserve an ephemeral wildcard port and advertise that real port over mDNS. The listener probe is dropped before `run_server` binds, leaving the existing small TOCTOU race; the upstream `run_server_with_listener` follow-up remains applicable.
 
-**Auth:** generate an ephemeral UUID key at startup and `std::env::set_var("MOLD_API_KEY", key)` _before_ spawning the server thread (`auth::load_api_keys` reads env once). This blocks other local processes from driving the loopback server. The frontend fetch wrapper attaches `X-Api-Key`. Remote mode stores per-host keys (app settings), same header. CORS stays permissive (default) — WKWebView's `tauri://localhost` origin is then a non-issue; CSP (below) constrains the frontend side.
+**Auth:** resolve `MOLD_API_KEY` as an explicit override; otherwise reuse or generate `desktop-local-api-key` in the owner-only app secrets file. Export it before spawning the server thread (`auth::load_api_keys` reads env once), advertise `auth=1`, and expose a masked reveal/copy control in Settings → Engine. The frontend attaches `X-Api-Key`; remote hosts retain their own per-host keys. CORS stays permissive (default), with CSP constraining the frontend side.
 
-**Shutdown:** on `RunEvent::ExitRequested`, POST `/api/shutdown` (loopback allowed) and join the server thread with a 5s timeout. Fallback: process exit (server is stateless-on-disk; SQLite/chain jobs are crash-safe and resumable by design).
+**Shutdown:** the embedded handle is owned separately from the selected primary connection. Switching to a remote primary leaves it alive and routable as **This Mac**; app exit or an explicit local-engine restart POSTs `/api/shutdown` and joins the thread with a 5s timeout. User-run external servers are never shut down by the app.
 
-**Modes UI:** a connection switcher (Local Engine / Remote host). Local mode also surfaces "engine off" (don't boot Metal workers until first needed or user opts into auto-start — saves memory when the app is used purely as a remote client). LTX-2 is CUDA-only: local Metal mode grays out `ltx2` (drive from `/api/status` gpus backend + family capability map); remote CUDA hosts get it enabled.
+**Modes UI:** a connection switcher selects Local Engine or a remote primary, while the local server remains a separate host lifecycle. With a remote primary, **This Mac** stays visible in the host selector and participates in model-aware Auto / Most capable routing. LTX-2 is CUDA-only: local Metal mode grays out `ltx2` (drive from `/api/status` gpus backend + family capability map); remote CUDA hosts get it enabled.
 
 ## 3. Frontend stack — DECISION: Vue 3.5 + TS strict + Vite 7 + Tailwind v4 + Pinia + TanStack Query/Virtual + fetch-event-source
 

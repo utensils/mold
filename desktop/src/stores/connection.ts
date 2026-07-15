@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { hostIdFromUrl } from "../lib/hosts";
-import { ipc, type ConnectionInfo } from "../lib/ipc";
+import { ipc, type ConnectionInfo, type LocalServerInfo } from "../lib/ipc";
 import { useToastStore } from "./toasts";
 
 export type ConnectionStatus = "idle" | "starting" | "ready" | "error";
@@ -26,6 +26,9 @@ export const useConnectionStore = defineStore("connection", {
     info: null as ConnectionInfo | null,
     status: "idle" as ConnectionStatus,
     error: null as string | null,
+    localInfo: null as LocalServerInfo | null,
+    localStatus: "idle" as ConnectionStatus,
+    localError: null as string | null,
   }),
   getters: {
     baseUrl: (s) => s.info?.baseUrl ?? null,
@@ -34,12 +37,26 @@ export const useConnectionStore = defineStore("connection", {
     ready: (s) => s.status === "ready" && !!s.info?.baseUrl,
   },
   actions: {
+    async ensureLocal(force = false) {
+      if (this.localStatus === "starting" || (this.localStatus === "ready" && !force)) return;
+      this.localStatus = "starting";
+      this.localError = null;
+      try {
+        this.localInfo = await ipc.ensureLocalServer();
+        this.localStatus = "ready";
+      } catch (err) {
+        this.localInfo = null;
+        this.localStatus = "error";
+        this.localError = String(err);
+      }
+    },
     async init() {
       if (this.status === "starting" || this.status === "ready") return;
       this.status = "starting";
       this.error = null;
       try {
         const settings = await ipc.appSettingsGet();
+        await this.ensureLocal();
         // Remote key: secret store first, legacy settings.json field as
         // fallback for files written before secrets landed.
         const remoteKey =
@@ -63,9 +80,15 @@ export const useConnectionStore = defineStore("connection", {
             const saved = settings.savedHosts.find((h) => h.id === id);
             const { useHostsStore } = await import("./hosts");
             useHostsStore().adopt(id, settings.remoteUrl, remoteKey, saved?.name ?? null);
+            if (this.localStatus !== "ready") {
+              throw new Error(this.localError ?? "The local server didn't start.");
+            }
             this.info = await ipc.startLocalEngine();
           }
         } else {
+          if (this.localStatus !== "ready") {
+            throw new Error(this.localError ?? "The local server didn't start.");
+          }
           this.info = await ipc.startLocalEngine();
         }
         this.status = "ready";
@@ -78,6 +101,10 @@ export const useConnectionStore = defineStore("connection", {
       this.status = "starting";
       this.error = null;
       try {
+        await this.ensureLocal();
+        if (this.localStatus !== "ready") {
+          throw new Error(this.localError ?? "The local server didn't start.");
+        }
         this.info = await ipc.startLocalEngine();
         this.status = "ready";
         const settings = await ipc.appSettingsGet();
@@ -101,6 +128,9 @@ export const useConnectionStore = defineStore("connection", {
     },
     async stopEngine() {
       this.info = await ipc.stopLocalEngine();
+      this.localInfo = null;
+      this.localStatus = "idle";
+      this.localError = null;
       this.status = "idle";
     },
   },

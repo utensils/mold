@@ -20,6 +20,13 @@ export interface ConnectionInfo {
   apiKey: string | null;
 }
 
+export interface LocalServerInfo {
+  kind: "embedded" | "external";
+  baseUrl: string;
+  apiKey: string | null;
+  port: number;
+}
+
 export type Theme = "system" | "dark" | "light";
 export type ThemeFamily = "safelight" | "mold";
 export type UpdateChannel = "stable" | "nightly";
@@ -158,6 +165,18 @@ export const ipc = {
   getConnection(): Promise<ConnectionInfo> {
     if (!inTauri()) return Promise.resolve(browserFallbackConnection());
     return invoke<ConnectionInfo>("get_connection");
+  },
+  ensureLocalServer(): Promise<LocalServerInfo> {
+    if (!inTauri()) {
+      const fallback = browserFallbackConnection();
+      return Promise.resolve({
+        kind: "external",
+        baseUrl: fallback.baseUrl!,
+        apiKey: fallback.apiKey,
+        port: Number(new URL(fallback.baseUrl!).port || 7680),
+      });
+    }
+    return invoke<LocalServerInfo>("ensure_local_server");
   },
   startLocalEngine(): Promise<ConnectionInfo> {
     if (!inTauri()) return Promise.resolve(browserFallbackConnection());
@@ -326,4 +345,9 @@ export const ipc = {
 };
 
 export type SecretName =
-  "hf-token" | "civitai-token" | "remote-api-key" | "runpod-api-key" | `remote-api-key.${string}`;
+  | "hf-token"
+  | "civitai-token"
+  | "remote-api-key"
+  | "runpod-api-key"
+  | "desktop-local-api-key"
+  | `remote-api-key.${string}`;
