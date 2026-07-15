@@ -19,6 +19,12 @@ fn appimage_ci_installs_tauri_linuxdeploy_runtime() {
             .any(|package| package == "xdg-utils"),
         "Tauri linuxdeploy requires /usr/bin/xdg-open from xdg-utils"
     );
+    assert!(
+        apt_packages
+            .split_whitespace()
+            .any(|package| package == "openbox"),
+        "the Xvfb launch needs a window manager for Tauri's maximize/show lifecycle"
+    );
 }
 
 #[test]
@@ -37,7 +43,8 @@ fn appimage_ci_reserves_optimized_artifacts_for_main() {
     );
     assert!(
         workflow.contains("xdotool search --onlyvisible --pid")
-            && workflow.contains("xdotool search --onlyvisible --name '.'"),
+            && workflow.contains("xdotool search --onlyvisible --name '.'")
+            && workflow.contains("openbox >/tmp/mold-openbox.log"),
         "the isolated Xvfb smoke must not depend on an exact window title"
     );
 }
