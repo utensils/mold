@@ -78,7 +78,7 @@ describe("HostSelector", () => {
     expect(options.map((o) => o.text())).toEqual([
       "Auto — least busy",
       "Most capable",
-      "This Mac",
+      "This device",
       "hal9000 · 2 queued",
     ]);
   });

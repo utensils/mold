@@ -1,13 +1,13 @@
 # Desktop App <Badge type="warning" text="experimental" />
 
-mold ships an experimental native macOS desktop app — a Tauri 2 shell around a
+mold ships an experimental native macOS and Linux desktop app — a Tauri 2 shell around a
 Vue 3 + TypeScript frontend with its own **Safelight** design language, a warm,
 matte "digital darkroom" that treats every generation as a print being
 developed.
 
 ::: warning Experimental
-The desktop app lives in `desktop/` and is under active development. It is
-macOS-first (Apple Silicon, Metal).
+The desktop app lives in `desktop/` and is under active development. Local
+generation uses Metal on Apple Silicon and CUDA on x86_64 Linux.
 :::
 
 ## Download
@@ -20,6 +20,11 @@ Open the DMG and drag **Mold** to Applications — no quarantine dance needed.
 Version-pinned DMGs and `SHA256SUMS` are on the
 [releases page](https://github.com/utensils/mold/releases). You can also build
 from source with the devshell commands below.
+
+Linux builds are currently source/CI distributions: `nix build
+.#mold-desktop` produces the native sm_89 package (`.#mold-desktop-sm120` for
+Blackwell). `desktop-build` produces that native package on NixOS and a CUDA
+AppImage on conventional Linux. Tagged releases do not publish the AppImage yet.
 
 ## What it is
 
@@ -38,7 +43,7 @@ surface powers it, so anything the app does maps to a documented endpoint.
   before you press Generate.
 - **Gallery** — a justified, virtualized contact-sheet grid. **Space** opens
   Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Generate with
-  every parameter restored. When the active engine is remote, **This Mac**
+  every parameter restored. When the active engine is remote, **This device**
   remains available as a separate local-gallery source. Still images offer
   full-resolution **Copy image** from tile and lightbox right-click menus.
 - **Models & catalog** — installed models grouped by family with residency and
@@ -76,12 +81,16 @@ surface powers it, so anything the app does maps to a documented endpoint.
   Advanced — every remaining `/api/config` row with its provenance tag (⌂ db /
   ⛁ file / ⚿ env); environment-overridden rows are locked with the variable
   that owns them.
-- **Command palette** — **⌘K** for navigation, actions, model search, and
+- **Command palette** — **Cmd/Ctrl+K** for navigation, actions, model search, and
   prompt-history search in one field.
-- **Native macOS** — menu bar, keyboard shortcuts, and background notifications
-  on generation, chain, and pull completion.
+- **Native desktop integration** — platform menus and shortcuts, Linux native
+  window decorations, macOS overlay chrome, and background notifications on
+  generation, chain, and pull completion.
 
 ## Updates
+
+Automatic signed updates are currently macOS-only. Linux Nix/AppImage builds
+report updates as unsupported and are replaced manually.
 
 Signed desktop builds keep update checks separate from installation. Mold makes
 a best-effort check after the app opens, and **Mold → Check for Updates…** plus
@@ -127,20 +136,20 @@ release is published.
 
 ### Keyboard map
 
-| Shortcut     | Action                                  |
-| ------------ | --------------------------------------- |
-| ⌘1–⌘5 / ⌘,   | Screens / Settings                      |
-| ⌘K           | Command palette                         |
-| ⌘N           | New generation (clear composer, focus)  |
-| ⌘↩           | Generate                                |
-| ⌘E           | Expand prompt                           |
-| ⌘R           | Randomize seed                          |
-| ⌘.           | Cancel the running job                  |
-| ⌘\           | Toggle sidebar                          |
-| Space        | Quick Look in Gallery                   |
-| ←/→, ⌫       | Gallery navigate / delete               |
-| ⇧⌘C          | Copy seed (lightbox)                    |
-| ⌘0 / ⌘+ / ⌘− | Interface size reset / larger / smaller |
+| Shortcut            | Action                                 |
+| ------------------- | -------------------------------------- |
+| Cmd/Ctrl+1–6, comma | Screens / Settings                     |
+| Cmd/Ctrl+K          | Command palette                        |
+| Cmd/Ctrl+N          | New generation (clear composer, focus) |
+| Cmd/Ctrl+Enter      | Generate                               |
+| Cmd/Ctrl+E          | Expand prompt                          |
+| Cmd/Ctrl+R          | Randomize seed                         |
+| Cmd/Ctrl+.          | Cancel the running job                 |
+| Cmd/Ctrl+\          | Toggle sidebar                         |
+| Space               | Quick Look in Gallery                  |
+| ←/→, ⌫              | Gallery navigate / delete              |
+| Shift+Cmd/Ctrl+C    | Copy seed (lightbox)                   |
+| Cmd/Ctrl+0 / + / −  | Interface size reset/larger/smaller    |
 
 Interface scaling applies to the complete app, including fixed overlays and
 right-click menus. Choose 80–130% from **Settings → Appearance & app → Interface size**, or
@@ -190,9 +199,10 @@ The app talks to a `mold-ai-server` over localhost HTTP + SSE using the same
 wire types as the CLI and web UI:
 
 - **Built-in engine and LAN server** — embeds the server in-process and runs on
-  Metal, so no separate `mold serve` is required. It listens on port 7680,
-  advertises itself over mDNS, and remains online as **This Mac** even when a
-  remote host is primary. Settings → Engine exposes the persistent per-Mac API
+  Metal on macOS or CUDA on Linux, so no separate `mold serve` is required. It
+  listens on port 7680, advertises itself over mDNS, and remains online as
+  **This device** even when a remote host is primary. Settings → Engine exposes
+  the persistent per-device API
   key that another Mold client needs to connect. If an unrelated process owns
   7680, Mold uses and advertises an ephemeral port instead.
 - **Existing server** — auto-detects a running `mold serve` on
@@ -222,7 +232,7 @@ wire types as the CLI and web UI:
   right-click any gallery image → **Upscale**; the result lands in this Mac's
   gallery. **Reuse settings** always restores the generation canvas, not the
   upscaled file's physical dimensions.
-- **Jobs (⌘6)** — a queue console for every connected host: the full
+- **Jobs (Cmd/Ctrl+6)** — a queue console for every connected host: the full
   server-side queue (other clients' jobs included), live thumbnails and step
   progress for this app's own jobs, per-job cancel, **Pause/Resume** of a
   host's queue (the running job finishes; nothing new starts), a two-step
@@ -262,18 +272,23 @@ wire types as the CLI and web UI:
 
 ## Development
 
-Run inside `nix develop` (the devshell wires up Metal, Bun, and the Tauri
-toolchain):
+Run inside `nix develop` (the devshell wires up Metal or CUDA, Bun, Tauri, and
+Linux WebKitGTK/GStreamer dependencies):
 
 ```bash
 desktop-dev        # Tauri app with hot reload (Vite on :1430)
-desktop-build      # build the Mold.app bundle
+desktop-build      # build Mold.app, a Linux AppImage, or the native NixOS package
 desktop-release    # signed + notarized + stapled app and DMG, then verify
 desktop-check      # CI gate: rustfmt, clippy, vue-tsc, prettier
 desktop-test       # cargo test (CPU) + vitest
 desktop-ui         # frontend-only Vite server (pair with a running `serve`)
 desktop-bun-lock   # regenerate desktop/bun.nix from bun.lock
 ```
+
+On Linux, `nix build .#mold-desktop` builds the sm_89 native package and
+`nix build .#mold-desktop-sm120` targets Blackwell. `CUDA_COMPUTE_CAP` controls
+local dev/AppImage compilation. `desktop-release` remains the macOS
+sign/notarize path and intentionally exits on Linux.
 
 The Rust crate under `desktop/src-tauri` is its own cargo root (excluded from
 the workspace); the frontend lives in `desktop/src`. CI runs the `desktop-check`

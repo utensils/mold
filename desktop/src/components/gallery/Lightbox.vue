@@ -125,7 +125,7 @@ function imageMenu(): MenuEntry[] {
     { label: "Copy prompt", action: () => void copy(meta.value.prompt) },
     { label: "Copy seed", action: () => void copy(String(meta.value.seed)) },
     { separator: true },
-    { label: "Reveal in Finder", disabled: !props.canReveal, action: () => void reveal() },
+    { label: "Reveal in file manager", disabled: !props.canReveal, action: () => void reveal() },
   ];
 }
 
@@ -261,7 +261,7 @@ function onDelete() {
         class="border-edge mt-2 h-8 w-full rounded-control border text-body text-ink-2 transition-colors duration-100 hover:text-ink"
         @click="reveal"
       >
-        Reveal in Finder
+        Reveal in file manager
       </button>
       <button
         type="button"

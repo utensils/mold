@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBundleCommand": "../scripts/fix-desktop-macos-linkage.sh"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Mold",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 1080,
+        "minHeight": 700,
+        "center": true,
+        "maximized": true,
+        "fullscreen": false,
+        "visible": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 19
+        }
+      }
+    ]
+  },
+  "bundle": {
+    "targets": "all",
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "entitlements": "Entitlements.plist"
+    }
+  }
+}

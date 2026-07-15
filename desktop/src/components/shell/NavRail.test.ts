@@ -58,7 +58,7 @@ describe("NavRail hosts section", () => {
     await flushPromises();
     const rows = wrapper.findAll("[data-test='host-row']");
     expect(rows).toHaveLength(2);
-    expect(rows[0]!.text()).toContain("This Mac");
+    expect(rows[0]!.text()).toContain("This device");
     expect(rows[1]!.text()).toContain("hal9000");
     expect(rows[1]!.text()).toContain("3");
   });

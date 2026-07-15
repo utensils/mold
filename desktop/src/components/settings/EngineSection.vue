@@ -218,7 +218,7 @@ async function restartEngine() {
             "
             @click="useLocal"
           >
-            Built-in (this Mac)
+            Built-in (this device)
           </button>
           <button
             type="button"
@@ -314,7 +314,7 @@ async function restartEngine() {
 
         <label class="mt-3 block text-caption text-ink-2" for="remote-key">
           API key
-          <span class="ml-1 text-ink-3">— stored only on this Mac</span>
+          <span class="ml-1 text-ink-3">— stored only on this device</span>
         </label>
         <input
           id="remote-key"
@@ -430,7 +430,7 @@ async function restartEngine() {
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
                   <span class="truncate text-body text-ink">{{ host.name }}</span>
-                  <span v-if="host.isThisMachine" class="edge-code">THIS MAC</span>
+                  <span v-if="host.isThisMachine" class="edge-code">THIS DEVICE</span>
                   <span v-if="host.authRequired" class="edge-code">KEY</span>
                 </div>
                 <div class="data-mono mt-0.5 truncate text-caption text-ink-3">

@@ -177,7 +177,7 @@ describe("HistoryView multi-host", () => {
     const rows = wrapper.findAll("[data-test='run-row']");
     expect(rows).toHaveLength(3);
     const badges = wrapper.findAll("[data-test='host-badge']");
-    expect(badges.map((b) => b.text())).toEqual(["This Mac", "okra", "This Mac"]);
+    expect(badges.map((b) => b.text())).toEqual(["This device", "okra", "This device"]);
   });
 
   it("the chip filter narrows the runs list and hides row chips", async () => {
@@ -282,7 +282,7 @@ describe("HistoryView multi-host", () => {
     await flushPromises();
     await wrapper.get("[data-test='clear-history']").trigger("click");
     const label = wrapper.get("[data-test='clear-history']").text();
-    expect(label).toContain("This Mac");
+    expect(label).toContain("This device");
     expect(label).toContain("okra");
     await wrapper.get("[data-test='clear-history']").trigger("click");
     await flushPromises();

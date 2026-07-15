@@ -112,7 +112,7 @@ beforeEach(() => {
 });
 
 describe("hosts store", () => {
-  it("exposes the primary connection as This Mac", () => {
+  it("exposes the primary connection as this device", () => {
     const hosts = useHostsStore();
     expect(hosts.all).toHaveLength(1);
     expect(hosts.all[0]).toMatchObject({
@@ -124,7 +124,7 @@ describe("hosts store", () => {
     });
   });
 
-  it("keeps This Mac routable when a remote host is primary", () => {
+  it("keeps this device routable when a remote host is primary", () => {
     const conn = useConnectionStore();
     conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: "remote-key" };
     conn.localInfo = {
@@ -138,7 +138,7 @@ describe("hosts store", () => {
     const hosts = useHostsStore();
     expect(hosts.all.map((host) => host.id)).toEqual(["hal9000-7680", "local"]);
     expect(hosts.all[1]).toMatchObject({
-      label: "This Mac",
+      label: "This device",
       kind: "local",
       primary: false,
       status: "ready",

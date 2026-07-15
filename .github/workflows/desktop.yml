@@ -26,6 +26,7 @@ on:
       - "scripts/create-desktop-update-manifest.sh"
       - "scripts/fix-desktop-macos-linkage.sh"
       - "scripts/notarize-desktop-dmg.sh"
+      - "scripts/prepare-desktop-linuxdeploy.sh"
       - "scripts/prune-desktop-nightly-assets.sh"
       - "scripts/select-desktop-stable-latest.sh"
       - "scripts/tests/check-desktop-nightly-main-head.sh"
@@ -56,6 +57,7 @@ on:
       - "scripts/create-desktop-update-manifest.sh"
       - "scripts/fix-desktop-macos-linkage.sh"
       - "scripts/notarize-desktop-dmg.sh"
+      - "scripts/prepare-desktop-linuxdeploy.sh"
       - "scripts/prune-desktop-nightly-assets.sh"
       - "scripts/select-desktop-stable-latest.sh"
       - "scripts/tests/check-desktop-nightly-main-head.sh"
@@ -111,7 +113,7 @@ jobs:
       - run: bun run build
 
   desktop-rust:
-    name: Rust (fmt, clippy, test)
+    name: macOS Rust (fmt, clippy, test)
     runs-on: macos-14
     defaults:
       run:
@@ -133,13 +135,167 @@ jobs:
         if: github.event_name != 'push'
         run: bunx tauri build --debug --bundles app --ci
 
+  desktop-linux:
+    name: Linux (clippy, test; main AppImage)
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      CUDA_COMPUTE_CAP: "89"
+      LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+      XDG_CACHE_HOME: /tmp/mold-desktop-cache-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          sudo apt-get clean
+      - name: Install Tauri build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang lld nasm pkg-config \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - name: Install AppImage smoke dependencies
+        if: github.event_name == 'push'
+        run: |
+          sudo apt-get install -y \
+            patchelf file wget curl xdg-utils xvfb xdotool openbox dbus-x11 imagemagick libfuse2 \
+            gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
+      - name: Install CUDA toolkit for AppImage
+        if: github.event_name == 'push'
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.8.1"
+          method: local
+          log-file-suffix: desktop-sm89
+          linux-local-args: '["--toolkit"]'
+          use-github-cache: false
+          use-local-cache: false
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          key: desktop-linux-sm89
+          cache-on-failure: true
+      - run: bun install --frozen-lockfile
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - if: github.event_name == 'push'
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features cuda -- -D warnings
+      - name: Prepare linuxdeploy and the CI driver stub
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver_stub_dir="$RUNNER_TEMP/mold-smoke-driver"
+          mkdir -p "$driver_stub_dir"
+          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$driver_stub_dir/libcuda.so.1"
+          echo "LD_LIBRARY_PATH=$driver_stub_dir:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          ../scripts/prepare-desktop-linuxdeploy.sh
+      - name: Build optimized CUDA AppImage
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bunx tauri build --features cuda --bundles appimage --ci -v
+      - name: Verify bundled CUDA libraries
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
+          test -n "$appimage"
+          extract_dir=$(mktemp -d)
+          appimage=$(realpath "$appimage")
+          (cd "$extract_dir" && "$appimage" --appimage-extract >/dev/null)
+          root="$extract_dir/squashfs-root"
+
+          if find "$root" -name 'libcuda.so*' -print -quit | grep -q .; then
+            echo "unexpected bundled NVIDIA driver" >&2
+            exit 1
+          fi
+          for library in 'libcurand.so*' 'libcublas.so*' 'libcublasLt.so*'; do
+            if ! find "$root" -name "$library" -print -quit | grep -q .; then
+              echo "missing bundled $library" >&2
+              exit 1
+            fi
+          done
+          rm -rf "$extract_dir"
+      - name: Launch AppImage under Xvfb
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
+          test -n "$appimage"
+          chmod +x "$appimage"
+          xvfb-run -a dbus-run-session -- bash -s -- "$appimage" <<'EOF'
+          set -euo pipefail
+          appimage=$1
+          screenshot=src-tauri/target/mold-appimage-smoke.png
+          body=src-tauri/target/mold-appimage-smoke-body.png
+
+          openbox >/tmp/mold-openbox.log 2>&1 &
+          wm_pid=$!
+          sleep 1
+          env WEBKIT_DISABLE_COMPOSITING_MODE=1 "$appimage" --appimage-extract-and-run &
+          pid=$!
+          cleanup() {
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            kill "$wm_pid" 2>/dev/null || true
+            wait "$wm_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          window=
+          rendered=0
+          for _ in $(seq 1 30); do
+            kill -0 "$pid"
+            window=$(xdotool search --onlyvisible --pid "$pid" 2>/dev/null | head -n 1 || true)
+            if [[ -z "$window" ]]; then
+              window=$(xdotool search --onlyvisible --name '.' 2>/dev/null | head -n 1 || true)
+            fi
+            if [[ -n "$window" ]]; then
+              if import -window "$window" "$screenshot" && \
+                convert "$screenshot" -gravity south -crop '100%x95%+0+0' +repage "$body"; then
+                rendered=$(identify -format '%[fx:standard_deviation>0.03]' "$body")
+                if [[ "$rendered" == 1 ]]; then
+                  break
+                fi
+              fi
+            fi
+            sleep 1
+          done
+
+          test -n "$window"
+          test "$rendered" = 1
+          EOF
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push' && always()
+        with:
+          name: mold-desktop-linux-smoke
+          path: desktop/src-tauri/target/mold-appimage-smoke.png
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: mold-desktop-linux-appimage-sm89
+          path: desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
   # Every desktop-relevant main commit that passes both CI jobs becomes a
   # signed, notarized nightly. The updater-artifact overlay stays isolated
   # from the fast debug PR bundle proof above.
   desktop-nightly:
     name: Build nightly distribution
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [desktop-frontend, desktop-rust]
+    needs: [desktop-frontend, desktop-rust, desktop-linux]
     uses: ./.github/workflows/desktop-distribution.yml
     with:
       channel: nightly

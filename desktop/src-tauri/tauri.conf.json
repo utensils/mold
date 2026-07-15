@@ -5,7 +5,6 @@
   "build": {
     "beforeDevCommand": "bun run dev",
     "beforeBuildCommand": "bun run build",
-    "beforeBundleCommand": "../scripts/fix-desktop-macos-linkage.sh",
     "devUrl": "http://localhost:1430",
     "frontendDist": "../dist"
   },
@@ -20,13 +19,7 @@
         "center": true,
         "maximized": true,
         "fullscreen": false,
-        "visible": false,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true,
-        "trafficLightPosition": {
-          "x": 14,
-          "y": 19
-        }
+        "visible": false
       }
     ],
     "security": {
@@ -41,7 +34,7 @@
     "copyright": "Copyright \u00a9 2026 James Brink. MIT License.",
     "category": "GraphicsAndDesign",
     "shortDescription": "Local AI image and video generation.",
-    "longDescription": "Mold generates images and video locally on your GPU \u2014 FLUX, SD, SDXL, SD3.5, Z-Image, Qwen-Image, LTX video and more \u2014 with a gallery, model manager, and multi-stage chain composer. Runs its engine in-process on Apple Silicon or connects to a remote mold server.",
+    "longDescription": "Mold generates images and video locally on your GPU \u2014 FLUX, SD, SDXL, SD3.5, Z-Image, Qwen-Image, LTX video and more \u2014 with a gallery, model manager, and multi-stage chain composer. Runs its engine in-process or connects to a remote mold server.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -50,10 +43,6 @@
       "icons/icon.ico",
       "icons/icon.png"
     ],
-    "macOS": {
-      "minimumSystemVersion": "12.0",
-      "entitlements": "Entitlements.plist"
-    },
     "createUpdaterArtifacts": false
   },
   "plugins": {

@@ -202,8 +202,8 @@ onMounted(() => void updater.init());
         class="mt-4 text-caption text-ink-3"
         role="status"
       >
-        Automatic updates are available in signed desktop builds. Browser previews and local dev
-        builds stay unchanged.
+        Automatic updates are currently available only in signed macOS builds. Linux packages,
+        browser previews, and local dev builds update manually.
       </p>
     </section>
   </div>

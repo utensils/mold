@@ -163,6 +163,8 @@ impl SecretStore {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     fn store() -> (SecretStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         (SecretStore::new(dir.path().to_path_buf()), dir)
@@ -220,6 +222,7 @@ mod tests {
 
     #[test]
     fn local_server_key_is_generated_once_and_persists() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MOLD_API_KEY");
         let dir = tempfile::tempdir().unwrap();
         let first = SecretStore::new(dir.path().to_path_buf())
@@ -234,6 +237,7 @@ mod tests {
 
     #[test]
     fn environment_overrides_the_persisted_local_server_key() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (store, _dir) = store();
         store.set(DESKTOP_LOCAL_API_KEY, "stored").unwrap();
         std::env::set_var("MOLD_API_KEY", "operator-key");

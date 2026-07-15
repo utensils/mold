@@ -166,7 +166,7 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     key: "expand.enabled",
     section: "expansion",
     label: "Enable prompt expansion",
-    help: "⌘E rewrites terse prompts into detailed ones before generating.",
+    help: "The primary shortcut plus E rewrites terse prompts before generating.",
     editor: "toggle",
   },
   {

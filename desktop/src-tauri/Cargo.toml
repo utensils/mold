@@ -75,7 +75,8 @@ mac-notification-sys = "0.6.15"
 [features]
 default = []
 # CPU-only by default so CI runs without a GPU; desktop-dev/desktop-build
-# turn this on for real Metal generation.
+# turn on the native GPU backend for real generation.
+cuda = ["mold-server/cuda"]
 metal = ["mold-server/metal"]
 
 [profile.release]

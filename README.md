@@ -160,21 +160,24 @@ See the [RunPod CLI guide](https://utensils.io/mold/deployment/runpod-cli)
 for full subcommand reference (`doctor`, `gpus`, `network-volume`, `list`,
 `create`, `stop`, `delete`, console-log handoff, `usage`, …).
 
-### Native macOS desktop
+### Native desktop
 
 **[Download the signed DMG](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** (Apple Silicon; notarized and stapled — drag to Applications).
 
-The experimental Tauri desktop app in `desktop/` embeds the Metal engine and
-keeps it available as an authenticated, mDNS-discoverable LAN server even when
-the app uses a remote primary. It can also reuse any local `mold serve` already
-on port 7680. Connected-host models form one picker, so a model installed only
-on a remote box can be selected and routed there without a local download. It
-includes Generate, a local/remote
+The experimental Tauri desktop app in `desktop/` embeds the Metal engine on
+macOS or the CUDA engine on Linux and keeps it available as an authenticated,
+mDNS-discoverable LAN server even when the app uses a remote primary. It can
+also reuse any local `mold serve` already on port 7680. Connected-host models
+form one picker, so a model installed only on a remote box can be selected and
+routed there without a local download. Linux developers can use `desktop-dev`;
+`desktop-build` creates an AppImage on conventional Linux or the native Nix
+package on NixOS via `nix build .#mold-desktop`. It includes Generate, a
+local/remote
 Gallery, parallel model downloads with real cancellation, chains, model
 catalog browsing, history, and a full settings bench. Its RunPod workspace can
 launch and manage pods and persistent network volumes without leaving the app.
 
-Signed desktop builds check for updates when they open, show a persistent banner
+Signed macOS desktop builds check for updates when they open, show a persistent banner
 when one is available, and send a native notification while the app is in the
 background. A check never installs anything. Choose **Stable** (tagged releases)
 or **Nightly** (signed builds from desktop-relevant commits on `main`) in
@@ -190,7 +193,7 @@ Mold waits for a newer Stable build.
 
 Still images expose **Copy image** from their right-click menus at full
 resolution. The complete interface—including fixed overlays and those context
-menus—scales from 80–130% with **⌘+**, **⌘−**, **⌘0**, the View menu, or
+menus—scales from 80–130% with **Cmd/Ctrl++**, **Cmd/Ctrl+−**, **Cmd/Ctrl+0**, the View menu, or
 Settings → Appearance & app, and restores the selected scale on relaunch.
 See the [desktop guide](https://utensils.io/mold/guide/desktop).
 

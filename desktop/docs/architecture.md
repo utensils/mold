@@ -1,6 +1,6 @@
 # mold Desktop — Tauri 2 Implementation Plan
 
-A brand-new macOS-first (Apple Silicon / Metal) desktop app for mold with full feature parity against the web SPA, a completely new design, living on one long-running experimental branch. All decisions below are final picks with justification.
+A native macOS (Apple Silicon / Metal) and x86_64 Linux (CUDA) desktop app for mold with full feature parity against the web SPA and a shared Safelight design. The backend and frontend stay platform-neutral; Tauri platform configs own window chrome and bundle details.
 
 ---
 
@@ -47,7 +47,7 @@ resolver = "2"
 **Pick (and why Vue again despite "don't copy the design"):** the mandate is new _design_, not new _framework_. Vue 3.5 lets us port two hard-won assets verbatim: the per-family capability matrix (`web/src/lib/generateCapabilities.ts` — the exact enable/disable logic for 11 families × 10 capabilities) and the typed API-layer knowledge in `web/src/lib/api.ts`/`useCatalog.ts`. It keeps one frontend language across the repo (Vue/Vite/Tailwind v4/vue-tsc/vitest all already proven in `web/` and in the bun2nix build). React would buy nothing here and cost a parallel toolchain. **No component library** — fully custom design system (tokens + primitives), per the "fully new, beautifully designed" mandate.
 
 - **Bundler:** Vite 7 (`^7.1`), `@vitejs/plugin-vue ^6`, dev server on **port 1430** (avoid web/'s 5173 and Aethon's 1420).
-- **Styling:** Tailwind v4 (`^4.2`, `@tailwindcss/vite`) with a custom token layer (CSS variables for surface/ink/accent, light+dark). System font stack (`-apple-system`), 13px base density, native macOS feel: three-pane layout — left nav rail (Generate / Gallery / Jobs / Models / Settings), center workspace, right inspector (parameters). Title bar is an overlay drag region with inline toolbar.
+- **Styling:** Tailwind v4 (`^4.2`, `@tailwindcss/vite`) with a custom token layer (CSS variables for surface/ink/accent, light+dark). The compact three-pane layout is shared; macOS uses overlay traffic-light chrome and Linux uses native decorations. Shortcut labels and primary modifiers are selected at build time.
 - **State:** Pinia `^3` for app/session state (connection, generation form, queue mirror, composer drafts). **Server state via `@tanstack/vue-query ^5`** (gallery, models, catalog search with its 5-min server cache, chain jobs, settings) — gives retries, cache invalidation on SSE events, and stale-while-revalidate for the gallery.
 - **Virtualized gallery:** `@tanstack/vue-virtual ^3` — virtualize rows of a CSS-grid (justified thumbnails, 256px server thumbs), `useVirtualizer` with dynamic row height. Thousands of items stay smooth.
 - **Video:** native `<video>` pointed at `GET /api/gallery/image/:filename` — the endpoint already supports HTTP Range (206), which WKWebView requires for scrubbing. Thumbnails/GIF previews from the existing endpoints. Loading `http://127.0.0.1` media from the `tauri://` origin is permitted by the CSP below.
@@ -134,19 +134,20 @@ The checked-in config deliberately leaves `createUpdaterArtifacts` false so unsi
 
 ## 5. Dev workflow & Nix devshell
 
-**Devshell additions to `/Users/jamesbrink/Projects/utensils/mold/flake.nix`** (new category `desktop`; names shadow no builtins, matching the repo's existing style):
+The shared devshell exposes cross-platform desktop helpers:
 
-| Command         | Runs                                                                                                                                                              |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `desktop-dev`   | `cd desktop && bun install --frozen-lockfile && cargo tauri dev` (Vite HMR at :1430; `beforeDevCommand` handles the dev server)                                   |
-| `desktop-build` | `cd desktop && bun install --frozen-lockfile && cargo tauri build` — sources `.secrets/signing.env` if present (Aethon opt-in signing flow), else ad-hoc unsigned |
-| `desktop-check` | `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` (with `--manifest-path desktop/src-tauri/Cargo.toml`) + `vue-tsc -b` + `bun run lint`           |
-| `desktop-test`  | `cargo test --manifest-path desktop/src-tauri/Cargo.toml` + `bun run test` (vitest)                                                                               |
-| `desktop-ui`    | `cd desktop && bun run dev` (frontend-only in a browser against a running `mold serve` — fastest UI iteration loop)                                               |
+| Command            | Runs                                                                                                                             |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `desktop-dev`      | Installs locked frontend dependencies, clears a stale Vite listener, and runs Tauri with Metal on macOS or CUDA on Linux         |
+| `desktop-build`    | Builds the macOS application bundle or the native Linux desktop package and AppImage; optional signing secrets remain macOS-only |
+| `desktop-check`    | Runs Rust formatting and warning-denied clippy plus frontend format and type checks                                              |
+| `desktop-test`     | Runs the CPU-only Rust test suite, embedded-engine boot test, and frontend Vitest suite                                          |
+| `desktop-ui`       | Runs the frontend-only Vite server against a running `mold serve`                                                                |
+| `desktop-bun-lock` | Refreshes the Nix-pinned Bun dependency lock after `desktop/bun.lock` changes                                                    |
 
-**Packages added to devshell:** `cargo-tauri` (nixpkgs; Tauri 2.x CLI — verify `cargo tauri --version` ≥ 2.4 at setup), plus existing `bun`. macOS needs no webkit packages (system WKWebView). **Darwin gotcha carried from Aethon:** export `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/cc` and `RUSTC_LINKER=/usr/bin/cc` _scoped to desktop commands_ (mold's devshell doesn't currently pin these; Tauri's objc2/system-framework linking fails or produces Team-ID-rejected binaries with the Nix linker). Linux later: reuse Aethon's `linuxBuildInputs` list (webkitgtk_4_1, gtk3, libsoup_3, …) verbatim when that milestone arrives.
+The devshell includes `cargo-tauri`, Bun tooling, `lsof`, and ImageMagick. Linux adds WebKitGTK, GTK, Soup, GStreamer, CUDA, and the runtime library paths required by the launched binary. macOS uses system WKWebView and scopes the system C compiler linker variables to desktop commands so the existing Apple build and signing flow is unchanged.
 
-**Nix package `mold-desktop` (aarch64-darwin first):** Aethon's recipe — `rustPlatform.buildRustPackage` + `pkgs.cargo-tauri.hook`, `cargoRoot = "src-tauri"` (relative to `desktop/` source), `buildAndTestSubdir`, `cargoLock.lockFile = ./desktop/src-tauri/Cargo.lock`, frontend deps via **bun2nix** (`fetchBunDeps { bunNix = ./desktop/bun.nix; }` — consistent with `mold-web`, not Aethon's npm hooks), `darwinBuildInputs = []` (system libiconv), `tauriBuildFlags = ["--no-sign"]`, postInstall wrapping `Mold.app/Contents/MacOS/mold-desktop` into `$out/bin`. Adopt `scripts/verify-bundle.sh` (Mach-O scan for `/nix/store` leaks). This lands in M6 — dev workflow doesn't block on it.
+The flake exports `mold-desktop` for the platform default GPU target. Linux also exports `mold-desktop-sm120` for Blackwell and an AppImage through `desktop-build`; macOS keeps the existing application bundle, signing, and bundle-verification path. Frontend dependencies are pinned through bun2nix on both platforms.
 
 **Rust toolchain:** the devshell's existing `rust-bin.stable.latest`. If a toolchain/Tauri transitive-dep breakage appears (Aethon had to pin 1.92 because 1.95 broke icu_provider/objc2), pin **only** in the desktop package derivation, never the shared devshell toolchain.
 

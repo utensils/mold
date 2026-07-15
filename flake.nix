@@ -36,6 +36,7 @@
           "${builtins.substring 0 4 raw}-${builtins.substring 4 2 raw}-${builtins.substring 6 2 raw}"
         else
           "unknown";
+      workspaceVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
     in
     inputs.flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
@@ -134,9 +135,47 @@
             NIX_LDFLAGS = "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
           };
 
-          opensslPkgConfigPath = "${pkgs.openssl.dev}/lib/pkgconfig";
           opensslLibDir = "${pkgs.lib.getLib pkgs.openssl}/lib";
           opensslIncludeDir = "${pkgs.openssl.dev}/include";
+
+          desktopLinuxBuildInputs = with pkgs; [
+            dbus
+            gst_all_1.gst-libav
+            gst_all_1.gst-plugins-bad
+            gst_all_1.gst-plugins-base
+            gst_all_1.gst-plugins-good
+            gst_all_1.gst-plugins-ugly
+            gst_all_1.gstreamer
+            gtk3
+            libayatana-appindicator
+            librsvg
+            libsoup_3
+            xdotool
+            webkitgtk_4_1
+            zlib
+          ];
+
+          desktopPkgConfigInputs = lib.closePropagation (
+            [ pkgs.openssl ] ++ lib.optionals isLinux desktopLinuxBuildInputs
+          );
+
+          desktopLinuxRuntimeInputs = lib.closePropagation (
+            desktopLinuxBuildInputs
+            ++ (with pkgs; [
+              atk
+              cairo
+              gdk-pixbuf
+              glib
+              pango
+            ])
+          );
+
+          desktopPkgConfigPath = lib.concatStringsSep ":" [
+            (lib.makeSearchPath "lib/pkgconfig" (map lib.getDev desktopPkgConfigInputs))
+            (lib.makeSearchPath "share/pkgconfig" (map lib.getDev desktopPkgConfigInputs))
+          ];
+
+          desktopFeature = if isLinux then "cuda" else "metal";
 
           gpuFeature =
             if isLinux then
@@ -315,7 +354,7 @@
           # Desktop app frontend (Vue SPA under desktop/), built like mold-web.
           mold-desktop-web = pkgs.stdenv.mkDerivation {
             pname = "mold-desktop-web";
-            version = "0.14.0";
+            version = workspaceVersion;
             src = ./desktop;
             nativeBuildInputs = [ pkgs.bun2nix.hook ];
             bunDeps = pkgs.bun2nix.fetchBunDeps {
@@ -339,89 +378,122 @@
             '';
           };
 
-          # Tauri desktop app (aarch64-darwin, experimental branch).
-          # Aethon recipe: rustPlatform + cargo-tauri.hook, own Cargo.lock,
-          # NO nix build inputs on Darwin (system libiconv → no /nix/store
-          # dyld leaks in the bundle), unsigned; the prebuilt SPA is staged
-          # so tauri's beforeBuildCommand becomes a no-op.
-          mold-desktop = pkgs.rustPlatform.buildRustPackage {
-            pname = "mold-desktop";
-            version = "0.14.0";
-            src = craneLib.path ./.;
-            cargoRoot = "desktop/src-tauri";
-            buildAndTestSubdir = "desktop/src-tauri";
-            cargoLock.lockFile = ./desktop/src-tauri/Cargo.lock;
-            buildFeatures = [ "metal" ];
+          # Tauri desktop app. The Nix package uses a native app bundle on
+          # Darwin and a deb intermediate on Linux, which cargo-tauri.hook
+          # installs into a regular Nix output. AppImage builds remain a
+          # developer/CI distribution path outside the Nix sandbox.
+          mkMoldDesktop =
+            computeCap:
+            pkgs.rustPlatform.buildRustPackage {
+              pname = "mold-desktop";
+              version = workspaceVersion;
+              src = craneLib.path ./.;
+              cargoRoot = "desktop/src-tauri";
+              buildAndTestSubdir = "desktop/src-tauri";
+              cargoLock.lockFile = ./desktop/src-tauri/Cargo.lock;
+              buildFeatures = [ desktopFeature ];
 
-            MOLD_GIT_SHA = gitShortRev;
-            MOLD_BUILD_DATE = gitDate;
-            # The embedded engine serves the regular web SPA to browsers.
-            MOLD_WEB_DIST = "${mold-web}";
+              MOLD_GIT_SHA = gitShortRev;
+              MOLD_BUILD_DATE = gitDate;
+              # The embedded engine serves the regular web SPA to browsers.
+              MOLD_WEB_DIST = "${mold-web}";
+              CUDA_PATH = lib.optionalString isLinux "${cudaToolkit}";
+              CUDA_COMPUTE_CAP = lib.optionalString isLinux computeCap;
+              NIX_LDFLAGS = lib.optionalString isLinux "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
 
-            nativeBuildInputs = [
-              pkgs.cargo-tauri.hook
-              pkgs.pkg-config
-              pkgs.nasm
-              pkgs.makeBinaryWrapper
-            ];
-            buildInputs = [
-              pkgs.openssl
-              pkgs.libwebp
-            ];
+              nativeBuildInputs = [
+                pkgs.cargo-tauri.hook
+                pkgs.pkg-config
+                pkgs.nasm
+                pkgs.makeBinaryWrapper
+              ]
+              ++ lib.optionals isLinux [
+                pkgs.autoPatchelfHook
+                pkgs.clang
+                pkgs.cudaPackages.cuda_nvcc
+                pkgs.lld
+                pkgs.wrapGAppsHook3
+              ];
+              buildInputs = [
+                pkgs.openssl
+                pkgs.libwebp
+              ]
+              ++ lib.optionals isLinux (
+                desktopLinuxBuildInputs
+                ++ [
+                  pkgs.stdenv.cc.cc.lib
+                  pkgs.cudaPackages.cuda_cudart
+                  pkgs.cudaPackages.libcublas.lib
+                  pkgs.cudaPackages.cuda_nvrtc.lib
+                  pkgs.cudaPackages.libcurand.lib
+                ]
+              );
 
-            postPatch = ''
-              mkdir -p desktop/dist
-              cp -R ${mold-desktop-web}/. desktop/dist/
-              ${pkgs.jq}/bin/jq '.build.beforeBuildCommand = ""' \
-                desktop/src-tauri/tauri.conf.json > tauri.conf.tmp
-              mv tauri.conf.tmp desktop/src-tauri/tauri.conf.json
-            '';
+              autoPatchelfIgnoreMissingDeps = lib.optionals isLinux [ "libcuda.so.1" ];
 
-            tauriBuildFlags = [
-              "--bundles"
-              "app"
-            ];
-            doCheck = false;
+              postPatch = ''
+                mkdir -p desktop/dist
+                cp -R ${mold-desktop-web}/. desktop/dist/
+                ${pkgs.jq}/bin/jq '.build.beforeBuildCommand = ""' \
+                  desktop/src-tauri/tauri.conf.json > tauri.conf.tmp
+                mv tauri.conf.tmp desktop/src-tauri/tauri.conf.json
+              '';
 
-            postInstall = ''
-              if [ -d "$out/Applications/Mold.app" ]; then
-                mkdir -p $out/bin
-                makeBinaryWrapper "$out/Applications/Mold.app/Contents/MacOS/mold-desktop" \
-                  $out/bin/mold-desktop
-              fi
-            '';
+              tauriBundleType = lib.optionalString isLinux "deb";
+              tauriBuildFlags = lib.optionals isDarwin [
+                "--bundles"
+                "app"
+              ];
+              doCheck = false;
 
-            # A signed/notarized bundle must not load /nix/store dylibs
-            # (dyld Team-ID rejection); libiconv links in via stdenv — point
-            # it at the system copy and re-sign ad hoc.
-            postFixup = ''
-              app_bin="$out/Applications/Mold.app/Contents/MacOS/mold-desktop"
-              if [ -f "$app_bin" ]; then
-                for ref in $(${pkgs.darwin.cctools}/bin/otool -L "$app_bin" \
-                  | awk '/\/nix\/store\/.*libiconv/ {print $1}'); do
-                  ${pkgs.darwin.cctools}/bin/install_name_tool \
-                    -change "$ref" /usr/lib/libiconv.2.dylib "$app_bin"
-                done
-                # install_name_tool invalidates the ad-hoc signature; re-sign
-                # with the sigtool codesign shim (sandbox has no Apple codesign).
-                ${pkgs.darwin.sigtool}/bin/codesign -f -s - "$app_bin"
-                # tail +2: otool's header line is the binary's own store path.
-                if ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" | tail -n +2 | grep -q "/nix/store"; then
-                  echo "mold-desktop still references /nix/store dylibs:" >&2
-                  ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" >&2
-                  exit 1
+              postInstall = lib.optionalString isDarwin ''
+                if [ -d "$out/Applications/Mold.app" ]; then
+                  mkdir -p $out/bin
+                  makeBinaryWrapper "$out/Applications/Mold.app/Contents/MacOS/mold-desktop" \
+                    $out/bin/mold-desktop
                 fi
-              fi
-            '';
+              '';
 
-            meta = with lib; {
-              description = "Mold — native desktop app for local AI image/video generation";
-              homepage = "https://github.com/utensils/mold";
-              license = licenses.mit;
-              mainProgram = "mold-desktop";
-              platforms = [ "aarch64-darwin" ];
+              # A signed/notarized bundle must not load /nix/store dylibs
+              # (dyld Team-ID rejection); libiconv links in via stdenv — point
+              # it at the system copy and re-sign ad hoc.
+              postFixup =
+                lib.optionalString isDarwin ''
+                  app_bin="$out/Applications/Mold.app/Contents/MacOS/mold-desktop"
+                  if [ -f "$app_bin" ]; then
+                    for ref in $(${pkgs.darwin.cctools}/bin/otool -L "$app_bin" \
+                      | awk '/\/nix\/store\/.*libiconv/ {print $1}'); do
+                      ${pkgs.darwin.cctools}/bin/install_name_tool \
+                        -change "$ref" /usr/lib/libiconv.2.dylib "$app_bin"
+                    done
+                    # install_name_tool invalidates the ad-hoc signature; re-sign
+                    # with the sigtool codesign shim (sandbox has no Apple codesign).
+                    ${pkgs.darwin.sigtool}/bin/codesign -f -s - "$app_bin"
+                    # tail +2: otool's header line is the binary's own store path.
+                    if ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" | tail -n +2 | grep -q "/nix/store"; then
+                      echo "mold-desktop still references /nix/store dylibs:" >&2
+                      ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" >&2
+                      exit 1
+                    fi
+                  fi
+                ''
+                + lib.optionalString isLinux ''
+                  patchelf --add-rpath /run/opengl-driver/lib "$out/bin/mold-desktop"
+                '';
+
+              meta = with lib; {
+                description = "Mold — native desktop app for local AI image/video generation";
+                homepage = "https://github.com/utensils/mold";
+                license = licenses.mit;
+                mainProgram = "mold-desktop";
+                platforms = [
+                  "aarch64-darwin"
+                  "x86_64-linux"
+                ];
+              };
             };
-          };
+
+          mold-desktop = mkMoldDesktop cudaComputeCap;
 
           # Build a mold package for a given CUDA compute capability.
           # `MOLD_WEB_DIST` is read by `crates/mold-server/build.rs`, which
@@ -508,17 +580,18 @@
           _module.args.pkgs = pkgs;
 
           packages = {
-            inherit mold mold-web;
+            inherit
+              mold
+              mold-desktop
+              mold-desktop-web
+              mold-web
+              ;
             mold-discord = moldDiscord;
             default = mold;
           }
           // lib.optionalAttrs isLinux {
             mold-sm120 = mkMold "120"; # Blackwell (RTX 50-series)
-          }
-          # Experimental Tauri desktop app — deliberately NOT in `checks`
-          # (flake check is the CI gate; this stays opt-in until merge-ready).
-          // lib.optionalAttrs isDarwin {
-            inherit mold-desktop mold-desktop-web;
+            mold-desktop-sm120 = mkMoldDesktop "120";
           };
 
           checks = {
@@ -577,6 +650,29 @@
               export MOLD_TEST_RPATH
               assertMoldRunpath
             '';
+          }
+          // lib.optionalAttrs isLinux {
+            desktop-runtime-closure = pkgs.runCommand "mold-desktop-runtime-closure-check" { } ''
+              set -eu
+              runtime_path=${lib.escapeShellArg (lib.makeLibraryPath desktopLinuxRuntimeInputs)}
+              for library in libgdk_pixbuf-2.0.so.0 libcairo.so.2 libglib-2.0.so.0 libgio-2.0.so.0; do
+                found=
+                old_ifs=$IFS
+                IFS=:
+                for directory in $runtime_path; do
+                  if [ -e "$directory/$library" ]; then
+                    found=1
+                    break
+                  fi
+                done
+                IFS=$old_ifs
+                if [ -z "$found" ]; then
+                  echo "desktop runtime closure is missing $library" >&2
+                  exit 1
+                fi
+              done
+              touch "$out"
+            '';
           };
 
           apps.default = {
@@ -600,6 +696,8 @@
               pkgs.git
               pkgs.gh
               pkgs.jq
+              pkgs.lsof
+              pkgs.curl
               pkgs.viu
               pkgs.mpv
               pkgs.cargo-llvm-cov
@@ -617,14 +715,19 @@
               pkgs.llvmPackages.libcxxClang
             ]
             ++ lib.optionals isLinux [
+              pkgs.clang
+              pkgs.file
               pkgs.lld
+              pkgs.wget
+              pkgs.xdg-utils
               pkgs.cudaPackages.cuda_nvcc
               pkgs.cudaPackages.cuda_cudart
               pkgs.cudaPackages.libcublas.lib
               pkgs.cudaPackages.cuda_nvtx.lib
               pkgs.cudaPackages.cuda_nvrtc.lib
               pkgs.cudaPackages.libcurand.lib
-            ];
+            ]
+            ++ lib.optionals isLinux desktopLinuxBuildInputs;
 
             env = [
               {
@@ -647,12 +750,12 @@
                 value = "sccache";
               }
               {
-                name = "PKG_CONFIG_PATH";
-                value = opensslPkgConfigPath;
-              }
-              {
                 name = "OPENSSL_DIR";
                 value = "${pkgs.openssl.dev}";
+              }
+              {
+                name = "PKG_CONFIG_PATH";
+                value = desktopPkgConfigPath;
               }
               {
                 name = "OPENSSL_LIB_DIR";
@@ -694,24 +797,32 @@
                   # stub placeholder. Without this, debug builds link against
                   # the stub and fail at runtime with CUDA_ERROR_STUB_LIBRARY.
                   "/run/opengl-driver/lib:"
-                  + lib.makeLibraryPath [
-                    pkgs.cudaPackages.cuda_cudart
-                    pkgs.cudaPackages.libcublas.lib
-                    pkgs.cudaPackages.cuda_nvrtc.lib
-                    pkgs.cudaPackages.libcurand.lib
-                  ]
+                  + lib.makeLibraryPath (
+                    desktopLinuxRuntimeInputs
+                    ++ [
+                      pkgs.stdenv.cc.cc.lib
+                      pkgs.cudaPackages.cuda_cudart
+                      pkgs.cudaPackages.libcublas.lib
+                      pkgs.cudaPackages.cuda_nvrtc.lib
+                      pkgs.cudaPackages.libcurand.lib
+                    ]
+                  )
                   + ":${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
               }
               {
                 name = "LD_LIBRARY_PATH";
                 value =
                   "/run/opengl-driver/lib:"
-                  + lib.makeLibraryPath [
-                    pkgs.cudaPackages.cuda_cudart
-                    pkgs.cudaPackages.libcublas.lib
-                    pkgs.cudaPackages.cuda_nvrtc.lib
-                    pkgs.cudaPackages.libcurand.lib
-                  ];
+                  + lib.makeLibraryPath (
+                    desktopLinuxRuntimeInputs
+                    ++ [
+                      pkgs.stdenv.cc.cc.lib
+                      pkgs.cudaPackages.cuda_cudart
+                      pkgs.cudaPackages.libcublas.lib
+                      pkgs.cudaPackages.cuda_nvrtc.lib
+                      pkgs.cudaPackages.libcurand.lib
+                    ]
+                  );
               }
             ];
 
@@ -943,7 +1054,7 @@
               {
                 category = "desktop";
                 name = "desktop-dev";
-                help = "run the Tauri desktop app with hot reload (Vite on :1430)";
+                help = "run the native Tauri desktop app with hot reload (Vite on :1430)";
                 command = ''
                   set -euo pipefail
                   ${desktopSetup}
@@ -960,53 +1071,76 @@
                   fi
                   cd desktop
                   bun install --frozen-lockfile
-                  cargo tauri dev --features metal "$@"
+                  cargo tauri dev --features ${desktopFeature} "$@"
                 '';
               }
               {
                 category = "desktop";
                 name = "desktop-build";
-                help = "build the Mold.app bundle (signed if .secrets/signing.env exists)";
+                help = "build the native desktop bundle (Mold.app, AppImage, or Nix package on NixOS)";
                 command = ''
                   set -euo pipefail
                   ${desktopSetup}
-                  if [ -f .secrets/signing.env ]; then
+                  if [ "$(uname -s)" = "Darwin" ] && [ -f .secrets/signing.env ]; then
                     # shellcheck disable=SC1091
                     source .secrets/signing.env
                   fi
                   cd desktop
                   bun install --frozen-lockfile
-                  cargo tauri build --features metal "$@"
+                  ${
+                    if isLinux then
+                      ''
+                        if [ -x /usr/bin/xdg-open ]; then
+                          export XDG_CACHE_HOME="''${MOLD_DESKTOP_CACHE_HOME:-''${XDG_CACHE_HOME:-$HOME/.cache}/mold-desktop}"
+                          ../scripts/prepare-desktop-linuxdeploy.sh
+                          cargo tauri build --features ${desktopFeature} --bundles appimage "$@"
+                        else
+                          # Tauri's downloaded linuxdeploy tools require an FHS
+                          # host. NixOS has a first-class native package instead.
+                          cd ..
+                          nix build .#mold-desktop "$@"
+                        fi
+                      ''
+                    else
+                      ''cargo tauri build --features ${desktopFeature} --bundles app "$@"''
+                  }
                 '';
               }
               {
                 category = "desktop";
                 name = "desktop-release";
                 help = "build, notarize, staple, and verify the Mold app + DMG";
-                command = ''
-                  set -euo pipefail
-                  ${desktopSetup}
-                  if [ ! -f .secrets/signing.env ]; then
-                    echo "missing .secrets/signing.env (see website/guide/desktop.md)" >&2
-                    exit 1
-                  fi
-                  # shellcheck disable=SC1091
-                  source .secrets/signing.env
-                  for name in APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH; do
-                    if [ -z "''${!name:-}" ]; then
-                      echo "missing $name in .secrets/signing.env" >&2
+                command =
+                  if isDarwin then
+                    ''
+                      set -euo pipefail
+                      ${desktopSetup}
+                      if [ ! -f .secrets/signing.env ]; then
+                        echo "missing .secrets/signing.env (see website/guide/desktop.md)" >&2
+                        exit 1
+                      fi
+                      # shellcheck disable=SC1091
+                      source .secrets/signing.env
+                      for name in APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH; do
+                        if [ -z "''${!name:-}" ]; then
+                          echo "missing $name in .secrets/signing.env" >&2
+                          exit 1
+                        fi
+                      done
+                      cd desktop
+                      bun install --frozen-lockfile
+                      cargo tauri build --features metal --bundles app,dmg "$@"
+                      cd ..
+                      app="desktop/src-tauri/target/release/bundle/macos/Mold.app"
+                      dmg=$(find desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)
+                      scripts/notarize-desktop-dmg.sh "$dmg"
+                      scripts/verify-desktop-release.sh "$app" "$dmg"
+                    ''
+                  else
+                    ''
+                      echo "desktop-release is the signed macOS distribution path; use desktop-build for a Linux AppImage" >&2
                       exit 1
-                    fi
-                  done
-                  cd desktop
-                  bun install --frozen-lockfile
-                  cargo tauri build --features metal --bundles app,dmg "$@"
-                  cd ..
-                  app="desktop/src-tauri/target/release/bundle/macos/Mold.app"
-                  dmg=$(find desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)
-                  scripts/notarize-desktop-dmg.sh "$dmg"
-                  scripts/verify-desktop-release.sh "$app" "$dmg"
-                '';
+                    '';
               }
               {
                 category = "desktop";
