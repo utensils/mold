@@ -413,6 +413,7 @@ function applyPrefill() {
   form.height = prefill.height;
   form.steps = prefill.steps;
   form.guidance = prefill.guidance;
+  form.upscaleModel = prefill.upscaleModel ?? "";
   const m = findInstalledModel(installedModels.value, prefill.model);
   if (m) form.family = m.family;
   void nextTick(() => promptEl.value?.focus());

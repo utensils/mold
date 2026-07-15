@@ -57,9 +57,12 @@ const halRoute = {
 function completeFrame() {
   return JSON.stringify({
     image: "aGVsbG8=",
+    original_image: "b3JpZ2luYWw=",
     format: "png",
     width: 512,
     height: 512,
+    original_width: 128,
+    original_height: 128,
     seed_used: 7,
     generation_time_ms: 100,
     model: "flux2-klein",
@@ -108,10 +111,13 @@ describe("generation store multi-host routing", () => {
     const store = useGenerationStore();
     const { settled } = store.submitBatch(request(), 1, halRoute);
     await settled;
-    expect(saveOutputBytes).toHaveBeenCalledTimes(1);
-    const [filename, b64] = saveOutputBytes.mock.calls[0] as [string, string];
-    expect(filename).toMatch(/^mold-flux2-klein-7-\d+\.png$/);
-    expect(b64).toBe("aGVsbG8=");
+    expect(saveOutputBytes).toHaveBeenCalledTimes(2);
+    const [originalName, originalB64] = saveOutputBytes.mock.calls[0] as [string, string];
+    const [upscaledName, upscaledB64] = saveOutputBytes.mock.calls[1] as [string, string];
+    expect(originalName).toMatch(/^mold-flux2-klein-7-\d+-original\.png$/);
+    expect(originalB64).toBe("b3JpZ2luYWw=");
+    expect(upscaledName).toMatch(/^mold-flux2-klein-7-\d+-upscaled\.png$/);
+    expect(upscaledB64).toBe("aGVsbG8=");
   });
 
   it("skips the local save for local jobs and when the pref is off", async () => {

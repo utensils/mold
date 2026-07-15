@@ -217,9 +217,11 @@ wire types as the CLI and web UI:
   the VRAM badge states plainly what fits ("VRAM · fits — est. 2.3 GB of
   64.0 GB").
 - **Upscaling** — pick a Real-ESRGAN model in the Print panel to upscale every
-  print as it develops (the engine pulls the model on first use), or
+  print as it develops (the engine pulls the model on first use and retains
+  both the original and `-upscaled` result), or
   right-click any gallery image → **Upscale**; the result lands in this Mac's
-  gallery.
+  gallery. **Reuse settings** always restores the generation canvas, not the
+  upscaled file's physical dimensions.
 - **Jobs (⌘6)** — a queue console for every connected host: the full
   server-side queue (other clients' jobs included), live thumbnails and step
   progress for this app's own jobs, per-job cancel, **Pause/Resume** of a

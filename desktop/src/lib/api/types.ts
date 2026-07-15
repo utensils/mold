@@ -257,6 +257,9 @@ export interface CompleteEvent {
   format: OutputFormat;
   width: number;
   height: number;
+  original_image?: string | null;
+  original_width?: number | null;
+  original_height?: number | null;
   seed_used: number;
   generation_time_ms: number;
   model: string;
@@ -276,6 +279,8 @@ export interface OutputMetadata {
   guidance: number;
   width: number;
   height: number;
+  generation_width?: number | null;
+  generation_height?: number | null;
   strength?: number | null;
   scheduler?: string | null;
   output_format?: OutputFormat | null;

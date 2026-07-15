@@ -421,6 +421,8 @@ Force stdout in interactive mode: `mold run "a cat" --output -`
 Upscale images to 2x or 4x resolution using Real-ESRGAN super-resolution models.
 Standalone and post-generation upscales auto-download the selected model on the
 server that runs the job, including remote multi-GPU hosts.
+Post-generation upscale retains distinct `-original` and `-upscaled` gallery
+artifacts; reuse restores the pre-upscale generation canvas from metadata.
 
 ```bash
 # Upscale with default model (real-esrgan-x4plus:fp16, auto-downloads ~32MB)

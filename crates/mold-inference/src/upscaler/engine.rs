@@ -201,16 +201,12 @@ impl UpscaleEngine for UpscalerEngine {
             image::ImageBuffer::from_raw(out_w as u32, out_h as u32, rgb_out)
                 .context("failed to create output image buffer")?;
 
-        let encoded = {
-            let mut buf = std::io::Cursor::new(Vec::new());
-            let fmt = match req.output_format {
-                mold_core::OutputFormat::Png => image::ImageFormat::Png,
-                mold_core::OutputFormat::Jpeg => image::ImageFormat::Jpeg,
-                _ => image::ImageFormat::Png, // video formats not applicable for upscaler
-            };
-            img_buf.write_to(&mut buf, fmt)?;
-            buf.into_inner()
-        };
+        let mut metadata = req.metadata.clone();
+        if let Some(metadata) = metadata.as_mut() {
+            metadata.apply_output_dimensions(out_w as u32, out_h as u32);
+        }
+        let encoded =
+            crate::image::encode_rgb_image(&img_buf, req.output_format, metadata.as_ref())?;
 
         self.progress
             .stage_done("Encoding output", encode_start.elapsed());

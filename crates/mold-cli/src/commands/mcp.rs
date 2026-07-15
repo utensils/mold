@@ -2124,6 +2124,8 @@ mod tests {
                 guidance: 0.0,
                 width: 768,
                 height: 768,
+                generation_width: Some(768),
+                generation_height: Some(768),
                 strength: None,
                 scheduler: None,
                 output_format: Some(OutputFormat::Png),

@@ -84,10 +84,11 @@ function reuseSettings() {
     prompt: m.prompt,
     model: m.model,
     seed: m.seed,
-    width: m.width,
-    height: m.height,
+    width: m.generation_width ?? m.width,
+    height: m.generation_height ?? m.height,
     steps: m.steps,
     guidance: m.guidance,
+    upscaleModel: m.upscale_model ?? "",
   });
   emit("close");
   void router.push("/generate");

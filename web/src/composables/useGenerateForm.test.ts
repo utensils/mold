@@ -801,6 +801,8 @@ describe("generate form serialization helpers", () => {
       guidance: 7.5,
       width: 768,
       height: 512,
+      generation_width: 192,
+      generation_height: 128,
       strength: 0.6,
       scheduler: "ddim",
       output_format: "jpeg",
@@ -827,6 +829,8 @@ describe("generate form serialization helpers", () => {
     expect(next.seedMode).toBe("static");
     expect(next.seed).toBe(42);
     expect(next.outputFormat).toBe("jpeg");
+    expect(next.width).toBe(192);
+    expect(next.height).toBe(128);
     expect(next.imageAttachments).toEqual([]);
     expect(next.loras).toEqual([
       { path: "/loras/one.safetensors", scale: 0.8 },

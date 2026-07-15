@@ -2381,6 +2381,7 @@ mod tests {
             image: png_bytes(),
             output_format: crate::OutputFormat::Png,
             tile_size: None,
+            metadata: None,
         }
     }
 

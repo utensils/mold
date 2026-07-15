@@ -30,12 +30,13 @@ export function suggestOutputFilename(
   seed: number,
   format: string,
   nowMs: number = Date.now(),
+  role?: "original" | "upscaled",
 ): string {
   const slug = model
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return `mold-${slug}-${seed}-${nowMs}.${format}`;
+  return `mold-${slug}-${seed}-${nowMs}${role ? `-${role}` : ""}.${format}`;
 }
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
@@ -476,13 +477,42 @@ export const useGenerationStore = defineStore("generation", {
               // the SSE payload is the encoded output file, metadata included,
               // so no extra download is needed.
               if (current.remote && (useAppPrefsStore().settings?.saveRemoteOutputs ?? true)) {
-                const filename = suggestOutputFilename(
-                  complete.model,
-                  complete.seed_used,
-                  complete.format,
-                );
-                ipc
-                  .saveOutputBytes(filename, complete.image)
+                const now = Date.now();
+                const saves = complete.original_image
+                  ? [
+                      ipc.saveOutputBytes(
+                        suggestOutputFilename(
+                          complete.model,
+                          complete.seed_used,
+                          complete.format,
+                          now,
+                          "original",
+                        ),
+                        complete.original_image,
+                      ),
+                      ipc.saveOutputBytes(
+                        suggestOutputFilename(
+                          complete.model,
+                          complete.seed_used,
+                          complete.format,
+                          now,
+                          "upscaled",
+                        ),
+                        complete.image,
+                      ),
+                    ]
+                  : [
+                      ipc.saveOutputBytes(
+                        suggestOutputFilename(
+                          complete.model,
+                          complete.seed_used,
+                          complete.format,
+                          now,
+                        ),
+                        complete.image,
+                      ),
+                    ];
+                Promise.all(saves)
                   .then(() => void useGalleryStore().refreshHost("local"))
                   .catch((err) => {
                     console.warn("local save of remote output failed:", err);

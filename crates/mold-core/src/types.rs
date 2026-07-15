@@ -213,6 +213,10 @@ pub struct UpscaleRequest {
     /// Default is 512. Set to 0 to disable tiling (process entire image at once).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tile_size: Option<u32>,
+    /// Optional generation metadata to preserve in a post-generation upscale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub metadata: Option<OutputMetadata>,
 }
 
 /// Response from image upscaling.
@@ -603,6 +607,12 @@ pub struct OutputMetadata {
     pub guidance: f64,
     pub width: u32,
     pub height: u32,
+    /// Generation canvas before any post-generation upscaler. These stay
+    /// stable when `width` / `height` are updated to describe the saved file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strength: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -677,6 +687,8 @@ impl OutputMetadata {
             guidance: req.guidance,
             width: req.width,
             height: req.height,
+            generation_width: Some(req.width),
+            generation_height: Some(req.height),
             strength: req.source_image.as_ref().map(|_| req.strength),
             scheduler,
             output_format: req.output_format,
@@ -1128,6 +1140,13 @@ pub struct SseCompleteEvent {
     pub width: u32,
     #[schema(example = 1024)]
     pub height: u32,
+    /// Original generated image before post-generation upscaling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_height: Option<u32>,
     #[schema(example = 42)]
     pub seed_used: u64,
     #[schema(example = 1234)]
@@ -1867,6 +1886,9 @@ mod tests {
             format: OutputFormat::Png,
             width: 1024,
             height: 1024,
+            original_image: None,
+            original_width: None,
+            original_height: None,
             seed_used: 42,
             generation_time_ms: 5000,
             model: "flux-schnell:q8".to_string(),
@@ -2537,6 +2559,7 @@ mod tests {
             image: image_bytes.clone(),
             output_format: OutputFormat::Png,
             tile_size: Some(256),
+            metadata: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("real-esrgan-x4plus:fp16"));
@@ -2558,6 +2581,7 @@ mod tests {
             image: vec![0xFF, 0xD8],
             output_format: OutputFormat::Jpeg,
             tile_size: None,
+            metadata: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("tile_size"));
@@ -2605,6 +2629,9 @@ mod tests {
             format: OutputFormat::Mp4,
             width: 832,
             height: 480,
+            original_image: None,
+            original_width: None,
+            original_height: None,
             seed_used: 99,
             generation_time_ms: 12000,
             model: "ltx-2.3-22b-distilled:fp8".to_string(),
@@ -2647,6 +2674,9 @@ mod tests {
             format: OutputFormat::Gif,
             width: 512,
             height: 512,
+            original_image: None,
+            original_width: None,
+            original_height: None,
             seed_used: 1,
             generation_time_ms: 100,
             model: "ltx-video:bf16".to_string(),
@@ -2701,6 +2731,9 @@ mod tests {
             format: OutputFormat::Png,
             width: 1024,
             height: 1024,
+            original_image: None,
+            original_width: None,
+            original_height: None,
             seed_used: 1,
             generation_time_ms: 100,
             model: "flux-dev:q8".to_string(),

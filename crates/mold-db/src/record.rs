@@ -143,6 +143,8 @@ mod tests {
             guidance: 3.0,
             width: 4,
             height: 5,
+            generation_width: Some(4),
+            generation_height: Some(5),
             strength: None,
             scheduler: None,
             output_format: Some(OutputFormat::Png),
