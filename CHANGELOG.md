@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-07-15
+
 ### Fixed
 
 - **Desktop updates no longer roll back a working interface while the engine starts.** Candidate health is now confirmed as soon as the restored route and native shell have painted instead of waiting for the local engine or a remote host to finish its potentially slow startup probe. A candidate whose interface never boots is stopped and restored after 15 seconds rather than lingering for a full minute; the relaunched backup continues to show the concrete recovery error.
@@ -914,7 +916,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/utensils/mold/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/utensils/mold/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/utensils/mold/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/utensils/mold/compare/v0.14.0...v0.15.0
