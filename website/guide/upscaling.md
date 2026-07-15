@@ -95,6 +95,8 @@ This will generate at the model's native resolution (e.g. 1024x1024) and then
 upscale it (to 4096x4096 at 4x). Both files are retained in the gallery with
 `-original` and `-upscaled` suffixes. Reusing either entry restores the native
 1024x1024 generation canvas and keeps the selected upscaler enabled.
+If post-generation upscaling fails, Mold keeps the successful original as a
+single gallery artifact instead of failing the entire generation.
 
 ## Piping
 

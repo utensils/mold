@@ -2,7 +2,7 @@ use crate::gpu_pool::{ActiveGeneration, GpuJob, GpuWorker};
 use crate::model_cache::ModelResidency;
 use crate::queue::{
     apply_upscale_response_to_image_generation, build_sse_complete_event, clean_error_message,
-    save_generated_image_outputs, save_video_to_dir,
+    save_generated_image_outputs, save_video_to_dir, settle_post_generation_upscale,
 };
 use crate::state::{GenerationJobResult, SseMessage};
 use mold_core::{
@@ -471,13 +471,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
             } else {
                 unreachable!("checked above");
             };
-            let original_img = (response.video.is_none()
-                && job
-                    .request
-                    .upscale_model
-                    .as_deref()
-                    .is_some_and(|model| !model.trim().is_empty()))
-            .then(|| img.clone());
+            let mut original_img = None;
 
             if response.video.is_none() {
                 if let Some(upscale_model) = job
@@ -487,23 +481,23 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                     .map(str::trim)
                     .filter(|m| !m.is_empty())
                 {
-                    match upscale_generated_image_on_worker(
+                    let upscale_result = upscale_generated_image_on_worker(
                         worker,
                         &job,
                         upscale_model,
                         img.clone(),
                         &mut response,
-                    ) {
-                        Ok(upscaled) => img = upscaled,
-                        Err(err_msg) => {
-                            if let Some(ref tx) = job.progress_tx {
-                                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                                    message: err_msg.clone(),
-                                }));
-                            }
-                            let _ = job.result_tx.send(Err(err_msg));
-                            return;
-                        }
+                    );
+                    let (output, preserved_original, upscale_error) =
+                        settle_post_generation_upscale(img, upscale_result);
+                    img = output;
+                    original_img = preserved_original;
+                    if let Some(error) = upscale_error {
+                        tracing::warn!(
+                            gpu = ordinal,
+                            %error,
+                            "post-generation upscale failed; keeping original image"
+                        );
                     }
                 }
             }

@@ -423,6 +423,7 @@ Standalone and post-generation upscales auto-download the selected model on the
 server that runs the job, including remote multi-GPU hosts.
 Post-generation upscale retains distinct `-original` and `-upscaled` gallery
 artifacts; reuse restores the pre-upscale generation canvas from metadata.
+An upscale-only failure falls back to the successful original as one artifact.
 
 ```bash
 # Upscale with default model (real-esrgan-x4plus:fp16, auto-downloads ~32MB)

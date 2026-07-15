@@ -419,6 +419,16 @@ pub(crate) fn apply_upscale_response_to_image_generation(
     })
 }
 
+pub(crate) fn settle_post_generation_upscale(
+    original: ImageData,
+    result: Result<ImageData, String>,
+) -> (ImageData, Option<ImageData>, Option<String>) {
+    match result {
+        Ok(upscaled) => (upscaled, Some(original), None),
+        Err(error) => (original, None, Some(error)),
+    }
+}
+
 async fn upscale_generated_image_on_single_worker(
     state: &AppState,
     req: &mold_core::GenerateRequest,
@@ -1104,31 +1114,22 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             } else {
                 unreachable!("checked above");
             };
-            let original_img = (response.video.is_none()
-                && requested_post_upscale_model(&job.request).is_some())
-            .then(|| img.clone());
+            let mut original_img = None;
             if response.video.is_none() && requested_post_upscale_model(&job.request).is_some() {
-                match upscale_generated_image_on_single_worker(
+                let upscale_result = upscale_generated_image_on_single_worker(
                     state,
                     &job.request,
                     response.seed_used,
-                    img,
+                    img.clone(),
                     job.progress_tx.as_ref(),
                 )
-                .await
-                {
-                    Ok(upscaled) => {
-                        img = upscaled;
-                    }
-                    Err(err_msg) => {
-                        if let Some(ref tx) = job.progress_tx {
-                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                                message: err_msg.clone(),
-                            }));
-                        }
-                        let _ = job.result_tx.send(Err(err_msg));
-                        return;
-                    }
+                .await;
+                let (output, preserved_original, upscale_error) =
+                    settle_post_generation_upscale(img, upscale_result);
+                img = output;
+                original_img = preserved_original;
+                if let Some(error) = upscale_error {
+                    tracing::warn!(%error, "post-generation upscale failed; keeping original image");
                 }
             }
 
@@ -2230,6 +2231,19 @@ mod tests {
             metadata.upscale_model.as_deref(),
             Some("real-esrgan-x4plus:fp16")
         );
+    }
+
+    #[test]
+    fn failed_post_generation_upscale_keeps_only_the_original_output() {
+        let original = fake_image();
+        let (output, preserved_original, error) = settle_post_generation_upscale(
+            original.clone(),
+            Err("upscaler unavailable".to_string()),
+        );
+
+        assert_eq!(output.data, original.data);
+        assert!(preserved_original.is_none());
+        assert_eq!(error.as_deref(), Some("upscaler unavailable"));
     }
 
     #[test]

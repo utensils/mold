@@ -512,11 +512,16 @@ export const useGenerationStore = defineStore("generation", {
                         complete.image,
                       ),
                     ];
-                Promise.all(saves)
-                  .then(() => void useGalleryStore().refreshHost("local"))
-                  .catch((err) => {
-                    console.warn("local save of remote output failed:", err);
-                  });
+                Promise.allSettled(saves).then((results) => {
+                  for (const result of results) {
+                    if (result.status === "rejected") {
+                      console.warn("local save of remote output failed:", result.reason);
+                    }
+                  }
+                  if (results.some((result) => result.status === "fulfilled")) {
+                    void useGalleryStore().refreshHost("local");
+                  }
+                });
               }
               // Nudge the unified gallery's bucket for the host this print
               // landed on. refreshHost only refetches already-loaded buckets

@@ -120,6 +120,23 @@ describe("generation store multi-host routing", () => {
     expect(upscaledB64).toBe("aGVsbG8=");
   });
 
+  it("refreshes the local gallery when only one paired remote save succeeds", async () => {
+    saveOutputBytes
+      .mockRejectedValueOnce(new Error("original save failed"))
+      .mockResolvedValueOnce("upscaled.png");
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("complete", completeFrame());
+        return Promise.resolve();
+      },
+    );
+    useGalleryStore().buckets["local"] = { items: [], loading: false, error: null, loaded: true };
+
+    await useGenerationStore().submitBatch(request(), 1, halRoute).settled;
+
+    await vi.waitFor(() => expect(localGalleryList).toHaveBeenCalled());
+  });
+
   it("skips the local save for local jobs and when the pref is off", async () => {
     sseStream.mockImplementation(
       (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
