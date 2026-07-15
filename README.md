@@ -174,19 +174,19 @@ Gallery, parallel model downloads with real cancellation, chains, model
 catalog browsing, history, and a full settings bench. Its RunPod workspace can
 launch and manage pods and persistent network volumes without leaving the app.
 
-Signed desktop builds check for updates when they open, but a check never
-installs anything. Choose **Stable** (tagged releases) or **Nightly** (signed
-builds from desktop-relevant commits on `main`) in **Settings → Updates**, run
-**Check for updates** whenever you want, then explicitly choose **Update and
-restart**. Tauri verifies every update's mandatory signature, bundle identity,
-and manifest version before Mold stages it. Mold keeps the previously healthy
-app until the replacement completes its launch-health handshake and process
-probation; failed, interrupted, or unhealthy installs restore and relaunch that
-backup. The handshake follows the first painted app shell without waiting for
-engine or remote-host startup; if the interface cannot boot within 15 seconds,
-Mold restores the backup and shows the recovery error. Moving from Nightly back
-to Stable never silently downgrades the app—if the nightly is newer, Mold waits
-for a newer Stable build.
+Signed desktop builds check for updates when they open, show a persistent banner
+when one is available, and send a native notification while the app is in the
+background. A check never installs anything. Choose **Stable** (tagged releases)
+or **Nightly** (signed builds from desktop-relevant commits on `main`) in
+**Settings → Updates**, run **Check for updates** whenever you want, then
+explicitly choose **Update and restart**. Before changing the installed app,
+Mold downloads and verifies the complete archive, extracts it to temporary
+storage, checks its Minisign and Apple signatures, Gatekeeper assessment, bundle
+identity/version, current install identity, and replacement permissions. Only a
+fully verified update is installed; otherwise the running version remains in
+place. There is no post-launch watchdog or automatic rollback. Moving from
+Nightly back to Stable never silently downgrades the app—if the nightly is newer,
+Mold waits for a newer Stable build.
 
 Still images expose **Copy image** from their right-click menus at full
 resolution. The complete interface—including fixed overlays and those context

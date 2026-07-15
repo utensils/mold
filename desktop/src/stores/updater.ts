@@ -1,11 +1,6 @@
 import { defineStore } from "pinia";
-import {
-  ipc,
-  type UpdateCandidate,
-  type UpdateChannel,
-  type UpdateProgress,
-  type UpdateRecovery,
-} from "../lib/ipc";
+import { ipc, type UpdateCandidate, type UpdateChannel, type UpdateProgress } from "../lib/ipc";
+import { notifyUpdateAvailable } from "../lib/notify";
 import { useAppPrefsStore } from "./appPrefs";
 
 export type UpdatePhase =
@@ -17,14 +12,13 @@ export type UpdatePhase =
   | "verifying"
   | "staging"
   | "installing"
-  | "rolling-back"
   | "failed"
   | "unsupported";
 
 export interface UpdateCommandError {
   code: string;
   message: string;
-  disposition: "unchanged" | "rolled-back" | "rollback-failed";
+  disposition: "unchanged";
   retryable: boolean;
 }
 
@@ -34,7 +28,6 @@ const BUSY_PHASES: UpdatePhase[] = [
   "verifying",
   "staging",
   "installing",
-  "rolling-back",
 ];
 
 export function normalizeUpdateError(error: unknown): UpdateCommandError {
@@ -44,10 +37,7 @@ export function normalizeUpdateError(error: unknown): UpdateCommandError {
       return {
         code: typeof candidate.code === "string" ? candidate.code : "unknown",
         message: candidate.message,
-        disposition:
-          candidate.disposition === "rolled-back" || candidate.disposition === "rollback-failed"
-            ? candidate.disposition
-            : "unchanged",
+        disposition: "unchanged",
         retryable: candidate.retryable !== false,
       };
     }
@@ -69,14 +59,16 @@ export const useUpdaterStore = defineStore("updater", {
     downloadedBytes: 0,
     totalBytes: null as number | null,
     error: null as UpdateCommandError | null,
-    recovery: null as UpdateRecovery | null,
+    dismissedCandidateId: null as string | null,
     initialized: false,
     progressUnlisten: null as (() => void) | null,
   }),
   getters: {
     isBusy: (state): boolean => BUSY_PHASES.includes(state.phase),
-    hasTerminalRecovery: (state): boolean =>
-      state.recovery?.rollbackFailed === true || state.error?.disposition === "rollback-failed",
+    shouldNotify: (state): boolean =>
+      state.phase === "available" &&
+      state.candidate !== null &&
+      state.dismissedCandidateId !== state.candidate.id,
     percent: (state): number | null => {
       if (state.totalBytes === null || state.totalBytes <= 0) return null;
       return Math.min(100, Math.max(0, (state.downloadedBytes / state.totalBytes) * 100));
@@ -88,30 +80,8 @@ export const useUpdaterStore = defineStore("updater", {
       this.initialized = true;
 
       await this.subscribeToProgress().catch(() => {});
-      try {
-        this.recovery = await ipc.takeUpdateRecovery();
-      } catch (error) {
-        this.error = normalizeUpdateError(error);
-        this.phase = "failed";
-        return;
-      }
-      if (this.recovery?.rollbackFailed) return;
-      // Network discovery is not part of candidate health. Let it continue in
-      // the background so a slow manifest cannot delay startup confirmation.
+      // The manifest check is background-only and never delays app startup.
       void this.check();
-    },
-
-    async confirmReady(): Promise<void> {
-      // App.vue calls this only after preferences, connection startup, and the
-      // first visible native-window paint have completed. The backend treats
-      // this as the beginning of probation, not immediate success.
-      try {
-        await ipc.confirmUpdateHealthy();
-      } catch (error) {
-        this.error = normalizeUpdateError(error);
-        if (this.error.disposition === "rollback-failed") this.candidate = null;
-        this.phase = "failed";
-      }
     },
 
     async subscribeToProgress(): Promise<void> {
@@ -120,7 +90,6 @@ export const useUpdaterStore = defineStore("updater", {
     },
 
     applyProgress(event: UpdateProgress): void {
-      if (this.hasTerminalRecovery) return;
       if (event.candidateId && event.candidateId !== this.candidate?.id) return;
       this.phase = event.phase;
       this.downloadedBytes = Math.max(0, event.downloadedBytes ?? this.downloadedBytes);
@@ -128,7 +97,7 @@ export const useUpdaterStore = defineStore("updater", {
     },
 
     async check(): Promise<void> {
-      if (this.isBusy || this.hasTerminalRecovery) return;
+      if (this.isBusy) return;
       this.phase = "checking";
       this.error = null;
       this.candidate = null;
@@ -137,7 +106,6 @@ export const useUpdaterStore = defineStore("updater", {
 
       try {
         const result = await ipc.checkForUpdates(useAppPrefsStore().updateChannel);
-        if (this.hasTerminalRecovery) return;
         this.currentVersion = result.currentVersion;
         this.checkedAt = result.checkedAt;
         this.candidate = result.candidate;
@@ -146,19 +114,17 @@ export const useUpdaterStore = defineStore("updater", {
           : result.candidate
             ? "available"
             : "up-to-date";
+        if (result.candidate) notifyUpdateAvailable(result.candidate.version);
       } catch (error) {
         const normalized = normalizeUpdateError(error);
-        if (this.hasTerminalRecovery && normalized.disposition !== "rollback-failed") return;
         this.error = normalized;
-        if (this.error.disposition === "rollback-failed" || !this.error.retryable) {
-          this.candidate = null;
-        }
+        if (!this.error.retryable) this.candidate = null;
         this.phase = "failed";
       }
     },
 
     async setChannel(channel: UpdateChannel): Promise<void> {
-      if (this.isBusy || this.hasTerminalRecovery || useAppPrefsStore().updateChannel === channel) {
+      if (this.isBusy || useAppPrefsStore().updateChannel === channel) {
         return;
       }
       this.candidate = null;
@@ -169,14 +135,13 @@ export const useUpdaterStore = defineStore("updater", {
         await this.check();
       } catch (error) {
         this.error = normalizeUpdateError(error);
-        if (this.error.disposition === "rollback-failed") this.candidate = null;
         this.phase = "failed";
       }
     },
 
     async install(): Promise<void> {
       const candidate = this.candidate;
-      if (!candidate || this.isBusy || this.hasTerminalRecovery) return;
+      if (!candidate || this.isBusy) return;
       this.phase = "downloading";
       this.error = null;
       this.downloadedBytes = 0;
@@ -189,22 +154,18 @@ export const useUpdaterStore = defineStore("updater", {
         this.phase = "installing";
       } catch (error) {
         this.error = normalizeUpdateError(error);
-        if (this.error.disposition === "rollback-failed" || !this.error.retryable) {
-          this.candidate = null;
-        }
+        if (!this.error.retryable) this.candidate = null;
         this.phase = "failed";
       }
     },
 
     clearError(): void {
-      if (this.error?.disposition === "rollback-failed") return;
       this.error = null;
       this.phase = this.candidate ? "available" : this.checkedAt ? "up-to-date" : "idle";
     },
 
-    dismissRecovery(): void {
-      if (this.recovery?.rollbackFailed) return;
-      this.recovery = null;
+    dismissCandidate(): void {
+      this.dismissedCandidateId = this.candidate?.id ?? null;
     },
   },
 });

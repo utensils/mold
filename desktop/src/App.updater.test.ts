@@ -9,15 +9,10 @@ describe("desktop updater integration", () => {
     );
   });
 
-  it("confirms updater health after the native shell paints without waiting for engine startup", () => {
-    expect(source).toContain("const connectionStartup = connection.init()");
-    expect(source).toContain("await appWindow.show()");
-    expect(source.indexOf("await updater.confirmReady()")).toBeGreaterThan(
-      source.indexOf("await appWindow.show()"),
-    );
-    expect(source.indexOf("await updater.confirmReady()")).toBeLessThan(
-      source.indexOf("await connectionStartup"),
-    );
+  it("surfaces automatic update checks in persistent app chrome", () => {
+    expect(source).toContain('import UpdateBanner from "./components/shell/UpdateBanner.vue"');
+    expect(source).toContain("<UpdateBanner />");
+    expect(source).not.toContain("confirmReady");
   });
 
   it("routes the native Check for Updates action to the Updates settings section", () => {

@@ -80,8 +80,6 @@ pub fn run() {
             commands::open_logs_dir,
             updater::check_for_updates,
             updater::install_pending_update,
-            updater::take_update_recovery,
-            updater::confirm_update_healthy,
             gallery::local_gallery_list,
             gallery::local_gallery_delete,
             gallery::save_output_bytes,

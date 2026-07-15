@@ -101,24 +101,24 @@ Both channels use public, HTTPS-hosted manifests:
 - [Stable manifest](https://github.com/utensils/mold/releases/latest/download/mold-desktop-stable.json)
 - [Nightly manifest](https://github.com/utensils/mold/releases/download/latest/mold-desktop-nightly.json)
 
-Tauri's updater signature check is mandatory. The complete archive must pass
-Minisign verification against the public key embedded in Mold before the app is
-staged, and its bundle identifier and version must match the signed manifest;
-this is separate from the Developer ID signature and Apple notarization that
-macOS verifies. Downloads stop cleanly after 15 minutes. Mold refuses to stage
-an update while it is running from a DMG or a translocated location—move it to
-Applications and reopen it first.
+Startup checks are non-destructive. When an update is available, Mold shows a
+persistent banner in the app; if Mold is backgrounded it also sends a native
+notification. Download and installation begin only after you choose **Update
+and restart**.
 
-Before installation, Mold persists a copy of the currently healthy `.app` and
-starts a supervisor from that backup. The supervisor survives replacement of
-the primary app, launches the candidate, and waits up to 15 seconds for the
-mounted interface to paint and complete its health handshake without waiting
-for engine or remote-host startup, then keeps watching the process through a
-10-second probation. An install failure, early candidate exit, or missing
-handshake restores and relaunches the backup with a recovery error. A shutdown
-during installation is reconciled on the next launch. The backup is removed
-only after probation; if automatic restoration itself fails, Settings shows the
-preserved recovery-app path and manual copy instructions.
+Tauri's updater signature check is mandatory. Before the installed app is
+changed, the complete archive passes Minisign verification against Mold's
+embedded public key and is fully extracted into temporary storage. Mold rejects
+unsafe paths and extra app bundles, binds the bundle identifier and version to
+the manifest, runs strict Apple code-signature verification and a Gatekeeper
+assessment, validates the currently running bundle, rejects DMG or translocated
+launches, and proves the install directory can be replaced. Downloads stop
+cleanly after 15 minutes.
+
+Only after every preflight check succeeds does Mold use macOS's atomic bundle
+exchange and restart. Mold does not run a post-launch health watchdog or
+roll back after a few seconds: the update either verifies and installs, or it
+fails before installation and the running version remains in place.
 
 Switching from Nightly to Stable changes which manifest Mold checks, but never
 silently downgrades the installed app. If your nightly version is newer than the
