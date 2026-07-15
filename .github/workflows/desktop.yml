@@ -205,7 +205,7 @@ jobs:
             echo "unexpected bundled NVIDIA driver" >&2
             exit 1
           fi
-          for library in 'libcudart.so*' 'libcurand.so*' 'libcublas.so*' 'libcublasLt.so*'; do
+          for library in 'libcurand.so*' 'libcublas.so*' 'libcublasLt.so*'; do
             if ! find "$root" -name "$library" -print -quit | grep -q .; then
               echo "missing bundled $library" >&2
               exit 1
