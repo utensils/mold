@@ -14,8 +14,8 @@ name = "mold-discord"
 path = "src/main.rs"
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.17.0" }
-mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.17.0" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.17.1" }
+mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.17.1" }
 poise = "0.6"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
