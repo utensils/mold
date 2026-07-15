@@ -51,3 +51,13 @@ fn appimage_excludes_the_host_cuda_driver() {
         "recursive linuxdeploy plugin calls must not require FUSE"
     );
 }
+
+#[test]
+fn nix_desktop_packages_follow_the_workspace_version() {
+    let flake = include_str!("../../../flake.nix");
+    assert!(
+        flake.contains("workspaceVersion =")
+            && flake.matches("version = workspaceVersion;").count() >= 2,
+        "desktop Nix packages must not drift from release-plz's workspace version"
+    );
+}

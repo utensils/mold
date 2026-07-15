@@ -36,6 +36,7 @@
           "${builtins.substring 0 4 raw}-${builtins.substring 4 2 raw}-${builtins.substring 6 2 raw}"
         else
           "unknown";
+      workspaceVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
     in
     inputs.flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
@@ -353,7 +354,7 @@
           # Desktop app frontend (Vue SPA under desktop/), built like mold-web.
           mold-desktop-web = pkgs.stdenv.mkDerivation {
             pname = "mold-desktop-web";
-            version = "0.17.0";
+            version = workspaceVersion;
             src = ./desktop;
             nativeBuildInputs = [ pkgs.bun2nix.hook ];
             bunDeps = pkgs.bun2nix.fetchBunDeps {
@@ -385,7 +386,7 @@
             computeCap:
             pkgs.rustPlatform.buildRustPackage {
               pname = "mold-desktop";
-              version = "0.17.0";
+              version = workspaceVersion;
               src = craneLib.path ./.;
               cargoRoot = "desktop/src-tauri";
               buildAndTestSubdir = "desktop/src-tauri";
