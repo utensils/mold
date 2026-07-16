@@ -78,7 +78,7 @@ Native single window, minimum 1080×700 and default 1360×860. macOS uses `title
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
-│ ●●●  MOLD                                    ⌘K Search or run a command…   │  ← overlay titlebar (drag region)
+│ ●●●  mold                                    ⌘K Search or run a command…   │  ← overlay titlebar (drag region)
 ├───────────────┬────────────────────────────────────────────────────────────┤
 │  ▸ Generate ⌘1│                                                            │
 │    Gallery  ⌘2│                                                            │

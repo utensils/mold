@@ -1,21 +1,30 @@
 export type DesktopPlatform = "macos" | "linux" | "windows" | "unknown";
 
 export function normalizePlatform(raw: string | undefined): DesktopPlatform {
-  switch (raw?.toLowerCase()) {
-    case "darwin":
-    case "macos":
-      return "macos";
-    case "linux":
-      return "linux";
-    case "win32":
-    case "windows":
-      return "windows";
-    default:
-      return "unknown";
-  }
+  const platform = raw?.trim().toLowerCase();
+  if (!platform) return "unknown";
+  if (platform.includes("mac") || platform.includes("darwin")) return "macos";
+  if (platform.includes("linux")) return "linux";
+  if (platform.includes("win")) return "windows";
+  return "unknown";
 }
 
-export const CURRENT_PLATFORM = normalizePlatform(import.meta.env.TAURI_ENV_PLATFORM);
+export function detectPlatform(
+  tauriPlatform: string | undefined,
+  browserPlatform: string | undefined,
+  isTauri: boolean,
+): DesktopPlatform {
+  return normalizePlatform(tauriPlatform || (isTauri ? browserPlatform : undefined));
+}
+
+// Tauri exposes TAURI_ENV_PLATFORM for production builds, but the Vite server
+// can start without it during `tauri dev`. WKWebView's platform keeps native
+// macOS chrome (traffic-light insets and Command shortcuts) correct in dev.
+export const CURRENT_PLATFORM = detectPlatform(
+  import.meta.env.TAURI_ENV_PLATFORM,
+  globalThis.navigator?.platform,
+  "__TAURI_INTERNALS__" in globalThis,
+);
 
 export function platformUi(raw: string | DesktopPlatform | undefined = CURRENT_PLATFORM) {
   const platform = normalizePlatform(raw === "unknown" ? undefined : raw);

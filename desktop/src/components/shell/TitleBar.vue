@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// Overlay titlebar: macOS traffic lights are inset over this strip
-// (trafficLightPosition in tauri.conf.json), so it is all drag region.
+// Overlay titlebar: macOS traffic lights occupy the leading edge of this strip,
+// so the wordmark reserves their full width and the remaining chrome can drag.
 import { useUiStore } from "../../stores/ui";
 import { PLATFORM_UI, shortcutLabel } from "../../lib/platform";
 
@@ -18,7 +18,7 @@ const ui = useUiStore();
       class="brand-wordmark font-display text-display-sm font-bold tracking-[0.08em] text-ink-2 select-none"
       style="font-stretch: 90%"
     >
-      MOLD
+      mold
     </span>
     <div data-tauri-drag-region class="flex-1" />
     <button
