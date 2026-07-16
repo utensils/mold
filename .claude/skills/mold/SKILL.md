@@ -124,7 +124,9 @@ mold run flux-dev:bf16 "epic shot" \
 
 **Catalog browse:** Desktop Models is one installed-first searchable library
 with All / Installed / Available filters and Grid / Table layouts; its catalog
-section proxies live HF + Civitai searches (filter by **LoRAs** to narrow).
+uses cache-stable 512 px Civitai derivatives plus lazy async decoding and
+per-card layout/paint containment instead of source-resolution preview images.
+The catalog section proxies live HF + Civitai searches (filter by **LoRAs** to narrow).
 Install with `mold pull cv:<id>` / `mold pull hf:<author>/<repo>` or Pull in
 Models. With several ready desktop hosts, Pull asks for the destination. Remote
 desktop catalog requests can carry request-scoped HF/Civitai fallback tokens;

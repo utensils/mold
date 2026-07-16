@@ -29,7 +29,7 @@ function entry(part: Partial<CatalogEntry> = {}): CatalogEntry {
     size_bytes: null,
     download_count: 4_242,
     likes: 88,
-    thumbnail_url: "https://image.civitai.example/thumb.jpeg",
+    thumbnail_url: "https://image.civitai.com/token/id/original=true/thumb.jpeg",
     page_url: "https://civitai.com/models/9001?modelVersionId=8001",
     ...part,
   };
@@ -50,7 +50,13 @@ describe("CatalogCard", () => {
     expect(wrapper.text()).toContain("alice");
     expect(wrapper.text()).toContain("flux");
     expect(wrapper.text()).toContain("↓ 4.2k · ♥ 88");
-    expect(wrapper.get("img").attributes("src")).toBe("https://image.civitai.example/thumb.jpeg");
+    expect(wrapper.get("img").attributes("src")).toBe(
+      "https://image.civitai.com/token/id/width=512/thumb.jpeg",
+    );
+    expect(wrapper.get("img").attributes("loading")).toBe("lazy");
+    expect(wrapper.get("img").attributes("decoding")).toBe("async");
+    expect(wrapper.get("img").attributes("fetchpriority")).toBe("low");
+    expect(wrapper.get('[data-test="catalog-card"]').classes()).toContain("catalog-card-contained");
   });
 
   it("drops the thumbnail block entirely when the image fails to load", async () => {

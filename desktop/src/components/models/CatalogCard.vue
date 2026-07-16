@@ -9,6 +9,7 @@ import {
   catalogSizeLabel,
 } from "../../lib/catalog";
 import { resolveEntrySize } from "../../lib/catalogSizes";
+import { catalogThumbnailUrl } from "../../lib/catalogThumbnails";
 import { formatCount } from "../../lib/format";
 import { openExternal } from "../../lib/openExternal";
 import type { ModelSource } from "../../lib/modelSource";
@@ -31,6 +32,9 @@ const glyphSource = computed<ModelSource>(() =>
 );
 
 const pageUrl = computed(() => catalogPageUrl(props.entry));
+const thumbnailUrl = computed(() =>
+  props.entry.thumbnail_url ? catalogThumbnailUrl(props.entry.thumbnail_url) : null,
+);
 
 /** `undefined` = still resolving (skeleton); `number | null` = resolved. */
 const resolvedBytes = ref<number | null | undefined>(props.entry.size_bytes ?? undefined);
@@ -68,7 +72,7 @@ function openPage(): void {
 
 <template>
   <div
-    class="border-edge rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench"
+    class="catalog-card-contained border-edge rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench"
     :class="layout === 'grid' ? 'flex flex-col' : 'flex min-h-16 items-center gap-3 p-2'"
     data-test="catalog-card"
     :data-layout="layout"
@@ -76,7 +80,7 @@ function openPage(): void {
     <!-- Civitai preview image (public URL); shimmer placeholder while it
          loads, dropped entirely if it fails. -->
     <div
-      v-if="entry.thumbnail_url && !thumbFailed"
+      v-if="thumbnailUrl && !thumbFailed"
       :class="
         layout === 'grid'
           ? 'relative h-32 w-full overflow-hidden rounded-t-chrome'
@@ -85,9 +89,11 @@ function openPage(): void {
     >
       <div v-if="!thumbLoaded" class="grain-shimmer absolute inset-0" aria-hidden="true" />
       <img
-        :src="entry.thumbnail_url"
+        :src="thumbnailUrl"
         alt=""
         loading="lazy"
+        decoding="async"
+        fetchpriority="low"
         class="h-full w-full object-cover"
         @load="thumbLoaded = true"
         @error="thumbFailed = true"
@@ -194,3 +200,9 @@ function openPage(): void {
     </div>
   </div>
 </template>
+
+<style scoped>
+.catalog-card-contained {
+  contain: layout paint style;
+}
+</style>

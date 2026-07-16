@@ -62,7 +62,11 @@ fn civitai_juggernaut_normalizes_as_sdxl_single_file() {
         entry.download_recipe.files[0].sha256.as_deref(),
         Some("ABC123")
     );
-    assert!(entry.thumbnail_url.as_deref().is_some());
+    assert_eq!(
+        entry.thumbnail_url.as_deref(),
+        Some("https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/abc123/width=512/preview.jpeg"),
+        "catalog cards must not receive Civitai's source-resolution image"
+    );
     // Model page = parent model id + the chosen version, so the browser
     // lands on the exact version the catalog row represents.
     assert_eq!(

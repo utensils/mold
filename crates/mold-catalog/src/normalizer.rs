@@ -366,6 +366,38 @@ pub struct CivitaiImage {
     pub nsfw_level: Option<u32>,
 }
 
+const CATALOG_THUMBNAIL_WIDTH: usize = 512;
+
+/// Replace Civitai's source-resolution transform with a stable card-sized
+/// derivative. The CDN serves this URL with public cache headers, so WebViews
+/// reuse the same small response in Grid and Table layouts instead of
+/// repeatedly transferring and decoding a multi-megapixel original.
+fn civitai_thumbnail_url(raw: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(raw) else {
+        return raw.to_string();
+    };
+    if !matches!(
+        url.host_str(),
+        Some("image.civitai.com" | "imagecache.civitai.com")
+    ) {
+        return raw.to_string();
+    }
+
+    let mut segments: Vec<String> = url
+        .path_segments()
+        .map(|parts| parts.map(str::to_string).collect())
+        .unwrap_or_default();
+    let Some(transform) = segments
+        .iter_mut()
+        .find(|segment| segment.starts_with("original=") || segment.starts_with("width="))
+    else {
+        return raw.to_string();
+    };
+    *transform = format!("width={CATALOG_THUMBNAIL_WIDTH}");
+    url.set_path(&format!("/{}", segments.join("/")));
+    url.to_string()
+}
+
 pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
     let version = item.model_versions.first()?;
     from_civitai_version(&item, version)
@@ -454,7 +486,10 @@ fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<
         rating: stats.rating,
         likes: stats.favorite_count,
         nsfw: item.nsfw,
-        thumbnail_url: version.images.first().map(|i| i.url.clone()),
+        thumbnail_url: version
+            .images
+            .first()
+            .map(|image| civitai_thumbnail_url(&image.url)),
         description: None,
         license: None,
         license_flags: LicenseFlags::default(),
