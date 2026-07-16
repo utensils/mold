@@ -1,4 +1,4 @@
-# Terminal UI <Badge type="warning" text="beta" />
+# Terminal UI
 
 mold includes an interactive terminal UI for browsing models, tuning parameters,
 generating images with live progress, and previewing results — all without
