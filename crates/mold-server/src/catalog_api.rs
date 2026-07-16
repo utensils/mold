@@ -2,13 +2,15 @@
 //! cache; the bulk-scrape DB and scanner are gone.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 
 pub async fn get_catalog_entry(
     State(state): State<crate::state::AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let forwarded = ForwardedCatalogCredentials::from_headers(&headers);
     let cfg_guard = state.config.read().await;
     let models_dir = cfg_guard.resolved_models_dir();
     drop(cfg_guard);
@@ -16,28 +18,18 @@ pub async fn get_catalog_entry(
     let entry = if let Some(entry) = mold_catalog::live::companion_entry_for_id(&id) {
         entry
     } else if let Some(version_id) = id.strip_prefix("cv:") {
-        match mold_catalog::live::fetch_civitai_version(
-            state.catalog_live_civitai_base.as_str(),
-            version_id,
-            std::env::var("CIVITAI_TOKEN").ok().as_deref(),
-        )
-        .await
+        match fetch_civitai_version_with_fallback(&state, version_id, forwarded.civitai.as_deref())
+            .await
         {
-            Ok(e) => e,
+            Ok((e, _)) => e,
             Err(mold_catalog::live::LiveSearchError::Upstream { status: 404, .. }) => {
                 return (StatusCode::NOT_FOUND, "not found").into_response();
             }
             Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
         }
     } else if let Some(repo_id) = id.strip_prefix("hf:") {
-        match mold_catalog::live::fetch_hf_repo(
-            "https://huggingface.co",
-            repo_id,
-            std::env::var("HF_TOKEN").ok().as_deref(),
-        )
-        .await
-        {
-            Ok(e) => e,
+        match fetch_hf_repo_with_fallback(repo_id, forwarded.hf.as_deref()).await {
+            Ok((e, _)) => e,
             Err(mold_catalog::live::LiveSearchError::Upstream { status: 404, .. }) => {
                 return (StatusCode::NOT_FOUND, "not found").into_response();
             }
@@ -60,14 +52,121 @@ pub async fn get_catalog_entry(
 pub async fn post_catalog_dispatch(
     State(state): State<crate::state::AppState>,
     Path(rest): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     if let Some(id) = rest.strip_suffix("/download") {
-        post_catalog_download(State(state), Path(id.to_string()))
+        post_catalog_download(State(state), Path(id.to_string()), headers)
             .await
             .into_response()
     } else {
         (StatusCode::NOT_FOUND, "unknown catalog action").into_response()
     }
+}
+
+const FORWARDED_HF_TOKEN_HEADER: &str = "x-mold-hf-token";
+const FORWARDED_CIVITAI_TOKEN_HEADER: &str = "x-mold-civitai-token";
+
+#[derive(Clone, Debug, Default)]
+struct ForwardedCatalogCredentials {
+    hf: Option<String>,
+    civitai: Option<String>,
+}
+
+impl ForwardedCatalogCredentials {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        let read = |name: &'static str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        Self {
+            hf: read(FORWARDED_HF_TOKEN_HEADER),
+            civitai: read(FORWARDED_CIVITAI_TOKEN_HEADER),
+        }
+    }
+}
+
+fn credential_candidates(server: Option<String>, forwarded: Option<&str>) -> Vec<Option<String>> {
+    let server = server.filter(|value| !value.trim().is_empty());
+    let forwarded = forwarded
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    match (server, forwarded) {
+        (Some(server), Some(forwarded)) if server != forwarded => {
+            vec![Some(server), Some(forwarded)]
+        }
+        (Some(server), _) => vec![Some(server)],
+        (None, Some(forwarded)) => vec![Some(forwarded)],
+        (None, None) => vec![None],
+    }
+}
+
+fn env_catalog_token(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_auth_error(error: &mold_catalog::live::LiveSearchError) -> bool {
+    matches!(
+        error,
+        mold_catalog::live::LiveSearchError::Upstream {
+            status: 401 | 403,
+            ..
+        }
+    )
+}
+
+async fn fetch_civitai_version_with_fallback(
+    state: &crate::state::AppState,
+    version_id: &str,
+    forwarded: Option<&str>,
+) -> Result<(mold_catalog::entry::CatalogEntry, Option<String>), mold_catalog::live::LiveSearchError>
+{
+    let candidates = credential_candidates(env_catalog_token("CIVITAI_TOKEN"), forwarded);
+    let mut last_error = None;
+    for (index, token) in candidates.iter().enumerate() {
+        match mold_catalog::live::fetch_civitai_version(
+            state.catalog_live_civitai_base.as_str(),
+            version_id,
+            token.as_deref(),
+        )
+        .await
+        {
+            Ok(entry) => return Ok((entry, token.clone())),
+            Err(error) if is_auth_error(&error) && index + 1 < candidates.len() => {
+                last_error = Some(error)
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.expect("credential candidates are never empty"))
+}
+
+async fn fetch_hf_repo_with_fallback(
+    repo_id: &str,
+    forwarded: Option<&str>,
+) -> Result<(mold_catalog::entry::CatalogEntry, Option<String>), mold_catalog::live::LiveSearchError>
+{
+    let candidates = credential_candidates(env_catalog_token("HF_TOKEN"), forwarded);
+    let mut last_error = None;
+    for (index, token) in candidates.iter().enumerate() {
+        match mold_catalog::live::fetch_hf_repo("https://huggingface.co", repo_id, token.as_deref())
+            .await
+        {
+            Ok(entry) => return Ok((entry, token.clone())),
+            Err(error) if is_auth_error(&error) && index + 1 < candidates.len() => {
+                last_error = Some(error)
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.expect("credential candidates are never empty"))
 }
 
 fn rendered_primary_recipe_dest(
@@ -237,6 +336,7 @@ pub(crate) async fn enqueue_missing_companions(
     models_dir: &std::path::Path,
     queue: &crate::downloads::DownloadQueue,
     catalog_id: Option<&str>,
+    hf_fallback_token: Option<String>,
 ) -> Vec<CompanionJob> {
     let manifests = mold_core::download::missing_companions(companion_names, models_dir);
     let mut jobs = Vec::with_capacity(manifests.len());
@@ -247,8 +347,20 @@ pub(crate) async fn enqueue_missing_companions(
         // ungrouped enqueue — companions invoked from elsewhere don't
         // synchronise on a group event.
         let result = match catalog_id {
-            Some(id) => queue.enqueue_in_group(manifest.name.clone(), id).await,
-            None => queue.enqueue(manifest.name.clone()).await,
+            Some(id) => {
+                queue
+                    .enqueue_in_group_with_hf_fallback(
+                        manifest.name.clone(),
+                        id,
+                        hf_fallback_token.clone(),
+                    )
+                    .await
+            }
+            None => {
+                queue
+                    .enqueue_with_hf_fallback(manifest.name.clone(), hf_fallback_token.clone())
+                    .await
+            }
         };
         match result {
             Ok((job_id, _, _)) => jobs.push(CompanionJob {
@@ -270,7 +382,9 @@ pub(crate) async fn enqueue_missing_companions(
 pub async fn post_catalog_download(
     State(state): State<crate::state::AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let forwarded = ForwardedCatalogCredentials::from_headers(&headers);
     // Live single-id lookup — replaces the bulk-scrape DB read.
     if let Some(companion_name) = mold_catalog::live::companion_name_for_catalog_id(&id) {
         let models_dir = state.config.read().await.resolved_models_dir();
@@ -279,6 +393,7 @@ pub async fn post_catalog_download(
             &models_dir,
             &state.downloads,
             Some(&id),
+            forwarded.hf.clone(),
         )
         .await;
         let primary_job_id = if companion_jobs.is_empty() {
@@ -296,13 +411,9 @@ pub async fn post_catalog_download(
             .into_response();
     }
 
-    let entry = if let Some(version_id) = id.strip_prefix("cv:") {
-        match mold_catalog::live::fetch_civitai_version(
-            state.catalog_live_civitai_base.as_str(),
-            version_id,
-            std::env::var("CIVITAI_TOKEN").ok().as_deref(),
-        )
-        .await
+    let (entry, resolved_token) = if let Some(version_id) = id.strip_prefix("cv:") {
+        match fetch_civitai_version_with_fallback(&state, version_id, forwarded.civitai.as_deref())
+            .await
         {
             Ok(e) => e,
             Err(mold_catalog::live::LiveSearchError::Upstream { status: 404, .. }) => {
@@ -311,13 +422,7 @@ pub async fn post_catalog_download(
             Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
         }
     } else if let Some(repo_id) = id.strip_prefix("hf:") {
-        match mold_catalog::live::fetch_hf_repo(
-            "https://huggingface.co",
-            repo_id,
-            std::env::var("HF_TOKEN").ok().as_deref(),
-        )
-        .await
-        {
+        match fetch_hf_repo_with_fallback(repo_id, forwarded.hf.as_deref()).await {
             Ok(e) => e,
             Err(mold_catalog::live::LiveSearchError::Upstream { status: 404, .. }) => {
                 return (StatusCode::NOT_FOUND, "unknown catalog id").into_response();
@@ -355,6 +460,7 @@ pub async fn post_catalog_download(
         &models_dir,
         &state.downloads,
         Some(&entry_id),
+        forwarded.hf.clone(),
     )
     .await;
 
@@ -370,7 +476,11 @@ pub async fn post_catalog_download(
                 Some(m) => m.name.clone(),
                 None => entry.source_id.clone(),
             };
-            match state.downloads.enqueue_in_group(model, &entry_id).await {
+            match state
+                .downloads
+                .enqueue_in_group_with_hf_fallback(model, &entry_id, resolved_token.clone())
+                .await
+            {
                 Ok((jid, _, _)) => Some(jid),
                 Err(crate::downloads::EnqueueError::UnknownModel(_)) => None,
                 Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -378,14 +488,15 @@ pub async fn post_catalog_download(
         }
         Source::Civitai => {
             let auth = match entry.download_recipe.needs_token {
-                Some(mold_catalog::entry::TokenKind::Civitai) => {
-                    match mold_core::download::civitai_auth_or_error(&entry_id) {
-                        Ok(a) => a,
+                Some(mold_catalog::entry::TokenKind::Civitai) => match resolved_token {
+                    Some(token) => mold_core::download::RecipeAuth::Bearer(token),
+                    None => match mold_core::download::civitai_auth_or_error(&entry_id) {
+                        Ok(auth) => auth,
                         Err(e) => {
                             return (StatusCode::UNAUTHORIZED, e.to_string()).into_response();
                         }
-                    }
-                }
+                    },
+                },
                 _ => mold_core::download::RecipeAuth::None,
             };
             let (author, name) = match entry.source_id.split_once('/') {
@@ -469,7 +580,9 @@ pub struct LiveSearchQuery {
 pub async fn live_search_catalog(
     State(state): State<crate::state::AppState>,
     Query(q): Query<LiveSearchQuery>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let forwarded = ForwardedCatalogCredentials::from_headers(&headers);
     let family = match q.family.as_deref().filter(|s| !s.is_empty()) {
         Some(s) => match mold_catalog::families::Family::from_str(s) {
             Ok(f) => Some(f),
@@ -495,7 +608,9 @@ pub async fn live_search_catalog(
         None => None,
     };
 
-    let opts = mold_catalog::live::LiveSearchOpts {
+    let server_civitai = env_catalog_token("CIVITAI_TOKEN");
+    let server_hf = env_catalog_token("HF_TOKEN");
+    let mut opts = mold_catalog::live::LiveSearchOpts {
         q: q.q.clone(),
         family,
         kind,
@@ -503,22 +618,62 @@ pub async fn live_search_catalog(
         page: q.page.unwrap_or(1).max(1),
         page_size: q.page_size.unwrap_or(20).clamp(1, 100),
         include_nsfw: q.include_nsfw.unwrap_or(true),
-        civitai_token: std::env::var("CIVITAI_TOKEN").ok(),
-        hf_token: std::env::var("HF_TOKEN").ok(),
+        civitai_token: server_civitai.clone().or_else(|| forwarded.civitai.clone()),
+        hf_token: server_hf.clone().or_else(|| forwarded.hf.clone()),
     };
 
     let cfg = state.config.read().await;
     let models_dir = cfg.resolved_models_dir();
     drop(cfg);
 
-    let entries = match mold_catalog::live::search(
+    let first = mold_catalog::live::search(
         state.catalog_live_civitai_base.as_str(),
         "https://huggingface.co",
         &state.catalog_live_cache,
         &opts,
     )
-    .await
-    {
+    .await;
+    let first = match first {
+        Err(
+            error @ mold_catalog::live::LiveSearchError::Upstream {
+                host,
+                status: 401 | 403,
+                ..
+            },
+        ) => {
+            let replacement = if host == "civitai.com" {
+                forwarded
+                    .civitai
+                    .clone()
+                    .filter(|token| Some(token) != server_civitai.as_ref())
+                    .map(|token| (true, token))
+            } else {
+                forwarded
+                    .hf
+                    .clone()
+                    .filter(|token| Some(token) != server_hf.as_ref())
+                    .map(|token| (false, token))
+            };
+            if let Some((is_civitai, token)) = replacement {
+                if is_civitai {
+                    opts.civitai_token = Some(token);
+                } else {
+                    opts.hf_token = Some(token);
+                }
+                mold_catalog::live::search(
+                    state.catalog_live_civitai_base.as_str(),
+                    "https://huggingface.co",
+                    &state.catalog_live_cache,
+                    &opts,
+                )
+                .await
+            } else {
+                Err(error)
+            }
+        }
+        other => other,
+    };
+    let entries = match first {
         Ok(es) => es,
         Err(e) => {
             tracing::warn!(target: "catalog.live", error = %e, "live search failed");

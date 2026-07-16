@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Desktop Models is now one installed-first library.** Installed and catalog models share one searchable view with All / Installed / Available filters, compact responsive cards, and a Grid / Table density toggle. When more than one host is connected, Pull opens a target picker naming each ready host and its queue depth before anything is downloaded.
+- **Remote catalog requests can use the desktop's Hugging Face and Civitai credentials.** The desktop forwards its locally stored tokens only on authenticated catalog requests to remote Mold hosts. A remote server keeps precedence for its own configured token and falls back to the request-scoped desktop token when the server token is missing or rejected; forwarded values never enter download listings, events, or persistent server config.
+
 ### Fixed
 
 - **Coverage CI now reserves enough runner disk for instrumented workspace builds.** The coverage job removes large unused preinstalled SDKs before installing Rust and compiling the workspace, preventing GitHub-hosted runners from aborting with `No space left on device` while generating LCOV output.

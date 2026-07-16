@@ -55,6 +55,9 @@ pub type DownloadProgressCallback = Arc<dyn Fn(DownloadProgressEvent) + Send + S
 pub struct PullOptions {
     /// Skip SHA-256 verification after download (use when HF updated a file).
     pub skip_verify: bool,
+    /// Explicit Hugging Face token for this pull attempt. Remote servers use
+    /// this only after their normal configured credential is rejected.
+    pub hf_token: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -267,6 +270,15 @@ fn resolve_hf_token() -> Option<String> {
     Cache::new(hf_cache_dir())
         .token()
         .or_else(|| Cache::from_env().token())
+}
+
+fn resolve_hf_token_for(opts: &PullOptions) -> Option<String> {
+    opts.hf_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .or_else(resolve_hf_token)
 }
 
 /// Resolve the mold models directory. Computed once from config on first access.
@@ -805,7 +817,7 @@ pub async fn pull_model(
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
-    if let Some(token) = resolve_hf_token() {
+    if let Some(token) = resolve_hf_token_for(opts) {
         builder = builder.with_token(Some(token));
     }
     let api = builder.build()?;
@@ -869,7 +881,7 @@ pub async fn pull_model_with_callback(
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
-    if let Some(token) = resolve_hf_token() {
+    if let Some(token) = resolve_hf_token_for(opts) {
         builder = builder.with_token(Some(token));
     }
     let api = builder.build()?;
@@ -983,7 +995,7 @@ async fn pull_model_files_only(
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
-    if let Some(token) = resolve_hf_token() {
+    if let Some(token) = resolve_hf_token_for(opts) {
         builder = builder.with_token(Some(token));
     }
     let api = builder.build()?;
@@ -1035,7 +1047,7 @@ async fn pull_model_files_only_with_callback(
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
-    if let Some(token) = resolve_hf_token() {
+    if let Some(token) = resolve_hf_token_for(opts) {
         builder = builder.with_token(Some(token));
     }
     let api = builder.build()?;

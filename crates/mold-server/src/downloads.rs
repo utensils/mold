@@ -88,6 +88,10 @@ pub struct DownloadQueue {
     /// drained by the driver task before running the job. Manifest jobs
     /// have no entry here and fall through to the `PullDriver` path.
     recipe_payloads: StdMutex<HashMap<String, RecipePayload>>,
+    /// Request-scoped HF fallback tokens for manifest jobs initiated by a
+    /// trusted remote desktop client. Tokens are consumed when the job starts
+    /// and never appear in the public download listing or event stream.
+    hf_fallback_tokens: StdMutex<HashMap<String, String>>,
     /// Catalog group bookkeeping. Keyed by catalog id; cleared when the
     /// group emits `CatalogReady`. Memory-only — server restart resets
     /// the ledger, which is fine because in-flight downloads were lost
@@ -122,6 +126,7 @@ impl DownloadQueue {
             events,
             notify: Notify::new(),
             recipe_payloads: StdMutex::new(HashMap::new()),
+            hf_fallback_tokens: StdMutex::new(HashMap::new()),
             groups: StdMutex::new(HashMap::new()),
         })
     }
@@ -177,6 +182,14 @@ impl DownloadQueue {
         &self,
         model: String,
     ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
+        self.enqueue_with_hf_fallback(model, None).await
+    }
+
+    pub async fn enqueue_with_hf_fallback(
+        &self,
+        model: String,
+        hf_fallback_token: Option<String>,
+    ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
         // Manifest validation up front so the caller gets a real 400 instead of a
         // background failure.
         let canonical = mold_core::manifest::resolve_model_name(&model);
@@ -223,6 +236,12 @@ impl DownloadQueue {
             queued.push_back(job);
             queued.len() // position shown to the user is 1-based in the drawer
         };
+        if let Some(token) = hf_fallback_token.filter(|token| !token.trim().is_empty()) {
+            self.hf_fallback_tokens
+                .lock()
+                .map_err(|_| EnqueueError::LockPoisoned)?
+                .insert(id.clone(), token);
+        }
         let _ = self.events.send(DownloadEvent::Enqueued {
             id: id.clone(),
             model: canonical,
@@ -321,6 +340,19 @@ impl DownloadQueue {
         catalog_id: &str,
     ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
         let (id, pos, outcome) = self.enqueue(model).await?;
+        self.register_in_group(catalog_id, &id);
+        Ok((id, pos, outcome))
+    }
+
+    pub async fn enqueue_in_group_with_hf_fallback(
+        &self,
+        model: String,
+        catalog_id: &str,
+        hf_fallback_token: Option<String>,
+    ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
+        let (id, pos, outcome) = self
+            .enqueue_with_hf_fallback(model, hf_fallback_token)
+            .await?;
         self.register_in_group(catalog_id, &id);
         Ok((id, pos, outcome))
     }
@@ -427,6 +459,13 @@ impl DownloadQueue {
             .and_then(|mut p| p.remove(job_id))
     }
 
+    pub(crate) fn take_hf_fallback_token(&self, job_id: &str) -> Option<String> {
+        self.hf_fallback_tokens
+            .lock()
+            .ok()
+            .and_then(|mut tokens| tokens.remove(job_id))
+    }
+
     /// Cancel an in-flight or queued download. Returns `true` if a job was
     /// found and cancelled; `false` if the id is unknown.
     pub async fn cancel(&self, id: &str) -> bool {
@@ -530,6 +569,7 @@ pub trait PullDriver: Send + Sync + 'static {
     async fn pull(
         &self,
         model: &str,
+        hf_fallback_token: Option<&str>,
         on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         cancel: CancellationToken,
     ) -> Result<(), String>;
@@ -597,18 +637,47 @@ impl PullDriver for HfPullDriver {
     async fn pull(
         &self,
         model: &str,
+        hf_fallback_token: Option<&str>,
         on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         cancel: CancellationToken,
     ) -> Result<(), String> {
         let on_progress: mold_core::download::DownloadProgressCallback =
             std::sync::Arc::from(on_progress);
-        let opts = mold_core::download::PullOptions::default();
         let model = model.to_string();
+        let pull = async {
+            let primary = mold_core::download::pull_and_configure_with_callback(
+                &model,
+                on_progress.clone(),
+                &Default::default(),
+            )
+            .await;
+            match (primary, hf_fallback_token) {
+                (
+                    Err(
+                        mold_core::download::DownloadError::Unauthorized { .. }
+                        | mold_core::download::DownloadError::GatedModel { .. },
+                    ),
+                    Some(token),
+                ) => {
+                    let fallback_opts = mold_core::download::PullOptions {
+                        hf_token: Some(token.to_string()),
+                        ..Default::default()
+                    };
+                    mold_core::download::pull_and_configure_with_callback(
+                        &model,
+                        on_progress,
+                        &fallback_opts,
+                    )
+                    .await
+                }
+                (result, _) => result,
+            }
+        };
         // Race the pull against cancellation. pull_and_configure_with_callback
         // is not cancel-aware internally, but dropping its future on cancel
         // aborts the underlying tokio-based HTTP calls.
         tokio::select! {
-            res = mold_core::download::pull_and_configure_with_callback(&model, on_progress, &opts) => {
+            res = pull => {
                 res.map(|_| ()).map_err(|e| e.to_string())
             }
             _ = cancel.cancelled() => {
@@ -830,6 +899,7 @@ async fn run_one_job(
     // Pull the recipe payload off the queue once, before the retry loop.
     // Subsequent retries clone from this owned copy.
     let recipe_payload = queue.take_recipe_payload(&job.id);
+    let hf_fallback_token = queue.take_hf_fallback_token(&job.id);
 
     // Install the job as active. The pull runs inline in this function so we
     // don't need a separate task handle — cancellation flows through `abort`.
@@ -845,6 +915,7 @@ async fn run_one_job(
         recipe_driver,
         models_dir,
         recipe_payload.as_ref(),
+        hf_fallback_token.as_deref(),
         &mut job,
         cancel.clone(),
     )
@@ -866,6 +937,7 @@ async fn try_pull_with_retry(
     recipe_driver: &Arc<dyn RecipePullDriver>,
     models_dir: &std::path::Path,
     recipe_payload: Option<&RecipePayload>,
+    hf_fallback_token: Option<&str>,
     job: &mut DownloadJob,
     cancel: CancellationToken,
 ) -> Result<(), ()> {
@@ -877,6 +949,7 @@ async fn try_pull_with_retry(
             recipe_driver,
             models_dir,
             recipe_payload,
+            hf_fallback_token,
             job,
             cancel.clone(),
         )
@@ -965,6 +1038,7 @@ async fn run_single_attempt(
     recipe_driver: &Arc<dyn RecipePullDriver>,
     models_dir: &std::path::Path,
     recipe_payload: Option<&RecipePayload>,
+    hf_fallback_token: Option<&str>,
     job: &mut DownloadJob,
     cancel: CancellationToken,
 ) -> Result<(), AttemptError> {
@@ -995,7 +1069,11 @@ async fn run_single_attempt(
                 )
                 .await
         }
-        None => driver.pull(&job.model, on_progress, cancel.clone()).await,
+        None => {
+            driver
+                .pull(&job.model, hf_fallback_token, on_progress, cancel.clone())
+                .await
+        }
     };
     // Wait for the drain task to finish (sender dropped when `pull` returned).
     let _ = drain_handle.await;

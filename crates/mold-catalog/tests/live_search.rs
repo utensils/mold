@@ -14,7 +14,8 @@ use std::time::Duration;
 use mold_catalog::entry::{Kind, Source};
 use mold_catalog::families::Family;
 use mold_catalog::live::{
-    family_from_hf, fetch_civitai_version, fetch_hf_repo, search, LiveCache, LiveSearchOpts,
+    family_from_hf, fetch_civitai_version, fetch_hf_repo, search, LiveCache, LiveSearchError,
+    LiveSearchOpts,
 };
 use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -595,6 +596,34 @@ async fn hf_search_failure_does_not_nuke_civitai_results() {
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].source, Source::Civitai);
+}
+
+#[tokio::test]
+async fn hf_auth_failure_is_returned_so_the_server_can_retry_a_fallback_token() {
+    let civ = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ONE_FLUX_LORA))
+        .mount(&civ)
+        .await;
+    let hf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("invalid token"))
+        .mount(&hf)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let mut opts = flux_lora_opts("test");
+    opts.source = None;
+    let error = search(&civ.uri(), &hf.uri(), &cache, &opts)
+        .await
+        .expect_err("auth failures must be available to the server fallback path");
+
+    assert!(matches!(
+        error,
+        LiveSearchError::Upstream { status: 401, .. }
+    ));
 }
 
 // ── Family inference ───────────────────────────────────────────────────────

@@ -78,6 +78,7 @@ fn spawn_test_driver(
 #[derive(Clone, Default)]
 struct FakePuller {
     pub called: Arc<AtomicBool>,
+    pub hf_fallback_token: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -85,10 +86,12 @@ impl PullDriver for FakePuller {
     async fn pull(
         &self,
         _model: &str,
+        hf_fallback_token: Option<&str>,
         on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         cancel: CancellationToken,
     ) -> Result<(), String> {
         self.called.store(true, Ordering::SeqCst);
+        *self.hf_fallback_token.lock().unwrap() = hf_fallback_token.map(str::to_owned);
         // Emit one Status + one FileProgress event so the driver sees work.
         on_progress(mold_core::download::DownloadProgressEvent::Status {
             message: "starting".into(),
@@ -138,7 +141,10 @@ async fn driver_happy_path_emits_started_progress_jobdone() {
 
     // Enqueue with a manifest-known model so validation passes. Use a model
     // that's cheap to resolve — the real pull is replaced by the fake.
-    let (id, _pos, _outcome) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+    let (id, _pos, _outcome) = queue
+        .enqueue_with_hf_fallback("flux-schnell:q4".into(), Some("hf_desktop".into()))
+        .await
+        .unwrap();
 
     // Collect events for up to 2 seconds.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -169,6 +175,11 @@ async fn driver_happy_path_emits_started_progress_jobdone() {
         puller.called.load(Ordering::SeqCst),
         "puller was not invoked"
     );
+    assert_eq!(
+        *puller.hf_fallback_token.lock().unwrap(),
+        Some("hf_desktop".into()),
+        "request-scoped HF fallback was not forwarded to the pull driver"
+    );
     assert!(seen_started, "missing Started event");
     assert!(seen_progress, "missing Progress event");
     assert!(seen_done, "missing JobDone event");
@@ -189,6 +200,7 @@ impl PullDriver for SlowPuller {
     async fn pull(
         &self,
         _model: &str,
+        _hf_fallback_token: Option<&str>,
         _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         cancel: CancellationToken,
     ) -> Result<(), String> {
@@ -414,6 +426,7 @@ impl PullDriver for AlwaysFailsPuller {
     async fn pull(
         &self,
         _model: &str,
+        _hf_fallback_token: Option<&str>,
         _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         _cancel: CancellationToken,
     ) -> Result<(), String> {
@@ -477,6 +490,7 @@ impl PullDriver for CancellablePuller {
     async fn pull(
         &self,
         _model: &str,
+        _hf_fallback_token: Option<&str>,
         _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         cancel: CancellationToken,
     ) -> Result<(), String> {
@@ -535,6 +549,7 @@ impl PullDriver for FlakyPuller {
     async fn pull(
         &self,
         _model: &str,
+        _hf_fallback_token: Option<&str>,
         on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         _cancel: CancellationToken,
     ) -> Result<(), String> {
@@ -576,6 +591,7 @@ impl PullDriver for MultiFilePuller {
     async fn pull(
         &self,
         _model: &str,
+        _hf_fallback_token: Option<&str>,
         on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         _cancel: CancellationToken,
     ) -> Result<(), String> {
@@ -838,6 +854,7 @@ impl PullDriver for UnexpectedManifestDriver {
     async fn pull(
         &self,
         _model: &str,
+        _hf_fallback_token: Option<&str>,
         _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         _cancel: CancellationToken,
     ) -> Result<(), String> {

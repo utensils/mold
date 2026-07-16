@@ -8,6 +8,30 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mold_catalog::sidecar::{sidecar_from_entry, write_sidecar, CatalogSidecar, SIDECAR_FILENAME};
+
+#[test]
+fn forwarded_catalog_credentials_are_trimmed_and_read_from_headers() {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("x-mold-hf-token", "  hf_desktop  ".parse().unwrap());
+    headers.insert("x-mold-civitai-token", "cv_desktop".parse().unwrap());
+
+    let credentials = super::ForwardedCatalogCredentials::from_headers(&headers);
+
+    assert_eq!(credentials.hf.as_deref(), Some("hf_desktop"));
+    assert_eq!(credentials.civitai.as_deref(), Some("cv_desktop"));
+}
+
+#[test]
+fn server_catalog_credentials_are_attempted_before_forwarded_fallbacks() {
+    assert_eq!(
+        super::credential_candidates(Some("server".into()), Some("desktop")),
+        vec![Some("server".into()), Some("desktop".into())]
+    );
+    assert_eq!(
+        super::credential_candidates(None, Some("desktop")),
+        vec![Some("desktop".into())]
+    );
+}
 use tower::ServiceExt;
 use wiremock::matchers::{method, path as wm_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

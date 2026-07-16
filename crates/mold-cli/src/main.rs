@@ -1797,7 +1797,10 @@ async fn run() -> anyhow::Result<()> {
             commands::jobs::run(action, &config).await?;
         }
         Commands::Pull { model, skip_verify } => {
-            let opts = mold_core::download::PullOptions { skip_verify };
+            let opts = mold_core::download::PullOptions {
+                skip_verify,
+                ..Default::default()
+            };
             if model.starts_with("hf:") || model.starts_with("cv:") {
                 match resolve_catalog_id(&model).await? {
                     CatalogIdResolution::Manifest(name) => {

@@ -1664,6 +1664,7 @@ async fn pull_model_endpoint(
             &models_dir,
             &state.downloads,
             Some(&body.model),
+            None,
         )
         .await;
         let primary_job = crate::catalog_api::enqueue_catalog_primary_repair(&state, &body.model)

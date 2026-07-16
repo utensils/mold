@@ -208,6 +208,12 @@ pub async fn search(
         // HF errors must not nuke Civitai results. Log and continue.
         match hf_search(hf_base, opts).await {
             Ok(rows) => entries.extend(rows),
+            Err(
+                e @ LiveSearchError::Upstream {
+                    status: 401 | 403, ..
+                },
+            ) => return Err(e),
+            Err(e) if matches!(opts.source, Some(Source::Hf)) => return Err(e),
             Err(e) => {
                 tracing::warn!(target: "catalog.live", error = %e, "hf search failed");
             }

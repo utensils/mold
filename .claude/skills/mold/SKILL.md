@@ -122,9 +122,13 @@ mold run flux-dev:bf16 "epic shot" \
   --lora dramatic-lighting.safetensors --lora-scale 0.4
 ```
 
-**Catalog browse:** the web UI's catalog tab proxies live HF + Civitai
-searches (filter by **LoRAs** to narrow). Install with `mold pull cv:<id>`
-/ `mold pull hf:<author>/<repo>` or the catalog tab's Download button.
+**Catalog browse:** Desktop Models is one installed-first searchable library
+with All / Installed / Available filters and Grid / Table layouts; its catalog
+section proxies live HF + Civitai searches (filter by **LoRAs** to narrow).
+Install with `mold pull cv:<id>` / `mold pull hf:<author>/<repo>` or Pull in
+Models. With several ready desktop hosts, Pull asks for the destination. Remote
+desktop catalog requests can carry request-scoped HF/Civitai fallback tokens;
+server env tokens retain precedence and forwarded values are not persisted.
 Once installed, the LoRA appears in the **Generate → Settings → LoRA**
 dropdown for any compatible model family. The CLI no longer ships a `mold catalog`
 subcommand — every read is live, no scan to run.

@@ -173,8 +173,11 @@ routed there without a local download. Linux developers can use `desktop-dev`;
 `desktop-build` creates an AppImage on conventional Linux or the native Nix
 package on NixOS via `nix build .#mold-desktop`. It includes Generate, a
 local/remote
-Gallery, parallel model downloads with real cancellation, chains, model
-catalog browsing, history, and a full settings bench. Its RunPod workspace can
+Gallery, parallel model downloads with real cancellation, chains, and one
+installed-first model library with Grid/Table catalog views and explicit
+multi-host download targeting. Remote catalog pulls can use request-scoped
+Hugging Face/Civitai credentials from the desktop when the host needs them.
+It also includes history and a full settings bench. Its RunPod workspace can
 launch and manage pods and persistent network volumes without leaving the app.
 
 Signed macOS desktop builds check for updates when they open, show a persistent banner
