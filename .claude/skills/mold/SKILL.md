@@ -126,6 +126,8 @@ mold run flux-dev:bf16 "epic shot" \
 with All / Installed / Available filters and Grid / Table layouts; its catalog
 uses cache-stable 512 px Civitai derivatives plus lazy async decoding and
 per-card layout/paint containment instead of source-resolution preview images.
+Entries without working preview art use a local model-family mark instead of a
+blank card or another image request.
 The catalog section proxies live HF + Civitai searches (filter by **LoRAs** to narrow).
 Install with `mold pull cv:<id>` / `mold pull hf:<author>/<repo>` or Pull in
 Models. With several ready desktop hosts, Pull asks for the destination. Remote

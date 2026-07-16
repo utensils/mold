@@ -59,12 +59,35 @@ describe("CatalogCard", () => {
     expect(wrapper.get('[data-test="catalog-card"]').classes()).toContain("catalog-card-contained");
   });
 
-  it("drops the thumbnail block entirely when the image fails to load", async () => {
+  it("replaces a failed thumbnail with the family placeholder", async () => {
     const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
     await flushPromises();
     await wrapper.get("img").trigger("error");
     expect(wrapper.find("img").exists()).toBe(false);
     expect(wrapper.find(".grain-shimmer").exists()).toBe(false);
+    expect(wrapper.get('[data-test="family-placeholder"]').text()).toContain("FLUX");
+  });
+
+  it("uses a family-aware placeholder in both catalog layouts when no image exists", async () => {
+    const grid = mount(CatalogCard, {
+      props: { entry: entry({ family: "sdxl", thumbnail_url: null }), pulling: false },
+    });
+    await flushPromises();
+    const gridPlaceholder = grid.get('[data-test="family-placeholder"]');
+    expect(gridPlaceholder.attributes("data-layout")).toBe("grid");
+    expect(gridPlaceholder.text()).toContain("SDXL");
+
+    const table = mount(CatalogCard, {
+      props: {
+        entry: entry({ family: "qwen-image", thumbnail_url: null }),
+        pulling: false,
+        layout: "table",
+      },
+    });
+    await flushPromises();
+    const tablePlaceholder = table.get('[data-test="family-placeholder"]');
+    expect(tablePlaceholder.attributes("data-layout")).toBe("table");
+    expect(tablePlaceholder.text()).toContain("QWEN");
   });
 
   it("shows a size skeleton while resolving, then the resolved SIZE line", async () => {

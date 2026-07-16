@@ -49,8 +49,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
 - **Models & catalog** — one searchable installed-first library with All,
   Installed, and Available filters plus compact Grid and Table layouts. The
   desktop reuses cacheable 512 px Civitai thumbnails across both layouts,
-  lazily decodes them, and contains each card's layout and paint work. The live
-  Hugging Face/Civitai catalog renders **SIZE vs FETCH** honestly. With
+  lazily decodes them, and contains each card's layout and paint work. Missing
+  previews use a local model-family mark, with no additional image request. The
+  live Hugging Face/Civitai catalog renders **SIZE vs FETCH** honestly. With
   several hosts connected, Pull asks which host should store the model.
 - **Chains** — a filmstrip editing bench for multi-stage video
   (`mold.chain.v1`): per-stage prompts and frame counts (validated `8n+1`),

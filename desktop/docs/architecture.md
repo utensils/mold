@@ -136,14 +136,14 @@ The checked-in config deliberately leaves `createUpdaterArtifacts` false so unsi
 
 The shared devshell exposes cross-platform desktop helpers:
 
-| Command            | Runs                                                                                                                             |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| `desktop-dev`      | Installs locked frontend dependencies, clears a stale Vite listener, and runs Tauri with Metal on macOS or CUDA on Linux         |
-| `desktop-build`    | Builds the macOS application bundle or the native Linux desktop package and AppImage; optional signing secrets remain macOS-only |
-| `desktop-check`    | Runs Rust formatting and warning-denied clippy plus frontend format and type checks                                              |
-| `desktop-test`     | Runs the CPU-only Rust test suite, embedded-engine boot test, and frontend Vitest suite                                          |
-| `desktop-ui`       | Runs the frontend-only Vite server against a running `mold serve`                                                                |
-| `desktop-bun-lock` | Refreshes the Nix-pinned Bun dependency lock after `desktop/bun.lock` changes                                                    |
+| Command            | Runs                                                                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `desktop-dev`      | Installs locked frontend dependencies, clears a stale Vite listener, and runs Tauri as `Mold - dev` with Metal on macOS or CUDA on Linux |
+| `desktop-build`    | Builds the macOS application bundle or the native Linux desktop package and AppImage; optional signing secrets remain macOS-only         |
+| `desktop-check`    | Runs Rust formatting and warning-denied clippy plus frontend format and type checks                                                      |
+| `desktop-test`     | Runs the CPU-only Rust test suite, embedded-engine boot test, and frontend Vitest suite                                                  |
+| `desktop-ui`       | Runs the frontend-only Vite server against a running `mold serve`                                                                        |
+| `desktop-bun-lock` | Refreshes the Nix-pinned Bun dependency lock after `desktop/bun.lock` changes                                                            |
 
 The devshell includes `cargo-tauri`, Bun tooling, `lsof`, and ImageMagick. Linux adds WebKitGTK, GTK, Soup, GStreamer, CUDA, and the runtime library paths required by the launched binary. macOS uses system WKWebView and scopes the system C compiler linker variables to desktop commands so the existing Apple build and signing flow is unchanged.
 

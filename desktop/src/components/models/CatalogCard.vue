@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import SourceGlyph from "../generate/SourceGlyph.vue";
+import ModelFamilyPlaceholder from "./ModelFamilyPlaceholder.vue";
 import {
   catalogFetchCaption,
   catalogPageUrl,
@@ -62,7 +63,7 @@ const counts = computed(() => {
 });
 
 const thumbLoaded = ref(false);
-/** A failed thumbnail drops the whole image block — no broken-image box. */
+/** A failed thumbnail falls back to the same family mark as a missing image. */
 const thumbFailed = ref(false);
 
 function openPage(): void {
@@ -77,8 +78,8 @@ function openPage(): void {
     data-test="catalog-card"
     :data-layout="layout"
   >
-    <!-- Civitai preview image (public URL); shimmer placeholder while it
-         loads, dropped entirely if it fails. -->
+    <!-- Civitai preview image (public URL); shimmer while loading and use a
+         local family mark when no custom image is available. -->
     <div
       v-if="thumbnailUrl && !thumbFailed"
       :class="
@@ -99,6 +100,7 @@ function openPage(): void {
         @error="thumbFailed = true"
       />
     </div>
+    <ModelFamilyPlaceholder v-else :family="entry.family" :layout="layout" />
 
     <div :class="layout === 'grid' ? 'flex min-h-32 flex-1 flex-col gap-1.5 p-3' : 'contents'">
       <div
