@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Desktop Models is now one installed-first library.** Installed and catalog models share one searchable view with All / Installed / Available filters, compact responsive cards, and a Grid / Table density toggle. When more than one host is connected, Pull opens a target picker naming each ready host and its queue depth before anything is downloaded.
-- **Remote catalog requests can use the desktop's Hugging Face and Civitai credentials.** The desktop forwards its locally stored tokens only on authenticated catalog requests to remote Mold hosts. A remote server keeps precedence for its own configured token and falls back to the request-scoped desktop token when the server token is missing or rejected; forwarded values never enter download listings, events, or persistent server config.
+- **Desktop Models is now one installed-first library.** Installed and catalog models share one searchable view with All / Installed / Available filters, compact responsive cards, and a Grid / Table density toggle. When more than one host is connected, Pull opens a target picker naming each ready host and its queue depth before anything is downloaded. Pulls on extra hosts remain visible in the shared downloads tray with host labels, live progress, completion refresh, and cancellation routed to the correct server.
+- **Remote catalog requests can use the desktop's Hugging Face and Civitai credentials.** The desktop forwards its locally stored tokens only on authenticated catalog requests to remote Mold hosts. A remote server keeps precedence for its own configured token and falls back independently per upstream to the request-scoped desktop token when the server token is missing or rejected; forwarded values never enter download listings, events, or persistent server config, and queued cancellation removes them from memory immediately.
 
 ### Fixed
 

@@ -186,10 +186,11 @@ Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector
 
 ### 4.3 Models — the chemistry shelf
 
-Two tabs: **Installed** and **Catalog**, plus a persistent **Downloads** tray.
+One installed-first model library with **All / Installed / Available** filters,
+plus a persistent **Downloads** tray.
 
 ```
-│ MODELS      [Installed 14 · 96 GB]  [Catalog]                 [Search ⌘F]  │
+│ MODELS   [All] [Installed 14 · 96 GB] [Available]  [Search ⌘F] [Grid|Table]│
 │ ── FLUX ─────────────────────────────────────────────────────────────────  │
 │ ◉ flux-dev        q8    11.8 GB  ▓▓▓▓▓▓▓░░  ● on GPU     [Load][Info][✕]  │
 │   flux-schnell    q4     6.4 GB  ▓▓▓░░░░░░               [Load][Info][✕]  │
@@ -198,9 +199,9 @@ Two tabs: **Installed** and **Catalog**, plus a persistent **Downloads** tray.
 │ ── SHARED COMPONENTS ────────────────────  t5-xxl 9.2 GB · clip-l 1.7 GB   │
 ```
 
-- **Installed:** grouped by family; rows show quant chip, disk usage bar (proportional, Halide), residency dot, per-row actions. **Info** expands components (`/api/models/:model/components`) with per-component download/verify state and a "Verify checksums" action. Removing warns about shared components: "Keeps t5-xxl (used by 3 models)."
-- **Catalog:** the Models view combines installed inventory and live catalog results under one search field, with All / Installed / Available filters and a Grid / Table toggle. Grid cards use a bounded preview height and responsive 260px minimum columns; Table rows favor names, source, family, popularity, size, and the Pull action. Civitai previews use one cache-stable 512 px CDN derivative in both layouts, async lazy decoding, and per-card layout/paint containment; the desktop also normalizes raw preview URLs returned by older remote servers. Missing or failed previews use a local family-aware mark at the same dimensions so cards keep their visual rhythm without another fetch. Source, Family, and NSFW filters refine paged `/api/catalog/search` results. Pulling with several ready hosts opens a labelled target dialog; a single-host setup starts immediately. Result cards keep **SIZE vs FETCH** honest.
-- **Downloads tray:** slides up from the Bench rail while `/api/downloads/stream` has activity: up to two active downloads plus the remaining queue, per-download progress (bytes + %), and cancellation (✕ → `DELETE /api/downloads/:id`) that stays visibly pending until the engine confirms termination. Companion downloads remain grouped under their primary. Progress bars here are plain Safelight fills; the Develop is reserved for generation.
+- **Installed models:** surface first; rows show quant chip, disk usage, residency, and per-row actions. **Info** expands components (`/api/models/:model/components`) with per-component download/verify state and a "Verify checksums" action. Removing warns about shared components: "Keeps t5-xxl (used by 3 models)."
+- **Available models:** share the same search and layout controls. Grid cards use a bounded preview height and responsive 260px minimum columns; Table rows favor names, source, family, popularity, size, and the Pull action. Civitai previews use one cache-stable 512 px CDN derivative in both layouts, async lazy decoding, and per-card layout/paint containment; the desktop also normalizes raw preview URLs returned by older remote servers. Missing or failed previews use a local family-aware mark at the same dimensions so cards keep their visual rhythm without another fetch. Source, Family, and NSFW filters refine paged `/api/catalog/search` results. Pulling with several ready hosts opens a labelled target dialog; a single-host setup starts immediately. Result cards keep **SIZE vs FETCH** honest.
+- **Downloads tray:** slides up from the Bench rail while any connected host's `/api/downloads/stream` has activity: up to two active downloads per host plus each remaining queue, per-download host label and progress (bytes + %), and cancellation (✕ → that host's `DELETE /api/downloads/:id`) that stays visibly pending until the engine confirms termination. Companion downloads remain grouped under their primary. Progress bars here are plain Safelight fills; the Develop is reserved for generation.
 - Built-in catalog entries and `hf:`/`cv:` live entries are visually identical; the id chip (`cv:12345`) is copyable.
 
 ### 4.4 Chains — the editing bench (mold.chain.v1)

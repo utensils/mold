@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import InstalledTab from "../components/models/InstalledTab.vue";
 import CatalogTab from "../components/models/CatalogTab.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
@@ -9,13 +10,14 @@ import { useDownloadsStore } from "../stores/downloads";
 import { formatGB } from "../lib/format";
 import { modelDiskBytes } from "../lib/models";
 import { primaryModifierPressed } from "../lib/platform";
+import { modelAvailabilityFromQuery, type ModelAvailability } from "../lib/modelAvailability";
 
 const conn = useConnectionStore();
 const models = useModelStore();
 const downloads = useDownloadsStore();
-type Availability = "all" | "installed" | "available";
+const route = useRoute();
 type Layout = "grid" | "table";
-const availability = ref<Availability>("all");
+const availability = ref<ModelAvailability>(modelAvailabilityFromQuery(route.query));
 const layout = ref<Layout>("grid");
 const query = ref("");
 const searchEl = ref<HTMLInputElement | null>(null);

@@ -116,7 +116,7 @@ Post-generation upscale persists distinct `-original` and `-upscaled` entries on
 - **clean** (`mold clean`, `--force`, `--older-than 30d`): dry-run by default; stale `.pulling` markers (>6h), orphaned shared files, hf-cache transients, old output images.
 - **load/unload** (`mold unload`, `POST /api/models/load`, `DELETE /api/models/unload`): free GPU memory.
 - **ps** (`mold ps`, `GET /api/status`): server status + loaded models.
-- **downloads drawer** (web): `GET/POST /api/downloads`, `DELETE /api/downloads/:id`, live SSE stream (cancelable, progress bytes/percent).
+- **downloads drawer** (web/desktop): `GET/POST /api/downloads`, `DELETE /api/downloads/:id`, live SSE stream (cancelable, progress bytes/percent). Desktop keeps one stream per selected download host and labels/routes each row by origin.
 - **SIZE vs FETCH semantics**: catalog entries distinguish declared size vs actual fetch; disk usage tracked per model + shared components.
 
 ---

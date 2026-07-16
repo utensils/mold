@@ -93,13 +93,15 @@ async function pullTo(entry: CatalogEntry, host: HostView | null) {
   pulling.value.add(entry.id);
   try {
     const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
+    // Attach the snapshot-first stream before enqueueing so a cached,
+    // near-instant pull still produces a visible terminal event and refresh.
+    await downloads.subscribe(host ?? undefined);
     await startCatalogDownload(
       entry.id,
       target,
       host ? host.kind === "remote" : conn.mode === "remote",
     );
     toasts.push(`Pulling ${entry.name}${host ? ` on ${host.label}` : ""}`);
-    if (!host || host.primary) downloads.subscribe();
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
       toasts.push(`${entry.name} is already queued.`);

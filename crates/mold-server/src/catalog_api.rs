@@ -122,6 +122,32 @@ fn is_auth_error(error: &mold_catalog::live::LiveSearchError) -> bool {
     )
 }
 
+fn replace_failed_search_credential(
+    error: &mold_catalog::live::LiveSearchError,
+    opts: &mut mold_catalog::live::LiveSearchOpts,
+    forwarded: &ForwardedCatalogCredentials,
+) -> bool {
+    let mold_catalog::live::LiveSearchError::Upstream {
+        host,
+        status: 401 | 403,
+        ..
+    } = error
+    else {
+        return false;
+    };
+    let (current, replacement) = if *host == "civitai.com" {
+        (&mut opts.civitai_token, forwarded.civitai.as_ref())
+    } else {
+        (&mut opts.hf_token, forwarded.hf.as_ref())
+    };
+    let Some(replacement) = replacement.filter(|replacement| current.as_ref() != Some(replacement))
+    else {
+        return false;
+    };
+    *current = Some(replacement.clone());
+    true
+}
+
 async fn fetch_civitai_version_with_fallback(
     state: &crate::state::AppState,
     version_id: &str,
@@ -626,54 +652,22 @@ pub async fn live_search_catalog(
     let models_dir = cfg.resolved_models_dir();
     drop(cfg);
 
-    let first = mold_catalog::live::search(
-        state.catalog_live_civitai_base.as_str(),
-        "https://huggingface.co",
-        &state.catalog_live_cache,
-        &opts,
-    )
-    .await;
-    let first = match first {
-        Err(
-            error @ mold_catalog::live::LiveSearchError::Upstream {
-                host,
-                status: 401 | 403,
-                ..
-            },
-        ) => {
-            let replacement = if host == "civitai.com" {
-                forwarded
-                    .civitai
-                    .clone()
-                    .filter(|token| Some(token) != server_civitai.as_ref())
-                    .map(|token| (true, token))
-            } else {
-                forwarded
-                    .hf
-                    .clone()
-                    .filter(|token| Some(token) != server_hf.as_ref())
-                    .map(|token| (false, token))
-            };
-            if let Some((is_civitai, token)) = replacement {
-                if is_civitai {
-                    opts.civitai_token = Some(token);
-                } else {
-                    opts.hf_token = Some(token);
-                }
-                mold_catalog::live::search(
-                    state.catalog_live_civitai_base.as_str(),
-                    "https://huggingface.co",
-                    &state.catalog_live_cache,
-                    &opts,
-                )
-                .await
-            } else {
-                Err(error)
+    let search_result = loop {
+        let result = mold_catalog::live::search(
+            state.catalog_live_civitai_base.as_str(),
+            "https://huggingface.co",
+            &state.catalog_live_cache,
+            &opts,
+        )
+        .await;
+        match result {
+            Err(ref error) if replace_failed_search_credential(error, &mut opts, &forwarded) => {
+                continue;
             }
+            result => break result,
         }
-        other => other,
     };
-    let entries = match first {
+    let entries = match search_result {
         Ok(es) => es,
         Err(e) => {
             tracing::warn!(target: "catalog.live", error = %e, "live search failed");

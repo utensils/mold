@@ -24,11 +24,13 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 const apiJsonTo = vi.fn();
-vi.mock("../lib/api/client", () => ({
+vi.mock("../lib/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
 }));
 
 import { useConnectionStore } from "./connection";
+import { useDownloadsStore } from "./downloads";
 import { useHostModelsStore } from "./hostModels";
 import { useHostsStore } from "./hosts";
 import { useToastStore } from "./toasts";
@@ -190,8 +192,23 @@ describe("hosts store", () => {
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
     const hosts = useHostsStore();
     await hosts.connect("hal9000", null, null);
+    const downloads = useDownloadsStore();
+    const abort = new AbortController();
+    downloads.hostStates["hal9000-7680"] = {
+      activeJobs: [],
+      queued: [],
+      history: [],
+      label: "hal9000",
+      target: { baseUrl: "http://hal9000:7680", apiKey: null },
+      subscribed: true,
+      abort,
+      cancelling: [],
+      ready: null,
+    };
     await hosts.disconnect("hal9000-7680");
     expect(hosts.all.map((h) => h.id)).not.toContain("hal9000-7680");
+    expect(abort.signal.aborted).toBe(true);
+    expect(downloads.hostStates["hal9000-7680"]).toBeUndefined();
     const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
     expect(persisted.connectedHostIds).not.toContain("hal9000-7680");
     expect(persisted.savedHosts.map((h: SavedHost) => h.id)).toContain("hal9000-7680");

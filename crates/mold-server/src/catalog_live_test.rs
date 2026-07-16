@@ -32,6 +32,43 @@ fn server_catalog_credentials_are_attempted_before_forwarded_fallbacks() {
         vec![Some("desktop".into())]
     );
 }
+
+#[test]
+fn combined_search_replaces_each_rejected_server_credential() {
+    let forwarded = super::ForwardedCatalogCredentials {
+        hf: Some("hf_desktop".into()),
+        civitai: Some("cv_desktop".into()),
+    };
+    let mut opts = mold_catalog::live::LiveSearchOpts {
+        civitai_token: Some("cv_server".into()),
+        hf_token: Some("hf_server".into()),
+        ..Default::default()
+    };
+    let civitai_error = mold_catalog::live::LiveSearchError::Upstream {
+        host: "civitai.com",
+        status: 401,
+        body: "stale".into(),
+    };
+    let hf_error = mold_catalog::live::LiveSearchError::Upstream {
+        host: "huggingface.co",
+        status: 403,
+        body: "stale".into(),
+    };
+
+    assert!(super::replace_failed_search_credential(
+        &civitai_error,
+        &mut opts,
+        &forwarded,
+    ));
+    assert_eq!(opts.civitai_token.as_deref(), Some("cv_desktop"));
+    assert!(super::replace_failed_search_credential(
+        &hf_error, &mut opts, &forwarded,
+    ));
+    assert_eq!(opts.hf_token.as_deref(), Some("hf_desktop"));
+    assert!(!super::replace_failed_search_credential(
+        &hf_error, &mut opts, &forwarded,
+    ));
+}
 use tower::ServiceExt;
 use wiremock::matchers::{method, path as wm_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

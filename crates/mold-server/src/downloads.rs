@@ -89,8 +89,9 @@ pub struct DownloadQueue {
     /// have no entry here and fall through to the `PullDriver` path.
     recipe_payloads: StdMutex<HashMap<String, RecipePayload>>,
     /// Request-scoped HF fallback tokens for manifest jobs initiated by a
-    /// trusted remote desktop client. Tokens are consumed when the job starts
-    /// and never appear in the public download listing or event stream.
+    /// trusted remote desktop client. Tokens live only until the job settles
+    /// (or is cancelled while queued) and never appear in the public download
+    /// listing or event stream.
     hf_fallback_tokens: StdMutex<HashMap<String, String>>,
     /// Catalog group bookkeeping. Keyed by catalog id; cleared when the
     /// group emits `CatalogReady`. Memory-only — server restart resets
@@ -201,6 +202,7 @@ impl DownloadQueue {
         {
             let active = self.active.lock().await;
             if let Some(handle) = active.values().find(|handle| handle.job.model == canonical) {
+                self.store_hf_fallback_token(&handle.job.id, hf_fallback_token.as_deref())?;
                 return Ok((handle.job.id.clone(), 0, EnqueueOutcome::AlreadyPresent));
             }
         }
@@ -211,6 +213,7 @@ impl DownloadQueue {
                 .enumerate()
                 .find(|(_, j)| j.model == canonical)
             {
+                self.store_hf_fallback_token(&existing.id, hf_fallback_token.as_deref())?;
                 return Ok((existing.id.clone(), idx + 1, EnqueueOutcome::AlreadyPresent));
             }
         }
@@ -236,12 +239,7 @@ impl DownloadQueue {
             queued.push_back(job);
             queued.len() // position shown to the user is 1-based in the drawer
         };
-        if let Some(token) = hf_fallback_token.filter(|token| !token.trim().is_empty()) {
-            self.hf_fallback_tokens
-                .lock()
-                .map_err(|_| EnqueueError::LockPoisoned)?
-                .insert(id.clone(), token);
-        }
+        self.store_hf_fallback_token(&id, hf_fallback_token.as_deref())?;
         let _ = self.events.send(DownloadEvent::Enqueued {
             id: id.clone(),
             model: canonical,
@@ -459,11 +457,32 @@ impl DownloadQueue {
             .and_then(|mut p| p.remove(job_id))
     }
 
-    pub(crate) fn take_hf_fallback_token(&self, job_id: &str) -> Option<String> {
+    fn store_hf_fallback_token(
+        &self,
+        job_id: &str,
+        token: Option<&str>,
+    ) -> Result<(), EnqueueError> {
+        let Some(token) = token.map(str::trim).filter(|token| !token.is_empty()) else {
+            return Ok(());
+        };
+        self.hf_fallback_tokens
+            .lock()
+            .map_err(|_| EnqueueError::LockPoisoned)?
+            .insert(job_id.to_string(), token.to_string());
+        Ok(())
+    }
+
+    pub(crate) fn hf_fallback_token(&self, job_id: &str) -> Option<String> {
         self.hf_fallback_tokens
             .lock()
             .ok()
-            .and_then(|mut tokens| tokens.remove(job_id))
+            .and_then(|tokens| tokens.get(job_id).cloned())
+    }
+
+    fn forget_hf_fallback_token(&self, job_id: &str) {
+        if let Ok(mut tokens) = self.hf_fallback_tokens.lock() {
+            tokens.remove(job_id);
+        }
     }
 
     /// Cancel an in-flight or queued download. Returns `true` if a job was
@@ -480,6 +499,10 @@ impl DownloadQueue {
                 self.recipe_payloads
                     .lock()
                     .expect("recipe payload lock poisoned")
+                    .remove(id);
+                self.hf_fallback_tokens
+                    .lock()
+                    .expect("HF fallback token lock poisoned")
                     .remove(id);
                 self.push_history(job);
                 let _ = self
@@ -560,6 +583,11 @@ impl DownloadQueue {
 
 // ── PullDriver trait + real & test implementations ──────────────────────────
 
+/// Late-readable request credential for an active manifest pull. The queue
+/// keeps the token out of public job state while allowing a duplicate desktop
+/// request to attach a valid credential even after the pull attempt began.
+pub type HfFallbackTokenProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// Trait that hides the HuggingFace pull behind something the tests can fake.
 ///
 /// The real implementation in `HfPullDriver` calls
@@ -569,10 +597,23 @@ pub trait PullDriver: Send + Sync + 'static {
     async fn pull(
         &self,
         model: &str,
-        hf_fallback_token: Option<&str>,
         on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         cancel: CancellationToken,
     ) -> Result<(), String>;
+
+    /// Pull with a credential provider that can be updated while the request
+    /// is active. Existing third-party drivers retain source compatibility via
+    /// this default adapter; the production HF driver overrides it.
+    async fn pull_with_token_provider(
+        &self,
+        model: &str,
+        hf_fallback_token: HfFallbackTokenProvider,
+        on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        let _ = hf_fallback_token;
+        self.pull(model, on_progress, cancel).await
+    }
 }
 
 /// Trait that hides the recipe-driven (Civitai) pull. Parallel to
@@ -637,7 +678,17 @@ impl PullDriver for HfPullDriver {
     async fn pull(
         &self,
         model: &str,
-        hf_fallback_token: Option<&str>,
+        on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        self.pull_with_token_provider(model, Arc::new(|| None), on_progress, cancel)
+            .await
+    }
+
+    async fn pull_with_token_provider(
+        &self,
+        model: &str,
+        hf_fallback_token: HfFallbackTokenProvider,
         on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
         cancel: CancellationToken,
     ) -> Result<(), String> {
@@ -651,26 +702,24 @@ impl PullDriver for HfPullDriver {
                 &Default::default(),
             )
             .await;
-            match (primary, hf_fallback_token) {
-                (
-                    Err(
-                        mold_core::download::DownloadError::Unauthorized { .. }
-                        | mold_core::download::DownloadError::GatedModel { .. },
-                    ),
-                    Some(token),
+            match primary {
+                Err(
+                    mold_core::download::DownloadError::Unauthorized { .. }
+                    | mold_core::download::DownloadError::GatedModel { .. },
                 ) => {
-                    let fallback_opts = mold_core::download::PullOptions {
-                        hf_token: Some(token.to_string()),
-                        ..Default::default()
-                    };
-                    mold_core::download::pull_and_configure_with_callback(
-                        &model,
-                        on_progress,
-                        &fallback_opts,
-                    )
-                    .await
+                    if let Some(token) = hf_fallback_token() {
+                        mold_core::download::pull_and_configure_with_callback_and_hf_token(
+                            &model,
+                            on_progress,
+                            &Default::default(),
+                            Some(&token),
+                        )
+                        .await
+                    } else {
+                        primary
+                    }
                 }
-                (result, _) => result,
+                result => result,
             }
         };
         // Race the pull against cancellation. pull_and_configure_with_callback
@@ -899,7 +948,10 @@ async fn run_one_job(
     // Pull the recipe payload off the queue once, before the retry loop.
     // Subsequent retries clone from this owned copy.
     let recipe_payload = queue.take_recipe_payload(&job.id);
-    let hf_fallback_token = queue.take_hf_fallback_token(&job.id);
+    let queue_for_token = queue.clone();
+    let token_job_id = job.id.clone();
+    let hf_fallback_token: HfFallbackTokenProvider =
+        Arc::new(move || queue_for_token.hf_fallback_token(&token_job_id));
 
     // Install the job as active. The pull runs inline in this function so we
     // don't need a separate task handle — cancellation flows through `abort`.
@@ -915,11 +967,12 @@ async fn run_one_job(
         recipe_driver,
         models_dir,
         recipe_payload.as_ref(),
-        hf_fallback_token.as_deref(),
+        hf_fallback_token,
         &mut job,
         cancel.clone(),
     )
     .await;
+    queue.forget_hf_fallback_token(&job.id);
 
     // Move the finished job into history.
     let final_job = queue
@@ -937,7 +990,7 @@ async fn try_pull_with_retry(
     recipe_driver: &Arc<dyn RecipePullDriver>,
     models_dir: &std::path::Path,
     recipe_payload: Option<&RecipePayload>,
-    hf_fallback_token: Option<&str>,
+    hf_fallback_token: HfFallbackTokenProvider,
     job: &mut DownloadJob,
     cancel: CancellationToken,
 ) -> Result<(), ()> {
@@ -949,7 +1002,7 @@ async fn try_pull_with_retry(
             recipe_driver,
             models_dir,
             recipe_payload,
-            hf_fallback_token,
+            hf_fallback_token.clone(),
             job,
             cancel.clone(),
         )
@@ -1038,7 +1091,7 @@ async fn run_single_attempt(
     recipe_driver: &Arc<dyn RecipePullDriver>,
     models_dir: &std::path::Path,
     recipe_payload: Option<&RecipePayload>,
-    hf_fallback_token: Option<&str>,
+    hf_fallback_token: HfFallbackTokenProvider,
     job: &mut DownloadJob,
     cancel: CancellationToken,
 ) -> Result<(), AttemptError> {
@@ -1071,7 +1124,12 @@ async fn run_single_attempt(
         }
         None => {
             driver
-                .pull(&job.model, hf_fallback_token, on_progress, cancel.clone())
+                .pull_with_token_provider(
+                    &job.model,
+                    hf_fallback_token,
+                    on_progress,
+                    cancel.clone(),
+                )
                 .await
         }
     };

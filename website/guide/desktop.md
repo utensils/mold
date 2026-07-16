@@ -52,7 +52,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
   lazily decodes them, and contains each card's layout and paint work. Missing
   previews use a local model-family mark, with no additional image request. The
   live Hugging Face/Civitai catalog renders **SIZE vs FETCH** honestly. With
-  several hosts connected, Pull asks which host should store the model.
+  several hosts connected, Pull asks which host should store the model. The
+  downloads tray keeps every selected host's progress and cancellation visible
+  and refreshes that host's installed-model inventory when the pull completes.
 - **Chains** — a filmstrip editing bench for multi-stage video
   (`mold.chain.v1`): per-stage prompts and frame counts (validated `8n+1`),
   splice transitions (smooth / cut / fade) you click to cycle, a live
