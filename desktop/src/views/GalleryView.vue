@@ -247,6 +247,8 @@ const virtualizer = useVirtualizer(
 );
 
 const showBadges = computed(() => gallery.filter === "all" && gallery.chipCounts.length > 1);
+const availabilityLabel = (entry: MergedPrint) =>
+  entry.availableOn.map((source) => source.label).join(" · ");
 
 const isSelected = (entry: MergedPrint) =>
   selected.value !== null &&
@@ -379,6 +381,7 @@ onUnmounted(() => {
         v-model="gallery.filter"
         class="ml-2"
         :chips="gallery.chipCounts"
+        :all-count="gallery.merged.length"
       />
       <span v-if="gallery.firstError" class="ml-auto text-caption text-stop">
         {{ gallery.firstError }}
@@ -452,8 +455,9 @@ onUnmounted(() => {
               v-if="showBadges"
               data-test="host-badge"
               class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/55 px-1 !text-rebate"
+              :title="`Available on ${availabilityLabel(laid.entry)}`"
             >
-              {{ laid.entry.hostLabel }}
+              {{ availabilityLabel(laid.entry) }}
             </span>
             <span
               class="edge-code absolute right-0 bottom-0 left-0 translate-y-full bg-black/60 px-1.5 py-0.5 text-left transition-transform duration-100 group-hover:translate-y-0"
@@ -474,7 +478,7 @@ onUnmounted(() => {
       :source="gallery.mediaSourceOf(selectedEntry.sourceKey)"
       :target="targetFor(selectedEntry)"
       :cache-key="selectedEntry.sourceKey"
-      :host-label="selectedEntry.hostLabel"
+      :host-label="availabilityLabel(selectedEntry)"
       :can-reveal="canReveal(selectedEntry)"
       @close="lightboxOpen = false"
       @prev="moveSelection(-1)"

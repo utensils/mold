@@ -11,10 +11,14 @@ const props = defineProps<{
   chips: HostFilterChip[];
   /** "all" or a chip key. */
   modelValue: string;
+  /** Override when All collapses prints that exist on multiple hosts. */
+  allCount?: number;
 }>();
 const emit = defineEmits<{ "update:modelValue": [value: string] }>();
 
-const total = computed(() => props.chips.reduce((sum, chip) => sum + chip.count, 0));
+const total = computed(
+  () => props.allCount ?? props.chips.reduce((sum, chip) => sum + chip.count, 0),
+);
 const options = computed(() => [{ key: "all", label: "All", count: total.value }, ...props.chips]);
 </script>
 

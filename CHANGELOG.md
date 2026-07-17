@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The desktop All gallery no longer repeats prints saved on several hosts.** Matching filenames collapse into one tile, preferring the copy on This Mac for media and actions while the badge and lightbox list every host where the print remains available. Individual host filters continue to show each host's complete gallery, and the All count reflects the deduplicated result set.
 - **Desktop title-bar chrome no longer collides on macOS development builds.** When Tauri's build-time platform value is unavailable, Mold now falls back to WKWebView's native platform before laying out the overlay, preserving the traffic-light inset and Command conventions. The custom wordmark also uses the lowercase `mold` brand form.
 - **Catalog models without preview art no longer leave blank cards.** Grid and Table use a lightweight local family mark for FLUX, Stable Diffusion, Qwen, Z-Image, LTX, and Wuerstchen entries when a source image is missing or fails, preserving card rhythm without another network request.
 - **Desktop development windows are now clearly identifiable.** Debug builds use the logical window title `Mold - dev`, while release builds remain `Mold`, so macOS system surfaces distinguish the hot-reload app even though Mold's overlay title bar hides native title text.
