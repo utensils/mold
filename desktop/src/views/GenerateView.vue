@@ -694,7 +694,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
             class="border-edge flex w-full items-center border-t px-2 py-2 text-left text-body text-halide hover:bg-bath"
             @click="
               pickerOpen = false;
-              void router.push('/models?tab=catalog');
+              void router.push(caps.supportsVideo ? '/models?type=video' : '/models');
             "
           >
             Browse all models →

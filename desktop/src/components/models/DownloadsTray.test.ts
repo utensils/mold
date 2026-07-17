@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import DownloadsTray from "./DownloadsTray.vue";
+import { useConnectionStore } from "../../stores/connection";
 import { useDownloadsStore } from "../../stores/downloads";
 import type { DownloadJob } from "../../lib/api/types";
 
@@ -52,13 +53,32 @@ describe("DownloadsTray a11y", () => {
     expect(bar.attributes("aria-label")).toContain("flux-dev:q4");
   });
 
-  it("labels the cancel control with the model name", () => {
+  it("labels the cancel control with the model name and target host", () => {
     const store = useDownloadsStore();
     store.activeJobs = [job()];
     const wrapper = mount(DownloadsTray);
 
     const cancel = wrapper.get("button");
-    expect(cancel.attributes("aria-label")).toBe("Cancel download of flux-dev:q4");
+    expect(cancel.attributes("aria-label")).toBe("Cancel download of flux-dev:q4 on This device");
+  });
+
+  it("renders a source glyph for each download row", () => {
+    const store = useDownloadsStore();
+    store.activeJobs = [job(), job({ id: "j2", model: "cv:8001" })];
+    const wrapper = mount(DownloadsTray);
+
+    expect(wrapper.find('[data-source="local"]').exists()).toBe(true);
+    expect(wrapper.find('[data-source="civitai"]').exists()).toBe(true);
+  });
+
+  it("labels primary rows with the primary host's name when one is connected", () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "remote", baseUrl: "http://host-a:7680", apiKey: null };
+    const store = useDownloadsStore();
+    store.activeJobs = [job()];
+    const wrapper = mount(DownloadsTray);
+
+    expect(wrapper.get('[data-test="download-host"]').text()).toContain("host-a:7680");
   });
 
   it("shows and cancels downloads on an explicitly selected extra host", async () => {

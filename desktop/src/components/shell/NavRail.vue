@@ -208,7 +208,7 @@ const destinations = [
   { route: "/generate", label: "Generate", key: shortcutLabel("1") },
   { route: "/gallery", label: "Gallery", key: shortcutLabel("2") },
   { route: "/chains", label: "Chains", key: shortcutLabel("3") },
-  { route: "/models", label: "Models", key: shortcutLabel("4") },
+  { route: "/models", label: "Catalog", key: shortcutLabel("4") },
   { route: "/history", label: "History", key: shortcutLabel("5") },
   { route: "/jobs", label: "Jobs", key: shortcutLabel("6") },
   { route: "/runpod", label: "RunPod", key: "" },

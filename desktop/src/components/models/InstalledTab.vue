@@ -3,15 +3,17 @@ import { computed, reactive, ref } from "vue";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 import SourceGlyph from "../generate/SourceGlyph.vue";
-import { groupInstalledModels, modelDiskBytes, quantTag } from "../../lib/models";
+import { isVideoFamily } from "../../lib/capabilities";
+import { groupInstalledModels, isUtilityModel, modelDiskBytes, quantTag } from "../../lib/models";
 import { modelSource } from "../../lib/modelSource";
 import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../../lib/api/models";
 import { ApiError } from "../../lib/api/client";
 import { formatGB, percent } from "../../lib/format";
 import { openExternal } from "../../lib/openExternal";
+import { type MediaType } from "../../lib/modelAvailability";
 import type { ModelComponentStatus, ModelEntry } from "../../lib/api/types";
 
-const props = defineProps<{ query?: string }>();
+const props = defineProps<{ query?: string; mediaType?: MediaType }>();
 const emit = defineEmits<{ (e: "browse-catalog"): void }>();
 
 const models = useModelStore();
@@ -19,14 +21,24 @@ const toasts = useToastStore();
 
 const filtered = computed(() => {
   const q = (props.query ?? "").trim().toLowerCase();
-  return q ? models.installed.filter((m) => m.name.toLowerCase().includes(q)) : models.installed;
+  const searched = q
+    ? models.installed.filter((m) => m.name.toLowerCase().includes(q))
+    : models.installed;
+  const type = props.mediaType ?? "all";
+  if (type === "all") return searched;
+  // Utility rows aren't image or video generators — they only show under All.
+  return searched.filter(
+    (m) => !isUtilityModel(m) && isVideoFamily(m.family) === (type === "video"),
+  );
 });
 const groups = computed(() => groupInstalledModels(filtered.value));
 
 /** Family groups plus a trailing utility section, as [heading, models] rows. */
 const sections = computed<[string, ModelEntry[]][]>(() => [
   ...groups.value.families,
-  ["SHARED / UTILITY", groups.value.utility],
+  ...((props.mediaType ?? "all") === "all"
+    ? [["SHARED / UTILITY", groups.value.utility] as [string, ModelEntry[]]]
+    : []),
 ]);
 
 // Per-row Info expansion + lazily-loaded component lists.

@@ -6,7 +6,9 @@ import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import { ApiError } from "../../lib/api/client";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
+import { isVideoFamily } from "../../lib/capabilities";
 import { sortInstalledFirst } from "../../lib/catalog";
+import { type MediaType } from "../../lib/modelAvailability";
 import CatalogCard from "./CatalogCard.vue";
 import DownloadTargetDialog from "./DownloadTargetDialog.vue";
 import type { CatalogEntry } from "../../lib/api/types";
@@ -15,6 +17,7 @@ const props = defineProps<{
   query: string;
   layout: "grid" | "table";
   excludeInstalled?: boolean;
+  mediaType?: MediaType;
 }>();
 
 const downloads = useDownloadsStore();
@@ -41,9 +44,14 @@ const pendingEntry = ref<CatalogEntry | null>(null);
 let debounce: ReturnType<typeof setTimeout> | null = null;
 
 // What you already have surfaces first; the divider marks where "available"
-// begins so installed models are visible at a glance.
+// begins so installed models are visible at a glance. The media-type filter
+// is client-side on `entry.family` — the server query stays unchanged.
 const displayEntries = computed(() =>
-  sortInstalledFirst(entries.value).filter((entry) => !props.excludeInstalled || !entry.installed),
+  sortInstalledFirst(entries.value).filter((entry) => {
+    if (props.excludeInstalled && entry.installed) return false;
+    const type = props.mediaType ?? "all";
+    return type === "all" || isVideoFamily(entry.family) === (type === "video");
+  }),
 );
 
 async function runSearch(reset: boolean) {

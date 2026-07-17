@@ -206,7 +206,7 @@ onMounted(() => {
     headline="No video models yet"
     detail="Chains stitch clips from LTX video models. Pull one to start."
     action="Browse models"
-    @action="router.push('/models')"
+    @action="router.push('/models?type=video')"
   />
 
   <div v-else class="flex h-full flex-col overflow-y-auto">
