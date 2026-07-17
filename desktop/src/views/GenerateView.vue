@@ -41,6 +41,10 @@ import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { buildRequest } from "../lib/generateForm";
+import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
+import { domCanvasOps } from "../lib/sourceFitCanvas";
+import { upscaleImage } from "../lib/api/upscale";
+import type { HostRoute } from "../stores/hosts";
 import type { GenerationTemplate } from "../lib/generationTemplates";
 import { autoGrowRows } from "../lib/autogrow";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCycler";
@@ -311,14 +315,60 @@ function appendPromptWord(word: string) {
   form.prompt = form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed;
 }
 
+/** Status line while the source is upscaled/refit ahead of the submit. */
+const preprocessingStatus = ref<string | null>(null);
+
+/**
+ * Apply the source-fit policy to the attached source (and mask) before the
+ * request is built: canvas-fit a mismatched source, generate the pad mask
+ * for pad-repaint, and for upscale-then-fit run the source through
+ * `POST /api/upscale/stream` first. `route` is the ALREADY-RESOLVED
+ * generation host so the upscaler model auto-downloads on the same machine
+ * the job will run on. Returns false when the submit must abort.
+ */
+async function preprocessSourceFit(route: HostRoute | null): Promise<boolean> {
+  if (!caps.value.supportsImg2img || caps.value.sourceImageMode !== "single") return true;
+  if (!form.sourceImage) return true;
+  try {
+    const result = await applySourceFitPreprocess(
+      {
+        source: form.sourceImage,
+        mask: form.maskImage,
+        policy: form.sourceFit,
+        target: { width: form.width, height: form.height },
+      },
+      {
+        ops: domCanvasOps,
+        upscale: (image, model) =>
+          upscaleImage({
+            model,
+            image,
+            ...(route ? { target: route.target } : {}),
+            onProgress: (message) => (preprocessingStatus.value = message),
+          }),
+        onStatus: (message) => (preprocessingStatus.value = message),
+      },
+    );
+    form.sourceImage = result.source;
+    form.maskImage = result.mask;
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    toasts.push(`Source preprocessing failed: ${message}`, "error");
+    return false;
+  } finally {
+    preprocessingStatus.value = null;
+  }
+}
+
 async function generate() {
   if (!form.prompt.trim() || !form.model) return;
-  const request = buildRequest(form);
   const batch = caps.value.forcesBatchSizeOne ? 1 : form.batchSize;
   // With multiple live hosts — or a dead primary while another host can
   // serve — route the batch (sticky pick, Auto = least busy, or Most
   // capable) — model-aware, so hosts that already have the weights win.
-  // A pinned host that went away is an error, not a reroute.
+  // A pinned host that went away is an error, not a reroute. Resolved
+  // BEFORE source preprocessing so upscale-then-fit hits the same host.
   let route = null;
   if (routeRequired.value) {
     route = hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null, form.model || null);
@@ -327,6 +377,8 @@ async function generate() {
       return;
     }
   }
+  if (!(await preprocessSourceFit(route))) return;
+  const request = buildRequest(form);
   // Submitting while another print develops queues server-side; each job
   // snapshots its own model + params, so tweaking the form afterwards is safe.
   const { settled } = generation.submitBatch(request, batch, route);
@@ -629,7 +681,14 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
             @apply="onExpandApply"
             @restore="onExpandRestore"
           />
-          <div class="flex items-center gap-3">
+          <div class="flex min-w-0 items-center gap-3">
+            <span
+              v-if="preprocessingStatus"
+              class="truncate text-caption text-ink-3"
+              data-test="preprocessing-status"
+            >
+              {{ preprocessingStatus }}
+            </span>
             <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
             <button
               type="button"
