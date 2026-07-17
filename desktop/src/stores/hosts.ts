@@ -217,15 +217,31 @@ export const useHostsStore = defineStore("hosts", {
       const instanceId = test.instanceId ?? null;
 
       // Same physical server reached by a different address (hostname vs IP vs
-      // mDNS name): return the existing row instead of a duplicate. Adopt the
-      // caller's key onto that host's slug if it has none stored yet.
+      // mDNS name): return the existing row instead of a duplicate. The probe
+      // just succeeded with the caller's credentials, so a freshly supplied key
+      // is authoritative for that box (a stale stored key must not block a
+      // rotation). When the twin's own address is dead (DHCP re-lease,
+      // recreated RunPod pod), adopt the validated address onto the twin's
+      // surviving slug — keeping its per-host secret and reconnect entry —
+      // instead of returning the dead row untouched. The primary "local" row
+      // has no extra, so it is returned as-is.
       if (instanceId !== null) {
         const twin = this.all.find((h) => h.instanceId === instanceId);
         if (twin) {
-          if (apiKey && !(await ipc.secretGet(`remote-api-key.${twin.id}`))) {
-            await ipc.secretSet(`remote-api-key.${twin.id}`, apiKey);
+          if (apiKey) await ipc.secretSet(`remote-api-key.${twin.id}`, apiKey);
+          const live = this.extras.find((h) => h.id === twin.id);
+          if (live) {
+            if (apiKey) live.apiKey = apiKey;
+            if (twin.status !== "ready") {
+              live.url = url;
+              live.status = "ready";
+              live.error = null;
+              live.instanceId = instanceId;
+              await this.persist(twin.id, url, name, instanceId);
+              void this.refresh();
+            }
           }
-          return twin;
+          return this.all.find((h) => h.id === twin.id) ?? twin;
         }
       }
 

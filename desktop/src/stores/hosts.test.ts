@@ -523,6 +523,81 @@ describe("hosts store", () => {
     );
   });
 
+  it("connect() revives a dead instance-id twin with the freshly validated address", async () => {
+    // Boot-reconnect lists the saved host as an errored extra (its old DHCP
+    // address no longer answers) carrying the persisted instance id.
+    installSettings(
+      settings({
+        savedHosts: [{ ...hal, name: null, instanceId: "uuid-x" }],
+        connectedHostIds: [hal.id],
+      }),
+    );
+    testRemoteHost.mockResolvedValueOnce({ ok: false, version: null, error: "down" });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      target.baseUrl.includes("hal9000")
+        ? Promise.reject(new Error("down"))
+        : Promise.resolve({ queue_depth: 0, queue_capacity: 8, version: null }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("error");
+
+    // The user adds the box's NEW address; the probe proves it's the same box.
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: "uuid-x",
+      hostname: "hal9000",
+    });
+    apiJsonTo.mockResolvedValue({ queue_depth: 0, queue_capacity: 8, version: null });
+    const view = await hosts.connect("http://192.168.1.99:7680", null, null);
+
+    // The twin's surviving slug adopts the validated URL instead of keeping
+    // the dead one forever.
+    expect(view.id).toBe(hal.id);
+    expect(view.status).toBe("ready");
+    expect(view.baseUrl).toBe("http://192.168.1.99:7680");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.savedHosts.find((h: SavedHost) => h.id === hal.id)?.url).toBe(
+      "http://192.168.1.99:7680",
+    );
+  });
+
+  it("connect() adopts a newly typed key onto its errored twin (key rotation)", async () => {
+    // The server rotated its API key; the stored key fails the boot probe.
+    installSettings(
+      settings({ savedHosts: [{ ...hal, instanceId: "uuid-x" }], connectedHostIds: [hal.id] }),
+    );
+    secretGet.mockResolvedValue("stale-key");
+    testRemoteHost.mockResolvedValueOnce({ ok: false, version: null, error: "401" });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      target.baseUrl.includes("hal9000")
+        ? Promise.reject(new Error("401"))
+        : Promise.resolve({ queue_depth: 0, queue_capacity: 8, version: null }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("error");
+
+    // Re-adding the host with the NEW key must persist it (a stale stored key
+    // must not block adoption) and revive the live row in place.
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: "uuid-x",
+      hostname: "hal9000",
+    });
+    apiJsonTo.mockResolvedValue({ queue_depth: 0, queue_capacity: 8, version: null });
+    await hosts.connect(hal.url, "new-key", null);
+    expect(secretSet).toHaveBeenCalledWith("remote-api-key.hal9000-7680", "new-key");
+    const live = hosts.extras.find((h) => h.id === hal.id)!;
+    expect(live.apiKey).toBe("new-key");
+    expect(live.status).toBe("ready");
+    expect(live.error).toBeNull();
+  });
+
   it("refresh() collapses two saved slugs that report the same instance id", async () => {
     const ip: SavedHost = {
       id: "192-168-1-114-7680",
