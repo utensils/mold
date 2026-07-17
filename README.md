@@ -87,6 +87,8 @@ components.
 Curated built-in variants take precedence over ambiguous multi-checkpoint
 Hugging Face repositories, so a pull targets one runnable model instead of an
 entire aggregate repository.
+Every remembered remote host is retried immediately whenever the app launches,
+independently of This Mac's startup; unreachable hosts stay visible and retry.
 
 **[Download Mold for macOS](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** · **[Desktop guide](https://utensils.io/mold/guide/desktop)**
 

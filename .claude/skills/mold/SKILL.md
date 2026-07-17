@@ -130,6 +130,8 @@ host-routed actions; host detail mirrors that host's active pulls. Rows label
 primary weights separately from the footprint including shared runtime files.
 Curated manifest variants replace ambiguous multi-checkpoint Hugging Face
 repositories so Pull always targets one runnable model.
+Every remembered host reconnects immediately on launch, independently of the
+local engine; failed hosts remain listed and polling retries them.
 The catalog uses cache-stable 512 px Civitai derivatives plus
 lazy async decoding and per-card layout/paint containment instead of
 source-resolution preview images.

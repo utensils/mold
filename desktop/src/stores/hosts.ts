@@ -183,7 +183,7 @@ export const useHostsStore = defineStore("hosts", {
     },
   },
   actions: {
-    /** Reconnect remembered extra hosts. Never blocks or fails the boot. */
+    /** Reconnect every remembered extra host. Never blocks or fails the boot. */
     async init() {
       if (this.initialized || this.initializing) return;
       this.initializing = true;
@@ -192,39 +192,53 @@ export const useHostsStore = defineStore("hosts", {
         for (const saved of settings.savedHosts) {
           if (saved.name) this.names[saved.id] = saved.name;
         }
-        for (const id of settings.connectedHostIds) {
-          const saved = settings.savedHosts.find((h) => h.id === id);
-          if (!saved) continue;
-          // Already listed (e.g. adopted after a failed primary reconnect) —
-          // don't duplicate the row or re-probe it.
-          if (this.extras.some((h) => h.id === id)) continue;
-          const key = await ipc.secretGet(`remote-api-key.${id}`);
-          const extra: ExtraHost = {
-            id,
+        // A saved host is a remembered host: always attempt it on launch.
+        // `connectedHostIds` remains readable for older settings migrations,
+        // but is no longer allowed to suppress a valid saved entry.
+        // Preserve the legacy reconnect order for existing users, then append
+        // any remembered host that was missing from that older marker list.
+        const reconnectOrder = [
+          ...new Set([...settings.connectedHostIds, ...settings.savedHosts.map((host) => host.id)]),
+        ];
+        const candidates = reconnectOrder
+          .map((id) => settings.savedHosts.find((host) => host.id === id))
+          .filter((saved): saved is SavedHost => Boolean(saved))
+          .filter((saved) => !this.extras.some((host) => host.id === saved.id));
+        // Add the connecting rows synchronously so their MRU order is stable
+        // even though secret reads and network probes run concurrently.
+        for (const saved of candidates) {
+          this.extras.push({
+            id: saved.id,
             label: saved.name ?? saved.url.replace(/^https?:\/\//, ""),
             url: saved.url,
-            apiKey: key,
+            apiKey: null,
             status: "connecting",
             error: null,
             instanceId: saved.instanceId ?? null,
-          };
-          this.extras.push(extra);
-          const live = this.extras.find((h) => h.id === id)!;
-          const test = await ipc.testRemoteHost(saved.url, key);
-          // Seed the sticky hostname from the probe so the row is labeled by
-          // the server's name (not the raw URL) before the first poll.
-          if (test.hostname) this.hostnames[id] = test.hostname;
-          if (test.ok) {
-            live.status = "ready";
-          } else {
-            live.status = "error";
-            live.error = test.error;
-            useToastStore().push(
-              `Couldn't reach ${live.label} — it stays listed for reconnect.`,
-              "error",
-            );
-          }
+          });
         }
+        await Promise.all(
+          candidates.map(async (saved) => {
+            const id = saved.id;
+            const key = await ipc.secretGet(`remote-api-key.${id}`);
+            const live = this.extras.find((h) => h.id === id)!;
+            live.apiKey = key;
+            const test = await ipc.testRemoteHost(saved.url, key);
+            // Seed the sticky hostname from the probe so the row is labeled by
+            // the server's name (not the raw URL) before the first poll.
+            if (test.hostname) this.hostnames[id] = test.hostname;
+            if (test.ok) {
+              live.status = "ready";
+            } else {
+              live.status = "error";
+              live.error = test.error;
+              useToastStore().push(
+                `Couldn't reach ${live.label} — it stays listed for reconnect.`,
+                "error",
+              );
+            }
+          }),
+        );
       } catch {
         // Settings unreadable — multi-host simply starts empty.
       } finally {

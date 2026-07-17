@@ -301,6 +301,9 @@ wire types as the CLI and web UI:
   live GPU, CPU, and RAM telemetry, disk usage for the filesystem holding its
   models, current queue state, active model-download progress, and a freshly
   fetched inventory of the models installed on that host.
+- **Launch reconnect** — every remembered host is attempted immediately on
+  every app launch, in parallel with This Mac. An unreachable host stays in
+  the sidebar as an errored row and periodic polling lets it self-heal.
 
 ## Development
 
