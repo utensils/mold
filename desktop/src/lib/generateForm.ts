@@ -92,6 +92,11 @@ export interface GenerateForm {
   temporalUpscale: Ltx2TemporalUpscale | null;
   /** Conditioning audio for the a2vid pipeline; base64 on the wire. */
   audioFile: PickedFile | null;
+  /** LTX-2 camera-motion LoRA: a preset id (dolly-in, …, static) or an
+   * explicit `.safetensors` path; null = off. Ships as a `loras[]` entry
+   * (`camera-control:<preset>` or the raw path) at scale 1.0 — exactly what
+   * the CLI's `--camera-control` sends; there is no dedicated wire field. */
+  cameraControl: string | null;
 }
 
 export function newGenerateForm(): GenerateForm {
@@ -128,6 +133,7 @@ export function newGenerateForm(): GenerateForm {
     spatialUpscale: null,
     temporalUpscale: null,
     audioFile: null,
+    cameraControl: null,
   };
 }
 
@@ -170,6 +176,7 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
     form.spatialUpscale = null;
     form.temporalUpscale = null;
     form.audioFile = null;
+    form.cameraControl = null;
   }
 }
 
@@ -182,6 +189,21 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   const caps = generationCapabilitiesForFamily(form.family);
   const parsedSeed = form.seed.trim() === "" ? undefined : Number(form.seed);
   const loras: LoraWeight[] = form.loras.map((l) => ({ path: l.path, scale: l.scale }));
+
+  // Camera motion rides the ordinary loras[] stack (mirrors the CLI's
+  // --camera-control, run.rs): presets ship as the `camera-control:<preset>`
+  // virtual alias the server resolves; explicit `.safetensors` paths pass
+  // through raw. LTX-2 only — and presets are published for 19B only, so
+  // they're skipped for LTX-2.3 models (the CLI errors there; a custom path
+  // remains valid on 2.3).
+  const cameraControl = form.cameraControl?.trim();
+  if (caps.supportsAdvancedVideo && cameraControl) {
+    if (cameraControl.endsWith(".safetensors")) {
+      loras.push({ path: cameraControl, scale: 1.0 });
+    } else if (!form.model.includes("ltx-2.3")) {
+      loras.push({ path: `camera-control:${cameraControl}`, scale: 1.0 });
+    }
+  }
 
   const req: GenerateRequest = {
     prompt: form.prompt.trim(),

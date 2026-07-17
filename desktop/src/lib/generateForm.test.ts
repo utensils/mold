@@ -142,6 +142,65 @@ describe("buildRequest — LTX-2 advanced video", () => {
   });
 });
 
+describe("buildRequest — camera control (LTX-2 motion LoRA presets)", () => {
+  it("appends a camera-control:<preset> lora with scale 1.0 for ltx2", () => {
+    const form = ltx2Form();
+    form.prompt = "a cave";
+    form.cameraControl = "dolly-in";
+    expect(buildRequest(form).loras).toEqual([{ path: "camera-control:dolly-in", scale: 1.0 }]);
+  });
+
+  it("appends the camera-control entry after user loras, preserving order", () => {
+    const form = ltx2Form();
+    form.loras = [{ path: "my-style.safetensors", name: "my-style", scale: 0.8, trainedWords: [] }];
+    form.cameraControl = "jib-up";
+    expect(buildRequest(form).loras).toEqual([
+      { path: "my-style.safetensors", scale: 0.8 },
+      { path: "camera-control:jib-up", scale: 1.0 },
+    ]);
+  });
+
+  it("passes a custom .safetensors path through raw — no prefix (mirrors the CLI)", () => {
+    const form = ltx2Form();
+    form.cameraControl = "/loras/pan-up.safetensors";
+    expect(buildRequest(form).loras).toEqual([{ path: "/loras/pan-up.safetensors", scale: 1.0 }]);
+  });
+
+  it("never leaks into requests for non-ltx2 families", () => {
+    const form = ltx2Form();
+    form.cameraControl = "dolly-out";
+    form.family = "flux";
+    form.model = "flux-schnell:q4";
+    expect(buildRequest(form).loras).toBeUndefined();
+    form.family = "ltx-video";
+    form.model = "ltx-video-0.9.6:bf16";
+    expect(buildRequest(form).loras).toBeUndefined();
+  });
+
+  it("skips presets for LTX-2.3 models (no published camera LoRAs) but keeps custom paths", () => {
+    const form = ltx2Form();
+    form.model = "ltx-2.3-22b-distilled:fp8";
+    form.cameraControl = "dolly-in";
+    expect(buildRequest(form).loras).toBeUndefined();
+    form.cameraControl = "/loras/dolly.safetensors";
+    expect(buildRequest(form).loras).toEqual([{ path: "/loras/dolly.safetensors", scale: 1.0 }]);
+  });
+
+  it("omits loras entirely when camera control is unset or blank", () => {
+    const form = ltx2Form();
+    expect(buildRequest(form).loras).toBeUndefined();
+    form.cameraControl = "   ";
+    expect(buildRequest(form).loras).toBeUndefined();
+  });
+
+  it("clears cameraControl when switching to a family without advanced video", () => {
+    const form = ltx2Form();
+    form.cameraControl = "static";
+    applyModelDefaults(form, { ...ltx2Model(), name: "flux:q8", family: "flux" });
+    expect(form.cameraControl).toBeNull();
+  });
+});
+
 describe("applyModelDefaults resets advanced video on family change", () => {
   it("clears the LTX-2 fields when the new family has no advanced video", () => {
     const form = ltx2Form();
