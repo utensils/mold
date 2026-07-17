@@ -317,12 +317,14 @@ function jobMenu(job: Job): MenuEntry[] {
       <div class="border-edge h-px flex-1 border-t" />
     </div>
     <div data-test="hosts-section">
-      <div
+      <button
         v-for="host in hosts.all"
         :key="host.id"
+        type="button"
         data-test="host-row"
-        class="mx-2 flex h-7 items-center gap-2 rounded-control px-2.5 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
+        class="mx-2 flex h-7 cursor-pointer items-center gap-2 rounded-control px-2.5 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
         :title="host.baseUrl ?? undefined"
+        @click="router.push(`/hosts/${host.id}`)"
         @contextmenu.prevent="contextMenu.open($event, hostMenu(host))"
       >
         <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="hostDot(host)" />
@@ -330,7 +332,7 @@ function jobMenu(job: Job): MenuEntry[] {
         <span v-if="host.queueDepth !== null" class="edge-code ml-auto shrink-0">
           {{ host.queueDepth }}
         </span>
-      </div>
+      </button>
       <div
         v-for="d in detectedHosts"
         :key="d.url"

@@ -12,12 +12,19 @@ const stub = { template: "<div />" };
 function makeRouter(): Router {
   return createRouter({
     history: createMemoryHistory(),
-    routes: ["/generate", "/gallery", "/chains", "/models", "/history", "/runpod", "/settings"].map(
-      (path) => ({
-        path,
-        component: stub,
-      }),
-    ),
+    routes: [
+      "/generate",
+      "/gallery",
+      "/chains",
+      "/models",
+      "/history",
+      "/runpod",
+      "/settings",
+      "/hosts/:id",
+    ].map((path) => ({
+      path,
+      component: stub,
+    })),
   });
 }
 
@@ -62,6 +69,31 @@ describe("NavRail hosts section", () => {
     expect(rows[0]!.text()).toContain("This device");
     expect(rows[1]!.text()).toContain("hal9000");
     expect(rows[1]!.text()).toContain("3");
+  });
+
+  it("left-click on a host row navigates to its detail page", async () => {
+    const wrapper = await mountAt("/generate");
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: "k" };
+    conn.status = "ready";
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    await flushPromises();
+    const rows = wrapper.findAll("[data-test='host-row']");
+    await rows[1]!.trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.path).toBe("/hosts/hal9000-7680");
+    await rows[0]!.trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.path).toBe("/hosts/local");
   });
 
   it("shows an empty message when nothing is connected or detected", async () => {
