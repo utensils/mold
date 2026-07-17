@@ -38,8 +38,9 @@ vi.mock("../lib/ipc", () => ({
   },
 }));
 
-import { useGenerationStore, suggestOutputFilename } from "./generation";
+import { useGenerationStore, suggestOutputFilename, needsHostRoute } from "./generation";
 import { useAppPrefsStore } from "./appPrefs";
+import { useConnectionStore } from "./connection";
 import { useGalleryStore } from "./gallery";
 import { useHostsStore } from "./hosts";
 
@@ -168,6 +169,7 @@ describe("generation store multi-host routing", () => {
       apiKey: "hk",
       status: "ready",
       error: null,
+      instanceId: null,
     });
     const gallery = useGalleryStore();
     gallery.buckets["hal9000-7680"] = { items: [], loading: false, error: null, loaded: true };
@@ -200,6 +202,49 @@ describe("generation store multi-host routing", () => {
     expect(useGalleryStore().buckets["hal9000-7680"]).toBeUndefined();
   });
 
+  it("falls back to a ready host when the primary connection is down", async () => {
+    // Local engine failed to start (conn.info never set) but a remote host is
+    // ready: an unrouted batch must snapshot that host, not the dead primary.
+    sseStream.mockResolvedValue(undefined);
+    useHostsStore().extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: "hk",
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1);
+    await settled;
+    expect(jobs[0]).toMatchObject({ hostId: "hal9000-7680", hostLabel: "hal9000", remote: true });
+    const options = sseStream.mock.calls[0]?.[1] as { target?: { baseUrl: string } };
+    expect(options.target?.baseUrl).toBe("http://hal9000:7680");
+  });
+
+  it("keeps the primary snapshot for unrouted jobs while the primary is ready", async () => {
+    sseStream.mockResolvedValue(undefined);
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://primary:7680", apiKey: "pk" };
+    conn.status = "ready";
+    useHostsStore().extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: "hk",
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1);
+    await settled;
+    expect(jobs[0]?.hostId).toBeNull();
+    const options = sseStream.mock.calls[0]?.[1] as { target?: { baseUrl: string } };
+    expect(options.target?.baseUrl).toBe("http://primary:7680");
+  });
+
   it("cancels a routed job against its own host", async () => {
     // Stream that stays open until aborted, reporting the server id.
     sseStream.mockImplementation(
@@ -222,6 +267,25 @@ describe("generation store multi-host routing", () => {
     expect(target.baseUrl).toBe("http://hal9000:7680");
     expect(path).toBe("/api/queue/srv-1");
     expect(init.method).toBe("DELETE");
+  });
+});
+
+describe("needsHostRoute", () => {
+  it("routes with multiple hosts, or a dead primary plus a live host", () => {
+    // Multi-host always routes (existing behavior).
+    expect(needsHostRoute({ multiHost: true, primaryReady: true, anyHostReady: true })).toBe(true);
+    // Single ready primary: unrouted (existing behavior).
+    expect(needsHostRoute({ multiHost: false, primaryReady: true, anyHostReady: true })).toBe(
+      false,
+    );
+    // Dead primary but a ready host exists: must route to reach it.
+    expect(needsHostRoute({ multiHost: false, primaryReady: false, anyHostReady: true })).toBe(
+      true,
+    );
+    // Nothing is ready: unrouted, so the submit surfaces the directed error.
+    expect(needsHostRoute({ multiHost: false, primaryReady: false, anyHostReady: false })).toBe(
+      false,
+    );
   });
 });
 

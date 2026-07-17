@@ -63,6 +63,9 @@ export interface SavedHost {
   name: string | null;
   url: string;
   lastUsedMs: number | null;
+  /** Stable server-installation UUID; used to dedupe the same box reached by a
+   *  different address. Absent on older servers / entries saved before it. */
+  instanceId?: string | null;
 }
 
 export interface AppSettings {
@@ -101,6 +104,10 @@ export interface HostTest {
   ok: boolean;
   version: string | null;
   error: string | null;
+  /** Stable server-installation UUID from `/api/status`; absent on older servers. */
+  instanceId?: string | null;
+  /** Server-reported hostname from `/api/status`; absent on older servers. */
+  hostname?: string | null;
 }
 
 /** A mold server discovered on the local network via mDNS. */
@@ -111,6 +118,8 @@ export interface DiscoveredHost {
   port: number;
   version: string | null;
   authRequired: boolean;
+  /** Stable server-installation UUID from the mDNS `id` TXT record; absent on older servers. */
+  instanceId?: string | null;
   isThisMachine: boolean;
 }
 
@@ -177,17 +186,20 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve(browserFallbackConnection());
     return invoke<ConnectionInfo>("stop_local_engine");
   },
-  setRemoteHost(url: string, apiKey: string | null, name?: string | null): Promise<ConnectionInfo> {
-    if (!inTauri()) return Promise.resolve(browserFallbackConnection());
-    return invoke<ConnectionInfo>("set_remote_host", { url, apiKey, name: name ?? null });
-  },
   /** Drop a host from the saved list and delete its stored API key. */
   forgetRemoteHost(id: string): Promise<SavedHost[]> {
     if (!inTauri()) return Promise.resolve([]);
     return invoke<SavedHost[]>("forget_remote_host", { id });
   },
   testRemoteHost(url: string, apiKey: string | null): Promise<HostTest> {
-    if (!inTauri()) return Promise.resolve({ ok: true, version: null, error: null });
+    if (!inTauri())
+      return Promise.resolve({
+        ok: true,
+        version: null,
+        error: null,
+        instanceId: null,
+        hostname: null,
+      });
     return invoke<HostTest>("test_remote_host", { url, apiKey });
   },
   /** Browse the LAN for advertised mold servers; empty in a plain browser. */

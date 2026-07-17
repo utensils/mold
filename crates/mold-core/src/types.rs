@@ -913,6 +913,26 @@ pub struct ServerStatus {
     /// Absent on older servers that don't support pausing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_paused: Option<bool>,
+    /// Stable UUID identifying this server installation. Persisted in the
+    /// metadata DB on first boot; ephemeral (per-process) when the DB is
+    /// unavailable. Absent on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58")]
+    pub instance_id: Option<String>,
+    /// Disk usage of the filesystem holding the models directory. Absent on
+    /// older servers or when the mount cannot be determined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_disk: Option<DiskUsage>,
+}
+
+/// Total/free bytes for the filesystem backing a directory (currently the
+/// models dir, surfaced as `ServerStatus::models_disk`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DiskUsage {
+    #[schema(example = 994662584320_u64)]
+    pub total_bytes: u64,
+    #[schema(example = 213909504000_u64)]
+    pub free_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -2526,6 +2546,8 @@ mod tests {
             queue_depth: None,
             queue_capacity: None,
             queue_paused: Some(true),
+            instance_id: None,
+            models_disk: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         let parsed: super::ServerStatus = serde_json::from_str(&json).unwrap();
@@ -2547,6 +2569,47 @@ mod tests {
         assert!(!serde_json::to_string(&status)
             .unwrap()
             .contains("queue_paused"));
+    }
+
+    #[test]
+    fn server_status_deserialize_without_instance_id_or_models_disk() {
+        // Older servers don't send `instance_id` / `models_disk` — both must
+        // default to None, and neither key may appear on re-serialization.
+        let json = r#"{"version":"0.16.0","models_loaded":[],"gpu_info":null,"uptime_secs":0}"#;
+        let status: super::ServerStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status.instance_id, None);
+        assert_eq!(status.models_disk, None);
+        let out = serde_json::to_string(&status).unwrap();
+        assert!(!out.contains("instance_id"));
+        assert!(!out.contains("models_disk"));
+    }
+
+    #[test]
+    fn server_status_roundtrip_preserves_instance_id_and_models_disk() {
+        let json = r#"{
+            "version": "0.17.0",
+            "models_loaded": [],
+            "gpu_info": null,
+            "uptime_secs": 12,
+            "instance_id": "0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58",
+            "models_disk": {"total_bytes": 994662584320, "free_bytes": 213909504000}
+        }"#;
+        let status: super::ServerStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            status.instance_id.as_deref(),
+            Some("0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58")
+        );
+        assert_eq!(
+            status.models_disk,
+            Some(super::DiskUsage {
+                total_bytes: 994_662_584_320,
+                free_bytes: 213_909_504_000,
+            })
+        );
+        let out = serde_json::to_string(&status).unwrap();
+        let parsed: super::ServerStatus = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.instance_id, status.instance_id);
+        assert_eq!(parsed.models_disk, status.models_disk);
     }
 
     // ── UpscaleRequest / UpscaleResponse tests ────────────────────────────

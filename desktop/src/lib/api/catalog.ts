@@ -16,6 +16,7 @@ export interface CatalogSearchParams {
 export async function searchCatalog(
   params: CatalogSearchParams,
   forwardCredentials = false,
+  target?: ApiTarget,
 ): Promise<CatalogSearchResponse> {
   const query = new URLSearchParams();
   if (params.q) query.set("q", params.q);
@@ -27,16 +28,19 @@ export async function searchCatalog(
   if (params.page_size != null) query.set("page_size", String(params.page_size));
   const headers = await catalogCredentialHeaders(forwardCredentials);
   return apiJsonTo<CatalogSearchResponse>(
-    currentTarget(),
+    target ?? currentTarget(),
     `/api/catalog/search?${query.toString()}`,
     { headers },
   );
 }
 
-export async function fetchCatalogFamilies(forwardCredentials = false): Promise<string[]> {
+export async function fetchCatalogFamilies(
+  forwardCredentials = false,
+  target?: ApiTarget,
+): Promise<string[]> {
   const headers = await catalogCredentialHeaders(forwardCredentials);
   const res = await apiJsonTo<{ families: CatalogFamily[] }>(
-    currentTarget(),
+    target ?? currentTarget(),
     "/api/catalog/families",
     {
       headers,

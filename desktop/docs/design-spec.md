@@ -83,7 +83,7 @@ Native single window, minimum 1080×700 and default 1360×860. macOS uses `title
 │  ▸ Generate ⌘1│                                                            │
 │    Gallery  ⌘2│                                                            │
 │    Chains   ⌘3│                    MAIN CONTENT                            │
-│    Models   ⌘4│                    (per-screen, §4)                        │
+│    Catalog  ⌘4│                    (per-screen, §4)                        │
 │    History  ⌘5│                                                            │
 │               │                                                            │
 │  ── JOBS ──── │                                                            │
@@ -97,9 +97,9 @@ Native single window, minimum 1080×700 and default 1360×860. macOS uses `title
 ```
 
 - **Sidebar** (208px default, drag-resizable 160–320px via its right-edge divider — width persists, double-click resets — native sidebar vibrancy, collapsible ⌘\): five destinations + Settings, plus a live **Hosts** section and a live **Jobs** section. It is navigation _and_ ambient status.
-  - **Hosts:** every connected host (primary + extras) as a row — status dot (Safelight ready / Halide connecting / Stop error), label, live queue depth — plus mold servers detected on the network (mDNS) with a one-click `+` connect. Right-click an extra for Reconnect/Disconnect. Multi-host is client-side: jobs stream from and cancel against the host they queued on, and the Generate inspector's **Host** selector (visible with >1 live host) offers Auto (least busy, by live queue depth), **Most capable** (backend CUDA > Metal, then total VRAM, then queue), or an explicit sticky pick — the automatic modes prefer hosts that already have the selected model (per-host `/api/models`, the `hostModels` store), and the model picker shows the union of every host's installed models with a quiet availability tag for models absent from the primary.
+  - **Hosts:** every connected host (this device's built-in engine — always the primary — plus each remote list entry, deduped by server instance id) as a row — status dot (Safelight ready / Halide connecting / Stop error), label (server hostname unless renamed), live queue depth — plus mold servers detected on the network (mDNS, also instance-id-deduped) with a one-click `+` connect. Clicking a row opens its Host detail view (§4.8); right-click a remote for Reconnect/Disconnect/Forget. Multi-host is client-side: jobs stream from and cancel against the host they queued on, and the Generate inspector's **Host** selector (visible with >1 live host) offers Auto (least busy, by live queue depth), **Most capable** (backend CUDA > Metal, then total VRAM, then queue), or an explicit sticky pick — the automatic modes prefer hosts that already have the selected model (per-host `/api/models`, the `hostModels` store), and the model picker shows the union of every host's installed models with a quiet availability tag for models absent from the primary.
   - **Jobs:** miniature Develop chips for every in-flight job (from `/api/queue` + SSE), labeled with their host when routed off the primary. The full queue console is the **Jobs view (⌘6)**: per-host sections showing the whole server queue (other clients' rows marked `OTHER CLIENT`), Pause/Resume + two-step Cancel all (feature-detected via `/api/capabilities.queue`), per-job cancel, and this session's finished prints with one-click reuse.
-- **The Bench rail** (28px, bottom, Bath): always-on telemetry from `/api/resources/stream` (1 Hz) — GPU name, VRAM meter (Halide fill, warms to Safelight while a job runs, Stop at >92%), RAM, queue depth, and the engine mode chip (`⌁ local` embedded engine / `⇄ studio.local:7680` remote). While a routed job is live on another host, the rail follows that host — chip label (Halide-tinted), VRAM via its resources stream (falling back to the status poll's `gpu_info` on older servers), loaded models, and queue — and reverts to the primary once the last routed job settles; the embedded-engine recovery poll stays bound to the primary throughout. Clicking the VRAM meter opens a resources popover with per-GPU detail and loaded-model residency (Gpu / Parked / Unloaded).
+- **The Bench rail** (28px, bottom, Bath): always-on telemetry from `/api/resources/stream` (1 Hz) — GPU name, VRAM meter (Halide fill, warms to Safelight while a job runs, Stop at >92%), RAM, queue depth, and the engine chip (`⌁ local` — the built-in engine is always the primary). While a routed job is live on another host, the rail follows that host (`⇄ hal9000`) — chip label (Halide-tinted), VRAM via its resources stream (falling back to the status poll's `gpu_info` on older servers), loaded models, and queue — and reverts to the primary once the last routed job settles; the embedded-engine recovery poll stays bound to the primary throughout. Clicking the VRAM meter opens a resources popover with per-GPU detail and loaded-model residency (Gpu / Parked / Unloaded).
 - **Command palette (⌘K):** navigation, actions ("Pull flux-dev:q8", "Cancel all queued", "Switch to remote engine"), model search, and prompt-history search in one field. Elevation-2, the one blurred surface besides the sidebar.
 - **Movement model:** sidebar click or ⌘1–⌘5; deep links everywhere (gallery item → "Reuse settings" → Generate prefilled; queue chip → owning screen; chain stage → Chains editor). Back/forward via ⌘[ / ⌘].
 
@@ -138,7 +138,7 @@ Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector
 ```
 
 - **Prompt composer:** multiline, Schibsted 15px, grows to 6 lines. `⌘↩` generates from anywhere. **Expand** (`POST /api/expand`) runs inline: expanded text types into the field with a Halide underline; `⌘Z` restores the original (`original_prompt` preserved on the request). Negative prompt is a collapsible second field shown _only_ for CFG families (sd15/sdxl/sd3/wuerstchen) — capability-gated, not merely disabled.
-- **Model picker:** popover with installed models grouped by family; each row shows a **source mark** (HF tile / Civitai diamond / local disk — neutral currentColor monograms, `SourceGlyph.vue`), the complete model name (wrapping rather than ellipsizing), multi-host availability on a secondary line when present, and a residency dot (Safelight = on GPU; parked/cold states and quant-tag chips remain aspirational). The selected-model control also wraps long names and grows vertically. Footer: **"Browse all models →"** deep-links to `/models`, where one searchable library places Installed above the live Catalog and filters the surface by All / Installed / Available.
+- **Model picker:** popover with installed models grouped by family; each row shows a **source mark** (HF tile / Civitai diamond / local disk — neutral currentColor monograms, `SourceGlyph.vue`), the complete model name (wrapping rather than ellipsizing), multi-host availability on a secondary line when present, and a residency dot (Safelight = on GPU; parked/cold states and quant-tag chips remain aspirational). The selected-model control also wraps long names and grows vertically. Footer: **"Browse all models →"** deep-links to `/models` (`?type=video` for video families), where one searchable Catalog view places Installed above the live catalog with All / Images / Video media chips.
 - **Per-family parameter panels:** the inspector is generated from the capability matrix. Scheduler row exists only for sd15/sdxl; CFG++ toggle only for sd3/sdxl/sd15+DDIM (with hint "Lower guidance to 1.5–2.5"); frames/fps/audio/pipeline/keyframes appear only for ltx-video/ltx2; edit-images multi-drop only for qwen-image-edit (batch locked to 1 with an inline reason). Unsupported controls are absent, not grayed — the panel _is_ the family's contract. Width/height snap to /16, the ⇄ button swaps them, and the size block pairs model-native quick presets with a live proportion diagram labeled by aspect ratio and Square/Portrait/Landscape orientation. The Qwen lists mirror the core's recommended buckets, including native 1328×1328. A megapixel readout warns (`x-mold-dimension-warning` surfaced post-hoc too).
 - **Empty canvas:** before the first job, the media surface shows a quiet print glyph, **No print yet**, and one sentence pointing the user to the model, prompt, and Generate controls. It must read as an intentional placeholder in every theme, not as a failed black preview.
 - **LoRA stack:** vertical list of chips with per-adapter scale sliders, drag-to-reorder, ✕ to remove. "+ Add LoRA" opens a picker fed by `GET /api/loras?model=` (family-filtered); Civitai entries show `trained_words` as tappable chips that insert trigger phrases into the prompt.
@@ -184,24 +184,27 @@ Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector
 - **Drag-out:** any tile or the lightbox image drags to Finder/other apps as the real file (Tauri drag-out with the on-disk path; remote engines download to a temp file first, cursor shows a progress badge).
 - **Clipboard:** right-clicking a still image offers **Copy image** and writes the full-resolution bitmap to the macOS clipboard. The same action is available on the completed Generate canvas; videos keep metadata-copy actions but disable bitmap copy.
 
-### 4.3 Models — the chemistry shelf
+### 4.3 Catalog — the chemistry shelf
 
-One installed-first model library with **All / Installed / Available** filters,
-plus a persistent **Downloads** tray.
+One model screen (sidebar destination **Catalog**, still `/models`): installed
+models stacked above the live catalog — no All / Installed / Available toggle —
+filtered by **All / Images / Video** media chips (`?type=` deep links; the
+Chains and video Generate empty states link straight to `/models?type=video`;
+legacy `?tab=` / `?availability=` params still parse), with active
+**Downloads** pinned at the top.
 
 ```
-│ MODELS   [All] [Installed 14 · 96 GB] [Available]  [Search ⌘F] [Grid|Table]│
-│ ── FLUX ─────────────────────────────────────────────────────────────────  │
+│ CATALOG  [All] [Images] [Video]            [Search ⌘F]          [Grid|Table]│
+│ ── DOWNLOADS ── ◆ flux-dev:q8 · hal9000  ▓▓▓▓▓░░ 62% · 7.3 GB          ✕   │
+│ ── INSTALLED  14 · 96 GB ────────────────────────────────────────────────  │
 │ ◉ flux-dev        q8    11.8 GB  ▓▓▓▓▓▓▓░░  ● on GPU     [Load][Info][✕]  │
-│   flux-schnell    q4     6.4 GB  ▓▓▓░░░░░░               [Load][Info][✕]  │
-│ ── LTX-2 ────────────────────────────────────────────────────────────────  │
 │   ltx2-19b-dist   fp8   28.1 GB  ⚠ Requires CUDA — runs on Linux           │
-│ ── SHARED COMPONENTS ────────────────────  t5-xxl 9.2 GB · clip-l 1.7 GB   │
+│ ── CATALOG — Hugging Face and Civitai ───────────────────────────────────  │
 ```
 
 - **Installed models:** surface first; rows show quant chip, disk usage, residency, and per-row actions. **Info** expands components (`/api/models/:model/components`) with per-component download/verify state and a "Verify checksums" action. Removing warns about shared components: "Keeps t5-xxl (used by 3 models)."
-- **Available models:** share the same search and layout controls. Grid cards use a bounded preview height and responsive 260px minimum columns; Table rows favor names, source, family, popularity, size, and the Pull action. Civitai previews use one cache-stable 512 px CDN derivative in both layouts, async lazy decoding, and per-card layout/paint containment; the desktop also normalizes raw preview URLs returned by older remote servers. Missing or failed previews use a local family-aware mark at the same dimensions so cards keep their visual rhythm without another fetch. Source, Family, and NSFW filters refine paged `/api/catalog/search` results. Pulling with several ready hosts opens a labelled target dialog; a single-host setup starts immediately. Result cards keep **SIZE vs FETCH** honest.
-- **Downloads tray:** slides up from the Bench rail while any connected host's `/api/downloads/stream` has activity: up to two active downloads per host plus each remaining queue, per-download host label and progress (bytes + %), and cancellation (✕ → that host's `DELETE /api/downloads/:id`) that stays visibly pending until the engine confirms termination. Companion downloads remain grouped under their primary. Progress bars here are plain Safelight fills; the Develop is reserved for generation.
+- **Catalog results:** share the same search and layout controls; already-installed entries are excluded. Grid cards use a bounded preview height and responsive 260px minimum columns; Table rows favor names, source, family, popularity, size, and the Pull action. Civitai previews use one cache-stable 512 px CDN derivative in both layouts, async lazy decoding, and per-card layout/paint containment; the desktop also normalizes raw preview URLs returned by older remote servers. Missing or failed previews use a local family-aware mark at the same dimensions so cards keep their visual rhythm without another fetch. Source, Family, and NSFW filters refine paged `/api/catalog/search` results. Pulling with several ready hosts opens a labelled target dialog; a single-host setup starts immediately. Result cards keep **SIZE vs FETCH** honest.
+- **Downloads:** pinned above Installed while any connected host's `/api/downloads/stream` has activity: up to two active downloads per host plus each remaining queue, each row with a source glyph (HF / Civitai), its target host (primary rows resolve to the local host's label), progress (bytes + %), and cancellation (✕ → that host's `DELETE /api/downloads/:id`) that stays visibly pending until the engine confirms termination. Companion downloads remain grouped under their primary. Progress bars here are plain Safelight fills; the Develop is reserved for generation.
 - Built-in catalog entries and `hf:`/`cv:` live entries are visually identical; the id chip (`cv:12345`) is copyable.
 
 ### 4.4 Chains — the editing bench (mold.chain.v1)
@@ -245,17 +248,21 @@ Two lenses behind a segmented toggle. **Runs** (default): every finished generat
 ### 4.6 Settings — the two stores, honestly
 
 ```
-│ SETTINGS   [General] [Engine] [Generation] [Expansion] [Profiles] [Advanced]│
-│ ENGINE                                                                     │
-│  Mode        ◉ Built-in (this Mac)   ○ Remote server                       │
-│  Remote host  http://studio.local:7680        [Test connection]            │
-│  API key      ••••••••••••                    stored securely              │
+│ SETTINGS   [General] [Hosts] [Generation] [Expansion] [Profiles] [Advanced] │
+│ HOSTS                                                                      │
+│  ● This device   http://127.0.0.1:7680     API key ••••••  [👁][⧉][Restart]│
+│  Add host   http://studio.local:7680   key (optional)  [Test] [Add]        │
+│  CONNECTED    ● hal9000 · queue 2                    [Disconnect] [Forget] │
+│  REMEMBERED   studio · 2 d ago                        [Connect] [Forget]   │
+│  ON YOUR NETWORK  bender · 0.17.1 · KEY  [+ Add]   halcyon · THIS DEVICE   │
 │ GENERATION                                                                 │
 │  Default size   1024 × 1024                                    ⌂ db        │
 │  Default steps  28                                             ⌂ db        │
 │  Models dir     ~/models/mold                                  ⛁ file      │
 │  Embed metadata ON — overridden by MOLD_EMBED_METADATA=0       ⚿ env       │
 ```
+
+- **Hosts, not modes:** the built-in engine is permanently the primary — there is no Built-in / Remote switch and no "Use this host". The **This device** card shows engine status, base URL, Restart, and the per-device API key (reveal/copy); **Add host** takes a URL + optional key with Test connection; **Connected** lists live remotes (Disconnect + two-step Forget); **Remembered** offers one-click Connect with each host's stored key; **On your network** shows mDNS-discovered servers (deduped against connected hosts by slug and instance id, this machine badged THIS DEVICE, one-click Add). Old remote-primary installs are migrated on boot by `settings::migrate_remote_primary` (ex-primary re-homed as a connected host, key carried to its per-host slot, generation pinned to it).
 
 - **Provenance is first-class:** every row carries a source tag — `⌂ db` (SQLite settings), `⛁ file` (config.toml), `⚿ env` (MOLD_* override). Env-overridden rows render locked with the exact variable name and value and the copy "Set by your environment — unset MOLD_EMBED_METADATA to edit here." _Reset_ on a db row drops the key and shows what it falls back to. This mirrors `mold config list/where/reset` exactly instead of pretending there's one store.
 - **Profiles:** switcher at the top of the tab (`profile.active`), create/duplicate; a Halide banner notes "Settings marked ⌂ are per-profile."
@@ -270,18 +277,22 @@ Two lenses behind a segmented toggle. **Runs** (default): every finished generat
 
 ### 4.7 RunPod — the remote bench
 
-The RunPod workspace keeps provisioning in the app: secure API setup, balance and active hourly spend, GPU stock, cloud/datacenter/storage choices, live pod status, console handoff, lifecycle controls, and **Use in Mold** to connect the engine to `https://<pod>-7680.proxy.runpod.net`. Network volumes can be created, selected, renamed/grown, and deleted in place; selection persists, volume-backed launches visibly lock to Secure Cloud and the volume datacenter, and destructive deletion names the permanent-data risk. Poll status every ten seconds while the screen is open without replacing button labels or flashing a loading state. Destructive delete uses an inline two-step confirmation. Keys go to the app's owner-only local secret store (no Keychain, no permission prompts). Existing CLI environment/config credentials continue to work and are identified as externally managed.
+The RunPod workspace keeps provisioning in the app: secure API setup, balance and active hourly spend, GPU stock, cloud/datacenter/storage choices, live pod status, console handoff, lifecycle controls, and **Use in Mold** to add `https://<pod>-7680.proxy.runpod.net` as a connected host and make it the sticky generation target. Network volumes can be created, selected, renamed/grown, and deleted in place; selection persists, volume-backed launches visibly lock to Secure Cloud and the volume datacenter, and destructive deletion names the permanent-data risk. Poll status every ten seconds while the screen is open without replacing button labels or flashing a loading state. Destructive delete uses an inline two-step confirmation. Keys go to the app's owner-only local secret store (no Keychain, no permission prompts). Existing CLI environment/config credentials continue to work and are identified as externally managed.
 
-While a remote engine is selected, Gallery uses a standard two-tab location switch: **Remote** shows that engine's output and **This Mac** reads the configured local output directory through a restricted native media protocol. Switching gallery location never changes the generation engine.
+A RunPod host participates in the unified Gallery like any other connected host (§4.2); filtering the gallery never changes where generation runs.
+
+### 4.8 Host detail — the machine card
+
+Clicking a host row in the sidebar opens a per-host detail view: bench-style cards with live GPU / CPU / RAM telemetry (that host's `/api/resources/stream`), a storage bar for the models filesystem (`/api/status.models_disk` total vs free — absent on older servers, the bar simply hides), queue state, and the models installed on that host. Same Bath/Safelight vocabulary as the Bench rail popover — meters, not dashboards.
 
 ## 5. States
 
 - **First run / no models (the empty bench):** Generate shows a full-canvas invitation — Bricolage headline **"Develop your first print."**, one sentence ("mold runs models locally on your Mac's GPU. Pull one to start."), and three curated starter cards sized for Apple Silicon (flux-schnell q4 · 6.4 GB "fastest", flux-dev q8 · 11.8 GB "best quality", sdxl-turbo · 6.9 GB "classic") each with a single **Pull** button that starts the download and threads progress right there. A quiet "Browse all models" link below. Gallery/Chains/History empties are one line + one action, e.g. Gallery: "No prints yet — generate one." [Go to Generate].
 - **Loading:** screens skeleton with static cold grain blocks (the latent motif), never spinners in content; the only spinner is the 12px one in the Bench rail chip during engine handshake.
 - **Engine starting (embedded):** Bench rail chip `⌁ starting…`; canvas usable (composer accepts input, Generate queues). If startup fails: full-width Stop banner "The engine didn't start. [Show log] [Retry]".
-- **Server down (remote mode):** banner "Can't reach studio.local:7680. [Retry] [Switch to built-in engine] [Edit host]" — direction, not mood; queued UI state preserved.
+- **Host unreachable:** the host's sidebar row goes Stop-dotted and the status poll retries it; a job targeted at it fails with "Can't reach studio.local:7680. [Retry] [Manage hosts]" — direction, not mood; queued UI state preserved. The built-in engine is always the primary, so the app itself never loses its engine.
 - **VRAM OOM:** job chip stop-bathes; inline error on the job: "Ran out of GPU memory (needed ~23.9 GB, had 18.2 GB). Try: enable Offload · lower resolution · use q4." with one-click **Retry with offload**.
-- **CUDA-only on Mac (LTX-2):** model rows and pickers show the model normally but tagged `⚠ CUDA only` (Halide); selecting it explains "LTX-2 generates on CUDA GPUs only. Connect a remote Linux engine to use it." with [Set up remote engine]. Never silently hidden — parity demands visibility.
+- **CUDA-only on Mac (LTX-2):** model rows and pickers show the model normally but tagged `⚠ CUDA only` (Halide); selecting it explains "LTX-2 generates on CUDA GPUs only. Add a Linux CUDA host to use it." with [Add host]. Never silently hidden — parity demands visibility.
 - **Long video / chain job:** sidebar chip with stage + frame counters; window can close to dock — job continues (engine is in-process but detached from the view); notification + dock bounce on completion; if the app was quit mid-durable-job, next launch shows an "Interrupted" row with **Resume**.
 - **Queue full (503):** toast "Queue is full (600 jobs). Cancel something or wait." with [Open queue].
 
@@ -346,7 +357,7 @@ Everything else is small and mechanical:
 | Primary button | `Generate` · running: `Developing… 12/28` · queued: `Queued #2`                                                        |
 | Success toasts | `Generated — saved to Gallery` · `Pulled flux-dev:q8` · `Chain finished · 243 frames` · `Upscaled 4× — saved`          |
 | Delete confirm | `Delete print? This can't be undone.` → `Delete`                                                                       |
-| Server error   | `Can't reach studio.local:7680. Check the host or switch to the built-in engine.`                                      |
+| Server error   | `Can't reach studio.local:7680. Check the host in Settings → Hosts.`                                                   |
 | OOM            | `Ran out of GPU memory (needed ~23.9 GB, had 18.2 GB). Enable Offload or lower the resolution.` → `Retry with offload` |
 | Queue full     | `Queue is full. Cancel a job or wait for one to finish.`                                                               |
 | CUDA gate      | `LTX-2 generates on CUDA GPUs only. Connect a remote Linux engine to use it.`                                          |

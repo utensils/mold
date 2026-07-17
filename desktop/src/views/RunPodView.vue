@@ -12,14 +12,14 @@ import {
   type RunPodPod,
 } from "../lib/runpod";
 import { inTauri } from "../lib/ipc";
-import { useConnectionStore } from "../stores/connection";
 import { useAppPrefsStore } from "../stores/appPrefs";
+import { useHostsStore } from "../stores/hosts";
 import { useRunPodStore } from "../stores/runpod";
 import { useToastStore } from "../stores/toasts";
 
 const runpod = useRunPodStore();
 const prefs = useAppPrefsStore();
-const connection = useConnectionStore();
+const hosts = useHostsStore();
 const toasts = useToastStore();
 const apiKey = ref("");
 const savingKey = ref(false);
@@ -235,7 +235,9 @@ async function act(action: "start" | "stop" | "delete", pod: RunPodPod) {
 
 async function useInMold(pod: RunPodPod) {
   try {
-    await connection.useRemote(podProxyUrl(pod.id), null);
+    const host = await hosts.connect(podProxyUrl(pod.id), null, pod.name);
+    // Send generations to the pod by default; the user can flip back to Auto.
+    await prefs.update({ generateTargetHost: host.id });
     toasts.push(`Connected to ${pod.name ?? pod.id}`);
   } catch (error) {
     toasts.push(`The instance is still starting: ${errorMessage(error)}`, "error");

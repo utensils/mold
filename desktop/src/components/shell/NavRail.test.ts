@@ -1,23 +1,31 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
 import NavRail from "./NavRail.vue";
+import { ipc } from "../../lib/ipc";
 import { useConnectionStore } from "../../stores/connection";
 import { useContextMenuStore, type MenuItem } from "../../stores/contextMenu";
-import { useHostsStore } from "../../stores/hosts";
+import { useHostsStore, type HostView } from "../../stores/hosts";
 
 const stub = { template: "<div />" };
 
 function makeRouter(): Router {
   return createRouter({
     history: createMemoryHistory(),
-    routes: ["/generate", "/gallery", "/chains", "/models", "/history", "/runpod", "/settings"].map(
-      (path) => ({
-        path,
-        component: stub,
-      }),
-    ),
+    routes: [
+      "/generate",
+      "/gallery",
+      "/chains",
+      "/models",
+      "/history",
+      "/runpod",
+      "/settings",
+      "/hosts/:id",
+    ].map((path) => ({
+      path,
+      component: stub,
+    })),
   });
 }
 
@@ -53,6 +61,7 @@ describe("NavRail hosts section", () => {
       apiKey: null,
       status: "ready",
       error: null,
+      instanceId: null,
     });
     hosts.telemetry["hal9000-7680"] = { queueDepth: 3, queueCapacity: 8, version: null };
     await flushPromises();
@@ -61,6 +70,31 @@ describe("NavRail hosts section", () => {
     expect(rows[0]!.text()).toContain("This device");
     expect(rows[1]!.text()).toContain("hal9000");
     expect(rows[1]!.text()).toContain("3");
+  });
+
+  it("left-click on a host row navigates to its detail page", async () => {
+    const wrapper = await mountAt("/generate");
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: "k" };
+    conn.status = "ready";
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    await flushPromises();
+    const rows = wrapper.findAll("[data-test='host-row']");
+    await rows[1]!.trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.path).toBe("/hosts/hal9000-7680");
+    await rows[0]!.trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.path).toBe("/hosts/local");
   });
 
   it("shows an empty message when nothing is connected or detected", async () => {
@@ -84,6 +118,7 @@ describe("NavRail host context menu", () => {
       apiKey: null,
       status: "ready",
       error: null,
+      instanceId: null,
     });
     await flushPromises();
     return { wrapper, hosts };
@@ -159,19 +194,133 @@ describe("NavRail host context menu", () => {
     expect(labels).not.toContain("Rename…");
     expect(labels).not.toContain("Switch to built-in engine");
   });
+});
 
-  it("offers switch-to-built-in and rename for a remote primary", async () => {
+describe("NavRail detected hosts", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("connectDetected finds a stored key under the saved instance-id twin's slug", async () => {
+    // hal9000 was remembered (and keyed) by hostname; mDNS advertises the
+    // same box by IP under a different slug but the same instance id. The
+    // rail must find the stored key instead of bouncing to Settings.
+    const base = await ipc.appSettingsGet();
+    vi.spyOn(ipc, "discoverServers").mockResolvedValue([
+      {
+        name: "hal9000",
+        url: "http://192.168.1.50:7680",
+        host: "192.168.1.50",
+        port: 7680,
+        version: "0.18.0",
+        authRequired: true,
+        instanceId: "uuid-1",
+        isThisMachine: false,
+      },
+    ]);
+    vi.spyOn(ipc, "appSettingsGet").mockResolvedValue({
+      ...base,
+      savedHosts: [
+        {
+          id: "hal9000-7680",
+          name: "hal9000",
+          url: "http://hal9000:7680",
+          lastUsedMs: 1,
+          instanceId: "uuid-1",
+        },
+      ],
+    });
+    vi.spyOn(ipc, "secretGet").mockImplementation((name) =>
+      Promise.resolve(name === "remote-api-key.hal9000-7680" ? "stored-key" : null),
+    );
     const wrapper = await mountAt("/generate");
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
-    conn.status = "ready";
     await flushPromises();
-    const rows = wrapper.findAll("[data-test='host-row']");
-    await rows[0]!.trigger("contextmenu");
-    const labels = menuLabels();
-    expect(labels).toContain("Switch to built-in engine");
-    expect(labels).toContain("Rename…");
-    expect(labels).toContain("Manage in Settings");
+    const hosts = useHostsStore();
+    const connect = vi.spyOn(hosts, "connect").mockResolvedValue({
+      id: "hal9000-7680",
+      label: "hal9000",
+      kind: "remote",
+      baseUrl: "http://192.168.1.50:7680",
+      apiKey: "stored-key",
+      status: "ready",
+      primary: false,
+      queueDepth: null,
+      queueCapacity: null,
+      version: null,
+      instanceId: "uuid-1",
+    } satisfies HostView);
+    await wrapper.get("[data-test='detected-host-connect']").trigger("click");
+    await flushPromises();
+    expect(connect).toHaveBeenCalledWith("http://192.168.1.50:7680", "stored-key", "hal9000");
+    // Not bounced to Settings for a key the app already holds.
+    expect(router.currentRoute.value.path).toBe("/generate");
+  });
+
+  it("right-click on a detected (disconnected) host opens a context menu", async () => {
+    vi.spyOn(ipc, "discoverServers").mockResolvedValue([
+      {
+        name: "hal9000",
+        url: "http://192.168.1.50:7680",
+        host: "192.168.1.50",
+        port: 7680,
+        version: "0.18.0",
+        authRequired: false,
+        instanceId: "uuid-1",
+        isThisMachine: false,
+      },
+    ]);
+    const wrapper = await mountAt("/generate");
+    await flushPromises();
+    await wrapper.get("[data-test='detected-host-row']").trigger("contextmenu");
+    const labels = useContextMenuStore()
+      .entries.filter((e): e is MenuItem => !("separator" in e))
+      .map((e) => e.label);
+    expect(labels).toContain("Connect");
+    expect(labels).toContain("Open web UI");
+    expect(labels).toContain("Copy URL");
+    // Not remembered — nothing to forget.
+    expect(labels).not.toContain("Forget");
+  });
+
+  it("detected-host menu offers Forget when the box is remembered under any slug", async () => {
+    const base = await ipc.appSettingsGet();
+    vi.spyOn(ipc, "discoverServers").mockResolvedValue([
+      {
+        name: "hal9000",
+        url: "http://192.168.1.50:7680",
+        host: "192.168.1.50",
+        port: 7680,
+        version: "0.18.0",
+        authRequired: false,
+        instanceId: "uuid-1",
+        isThisMachine: false,
+      },
+    ]);
+    vi.spyOn(ipc, "appSettingsGet").mockResolvedValue({
+      ...base,
+      savedHosts: [
+        {
+          id: "hal9000-7680",
+          name: "hal9000",
+          url: "http://hal9000:7680",
+          lastUsedMs: 1,
+          instanceId: "uuid-1",
+        },
+      ],
+    });
+    const forget = vi.spyOn(ipc, "forgetRemoteHost").mockResolvedValue([]);
+    const wrapper = await mountAt("/generate");
+    await flushPromises();
+    await wrapper.get("[data-test='detected-host-row']").trigger("contextmenu");
+    const menu = useContextMenuStore();
+    const forgetEntry = menu.entries.find(
+      (e): e is MenuItem => !("separator" in e) && e.label === "Forget",
+    );
+    expect(forgetEntry).toBeDefined();
+    await forgetEntry!.action?.();
+    await flushPromises();
+    // Forgets the remembered slug (hostname), not the advertised IP slug.
+    expect(forget).toHaveBeenCalledWith("hal9000-7680");
   });
 });
 

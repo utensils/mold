@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { modelAvailabilityFromQuery } from "./modelAvailability";
+import { mediaTypeFromQuery } from "./modelAvailability";
 
-describe("modelAvailabilityFromQuery", () => {
-  it("keeps the legacy catalog deep link focused on available models", () => {
-    expect(modelAvailabilityFromQuery({ tab: "catalog" })).toBe("available");
+describe("mediaTypeFromQuery", () => {
+  it("reads the explicit media-type query", () => {
+    expect(mediaTypeFromQuery({ type: "image" })).toBe("image");
+    expect(mediaTypeFromQuery({ type: "video" })).toBe("video");
   });
 
-  it("accepts the explicit availability query", () => {
-    expect(modelAvailabilityFromQuery({ availability: "installed" })).toBe("installed");
+  it("defaults an absent or unknown type to all", () => {
+    expect(mediaTypeFromQuery({})).toBe("all");
+    expect(mediaTypeFromQuery({ type: "wat" })).toBe("all");
+    expect(mediaTypeFromQuery({ type: ["image", "video"] })).toBe("all");
   });
 
-  it("defaults unknown queries to the combined library", () => {
-    expect(modelAvailabilityFromQuery({ tab: "wat" })).toBe("all");
+  it("maps the legacy catalog deep link to all without crashing", () => {
+    expect(mediaTypeFromQuery({ tab: "catalog" })).toBe("all");
+  });
+
+  it("maps legacy availability queries to all without crashing", () => {
+    expect(mediaTypeFromQuery({ availability: "installed" })).toBe("all");
+    expect(mediaTypeFromQuery({ availability: "available" })).toBe("all");
   });
 });

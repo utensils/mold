@@ -1,25 +1,14 @@
 import { defineStore } from "pinia";
-import { hostIdFromUrl } from "../lib/hosts";
 import { ipc, type ConnectionInfo, type LocalServerInfo } from "../lib/ipc";
-import { useToastStore } from "./toasts";
 
 export type ConnectionStatus = "idle" | "starting" | "ready" | "error";
 
-/** Bare host for user-facing messages ("studio.local", not the full URL). */
-function hostLabel(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-}
-
 /**
- * Which engine the app is talking to. `init()` runs once at shell mount:
- * saved remote hosts reconnect, everything else brings the local engine
- * online (embedded, or an already-running `mold serve` on :7680). An
- * unreachable saved host falls back to the local engine for this session
- * without rewriting the remote preference.
+ * Which engine the app is talking to. The built-in engine is always the
+ * internal primary; `init()` runs once at shell mount and brings the local
+ * engine online (embedded, or an already-running `mold serve` on :7680).
+ * Remote hosts are additive list entries owned by the hosts store, not a
+ * primary the connection ever switches to.
  */
 export const useConnectionStore = defineStore("connection", {
   state: () => ({
@@ -55,42 +44,11 @@ export const useConnectionStore = defineStore("connection", {
       this.status = "starting";
       this.error = null;
       try {
-        const settings = await ipc.appSettingsGet();
         await this.ensureLocal();
-        // Remote key: secret store first, legacy settings.json field as
-        // fallback for files written before secrets landed.
-        const remoteKey =
-          settings.mode === "remote"
-            ? ((await ipc.secretGet("remote-api-key")) ?? settings.remoteApiKey)
-            : null;
-        if (settings.mode === "remote" && settings.remoteUrl) {
-          try {
-            this.info = await ipc.setRemoteHost(settings.remoteUrl, remoteKey);
-          } catch {
-            // Session-only fallback: settings.mode stays "remote" so the
-            // preferred host is retried on the next launch.
-            useToastStore().push(
-              `Couldn't reach ${hostLabel(settings.remoteUrl)} — using the built-in engine.`,
-              "error",
-            );
-            // The unreachable host stays visible as an errored sidebar row;
-            // the hosts poll self-heals it when the server answers again.
-            // (Dynamic import: the hosts store statically imports this one.)
-            const id = hostIdFromUrl(settings.remoteUrl);
-            const saved = settings.savedHosts.find((h) => h.id === id);
-            const { useHostsStore } = await import("./hosts");
-            useHostsStore().adopt(id, settings.remoteUrl, remoteKey, saved?.name ?? null);
-            if (this.localStatus !== "ready") {
-              throw new Error(this.localError ?? "The local server didn't start.");
-            }
-            this.info = await ipc.startLocalEngine();
-          }
-        } else {
-          if (this.localStatus !== "ready") {
-            throw new Error(this.localError ?? "The local server didn't start.");
-          }
-          this.info = await ipc.startLocalEngine();
+        if (this.localStatus !== "ready") {
+          throw new Error(this.localError ?? "The local server didn't start.");
         }
+        this.info = await ipc.startLocalEngine();
         this.status = "ready";
       } catch (err) {
         this.status = "error";
@@ -112,18 +70,6 @@ export const useConnectionStore = defineStore("connection", {
       } catch (err) {
         this.status = "error";
         this.error = String(err);
-      }
-    },
-    async useRemote(url: string, apiKey: string | null, name?: string | null) {
-      this.status = "starting";
-      this.error = null;
-      try {
-        this.info = await ipc.setRemoteHost(url, apiKey, name);
-        this.status = "ready";
-      } catch (err) {
-        this.status = "error";
-        this.error = String(err);
-        throw err;
       }
     },
     async stopEngine() {

@@ -2999,6 +2999,7 @@ mod tests {
         let mut cache = crate::model_cache::ModelCache::new(3);
         cache.insert(Box::new(engine), 0);
         let state = AppState {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
@@ -3032,6 +3033,7 @@ mod tests {
             catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
+            models_disk_cache: Arc::new(crate::state::ModelsDiskCache::default()),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -3061,6 +3063,7 @@ mod tests {
         let mut cache = crate::model_cache::ModelCache::new(3);
         cache.insert(Box::new(engine), 0);
         let state = AppState {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
@@ -3094,6 +3097,7 @@ mod tests {
             catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
+            models_disk_cache: Arc::new(crate::state::ModelsDiskCache::default()),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
@@ -3326,6 +3330,7 @@ mod tests {
         let mut cache = crate::model_cache::ModelCache::new(3);
         cache.insert(Box::new(engine), 0);
         let state = AppState {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
@@ -3359,6 +3364,7 @@ mod tests {
             catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
+            models_disk_cache: Arc::new(crate::state::ModelsDiskCache::default()),
         };
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));

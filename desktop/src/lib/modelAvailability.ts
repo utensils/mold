@@ -1,9 +1,12 @@
-export type ModelAvailability = "all" | "installed" | "available";
+export type MediaType = "all" | "image" | "video";
 
-/** Preserve old catalog deep links while supporting the unified-library query. */
-export function modelAvailabilityFromQuery(query: Record<string, unknown>): ModelAvailability {
-  const availability = query.availability;
-  if (availability === "installed" || availability === "available") return availability;
-  if (query.tab === "catalog") return "available";
+/**
+ * Media-type filter for the unified Catalog view. Legacy deep links from the
+ * split Models screen (`?tab=catalog`, `?availability=*`) are tolerated and
+ * fall back to the unfiltered view.
+ */
+export function mediaTypeFromQuery(query: Record<string, unknown>): MediaType {
+  const type = query.type;
+  if (type === "image" || type === "video") return type;
   return "all";
 }

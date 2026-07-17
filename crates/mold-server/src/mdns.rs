@@ -74,6 +74,10 @@ pub struct DiscoveredServer {
     pub version: Option<String>,
     /// Whether the server requires an API key (`auth=1`).
     pub auth_required: bool,
+    /// Stable server-installation UUID from the `id` TXT record. `None` on
+    /// older servers that don't advertise one (empty values are treated as
+    /// absent).
+    pub instance_id: Option<String>,
     /// All decoded TXT key/value pairs.
     pub txt: BTreeMap<String, String>,
 }
@@ -203,14 +207,16 @@ pub fn gpu_summary(names: &[String]) -> String {
 
 /// Assemble the TXT records advertised alongside the service.
 ///
-/// Keys: `version`, `sha`, `auth` (`1`/`0`), `gpu`, `queue`, `proto`. Values are
-/// clamped defensively — a single TXT entry must stay well under 255 bytes.
+/// Keys: `version`, `sha`, `auth` (`1`/`0`), `gpu`, `queue`, `proto`, `id`.
+/// Values are clamped defensively — a single TXT entry must stay well under
+/// 255 bytes.
 pub fn build_txt_records(
     version: &str,
     git_sha: &str,
     auth_required: bool,
     gpu_summary: &str,
     queue_capacity: usize,
+    instance_id: &str,
 ) -> Vec<(String, String)> {
     fn clamp(s: &str, max: usize) -> String {
         if s.len() <= max {
@@ -233,6 +239,7 @@ pub fn build_txt_records(
         ("gpu".to_string(), clamp(gpu_summary, 200)),
         ("queue".to_string(), queue_capacity.to_string()),
         ("proto".to_string(), "http".to_string()),
+        ("id".to_string(), clamp(instance_id, 64)),
     ]
 }
 
@@ -292,6 +299,7 @@ pub fn from_service_parts(
         port,
         version: txt_map.get("version").cloned(),
         auth_required: txt_map.get("auth").map(|v| v == "1").unwrap_or(false),
+        instance_id: txt_map.get("id").filter(|v| !v.is_empty()).cloned(),
         txt: txt_map,
     }
 }
@@ -492,7 +500,14 @@ mod tests {
 
     #[test]
     fn build_txt_records_shape() {
-        let txt = build_txt_records("0.14.0", "abc1234", true, "1xRTX 4090", 200);
+        let txt = build_txt_records(
+            "0.14.0",
+            "abc1234",
+            true,
+            "1xRTX 4090",
+            200,
+            "0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58",
+        );
         let map: BTreeMap<_, _> = txt.into_iter().collect();
         assert_eq!(map["version"], "0.14.0");
         assert_eq!(map["sha"], "abc1234");
@@ -500,14 +515,16 @@ mod tests {
         assert_eq!(map["gpu"], "1xRTX 4090");
         assert_eq!(map["queue"], "200");
         assert_eq!(map["proto"], "http");
+        assert_eq!(map["id"], "0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58");
     }
 
     #[test]
     fn build_txt_records_auth_off_and_clamps() {
-        let txt = build_txt_records(&"v".repeat(300), "sha", false, "gpu", 0);
+        let txt = build_txt_records(&"v".repeat(300), "sha", false, "gpu", 0, &"i".repeat(100));
         let map: BTreeMap<_, _> = txt.into_iter().collect();
         assert_eq!(map["auth"], "0");
         assert!(map["version"].len() <= 200);
+        assert!(map["id"].len() <= 64);
     }
 
     #[test]
@@ -637,6 +654,40 @@ mod tests {
     }
 
     #[test]
+    fn from_service_parts_parses_instance_id() {
+        let s = from_service_parts(
+            "box._mold._tcp.local.",
+            "box.local.",
+            7680,
+            vec![],
+            vec![(
+                "id".to_string(),
+                "0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58".to_string(),
+            )],
+        );
+        assert_eq!(
+            s.instance_id.as_deref(),
+            Some("0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58")
+        );
+    }
+
+    #[test]
+    fn from_service_parts_tolerates_missing_or_empty_instance_id() {
+        // Older servers don't advertise `id` at all.
+        let s = from_service_parts("box._mold._tcp.local.", "box.local.", 7680, vec![], vec![]);
+        assert_eq!(s.instance_id, None);
+        // An empty value is treated as absent, not as an empty identity.
+        let s = from_service_parts(
+            "box._mold._tcp.local.",
+            "box.local.",
+            7680,
+            vec![],
+            vec![("id".to_string(), String::new())],
+        );
+        assert_eq!(s.instance_id, None);
+    }
+
+    #[test]
     fn from_service_parts_no_addresses_uses_hostname() {
         let s = from_service_parts("box._mold._tcp.local.", "box.local.", 7680, vec![], vec![]);
         // No addresses: fall back to the mDNS hostname (trailing dot stripped).
@@ -651,7 +702,7 @@ mod tests {
     #[test]
     #[ignore]
     fn register_then_discover_roundtrip() {
-        let txt = build_txt_records("9.9.9", "deadbee", false, "cpu", 42);
+        let txt = build_txt_records("9.9.9", "deadbee", false, "cpu", 42, "test-instance-id");
         let guard = register("0.0.0.0", 0, txt).expect("register");
         // Give the responder a moment, then browse.
         let found = discover(Duration::from_secs(3)).expect("discover");

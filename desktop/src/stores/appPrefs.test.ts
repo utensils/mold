@@ -153,7 +153,7 @@ describe("appPrefs concurrent-writer safety", () => {
   it("update() merges onto fresh disk settings, not the boot snapshot", async () => {
     const prefs = useAppPrefsStore();
     await prefs.init(); // snapshot has savedHosts: []
-    // Another writer (hosts store / Rust set_remote_host) persists a host…
+    // Another writer (the hosts store's saved-host persistence) persists a host…
     vi.mocked(ipc.appSettingsGet).mockResolvedValue({
       ...(prefs.settings as NonNullable<typeof prefs.settings>),
       savedHosts: [

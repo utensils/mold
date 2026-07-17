@@ -1,6 +1,13 @@
 import { defineStore } from "pinia";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
-import { hostIdFromUrl, normalizeHostUrl, pickAutoHost, pickMostCapableHost } from "../lib/hosts";
+import {
+  hostIdFromUrl,
+  hostnamesCompatible,
+  mergeSavedHostsByInstanceId,
+  normalizeHostUrl,
+  pickAutoHost,
+  pickMostCapableHost,
+} from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
 import { PLATFORM_UI } from "../lib/platform";
 import type { GpuInfo, ServerStatus } from "../lib/api/types";
@@ -13,6 +20,23 @@ import { useToastStore } from "./toasts";
 const POLL_INTERVAL_MS = 10_000;
 const MAX_SAVED_HOSTS = 8;
 
+/**
+ * Serialize this store's settings read-modify-writes: `app_settings_set`
+ * replaces the whole file last-writer-wins, so two overlapping
+ * get→mutate→set cycles (a user action racing the 10 s poll's reconcile)
+ * would silently drop one writer's change. Every RMW in this store runs
+ * through this chain; failures don't wedge it.
+ */
+let settingsWriteChain: Promise<unknown> = Promise.resolve();
+function withSettingsLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = settingsWriteChain.then(fn, fn);
+  settingsWriteChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 /** An additional live connection beyond the primary one. */
 export interface ExtraHost {
   id: string;
@@ -21,6 +45,9 @@ export interface ExtraHost {
   apiKey: string | null;
   status: "connecting" | "ready" | "error";
   error: string | null;
+  /** Stable server-installation UUID (from the connect probe / saved entry);
+   *  the refresh poll's telemetry value supersedes it once live. */
+  instanceId: string | null;
 }
 
 /** Unified host row for the sidebar, the selector, and routing. */
@@ -35,6 +62,8 @@ export interface HostView {
   queueDepth: number | null;
   queueCapacity: number | null;
   version: string | null;
+  /** Stable server-installation UUID; null until learned. Dedupe key. */
+  instanceId: string | null;
 }
 
 interface HostTelemetry {
@@ -46,6 +75,10 @@ interface HostTelemetry {
   /** GPU summary from `/api/status`; the status bar's fallback when a host's
    *  resources stream is unavailable. */
   gpuInfo?: GpuInfo | null;
+  /** Stable server-installation UUID from `/api/status`; absent on older servers. */
+  instanceId?: string | null;
+  /** Server-reported hostname from `/api/status`; drives the display label. */
+  hostname?: string | null;
 }
 
 /** Where a batch will run: resolved just before submit. */
@@ -69,24 +102,25 @@ export const useHostsStore = defineStore("hosts", {
     telemetry: {} as Record<string, HostTelemetry>,
     /** Friendly names from savedHosts, so the primary can be renamed too. */
     names: {} as Record<string, string>,
+    /** Last-known server-reported hostname per host id. Sticky — unlike
+     *  telemetry it survives failed polls, keeping labels stable and letting
+     *  instance-id dedupe stay hostname-qualified while a host is down. */
+    hostnames: {} as Record<string, string>,
     pollTimer: null as ReturnType<typeof setInterval> | null,
     initializing: false,
     initialized: false,
   }),
   getters: {
-    /** The primary connection as a host row (this device or the remote). */
+    /** The primary connection as a host row. The built-in engine is always the
+     *  internal primary (host id "local"); remotes are additive list entries. */
     primaryHost(state): HostView | null {
       const conn = useConnectionStore();
       if (!conn.info?.baseUrl) return null;
-      const remote = conn.info.mode === "remote";
-      const id = remote ? hostIdFromUrl(conn.info.baseUrl) : "local";
-      const t = state.telemetry[id];
+      const t = state.telemetry.local;
       return {
-        id,
-        label: remote
-          ? (state.names[id] ?? conn.info.baseUrl.replace(/^https?:\/\//, ""))
-          : PLATFORM_UI.deviceLabel,
-        kind: remote ? "remote" : "local",
+        id: "local",
+        label: PLATFORM_UI.deviceLabel,
+        kind: "local",
         baseUrl: conn.info.baseUrl,
         apiKey: conn.info.apiKey,
         status:
@@ -95,42 +129,41 @@ export const useHostsStore = defineStore("hosts", {
         queueDepth: t?.queueDepth ?? null,
         queueCapacity: t?.queueCapacity ?? null,
         version: t?.version ?? null,
+        instanceId: t?.instanceId ?? null,
       };
     },
-    /** Every host, primary first; an extra shadowed by the primary is hidden.
-     *  Dedupe by URL as well as id — the local primary's id is the literal
-     *  "local", so a loopback extra pointing at the same server would
-     *  otherwise be listed (and routed to) twice. */
+    /** Every host, the local primary first. Dedupe extras by id, loopback URL,
+     *  and instance id — the local primary's id is the literal "local", so a
+     *  loopback extra pointing at the same server would otherwise be listed
+     *  (and routed to) twice. */
     all(state): HostView[] {
       const primary = this.primaryHost;
       const rows: HostView[] = primary ? [primary] : [];
-      const conn = useConnectionStore();
-      if (primary?.kind !== "local" && conn.localStatus !== "idle") {
-        rows.push({
-          id: "local",
-          label: PLATFORM_UI.deviceLabel,
-          kind: "local",
-          baseUrl: conn.localInfo?.baseUrl ?? null,
-          apiKey: conn.localInfo?.apiKey ?? null,
-          status:
-            conn.localStatus === "ready"
-              ? "ready"
-              : conn.localStatus === "starting"
-                ? "connecting"
-                : "error",
-          primary: false,
-          queueDepth: state.telemetry.local?.queueDepth ?? null,
-          queueCapacity: state.telemetry.local?.queueCapacity ?? null,
-          version: state.telemetry.local?.version ?? null,
-        });
-      }
+      const hostnameOf = (id: string): string | null =>
+        state.hostnames[id] ?? state.telemetry[id]?.hostname ?? null;
       for (const extra of state.extras) {
-        if (rows.some((row) => row.id === extra.id || (row.baseUrl && row.baseUrl === extra.url)))
-          continue;
         const t = state.telemetry[extra.id];
+        const instanceId = t?.instanceId ?? extra.instanceId ?? null;
+        // Dedupe by id, loopback URL, AND instance id — the same physical
+        // server reached by hostname vs IP has one row, not two. An instance-id
+        // match only counts when the reported hostnames agree (or one is
+        // unknown): distinct servers sharing a MOLD_HOME share a uuid too.
+        if (
+          rows.some(
+            (row) =>
+              row.id === extra.id ||
+              (row.baseUrl && row.baseUrl === extra.url) ||
+              (instanceId !== null &&
+                row.instanceId === instanceId &&
+                hostnamesCompatible(hostnameOf(row.id), hostnameOf(extra.id))),
+          )
+        )
+          continue;
         rows.push({
           id: extra.id,
-          label: extra.label,
+          // User rename wins; otherwise the last-known server hostname (sticky
+          // across failed polls); otherwise the URL.
+          label: this.names[extra.id] ?? hostnameOf(extra.id) ?? extra.label,
           kind: "remote",
           baseUrl: extra.url,
           apiKey: extra.apiKey,
@@ -139,6 +172,7 @@ export const useHostsStore = defineStore("hosts", {
           queueDepth: t?.queueDepth ?? null,
           queueCapacity: t?.queueCapacity ?? null,
           version: t?.version ?? null,
+          instanceId,
         });
       }
       return rows;
@@ -165,20 +199,6 @@ export const useHostsStore = defineStore("hosts", {
           // don't duplicate the row or re-probe it.
           if (this.extras.some((h) => h.id === id)) continue;
           const key = await ipc.secretGet(`remote-api-key.${id}`);
-          // Shadowed by the live primary: same server, already connected.
-          // List it (so switching the primary away mid-session keeps the
-          // host around) but skip the redundant probe; `all` hides the row.
-          if (id === this.primaryHost?.id) {
-            this.extras.push({
-              id,
-              label: saved.name ?? saved.url.replace(/^https?:\/\//, ""),
-              url: saved.url,
-              apiKey: key,
-              status: "ready",
-              error: null,
-            });
-            continue;
-          }
           const extra: ExtraHost = {
             id,
             label: saved.name ?? saved.url.replace(/^https?:\/\//, ""),
@@ -186,10 +206,14 @@ export const useHostsStore = defineStore("hosts", {
             apiKey: key,
             status: "connecting",
             error: null,
+            instanceId: saved.instanceId ?? null,
           };
           this.extras.push(extra);
           const live = this.extras.find((h) => h.id === id)!;
           const test = await ipc.testRemoteHost(saved.url, key);
+          // Seed the sticky hostname from the probe so the row is labeled by
+          // the server's name (not the raw URL) before the first poll.
+          if (test.hostname) this.hostnames[id] = test.hostname;
           if (test.ok) {
             live.status = "ready";
           } else {
@@ -213,23 +237,69 @@ export const useHostsStore = defineStore("hosts", {
     async connect(rawUrl: string, apiKey: string | null, name: string | null): Promise<HostView> {
       const url = normalizeHostUrl(rawUrl);
       const id = hostIdFromUrl(url);
+      // `https://local` slugs to the literal "local", colliding with the
+      // built-in engine's reserved id — refuse it rather than shadow the
+      // primary's secret/routing keys.
+      if (id === "local") throw new Error("That address is reserved for the built-in engine.");
       const existing = this.all.find((h) => h.id === id);
       if (existing?.status === "ready") return existing;
 
       const test = await ipc.testRemoteHost(url, apiKey);
       if (!test.ok) throw new Error(test.error ?? "Connection failed.");
+      const instanceId = test.instanceId ?? null;
+
+      // Same physical server reached by a different address (hostname vs IP vs
+      // mDNS name): return the existing row instead of a duplicate. The probe
+      // just succeeded with the caller's credentials, so a freshly supplied key
+      // is authoritative for that box (a stale stored key must not block a
+      // rotation). When the twin's own address is dead (DHCP re-lease,
+      // recreated RunPod pod), adopt the validated address onto the twin's
+      // surviving slug — keeping its per-host secret and reconnect entry —
+      // instead of returning the dead row untouched. The primary "local" row
+      // has no extra, so it is returned as-is.
+      if (instanceId !== null) {
+        // Hostname-qualified: a shared uuid with a DIFFERENT reported hostname
+        // is two servers sharing a MOLD_HOME, not one server on two addresses.
+        const twin = this.all.find(
+          (h) =>
+            h.instanceId === instanceId &&
+            hostnamesCompatible(
+              this.hostnames[h.id] ?? this.telemetry[h.id]?.hostname,
+              test.hostname,
+            ),
+        );
+        if (twin) {
+          if (test.hostname) this.hostnames[twin.id] = test.hostname;
+          if (apiKey) await ipc.secretSet(`remote-api-key.${twin.id}`, apiKey);
+          const live = this.extras.find((h) => h.id === twin.id);
+          if (live) {
+            if (apiKey) live.apiKey = apiKey;
+            if (twin.status !== "ready") {
+              live.url = url;
+              live.status = "ready";
+              live.error = null;
+              live.instanceId = instanceId;
+              await this.persist(twin.id, url, name, instanceId);
+              void this.refresh();
+            }
+          }
+          return this.all.find((h) => h.id === twin.id) ?? twin;
+        }
+      }
 
       this.extras = this.extras.filter((h) => h.id !== id);
       this.extras.push({
         id,
-        label: name ?? url.replace(/^https?:\/\//, ""),
+        label: name ?? test.hostname ?? url.replace(/^https?:\/\//, ""),
         url,
         apiKey,
         status: "ready",
         error: null,
+        instanceId,
       });
+      if (test.hostname) this.hostnames[id] = test.hostname;
       if (apiKey) await ipc.secretSet(`remote-api-key.${id}`, apiKey);
-      await this.persist(id, url, name);
+      await this.persist(id, url, name, instanceId);
       void this.refresh();
       return this.all.find((h) => h.id === id)!;
     },
@@ -238,57 +308,23 @@ export const useHostsStore = defineStore("hosts", {
       useDownloadsStore().unsubscribeHost(id);
       this.extras = this.extras.filter((h) => h.id !== id);
       delete this.telemetry[id];
-      const settings = await ipc.appSettingsGet();
-      // A sticky generation target pointing at the removed host would only
-      // linger as a dead preference (resolveRoute already falls back to
-      // Auto) — clear it alongside the reconnect entry.
-      const clearedTarget = settings.generateTargetHost === id;
-      await ipc.appSettingsSet({
-        ...settings,
-        connectedHostIds: settings.connectedHostIds.filter((h) => h !== id),
-        generateTargetHost: clearedTarget ? null : settings.generateTargetHost,
+      let clearedTarget = false;
+      await withSettingsLock(async () => {
+        const settings = await ipc.appSettingsGet();
+        // A sticky generation target pointing at the removed host would only
+        // linger as a dead preference (resolveRoute already falls back to
+        // Auto) — clear it alongside the reconnect entry.
+        clearedTarget = settings.generateTargetHost === id;
+        await ipc.appSettingsSet({
+          ...settings,
+          connectedHostIds: settings.connectedHostIds.filter((h) => h !== id),
+          generateTargetHost: clearedTarget ? null : settings.generateTargetHost,
+        });
       });
       if (clearedTarget) {
         // Keep the in-memory prefs snapshot coherent (HostSelector reads it).
         const prefs = useAppPrefsStore();
         if (prefs.settings) prefs.settings = { ...prefs.settings, generateTargetHost: null };
-      }
-    },
-    /**
-     * List a host that could not be reached (e.g. the persisted primary at
-     * launch) as an errored extra, so it stays visible in the sidebar for
-     * one-click reconnect instead of silently vanishing. The regular refresh
-     * poll self-heals it the moment the host answers again.
-     */
-    adopt(id: string, url: string, apiKey: string | null, label?: string | null) {
-      if (this.extras.some((h) => h.id === id)) return;
-      this.extras.push({
-        id,
-        label: label ?? this.names[id] ?? url.replace(/^https?:\/\//, ""),
-        url,
-        apiKey,
-        status: "error",
-        error: "Unreachable at launch",
-      });
-    },
-    /**
-     * Keep a remote primary live as an extra while the app returns to the
-     * built-in engine. Order matters: `connect()` deliberately no-ops while
-     * the host is still the primary, so the engine switch happens first.
-     */
-    async demoteToExtra(host: {
-      id: string;
-      baseUrl: string | null;
-      apiKey: string | null;
-      label: string;
-    }) {
-      const conn = useConnectionStore();
-      await conn.useLocal();
-      if (!host.baseUrl) return;
-      try {
-        await this.connect(host.baseUrl, host.apiKey, host.label);
-      } catch {
-        // Unreachable right now — the saved entry still allows reconnect.
       }
     },
     /** Give a host a friendly name (sidebar, host selector, Recent hosts). */
@@ -298,19 +334,27 @@ export const useHostsStore = defineStore("hosts", {
       this.names[id] = trimmed;
       const extra = this.extras.find((h) => h.id === id);
       if (extra) extra.label = trimmed;
-      const settings = await ipc.appSettingsGet();
-      const known = settings.savedHosts.some((h) => h.id === id);
-      // An adopted host whose MRU entry was pruned still deserves a sticky
-      // name — re-insert it so the rename survives relaunch.
-      const savedHosts = known
-        ? settings.savedHosts.map((h) => (h.id === id ? { ...h, name: trimmed } : h))
-        : extra
-          ? [
-              { id, name: trimmed, url: extra.url, lastUsedMs: Date.now() },
-              ...settings.savedHosts,
-            ].slice(0, MAX_SAVED_HOSTS)
-          : settings.savedHosts;
-      await ipc.appSettingsSet({ ...settings, savedHosts });
+      await withSettingsLock(async () => {
+        const settings = await ipc.appSettingsGet();
+        const known = settings.savedHosts.some((h) => h.id === id);
+        // An adopted host whose MRU entry was pruned still deserves a sticky
+        // name — re-insert it so the rename survives relaunch.
+        const savedHosts = known
+          ? settings.savedHosts.map((h) => (h.id === id ? { ...h, name: trimmed } : h))
+          : extra
+            ? [
+                {
+                  id,
+                  name: trimmed,
+                  url: extra.url,
+                  lastUsedMs: Date.now(),
+                  instanceId: extra.instanceId,
+                },
+                ...settings.savedHosts,
+              ].slice(0, MAX_SAVED_HOSTS)
+            : settings.savedHosts;
+        await ipc.appSettingsSet({ ...settings, savedHosts });
+      });
     },
     /** Retry a failed extra host in place. */
     async reconnect(id: string) {
@@ -366,6 +410,8 @@ export const useHostsStore = defineStore("hosts", {
     },
     /** Pull queue depth/capacity from every live host. */
     async refresh() {
+      /** hostId → instanceId learned this poll, to reconcile saved entries once. */
+      const learned = new Map<string, string>();
       await Promise.all(
         this.all.map(async (host) => {
           if (!host.baseUrl || host.status === "connecting") return;
@@ -380,7 +426,11 @@ export const useHostsStore = defineStore("hosts", {
               version: status.version ?? null,
               modelsLoaded: status.models_loaded ?? [],
               gpuInfo: status.gpu_info ?? null,
+              instanceId: status.instance_id ?? null,
+              hostname: status.hostname ?? null,
             };
+            if (status.instance_id) learned.set(host.id, status.instance_id);
+            if (status.hostname) this.hostnames[host.id] = status.hostname;
             const extra = this.extras.find((h) => h.id === host.id);
             if (extra && extra.status !== "ready") {
               extra.status = "ready";
@@ -404,6 +454,92 @@ export const useHostsStore = defineStore("hosts", {
           }
         }),
       );
+      // Stamp the extras with what the poll learned (the "shadowed by primary"
+      // row starts unprobed) so `all`'s instance-id dedupe engages immediately.
+      for (const extra of this.extras) {
+        const uuid = learned.get(extra.id);
+        if (uuid && extra.instanceId !== uuid) extra.instanceId = uuid;
+      }
+      if (learned.size > 0) await this.reconcileSavedInstanceIds(learned);
+    },
+    /**
+     * Persist newly-learned instance ids onto their saved entries and collapse
+     * saved hosts that turn out to be the same physical server (same instance
+     * id AND a compatible hostname). Writes settings only when something
+     * actually changed, so the 10 s poll stays quiet in steady state. Re-homes
+     * the loser's connected-id, sticky target, per-host secret, user name, and
+     * live extra onto the surviving slug — in memory as well as on disk.
+     */
+    async reconcileSavedInstanceIds(learned: Map<string, string>) {
+      const hostnameOf = (id: string): string | null =>
+        this.hostnames[id] ?? this.telemetry[id]?.hostname ?? null;
+      const stamp = (saved: SavedHost[]) =>
+        saved.map((h) => {
+          const uuid = learned.get(h.id);
+          const next = uuid && h.instanceId !== uuid ? { ...h, instanceId: uuid } : h;
+          const hostname = hostnameOf(h.id);
+          return (hostname ? { ...next, hostname } : next) as SavedHost & {
+            hostname?: string | null;
+          };
+        });
+      // Carry per-host secrets onto survivors BEFORE the settings
+      // read-modify-write, so the get→set window below contains no slow
+      // secret IPC — writers outside this store's lock (theme toggles, route
+      // memory) must not be clobbered by a stale settings snapshot.
+      const probe = mergeSavedHostsByInstanceId(stamp((await ipc.appSettingsGet()).savedHosts));
+      for (const { loser, survivor } of probe.dropped) {
+        const survivorKey = await ipc.secretGet(`remote-api-key.${survivor}`);
+        if (!survivorKey) {
+          const loserKey = await ipc.secretGet(`remote-api-key.${loser}`);
+          if (loserKey) await ipc.secretSet(`remote-api-key.${survivor}`, loserKey);
+        }
+      }
+      await withSettingsLock(async () => {
+        const settings = await ipc.appSettingsGet();
+        const stamped = stamp(settings.savedHosts);
+        const { hosts: merged, dropped } = mergeSavedHostsByInstanceId(stamped);
+        const changed =
+          dropped.length > 0 ||
+          stamped.some((h, i) => h.instanceId !== settings.savedHosts[i]?.instanceId);
+        if (!changed) return;
+
+        let connectedHostIds = settings.connectedHostIds;
+        let generateTargetHost = settings.generateTargetHost;
+        for (const { loser, survivor } of dropped) {
+          connectedHostIds = connectedHostIds.map((id) => (id === loser ? survivor : id));
+          if (generateTargetHost === loser) generateTargetHost = survivor;
+          // The loser may hold the only working live connection (the
+          // survivor's own address might not answer right now) — re-home it
+          // onto the surviving slug instead of deleting it.
+          const loserLive = this.extras.find((h) => h.id === loser);
+          if (loserLive && !this.extras.some((h) => h.id === survivor)) {
+            this.extras = this.extras.map((h) => (h.id === loser ? { ...h, id: survivor } : h));
+            if (this.telemetry[loser]) this.telemetry[survivor] = this.telemetry[loser];
+            if (this.hostnames[loser] && !this.hostnames[survivor])
+              this.hostnames[survivor] = this.hostnames[loser];
+          } else {
+            this.extras = this.extras.filter((h) => h.id !== loser);
+          }
+          delete this.telemetry[loser];
+          delete this.hostnames[loser];
+          // Carry the loser's user-assigned name in memory, mirroring the
+          // saved-entry merge — labels must not wait for a relaunch.
+          if (this.names[loser] && !this.names[survivor]) this.names[survivor] = this.names[loser];
+          delete this.names[loser];
+        }
+        // `hostname` is a merge input, never a persisted field.
+        const savedHosts: SavedHost[] = merged.map((h) => {
+          const { hostname: _hostname, ...rest } = h;
+          return rest;
+        });
+        connectedHostIds = [...new Set(connectedHostIds)];
+        await ipc.appSettingsSet({ ...settings, savedHosts, connectedHostIds, generateTargetHost });
+        // Keep the in-memory prefs snapshot coherent the same way disconnect()
+        // does — every generateTargetHost reader consumes it.
+        const prefs = useAppPrefsStore();
+        if (prefs.settings)
+          prefs.settings = { ...prefs.settings, savedHosts, connectedHostIds, generateTargetHost };
+      });
     },
     startPolling() {
       if (this.pollTimer) return;
@@ -415,19 +551,44 @@ export const useHostsStore = defineStore("hosts", {
       this.pollTimer = null;
     },
     /** Remember the host across launches (MRU list + reconnect set). */
-    async persist(id: string, url: string, name: string | null) {
-      const settings = await ipc.appSettingsGet();
-      // A nameless reconnect must not wipe a previously discovered name —
-      // same rule as Rust's upsert_saved_host.
-      const existingName = settings.savedHosts.find((h) => h.id === id)?.name ?? null;
-      const savedHosts: SavedHost[] = [
-        { id, name: name ?? existingName, url, lastUsedMs: Date.now() },
-        ...settings.savedHosts.filter((h) => h.id !== id),
-      ].slice(0, MAX_SAVED_HOSTS);
-      const connectedHostIds = settings.connectedHostIds.includes(id)
-        ? settings.connectedHostIds
-        : [...settings.connectedHostIds, id];
-      await ipc.appSettingsSet({ ...settings, savedHosts, connectedHostIds });
+    async persist(id: string, url: string, name: string | null, instanceId: string | null = null) {
+      await withSettingsLock(async () => {
+        const settings = await ipc.appSettingsGet();
+        // A nameless reconnect must not wipe a previously discovered name or a
+        // previously learned instance id — same rule as Rust's
+        // upsert_saved_host.
+        const prior = settings.savedHosts.find((h) => h.id === id);
+        const upserted: SavedHost[] = [
+          {
+            id,
+            name: name ?? prior?.name ?? null,
+            url,
+            lastUsedMs: Date.now(),
+            instanceId: instanceId ?? prior?.instanceId ?? null,
+          },
+          ...settings.savedHosts.filter((h) => h.id !== id),
+        ].slice(0, MAX_SAVED_HOSTS);
+        // Collapse any saved twin that shares this host's instance id (and a
+        // compatible last-known hostname).
+        const withHostnames = upserted.map((h) => {
+          const hostname = this.hostnames[h.id] ?? this.telemetry[h.id]?.hostname ?? null;
+          return hostname ? { ...h, hostname } : h;
+        });
+        const { hosts: mergedHosts, dropped } = mergeSavedHostsByInstanceId(withHostnames);
+        const savedHosts: SavedHost[] = mergedHosts.map((h) => {
+          const { hostname: _hostname, ...rest } = h as SavedHost & { hostname?: string | null };
+          return rest;
+        });
+        const droppedIds = new Set(dropped.map((d) => d.loser));
+        const connectedHostIds = [
+          ...new Set(
+            [...settings.connectedHostIds, id]
+              .filter((h) => !droppedIds.has(h))
+              .map((h) => dropped.find((d) => d.loser === h)?.survivor ?? h),
+          ),
+        ];
+        await ipc.appSettingsSet({ ...settings, savedHosts, connectedHostIds });
+      });
     },
   },
 });

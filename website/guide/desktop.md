@@ -48,15 +48,18 @@ surface powers it, so anything the app does maps to a documented endpoint.
   host where a print is available; source filters retain each host's full
   gallery. Still images offer full-resolution **Copy image** from tile and
   lightbox right-click menus.
-- **Models & catalog** — one searchable installed-first library with All,
-  Installed, and Available filters plus compact Grid and Table layouts. The
-  desktop reuses cacheable 512 px Civitai thumbnails across both layouts,
-  lazily decodes them, and contains each card's layout and paint work. Missing
-  previews use a local model-family mark, with no additional image request. The
-  live Hugging Face/Civitai catalog renders **SIZE vs FETCH** honestly. With
-  several hosts connected, Pull asks which host should store the model. The
-  downloads tray keeps every selected host's progress and cancellation visible
-  and refreshes that host's installed-model inventory when the pull completes.
+- **Catalog** — one searchable model screen: installed models stacked above
+  the live Hugging Face/Civitai catalog, filtered by **All / Images / Video**
+  media chips, with compact Grid and Table layouts. Active downloads pin to
+  the top of the view, each showing its source glyph and the host receiving
+  the pull. The desktop reuses cacheable 512 px Civitai thumbnails across both
+  layouts, lazily decodes them, and contains each card's layout and paint
+  work. Missing previews use a local model-family mark, with no additional
+  image request. The catalog renders **SIZE vs FETCH** honestly. With several
+  hosts connected, Pull asks which host should store the model, and each
+  host's installed-model inventory refreshes when its pull completes. The
+  Chains and video Generate empty states deep-link straight to the video
+  catalog.
 - **Chains** — a filmstrip editing bench for multi-stage video
   (`mold.chain.v1`): per-stage prompts and frame counts (validated `8n+1`),
   splice transitions (smooth / cut / fade) you click to cycle, a live
@@ -76,8 +79,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
   the geographic location and RunPod ID, while the volume form limits choices
   to datacenters that currently support persistent volumes.
 - **Settings** — a full preferences bench with a section rail and
-  cross-section search: Engine (connection, native folder pickers for the
-  models/output directories), Performance (the `MOLD_*` engine knobs as real
+  cross-section search: Hosts (this device's engine and API key, remote hosts,
+  network discovery, native folder pickers for the models/output
+  directories), Performance (the `MOLD_*` engine knobs as real
   controls, applied on engine restart), Generation defaults, a Prompt
   expansion form, Accounts & tokens (Hugging Face / Civitai keys in an
   owner-only local file under the app's data directory — no Keychain prompts —
@@ -211,22 +215,27 @@ wire types as the CLI and web UI:
 
 - **Built-in engine and LAN server** — embeds the server in-process and runs on
   Metal on macOS or CUDA on Linux, so no separate `mold serve` is required. It
-  listens on port 7680, advertises itself over mDNS, and remains online as
-  **This device** even when a remote host is primary. Settings → Engine exposes
+  listens on port 7680, advertises itself over mDNS, and is always the app's
+  own engine — **This device** in the host list. Settings → Hosts exposes
   the persistent per-device API
   key that another Mold client needs to connect. If an unrelated process owns
   7680, Mold uses and advertises an ephemeral port instead.
 - **Existing server** — auto-detects a running `mold serve` on
   `localhost:7680`.
-- **Remote host** — point it at a remote GPU box (e.g. a Linux CUDA machine for
-  LTX-2), configured in Settings → Engine, with the API key stored in an
-  owner-only file under the app's data directory (never the macOS Keychain, so
-  connecting never triggers Keychain prompts). A bare hostname is enough:
-  `hal9000` expands to `http://hal9000:7680`. Hosts you connect to are
-  remembered as **Recent hosts** for one-click reconnect, each with its own
-  stored key, and the last-used host is restored on launch — if it is
-  unreachable the app falls back to the built-in engine for that session
-  without forgetting your preference. The network list uses the operating
+- **Hosts** — remote GPU boxes (e.g. a Linux CUDA machine for LTX-2) are
+  added in Settings → Hosts: an **Add host** row with Test connection, a
+  **Connected** list, **Remembered** hosts for one-click reconnect (each with
+  its own API key, stored in an owner-only file under the app's data
+  directory — never the macOS Keychain, so connecting never triggers Keychain
+  prompts), and an **On your network** list of discovered servers. A bare
+  hostname is enough: `hal9000` expands to `http://hal9000:7680`. One
+  physical server is one entry: hosts are deduplicated by the server's stable
+  instance id, so a box reached by hostname, mDNS name, and IP address
+  collapses into a single row whose name follows the server's hostname unless
+  you rename it. There is no separate remote "mode" — installs that
+  previously used a remote primary migrate automatically: the old primary
+  becomes a connected host, keeps its API key, and stays the generation
+  target until you change it. The network list uses the operating
   system's native DNS-SD browser on macOS, so advertised `_mold._tcp` services
   share the same cache and interface handling as Finder and `dns-sd`.
 - **Generation controls** — the Size block quick-selects common, per-family
@@ -260,19 +269,19 @@ wire types as the CLI and web UI:
   your local gallery stays the complete record even when the GPU lives
   elsewhere. The gallery's right-click menu adds **Save to this Mac** for
   pulling any older remote print down on demand.
-- **Several hosts at once** — beyond the primary engine, any number of extra
-  hosts can be live simultaneously (**Add as extra host** in Settings →
-  Engine, or the **+** next to a detected server in the sidebar's HOSTS
+- **Several hosts at once** — alongside this device, any number of remote
+  hosts can be live simultaneously (**Add host** in Settings → Hosts, or the
+  **+** next to a detected server in the sidebar's HOSTS
   section). With more than one live host, the Generate inspector grows a
   **Host** selector: pick one explicitly, leave it on **Auto** to route
   each batch to the least-busy host by live queue depth, or choose **Most
   capable** to always target the strongest GPU (CUDA over Metal, then most
   VRAM, then shallowest queue). Both automatic modes prefer hosts that
   already have the selected model installed, and the model picker lists
-  every connected host's models — one that only lives on an extra host is
+  every connected host's models — one that only lives on a remote host is
   tagged with the host that has it, and routing there just works. Jobs
   stream progress from — and cancel against — the host they queued on, so a
-  long LTX-2 render on a CUDA box never blocks quick local prints. Extra
+  long LTX-2 render on a CUDA box never blocks quick local prints. Host
   connections are remembered and restored on the next launch.
 
   The Generate workspace waits for those remembered hosts and their model
@@ -280,6 +289,10 @@ wire types as the CLI and web UI:
   model” screen appears only when every connected host reports zero installed
   generation models; a remote-only model is selected and routed without a
   local download.
+
+- **Host detail** — click a host in the sidebar to open its detail view:
+  live GPU, CPU, and RAM telemetry, disk usage for the filesystem holding its
+  models, current queue state, and the models installed on that host.
 
 ## Development
 

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import DownloadsTray from "./DownloadsTray.vue";
+import { useConnectionStore } from "../../stores/connection";
 import { useDownloadsStore } from "../../stores/downloads";
 import type { DownloadJob } from "../../lib/api/types";
 
@@ -52,13 +53,33 @@ describe("DownloadsTray a11y", () => {
     expect(bar.attributes("aria-label")).toContain("flux-dev:q4");
   });
 
-  it("labels the cancel control with the model name", () => {
+  it("labels the cancel control with the model name and target host", () => {
     const store = useDownloadsStore();
     store.activeJobs = [job()];
     const wrapper = mount(DownloadsTray);
 
     const cancel = wrapper.get("button");
-    expect(cancel.attributes("aria-label")).toBe("Cancel download of flux-dev:q4");
+    expect(cancel.attributes("aria-label")).toBe("Cancel download of flux-dev:q4 on This device");
+  });
+
+  it("renders a source glyph for each download row", () => {
+    const store = useDownloadsStore();
+    store.activeJobs = [job(), job({ id: "j2", model: "cv:8001" })];
+    const wrapper = mount(DownloadsTray);
+
+    expect(wrapper.find('[data-source="local"]').exists()).toBe(true);
+    expect(wrapper.find('[data-source="civitai"]').exists()).toBe(true);
+  });
+
+  it("labels primary rows with the built-in engine's name", () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    const store = useDownloadsStore();
+    store.activeJobs = [job()];
+    const wrapper = mount(DownloadsTray);
+
+    // The primary is always the built-in engine (host id "local").
+    expect(wrapper.get('[data-test="download-host"]').text()).toContain("This device");
   });
 
   it("shows and cancels downloads on an explicitly selected extra host", async () => {
@@ -100,6 +121,7 @@ describe("DownloadsTray a11y", () => {
       queueDepth: 0,
       queueCapacity: 8,
       version: null,
+      instanceId: null,
     };
     store.subscribeHost(host);
     store.hostStates.hal9000!.activeJobs = [job()];
@@ -128,6 +150,7 @@ describe("DownloadsTray a11y", () => {
       queueDepth: 0,
       queueCapacity: 8,
       version: null,
+      instanceId: null,
     };
     await store.subscribe(primary);
     const oldSignal = store.abort!.signal;
@@ -170,6 +193,7 @@ describe("DownloadsTray a11y", () => {
       queueDepth: 0,
       queueCapacity: 8,
       version: null,
+      instanceId: null,
     });
 
     await expect(opening).rejects.toThrow("HTTP 401");
@@ -203,6 +227,7 @@ describe("DownloadsTray a11y", () => {
       queueDepth: 0,
       queueCapacity: 8,
       version: null,
+      instanceId: null,
     });
 
     expect(extraAbort.signal.aborted).toBe(true);

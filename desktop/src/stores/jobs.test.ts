@@ -25,6 +25,7 @@ function seedHosts() {
     apiKey: "hk",
     status: "ready",
     error: null,
+    instanceId: null,
   });
   return hosts;
 }

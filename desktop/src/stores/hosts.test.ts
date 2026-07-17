@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import type { SavedHost } from "../lib/ipc";
+import type { AppSettings, SavedHost } from "../lib/ipc";
 
 const appSettingsGet = vi.fn();
 const appSettingsSet = vi.fn().mockResolvedValue(undefined);
@@ -29,6 +29,7 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
 }));
 
+import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
 import { useHostModelsStore } from "./hostModels";
@@ -133,30 +134,6 @@ describe("hosts store", () => {
     });
   });
 
-  it("keeps this device routable when a remote host is primary", () => {
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: "remote-key" };
-    conn.localInfo = {
-      kind: "embedded",
-      baseUrl: "http://127.0.0.1:7680",
-      apiKey: "local-key",
-      port: 7680,
-    };
-    conn.localStatus = "ready";
-
-    const hosts = useHostsStore();
-    expect(hosts.all.map((host) => host.id)).toEqual(["hal9000-7680", "local"]);
-    expect(hosts.all[1]).toMatchObject({
-      label: "This device",
-      kind: "local",
-      primary: false,
-      status: "ready",
-      baseUrl: "http://127.0.0.1:7680",
-      apiKey: "local-key",
-    });
-    expect(hosts.resolveRoute("local")?.hostId).toBe("local");
-  });
-
   it("reconnects remembered extra hosts at boot with their own keys", async () => {
     installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
     secretGet.mockResolvedValue("host-key");
@@ -168,34 +145,30 @@ describe("hosts store", () => {
     expect(extra).toMatchObject({ status: "ready", apiKey: "host-key", primary: false });
   });
 
-  it("restores the persisted remote primary and extra-host set together", async () => {
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: hal.url, apiKey: "primary-key" };
+  it("reconnects the whole remembered host set at boot, local primary first", async () => {
     installSettings(
       settings({
-        mode: "remote",
-        remoteUrl: hal.url,
         savedHosts: [studio, hal],
         connectedHostIds: [hal.id, studio.id],
       }),
     );
     secretGet.mockImplementation((key: string) =>
-      Promise.resolve(key.endsWith(studio.id) ? "studio-key" : "primary-key"),
+      Promise.resolve(key.endsWith(studio.id) ? "studio-key" : "hal-key"),
     );
     testRemoteHost.mockResolvedValue({ ok: true, version: "0.17.1", error: null });
 
     const hosts = useHostsStore();
     await hosts.init();
 
-    expect(hosts.all.map((host) => host.id)).toEqual([hal.id, studio.id]);
-    expect(hosts.primaryHost).toMatchObject({ id: hal.id, primary: true });
-    expect(hosts.all[1]).toMatchObject({
-      id: studio.id,
+    // The built-in engine is always the primary; every remembered host follows.
+    expect(hosts.primaryHost).toMatchObject({ id: "local", primary: true });
+    expect(hosts.all.map((host) => host.id)).toEqual(["local", hal.id, studio.id]);
+    expect(hosts.all.find((h) => h.id === studio.id)).toMatchObject({
       status: "ready",
       apiKey: "studio-key",
       primary: false,
     });
-    expect(testRemoteHost).toHaveBeenCalledOnce();
+    expect(testRemoteHost).toHaveBeenCalledWith(hal.url, "hal-key");
     expect(testRemoteHost).toHaveBeenCalledWith(studio.url, "studio-key");
   });
 
@@ -397,21 +370,20 @@ describe("hosts store", () => {
     expect(persisted.savedHosts[0]).toMatchObject({ id: "hal9000-7680", name: "hal9000" });
   });
 
-  it("adopt() lists an unreachable host as an errored extra, idempotently", () => {
-    const hosts = useHostsStore();
-    hosts.adopt("hal9000-7680", "http://hal9000:7680", "key", "hal9000");
-    hosts.adopt("hal9000-7680", "http://hal9000:7680", "key", "hal9000");
-    expect(hosts.extras).toHaveLength(1);
-    const row = hosts.all.find((h) => h.id === "hal9000-7680");
-    expect(row).toMatchObject({ status: "error", primary: false, apiKey: "key" });
-    expect(row?.label).toBe("hal9000");
-  });
-
-  it("init() does not duplicate a host that was already adopted", async () => {
+  it("init() does not duplicate a host already listed as an extra", async () => {
     installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
     const hosts = useHostsStore();
-    hosts.adopt(hal.id, hal.url, null, null);
+    // Pre-listed (e.g. connected earlier this session) — init must not re-add.
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
     await hosts.init();
     expect(hosts.extras.filter((h) => h.id === hal.id)).toHaveLength(1);
   });
@@ -427,31 +399,57 @@ describe("hosts store", () => {
     expect(persisted.savedHosts[0]).toMatchObject({ id: hal.id, name: "render box" });
   });
 
-  it("labels a remote primary with its saved friendly name", async () => {
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
-    installSettings(settings({ savedHosts: [hal] }));
+  it("names a remote extra by its server hostname when the user hasn't renamed it", async () => {
+    installSettings(settings({ savedHosts: [{ ...hal, name: null }], connectedHostIds: [hal.id] }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 0,
+      queue_capacity: 8,
+      version: null,
+      hostname: "hal9000",
+    });
     const hosts = useHostsStore();
     await hosts.init();
-    expect(hosts.primaryHost?.label).toBe("hal9000");
+    await hosts.refresh();
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("hal9000");
+    // A user rename still wins over the server hostname.
     await hosts.rename(hal.id, "render box");
-    expect(hosts.primaryHost?.label).toBe("render box");
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("render box");
   });
 
-  it("init() lists a host shadowed by the primary without re-probing it", async () => {
-    // Review follow-up: the primary's id now lands in connectedHostIds, so
-    // init used to burn a testRemoteHost probe on a server the app is
-    // already connected to. The row still exists (so switching the primary
-    // away mid-session keeps the host live) but stays hidden and unprobed.
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
-    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
+  it("keeps the last-known hostname label across a failed poll", async () => {
+    installSettings(settings({ savedHosts: [{ ...hal, name: null }], connectedHostIds: [hal.id] }));
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: null,
+      hostname: "hal9000",
+    });
     const hosts = useHostsStore();
     await hosts.init();
-    expect(testRemoteHost).not.toHaveBeenCalled();
-    expect(hosts.extras.find((h) => h.id === hal.id)?.status).toBe("ready");
-    // Hidden while shadowed by the primary.
-    expect(hosts.all.filter((h) => h.id === hal.id)).toHaveLength(1);
+    // The boot probe already reported the hostname — the row must not sit on
+    // the raw URL until the first poll.
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("hal9000");
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 0,
+      queue_capacity: 8,
+      version: null,
+      hostname: "hal9000",
+    });
+    await hosts.refresh();
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("hal9000");
+    // A wifi blip fails one poll: telemetry is dropped, but the label must
+    // not flip back to the raw URL until the next successful poll.
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      target.baseUrl.includes("hal9000")
+        ? Promise.reject(new Error("timeout"))
+        : Promise.resolve({ queue_depth: 0, queue_capacity: 8, version: null }),
+    );
+    await hosts.refresh();
+    const row = hosts.all.find((h) => h.id === hal.id);
+    expect(row?.status).toBe("error");
+    expect(row?.label).toBe("hal9000");
   });
 
   it("disconnect() clears a sticky generation target pointing at the removed host", async () => {
@@ -467,27 +465,19 @@ describe("hosts store", () => {
   it("rename() persists even when the saved-hosts entry was pruned", async () => {
     installSettings(settings({ savedHosts: [], connectedHostIds: [] }));
     const hosts = useHostsStore();
-    hosts.adopt(hal.id, hal.url, null, null);
+    // A live extra whose MRU row was pruned still deserves a sticky name.
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
     await hosts.rename(hal.id, "render box");
     const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
     expect(persisted.savedHosts[0]).toMatchObject({ id: hal.id, url: hal.url, name: "render box" });
-  });
-
-  it("demoteToExtra switches to built-in first, then keeps the host live as an extra", async () => {
-    // Regression (Copilot review): connect() early-returns while the host is
-    // still the primary, so the engine switch must happen before the re-add.
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: "key" };
-    startLocalEngine.mockImplementation(() => {
-      conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
-      return Promise.resolve(conn.info);
-    });
-    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
-    const hosts = useHostsStore();
-    await hosts.demoteToExtra(hosts.primaryHost!);
-    expect(conn.mode).toBe("local");
-    const row = hosts.all.find((h) => h.id === "hal9000-7680");
-    expect(row).toMatchObject({ primary: false, status: "ready", apiKey: "key" });
   });
 
   it("refresh() pulls queue telemetry from every host", async () => {
@@ -507,5 +497,318 @@ describe("hosts store", () => {
     // The status-bar fallback data rides the same poll.
     expect(hosts.telemetry["hal9000-7680"]?.modelsLoaded).toEqual(["flux2-klein:q4"]);
     expect(hosts.telemetry["hal9000-7680"]?.gpuInfo?.vram_total_mb).toBe(24564);
+  });
+
+  it("connect() dedupes a server already connected under another address by instance id", async () => {
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: "uuid-1",
+      hostname: "hal9000",
+    });
+    const hosts = useHostsStore();
+    const first = await hosts.connect("http://hal9000:7680", null, null);
+    // Same physical box, reached by IP this time — one row, not two.
+    const second = await hosts.connect("http://192.168.1.114:7680", null, null);
+    expect(second.id).toBe(first.id);
+    expect(hosts.all.filter((h) => h.id !== "local").map((h) => h.id)).toEqual(["hal9000-7680"]);
+  });
+
+  it("connect() adopts a provided key onto the existing slug when deduping by instance id", async () => {
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: "uuid-1",
+      hostname: "hal9000",
+    });
+    const hosts = useHostsStore();
+    await hosts.connect("http://hal9000:7680", null, null);
+    secretGet.mockResolvedValue(null); // survivor slug has no stored key yet
+    await hosts.connect("http://192.168.1.114:7680", "ip-key", null);
+    expect(secretSet).toHaveBeenCalledWith("remote-api-key.hal9000-7680", "ip-key");
+  });
+
+  it("connect() refuses a URL whose slug collides with the built-in engine id", async () => {
+    const hosts = useHostsStore();
+    await expect(hosts.connect("https://local", null, null)).rejects.toThrow(/built-in engine/);
+    expect(testRemoteHost).not.toHaveBeenCalled();
+  });
+
+  it("refresh() stamps instance id + hostname and persists the id onto the saved host", async () => {
+    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve({
+        queue_depth: 0,
+        queue_capacity: 8,
+        version: "0.18.0",
+        instance_id: target.baseUrl.includes("hal9000") ? "uuid-hal" : "uuid-local",
+        hostname: target.baseUrl.includes("hal9000") ? "hal9000" : "this-mac",
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.refresh();
+    expect(hosts.telemetry[hal.id]?.instanceId).toBe("uuid-hal");
+    expect(hosts.telemetry[hal.id]?.hostname).toBe("hal9000");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.savedHosts.find((h: SavedHost) => h.id === hal.id)?.instanceId).toBe(
+      "uuid-hal",
+    );
+  });
+
+  it("connect() revives a dead instance-id twin with the freshly validated address", async () => {
+    // Boot-reconnect lists the saved host as an errored extra (its old DHCP
+    // address no longer answers) carrying the persisted instance id.
+    installSettings(
+      settings({
+        savedHosts: [{ ...hal, name: null, instanceId: "uuid-x" }],
+        connectedHostIds: [hal.id],
+      }),
+    );
+    testRemoteHost.mockResolvedValueOnce({ ok: false, version: null, error: "down" });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      target.baseUrl.includes("hal9000")
+        ? Promise.reject(new Error("down"))
+        : Promise.resolve({ queue_depth: 0, queue_capacity: 8, version: null }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("error");
+
+    // The user adds the box's NEW address; the probe proves it's the same box.
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: "uuid-x",
+      hostname: "hal9000",
+    });
+    apiJsonTo.mockResolvedValue({ queue_depth: 0, queue_capacity: 8, version: null });
+    const view = await hosts.connect("http://192.168.1.99:7680", null, null);
+
+    // The twin's surviving slug adopts the validated URL instead of keeping
+    // the dead one forever.
+    expect(view.id).toBe(hal.id);
+    expect(view.status).toBe("ready");
+    expect(view.baseUrl).toBe("http://192.168.1.99:7680");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.savedHosts.find((h: SavedHost) => h.id === hal.id)?.url).toBe(
+      "http://192.168.1.99:7680",
+    );
+  });
+
+  it("connect() adopts a newly typed key onto its errored twin (key rotation)", async () => {
+    // The server rotated its API key; the stored key fails the boot probe.
+    installSettings(
+      settings({ savedHosts: [{ ...hal, instanceId: "uuid-x" }], connectedHostIds: [hal.id] }),
+    );
+    secretGet.mockResolvedValue("stale-key");
+    testRemoteHost.mockResolvedValueOnce({ ok: false, version: null, error: "401" });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      target.baseUrl.includes("hal9000")
+        ? Promise.reject(new Error("401"))
+        : Promise.resolve({ queue_depth: 0, queue_capacity: 8, version: null }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("error");
+
+    // Re-adding the host with the NEW key must persist it (a stale stored key
+    // must not block adoption) and revive the live row in place.
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: "uuid-x",
+      hostname: "hal9000",
+    });
+    apiJsonTo.mockResolvedValue({ queue_depth: 0, queue_capacity: 8, version: null });
+    await hosts.connect(hal.url, "new-key", null);
+    expect(secretSet).toHaveBeenCalledWith("remote-api-key.hal9000-7680", "new-key");
+    const live = hosts.extras.find((h) => h.id === hal.id)!;
+    expect(live.apiKey).toBe("new-key");
+    expect(live.status).toBe("ready");
+    expect(live.error).toBeNull();
+  });
+
+  it("connect() keeps two servers with the same instance id but different hostnames separate", async () => {
+    // Two RunPod pods sharing one network volume (shared MOLD_HOME) report
+    // the SAME instance uuid — the reported hostname tells them apart.
+    testRemoteHost.mockImplementation((url: string) =>
+      Promise.resolve({
+        ok: true,
+        version: null,
+        error: null,
+        instanceId: "uuid-shared",
+        hostname: url.includes("pod-a") ? "pod-a" : "pod-b",
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.connect("http://pod-a:7680", null, null);
+    const second = await hosts.connect("http://pod-b:7680", null, null);
+    expect(second.id).toBe("pod-b-7680");
+    expect(hosts.all.filter((h) => h.kind === "remote").map((h) => h.id)).toEqual([
+      "pod-a-7680",
+      "pod-b-7680",
+    ]);
+  });
+
+  it("reconcile does not clobber a settings write that lands during its secret IPC", async () => {
+    const ip: SavedHost = {
+      id: "192-168-1-114-7680",
+      name: null,
+      url: "http://192.168.1.114:7680",
+      lastUsedMs: 1,
+    };
+    installSettings(settings({ savedHosts: [hal, ip], connectedHostIds: [] }));
+    let releaseSecret!: () => void;
+    const gate = new Promise<string | null>((resolve) => {
+      releaseSecret = () => resolve(null);
+    });
+    secretGet.mockImplementationOnce(() => gate);
+    const hosts = useHostsStore();
+    const reconcile = hosts.reconcileSavedInstanceIds(
+      new Map([
+        [hal.id, "uuid-shared"],
+        [ip.id, "uuid-shared"],
+      ]),
+    );
+    // Reconcile is parked on the per-host secret round-trip...
+    await vi.waitFor(() => expect(secretGet).toHaveBeenCalled());
+    // ...while a different writer (a theme toggle) lands in between.
+    await appSettingsSet({ ...(await appSettingsGet()), theme: "dark" });
+    releaseSecret();
+    await reconcile;
+    const final = (await appSettingsGet()) as ReturnType<typeof settings>;
+    // The merge landed AND the interleaved write survived.
+    expect(final.savedHosts.map((h: SavedHost) => h.id)).toEqual([hal.id]);
+    expect(final.theme).toBe("dark");
+  });
+
+  it("serializes this store's settings writers so neither clobbers the other", async () => {
+    installSettings(settings({ savedHosts: [hal, studio], connectedHostIds: [hal.id, studio.id] }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.init();
+    // Two concurrent read-modify-writes: unserialized, the rename's stale
+    // snapshot would resurrect the just-disconnected host.
+    await Promise.all([hosts.disconnect(studio.id), hosts.rename(hal.id, "render box")]);
+    const final = (await appSettingsGet()) as ReturnType<typeof settings>;
+    expect(final.connectedHostIds).not.toContain(studio.id);
+    expect(final.savedHosts.find((h: SavedHost) => h.id === hal.id)?.name).toBe("render box");
+  });
+
+  it("reconcile re-homes the loser's live row when the survivor has no live one", async () => {
+    // hal was used more recently (survivor) but only the IP slug is connected
+    // right now — its working live row must move onto the surviving slug, not
+    // be deleted (the survivor's own address may not even answer).
+    const ip: SavedHost = {
+      id: "192-168-1-114-7680",
+      name: null,
+      url: "http://192.168.1.114:7680",
+      lastUsedMs: 1,
+    };
+    installSettings(
+      settings({
+        savedHosts: [{ ...hal, lastUsedMs: 5, instanceId: "uuid-shared" }, ip],
+        connectedHostIds: [ip.id],
+      }),
+    );
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve({
+        queue_depth: 0,
+        queue_capacity: 8,
+        version: null,
+        instance_id: target.baseUrl.includes("192.168.1.114") ? "uuid-shared" : "uuid-local",
+        hostname: target.baseUrl.includes("192.168.1.114") ? "hal9000" : "this-mac",
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.refresh();
+    const row = hosts.all.find((h) => h.id === hal.id);
+    expect(row).toMatchObject({ status: "ready", baseUrl: ip.url });
+    expect(hosts.all.some((h) => h.id === ip.id)).toBe(false);
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.connectedHostIds).toEqual([hal.id]);
+  });
+
+  it("reconcile re-homes in-memory names and the appPrefs snapshot", async () => {
+    const ip: SavedHost = {
+      id: "192-168-1-114-7680",
+      name: "Render box",
+      url: "http://192.168.1.114:7680",
+      lastUsedMs: 1,
+    };
+    installSettings(
+      settings({
+        savedHosts: [{ ...hal, name: null, lastUsedMs: 5 }, ip],
+        connectedHostIds: [hal.id, ip.id],
+        generateTargetHost: ip.id,
+      }),
+    );
+    const prefs = useAppPrefsStore();
+    prefs.settings = settings({ generateTargetHost: ip.id }) as unknown as AppSettings;
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve({
+        queue_depth: 0,
+        queue_capacity: 8,
+        version: null,
+        instance_id: target.baseUrl.includes("127.0.0.1") ? "uuid-local" : "uuid-shared",
+        hostname: target.baseUrl.includes("127.0.0.1") ? "this-mac" : "hal9000",
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.refresh();
+    // The sticky target is re-homed in the live prefs snapshot, not just on
+    // disk — resolveRoute readers must keep honoring the pin immediately.
+    expect(prefs.settings?.generateTargetHost).toBe(hal.id);
+    // The loser's user-assigned name carries onto the surviving row now, not
+    // only after a relaunch re-reads savedHosts.
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("Render box");
+    expect(hosts.all.some((h) => h.id === ip.id)).toBe(false);
+  });
+
+  it("refresh() collapses two saved slugs that report the same instance id", async () => {
+    const ip: SavedHost = {
+      id: "192-168-1-114-7680",
+      name: null,
+      url: "http://192.168.1.114:7680",
+      lastUsedMs: 1,
+    };
+    installSettings(
+      settings({
+        savedHosts: [hal, ip],
+        connectedHostIds: [hal.id, ip.id],
+        generateTargetHost: ip.id,
+      }),
+    );
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    // The two remote slugs answer with the SAME instance id — one physical box;
+    // the local engine keeps its own id.
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve({
+        queue_depth: 0,
+        queue_capacity: 8,
+        version: "0.18.0",
+        instance_id: target.baseUrl.includes("127.0.0.1") ? "uuid-local" : "uuid-shared",
+        hostname: "hal9000",
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.refresh();
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    // Survivor is hal (more recent lastUsedMs); the IP slug is dropped and the
+    // sticky target re-homed onto the survivor.
+    expect(persisted.savedHosts.map((h: SavedHost) => h.id)).toEqual([hal.id]);
+    expect(persisted.connectedHostIds).toEqual([hal.id]);
+    expect(persisted.generateTargetHost).toBe(hal.id);
   });
 });

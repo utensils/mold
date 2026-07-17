@@ -15,6 +15,7 @@ const hosts: HostView[] = [
     queueDepth: 0,
     queueCapacity: 2,
     version: "0.18.0",
+    instanceId: null,
   },
   {
     id: "studio-7680",
@@ -27,6 +28,7 @@ const hosts: HostView[] = [
     queueDepth: 1,
     queueCapacity: 4,
     version: "0.18.0",
+    instanceId: null,
   },
 ];
 

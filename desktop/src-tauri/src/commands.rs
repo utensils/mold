@@ -5,11 +5,9 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::Manager;
 
-use crate::connection::{host_id, normalize_host_url, Conn, ConnectionInfo};
+use crate::connection::{normalize_host_url, Conn, ConnectionInfo};
 use crate::server;
-use crate::settings::{
-    self, remember_connected_host, upsert_saved_host, AppSettings, ConnectionMode, SavedHost,
-};
+use crate::settings::{self, AppSettings, SavedHost};
 
 pub struct SettingsStore {
     pub path: PathBuf,
@@ -309,6 +307,13 @@ pub struct HostTest {
     pub ok: bool,
     pub version: Option<String>,
     pub error: Option<String>,
+    /// Stable server-installation UUID (`ServerStatus::instance_id`); used to
+    /// dedupe the same box reached by a different address. Absent on older
+    /// servers.
+    pub instance_id: Option<String>,
+    /// Server-reported hostname (`ServerStatus::hostname`); the stable display
+    /// name regardless of how we connected. Absent on older servers.
+    pub hostname: Option<String>,
 }
 
 async fn probe_host(url: &str, api_key: Option<&str>) -> HostTest {
@@ -325,6 +330,8 @@ async fn probe_host(url: &str, api_key: Option<&str>) -> HostTest {
                 ok: false,
                 version: None,
                 error: Some(format!("{url} answered {} on /health.", resp.status())),
+                instance_id: None,
+                hostname: None,
             }
         }
         Err(e) => {
@@ -332,6 +339,8 @@ async fn probe_host(url: &str, api_key: Option<&str>) -> HostTest {
                 ok: false,
                 version: None,
                 error: Some(format!("Can't reach {url}: {e}")),
+                instance_id: None,
+                hostname: None,
             }
         }
     }
@@ -346,28 +355,36 @@ async fn probe_host(url: &str, api_key: Option<&str>) -> HostTest {
             ok: false,
             version: None,
             error: Some("This host requires an API key.".into()),
+            instance_id: None,
+            hostname: None,
         },
         Ok(resp) if resp.status().is_success() => {
-            let version = resp
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|v| v.get("version")?.as_str().map(str::to_string));
+            let body = resp.json::<serde_json::Value>().await.ok();
+            let field = |key: &str| {
+                body.as_ref()
+                    .and_then(|v| v.get(key)?.as_str().map(str::to_string))
+            };
             HostTest {
                 ok: true,
-                version,
+                version: field("version"),
                 error: None,
+                instance_id: field("instance_id"),
+                hostname: field("hostname"),
             }
         }
         Ok(resp) => HostTest {
             ok: false,
             version: None,
             error: Some(format!("{url} answered {} on /api/status.", resp.status())),
+            instance_id: None,
+            hostname: None,
         },
         Err(e) => HostTest {
             ok: false,
             version: None,
             error: Some(format!("Can't reach {url}: {e}")),
+            instance_id: None,
+            hostname: None,
         },
     }
 }
@@ -388,6 +405,9 @@ pub struct DiscoveredHost {
     pub port: u16,
     pub version: Option<String>,
     pub auth_required: bool,
+    /// Stable server-installation UUID from the mDNS `id` TXT record. Absent
+    /// on servers that predate instance identity.
+    pub instance_id: Option<String>,
     /// True when the advertisement resolves to one of this machine's own
     /// interface addresses (or its hostname) — i.e. our embedded/local server.
     pub is_this_machine: bool,
@@ -508,84 +528,16 @@ pub async fn discover_servers(timeout_ms: Option<u64>) -> Result<Vec<DiscoveredH
                 port: s.port,
                 version: s.version,
                 auth_required: s.auth_required,
+                instance_id: s.instance_id,
                 is_this_machine,
             }
         })
         .collect())
 }
 
-/// Switch to a remote host (validates first) and persist it in app settings,
-/// remembering it in the most-recently-used host list.
-#[tauri::command]
-pub async fn set_remote_host(
-    state: tauri::State<'_, AppState>,
-    store: tauri::State<'_, SettingsStore>,
-    url: String,
-    api_key: Option<String>,
-    name: Option<String>,
-) -> Result<ConnectionInfo, String> {
-    let url = normalize_host_url(&url)?;
-    let test = probe_host(&url, api_key.as_deref()).await;
-    if !test.ok {
-        return Err(test.error.unwrap_or_else(|| "Connection failed.".into()));
-    }
-
-    let mut conn = state.conn.lock().await;
-    *conn = Conn::Remote {
-        url: url.clone(),
-        api_key: api_key.clone(),
-    };
-
-    // Keys live in the secret store: the shared slot feeds the current
-    // connection, the per-host slot lets saved hosts reconnect later. The
-    // legacy plaintext settings slot is wiped so old files converge.
-    let id = host_id(&url);
-    match api_key.as_deref().filter(|k| !k.is_empty()) {
-        Some(key) => {
-            state
-                .secrets
-                .set("remote-api-key", key)
-                .map_err(|e| e.to_string())?;
-            state
-                .secrets
-                .set(&format!("remote-api-key.{id}"), key)
-                .map_err(|e| e.to_string())?;
-        }
-        None => {
-            state
-                .secrets
-                .clear("remote-api-key")
-                .map_err(|e| e.to_string())?;
-            state
-                .secrets
-                .clear(&format!("remote-api-key.{id}"))
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let updated = {
-        let mut current = store.current.lock().expect("settings mutex");
-        current.mode = ConnectionMode::Remote;
-        current.remote_url = Some(url.clone());
-        current.remote_api_key = None;
-        upsert_saved_host(&mut current.saved_hosts, &id, &url, name, now_ms);
-        // The primary also joins the boot-reconnect set: switching to another
-        // host (or falling back to the built-in engine) must not make this
-        // one vanish on the next launch.
-        remember_connected_host(&mut current, &id);
-        current.clone()
-    };
-    settings::save(&store.path, &updated).map_err(|e| e.to_string())?;
-    Ok(conn.info(&state.local_api_key))
-}
-
-/// Drop a host from the saved list and delete its stored API key. Does not
-/// touch the live connection, but if the host is also the persisted primary
-/// remote, the remote preference (and its shared key) is cleared too — the
-/// next launch must not resurrect a host the user just forgot.
+/// Drop a host from the saved list and delete its stored API key. Remote hosts
+/// are list entries (never a primary the app switches to), so this only prunes
+/// the saved/reconnect state and the per-host secret.
 #[tauri::command]
 pub async fn forget_remote_host(
     state: tauri::State<'_, AppState>,
@@ -596,17 +548,11 @@ pub async fn forget_remote_host(
         .secrets
         .clear(&format!("remote-api-key.{id}"))
         .map_err(|e| e.to_string())?;
-    let (updated, was_primary) = {
+    let updated = {
         let mut current = store.current.lock().expect("settings mutex");
-        let was_primary = settings::forget_host(&mut current, &id);
-        (current.clone(), was_primary)
+        settings::forget_host(&mut current, &id);
+        current.clone()
     };
-    if was_primary {
-        state
-            .secrets
-            .clear("remote-api-key")
-            .map_err(|e| e.to_string())?;
-    }
     settings::save(&store.path, &updated).map_err(|e| e.to_string())?;
     Ok(updated.saved_hosts)
 }
@@ -648,17 +594,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_primary_does_not_own_the_local_server_lifecycle() {
-        assert!(!primary_uses_local_server(&Conn::Remote {
-            url: "http://hal9000:7680".into(),
-            api_key: None,
-        }));
+    fn local_and_external_engines_own_the_local_server_lifecycle() {
         assert!(primary_uses_local_server(&Conn::Local {
             base_url: "http://127.0.0.1:7680".into(),
         }));
         assert!(primary_uses_local_server(&Conn::External {
             base_url: "http://127.0.0.1:7680".into(),
         }));
+        assert!(!primary_uses_local_server(&Conn::Off));
     }
 
     #[test]
@@ -696,15 +639,18 @@ mod tests {
             port: 7680,
             version: Some("0.14.0".into()),
             auth_required: true,
+            instance_id: Some("0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58".into()),
             is_this_machine: false,
         };
         let json = serde_json::to_value(&host).unwrap();
         assert_eq!(json["authRequired"], true);
         assert_eq!(json["isThisMachine"], false);
         assert_eq!(json["url"], "http://192.168.1.10:7680");
+        assert_eq!(json["instanceId"], "0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58");
         // Snake-case keys must not leak through.
         assert!(json.get("auth_required").is_none());
         assert!(json.get("is_this_machine").is_none());
+        assert!(json.get("instance_id").is_none());
     }
 
     #[test]

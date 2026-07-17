@@ -10,12 +10,13 @@ import {
 
 describe("settings schema", () => {
   it("routes curated keys to their sections", () => {
-    expect(sectionForConfigKey("models_dir")).toBe("engine");
+    expect(sectionForConfigKey("models_dir")).toBe("hosts");
     expect(sectionForConfigKey("default_model")).toBe("generation");
     expect(sectionForConfigKey("expand.temperature")).toBe("expansion");
   });
 
-  it("gives desktop updates a dedicated settings section", () => {
+  it("names the first section Hosts (the default) and keeps Updates", () => {
+    expect(SECTIONS[0]).toMatchObject({ id: "hosts", label: "Hosts" });
     expect(SECTIONS.find((section) => section.id === "updates")?.label).toBe("Updates");
   });
 

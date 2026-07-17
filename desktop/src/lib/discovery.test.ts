@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { addressLabel, dedupeHosts, prepareHosts, sortHosts, versionLabel } from "./discovery";
+import {
+  addressLabel,
+  dedupeHosts,
+  detectedHosts,
+  prepareHosts,
+  sortHosts,
+  versionLabel,
+} from "./discovery";
 import type { DiscoveredHost } from "./ipc";
 
 function host(overrides: Partial<DiscoveredHost> = {}): DiscoveredHost {
@@ -14,6 +21,29 @@ function host(overrides: Partial<DiscoveredHost> = {}): DiscoveredHost {
     ...overrides,
   };
 }
+
+describe("detectedHosts", () => {
+  it("hides this machine and hosts already connected by slug", () => {
+    const self = host({ name: "me-7680", url: "http://10.0.0.1:7680", isThisMachine: true });
+    const connected = host({ name: "hal-7680", url: "http://hal9000:7680" });
+    const fresh = host({ name: "okra-7680", url: "http://okra:7680" });
+    const out = detectedHosts([self, connected, fresh], new Set(["hal9000-7680"]), new Set());
+    expect(out.map((h) => h.url)).toEqual(["http://okra:7680"]);
+  });
+
+  it("hides a host reached by IP when it is already connected by hostname (instance id)", () => {
+    // Same box: connected as hal9000-7680, re-advertised by IP with the same id.
+    const byIp = host({ name: "hal-7680", url: "http://192.168.1.114:7680", instanceId: "uuid-1" });
+    const out = detectedHosts([byIp], new Set(["hal9000-7680"]), new Set(["uuid-1"]));
+    expect(out).toEqual([]);
+  });
+
+  it("still offers a discovered host whose instance id is not connected", () => {
+    const other = host({ name: "okra-7680", url: "http://okra:7680", instanceId: "uuid-2" });
+    const out = detectedHosts([other], new Set(["hal9000-7680"]), new Set(["uuid-1"]));
+    expect(out.map((h) => h.url)).toEqual(["http://okra:7680"]);
+  });
+});
 
 describe("sortHosts", () => {
   it("puts this machine first", () => {

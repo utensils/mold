@@ -42,22 +42,22 @@ function connectLocal() {
   conn.status = "ready";
 }
 
-/** Primary = a remote host (id "hal9000-7680"). */
-function connectRemote() {
-  const conn = useConnectionStore();
-  conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: "hk" };
-  conn.status = "ready";
-}
-
-function addExtra(id = "okra-7680", url = "http://okra:7680") {
+function addExtra(id = "okra-7680", url = "http://okra:7680", apiKey: string | null = null) {
   useHostsStore().extras.push({
     id,
     label: id.replace(/-\d+$/, ""),
     url,
-    apiKey: null,
+    apiKey,
     status: "ready",
     error: null,
+    instanceId: null,
   });
+}
+
+/** Local primary plus hal9000 connected as an extra host (a second bucket). */
+function connectLocalPlusHal() {
+  connectLocal();
+  addExtra("hal9000-7680", "http://hal9000:7680", "hk");
 }
 
 beforeEach(() => {
@@ -68,9 +68,9 @@ beforeEach(() => {
 });
 
 describe("gallery sources", () => {
-  it("has no separate This-Mac bucket when the primary is the built-in engine", async () => {
-    // The built-in/external engine reads this Mac's output dir — its bucket
-    // IS this Mac's gallery. A second IPC bucket would list every print twice.
+  it("reads the built-in engine's gallery over HTTP, with no separate IPC bucket", async () => {
+    // The built-in engine (host id "local") reads this device's output dir; its
+    // /api/gallery covers IPC-saved files, so there is no second This-Mac bucket.
     connectLocal();
     const gallery = useGalleryStore();
 
@@ -84,34 +84,21 @@ describe("gallery sources", () => {
     );
   });
 
-  it("adds a This-Mac IPC bucket only when the primary is remote", async () => {
-    connectRemote();
+  it("gives every connected host its own bucket", async () => {
+    connectLocalPlusHal();
     const gallery = useGalleryStore();
 
     expect(gallery.sources.map((s) => s.key)).toEqual(["local", "hal9000-7680"]);
 
     await gallery.fetchAll();
-    expect(ipc.localGalleryList).toHaveBeenCalledOnce();
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:49152", apiKey: null },
+      "/api/gallery",
+    );
     expect(apiJsonTo).toHaveBeenCalledWith(
       { baseUrl: "http://hal9000:7680", apiKey: "hk" },
       "/api/gallery",
     );
-  });
-
-  it("does not duplicate the local source when a remote primary keeps the local engine ready", () => {
-    connectRemote();
-    const conn = useConnectionStore();
-    conn.localInfo = {
-      kind: "embedded",
-      baseUrl: "http://127.0.0.1:7680",
-      apiKey: "local-key",
-      port: 7680,
-    };
-    conn.localStatus = "ready";
-
-    const gallery = useGalleryStore();
-
-    expect(gallery.sources.map((source) => source.key)).toEqual(["local", "hal9000-7680"]);
   });
 
   it("only ready hosts get buckets", () => {
@@ -125,17 +112,15 @@ describe("gallery sources", () => {
 
 describe("merged grid", () => {
   it("merges buckets newest-first with host labels, filters, and counts chips", async () => {
-    connectRemote();
+    connectLocalPlusHal();
     addExtra();
-    vi.mocked(apiJsonTo).mockImplementation(
-      (target, _path) =>
-        Promise.resolve(
-          (target as { baseUrl: string }).baseUrl.includes("hal9000")
-            ? [img("h1.png", 300), img("h2.png", 100)]
-            : [img("o1.png", 250)],
-        ) as never,
-    );
-    vi.mocked(ipc.localGalleryList).mockResolvedValue([img("l1.png", 200)]);
+    vi.mocked(apiJsonTo).mockImplementation((target, _path) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000"))
+        return Promise.resolve([img("h1.png", 300), img("h2.png", 100)]) as never;
+      if (url.includes("okra")) return Promise.resolve([img("o1.png", 250)]) as never;
+      return Promise.resolve([img("l1.png", 200)]) as never; // built-in engine
+    });
     const gallery = useGalleryStore();
 
     await gallery.fetchAll();
@@ -152,13 +137,13 @@ describe("merged grid", () => {
       "local",
       "hal9000-7680",
     ]);
-    expect(gallery.merged[2]!.hostLabel).toBe("This Mac");
+    expect(gallery.merged[2]!.hostLabel).toBe("This device");
 
     gallery.filter = "hal9000-7680";
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["h1.png", "h2.png"]);
 
     expect(gallery.chipCounts).toEqual([
-      { key: "local", label: "This Mac", count: 1 },
+      { key: "local", label: "This device", count: 1 },
       { key: "hal9000-7680", label: expect.any(String), count: 2 },
       { key: "okra-7680", label: "okra", count: 1 },
     ]);
@@ -173,18 +158,16 @@ describe("merged grid", () => {
     expect(gallery.filtered).toHaveLength(1);
   });
 
-  it("dedupes matching filenames in All, prefers This Mac, and lists every location", async () => {
-    connectRemote();
+  it("dedupes matching filenames in All, prefers This device, and lists every location", async () => {
+    connectLocalPlusHal();
     addExtra();
-    vi.mocked(ipc.localGalleryList).mockResolvedValue([img("shared.png", 200)]);
-    vi.mocked(apiJsonTo).mockImplementation(
-      (target, _path) =>
-        Promise.resolve(
-          (target as { baseUrl: string }).baseUrl.includes("hal9000")
-            ? [img("shared.png", 201), img("remote-only.png", 100)]
-            : [img("shared.png", 202)],
-        ) as never,
-    );
+    vi.mocked(apiJsonTo).mockImplementation((target, _path) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000"))
+        return Promise.resolve([img("shared.png", 201), img("remote-only.png", 100)]) as never;
+      if (url.includes("okra")) return Promise.resolve([img("shared.png", 200)]) as never;
+      return Promise.resolve([img("shared.png", 202)]) as never; // built-in engine
+    });
     const gallery = useGalleryStore();
 
     await gallery.fetchAll();
@@ -192,10 +175,10 @@ describe("merged grid", () => {
     expect(gallery.merged.map((e) => e.item.filename)).toEqual(["shared.png", "remote-only.png"]);
     expect(gallery.merged[0]).toMatchObject({
       sourceKey: "local",
-      hostLabel: "This Mac",
+      hostLabel: "This device",
       availableOn: [
-        { key: "local", label: "This Mac" },
-        { key: "hal9000-7680", label: "hal9000:7680" },
+        { key: "local", label: "This device" },
+        { key: "hal9000-7680", label: "hal9000" },
         { key: "okra-7680", label: "okra" },
       ],
     });
@@ -204,21 +187,21 @@ describe("merged grid", () => {
     expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png", "remote-only.png"]);
     expect(gallery.filtered[0]).toMatchObject({
       sourceKey: "hal9000-7680",
-      availableOn: [{ key: "hal9000-7680", label: "hal9000:7680" }],
+      availableOn: [{ key: "hal9000-7680", label: "hal9000" }],
     });
   });
 });
 
 describe("per-bucket isolation", () => {
   it("one host failing never breaks the others", async () => {
-    connectRemote();
+    connectLocalPlusHal();
     addExtra();
-    vi.mocked(apiJsonTo).mockImplementation((target, _path) =>
-      (target as { baseUrl: string }).baseUrl.includes("hal9000")
-        ? Promise.reject(new Error("connection refused"))
-        : (Promise.resolve([img("o1.png", 10)]) as never),
-    );
-    vi.mocked(ipc.localGalleryList).mockResolvedValue([img("l1.png", 20)]);
+    vi.mocked(apiJsonTo).mockImplementation((target, _path) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000")) return Promise.reject(new Error("connection refused"));
+      if (url.includes("okra")) return Promise.resolve([img("o1.png", 10)]) as never;
+      return Promise.resolve([img("l1.png", 20)]) as never; // built-in engine
+    });
     const gallery = useGalleryStore();
 
     await gallery.fetchAll();
@@ -232,10 +215,11 @@ describe("per-bucket isolation", () => {
 
 describe("live server events", () => {
   it("applyAdded inserts into the primary host's bucket only", () => {
-    connectRemote();
+    connectLocalPlusHal();
     const gallery = useGalleryStore();
-    gallery.buckets["hal9000-7680"] = loadedBucket([img("old.png", 100)]);
-    gallery.buckets["local"] = loadedBucket([]);
+    // The primary is always the built-in engine (host id "local").
+    gallery.buckets["local"] = loadedBucket([img("old.png", 100)]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([]);
 
     gallery.applyAdded({
       type: "gallery_added",
@@ -243,11 +227,8 @@ describe("live server events", () => {
       image: img("new.png", 200),
     });
 
-    expect(gallery.buckets["hal9000-7680"]!.items.map((i) => i.filename)).toEqual([
-      "new.png",
-      "old.png",
-    ]);
-    expect(gallery.buckets["local"]!.items).toHaveLength(0);
+    expect(gallery.buckets["local"]!.items.map((i) => i.filename)).toEqual(["new.png", "old.png"]);
+    expect(gallery.buckets["hal9000-7680"]!.items).toHaveLength(0);
   });
 
   it("applyAdded dedupes by filename", () => {
@@ -261,14 +242,12 @@ describe("live server events", () => {
   });
 
   it("applyAdded is a no-op while the primary bucket is not loaded", () => {
-    connectRemote();
+    connectLocal();
     const gallery = useGalleryStore();
-    gallery.buckets["local"] = loadedBucket([]);
-
+    // The primary "local" bucket was never opened — the frame must not create it.
     gallery.applyAdded({ type: "gallery_added", filename: "x.png", image: img("x.png", 1) });
 
-    expect(gallery.buckets["hal9000-7680"]).toBeUndefined();
-    expect(gallery.buckets["local"]!.items).toHaveLength(0);
+    expect(gallery.buckets["local"]).toBeUndefined();
   });
 
   it("applyAdded without a row falls back to a debounced refetch of the primary", async () => {
@@ -301,26 +280,81 @@ describe("live server events", () => {
   });
 });
 
+describe("local bucket while the engine is down", () => {
+  it("keeps the This-device bucket and routes it over IPC when the local host isn't ready", async () => {
+    // Local engine errored at start; a remote host is still connected. The
+    // local server exposes a stale baseUrl, so target presence is NOT enough
+    // — the "local" key must fall back to native IPC.
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "error";
+    addExtra("hal9000-7680", "http://hal9000:7680", "hk");
+    vi.mocked(ipc.localGalleryList).mockResolvedValue([img("saved-remote-print.png", 50)]);
+    const gallery = useGalleryStore();
+
+    expect(gallery.sources.map((s) => s.key)).toEqual(["local", "hal9000-7680"]);
+
+    await gallery.fetchAll();
+
+    expect(ipc.localGalleryList).toHaveBeenCalled();
+    // The dead local server must not be hit for the local bucket.
+    expect(apiJsonTo).not.toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:49152", apiKey: null },
+      "/api/gallery",
+    );
+    expect(gallery.merged.some((e) => e.item.filename === "saved-remote-print.png")).toBe(true);
+    expect(gallery.mediaSourceOf("local")).toBe("local");
+    expect(gallery.targetOf("local")).toBeNull();
+  });
+
+  it("lists This device even when there is no primary connection at all", () => {
+    const gallery = useGalleryStore();
+    expect(gallery.sources.map((s) => s.key)).toEqual(["local"]);
+  });
+
+  it("refreshHost('local') works over IPC while the engine is down (auto-save nudge)", async () => {
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([]);
+    vi.mocked(ipc.localGalleryList).mockResolvedValue([img("just-saved.png", 9)]);
+
+    await gallery.refreshHost("local");
+
+    expect(ipc.localGalleryList).toHaveBeenCalledTimes(1);
+    expect(gallery.buckets["local"]!.items.map((i) => i.filename)).toEqual(["just-saved.png"]);
+  });
+
+  it("returns to HTTP the moment the local server is ready again", async () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+
+    await gallery.fetchBucket("local");
+
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:49152", apiKey: null },
+      "/api/gallery",
+    );
+    expect(ipc.localGalleryList).not.toHaveBeenCalled();
+  });
+});
+
 describe("remove", () => {
-  it("deletes This-Mac prints through native IPC and evicts only that bucket", async () => {
-    connectRemote();
+  it("deletes prints in a host-less local bucket through native IPC", async () => {
+    // With no connected local host (engine down), the "local" bucket falls
+    // back to native IPC for deletes and mold-local:// media.
     vi.mocked(ipc.localGalleryDelete).mockResolvedValue();
     const gallery = useGalleryStore();
     gallery.buckets["local"] = loadedBucket([img("print.png", 1)]);
-    gallery.buckets["hal9000-7680"] = loadedBucket([img("print.png", 2)]);
 
     await gallery.remove("local", "print.png");
 
     expect(ipc.localGalleryDelete).toHaveBeenCalledWith("print.png");
     expect(apiFetchTo).not.toHaveBeenCalled();
     expect(gallery.buckets["local"]!.items).toHaveLength(0);
-    // The same filename on the host bucket is a different print — untouched.
-    expect(gallery.buckets["hal9000-7680"]!.items).toHaveLength(1);
     expect(evictMedia).toHaveBeenCalledWith("mold-local://localhost/print.png", "local");
   });
 
   it("deletes host prints against that host and evicts its cache bucket", async () => {
-    connectRemote();
+    connectLocalPlusHal();
     vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 200 }));
     const gallery = useGalleryStore();
     gallery.buckets["hal9000-7680"] = loadedBucket([img("print one.png", 2)]);
@@ -397,7 +431,7 @@ describe("refreshHost", () => {
 
 describe("bucket sync", () => {
   it("drops buckets whose source disappeared and evicts their media", async () => {
-    connectRemote();
+    connectLocalPlusHal();
     addExtra();
     const gallery = useGalleryStore();
     await gallery.fetchAll();

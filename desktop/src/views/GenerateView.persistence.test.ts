@@ -83,6 +83,7 @@ describe("GenerateView form persistence", () => {
       apiKey: "remote-key",
       status: "ready",
       error: null,
+      instanceId: null,
     });
     apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
       Promise.resolve(target.baseUrl.includes("hal9000") ? [model] : []),
