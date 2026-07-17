@@ -22,6 +22,7 @@ vi.mock("../../lib/openExternal", () => ({ openExternal: vi.fn() }));
 import CatalogTab from "./CatalogTab.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
+import { useModelStore } from "../../stores/models";
 
 const PAGE_SIZE = 24;
 
@@ -63,6 +64,49 @@ beforeEach(() => {
 });
 
 describe("CatalogTab media filter under pagination", () => {
+  it("offers safe manifest variants and hides aggregate HF rows for the same repo", async () => {
+    setActivePinia(createPinia());
+    useModelStore().all = [
+      {
+        name: "ltx-video-0.9.8-2b-distilled:bf16",
+        family: "ltx-video",
+        size_gb: 4.2,
+        is_loaded: false,
+        hf_repo: "Lightricks/LTX-Video",
+        default_steps: 8,
+        default_guidance: 1,
+        default_width: 768,
+        default_height: 512,
+        description: "Small LTX-Video",
+        downloaded: false,
+        remaining_download_bytes: 16_200_000_000,
+      },
+    ];
+    searchCatalog.mockResolvedValue({
+      entries: [
+        {
+          ...entry("LTX-Video", "ltx-video"),
+          source_id: "Lightricks/LTX-Video",
+          bundling: "separated",
+          size_bytes: 253_800_000_000,
+        },
+      ],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+
+    const wrapper = mount(CatalogTab, {
+      props: { query: "", layout: "grid" as const, mediaType: "video" },
+      global: { plugins: [] },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("ltx-video-0.9.8-2b-distilled:bf16");
+    expect(wrapper.text()).toContain("SIZE 4.2 GB · FETCH 16.2 GB");
+    expect(wrapper.text()).not.toContain("253.8 GB");
+  });
+
   it("auto-fetches follow-up pages until the Video filter has content", async () => {
     // Page 1 is all image models (the common HF/Civitai shape); the first
     // video model only appears on page 2.

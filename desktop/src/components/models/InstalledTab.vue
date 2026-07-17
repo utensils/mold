@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
 import { useModelStore } from "../../stores/models";
+import { useHostModelsStore } from "../../stores/hostModels";
+import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import SourceGlyph from "../generate/SourceGlyph.vue";
 import { isVideoFamily } from "../../lib/capabilities";
-import { groupInstalledModels, isUtilityModel, modelDiskBytes, quantTag } from "../../lib/models";
+import {
+  groupInstalledModels,
+  isUtilityModel,
+  modelDiskBytes,
+  modelSizeLabels,
+  quantTag,
+} from "../../lib/models";
 import { modelSource } from "../../lib/modelSource";
 import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../../lib/api/models";
 import { ApiError } from "../../lib/api/client";
@@ -13,17 +21,26 @@ import { openExternal } from "../../lib/openExternal";
 import { type MediaType } from "../../lib/modelAvailability";
 import type { ModelComponentStatus, ModelEntry } from "../../lib/api/types";
 
-const props = defineProps<{ query?: string; mediaType?: MediaType }>();
+type LibraryModelEntry = ModelEntry & { hostIds?: string[] };
+
+const props = defineProps<{
+  query?: string;
+  mediaType?: MediaType;
+  entries?: LibraryModelEntry[];
+}>();
 const emit = defineEmits<{ (e: "browse-catalog"): void }>();
 
 const models = useModelStore();
+const hostModels = useHostModelsStore();
+const hosts = useHostsStore();
 const toasts = useToastStore();
+const sourceEntries = computed(() => props.entries ?? models.installed);
 
 const filtered = computed(() => {
   const q = (props.query ?? "").trim().toLowerCase();
   const searched = q
-    ? models.installed.filter((m) => m.name.toLowerCase().includes(q))
-    : models.installed;
+    ? sourceEntries.value.filter((m) => m.name.toLowerCase().includes(q))
+    : sourceEntries.value;
   const type = props.mediaType ?? "all";
   if (type === "all") return searched;
   // Utility rows aren't image or video generators — they only show under All.
@@ -47,7 +64,31 @@ const components = reactive<Record<string, ModelComponentStatus[] | "loading" | 
 const busy = ref<string | null>(null);
 const confirmingRemove = ref<string | null>(null);
 
-async function remove(m: ModelEntry) {
+function targetHost(m: LibraryModelEntry) {
+  const ids = m.hostIds ?? ["local"];
+  const preferred = ids.includes("local") ? "local" : ids[0];
+  return hosts.all.find((host) => host.id === preferred) ?? null;
+}
+
+function targetFor(m: LibraryModelEntry) {
+  const target = targetHost(m);
+  return target && !target.primary && target.baseUrl
+    ? { baseUrl: target.baseUrl, apiKey: target.apiKey }
+    : undefined;
+}
+
+function hostLabels(m: LibraryModelEntry): string[] {
+  return (m.hostIds ?? ["local"]).map(
+    (id) => hosts.all.find((host) => host.id === id)?.label ?? id,
+  );
+}
+
+async function refreshAfterAction(m: LibraryModelEntry) {
+  if (!targetFor(m)) await models.fetch();
+  await hostModels.refresh(true);
+}
+
+async function remove(m: LibraryModelEntry) {
   if (confirmingRemove.value !== m.name) {
     confirmingRemove.value = m.name;
     return;
@@ -55,14 +96,14 @@ async function remove(m: ModelEntry) {
   confirmingRemove.value = null;
   busy.value = m.name;
   try {
-    const result = await removeModel(m.name);
+    const result = await removeModel(m.name, targetFor(m));
     const kept = result.kept.length;
     toasts.push(
       kept > 0
         ? `Removed ${m.name} — freed ${formatGB(result.freed_bytes)}, kept ${kept} shared component${kept === 1 ? "" : "s"}`
         : `Removed ${m.name} — freed ${formatGB(result.freed_bytes)}`,
     );
-    await models.fetch();
+    await refreshAfterAction(m);
   } catch (err) {
     // 409 MODEL_LOADED → tell the user the one concrete fix.
     toasts.push(
@@ -76,23 +117,23 @@ async function remove(m: ModelEntry) {
   }
 }
 
-async function toggleInfo(m: ModelEntry) {
+async function toggleInfo(m: LibraryModelEntry) {
   expanded[m.name] = !expanded[m.name];
   if (expanded[m.name] && components[m.name] === undefined) {
     components[m.name] = "loading";
     try {
-      components[m.name] = (await fetchModelComponents(m.name)).components;
+      components[m.name] = (await fetchModelComponents(m.name, targetFor(m))).components;
     } catch {
       components[m.name] = "error";
     }
   }
 }
 
-async function load(m: ModelEntry) {
+async function load(m: LibraryModelEntry) {
   busy.value = m.name;
   try {
-    await loadModel(m.name);
-    await models.fetch();
+    await loadModel(m.name, targetFor(m));
+    await refreshAfterAction(m);
   } catch (err) {
     toasts.push(String(err), "error");
   } finally {
@@ -100,11 +141,11 @@ async function load(m: ModelEntry) {
   }
 }
 
-async function unload(m: ModelEntry) {
+async function unload(m: LibraryModelEntry) {
   busy.value = m.name;
   try {
-    await unloadModel(m.name);
-    await models.fetch();
+    await unloadModel(m.name, targetFor(m));
+    await refreshAfterAction(m);
   } catch (err) {
     toasts.push(String(err), "error");
   } finally {
@@ -161,6 +202,14 @@ function componentList(name: string): ModelComponentStatus[] {
             <SourceGlyph :source="modelSource(m)" class="text-ink-3" />
             <span class="truncate text-body text-ink" :title="m.name">{{ m.name }}</span>
             <span
+              v-for="label in hostLabels(m)"
+              :key="label"
+              data-test="installed-host"
+              class="border-edge data-mono shrink-0 rounded-full border px-1.5 text-caption text-ink-3"
+            >
+              {{ label }}
+            </span>
+            <span
               v-if="quantTag(m.name)"
               class="border-edge data-mono rounded-full border px-1.5 text-caption text-ink-2"
             >
@@ -192,13 +241,24 @@ function componentList(name: string): ModelComponentStatus[] {
               </svg>
             </button>
 
-            <!-- disk usage bar -->
-            <div class="ml-auto flex w-40 items-center gap-2">
+            <!-- Primary weights and full runtime footprint are deliberately
+                 separate: the latter includes shared encoders/VAEs. -->
+            <div class="ml-auto flex w-64 items-center gap-2">
               <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-bath" aria-hidden="true">
                 <div class="h-full bg-halide" :style="{ width: barWidth(m) }" />
               </div>
-              <span class="data-mono w-16 shrink-0 text-right text-ink-3">
-                {{ formatGB(modelDiskBytes(m)) }}
+              <span class="w-40 shrink-0 text-right">
+                <span class="data-mono block text-caption text-ink-2">
+                  {{
+                    modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? "Size unavailable"
+                  }}
+                </span>
+                <span
+                  v-if="modelSizeLabels(m).runtime && modelSizeLabels(m).weights"
+                  class="data-mono block text-[10px] text-ink-3"
+                >
+                  {{ modelSizeLabels(m).runtime }}
+                </span>
               </span>
             </div>
 

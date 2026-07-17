@@ -125,7 +125,12 @@ mold run flux-dev:bf16 "epic shot" \
 **Catalog browse:** the desktop's single **Catalog** view stacks installed
 models above the live catalog with **All / Images / Video** media chips and
 Grid / Table layouts; active downloads pin to the top with a source glyph and
-target host. The catalog uses cache-stable 512 px Civitai derivatives plus
+target host. The Installed shelf merges every ready host with host badges and
+host-routed actions; host detail mirrors that host's active pulls. Rows label
+primary weights separately from the footprint including shared runtime files.
+Curated manifest variants replace ambiguous multi-checkpoint Hugging Face
+repositories so Pull always targets one runnable model.
+The catalog uses cache-stable 512 px Civitai derivatives plus
 lazy async decoding and per-card layout/paint containment instead of
 source-resolution preview images.
 Entries without working preview art use a local model-family mark instead of a

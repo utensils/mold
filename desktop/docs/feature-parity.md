@@ -116,8 +116,10 @@ Post-generation upscale persists distinct `-original` and `-upscaled` entries on
 - **clean** (`mold clean`, `--force`, `--older-than 30d`): dry-run by default; stale `.pulling` markers (>6h), orphaned shared files, hf-cache transients, old output images.
 - **load/unload** (`mold unload`, `POST /api/models/load`, `DELETE /api/models/unload`): free GPU memory.
 - **ps** (`mold ps`, `GET /api/status`): server status + loaded models.
-- **downloads drawer** (web/desktop): `GET/POST /api/downloads`, `DELETE /api/downloads/:id`, live SSE stream (cancelable, progress bytes/percent). Desktop keeps one stream per selected download host, pins active rows at the top of the Catalog view, and labels/routes each row by origin (source glyph + target host; primary rows resolve to the local host's label).
-- **SIZE vs FETCH semantics**: catalog entries distinguish declared size vs actual fetch; disk usage tracked per model + shared components.
+- **downloads drawer** (web/desktop): `GET/POST /api/downloads`, `DELETE /api/downloads/:id`, live SSE stream (cancelable, progress bytes/percent). Desktop keeps one stream for every ready host, pins active rows at the top of the Catalog view, mirrors a host's rows on its detail page, and labels/routes each row by origin (source glyph + target host; primary rows resolve to the local host's label).
+- **multi-host Installed shelf (desktop)**: merges every ready host's `/api/models` result, deduplicates equal names, collects host badges, and routes load/unload/info/remove to the row's owning host (preferring the local copy when several hosts have one). Host detail forces a fresh inventory fetch rather than trusting the 60-second routing cache.
+- **SIZE vs FETCH semantics**: catalog entries distinguish declared size vs actual fetch. Installed rows separately label primary checkpoint **weights** (`size_gb`) and the larger footprint **with shared runtime** (`disk_usage_bytes`, including referenced shared encoders/VAEs); the all-host header does not sum per-model runtime footprints because that would double-count shared files.
+- **safe manifest pull targets (desktop)**: runnable built-in variants precede live Hugging Face results; aggregate `separated` checkpoint repositories and repositories already represented by the manifest are suppressed so one click cannot accidentally fetch every checkpoint in a multi-model LTX repository.
 
 ---
 

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore } from "../../stores/hosts";
 import { modelSource } from "../../lib/modelSource";
@@ -8,6 +9,13 @@ import SourceGlyph from "../generate/SourceGlyph.vue";
 
 const downloads = useDownloadsStore();
 const hosts = useHostsStore();
+const props = defineProps<{ hostId?: string }>();
+
+const rows = computed(() =>
+  props.hostId
+    ? downloads.hostedInFlight.filter((row) => row.hostId === props.hostId)
+    : downloads.hostedInFlight,
+);
 
 /** Primary rows carry a null label; resolve them to the primary host's name. */
 function hostLabel(label: string | null): string {
@@ -16,11 +24,15 @@ function hostLabel(label: string | null): string {
 </script>
 
 <template>
-  <div v-if="downloads.hasActivity" class="border-edge border-b bg-bench px-4 py-2">
+  <div
+    v-if="rows.length"
+    class="border-edge border-b bg-bench px-4 py-2"
+    data-test="downloads-tray"
+  >
     <div class="edge-code mb-2">Downloads</div>
     <div class="flex flex-col gap-2">
       <div
-        v-for="row in downloads.hostedInFlight"
+        v-for="row in rows"
         :key="`${row.hostId}:${row.job.id}`"
         class="-mx-1 flex items-center gap-3 rounded-control px-1 transition-colors duration-100 hover:bg-bath"
       >

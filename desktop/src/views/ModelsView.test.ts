@@ -33,6 +33,8 @@ vi.mock("../lib/catalogSizes", () => ({
 
 import ModelsView from "./ModelsView.vue";
 import { useDownloadsStore } from "../stores/downloads";
+import { useHostModelsStore } from "../stores/hostModels";
+import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import type { DownloadJob } from "../lib/api/types";
 
@@ -129,6 +131,43 @@ describe("ModelsView unified catalog", () => {
     expect(downloadsAt).toBeGreaterThan(-1);
     expect(downloadsAt).toBeLessThan(html.indexOf("installed-models-heading"));
     expect(downloadsAt).toBeLessThan(html.indexOf("available-models-heading"));
+  });
+
+  it("shows installed models and active downloads from a connected remote host", async () => {
+    const wrapper = await mountView();
+    useHostsStore().extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    useHostModelsStore().byHost["hal9000-7680"] = {
+      entries: [model("qwen-image:q4", "qwen-image")],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    useDownloadsStore().hostStates["hal9000-7680"] = {
+      label: "hal9000",
+      target: { baseUrl: "http://hal9000:7680", apiKey: null },
+      subscribed: true,
+      abort: null,
+      cancelling: [],
+      ready: null,
+      activeJobs: [job({ model: "qwen-image:q4" })],
+      queued: [],
+      history: [],
+    };
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("qwen-image:q4");
+    expect(wrapper.text()).toContain("hal9000");
+    expect(
+      wrapper.findAll("[data-test='installed-host']").some((chip) => chip.text() === "hal9000"),
+    ).toBe(true);
+    expect(wrapper.find("[aria-label='Downloading qwen-image:q4 on hal9000']").exists()).toBe(true);
   });
 
   it("filters installed and catalog entries to video families for ?type=video", async () => {
