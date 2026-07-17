@@ -25,6 +25,7 @@ describe("GenerateView layout", () => {
 
   it("renders an instructive blank-canvas placeholder before the first print", () => {
     expect(source).toContain('data-test="empty-canvas"');
+    expect(source).toContain(":class=\"job ? 'bg-print-surface' : 'bg-empty-surface'\"");
     expect(source).toContain("No print yet");
     expect(source).toContain("Choose a model, describe your print, then generate.");
   });

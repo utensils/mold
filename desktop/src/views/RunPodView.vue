@@ -323,7 +323,7 @@ onBeforeUnmount(() => {
           />
           <button
             type="button"
-            class="h-9 rounded-control bg-safelight px-4 text-body font-semibold text-[#141110] hover:brightness-105 disabled:opacity-50"
+            class="h-9 rounded-control bg-safelight px-4 text-body font-semibold text-on-accent hover:brightness-105 disabled:opacity-50"
             :disabled="savingKey || !apiKey.trim()"
             @click="connectKey"
           >
@@ -363,7 +363,7 @@ onBeforeUnmount(() => {
 
         <span class="mt-4 block text-caption text-ink-3">Cloud</span>
         <div
-          class="border-edge mt-1 flex rounded-control border bg-bath p-0.5"
+          class="mt-1 flex rounded-control border border-control-edge bg-bath p-0.5"
           role="group"
           aria-label="RunPod cloud type"
         >
@@ -375,7 +375,7 @@ onBeforeUnmount(() => {
             class="flex-1 rounded-control px-2 py-1.5 text-body transition-colors"
             :class="
               form.cloudType === cloud
-                ? 'bg-safelight font-semibold text-[#141110]'
+                ? 'bg-safelight font-semibold text-on-accent'
                 : 'text-ink-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-35'
             "
             @click="form.cloudType = cloud"
@@ -413,7 +413,7 @@ onBeforeUnmount(() => {
           <label class="text-caption text-ink-3">
             Container disk
             <span
-              class="border-edge mt-1 flex h-9 items-center rounded-control border bg-bath px-2"
+              class="mt-1 flex h-9 items-center rounded-control border border-control-edge bg-bath px-2"
             >
               <input
                 v-model.number="form.containerDiskGb"
@@ -429,7 +429,7 @@ onBeforeUnmount(() => {
           <label class="text-caption text-ink-3">
             Workspace
             <span
-              class="border-edge mt-1 flex h-9 items-center rounded-control border bg-bath px-2"
+              class="mt-1 flex h-9 items-center rounded-control border border-control-edge bg-bath px-2"
             >
               <input
                 v-model.number="form.volumeGb"
@@ -478,7 +478,7 @@ onBeforeUnmount(() => {
 
         <button
           type="button"
-          class="mt-5 h-9 w-full rounded-control bg-safelight text-body font-semibold text-[#141110] hover:brightness-105 active:translate-y-px disabled:opacity-50"
+          class="mt-5 h-9 w-full rounded-control bg-safelight text-body font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
           :disabled="!form.gpuTypeId || runpod.mutating === 'create'"
           @click="launch"
         >
@@ -586,7 +586,7 @@ onBeforeUnmount(() => {
             <button
               type="submit"
               :disabled="runpod.mutating === 'volume:create'"
-              class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] disabled:opacity-50"
+              class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent disabled:opacity-50"
             >
               {{ runpod.mutating === "volume:create" ? "Creating…" : "Create" }}
             </button>
@@ -652,7 +652,7 @@ onBeforeUnmount(() => {
                     (volumeEdit.name === volume.name && volumeEdit.sizeGb === volume.size) ||
                     runpod.mutating === `volume:update:${volume.id}`
                   "
-                  class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] disabled:opacity-50"
+                  class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent disabled:opacity-50"
                 >
                   Save
                 </button>
@@ -668,7 +668,7 @@ onBeforeUnmount(() => {
                   class="h-8 rounded-control px-2 text-body"
                   :class="
                     confirmingVolumeDelete === volume.id
-                      ? 'bg-stop font-semibold text-[#141110]'
+                      ? 'bg-stop font-semibold text-on-accent'
                       : 'text-stop'
                   "
                   @blur="confirmingVolumeDelete = null"
@@ -749,7 +749,7 @@ onBeforeUnmount(() => {
               <button
                 v-if="pod.desiredStatus === 'RUNNING'"
                 type="button"
-                class="h-7 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] hover:brightness-105"
+                class="h-7 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105"
                 @click="useInMold(pod)"
               >
                 Use in Mold
@@ -784,7 +784,7 @@ onBeforeUnmount(() => {
                 class="h-7 rounded-control px-2 text-body"
                 :class="
                   confirmingDelete === pod.id
-                    ? 'bg-stop font-semibold text-[#141110]'
+                    ? 'bg-stop font-semibold text-on-accent'
                     : 'text-ink-3 hover:text-stop'
                 "
                 @blur="confirmingDelete = null"

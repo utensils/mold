@@ -254,7 +254,7 @@ async function clear() {
       <div class="mt-4 flex items-center gap-3">
         <button
           type="button"
-          class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] hover:brightness-105 active:translate-y-px disabled:opacity-50"
+          class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
           data-test="placement-save"
           :disabled="saving || !selectedModel"
           @click="save"

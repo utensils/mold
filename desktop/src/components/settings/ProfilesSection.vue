@@ -77,7 +77,7 @@ async function create() {
         />
         <button
           type="button"
-          class="h-7 rounded-control bg-safelight px-2.5 text-body font-semibold text-[#141110] disabled:opacity-50"
+          class="h-7 rounded-control bg-safelight px-2.5 text-body font-semibold text-on-accent disabled:opacity-50"
           :disabled="!newName.trim()"
           @click="create"
         >

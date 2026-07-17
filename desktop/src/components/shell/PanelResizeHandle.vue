@@ -57,23 +57,28 @@ function onPointerEnd(e: PointerEvent) {
   }
   emit("commit");
 }
+
+function onKeyDown(e: KeyboardEvent) {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  e.preventDefault();
+  emit("resize", e.key === "ArrowLeft" ? -10 : 10);
+  emit("commit");
+}
 </script>
 
 <template>
   <div
     role="separator"
+    tabindex="0"
     aria-orientation="vertical"
     :aria-label="label"
-    class="w-1 shrink-0 touch-none cursor-col-resize transition-colors duration-100 after:absolute after:inset-y-0 after:-inset-x-1 after:content-['']"
-    :class="
-      dragging
-        ? 'bg-[color-mix(in_srgb,var(--safelight)_40%,transparent)]'
-        : 'bg-transparent hover:bg-[color-mix(in_srgb,var(--safelight)_25%,transparent)]'
-    "
+    class="w-1 shrink-0 touch-none cursor-col-resize transition-colors duration-100 before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 before:bg-control-edge before:content-[''] after:absolute after:inset-y-0 after:-inset-x-1 after:content-[''] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-safelight"
+    :class="dragging ? 'bg-safelight' : 'bg-transparent hover:bg-safelight'"
     @pointerdown="onPointerDown"
     @pointermove="onPointerMove"
     @pointerup="onPointerEnd"
     @pointercancel="onPointerEnd"
+    @keydown="onKeyDown"
     @dblclick="emit('reset')"
   />
 </template>

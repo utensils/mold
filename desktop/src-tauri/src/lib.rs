@@ -92,7 +92,8 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(app_window_title(cfg!(debug_assertions)))?;
             }
-            let menu = menu::build(app.handle())?;
+            menu::set_process_name(cfg!(debug_assertions));
+            let menu = menu::build(app.handle(), cfg!(debug_assertions))?;
             app.set_menu(menu)?;
             app.manage(commands::SettingsStore::load(app.handle())?);
             app.manage(updater::UpdaterState::default());

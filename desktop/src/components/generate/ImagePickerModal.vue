@@ -137,7 +137,7 @@ async function pickFromGallery(item: GalleryImage) {
             class="rounded-control px-3 py-1 text-body transition-colors duration-100"
             :class="
               tab === 'upload'
-                ? 'bg-safelight font-semibold text-[#141110]'
+                ? 'bg-safelight font-semibold text-on-accent'
                 : 'border-edge border text-ink-2 hover:text-ink'
             "
             data-test="picker-tab-upload"
@@ -150,7 +150,7 @@ async function pickFromGallery(item: GalleryImage) {
             class="rounded-control px-3 py-1 text-body transition-colors duration-100"
             :class="
               tab === 'gallery'
-                ? 'bg-safelight font-semibold text-[#141110]'
+                ? 'bg-safelight font-semibold text-on-accent'
                 : 'border-edge border text-ink-2 hover:text-ink'
             "
             data-test="picker-tab-gallery"
@@ -163,11 +163,7 @@ async function pickFromGallery(item: GalleryImage) {
         <div v-if="tab === 'upload'" class="mt-4 flex-1 overflow-y-auto">
           <label
             class="flex h-48 w-full cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors"
-            :class="
-              dragOver
-                ? 'border-safelight text-safelight'
-                : 'border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] text-ink-3'
-            "
+            :class="dragOver ? 'border-safelight text-safelight' : 'border-control-edge text-ink-3'"
             @dragover.prevent="dragOver = true"
             @dragleave="dragOver = false"
             @drop.prevent="onDrop"

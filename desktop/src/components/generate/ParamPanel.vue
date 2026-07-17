@@ -303,7 +303,7 @@ const schedulerLabel: Record<string, string> = {
          answerable at a glance instead of implied by an empty field. -->
     <label class="mt-3 text-caption text-ink-2">Seed</label>
     <div
-      class="border-edge mt-1 flex rounded-control border bg-bath p-0.5"
+      class="mt-1 flex rounded-control border border-control-edge bg-bath p-0.5"
       role="group"
       aria-label="Seed mode"
     >

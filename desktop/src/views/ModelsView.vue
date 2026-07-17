@@ -81,7 +81,7 @@ onUnmounted(() => {
       />
 
       <div
-        class="border-edge flex h-7 items-center rounded-control border bg-bath p-0.5"
+        class="flex h-7 items-center rounded-control border border-control-edge bg-bath p-0.5"
         aria-label="Catalog layout"
       >
         <button

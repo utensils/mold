@@ -55,7 +55,7 @@ async function restartEngine() {
         <span class="text-body text-ink">Knobs changed — restart the engine to apply.</span>
         <button
           type="button"
-          class="ml-auto h-7 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
+          class="ml-auto h-7 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
           :disabled="restarting"
           @click="restartEngine"
         >

@@ -12,7 +12,16 @@ describe("PanelResizeHandle a11y", () => {
     expect(wrapper.attributes("role")).toBe("separator");
     expect(wrapper.attributes("aria-orientation")).toBe("vertical");
     expect(wrapper.attributes("aria-label")).toBe("Resize sidebar");
+    expect(wrapper.attributes("tabindex")).toBe("0");
     expect(wrapper.classes().join(" ")).toContain("cursor-col-resize");
+  });
+
+  it("supports keyboard resizing", async () => {
+    const wrapper = mountHandle();
+    await wrapper.trigger("keydown", { key: "ArrowLeft" });
+    await wrapper.trigger("keydown", { key: "ArrowRight" });
+    expect(wrapper.emitted("resize")).toEqual([[-10], [10]]);
+    expect(wrapper.emitted("commit")).toHaveLength(2);
   });
 });
 

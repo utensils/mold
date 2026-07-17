@@ -162,6 +162,11 @@ right-click menus. Choose 80–130% from **Settings → Appearance & app → Int
 use the View menu and keyboard shortcuts. The selected level is restored on
 the next launch.
 
+Appearance offers Safelight and Mold theme families in System, Light, or Dark
+mode. All combinations keep text and interactive boundaries at WCAG AA
+contrast; an empty generation canvas follows the selected chrome, while actual
+generated media remains on a color-stable viewing surface.
+
 ## Generation templates
 
 Save the current Generate form as a named, recallable preset. Open the

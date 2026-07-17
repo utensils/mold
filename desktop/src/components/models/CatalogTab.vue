@@ -144,7 +144,7 @@ onMounted(async () => {
           :key="s"
           type="button"
           class="border-edge h-7 rounded-full border px-2.5 text-caption"
-          :class="source === s ? 'bg-safelight text-[#141110]' : 'text-ink-2 hover:text-ink'"
+          :class="source === s ? 'bg-safelight text-on-accent' : 'text-ink-2 hover:text-ink'"
           @click="source = s"
         >
           {{ s === "all" ? "All" : s === "hf" ? "HuggingFace" : "Civitai" }}

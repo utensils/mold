@@ -21,11 +21,16 @@
   --color-safelight: var(--safelight);
   --color-stop: var(--stop);
   --color-ink: var(--rebate);
-  --color-ink-2: color-mix(in srgb, var(--rebate) 62%, transparent);
-  --color-ink-3: color-mix(in srgb, var(--rebate) 40%, transparent);
-  --color-edge: color-mix(in srgb, var(--rebate) 8%, transparent);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-edge: var(--edge);
+  --color-control-edge: var(--control-edge);
+  --color-on-accent: var(--on-accent);
+  --color-on-media: #f5efff;
   /* Media surfaces never invert. */
   --color-print-surface: #141110;
+  /* Empty work areas follow the active chrome theme. */
+  --color-empty-surface: var(--empty-surface);
 
   /* Type */
   --font-display: "Bricolage Grotesque", system-ui, sans-serif;
@@ -57,7 +62,13 @@
   --rebate: #efe7da;
   --halide: #93a7b0;
   --safelight: #f08a24;
-  --stop: #c94f3d;
+  --stop: #df6955;
+  --ink-2: color-mix(in srgb, var(--rebate) 78%, transparent);
+  --ink-3: color-mix(in srgb, var(--rebate) 68%, transparent);
+  --edge: color-mix(in srgb, var(--rebate) 8%, transparent);
+  --control-edge: color-mix(in srgb, var(--rebate) 37%, transparent);
+  --on-accent: #141110;
+  --empty-surface: #141110;
   color-scheme: dark;
 }
 
@@ -67,8 +78,12 @@
     --bath: #f2ebde;
     --bench: #fbf6ec;
     --rebate: #231d18;
-    --halide: #5c737e;
-    --safelight: #c96a0a;
+    --halide: #4f6570;
+    --safelight: #9b4d00;
+    --stop: #a93629;
+    --on-accent: #ffffff;
+    --empty-surface: #ffffff;
+    --control-edge: color-mix(in srgb, var(--rebate) 49%, transparent);
     color-scheme: light;
   }
 }
@@ -76,8 +91,12 @@
   --bath: #f2ebde;
   --bench: #fbf6ec;
   --rebate: #231d18;
-  --halide: #5c737e;
-  --safelight: #c96a0a;
+  --halide: #4f6570;
+  --safelight: #9b4d00;
+  --stop: #a93629;
+  --on-accent: #ffffff;
+  --empty-surface: #ffffff;
+  --control-edge: color-mix(in srgb, var(--rebate) 49%, transparent);
   color-scheme: light;
 }
 
@@ -91,6 +110,9 @@
   --halide: #67e8f9;
   --safelight: #e879f9;
   --stop: #fb7185;
+  --on-accent: #141110;
+  --empty-surface: #12101d;
+  --control-edge: color-mix(in srgb, var(--rebate) 37%, transparent);
   color-scheme: dark;
 }
 
@@ -102,6 +124,9 @@
     --halide: #0e7490;
     --safelight: #a21caf;
     --stop: #b4233b;
+    --on-accent: #ffffff;
+    --empty-surface: #ffffff;
+    --control-edge: color-mix(in srgb, var(--rebate) 49%, transparent);
     color-scheme: light;
   }
 }
@@ -113,5 +138,8 @@
   --halide: #0e7490;
   --safelight: #a21caf;
   --stop: #b4233b;
+  --on-accent: #ffffff;
+  --empty-surface: #ffffff;
+  --control-edge: color-mix(in srgb, var(--rebate) 49%, transparent);
   color-scheme: light;
 }

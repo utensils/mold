@@ -222,7 +222,7 @@ function componentList(name: string): ModelComponentStatus[] {
                 class="h-7 rounded-control border px-2 text-caption transition-colors duration-100 active:translate-y-px"
                 :class="
                   confirmingRemove === m.name
-                    ? 'border-stop bg-stop font-semibold text-[#141110]'
+                    ? 'border-stop bg-stop font-semibold text-on-accent'
                     : 'border-edge text-ink-2 hover:text-stop'
                 "
                 :disabled="busy === m.name"

@@ -51,7 +51,7 @@ async function clear() {
       />
       <button
         type="button"
-        class="h-7 rounded-control bg-safelight px-2.5 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
+        class="h-7 rounded-control bg-safelight px-2.5 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-50"
         :disabled="!draft.trim()"
         @click="save"
       >

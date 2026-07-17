@@ -85,6 +85,13 @@ const hal: SavedHost = {
   lastUsedMs: 1,
 };
 
+const studio: SavedHost = {
+  id: "studio-local-7680",
+  name: "studio",
+  url: "http://studio.local:7680",
+  lastUsedMs: 2,
+};
+
 /** Stateful settings mock: writes are visible to subsequent reads. */
 function installSettings(initial: ReturnType<typeof settings>) {
   let current = initial;
@@ -159,6 +166,37 @@ describe("hosts store", () => {
     expect(secretGet).toHaveBeenCalledWith("remote-api-key.hal9000-7680");
     const extra = hosts.all.find((h) => h.id === hal.id);
     expect(extra).toMatchObject({ status: "ready", apiKey: "host-key", primary: false });
+  });
+
+  it("restores the persisted remote primary and extra-host set together", async () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "remote", baseUrl: hal.url, apiKey: "primary-key" };
+    installSettings(
+      settings({
+        mode: "remote",
+        remoteUrl: hal.url,
+        savedHosts: [studio, hal],
+        connectedHostIds: [hal.id, studio.id],
+      }),
+    );
+    secretGet.mockImplementation((key: string) =>
+      Promise.resolve(key.endsWith(studio.id) ? "studio-key" : "primary-key"),
+    );
+    testRemoteHost.mockResolvedValue({ ok: true, version: "0.17.1", error: null });
+
+    const hosts = useHostsStore();
+    await hosts.init();
+
+    expect(hosts.all.map((host) => host.id)).toEqual([hal.id, studio.id]);
+    expect(hosts.primaryHost).toMatchObject({ id: hal.id, primary: true });
+    expect(hosts.all[1]).toMatchObject({
+      id: studio.id,
+      status: "ready",
+      apiKey: "studio-key",
+      primary: false,
+    });
+    expect(testRemoteHost).toHaveBeenCalledOnce();
+    expect(testRemoteHost).toHaveBeenCalledWith(studio.url, "studio-key");
   });
 
   it("marks an unreachable remembered host instead of blocking boot", async () => {

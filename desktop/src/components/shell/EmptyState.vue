@@ -17,7 +17,7 @@ defineEmits<{ action: [] }>();
     <button
       v-if="action"
       type="button"
-      class="mt-2 h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
+      class="mt-2 h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
       @click="$emit('action')"
     >
       {{ action }}

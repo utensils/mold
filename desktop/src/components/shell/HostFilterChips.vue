@@ -24,7 +24,7 @@ const options = computed(() => [{ key: "all", label: "All", count: total.value }
 
 <template>
   <div
-    class="border-edge flex rounded-control border bg-bath p-0.5"
+    class="flex rounded-control border border-control-edge bg-bath p-0.5"
     role="tablist"
     aria-label="Gallery source"
   >

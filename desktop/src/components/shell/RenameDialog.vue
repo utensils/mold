@@ -60,7 +60,7 @@ function save() {
           <button
             type="button"
             data-test="rename-save"
-            class="h-7 rounded-control bg-safelight px-3 text-caption font-semibold text-[#141110] hover:brightness-105 active:translate-y-px"
+            class="h-7 rounded-control bg-safelight px-3 text-caption font-semibold text-on-accent hover:brightness-105 active:translate-y-px"
             @click="save"
           >
             Save

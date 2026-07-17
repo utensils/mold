@@ -65,7 +65,7 @@ const identity = computed<FamilyIdentity>(() => {
   --family-primary: var(--halide);
   --family-secondary: var(--safelight);
   color: var(--family-primary);
-  background: color-mix(in srgb, var(--family-primary) 9%, var(--color-print-surface));
+  background: color-mix(in srgb, var(--family-primary) 9%, var(--bench));
 }
 
 .family-placeholder[data-tone="warm"] {
@@ -104,12 +104,12 @@ const identity = computed<FamilyIdentity>(() => {
 }
 
 .family-mark {
-  color: color-mix(in srgb, var(--family-primary) 88%, white);
+  color: color-mix(in srgb, var(--family-primary) 88%, var(--rebate));
   letter-spacing: -0.04em;
 }
 
 .family-label {
-  color: color-mix(in srgb, var(--family-primary) 72%, white);
+  color: color-mix(in srgb, var(--family-primary) 72%, var(--rebate));
 }
 
 .family-placeholder[data-layout="table"] .family-orbit {

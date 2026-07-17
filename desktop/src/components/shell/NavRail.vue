@@ -338,7 +338,7 @@ function jobMenu(job: Job): MenuEntry[] {
         class="mx-2 flex h-7 items-center gap-2 rounded-control px-2.5"
         :title="d.url"
       >
-        <span class="border-edge h-1.5 w-1.5 shrink-0 rounded-full border" />
+        <span class="h-1.5 w-1.5 shrink-0 rounded-full border border-control-edge" />
         <span class="min-w-0 truncate text-caption text-ink-3">{{ d.name }}</span>
         <button
           type="button"
