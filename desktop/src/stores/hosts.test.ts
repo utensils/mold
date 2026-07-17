@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import type { SavedHost } from "../lib/ipc";
+import type { AppSettings, SavedHost } from "../lib/ipc";
 
 const appSettingsGet = vi.fn();
 const appSettingsSet = vi.fn().mockResolvedValue(undefined);
@@ -29,6 +29,7 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
 }));
 
+import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
 import { useHostModelsStore } from "./hostModels";
@@ -596,6 +597,147 @@ describe("hosts store", () => {
     expect(live.apiKey).toBe("new-key");
     expect(live.status).toBe("ready");
     expect(live.error).toBeNull();
+  });
+
+  it("connect() keeps two servers with the same instance id but different hostnames separate", async () => {
+    // Two RunPod pods sharing one network volume (shared MOLD_HOME) report
+    // the SAME instance uuid — the reported hostname tells them apart.
+    testRemoteHost.mockImplementation((url: string) =>
+      Promise.resolve({
+        ok: true,
+        version: null,
+        error: null,
+        instanceId: "uuid-shared",
+        hostname: url.includes("pod-a") ? "pod-a" : "pod-b",
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.connect("http://pod-a:7680", null, null);
+    const second = await hosts.connect("http://pod-b:7680", null, null);
+    expect(second.id).toBe("pod-b-7680");
+    expect(hosts.all.filter((h) => h.kind === "remote").map((h) => h.id)).toEqual([
+      "pod-a-7680",
+      "pod-b-7680",
+    ]);
+  });
+
+  it("reconcile does not clobber a settings write that lands during its secret IPC", async () => {
+    const ip: SavedHost = {
+      id: "192-168-1-114-7680",
+      name: null,
+      url: "http://192.168.1.114:7680",
+      lastUsedMs: 1,
+    };
+    installSettings(settings({ savedHosts: [hal, ip], connectedHostIds: [] }));
+    let releaseSecret!: () => void;
+    const gate = new Promise<string | null>((resolve) => {
+      releaseSecret = () => resolve(null);
+    });
+    secretGet.mockImplementationOnce(() => gate);
+    const hosts = useHostsStore();
+    const reconcile = hosts.reconcileSavedInstanceIds(
+      new Map([
+        [hal.id, "uuid-shared"],
+        [ip.id, "uuid-shared"],
+      ]),
+    );
+    // Reconcile is parked on the per-host secret round-trip...
+    await vi.waitFor(() => expect(secretGet).toHaveBeenCalled());
+    // ...while a different writer (a theme toggle) lands in between.
+    await appSettingsSet({ ...(await appSettingsGet()), theme: "dark" });
+    releaseSecret();
+    await reconcile;
+    const final = (await appSettingsGet()) as ReturnType<typeof settings>;
+    // The merge landed AND the interleaved write survived.
+    expect(final.savedHosts.map((h: SavedHost) => h.id)).toEqual([hal.id]);
+    expect(final.theme).toBe("dark");
+  });
+
+  it("serializes this store's settings writers so neither clobbers the other", async () => {
+    installSettings(settings({ savedHosts: [hal, studio], connectedHostIds: [hal.id, studio.id] }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.init();
+    // Two concurrent read-modify-writes: unserialized, the rename's stale
+    // snapshot would resurrect the just-disconnected host.
+    await Promise.all([hosts.disconnect(studio.id), hosts.rename(hal.id, "render box")]);
+    const final = (await appSettingsGet()) as ReturnType<typeof settings>;
+    expect(final.connectedHostIds).not.toContain(studio.id);
+    expect(final.savedHosts.find((h: SavedHost) => h.id === hal.id)?.name).toBe("render box");
+  });
+
+  it("reconcile re-homes the loser's live row when the survivor has no live one", async () => {
+    // hal was used more recently (survivor) but only the IP slug is connected
+    // right now — its working live row must move onto the surviving slug, not
+    // be deleted (the survivor's own address may not even answer).
+    const ip: SavedHost = {
+      id: "192-168-1-114-7680",
+      name: null,
+      url: "http://192.168.1.114:7680",
+      lastUsedMs: 1,
+    };
+    installSettings(
+      settings({
+        savedHosts: [{ ...hal, lastUsedMs: 5, instanceId: "uuid-shared" }, ip],
+        connectedHostIds: [ip.id],
+      }),
+    );
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve({
+        queue_depth: 0,
+        queue_capacity: 8,
+        version: null,
+        instance_id: target.baseUrl.includes("192.168.1.114") ? "uuid-shared" : "uuid-local",
+        hostname: target.baseUrl.includes("192.168.1.114") ? "hal9000" : "this-mac",
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.refresh();
+    const row = hosts.all.find((h) => h.id === hal.id);
+    expect(row).toMatchObject({ status: "ready", baseUrl: ip.url });
+    expect(hosts.all.some((h) => h.id === ip.id)).toBe(false);
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.connectedHostIds).toEqual([hal.id]);
+  });
+
+  it("reconcile re-homes in-memory names and the appPrefs snapshot", async () => {
+    const ip: SavedHost = {
+      id: "192-168-1-114-7680",
+      name: "Render box",
+      url: "http://192.168.1.114:7680",
+      lastUsedMs: 1,
+    };
+    installSettings(
+      settings({
+        savedHosts: [{ ...hal, name: null, lastUsedMs: 5 }, ip],
+        connectedHostIds: [hal.id, ip.id],
+        generateTargetHost: ip.id,
+      }),
+    );
+    const prefs = useAppPrefsStore();
+    prefs.settings = settings({ generateTargetHost: ip.id }) as unknown as AppSettings;
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve({
+        queue_depth: 0,
+        queue_capacity: 8,
+        version: null,
+        instance_id: target.baseUrl.includes("127.0.0.1") ? "uuid-local" : "uuid-shared",
+        hostname: target.baseUrl.includes("127.0.0.1") ? "this-mac" : "hal9000",
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.refresh();
+    // The sticky target is re-homed in the live prefs snapshot, not just on
+    // disk — resolveRoute readers must keep honoring the pin immediately.
+    expect(prefs.settings?.generateTargetHost).toBe(hal.id);
+    // The loser's user-assigned name carries onto the surviving row now, not
+    // only after a relaunch re-reads savedHosts.
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("Render box");
+    expect(hosts.all.some((h) => h.id === ip.id)).toBe(false);
   });
 
   it("refresh() collapses two saved slugs that report the same instance id", async () => {
