@@ -37,6 +37,16 @@ export function percent(used: number, total: number): number {
   return Math.min(100, Math.max(0, (used / total) * 100));
 }
 
+/** Compact ETA for download rows: 42 → "42s", 192 → "3m 12s", 3845 → "1h 4m". */
+export function formatEta(seconds: number | null): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "—";
+  const whole = Math.max(0, Math.round(seconds));
+  if (whole < 60) return `${whole}s`;
+  const minutes = Math.floor(whole / 60);
+  if (minutes < 60) return `${minutes}m ${whole % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
 /** Compact relative timestamp for MRU lists ("just now", "5m ago", "3d ago"). */
 export function timeAgo(thenMs: number, nowMs: number = Date.now()): string {
   const seconds = Math.max(0, Math.floor((nowMs - thenMs) / 1000));

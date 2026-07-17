@@ -1,6 +1,20 @@
-import { describe, expect, it } from "vitest";
-import { applyDownloadEvent, emptyDownloadsState } from "./downloads";
-import type { DownloadEvent, DownloadsListing } from "../lib/api/types";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
+import {
+  applyDownloadEvent,
+  computeEtaSeconds,
+  emptyDownloadsState,
+  pushRateSample,
+  useDownloadsStore,
+  type RateSample,
+} from "./downloads";
+import { ApiError } from "../lib/api/client";
+import type { DownloadEvent, DownloadJob, DownloadsListing } from "../lib/api/types";
+
+const { startCatalogDownload } = vi.hoisted(() => ({
+  startCatalogDownload: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../lib/api/catalog", () => ({ startCatalogDownload }));
 
 function reduce(events: DownloadEvent[]) {
   return events.reduce(applyDownloadEvent, emptyDownloadsState());
@@ -113,5 +127,160 @@ describe("applyDownloadEvent", () => {
     expect(s.activeJobs.map((job) => job.id)).toEqual(["a", "b"]);
     expect(s.activeJobs.find((job) => job.id === "a")?.bytes_done).toBe(0);
     expect(s.activeJobs.find((job) => job.id === "b")?.bytes_done).toBe(50);
+  });
+});
+
+describe("computeEtaSeconds", () => {
+  it("derives ETA from a steady byte rate", () => {
+    const samples: RateSample[] = [
+      { ts: 0, bytes: 0 },
+      { ts: 5_000, bytes: 5_000_000 },
+    ];
+    // 1 MB/s with 15 MB remaining of 20 MB total → 15 s.
+    expect(computeEtaSeconds(samples, 20_000_000)).toBe(15);
+  });
+
+  it("needs at least two samples", () => {
+    expect(computeEtaSeconds([], 1_000)).toBeNull();
+    expect(computeEtaSeconds([{ ts: 0, bytes: 10 }], 1_000)).toBeNull();
+  });
+
+  it("returns null for a stalled or non-advancing window", () => {
+    const stalled: RateSample[] = [
+      { ts: 0, bytes: 500 },
+      { ts: 5_000, bytes: 500 },
+    ];
+    expect(computeEtaSeconds(stalled, 1_000)).toBeNull();
+    const sameInstant: RateSample[] = [
+      { ts: 1_000, bytes: 0 },
+      { ts: 1_000, bytes: 100 },
+    ];
+    expect(computeEtaSeconds(sameInstant, 1_000)).toBeNull();
+  });
+});
+
+describe("pushRateSample", () => {
+  it("trims samples that fall out of the sliding window", () => {
+    const samples: RateSample[] = [];
+    pushRateSample(samples, 0, 0);
+    pushRateSample(samples, 100, 5_000);
+    pushRateSample(samples, 200, 12_000); // first sample is now >10 s old
+    expect(samples.map((s) => s.ts)).toEqual([5_000, 12_000]);
+  });
+});
+
+function failedJob(overrides: Partial<DownloadJob> = {}): DownloadJob {
+  return {
+    id: "f1",
+    model: "flux-dev:q4",
+    status: "failed",
+    files_done: 1,
+    files_total: 4,
+    bytes_done: 25,
+    bytes_total: 100,
+    error: "connection reset",
+    ...overrides,
+  };
+}
+
+describe("downloads store ETA + history + retry", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    startCatalogDownload.mockReset();
+    startCatalogDownload.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("exposes a live ETA per active job from progress samples", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const store = useDownloadsStore();
+    store.apply({ type: "started", id: "a", files_total: 2, bytes_total: 100_000_000 });
+    store.apply({ type: "progress", id: "a", files_done: 0, bytes_done: 0 });
+    vi.setSystemTime(10_000);
+    store.apply({ type: "progress", id: "a", files_done: 1, bytes_done: 10_000_000 });
+    // 1 MB/s with 90 MB remaining → 90 s.
+    expect(store.etaByJob["a"]).toBe(90);
+  });
+
+  it("drops the rate window when a job settles", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const store = useDownloadsStore();
+    store.apply({ type: "started", id: "a", files_total: 1, bytes_total: 100 });
+    store.apply({ type: "progress", id: "a", files_done: 0, bytes_done: 10 });
+    vi.setSystemTime(1_000);
+    store.apply({ type: "progress", id: "a", files_done: 0, bytes_done: 20 });
+    store.apply({ type: "job_failed", id: "a", error: "boom" });
+    expect(store.etaByJob["a"]).toBeUndefined();
+    expect(Object.keys(store.rateSamples)).toHaveLength(0);
+  });
+
+  it("surfaces failed jobs from every host in hostedHistory", () => {
+    const store = useDownloadsStore();
+    store.apply({ type: "snapshot", listing: { active: null, queued: [], history: [] } });
+    store.activeJobs = [
+      { ...failedJob({ id: "p1", model: "sdxl:fp16" }), status: "active" as const },
+    ];
+    store.apply({ type: "job_failed", id: "p1", error: "disk full" });
+    store.hostStates["hal9000"] = {
+      label: "hal9000",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
+      activeJobs: [],
+      queued: [],
+      history: [failedJob()],
+      subscribed: true,
+      abort: null,
+      cancelling: [],
+      ready: null,
+    };
+    const rows = store.hostedHistory;
+    expect(rows.map((r) => `${r.hostId}:${r.job.id}`)).toEqual(["primary:p1", "hal9000:f1"]);
+    expect(rows[0]!.job.status).toBe("failed");
+    expect(rows[0]!.job.error).toBe("disk full");
+  });
+
+  it("retries a failed job on the same extra host, forwarding credentials", async () => {
+    const store = useDownloadsStore();
+    store.hostStates["hal9000"] = {
+      label: "hal9000",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
+      activeJobs: [],
+      queued: [],
+      history: [failedJob()],
+      subscribed: true,
+      abort: null,
+      cancelling: [],
+      ready: null,
+    };
+    await store.retry("hal9000", failedJob());
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "flux-dev:q4",
+      { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
+      true,
+    );
+  });
+
+  it("retries a failed primary job against the primary target without forwarding", async () => {
+    const store = useDownloadsStore();
+    store.primaryHostId = "local";
+    store.primaryTarget = { baseUrl: "http://127.0.0.1:49152", apiKey: "local-key" };
+    await store.retry("local", failedJob({ model: "cv:8001" }));
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "cv:8001",
+      { baseUrl: "http://127.0.0.1:49152", apiKey: "local-key" },
+      false,
+    );
+  });
+
+  it("swallows an already-queued conflict on retry", async () => {
+    startCatalogDownload.mockRejectedValueOnce(new ApiError("conflict", 409));
+    const store = useDownloadsStore();
+    store.primaryHostId = "local";
+    store.primaryTarget = { baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    await expect(store.retry("local", failedJob())).resolves.toBeUndefined();
   });
 });

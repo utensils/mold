@@ -6,15 +6,17 @@ import { useConnectionStore } from "../../stores/connection";
 import { useDownloadsStore } from "../../stores/downloads";
 import type { DownloadJob } from "../../lib/api/types";
 
-const { apiFetchTo, sseStream } = vi.hoisted(() => ({
+const { apiFetchTo, sseStream, startCatalogDownload } = vi.hoisted(() => ({
   apiFetchTo: vi.fn(),
   sseStream: vi.fn().mockResolvedValue(undefined),
+  startCatalogDownload: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/api/client")>()),
   apiFetchTo,
 }));
 vi.mock("../../lib/api/sse", () => ({ sseStream }));
+vi.mock("../../lib/api/catalog", () => ({ startCatalogDownload }));
 
 function job(overrides: Partial<DownloadJob> = {}): DownloadJob {
   return {
@@ -38,6 +40,8 @@ beforeEach(() => {
     options.onOpen?.();
     return Promise.resolve();
   });
+  startCatalogDownload.mockReset();
+  startCatalogDownload.mockResolvedValue(undefined);
 });
 
 describe("DownloadsTray a11y", () => {
@@ -199,6 +203,76 @@ describe("DownloadsTray a11y", () => {
     await expect(opening).rejects.toThrow("HTTP 401");
     expect(store.subscribed).toBe(false);
     expect(store.primaryTarget).toBeNull();
+  });
+
+  it("shows status chip, current file, file counts, and ETA on active rows", () => {
+    const store = useDownloadsStore();
+    store.activeJobs = [
+      job({ current_file: "unet.safetensors", bytes_done: 10_000_000, bytes_total: 100_000_000 }),
+    ];
+    store.rateSamples["primary:j1"] = [
+      { ts: 0, bytes: 0 },
+      { ts: 10_000, bytes: 10_000_000 },
+    ];
+    const wrapper = mount(DownloadsTray);
+
+    expect(wrapper.get('[data-test="download-status"]').text()).toBe("active");
+    expect(wrapper.get('[data-test="download-current-file"]').text()).toBe("unet.safetensors");
+    expect(wrapper.get('[data-test="download-files"]').text()).toContain("1/4");
+    expect(wrapper.get('[data-test="download-eta"]').text()).toContain("1m 30s");
+  });
+
+  it("renders failed jobs in a collapsed history section with their error", async () => {
+    const store = useDownloadsStore();
+    store.history = [job({ status: "failed", error: "connection reset" })];
+    const wrapper = mount(DownloadsTray);
+
+    // Tray is visible on history alone, collapsed by default.
+    const toggle = wrapper.get('[data-test="history-toggle"]');
+    expect(toggle.text()).toContain("History (1)");
+    expect(wrapper.find('[data-test="history-list"]').exists()).toBe(false);
+
+    await toggle.trigger("click");
+    const list = wrapper.get('[data-test="history-list"]');
+    expect(list.text()).toContain("flux-dev:q4");
+    expect(list.text()).toContain("failed");
+    expect(list.text()).toContain("connection reset");
+  });
+
+  it("retries a failed history job on its own host", async () => {
+    const store = useDownloadsStore();
+    store.hostStates.hal9000 = {
+      label: "hal9000",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
+      activeJobs: [],
+      queued: [],
+      history: [job({ status: "failed", error: "boom" })],
+      subscribed: true,
+      abort: null,
+      cancelling: [],
+      ready: null,
+    };
+    const wrapper = mount(DownloadsTray);
+
+    await wrapper.get('[data-test="history-toggle"]').trigger("click");
+    await wrapper.get('[data-test="download-retry"]').trigger("click");
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "flux-dev:q4",
+      { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
+      true,
+    );
+  });
+
+  it("does not offer retry for completed or cancelled history entries", async () => {
+    const store = useDownloadsStore();
+    store.history = [
+      job({ id: "c1", status: "completed" }),
+      job({ id: "x1", status: "cancelled" }),
+    ];
+    const wrapper = mount(DownloadsTray);
+
+    await wrapper.get('[data-test="history-toggle"]').trigger("click");
+    expect(wrapper.find('[data-test="download-retry"]').exists()).toBe(false);
   });
 
   it("removes an extra stream when that host becomes primary", async () => {
