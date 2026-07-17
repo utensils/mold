@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { ServerStatus } from "../lib/api/types";
 import { useHostsStore, type HostView } from "./hosts";
+import { useToastStore } from "./toasts";
 import type { Job } from "./generation";
 
 const POLL_INTERVAL_MS = 5_000;
@@ -29,6 +30,8 @@ export interface HostQueueSnapshot {
   /** null until the host reports it (older servers never do). */
   paused: boolean | null;
   caps: HostQueueCaps | null;
+  /** GPU worker ordinals from `/api/status.gpus`; empty when unreported. */
+  gpuOrdinals: number[];
   error: string | null;
 }
 
@@ -102,6 +105,7 @@ export const useJobsStore = defineStore("jobs", {
               entries: listing.entries,
               paused: status.queue_paused ?? null,
               caps,
+              gpuOrdinals: (status.gpus ?? []).map((g) => g.ordinal),
               error: null,
             };
           } catch (err) {
@@ -110,6 +114,7 @@ export const useJobsStore = defineStore("jobs", {
               entries: previous?.entries ?? [],
               paused: previous?.paused ?? null,
               caps: previous?.caps ?? null,
+              gpuOrdinals: previous?.gpuOrdinals ?? [],
               error: String(err),
             };
           }
@@ -141,12 +146,53 @@ export const useJobsStore = defineStore("jobs", {
       await this.queueControl(hostId, `/api/queue/${encodeURIComponent(jobId)}`, "DELETE");
       void this.refresh();
     },
-    async queueControl(hostId: string, path: string, method: "POST" | "DELETE") {
+    /**
+     * Move a queued job to another GPU lane on its OWNING host via
+     * `PATCH /api/queue/:id`. Never optimistic: whatever the outcome, the
+     * queue re-syncs from the server afterwards (the job may have started
+     * between render and PATCH — that race answers 409 here).
+     */
+    async reassignGpu(hostId: string, jobId: string, targetGpu: number): Promise<boolean> {
+      const toasts = useToastStore();
+      try {
+        await this.queueControl(hostId, `/api/queue/${encodeURIComponent(jobId)}`, "PATCH", {
+          target_gpu: targetGpu,
+        });
+        toasts.push(`Moved to GPU ${targetGpu}`);
+        return true;
+      } catch (err) {
+        const status = (err as { status?: number } | null)?.status ?? 0;
+        const message =
+          status === 404
+            ? "That job is no longer queued."
+            : status === 409
+              ? "Job already started — lane changes only apply to queued jobs."
+              : status === 422
+                ? `GPU ${targetGpu} is not available on this host.`
+                : String(err);
+        toasts.push(message, "error");
+        return false;
+      } finally {
+        // Server truth over local reordering, on success and failure alike.
+        await this.refresh();
+      }
+    },
+    async queueControl(
+      hostId: string,
+      path: string,
+      method: "POST" | "DELETE" | "PATCH",
+      body?: unknown,
+    ) {
       const hosts = useHostsStore();
       const host = hosts.all.find((h) => h.id === hostId);
       const target = host ? this.targetFor(host) : null;
       if (!target) throw new Error("Host is not connected.");
-      await apiFetchTo(target, path, { method });
+      const init: RequestInit = { method };
+      if (body !== undefined) {
+        init.body = JSON.stringify(body);
+        init.headers = { "Content-Type": "application/json" };
+      }
+      await apiFetchTo(target, path, init);
     },
     startPolling() {
       if (this.pollTimer) return;

@@ -28,6 +28,16 @@ export interface ResourceSnapshot {
   system_ram: RamSnapshot;
 }
 
+/** `/api/status` per-GPU worker row; present only on multi-GPU-aware servers. */
+export interface GpuWorkerStatus {
+  ordinal: number;
+  name: string;
+  vram_total_bytes: number;
+  vram_used_bytes: number;
+  loaded_model?: string | null;
+  state: string;
+}
+
 /** `/api/status` GPU summary (MB units, unlike GpuSnapshot's bytes). */
 export interface GpuInfo {
   name: string;
@@ -45,6 +55,8 @@ export interface ServerStatus {
   uptime_secs: number;
   hostname?: string | null;
   gpu_info?: GpuInfo | null;
+  /** One row per GPU worker; absent/null on single-GPU or older servers. */
+  gpus?: GpuWorkerStatus[] | null;
   queue_depth?: number | null;
   queue_capacity?: number | null;
   /** Stable server-installation UUID; absent on older servers. */

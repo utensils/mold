@@ -11,6 +11,7 @@ vi.mock("../lib/api/client", () => ({
 import { useConnectionStore } from "./connection";
 import { useHostsStore } from "./hosts";
 import { enrichQueueEntries, useJobsStore } from "./jobs";
+import { useToastStore } from "./toasts";
 import type { Job } from "./generation";
 
 function seedHosts() {
@@ -31,7 +32,10 @@ function seedHosts() {
 }
 
 /** Route API mocks by path so one implementation serves every host. */
-function installApi({ paused = false }: { paused?: boolean } = {}) {
+function installApi({
+  paused = false,
+  gpus,
+}: { paused?: boolean; gpus?: { ordinal: number }[] } = {}) {
   apiJsonTo.mockImplementation((_target: unknown, path: string) => {
     if (path === "/api/queue") {
       return Promise.resolve({
@@ -48,7 +52,8 @@ function installApi({ paused = false }: { paused?: boolean } = {}) {
         ],
       });
     }
-    if (path === "/api/status") return Promise.resolve({ version: "0.17.0", queue_paused: paused });
+    if (path === "/api/status")
+      return Promise.resolve({ version: "0.17.0", queue_paused: paused, gpus });
     if (path === "/api/capabilities") {
       return Promise.resolve({ queue: { can_pause: true, can_cancel_all: true } });
     }
@@ -97,6 +102,81 @@ describe("jobs store", () => {
       : [{ baseUrl: string }, string, { method: string }];
     expect(path).toBe("/api/queue/resume");
     expect(jobs.queues["hal9000-7680"]?.paused).toBe(false);
+  });
+
+  it("refresh() records the host's GPU ordinals for lane rendering", async () => {
+    seedHosts();
+    installApi({ gpus: [{ ordinal: 0 }, { ordinal: 1 }] });
+    const jobs = useJobsStore();
+    await jobs.refresh();
+    expect(jobs.queues["local"]?.gpuOrdinals).toEqual([0, 1]);
+  });
+
+  it("refresh() leaves gpuOrdinals empty on servers that report no gpus field", async () => {
+    seedHosts();
+    installApi();
+    const jobs = useJobsStore();
+    await jobs.refresh();
+    expect(jobs.queues["local"]?.gpuOrdinals).toEqual([]);
+  });
+
+  it("reassignGpu PATCHes the owning host with a JSON target_gpu body", async () => {
+    seedHosts();
+    installApi({ gpus: [{ ordinal: 0 }, { ordinal: 1 }] });
+    const jobs = useJobsStore();
+    await jobs.refresh();
+    apiJsonTo.mockClear();
+
+    const ok = await jobs.reassignGpu("hal9000-7680", "srv-2", 1);
+    expect(ok).toBe(true);
+    const [target, path, init] = apiFetchTo.mock.lastCall as [
+      { baseUrl: string; apiKey: string | null },
+      string,
+      { method: string; body: string; headers: Record<string, string> },
+    ];
+    expect(target).toMatchObject({ baseUrl: "http://hal9000:7680", apiKey: "hk" });
+    expect(path).toBe("/api/queue/srv-2");
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body)).toEqual({ target_gpu: 1 });
+    expect(init.headers).toMatchObject({ "Content-Type": "application/json" });
+    // Never optimistic: server truth is re-fetched after the PATCH.
+    expect(apiJsonTo.mock.calls.some(([, p]) => p === "/api/queue")).toBe(true);
+  });
+
+  it("reassignGpu on 409 (job already started) toasts an error and refetches", async () => {
+    seedHosts();
+    installApi({ gpus: [{ ordinal: 0 }, { ordinal: 1 }] });
+    const jobs = useJobsStore();
+    await jobs.refresh();
+    apiFetchTo.mockRejectedValueOnce(
+      Object.assign(new Error("queue job srv-2 is already running"), { status: 409 }),
+    );
+    apiJsonTo.mockClear();
+
+    const ok = await jobs.reassignGpu("hal9000-7680", "srv-2", 1);
+    expect(ok).toBe(false);
+    const toasts = useToastStore();
+    expect(toasts.items).toHaveLength(1);
+    expect(toasts.items[0]).toMatchObject({ kind: "error" });
+    expect(toasts.items[0]!.message).toMatch(/already started/i);
+    // The store still re-syncs the host's queue so the UI shows server truth.
+    expect(apiJsonTo.mock.calls.some(([, p]) => p === "/api/queue")).toBe(true);
+  });
+
+  it("reassignGpu maps 404 and 422 to directed error toasts", async () => {
+    seedHosts();
+    installApi();
+    const jobs = useJobsStore();
+    await jobs.refresh();
+    const toasts = useToastStore();
+
+    apiFetchTo.mockRejectedValueOnce(Object.assign(new Error("not found"), { status: 404 }));
+    expect(await jobs.reassignGpu("local", "srv-9", 0)).toBe(false);
+    expect(toasts.items.at(-1)!.message).toMatch(/no longer queued/i);
+
+    apiFetchTo.mockRejectedValueOnce(Object.assign(new Error("bad gpu"), { status: 422 }));
+    expect(await jobs.reassignGpu("local", "srv-2", 7)).toBe(false);
+    expect(toasts.items.at(-1)!.message).toMatch(/not available/i);
   });
 
   it("cancelAll deletes the host's whole queue", async () => {
