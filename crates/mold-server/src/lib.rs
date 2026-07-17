@@ -270,10 +270,15 @@ pub async fn run_server(
     }
 
     // Resolve the persistent instance id (ephemeral when the DB is
-    // unavailable). Captured for mDNS here because `state` is moved into the
-    // router before the TXT records are built.
+    // unavailable). Scoped per (data dir, port) so two servers sharing one
+    // mold.db report distinct identities; the configured port is used, so an
+    // ephemeral `--port 0` server shares the `.0` slot with other `--port 0`
+    // runs on the same DB — its address changes every run anyway. Captured
+    // for mDNS here because `state` is moved into the router before the TXT
+    // records are built.
     state.instance_id = std::sync::Arc::new(instance::resolve_instance_id(
         state.metadata_db.as_ref().as_ref(),
+        port,
     ));
     #[cfg(feature = "mdns")]
     let mdns_instance_id = state.instance_id.clone();
