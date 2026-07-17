@@ -95,10 +95,22 @@ pub fn run() {
             menu::set_process_name(cfg!(debug_assertions));
             let menu = menu::build(app.handle(), cfg!(debug_assertions))?;
             app.set_menu(menu)?;
-            app.manage(commands::SettingsStore::load(app.handle())?);
+            let settings_store = commands::SettingsStore::load(app.handle())?;
             app.manage(updater::UpdaterState::default());
             let app_data = app.path().app_data_dir()?;
             let secrets = secrets::SecretStore::new(app_data);
+            // Retire remote-primary installs: re-home the ex-primary as a
+            // connected host so the built-in engine is always the internal
+            // primary. Runs once (idempotent) before anything reads settings.
+            {
+                let mut current = settings_store.current.lock().expect("settings mutex");
+                if settings::migrate_remote_primary(&mut current, &secrets) {
+                    if let Err(e) = settings::save(&settings_store.path, &current) {
+                        tracing::warn!("failed to persist remote-primary migration: {e}");
+                    }
+                }
+            }
+            app.manage(settings_store);
             let local_api_key = secrets.local_server_api_key()?;
             // mold-server reads auth from the environment when the server
             // thread starts. Resolve and export the persistent key first.

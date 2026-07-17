@@ -6,6 +6,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::secrets::SecretStore;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConnectionMode {
@@ -118,6 +120,69 @@ pub fn forget_host(settings: &mut AppSettings, id: &str) -> bool {
         settings.mode = ConnectionMode::Local;
     }
     was_primary
+}
+
+/// Retire an install whose selected primary was a remote host. Remote-primary
+/// is no longer user-facing: the local engine is always the internal primary,
+/// and every remote is a list entry. This re-homes the ex-primary as a
+/// connected host and moves its API key into the per-host secret slot, so the
+/// existing boot-reconnect path (`hosts.init`) brings it back as a normal host
+/// on this launch — the frontend needs no migration code of its own.
+///
+/// Idempotent: once `mode` is no longer `Remote` it is a no-op. Returns true
+/// when it changed anything, so the caller knows to persist.
+pub fn migrate_remote_primary(settings: &mut AppSettings, secrets: &SecretStore) -> bool {
+    if settings.mode != ConnectionMode::Remote {
+        return false;
+    }
+    settings.mode = ConnectionMode::Local;
+    if let Some(url) = settings.remote_url.take() {
+        let id = crate::connection::host_id(&url);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        // Name-preserving: a nameless re-home must not wipe a discovered name.
+        upsert_saved_host(&mut settings.saved_hosts, &id, &url, None, now_ms);
+        remember_connected_host(settings, &id);
+
+        // Carry the primary's key into its per-host slot when that slot is
+        // empty. `set_remote_host` has always written both the shared and the
+        // per-host slot identically, so an existing per-host value is never
+        // worse; the legacy plaintext field is the last resort.
+        let per_host = format!("remote-api-key.{id}");
+        let has_per_host = secrets
+            .get(&per_host)
+            .ok()
+            .flatten()
+            .is_some_and(|k| !k.is_empty());
+        if !has_per_host {
+            let carried = secrets
+                .get("remote-api-key")
+                .ok()
+                .flatten()
+                .filter(|k| !k.is_empty())
+                .or_else(|| settings.remote_api_key.clone().filter(|k| !k.is_empty()));
+            if let Some(key) = carried {
+                if let Err(e) = secrets.set(&per_host, &key) {
+                    tracing::warn!("failed to carry remote-primary key to per-host slot: {e}");
+                }
+            }
+        }
+
+        // A remote-primary user expects generations to keep landing on that
+        // host; model-aware Auto might route locally otherwise. Pin it once —
+        // the user can flip back to Auto.
+        if settings.generate_target_host.is_none() {
+            settings.generate_target_host = Some(id);
+        }
+    }
+    // The shared slot and legacy plaintext field are dead after migration.
+    if let Err(e) = secrets.clear("remote-api-key") {
+        tracing::warn!("failed to clear shared remote-api-key after migration: {e}");
+    }
+    settings.remote_api_key = None;
+    true
 }
 
 fn legacy_theme_family() -> ThemeFamily {
@@ -473,6 +538,132 @@ mod tests {
             ..AppSettings::default()
         };
         assert_eq!(load(&path), expected);
+    }
+
+    fn secret_store() -> (SecretStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        (SecretStore::new(dir.path().to_path_buf()), dir)
+    }
+
+    fn remote_primary_settings() -> AppSettings {
+        AppSettings {
+            mode: ConnectionMode::Remote,
+            remote_url: Some("http://hal9000:7680".into()),
+            ..AppSettings::default()
+        }
+    }
+
+    #[test]
+    fn migrate_remote_primary_rehomes_the_host_and_pins_the_target() {
+        let (secrets, _dir) = secret_store();
+        secrets.set("remote-api-key", "shared-key").unwrap();
+        let mut settings = remote_primary_settings();
+
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        assert_eq!(settings.mode, ConnectionMode::Local);
+        // Re-homed as a connected, remembered host.
+        assert_eq!(settings.connected_host_ids, vec!["hal9000-7680"]);
+        assert_eq!(settings.saved_hosts[0].id, "hal9000-7680");
+        assert_eq!(settings.remote_url, None);
+        // Sticky target keeps generations landing on the ex-primary.
+        assert_eq!(
+            settings.generate_target_host.as_deref(),
+            Some("hal9000-7680")
+        );
+        // Shared key carried to the per-host slot; shared slot cleared.
+        assert_eq!(
+            secrets
+                .get("remote-api-key.hal9000-7680")
+                .unwrap()
+                .as_deref(),
+            Some("shared-key")
+        );
+        assert_eq!(secrets.get("remote-api-key").unwrap(), None);
+    }
+
+    #[test]
+    fn migrate_remote_primary_is_idempotent() {
+        let (secrets, _dir) = secret_store();
+        let mut settings = remote_primary_settings();
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        // A second pass finds mode already Local — nothing more to do.
+        assert!(!migrate_remote_primary(&mut settings, &secrets));
+        assert_eq!(settings.connected_host_ids, vec!["hal9000-7680"]);
+    }
+
+    #[test]
+    fn migrate_remote_primary_carries_the_legacy_plaintext_key() {
+        let (secrets, _dir) = secret_store();
+        let mut settings = AppSettings {
+            remote_api_key: Some("legacy-plaintext".into()),
+            ..remote_primary_settings()
+        };
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        assert_eq!(
+            secrets
+                .get("remote-api-key.hal9000-7680")
+                .unwrap()
+                .as_deref(),
+            Some("legacy-plaintext")
+        );
+        // The plaintext field is wiped so old files converge.
+        assert_eq!(settings.remote_api_key, None);
+    }
+
+    #[test]
+    fn migrate_remote_primary_keeps_an_existing_per_host_key() {
+        let (secrets, _dir) = secret_store();
+        secrets
+            .set("remote-api-key.hal9000-7680", "per-host")
+            .unwrap();
+        secrets.set("remote-api-key", "shared").unwrap();
+        let mut settings = remote_primary_settings();
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        // The per-host slot is authoritative — never clobbered by the shared one.
+        assert_eq!(
+            secrets
+                .get("remote-api-key.hal9000-7680")
+                .unwrap()
+                .as_deref(),
+            Some("per-host")
+        );
+        assert_eq!(secrets.get("remote-api-key").unwrap(), None);
+    }
+
+    #[test]
+    fn migrate_remote_primary_is_a_no_op_when_local() {
+        let (secrets, _dir) = secret_store();
+        let mut settings = AppSettings::default();
+        let before = settings.clone();
+        assert!(!migrate_remote_primary(&mut settings, &secrets));
+        assert_eq!(settings, before);
+    }
+
+    #[test]
+    fn migrate_remote_primary_leaves_an_existing_sticky_target_alone() {
+        let (secrets, _dir) = secret_store();
+        let mut settings = AppSettings {
+            generate_target_host: Some("studio-local-7680".into()),
+            ..remote_primary_settings()
+        };
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        // The user's explicit target wins over the ex-primary default.
+        assert_eq!(
+            settings.generate_target_host.as_deref(),
+            Some("studio-local-7680")
+        );
+    }
+
+    #[test]
+    fn migrate_remote_primary_is_idempotent_when_id_already_connected() {
+        let (secrets, _dir) = secret_store();
+        let mut settings = AppSettings {
+            connected_host_ids: vec!["hal9000-7680".into()],
+            ..remote_primary_settings()
+        };
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        // remember_connected_host must not duplicate the entry.
+        assert_eq!(settings.connected_host_ids, vec!["hal9000-7680"]);
     }
 
     #[test]
