@@ -255,6 +255,73 @@ describe("NavRail detected hosts", () => {
     // Not bounced to Settings for a key the app already holds.
     expect(router.currentRoute.value.path).toBe("/generate");
   });
+
+  it("right-click on a detected (disconnected) host opens a context menu", async () => {
+    vi.spyOn(ipc, "discoverServers").mockResolvedValue([
+      {
+        name: "hal9000",
+        url: "http://192.168.1.50:7680",
+        host: "192.168.1.50",
+        port: 7680,
+        version: "0.18.0",
+        authRequired: false,
+        instanceId: "uuid-1",
+        isThisMachine: false,
+      },
+    ]);
+    const wrapper = await mountAt("/generate");
+    await flushPromises();
+    await wrapper.get("[data-test='detected-host-row']").trigger("contextmenu");
+    const labels = useContextMenuStore()
+      .entries.filter((e): e is MenuItem => !("separator" in e))
+      .map((e) => e.label);
+    expect(labels).toContain("Connect");
+    expect(labels).toContain("Open web UI");
+    expect(labels).toContain("Copy URL");
+    // Not remembered — nothing to forget.
+    expect(labels).not.toContain("Forget");
+  });
+
+  it("detected-host menu offers Forget when the box is remembered under any slug", async () => {
+    const base = await ipc.appSettingsGet();
+    vi.spyOn(ipc, "discoverServers").mockResolvedValue([
+      {
+        name: "hal9000",
+        url: "http://192.168.1.50:7680",
+        host: "192.168.1.50",
+        port: 7680,
+        version: "0.18.0",
+        authRequired: false,
+        instanceId: "uuid-1",
+        isThisMachine: false,
+      },
+    ]);
+    vi.spyOn(ipc, "appSettingsGet").mockResolvedValue({
+      ...base,
+      savedHosts: [
+        {
+          id: "hal9000-7680",
+          name: "hal9000",
+          url: "http://hal9000:7680",
+          lastUsedMs: 1,
+          instanceId: "uuid-1",
+        },
+      ],
+    });
+    const forget = vi.spyOn(ipc, "forgetRemoteHost").mockResolvedValue([]);
+    const wrapper = await mountAt("/generate");
+    await flushPromises();
+    await wrapper.get("[data-test='detected-host-row']").trigger("contextmenu");
+    const menu = useContextMenuStore();
+    const forgetEntry = menu.entries.find(
+      (e): e is MenuItem => !("separator" in e) && e.label === "Forget",
+    );
+    expect(forgetEntry).toBeDefined();
+    await forgetEntry!.action?.();
+    await flushPromises();
+    // Forgets the remembered slug (hostname), not the advertised IP slug.
+    expect(forget).toHaveBeenCalledWith("hal9000-7680");
+  });
 });
 
 describe("NavRail a11y", () => {

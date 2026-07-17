@@ -20,7 +20,7 @@ import { useToastStore } from "../../stores/toasts";
 import { hostIdFromUrl } from "../../lib/hosts";
 import { detectedHosts as computeDetectedHosts } from "../../lib/discovery";
 import { dragWidth } from "../../lib/panelResize";
-import { ipc, type DiscoveredHost } from "../../lib/ipc";
+import { ipc, type DiscoveredHost, type SavedHost } from "../../lib/ipc";
 import { shortcutLabel } from "../../lib/platform";
 
 const router = useRouter();
@@ -56,11 +56,15 @@ function onRailReset() {
 // Quiet background mDNS scan so nearby `mold serve` instances surface in the
 // rail without a trip to Settings.
 const discovered = ref<DiscoveredHost[]>([]);
+// Remembered hosts snapshot so the detected-row menu can offer Forget for a
+// box that's saved (under any slug) but not currently connected.
+const remembered = ref<SavedHost[]>([]);
 let scanTimer: ReturnType<typeof setInterval> | null = null;
 
 async function scanNetwork() {
   try {
     discovered.value = await ipc.discoverServers();
+    remembered.value = (await ipc.appSettingsGet()).savedHosts;
   } catch {
     // Discovery is best-effort; the section simply stays as-is.
   }
@@ -150,6 +154,43 @@ function onRenameSave(name: string) {
   const host = renameTarget.value;
   renameTarget.value = null;
   if (host) void hosts.rename(host.id, name);
+}
+
+/** The remembered entry for a detected box — matched by advertised slug or,
+ *  when the advertisement carries an instance id, by a saved twin under any
+ *  slug (remembered by hostname, advertised by IP). */
+function rememberedTwinOf(d: DiscoveredHost): SavedHost | null {
+  const id = hostIdFromUrl(d.url);
+  return (
+    remembered.value.find((s) => s.id === id) ??
+    (d.instanceId ? (remembered.value.find((s) => s.instanceId === d.instanceId) ?? null) : null)
+  );
+}
+
+function detectedMenu(d: DiscoveredHost): MenuEntry[] {
+  const entries: MenuEntry[] = [
+    { label: "Connect", action: () => void connectDetected(d) },
+    { separator: true },
+    { label: "Open web UI", action: () => void openHostUrl(d.url) },
+    {
+      label: "Copy URL",
+      action: () => void navigator.clipboard.writeText(d.url).then(() => toasts.push("Copied")),
+    },
+  ];
+  const saved = rememberedTwinOf(d);
+  if (saved) {
+    entries.push({ separator: true });
+    entries.push({
+      label: "Forget",
+      danger: true,
+      action: () =>
+        void ipc.forgetRemoteHost(saved.id).then(() => {
+          remembered.value = remembered.value.filter((s) => s.id !== saved.id);
+          toasts.push(`Forgot ${saved.name ?? d.name}`);
+        }),
+    });
+  }
+  return entries;
 }
 
 function hostMenu(host: HostView): MenuEntry[] {
@@ -352,6 +393,7 @@ function jobMenu(job: Job): MenuEntry[] {
         data-test="detected-host-row"
         class="mx-2 flex h-7 items-center gap-2 rounded-control px-2.5"
         :title="d.url"
+        @contextmenu.prevent="contextMenu.open($event, detectedMenu(d))"
       >
         <span class="h-1.5 w-1.5 shrink-0 rounded-full border border-control-edge" />
         <span class="min-w-0 truncate text-caption text-ink-3">{{ d.name }}</span>
