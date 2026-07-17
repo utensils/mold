@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
-import { ApiError } from "../../lib/api/client";
+import { ApiError, type ApiTarget } from "../../lib/api/client";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
 import { isVideoFamily } from "../../lib/capabilities";
 import { sortInstalledFirst } from "../../lib/catalog";
@@ -19,11 +19,20 @@ const props = defineProps<{
   mediaType?: MediaType;
 }>();
 
+const emit = defineEmits<{ (e: "clear-media-filter"): void }>();
+
 const downloads = useDownloadsStore();
 const toasts = useToastStore();
 const hosts = useHostsStore();
 
 const PAGE_SIZE = 24;
+/**
+ * The media chips filter client-side on `entry.family`, but the server can
+ * only constrain one family per query — a single page routinely holds zero
+ * video entries. Keep auto-fetching pages (bounded) until the filtered view
+ * has content or the results run out.
+ */
+const MAX_AUTO_PAGES = 5;
 type Source = "all" | "hf" | "civitai";
 
 const source = ref<Source>("all");
@@ -41,18 +50,60 @@ const pendingEntry = ref<CatalogEntry | null>(null);
 
 let debounce: ReturnType<typeof setTimeout> | null = null;
 
+/** True when `entry` passes the active media-type chip. */
+function matchesMediaType(entry: CatalogEntry): boolean {
+  const type = props.mediaType ?? "all";
+  return type === "all" || isVideoFamily(entry.family) === (type === "video");
+}
+
 // What you already have surfaces first; the divider marks where "available"
 // begins so installed models are visible at a glance. The media-type filter
 // is client-side on `entry.family` — the server query stays unchanged.
 const displayEntries = computed(() =>
-  sortInstalledFirst(entries.value).filter((entry) => {
-    if (props.excludeInstalled && entry.installed) return false;
-    const type = props.mediaType ?? "all";
-    return type === "all" || isVideoFamily(entry.family) === (type === "video");
-  }),
+  sortInstalledFirst(entries.value).filter(
+    (entry) => !(props.excludeInstalled && entry.installed) && matchesMediaType(entry),
+  ),
 );
 
+/** Why the grid is empty while entries exist — names the active filter. */
+const filteredEmptyMessage = computed(() => {
+  const type = props.mediaType ?? "all";
+  if (type !== "all" && !entries.value.some(matchesMediaType)) {
+    const noun = type === "video" ? "video" : "image";
+    return hasMore.value
+      ? `No ${noun} models in these results yet — load more or show all media types.`
+      : `No ${noun} models in these results.`;
+  }
+  return "Everything here is already installed.";
+});
+
+const readyHosts = computed(() =>
+  hosts.all.filter((host) => host.status === "ready" && host.baseUrl),
+);
+
+/**
+ * Where catalog calls go: the local primary when it's ready (it reads its
+ * own credentials), else the first ready host — with credentials forwarded
+ * for remote hosts — so browsing survives a dead built-in engine.
+ */
+function catalogTarget(): { target: ApiTarget | undefined; forward: boolean } {
+  const primary = hosts.all.find((host) => host.id === "local");
+  if (primary?.status === "ready") return { target: undefined, forward: false };
+  const fallback = readyHosts.value[0];
+  if (fallback?.baseUrl) {
+    return {
+      target: { baseUrl: fallback.baseUrl, apiKey: fallback.apiKey },
+      forward: fallback.kind === "remote",
+    };
+  }
+  return { target: undefined, forward: false };
+}
+
+/** Invalidates in-flight page loops when a newer search supersedes them. */
+let searchEpoch = 0;
+
 async function runSearch(reset: boolean) {
+  const epoch = ++searchEpoch;
   if (reset) {
     page.value = 1;
     entries.value = [];
@@ -60,25 +111,37 @@ async function runSearch(reset: boolean) {
   loading.value = true;
   error.value = null;
   try {
-    const res = await searchCatalog(
-      {
-        q: props.query || undefined,
-        family: family.value || undefined,
-        source: source.value === "all" ? undefined : source.value,
-        include_nsfw: includeNsfw.value,
-        page: page.value,
-        page_size: PAGE_SIZE,
-      },
-      // Catalog search targets the local primary, which reads its own creds.
-      false,
-    );
-    entries.value = reset ? res.entries : [...entries.value, ...res.entries];
-    hasMore.value = res.entries.length === PAGE_SIZE;
+    for (let fetched = 0; ;) {
+      const { target, forward } = catalogTarget();
+      const res = await searchCatalog(
+        {
+          q: props.query || undefined,
+          family: family.value || undefined,
+          source: source.value === "all" ? undefined : source.value,
+          include_nsfw: includeNsfw.value,
+          page: page.value,
+          page_size: PAGE_SIZE,
+        },
+        forward,
+        target,
+      );
+      if (epoch !== searchEpoch) return;
+      entries.value = [...entries.value, ...res.entries];
+      hasMore.value = res.entries.length === PAGE_SIZE;
+      fetched += 1;
+      // Under a media chip, keep paging (bounded) until something survives
+      // the filter — otherwise the chip renders a blank, message-less grid.
+      const filterActive = (props.mediaType ?? "all") !== "all";
+      if (!filterActive || !hasMore.value || fetched >= MAX_AUTO_PAGES) break;
+      if (entries.value.some(matchesMediaType)) break;
+      page.value += 1;
+    }
   } catch (err) {
+    if (epoch !== searchEpoch) return;
     error.value = String(err);
     hasMore.value = false;
   } finally {
-    loading.value = false;
+    if (epoch === searchEpoch) loading.value = false;
   }
 }
 
@@ -91,10 +154,6 @@ function loadMore() {
   page.value += 1;
   void runSearch(false);
 }
-
-const readyHosts = computed(() =>
-  hosts.all.filter((host) => host.status === "ready" && host.baseUrl),
-);
 
 async function pullTo(entry: CatalogEntry, host: HostView | null) {
   pulling.value.add(entry.id);
@@ -127,9 +186,20 @@ function pull(entry: CatalogEntry) {
 
 watch([() => props.query, source, family, includeNsfw], scheduleSearch);
 
+// Flipping to a media chip with no matching entries loaded yet continues the
+// existing pagination instead of leaving a blank grid behind the chip.
+watch(
+  () => props.mediaType,
+  () => {
+    if ((props.mediaType ?? "all") === "all" || loading.value) return;
+    if (!entries.value.some(matchesMediaType) && hasMore.value) loadMore();
+  },
+);
+
 onMounted(async () => {
   try {
-    families.value = await fetchCatalogFamilies(false);
+    const { target, forward } = catalogTarget();
+    families.value = await fetchCatalogFamilies(forward, target);
   } catch {
     /* families are a nicety; search still works without them */
   }
@@ -170,10 +240,29 @@ onMounted(async () => {
 
     <p v-if="error" class="text-caption text-stop">{{ error }}</p>
 
-    <!-- Empty state -->
-    <div v-else-if="!loading && entries.length === 0" class="p-8 text-center text-body text-ink-2">
-      <template v-if="query">Nothing on the shelf for "{{ query }}".</template>
-      <template v-else>Search the catalog to find models.</template>
+    <!-- Empty state — keyed on the FILTERED list so an all-image page under
+         the Video chip explains itself instead of rendering a blank grid. -->
+    <div
+      v-else-if="!loading && displayEntries.length === 0"
+      class="p-8 text-center text-body text-ink-2"
+      data-test="catalog-empty"
+    >
+      <template v-if="entries.length === 0">
+        <template v-if="query">Nothing on the shelf for "{{ query }}".</template>
+        <template v-else>Search the catalog to find models.</template>
+      </template>
+      <template v-else>
+        <p>{{ filteredEmptyMessage }}</p>
+        <button
+          v-if="(mediaType ?? 'all') !== 'all'"
+          type="button"
+          data-test="clear-media-filter"
+          class="border-edge mt-3 h-7 rounded-control border px-2.5 text-caption text-ink-2 hover:text-ink"
+          @click="emit('clear-media-filter')"
+        >
+          Show all media types
+        </button>
+      </template>
     </div>
 
     <!-- Result cards, installed first -->

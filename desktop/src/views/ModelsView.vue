@@ -148,6 +148,7 @@ onUnmounted(() => {
           :layout="layout"
           :exclude-installed="true"
           :media-type="mediaType"
+          @clear-media-filter="setMediaType('all')"
         />
       </section>
     </div>
