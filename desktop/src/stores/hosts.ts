@@ -265,26 +265,6 @@ export const useHostsStore = defineStore("hosts", {
         if (prefs.settings) prefs.settings = { ...prefs.settings, generateTargetHost: null };
       }
     },
-    /**
-     * Keep a remote primary live as an extra while the app returns to the
-     * built-in engine. Order matters: `connect()` deliberately no-ops while
-     * the host is still the primary, so the engine switch happens first.
-     */
-    async demoteToExtra(host: {
-      id: string;
-      baseUrl: string | null;
-      apiKey: string | null;
-      label: string;
-    }) {
-      const conn = useConnectionStore();
-      await conn.useLocal();
-      if (!host.baseUrl) return;
-      try {
-        await this.connect(host.baseUrl, host.apiKey, host.label);
-      } catch {
-        // Unreachable right now — the saved entry still allows reconnect.
-      }
-    },
     /** Give a host a friendly name (sidebar, host selector, Recent hosts). */
     async rename(id: string, name: string) {
       const trimmed = name.trim();

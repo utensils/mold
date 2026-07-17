@@ -11,7 +11,6 @@ vi.mock("../lib/ipc", () => ({
     ensureLocalServer: vi.fn(),
     startLocalEngine: vi.fn(),
     stopLocalEngine: vi.fn(),
-    setRemoteHost: vi.fn(),
     testRemoteHost: vi.fn(),
     getConnection: vi.fn(),
     secretGet: vi.fn().mockResolvedValue(null),
@@ -81,8 +80,6 @@ describe("connection store", () => {
     await store.init();
     expect(store.ready).toBe(true);
     expect(store.mode).toBe("local");
-    // The connection never switches to a remote host on its own.
-    expect(mocked.setRemoteHost).not.toHaveBeenCalled();
   });
 
   it("errors cleanly when the local server can't start", async () => {

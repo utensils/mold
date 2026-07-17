@@ -1,26 +1,17 @@
-//! Connection state machine: which engine the webview talks to.
-//!
-//! The selected primary connection is intentionally separate from the local
-//! server lifecycle. `Local` selects the desktop-owned embedded server;
-//! `External` selects a mold server the user already runs on this machine;
-//! `Remote` selects a network host. The actual embedded handle lives in
-//! `commands::AppState::local_server`, so switching to `Remote` leaves this Mac
-//! online for multi-host routing and LAN discovery.
+//! Connection state machine: which engine the webview talks to. The built-in
+//! engine is always the primary — remote hosts are additive list entries owned
+//! by the frontend's hosts store, never a primary this ever switches to.
+//! `Local` selects the desktop-owned embedded server; `External` selects a mold
+//! server the user already runs on this machine. The embedded handle lives in
+//! `commands::AppState::local_server`, so this Mac stays online for multi-host
+//! routing and LAN discovery regardless.
 
 use serde::Serialize;
 
 pub enum Conn {
     Off,
-    Local {
-        base_url: String,
-    },
-    External {
-        base_url: String,
-    },
-    Remote {
-        url: String,
-        api_key: Option<String>,
-    },
+    Local { base_url: String },
+    External { base_url: String },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -48,11 +39,6 @@ impl Conn {
                 mode: "external",
                 base_url: Some(base_url.clone()),
                 api_key: Some(local_api_key.to_string()),
-            },
-            Conn::Remote { url, api_key } => ConnectionInfo {
-                mode: "remote",
-                base_url: Some(url.clone()),
-                api_key: api_key.clone(),
             },
         }
     }
@@ -114,21 +100,17 @@ mod tests {
     #[test]
     fn info_reports_each_mode() {
         assert_eq!(Conn::Off.info("k").mode, "off");
-        let remote = Conn::Remote {
-            url: "http://h:1".into(),
-            api_key: Some("secret".into()),
-        };
-        let info = remote.info("local-key");
-        assert_eq!(info.mode, "remote");
-        assert_eq!(info.base_url.as_deref(), Some("http://h:1"));
-        assert_eq!(info.api_key.as_deref(), Some("secret"));
         let external = Conn::External {
             base_url: "http://127.0.0.1:7680".into(),
         };
-        assert_eq!(external.info("k").api_key.as_deref(), Some("k"));
+        let info = external.info("k");
+        assert_eq!(info.mode, "external");
+        assert_eq!(info.base_url.as_deref(), Some("http://127.0.0.1:7680"));
+        assert_eq!(info.api_key.as_deref(), Some("k"));
         let local = Conn::Local {
             base_url: "http://127.0.0.1:49152".into(),
         };
+        assert_eq!(local.info("k").mode, "local");
         assert_eq!(local.info("k").api_key.as_deref(), Some("k"));
     }
 

@@ -72,18 +72,6 @@ export const useConnectionStore = defineStore("connection", {
         this.error = String(err);
       }
     },
-    async useRemote(url: string, apiKey: string | null, name?: string | null) {
-      this.status = "starting";
-      this.error = null;
-      try {
-        this.info = await ipc.setRemoteHost(url, apiKey, name);
-        this.status = "ready";
-      } catch (err) {
-        this.status = "error";
-        this.error = String(err);
-        throw err;
-      }
-    },
     async stopEngine() {
       this.info = await ipc.stopLocalEngine();
       this.localInfo = null;

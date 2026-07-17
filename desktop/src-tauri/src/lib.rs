@@ -132,7 +132,6 @@ pub fn run() {
             commands::ensure_local_server,
             commands::start_local_engine,
             commands::stop_local_engine,
-            commands::set_remote_host,
             commands::forget_remote_host,
             commands::test_remote_host,
             commands::discover_servers,

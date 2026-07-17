@@ -444,23 +444,6 @@ describe("hosts store", () => {
     expect(persisted.savedHosts[0]).toMatchObject({ id: hal.id, url: hal.url, name: "render box" });
   });
 
-  it("demoteToExtra switches to built-in first, then keeps the host live as an extra", async () => {
-    // Regression (Copilot review): connect() early-returns while the host is
-    // still the primary, so the engine switch must happen before the re-add.
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: "key" };
-    startLocalEngine.mockImplementation(() => {
-      conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
-      return Promise.resolve(conn.info);
-    });
-    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
-    const hosts = useHostsStore();
-    await hosts.demoteToExtra(hosts.primaryHost!);
-    expect(conn.mode).toBe("local");
-    const row = hosts.all.find((h) => h.id === "hal9000-7680");
-    expect(row).toMatchObject({ primary: false, status: "ready", apiKey: "key" });
-  });
-
   it("refresh() pulls queue telemetry from every host", async () => {
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
     apiJsonTo.mockResolvedValue({

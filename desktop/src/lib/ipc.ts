@@ -186,10 +186,6 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve(browserFallbackConnection());
     return invoke<ConnectionInfo>("stop_local_engine");
   },
-  setRemoteHost(url: string, apiKey: string | null, name?: string | null): Promise<ConnectionInfo> {
-    if (!inTauri()) return Promise.resolve(browserFallbackConnection());
-    return invoke<ConnectionInfo>("set_remote_host", { url, apiKey, name: name ?? null });
-  },
   /** Drop a host from the saved list and delete its stored API key. */
   forgetRemoteHost(id: string): Promise<SavedHost[]> {
     if (!inTauri()) return Promise.resolve([]);

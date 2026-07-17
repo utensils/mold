@@ -108,25 +108,13 @@ pub fn remember_connected_host(settings: &mut AppSettings, id: &str) {
     }
 }
 
-/// Drop `id` from the saved list — and when it is also the persisted primary
-/// remote, clear that preference too, otherwise the next launch would
-/// reconnect via `remote_url` and re-save the host, making Forget a no-op
-/// for the active host. Returns true when the primary preference was cleared
-/// (the caller must also clear the shared `remote-api-key` secret).
-pub fn forget_host(settings: &mut AppSettings, id: &str) -> bool {
+/// Drop `id` from the saved list and the boot-reconnect set. Remote hosts are
+/// list entries (never a primary the app switches to), so there is no primary
+/// preference to clear.
+pub fn forget_host(settings: &mut AppSettings, id: &str) {
     settings.saved_hosts.retain(|h| h.id != id);
     // The boot-reconnect set must not resurrect a forgotten host.
     settings.connected_host_ids.retain(|h| h != id);
-    let was_primary = settings
-        .remote_url
-        .as_deref()
-        .is_some_and(|url| crate::connection::host_id(url) == id);
-    if was_primary {
-        settings.remote_url = None;
-        settings.remote_api_key = None;
-        settings.mode = ConnectionMode::Local;
-    }
-    was_primary
 }
 
 /// Retire an install whose selected primary was a remote host. Remote-primary
@@ -405,22 +393,8 @@ mod tests {
     }
 
     #[test]
-    fn forget_host_removes_the_boot_reconnect_entry() {
+    fn forget_host_prunes_the_saved_entry_and_reconnect_id() {
         let mut settings = AppSettings {
-            connected_host_ids: vec!["hal9000-7680".into(), "studio-local-7680".into()],
-            ..AppSettings::default()
-        };
-        forget_host(&mut settings, "hal9000-7680");
-        // A forgotten host must not resurrect as an extra on the next boot.
-        assert_eq!(settings.connected_host_ids, vec!["studio-local-7680"]);
-    }
-
-    #[test]
-    fn forget_host_clears_the_primary_remote_preference_too() {
-        let mut settings = AppSettings {
-            mode: ConnectionMode::Remote,
-            remote_url: Some("http://hal9000:7680".into()),
-            remote_api_key: Some("legacy".into()),
             saved_hosts: vec![SavedHost {
                 id: "hal9000-7680".into(),
                 name: None,
@@ -428,35 +402,13 @@ mod tests {
                 last_used_ms: Some(1),
                 instance_id: None,
             }],
+            connected_host_ids: vec!["hal9000-7680".into(), "studio-local-7680".into()],
             ..AppSettings::default()
         };
-        // Forgetting the ACTIVE host must clear the reconnect preference —
-        // otherwise the next launch re-saves it and Forget is a no-op.
-        assert!(forget_host(&mut settings, "hal9000-7680"));
+        forget_host(&mut settings, "hal9000-7680");
         assert!(settings.saved_hosts.is_empty());
-        assert_eq!(settings.remote_url, None);
-        assert_eq!(settings.remote_api_key, None);
-        assert_eq!(settings.mode, ConnectionMode::Local);
-    }
-
-    #[test]
-    fn forget_host_leaves_the_primary_alone_for_other_hosts() {
-        let mut settings = AppSettings {
-            mode: ConnectionMode::Remote,
-            remote_url: Some("http://hal9000:7680".into()),
-            saved_hosts: vec![SavedHost {
-                id: "studio-local-7680".into(),
-                name: None,
-                url: "http://studio.local:7680".into(),
-                last_used_ms: Some(1),
-                instance_id: None,
-            }],
-            ..AppSettings::default()
-        };
-        assert!(!forget_host(&mut settings, "studio-local-7680"));
-        assert!(settings.saved_hosts.is_empty());
-        assert_eq!(settings.remote_url.as_deref(), Some("http://hal9000:7680"));
-        assert_eq!(settings.mode, ConnectionMode::Remote);
+        // A forgotten host must not resurrect as an extra on the next boot.
+        assert_eq!(settings.connected_host_ids, vec!["studio-local-7680"]);
     }
 
     #[test]

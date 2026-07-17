@@ -71,10 +71,9 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     async update(patch: Partial<AppSettings>): Promise<void> {
       // Always merge onto the FRESH on-disk settings, never the in-memory
       // snapshot: other writers (the hosts store's saved-host persistence,
-      // Rust's set_remote_host) write directly to settings.json, and
-      // spreading a stale snapshot here would silently erase their fields
-      // (saved hosts, reconnect list, remote mode) on the next theme toggle
-      // or route change.
+      // the boot remote-primary migration) write directly to settings.json,
+      // and spreading a stale snapshot here would silently erase their fields
+      // (saved hosts, reconnect list) on the next theme toggle or route change.
       const current = await ipc.appSettingsGet();
       this.settings = { ...current, ...patch };
       applyTheme(this.settings.theme, this.settings.themeFamily);
