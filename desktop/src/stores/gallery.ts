@@ -7,6 +7,7 @@ import {
   type GallerySource,
 } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
+import { PLATFORM_UI } from "../lib/platform";
 import { useHostsStore, type HostView } from "./hosts";
 import type { GalleryImage, ServerEvent } from "../lib/api/types";
 
@@ -65,11 +66,14 @@ export const useGalleryStore = defineStore("gallery", {
   }),
   getters: {
     /**
-     * Which buckets should exist right now: one per ready host. The built-in
-     * engine is always the internal primary (host id "local"), and its
-     * `/api/gallery` on the local server already covers IPC-saved files (a
+     * Which buckets should exist right now: This device first, then one per
+     * ready host. The built-in engine is the internal primary (host id
+     * "local"), and its `/api/gallery` already covers IPC-saved files (a
      * saved remote print writes a best-effort DB row into the same mold.db),
-     * so there is no separate This-Mac IPC bucket.
+     * so there is no separate This-Mac IPC bucket while it's ready. When the
+     * local server is NOT ready (failed start, mid-restart), the "local"
+     * bucket stays listed and falls back to native IPC — this device's
+     * prints must never vanish with the engine.
      */
     sources(): GallerySourceRef[] {
       const hosts = useHostsStore();
@@ -80,6 +84,8 @@ export const useGalleryStore = defineStore("gallery", {
         keys.add(source.key);
         refs.push(source);
       };
+      const local = hosts.all.find((host) => host.id === "local");
+      add({ key: "local", label: local?.label ?? PLATFORM_UI.deviceLabel });
       for (const host of hosts.all) {
         if (host.status !== "ready") continue;
         add({ key: host.id, label: host.label });
@@ -173,9 +179,14 @@ export const useGalleryStore = defineStore("gallery", {
     },
   },
   actions: {
-    /** The live host behind a bucket key, if any (resolved at call time). */
+    /** The live host behind a bucket key, if any (resolved at call time).
+     *  The "local" key only counts as host-backed while the local server is
+     *  READY — an errored local host can still expose a stale baseUrl, and
+     *  routing there would land errors instead of falling back to IPC. */
     hostFor(sourceKey: string): HostView | null {
-      return useHostsStore().all.find((h) => h.id === sourceKey) ?? null;
+      const host = useHostsStore().all.find((h) => h.id === sourceKey) ?? null;
+      if (sourceKey === "local" && host?.status !== "ready") return null;
+      return host;
     },
     /** How a bucket's media is addressed: API paths vs mold-local files. */
     mediaSourceOf(sourceKey: string): GallerySource {

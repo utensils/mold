@@ -280,6 +280,63 @@ describe("live server events", () => {
   });
 });
 
+describe("local bucket while the engine is down", () => {
+  it("keeps the This-device bucket and routes it over IPC when the local host isn't ready", async () => {
+    // Local engine errored at start; a remote host is still connected. The
+    // local server exposes a stale baseUrl, so target presence is NOT enough
+    // — the "local" key must fall back to native IPC.
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "error";
+    addExtra("hal9000-7680", "http://hal9000:7680", "hk");
+    vi.mocked(ipc.localGalleryList).mockResolvedValue([img("saved-remote-print.png", 50)]);
+    const gallery = useGalleryStore();
+
+    expect(gallery.sources.map((s) => s.key)).toEqual(["local", "hal9000-7680"]);
+
+    await gallery.fetchAll();
+
+    expect(ipc.localGalleryList).toHaveBeenCalled();
+    // The dead local server must not be hit for the local bucket.
+    expect(apiJsonTo).not.toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:49152", apiKey: null },
+      "/api/gallery",
+    );
+    expect(gallery.merged.some((e) => e.item.filename === "saved-remote-print.png")).toBe(true);
+    expect(gallery.mediaSourceOf("local")).toBe("local");
+    expect(gallery.targetOf("local")).toBeNull();
+  });
+
+  it("lists This device even when there is no primary connection at all", () => {
+    const gallery = useGalleryStore();
+    expect(gallery.sources.map((s) => s.key)).toEqual(["local"]);
+  });
+
+  it("refreshHost('local') works over IPC while the engine is down (auto-save nudge)", async () => {
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([]);
+    vi.mocked(ipc.localGalleryList).mockResolvedValue([img("just-saved.png", 9)]);
+
+    await gallery.refreshHost("local");
+
+    expect(ipc.localGalleryList).toHaveBeenCalledTimes(1);
+    expect(gallery.buckets["local"]!.items.map((i) => i.filename)).toEqual(["just-saved.png"]);
+  });
+
+  it("returns to HTTP the moment the local server is ready again", async () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+
+    await gallery.fetchBucket("local");
+
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:49152", apiKey: null },
+      "/api/gallery",
+    );
+    expect(ipc.localGalleryList).not.toHaveBeenCalled();
+  });
+});
+
 describe("remove", () => {
   it("deletes prints in a host-less local bucket through native IPC", async () => {
     // With no connected local host (engine down), the "local" bucket falls

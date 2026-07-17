@@ -25,7 +25,13 @@ import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useConnectionStore } from "../stores/connection";
-import { useGenerationStore, jobPhase, jobProgress, type Job } from "../stores/generation";
+import {
+  useGenerationStore,
+  jobPhase,
+  jobProgress,
+  needsHostRoute,
+  type Job,
+} from "../stores/generation";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
@@ -114,9 +120,19 @@ const showStarterCards = computed(() =>
 /** The request the estimate badge previews — null until a model is chosen. */
 const estimateRequest = computed(() => (form.model ? buildRequest(form) : null));
 
+/** True when submits (and the estimate preflight) must resolve a route:
+ *  multiple hosts, or a dead primary while another host can serve. */
+const routeRequired = computed(() =>
+  needsHostRoute({
+    multiHost: hosts.multiHost,
+    primaryReady: hosts.primaryHost?.status === "ready",
+    anyHostReady: hosts.all.some((h) => h.status === "ready"),
+  }),
+);
+
 /** Preflight against the host the batch will actually route to. */
 const estimateTarget = computed(() =>
-  hosts.multiHost
+  routeRequired.value
     ? (hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null, form.model || null)
         ?.target ?? null)
     : null,
@@ -299,11 +315,12 @@ async function generate() {
   if (!form.prompt.trim() || !form.model) return;
   const request = buildRequest(form);
   const batch = caps.value.forcesBatchSizeOne ? 1 : form.batchSize;
-  // With multiple live hosts, route the batch (sticky pick, Auto = least
-  // busy, or Most capable) — model-aware, so hosts that already have the
-  // weights win. A pinned host that went away is an error, not a reroute.
+  // With multiple live hosts — or a dead primary while another host can
+  // serve — route the batch (sticky pick, Auto = least busy, or Most
+  // capable) — model-aware, so hosts that already have the weights win.
+  // A pinned host that went away is an error, not a reroute.
   let route = null;
-  if (hosts.multiHost) {
+  if (routeRequired.value) {
     route = hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null, form.model || null);
     if (!route) {
       toasts.push("The selected host isn't reachable — pick another host.", "error");

@@ -167,6 +167,21 @@ export function randomSeed(): number {
 }
 
 /**
+ * Whether a batch must resolve an explicit host route instead of relying on
+ * the primary connection: multiple live hosts, or a primary that isn't ready
+ * while some host is (local engine down, remote still serving). When nothing
+ * is ready, stay unrouted so the submit surfaces the directed error. Pure —
+ * shared by GenerateView's submit path and its estimate preflight.
+ */
+export function needsHostRoute(opts: {
+  multiHost: boolean;
+  primaryReady: boolean;
+  anyHostReady: boolean;
+}): boolean {
+  return opts.multiHost || (!opts.primaryReady && opts.anyHostReady);
+}
+
+/**
  * Resolve the base seed for a batch: an explicit finite seed is honored,
  * otherwise a fresh random base is drawn so the run is reproducible from the
  * first sibling. Pure given `rng`.
@@ -333,15 +348,30 @@ export const useGenerationStore = defineStore("generation", {
           // Unrouted = the local primary engine — its prints are already in
           // this device's gallery, so they never trigger the remote auto-save.
           job.remote = false;
-          // And snapshot the PRIMARY target at submit time: queued batch
-          // siblings open their streams later, and cancels resolve later
-          // still — both must hit the host the job was submitted to, not
-          // whatever the primary happens to be then.
-          try {
-            targets.set(job.clientId, currentTarget());
-          } catch {
-            // No live connection — the stream will fail with the same
-            // directed error the old path produced.
+          // When the primary isn't ready but another host is (local engine
+          // failed to start, remote still serving), snapshot that host
+          // instead of the dead primary so the batch isn't dead on arrival.
+          const hosts = useHostsStore();
+          const primaryReady = hosts.primaryHost?.status === "ready";
+          const fallback = primaryReady
+            ? undefined
+            : hosts.all.find((h) => h.status === "ready" && h.baseUrl);
+          if (fallback?.baseUrl) {
+            job.hostId = fallback.id;
+            job.hostLabel = fallback.label;
+            job.remote = fallback.kind === "remote";
+            targets.set(job.clientId, { baseUrl: fallback.baseUrl, apiKey: fallback.apiKey });
+          } else {
+            // And snapshot the PRIMARY target at submit time: queued batch
+            // siblings open their streams later, and cancels resolve later
+            // still — both must hit the host the job was submitted to, not
+            // whatever the primary happens to be then.
+            try {
+              targets.set(job.clientId, currentTarget());
+            } catch {
+              // No live connection — the stream will fail with the same
+              // directed error the old path produced.
+            }
           }
         }
         return job;
