@@ -46,11 +46,15 @@ surface powers it, so anything the app does maps to a documented endpoint.
   every parameter restored. When the active engine is remote, **This device**
   remains available as a separate local-gallery source. Still images offer
   full-resolution **Copy image** from tile and lightbox right-click menus.
-- **Models & catalog** — installed models grouped by family with residency and
-  disk usage, plus a live HuggingFace/Civitai catalog. Pulls render **SIZE vs
-  FETCH** honestly (model weights vs. the full download including shared
-  components), run in parallel, and stream through a downloads tray whose
-  cancel action aborts queued or active work rather than only hiding the row.
+- **Models & catalog** — one searchable installed-first library with All,
+  Installed, and Available filters plus compact Grid and Table layouts. The
+  desktop reuses cacheable 512 px Civitai thumbnails across both layouts,
+  lazily decodes them, and contains each card's layout and paint work. Missing
+  previews use a local model-family mark, with no additional image request. The
+  live Hugging Face/Civitai catalog renders **SIZE vs FETCH** honestly. With
+  several hosts connected, Pull asks which host should store the model. The
+  downloads tray keeps every selected host's progress and cancellation visible
+  and refreshes that host's installed-model inventory when the pull completes.
 - **Chains** — a filmstrip editing bench for multi-stage video
   (`mold.chain.v1`): per-stage prompts and frame counts (validated `8n+1`),
   splice transitions (smooth / cut / fade) you click to cycle, a live

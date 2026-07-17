@@ -12,6 +12,14 @@ pub mod updater;
 
 use tauri::Manager;
 
+fn app_window_title(is_development: bool) -> &'static str {
+    if is_development {
+        "Mold - dev"
+    } else {
+        "Mold"
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn preferred_linux_gdk_backend(
     wayland_display: Option<&str>,
@@ -81,6 +89,9 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(move |app| {
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_title(app_window_title(cfg!(debug_assertions)))?;
+            }
             let menu = menu::build(app.handle())?;
             app.set_menu(menu)?;
             app.manage(commands::SettingsStore::load(app.handle())?);
@@ -192,5 +203,16 @@ mod tests {
     fn linux_disables_webkit_dmabuf_unless_explicitly_configured() {
         assert_eq!(preferred_linux_dmabuf_setting(None), Some("1"));
         assert_eq!(preferred_linux_dmabuf_setting(Some("0")), None);
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::app_window_title;
+
+    #[test]
+    fn development_window_title_is_distinct_from_release() {
+        assert_eq!(app_window_title(true), "Mold - dev");
+        assert_eq!(app_window_title(false), "Mold");
     }
 }

@@ -78,6 +78,7 @@ fn spawn_test_driver(
 #[derive(Clone, Default)]
 struct FakePuller {
     pub called: Arc<AtomicBool>,
+    pub hf_fallback_token: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -124,6 +125,17 @@ impl PullDriver for FakePuller {
         }
         Ok(())
     }
+
+    async fn pull_with_token_provider(
+        &self,
+        model: &str,
+        hf_fallback_token: crate::downloads::HfFallbackTokenProvider,
+        on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        *self.hf_fallback_token.lock().unwrap() = hf_fallback_token();
+        self.pull(model, on_progress, cancel).await
+    }
 }
 
 #[tokio::test]
@@ -138,7 +150,10 @@ async fn driver_happy_path_emits_started_progress_jobdone() {
 
     // Enqueue with a manifest-known model so validation passes. Use a model
     // that's cheap to resolve — the real pull is replaced by the fake.
-    let (id, _pos, _outcome) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+    let (id, _pos, _outcome) = queue
+        .enqueue_with_hf_fallback("flux-schnell:q4".into(), Some("hf_desktop".into()))
+        .await
+        .unwrap();
 
     // Collect events for up to 2 seconds.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -168,6 +183,11 @@ async fn driver_happy_path_emits_started_progress_jobdone() {
     assert!(
         puller.called.load(Ordering::SeqCst),
         "puller was not invoked"
+    );
+    assert_eq!(
+        *puller.hf_fallback_token.lock().unwrap(),
+        Some("hf_desktop".into()),
+        "request-scoped HF fallback was not forwarded to the pull driver"
     );
     assert!(seen_started, "missing Started event");
     assert!(seen_progress, "missing Progress event");
@@ -288,6 +308,104 @@ async fn cancel_queued_moves_to_history_and_emits_cancelled() {
     assert_eq!(listing.queued.len(), 1);
     assert_eq!(listing.queued[0].id, id_a);
     assert_eq!(listing.history.last().unwrap().status, JobStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn cancel_queued_forgets_request_scoped_hf_token() {
+    let queue = DownloadQueue::new_for_test();
+    let (id, _, _) = queue
+        .enqueue_with_hf_fallback("flux-schnell:q4".into(), Some("hf_desktop".into()))
+        .await
+        .unwrap();
+
+    assert!(queue.cancel(&id).await);
+    assert_eq!(queue.hf_fallback_token(&id), None);
+}
+
+#[tokio::test]
+async fn duplicate_queued_request_can_add_request_scoped_hf_token() {
+    let queue = DownloadQueue::new_for_test();
+    let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+    let (duplicate_id, _, outcome) = queue
+        .enqueue_with_hf_fallback("flux-schnell:q4".into(), Some("hf_desktop".into()))
+        .await
+        .unwrap();
+
+    assert_eq!(duplicate_id, id);
+    assert_eq!(outcome, crate::downloads::EnqueueOutcome::AlreadyPresent);
+    assert_eq!(queue.hf_fallback_token(&id).as_deref(), Some("hf_desktop"));
+}
+
+#[derive(Clone, Default)]
+struct LateTokenPuller {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    seen: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[async_trait::async_trait]
+impl PullDriver for LateTokenPuller {
+    async fn pull(
+        &self,
+        _model: &str,
+        _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        _cancel: CancellationToken,
+    ) -> Result<(), String> {
+        Err("late-token test requires provider path".into())
+    }
+
+    async fn pull_with_token_provider(
+        &self,
+        _model: &str,
+        hf_fallback_token: crate::downloads::HfFallbackTokenProvider,
+        _on_progress: Box<dyn Fn(mold_core::download::DownloadProgressEvent) + Send + Sync>,
+        _cancel: CancellationToken,
+    ) -> Result<(), String> {
+        self.started.notify_one();
+        self.release.notified().await;
+        let token = hf_fallback_token();
+        *self.seen.lock().unwrap() = token.clone();
+        token
+            .map(|_| ())
+            .ok_or_else(|| "missing fallback token".into())
+    }
+}
+
+#[tokio::test]
+async fn duplicate_active_request_supplies_late_token_to_running_driver() {
+    let queue = DownloadQueue::new_for_test();
+    let puller = LateTokenPuller::default();
+    let shutdown = CancellationToken::new();
+    let driver = spawn_test_driver(queue.clone(), Arc::new(puller.clone()), shutdown.clone());
+    let mut events = queue.subscribe();
+    let (id, _, _) = queue.enqueue("flux-schnell:q4".into()).await.unwrap();
+    puller.started.notified().await;
+
+    let (duplicate_id, position, outcome) = queue
+        .enqueue_with_hf_fallback("flux-schnell:q4".into(), Some("hf_desktop".into()))
+        .await
+        .unwrap();
+
+    assert_eq!(duplicate_id, id);
+    assert_eq!(position, 0);
+    assert_eq!(outcome, crate::downloads::EnqueueOutcome::AlreadyPresent);
+    puller.release.notify_one();
+
+    let completed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(DownloadEvent::JobDone { id: completed, .. }) = events.recv().await {
+                if completed == id {
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+    shutdown.cancel();
+    let _ = driver.await;
+
+    assert!(completed.is_ok(), "late-token pull did not complete");
+    assert_eq!(puller.seen.lock().unwrap().as_deref(), Some("hf_desktop"));
 }
 
 #[tokio::test]

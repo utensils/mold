@@ -73,6 +73,21 @@ Pre-built binaries on the [releases page](https://github.com/utensils/mold/relea
 
 </details>
 
+## Desktop app
+
+Mold also has a native desktop app for macOS and Linux. It brings Generate,
+Gallery, Models, Chains, History, Jobs, RunPod, and Settings into one interface,
+and can use this device alongside multiple remote Mold hosts. The unified model
+library keeps installed models first, supports Grid and Table layouts, and lets
+you choose which host receives a download.
+
+**[Download Mold for macOS](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** · **[Desktop guide](https://utensils.io/mold/guide/desktop)**
+
+The macOS DMG is signed and notarized. Linux builds are currently available
+through Nix or as source/CI artifacts; tagged releases do not publish an
+AppImage yet. Detailed setup, multi-host behavior, and update-channel guidance
+live in the desktop guide.
+
 ## Usage
 
 ```bash
@@ -109,7 +124,7 @@ mold run "neon cityscape" | viu -                     # Pipe to image viewer
 echo "a cat" | mold run flux-schnell                  # Pipe prompt from stdin
 ```
 
-### Terminal UI (beta)
+### Terminal UI
 
 ```bash
 mold tui
@@ -153,49 +168,9 @@ mold runpod network-volume create --name models --size 100 --dc US-KS-2
 mold runpod run "a cat" --network-volume <volume-id>
 ```
 
-`mold runpod run` picks the cheapest available GPU, falls back across
-datacenters if scheduling stalls, streams SSE progress over RunPod's
-Cloudflare proxy, and leaves the pod warm for reuse on the next call.
-See the [RunPod CLI guide](https://utensils.io/mold/deployment/runpod-cli)
-for full subcommand reference (`doctor`, `gpus`, `network-volume`, `list`,
-`create`, `stop`, `delete`, console-log handoff, `usage`, …).
-
-### Native desktop
-
-**[Download the signed DMG](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** (Apple Silicon; notarized and stapled — drag to Applications).
-
-The experimental Tauri desktop app in `desktop/` embeds the Metal engine on
-macOS or the CUDA engine on Linux and keeps it available as an authenticated,
-mDNS-discoverable LAN server even when the app uses a remote primary. It can
-also reuse any local `mold serve` already on port 7680. Connected-host models
-form one picker, so a model installed only on a remote box can be selected and
-routed there without a local download. Linux developers can use `desktop-dev`;
-`desktop-build` creates an AppImage on conventional Linux or the native Nix
-package on NixOS via `nix build .#mold-desktop`. It includes Generate, a
-local/remote
-Gallery, parallel model downloads with real cancellation, chains, model
-catalog browsing, history, and a full settings bench. Its RunPod workspace can
-launch and manage pods and persistent network volumes without leaving the app.
-
-Signed macOS desktop builds check for updates when they open, show a persistent banner
-when one is available, and send a native notification while the app is in the
-background. A check never installs anything. Choose **Stable** (tagged releases)
-or **Nightly** (signed builds from desktop-relevant commits on `main`) in
-**Settings → Updates**, run **Check for updates** whenever you want, then
-explicitly choose **Update and restart**. Before changing the installed app,
-Mold downloads and verifies the complete archive, extracts it to temporary
-storage, checks its Minisign and Apple signatures, Gatekeeper assessment, bundle
-identity/version, current install identity, and replacement permissions. Only a
-fully verified update is installed; otherwise the running version remains in
-place. There is no post-launch watchdog or automatic rollback. Moving from
-Nightly back to Stable never silently downgrades the app—if the nightly is newer,
-Mold waits for a newer Stable build.
-
-Still images expose **Copy image** from their right-click menus at full
-resolution. The complete interface—including fixed overlays and those context
-menus—scales from 80–130% with **Cmd/Ctrl++**, **Cmd/Ctrl+−**, **Cmd/Ctrl+0**, the View menu, or
-Settings → Appearance & app, and restores the selected scale on relaunch.
-See the [desktop guide](https://utensils.io/mold/guide/desktop).
+`mold runpod run` selects an available GPU, streams progress, and keeps the pod
+warm for reuse. See the [RunPod CLI guide](https://utensils.io/mold/deployment/runpod-cli)
+for provisioning, storage, diagnostics, and lifecycle commands.
 
 See the full [CLI reference](https://utensils.io/mold/guide/cli-reference), [configuration guide](https://utensils.io/mold/guide/configuration), and [model catalog](https://utensils.io/mold/models/) in the documentation.
 
@@ -221,53 +196,6 @@ Bare names auto-resolve: `mold run flux-schnell "a cat"` picks the best availabl
 
 See the full [model catalog](https://utensils.io/mold/models/) for sizes, VRAM requirements, and recommended settings.
 
-### LTX Video
-
-Current supported LTX checkpoints are:
-
-- `ltx-video-0.9.6:bf16`
-- `ltx-video-0.9.6-distilled:bf16`
-- `ltx-video-0.9.8-2b-distilled:bf16`
-- `ltx-video-0.9.8-13b-dev:bf16`
-- `ltx-video-0.9.8-13b-distilled:bf16`
-
-Recommended default today: `ltx-video-0.9.6-distilled:bf16`.
-
-The `0.9.8` models pull the required spatial-upscaler asset automatically and
-now run the full multiscale refinement path. mold keeps the shared T5 assets
-under `shared/flux/...`, stores the `0.9.8` spatial upscaler under
-`shared/LTX-Video/...`, and intentionally continues using the compatible
-`LTX-Video-0.9.5` VAE source until the newer VAE layout is ported.
-
-### LTX-2 / LTX-2.3
-
-Current supported LTX-2 checkpoints are:
-
-- `ltx-2-19b-dev:fp8`
-- `ltx-2-19b-distilled:fp8`
-- `ltx-2.3-22b-dev:fp8`
-- `ltx-2.3-22b-distilled:fp8`
-
-Recommended default today: `ltx-2-19b-distilled:fp8`.
-
-This family is separate from `ltx-video`: it defaults to MP4, supports
-synchronized audio, audio-to-video, keyframe interpolation, retake workflows,
-stacked LoRAs, and camera-control LoRAs. The implementation is native Rust in
-`mold-inference` with no Python bridge or upstream checkout requirement. CUDA
-is the supported backend for real local generation, CPU is a correctness-only
-fallback, and Metal is explicitly unsupported for this family. On 24 GB Ada
-GPUs such as the RTX 4090, mold uses native staged loading, layer streaming,
-and the compatible `fp8-cast` path for local FP8 runs rather than Hopper-only
-`fp8-scaled-mm`. The native CUDA acceptance matrix is now validated across 19B
-and 22B text+audio-video, image-to-video, audio-to-video, keyframe, retake,
-public IC-LoRA, spatial upscaling (`x1.5` / `x2` where published), and
-temporal upscaling (`x2`). The shared Gemma text assets are gated on Hugging
-Face, so `mold pull` requires approved access to
-`google/gemma-3-12b-it-qat-q4_0-unquantized`.
-When you send source media through `mold serve`, the built-in request body
-limit is `64 MiB`, which is enough for common retake and audio-to-video
-requests without changing server config.
-
 ## Features
 
 - **txt2img, img2img, multimodal edit, inpainting** — full generation pipeline
@@ -286,15 +214,17 @@ requests without changing server config.
 - **REST API** — `mold serve` with SSE streaming, auth, rate limiting
 - **Discord bot** — slash commands with role permissions and quotas
 - **Interactive TUI** — generate, gallery, models, settings
+- **Native desktop** — local and multi-host generation, gallery, model library,
+  chains, history, jobs, RunPod, and settings
 
 ## Deployment
 
-| Method              | Guide                                                                          |
-| ------------------- | ------------------------------------------------------------------------------ |
-| **NixOS module**    | [Deployment: NixOS](https://utensils.io/mold/deployment/nixos)          |
-| **Docker / RunPod** | [Deployment: Docker](https://utensils.io/mold/deployment/docker)        |
+| Method              | Guide                                                                    |
+| ------------------- | ------------------------------------------------------------------------ |
+| **NixOS module**    | [Deployment: NixOS](https://utensils.io/mold/deployment/nixos)           |
+| **Docker / RunPod** | [Deployment: Docker](https://utensils.io/mold/deployment/docker)         |
 | **mold runpod CLI** | [Deployment: RunPod CLI](https://utensils.io/mold/deployment/runpod-cli) |
-| **Systemd**         | [Deployment: Overview](https://utensils.io/mold/deployment/)            |
+| **Systemd**         | [Deployment: Overview](https://utensils.io/mold/deployment/)             |
 
 ## How it works
 

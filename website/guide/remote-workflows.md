@@ -50,7 +50,10 @@ or `MOLD_MDNS=0` (for example on a shared or untrusted LAN). Loopback-only binds
 1. `mold pull` models on the GPU host, not from every client machine.
 2. Keep the server running so models stay warm between requests.
 3. Use `mold ps` to confirm the client can reach the server.
-4. Set `HF_TOKEN` on the server if you use gated Hugging Face repos.
+4. Set `HF_TOKEN` / `CIVITAI_TOKEN` on the server for gated models, or save the
+   tokens in Desktop Settings → Accounts. For remote catalog searches and
+   pulls, the desktop sends its local token as a request-scoped fallback when
+   the server has no working token; the server's own credential remains first.
 
 ## OpenClaw and Discord
 

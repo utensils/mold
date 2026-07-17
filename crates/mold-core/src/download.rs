@@ -269,6 +269,14 @@ fn resolve_hf_token() -> Option<String> {
         .or_else(|| Cache::from_env().token())
 }
 
+fn resolve_hf_token_for(explicit_token: Option<&str>) -> Option<String> {
+    explicit_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .or_else(resolve_hf_token)
+}
+
 /// Resolve the mold models directory. Computed once from config on first access.
 /// Resolution order: `MOLD_MODELS_DIR` env var → config `models_dir` → `~/.mold/models`.
 ///
@@ -802,10 +810,18 @@ pub async fn pull_model(
     manifest: &ModelManifest,
     opts: &PullOptions,
 ) -> Result<ModelPaths, DownloadError> {
+    pull_model_with_hf_token(manifest, opts, None).await
+}
+
+async fn pull_model_with_hf_token(
+    manifest: &ModelManifest,
+    opts: &PullOptions,
+    hf_token: Option<&str>,
+) -> Result<ModelPaths, DownloadError> {
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
-    if let Some(token) = resolve_hf_token() {
+    if let Some(token) = resolve_hf_token_for(hf_token) {
         builder = builder.with_token(Some(token));
     }
     let api = builder.build()?;
@@ -866,10 +882,19 @@ pub async fn pull_model_with_callback(
     callback: DownloadProgressCallback,
     opts: &PullOptions,
 ) -> Result<ModelPaths, DownloadError> {
+    pull_model_with_callback_and_hf_token(manifest, callback, opts, None).await
+}
+
+async fn pull_model_with_callback_and_hf_token(
+    manifest: &ModelManifest,
+    callback: DownloadProgressCallback,
+    opts: &PullOptions,
+    hf_token: Option<&str>,
+) -> Result<ModelPaths, DownloadError> {
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
-    if let Some(token) = resolve_hf_token() {
+    if let Some(token) = resolve_hf_token_for(hf_token) {
         builder = builder.with_token(Some(token));
     }
     let api = builder.build()?;
@@ -980,10 +1005,18 @@ async fn pull_model_files_only(
     manifest: &ModelManifest,
     opts: &PullOptions,
 ) -> Result<(), DownloadError> {
+    pull_model_files_only_with_hf_token(manifest, opts, None).await
+}
+
+async fn pull_model_files_only_with_hf_token(
+    manifest: &ModelManifest,
+    opts: &PullOptions,
+    hf_token: Option<&str>,
+) -> Result<(), DownloadError> {
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
-    if let Some(token) = resolve_hf_token() {
+    if let Some(token) = resolve_hf_token_for(hf_token) {
         builder = builder.with_token(Some(token));
     }
     let api = builder.build()?;
@@ -1026,16 +1059,16 @@ async fn pull_model_files_only(
     Ok(())
 }
 
-/// Download all files for a utility model, reporting progress via callback.
-async fn pull_model_files_only_with_callback(
+async fn pull_model_files_only_with_callback_and_hf_token(
     manifest: &ModelManifest,
     callback: DownloadProgressCallback,
     opts: &PullOptions,
+    hf_token: Option<&str>,
 ) -> Result<(), DownloadError> {
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
-    if let Some(token) = resolve_hf_token() {
+    if let Some(token) = resolve_hf_token_for(hf_token) {
         builder = builder.with_token(Some(token));
     }
     let api = builder.build()?;
@@ -1387,6 +1420,18 @@ pub async fn pull_and_configure_with_callback(
     callback: DownloadProgressCallback,
     opts: &PullOptions,
 ) -> Result<(crate::Config, Option<ModelPaths>), DownloadError> {
+    pull_and_configure_with_callback_and_hf_token(model, callback, opts, None).await
+}
+
+/// Download a model with a request-scoped Hugging Face token. The explicit
+/// token takes precedence over environment and token-file credentials for this
+/// call only, without expanding the stable public [`PullOptions`] struct.
+pub async fn pull_and_configure_with_callback_and_hf_token(
+    model: &str,
+    callback: DownloadProgressCallback,
+    opts: &PullOptions,
+    hf_token: Option<&str>,
+) -> Result<(crate::Config, Option<ModelPaths>), DownloadError> {
     use crate::config::Config;
     use crate::manifest::{find_manifest, resolve_model_name};
 
@@ -1398,14 +1443,16 @@ pub async fn pull_and_configure_with_callback(
 
     // Utility models (e.g., qwen3-expand) have no VAE and don't need config entries.
     if manifest.is_utility() {
-        pull_model_files_only_with_callback(manifest, callback, opts).await?;
+        pull_model_files_only_with_callback_and_hf_token(manifest, callback, opts, hf_token)
+            .await?;
         let config = Config::load_or_default();
         return Ok((config, None));
     }
 
     // Upscaler models: download files, create minimal config with weights path.
     if manifest.is_upscaler() {
-        pull_model_files_only_with_callback(manifest, callback, opts).await?;
+        pull_model_files_only_with_callback_and_hf_token(manifest, callback, opts, hf_token)
+            .await?;
 
         let mdir = models_dir();
         let weights_file = manifest
@@ -1429,7 +1476,7 @@ pub async fn pull_and_configure_with_callback(
         return Ok((config, None));
     }
 
-    let paths = pull_model_with_callback(manifest, callback, opts).await?;
+    let paths = pull_model_with_callback_and_hf_token(manifest, callback, opts, hf_token).await?;
 
     let mut config = Config::load_or_default();
     let model_config = manifest.to_model_config(&paths);

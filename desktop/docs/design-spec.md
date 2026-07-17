@@ -78,7 +78,7 @@ Native single window, minimum 1080×700 and default 1360×860. macOS uses `title
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
-│ ●●●  MOLD                                    ⌘K Search or run a command…   │  ← overlay titlebar (drag region)
+│ ●●●  mold                                    ⌘K Search or run a command…   │  ← overlay titlebar (drag region)
 ├───────────────┬────────────────────────────────────────────────────────────┤
 │  ▸ Generate ⌘1│                                                            │
 │    Gallery  ⌘2│                                                            │
@@ -138,7 +138,7 @@ Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector
 ```
 
 - **Prompt composer:** multiline, Schibsted 15px, grows to 6 lines. `⌘↩` generates from anywhere. **Expand** (`POST /api/expand`) runs inline: expanded text types into the field with a Halide underline; `⌘Z` restores the original (`original_prompt` preserved on the request). Negative prompt is a collapsible second field shown _only_ for CFG families (sd15/sdxl/sd3/wuerstchen) — capability-gated, not merely disabled.
-- **Model picker:** popover with installed models grouped by family; each row shows a **source mark** (HF tile / Civitai diamond / local disk — neutral currentColor monograms, `SourceGlyph.vue`), the complete model name (wrapping rather than ellipsizing), multi-host availability on a secondary line when present, and a residency dot (Safelight = on GPU; parked/cold states and quant-tag chips remain aspirational). The selected-model control also wraps long names and grows vertically. Footer: **"Browse all models →"** deep-links to `/models?tab=catalog`, where installed entries group at the top under an Installed divider. Selecting a non-installed catalog model queues a pull and shows "Pulls on first generate" (aspirational).
+- **Model picker:** popover with installed models grouped by family; each row shows a **source mark** (HF tile / Civitai diamond / local disk — neutral currentColor monograms, `SourceGlyph.vue`), the complete model name (wrapping rather than ellipsizing), multi-host availability on a secondary line when present, and a residency dot (Safelight = on GPU; parked/cold states and quant-tag chips remain aspirational). The selected-model control also wraps long names and grows vertically. Footer: **"Browse all models →"** deep-links to `/models`, where one searchable library places Installed above the live Catalog and filters the surface by All / Installed / Available.
 - **Per-family parameter panels:** the inspector is generated from the capability matrix. Scheduler row exists only for sd15/sdxl; CFG++ toggle only for sd3/sdxl/sd15+DDIM (with hint "Lower guidance to 1.5–2.5"); frames/fps/audio/pipeline/keyframes appear only for ltx-video/ltx2; edit-images multi-drop only for qwen-image-edit (batch locked to 1 with an inline reason). Unsupported controls are absent, not grayed — the panel _is_ the family's contract. Width/height snap to /16, the ⇄ button swaps them, and the size block pairs model-native quick presets with a live proportion diagram labeled by aspect ratio and Square/Portrait/Landscape orientation. The Qwen lists mirror the core's recommended buckets, including native 1328×1328. A megapixel readout warns (`x-mold-dimension-warning` surfaced post-hoc too).
 - **Empty canvas:** before the first job, the media surface shows a quiet print glyph, **No print yet**, and one sentence pointing the user to the model, prompt, and Generate controls. It must read as an intentional placeholder in every theme, not as a failed black preview.
 - **LoRA stack:** vertical list of chips with per-adapter scale sliders, drag-to-reorder, ✕ to remove. "+ Add LoRA" opens a picker fed by `GET /api/loras?model=` (family-filtered); Civitai entries show `trained_words` as tappable chips that insert trigger phrases into the prompt.
@@ -186,10 +186,11 @@ Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector
 
 ### 4.3 Models — the chemistry shelf
 
-Two tabs: **Installed** and **Catalog**, plus a persistent **Downloads** tray.
+One installed-first model library with **All / Installed / Available** filters,
+plus a persistent **Downloads** tray.
 
 ```
-│ MODELS      [Installed 14 · 96 GB]  [Catalog]                 [Search ⌘F]  │
+│ MODELS   [All] [Installed 14 · 96 GB] [Available]  [Search ⌘F] [Grid|Table]│
 │ ── FLUX ─────────────────────────────────────────────────────────────────  │
 │ ◉ flux-dev        q8    11.8 GB  ▓▓▓▓▓▓▓░░  ● on GPU     [Load][Info][✕]  │
 │   flux-schnell    q4     6.4 GB  ▓▓▓░░░░░░               [Load][Info][✕]  │
@@ -198,9 +199,9 @@ Two tabs: **Installed** and **Catalog**, plus a persistent **Downloads** tray.
 │ ── SHARED COMPONENTS ────────────────────  t5-xxl 9.2 GB · clip-l 1.7 GB   │
 ```
 
-- **Installed:** grouped by family; rows show quant chip, disk usage bar (proportional, Halide), residency dot, per-row actions. **Info** expands components (`/api/models/:model/components`) with per-component download/verify state and a "Verify checksums" action. Removing warns about shared components: "Keeps t5-xxl (used by 3 models)."
-- **Catalog:** search field + chips for **Source** (HF / Civitai), **Family**, **Kind** (checkpoint/lora/…), NSFW toggle (off by default, remembered), paged results from `/api/catalog/search`. Result cards: name, author, family chip, **SIZE vs FETCH** rendered honestly — `SIZE 23.9 GB · FETCH 8.1 GB` in Martian Mono with a caption "8.1 GB to download; the rest is shared components you already have." Variant selector (q4/q6/q8/bf16…) is a segmented chip row with per-variant sizes. Pull button label: **"Pull q8 · 8.1 GB"**.
-- **Downloads tray:** slides up from the Bench rail while `/api/downloads/stream` has activity: up to two active downloads plus the remaining queue, per-download progress (bytes + %), and cancellation (✕ → `DELETE /api/downloads/:id`) that stays visibly pending until the engine confirms termination. Companion downloads remain grouped under their primary. Progress bars here are plain Safelight fills; the Develop is reserved for generation.
+- **Installed models:** surface first; rows show quant chip, disk usage, residency, and per-row actions. **Info** expands components (`/api/models/:model/components`) with per-component download/verify state and a "Verify checksums" action. Removing warns about shared components: "Keeps t5-xxl (used by 3 models)."
+- **Available models:** share the same search and layout controls. Grid cards use a bounded preview height and responsive 260px minimum columns; Table rows favor names, source, family, popularity, size, and the Pull action. Civitai previews use one cache-stable 512 px CDN derivative in both layouts, async lazy decoding, and per-card layout/paint containment; the desktop also normalizes raw preview URLs returned by older remote servers. Missing or failed previews use a local family-aware mark at the same dimensions so cards keep their visual rhythm without another fetch. Source, Family, and NSFW filters refine paged `/api/catalog/search` results. Pulling with several ready hosts opens a labelled target dialog; a single-host setup starts immediately. Result cards keep **SIZE vs FETCH** honest.
+- **Downloads tray:** slides up from the Bench rail while any connected host's `/api/downloads/stream` has activity: up to two active downloads per host plus each remaining queue, per-download host label and progress (bytes + %), and cancellation (✕ → that host's `DELETE /api/downloads/:id`) that stays visibly pending until the engine confirms termination. Companion downloads remain grouped under their primary. Progress bars here are plain Safelight fills; the Develop is reserved for generation.
 - Built-in catalog entries and `hf:`/`cv:` live entries are visually identical; the id chip (`cv:12345`) is copyable.
 
 ### 4.4 Chains — the editing bench (mold.chain.v1)

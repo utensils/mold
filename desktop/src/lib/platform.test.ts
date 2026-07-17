@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { platformUi, primaryModifierPressed } from "./platform";
+import { detectPlatform, platformUi, primaryModifierPressed } from "./platform";
+
+describe("detectPlatform", () => {
+  it("falls back to the browser platform when the Tauri build variable is unavailable", () => {
+    expect(detectPlatform(undefined, "MacIntel", true)).toBe("macos");
+  });
+
+  it("prefers the Tauri build platform over the browser fallback", () => {
+    expect(detectPlatform("linux", "MacIntel", true)).toBe("linux");
+  });
+
+  it("keeps ordinary browser previews platform-neutral", () => {
+    expect(detectPlatform(undefined, "MacIntel", false)).toBe("unknown");
+  });
+});
 
 describe("platformUi", () => {
   it("uses Command conventions on macOS", () => {

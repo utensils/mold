@@ -6,6 +6,7 @@ import { PLATFORM_UI } from "../lib/platform";
 import type { GpuInfo, ServerStatus } from "../lib/api/types";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
+import { useDownloadsStore } from "./downloads";
 import { useHostModelsStore } from "./hostModels";
 import { useToastStore } from "./toasts";
 
@@ -234,6 +235,7 @@ export const useHostsStore = defineStore("hosts", {
     },
     /** Drop a live extra host. Its saved entry and key stay for later. */
     async disconnect(id: string) {
+      useDownloadsStore().unsubscribeHost(id);
       this.extras = this.extras.filter((h) => h.id !== id);
       delete this.telemetry[id];
       const settings = await ipc.appSettingsGet();

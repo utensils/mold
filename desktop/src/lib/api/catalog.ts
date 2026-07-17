@@ -1,5 +1,6 @@
-import { apiFetch, apiJson } from "./client";
+import { apiFetchTo, apiJsonTo, currentTarget, type ApiTarget } from "./client";
 import { isCatalogId } from "../catalog";
+import { catalogCredentialHeaders } from "../catalogCredentials";
 import type { CatalogDownloadResponse, CatalogFamily, CatalogSearchResponse } from "./types";
 
 export interface CatalogSearchParams {
@@ -12,7 +13,10 @@ export interface CatalogSearchParams {
   page_size?: number | undefined;
 }
 
-export function searchCatalog(params: CatalogSearchParams): Promise<CatalogSearchResponse> {
+export async function searchCatalog(
+  params: CatalogSearchParams,
+  forwardCredentials = false,
+): Promise<CatalogSearchResponse> {
   const query = new URLSearchParams();
   if (params.q) query.set("q", params.q);
   if (params.family) query.set("family", params.family);
@@ -21,11 +25,23 @@ export function searchCatalog(params: CatalogSearchParams): Promise<CatalogSearc
   if (params.include_nsfw != null) query.set("include_nsfw", String(params.include_nsfw));
   if (params.page != null) query.set("page", String(params.page));
   if (params.page_size != null) query.set("page_size", String(params.page_size));
-  return apiJson<CatalogSearchResponse>(`/api/catalog/search?${query.toString()}`);
+  const headers = await catalogCredentialHeaders(forwardCredentials);
+  return apiJsonTo<CatalogSearchResponse>(
+    currentTarget(),
+    `/api/catalog/search?${query.toString()}`,
+    { headers },
+  );
 }
 
-export async function fetchCatalogFamilies(): Promise<string[]> {
-  const res = await apiJson<{ families: CatalogFamily[] }>("/api/catalog/families");
+export async function fetchCatalogFamilies(forwardCredentials = false): Promise<string[]> {
+  const headers = await catalogCredentialHeaders(forwardCredentials);
+  const res = await apiJsonTo<{ families: CatalogFamily[] }>(
+    currentTarget(),
+    "/api/catalog/families",
+    {
+      headers,
+    },
+  );
   return res.families.map((f) => f.family);
 }
 
@@ -35,14 +51,20 @@ export async function fetchCatalogFamilies(): Promise<string[]> {
  * straight to the download queue. The id is placed raw in the path (its colons
  * and slashes are part of the wildcard match — do not URL-encode it).
  */
-export async function startCatalogDownload(id: string): Promise<void> {
+export async function startCatalogDownload(
+  id: string,
+  target: ApiTarget = currentTarget(),
+  forwardCredentials = false,
+): Promise<void> {
+  const headers = await catalogCredentialHeaders(forwardCredentials);
   if (isCatalogId(id)) {
-    await apiFetch(`/api/catalog/${id}/download`, { method: "POST" });
+    await apiFetchTo(target, `/api/catalog/${id}/download`, { method: "POST", headers });
     return;
   }
-  await apiFetch("/api/downloads", {
+  headers.set("Content-Type", "application/json");
+  await apiFetchTo(target, "/api/downloads", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ model: id }),
   });
 }

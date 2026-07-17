@@ -8,6 +8,93 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mold_catalog::sidecar::{sidecar_from_entry, write_sidecar, CatalogSidecar, SIDECAR_FILENAME};
+
+#[test]
+fn forwarded_catalog_credentials_are_trimmed_and_read_from_headers() {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("x-mold-hf-token", "  hf_desktop  ".parse().unwrap());
+    headers.insert("x-mold-civitai-token", "cv_desktop".parse().unwrap());
+
+    let credentials = super::ForwardedCatalogCredentials::from_headers(&headers);
+
+    assert_eq!(credentials.hf.as_deref(), Some("hf_desktop"));
+    assert_eq!(credentials.civitai.as_deref(), Some("cv_desktop"));
+}
+
+#[test]
+fn server_catalog_credentials_are_attempted_before_forwarded_fallbacks() {
+    assert_eq!(
+        super::credential_candidates(Some("server".into()), Some("desktop")),
+        vec![Some("server".into()), Some("desktop".into())]
+    );
+    assert_eq!(
+        super::credential_candidates(None, Some("desktop")),
+        vec![Some("desktop".into())]
+    );
+}
+
+#[test]
+fn combined_search_replaces_each_rejected_server_credential() {
+    let forwarded = super::ForwardedCatalogCredentials {
+        hf: Some("hf_desktop".into()),
+        civitai: Some("cv_desktop".into()),
+    };
+    let mut opts = mold_catalog::live::LiveSearchOpts {
+        civitai_token: Some("cv_server".into()),
+        hf_token: Some("hf_server".into()),
+        ..Default::default()
+    };
+    let civitai_error = mold_catalog::live::LiveSearchError::Upstream {
+        host: "civitai.com",
+        status: 401,
+        body: "stale".into(),
+    };
+    let hf_error = mold_catalog::live::LiveSearchError::Upstream {
+        host: "huggingface.co",
+        status: 403,
+        body: "stale".into(),
+    };
+
+    assert!(super::replace_failed_search_credential(
+        &civitai_error,
+        &mut opts,
+        &forwarded,
+    ));
+    assert_eq!(opts.civitai_token.as_deref(), Some("cv_desktop"));
+    assert!(super::replace_failed_search_credential(
+        &hf_error, &mut opts, &forwarded,
+    ));
+    assert_eq!(opts.hf_token.as_deref(), Some("hf_desktop"));
+    assert!(super::replace_failed_search_credential(
+        &hf_error, &mut opts, &forwarded,
+    ));
+    assert_eq!(opts.hf_token, None);
+    assert!(!super::replace_failed_search_credential(
+        &hf_error, &mut opts, &forwarded,
+    ));
+}
+
+#[test]
+fn combined_search_retries_without_auth_when_the_server_credential_is_rejected() {
+    let forwarded = super::ForwardedCatalogCredentials::default();
+    let mut opts = mold_catalog::live::LiveSearchOpts {
+        hf_token: Some("hf_server".into()),
+        ..Default::default()
+    };
+    let error = mold_catalog::live::LiveSearchError::Upstream {
+        host: "huggingface.co",
+        status: 401,
+        body: "stale".into(),
+    };
+
+    assert!(super::replace_failed_search_credential(
+        &error, &mut opts, &forwarded,
+    ));
+    assert_eq!(opts.hf_token, None);
+    assert!(!super::replace_failed_search_credential(
+        &error, &mut opts, &forwarded,
+    ));
+}
 use tower::ServiceExt;
 use wiremock::matchers::{method, path as wm_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

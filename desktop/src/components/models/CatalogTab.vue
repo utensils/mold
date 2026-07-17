@@ -1,17 +1,26 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useDownloadsStore } from "../../stores/downloads";
+import { useConnectionStore } from "../../stores/connection";
+import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import { ApiError } from "../../lib/api/client";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
 import { sortInstalledFirst } from "../../lib/catalog";
 import CatalogCard from "./CatalogCard.vue";
+import DownloadTargetDialog from "./DownloadTargetDialog.vue";
 import type { CatalogEntry } from "../../lib/api/types";
 
-const props = defineProps<{ query: string }>();
+const props = defineProps<{
+  query: string;
+  layout: "grid" | "table";
+  excludeInstalled?: boolean;
+}>();
 
 const downloads = useDownloadsStore();
 const toasts = useToastStore();
+const conn = useConnectionStore();
+const hosts = useHostsStore();
 
 const PAGE_SIZE = 24;
 type Source = "all" | "hf" | "civitai";
@@ -27,13 +36,15 @@ const hasMore = ref(false);
 const loading = ref(false);
 const error = ref<string | null>(null);
 const pulling = ref<Set<string>>(new Set());
+const pendingEntry = ref<CatalogEntry | null>(null);
 
 let debounce: ReturnType<typeof setTimeout> | null = null;
 
 // What you already have surfaces first; the divider marks where "available"
 // begins so installed models are visible at a glance.
-const displayEntries = computed(() => sortInstalledFirst(entries.value));
-const installedCount = computed(() => entries.value.filter((e) => e.installed).length);
+const displayEntries = computed(() =>
+  sortInstalledFirst(entries.value).filter((entry) => !props.excludeInstalled || !entry.installed),
+);
 
 async function runSearch(reset: boolean) {
   if (reset) {
@@ -43,14 +54,17 @@ async function runSearch(reset: boolean) {
   loading.value = true;
   error.value = null;
   try {
-    const res = await searchCatalog({
-      q: props.query || undefined,
-      family: family.value || undefined,
-      source: source.value === "all" ? undefined : source.value,
-      include_nsfw: includeNsfw.value,
-      page: page.value,
-      page_size: PAGE_SIZE,
-    });
+    const res = await searchCatalog(
+      {
+        q: props.query || undefined,
+        family: family.value || undefined,
+        source: source.value === "all" ? undefined : source.value,
+        include_nsfw: includeNsfw.value,
+        page: page.value,
+        page_size: PAGE_SIZE,
+      },
+      conn.mode === "remote",
+    );
     entries.value = reset ? res.entries : [...entries.value, ...res.entries];
     hasMore.value = res.entries.length === PAGE_SIZE;
   } catch (err) {
@@ -71,12 +85,23 @@ function loadMore() {
   void runSearch(false);
 }
 
-async function pull(entry: CatalogEntry) {
+const readyHosts = computed(() =>
+  hosts.all.filter((host) => host.status === "ready" && host.baseUrl),
+);
+
+async function pullTo(entry: CatalogEntry, host: HostView | null) {
   pulling.value.add(entry.id);
   try {
-    await startCatalogDownload(entry.id);
-    toasts.push(`Pulling ${entry.name}`);
-    downloads.subscribe();
+    const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
+    // Attach the snapshot-first stream before enqueueing so a cached,
+    // near-instant pull still produces a visible terminal event and refresh.
+    await downloads.subscribe(host ?? undefined);
+    await startCatalogDownload(
+      entry.id,
+      target,
+      host ? host.kind === "remote" : conn.mode === "remote",
+    );
+    toasts.push(`Pulling ${entry.name}${host ? ` on ${host.label}` : ""}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
       toasts.push(`${entry.name} is already queued.`);
@@ -85,14 +110,23 @@ async function pull(entry: CatalogEntry) {
     }
   } finally {
     pulling.value.delete(entry.id);
+    pendingEntry.value = null;
   }
+}
+
+function pull(entry: CatalogEntry) {
+  if (readyHosts.value.length > 1) {
+    pendingEntry.value = entry;
+    return;
+  }
+  void pullTo(entry, readyHosts.value[0] ?? null);
 }
 
 watch([() => props.query, source, family, includeNsfw], scheduleSearch);
 
 onMounted(async () => {
   try {
-    families.value = await fetchCatalogFamilies();
+    families.value = await fetchCatalogFamilies(conn.mode === "remote");
   } catch {
     /* families are a nicety; search still works without them */
   }
@@ -140,27 +174,21 @@ onMounted(async () => {
     </div>
 
     <!-- Result cards, installed first -->
-    <div v-else class="grid grid-cols-2 gap-2">
-      <template v-for="(entry, index) in displayEntries" :key="entry.id">
-        <div
-          v-if="installedCount > 0 && index === 0"
-          class="col-span-2 flex items-center gap-2"
-          data-test="installed-divider"
-        >
-          <span class="edge-code">Installed</span>
-          <div class="border-edge h-px flex-1 border-t" />
-        </div>
-        <div
-          v-if="
-            installedCount > 0 && installedCount < displayEntries.length && index === installedCount
-          "
-          class="col-span-2 flex items-center gap-2"
-          data-test="available-divider"
-        >
-          <span class="edge-code">Available</span>
-          <div class="border-edge h-px flex-1 border-t" />
-        </div>
-        <CatalogCard :entry="entry" :pulling="pulling.has(entry.id)" @pull="pull" />
+    <div
+      v-else
+      :class="
+        layout === 'grid'
+          ? 'grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-2'
+          : 'flex flex-col gap-1'
+      "
+    >
+      <template v-for="entry in displayEntries" :key="entry.id">
+        <CatalogCard
+          :entry="entry"
+          :pulling="pulling.has(entry.id)"
+          :layout="layout"
+          @pull="pull"
+        />
       </template>
     </div>
 
@@ -173,5 +201,13 @@ onMounted(async () => {
     >
       {{ loading ? "Loading…" : "Load more" }}
     </button>
+
+    <DownloadTargetDialog
+      v-if="pendingEntry"
+      :model-name="pendingEntry.name"
+      :hosts="readyHosts"
+      @close="pendingEntry = null"
+      @select="(host) => pendingEntry && void pullTo(pendingEntry, host)"
+    />
   </div>
 </template>

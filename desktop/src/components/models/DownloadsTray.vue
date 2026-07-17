@@ -10,38 +10,39 @@ const downloads = useDownloadsStore();
     <div class="edge-code mb-2">Downloads</div>
     <div class="flex flex-col gap-2">
       <div
-        v-for="job in downloads.inFlight"
-        :key="job.id"
+        v-for="row in downloads.hostedInFlight"
+        :key="`${row.hostId}:${row.job.id}`"
         class="-mx-1 flex items-center gap-3 rounded-control px-1 transition-colors duration-100 hover:bg-bath"
       >
-        <span class="w-40 shrink-0 truncate text-body text-ink" :title="job.model">
-          {{ job.model }}
+        <span class="w-40 shrink-0 truncate text-body text-ink" :title="row.job.model">
+          {{ row.job.model }}
+          <span v-if="row.hostLabel" class="edge-code ml-1">· {{ row.hostLabel }}</span>
         </span>
         <div
           class="h-1.5 flex-1 overflow-hidden rounded-full bg-bath"
           role="progressbar"
           aria-valuemin="0"
           aria-valuemax="100"
-          :aria-valuenow="percent(job.bytes_done, job.bytes_total)"
-          :aria-label="`Downloading ${job.model}`"
+          :aria-valuenow="percent(row.job.bytes_done, row.job.bytes_total)"
+          :aria-label="`Downloading ${row.job.model}${row.hostLabel ? ` on ${row.hostLabel}` : ''}`"
         >
           <div
             class="h-full bg-safelight transition-[width] duration-300"
-            :style="{ width: `${percent(job.bytes_done, job.bytes_total)}%` }"
+            :style="{ width: `${percent(row.job.bytes_done, row.job.bytes_total)}%` }"
           />
         </div>
         <span class="data-mono w-28 shrink-0 text-right text-ink-3">
-          {{ formatGB(job.bytes_done) }} / {{ formatGB(job.bytes_total) }}
+          {{ formatGB(row.job.bytes_done) }} / {{ formatGB(row.job.bytes_total) }}
         </span>
         <button
           type="button"
           class="text-ink-3 hover:text-stop active:translate-y-px"
           title="Cancel download"
-          :aria-label="`Cancel download of ${job.model}`"
-          :disabled="downloads.cancelling.includes(job.id)"
-          @click="downloads.cancel(job.id)"
+          :aria-label="`Cancel download of ${row.job.model}${row.hostLabel ? ` on ${row.hostLabel}` : ''}`"
+          :disabled="downloads.isCancelling(row.hostId, row.job.id)"
+          @click="downloads.cancel(row.job.id, row.hostId)"
         >
-          {{ downloads.cancelling.includes(job.id) ? "…" : "✕" }}
+          {{ downloads.isCancelling(row.hostId, row.job.id) ? "…" : "✕" }}
         </button>
       </div>
     </div>

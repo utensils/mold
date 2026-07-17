@@ -10,6 +10,10 @@ export interface StreamOptions {
   body?: unknown;
   signal: AbortSignal;
   onEvent: (event: string, data: string) => void;
+  /** Called once the server has accepted the SSE response. */
+  onOpen?: () => void;
+  /** Called when the initial connection cannot be established. */
+  onOpenError?: (error: Error) => void;
   /** Called when the stream ends or errors after retries. */
   onClose?: (error: Error | null) => void;
   /** Retry transient drops (default true for GET snapshots-first streams). */
@@ -28,6 +32,7 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
     body = JSON.stringify(options.body);
   }
   const retriable = options.retry ?? method === "GET";
+  let opened = false;
 
   try {
     await fetchEventSource(`${target.baseUrl}${path}`, {
@@ -36,11 +41,28 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
       ...(body !== undefined ? { body } : {}),
       signal: options.signal,
       openWhenHidden: true,
+      onopen(response) {
+        if (!response.ok) {
+          const error = new Error(`SSE request failed with HTTP ${response.status}`);
+          options.onOpenError?.(error);
+          throw error;
+        }
+        if (!opened) {
+          opened = true;
+          options.onOpen?.();
+        }
+        return Promise.resolve();
+      },
       onmessage(msg) {
         options.onEvent(msg.event || "message", msg.data);
       },
       onerror(err) {
-        if (!retriable) throw err instanceof Error ? err : new Error(String(err));
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (!opened && options.onOpenError) {
+          options.onOpenError(error);
+          throw error;
+        }
+        if (!retriable) throw error;
         // returning undefined lets fetchEventSource retry with backoff
       },
     });
