@@ -26,6 +26,13 @@ grep -Fq "if: github.event_name != 'push'" <<< "$rust_job" \
 grep -Fq 'run: bunx tauri build --debug --bundles app --ci' <<< "$rust_job" \
   || fail "PR bundle proof does not reuse debug test artifacts"
 
+nightly_header="$(sed -n '/^  desktop-nightly:/,/^  publish-desktop-nightly:/p' "$workflow")"
+grep -Fq 'needs: [desktop-frontend, desktop-rust]' <<< "$nightly_header" \
+  || fail "macOS Nightly distribution does not start after its own frontend and Rust gates"
+if grep -Fq 'desktop-linux' <<< "$nightly_header"; then
+  fail "macOS Nightly distribution is still blocked on the Linux AppImage job"
+fi
+
 publisher_header="$(sed -n '/^  publish-desktop-nightly:/,/^    steps:/p' "$workflow")"
 grep -Fq 'group: desktop-nightly-publication' <<< "$publisher_header" \
   || fail "Nightly publication is not serialized"

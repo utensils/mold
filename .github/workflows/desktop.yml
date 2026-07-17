@@ -289,13 +289,15 @@ jobs:
           path: desktop/src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
 
-  # Every desktop-relevant main commit that passes both CI jobs becomes a
-  # signed, notarized nightly. The updater-artifact overlay stays isolated
-  # from the fast debug PR bundle proof above.
+  # Every desktop-relevant main commit that passes the frontend and macOS Rust
+  # gates becomes a signed, notarized nightly. Linux remains an independent
+  # required check so its slower AppImage build cannot delay macOS updates.
+  # The updater-artifact overlay stays isolated from the fast debug PR bundle
+  # proof above.
   desktop-nightly:
     name: Build nightly distribution
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [desktop-frontend, desktop-rust, desktop-linux]
+    needs: [desktop-frontend, desktop-rust]
     uses: ./.github/workflows/desktop-distribution.yml
     with:
       channel: nightly
