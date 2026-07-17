@@ -408,12 +408,31 @@ export interface CatalogCompanionDetail {
   size_bytes?: number | null;
 }
 
+/** One file of a catalog entry's download recipe (`mold-catalog RecipeFile`). */
+export interface CatalogRecipeFile {
+  url: string;
+  dest: string;
+  sha256?: string | null;
+  size_bytes?: number | null;
+  role?: string | null;
+}
+
+/** Primary-download plan for a catalog entry (`mold-catalog DownloadRecipe`). */
+export interface CatalogDownloadRecipe {
+  files: CatalogRecipeFile[];
+  needs_token?: string | null;
+}
+
 /**
- * Minimal subset of a `GET /api/catalog/search` entry the desktop renders.
- * `size_bytes` is the primary weights; `companion_details[].size_bytes` are the
- * shared components. The endpoint does not report which companions are already
- * on disk, so "fetch" is the full weights-plus-companions download (see
- * `lib/catalog.ts`).
+ * Subset of a `GET /api/catalog/search` / `GET /api/catalog/:id` entry the
+ * desktop renders. `size_bytes` is the primary weights;
+ * `companion_details[].size_bytes` are the shared components. The endpoint
+ * does not report which companions are already on disk, so "fetch" is the
+ * full weights-plus-companions download (see `lib/catalog.ts`).
+ *
+ * Every descriptive field past the search-summary core is optional: the
+ * desktop connects to arbitrary-version remote hosts, and older servers omit
+ * them from the wire.
  */
 export interface CatalogEntry {
   id: string;
@@ -424,17 +443,29 @@ export interface CatalogEntry {
   author?: string | null;
   family: string;
   kind: string;
+  /** `"image"` / `"video"`. */
+  modality?: string;
+  /** `"safetensors"` / `"gguf"` / `"diffusers"`. */
+  file_format?: string;
   size_bytes?: number | null;
   download_count?: number | null;
+  rating?: number | null;
   likes?: number | null;
   nsfw: boolean;
   installed: boolean;
   thumbnail_url?: string | null;
   /** Human-facing model page. Additive wire field — absent on older servers. */
   page_url?: string | null;
+  description?: string | null;
+  license?: string | null;
+  tags?: string[];
   trained_words?: string[];
   companions?: string[];
   companion_details?: CatalogCompanionDetail[];
+  /** Primary weights files a pull will fetch (detail drawer itemization). */
+  download_recipe?: CatalogDownloadRecipe;
+  /** `>= 6` marks catalog packages no shipped engine can run yet. */
+  engine_phase?: number;
 }
 
 /** `GET /api/catalog/search` response envelope. */

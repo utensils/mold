@@ -9,6 +9,7 @@ import { isVideoFamily } from "../../lib/capabilities";
 import { sortInstalledFirst } from "../../lib/catalog";
 import { type MediaType } from "../../lib/modelAvailability";
 import CatalogCard from "./CatalogCard.vue";
+import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
 import DownloadTargetDialog from "./DownloadTargetDialog.vue";
 import type { CatalogEntry } from "../../lib/api/types";
 
@@ -47,6 +48,8 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const pulling = ref<Set<string>>(new Set());
 const pendingEntry = ref<CatalogEntry | null>(null);
+/** Entry whose in-app detail drawer is open. */
+const detailEntry = ref<CatalogEntry | null>(null);
 
 let debounce: ReturnType<typeof setTimeout> | null = null;
 
@@ -184,6 +187,15 @@ function pull(entry: CatalogEntry) {
   void pullTo(entry, readyHosts.value[0] ?? null);
 }
 
+/** The detail drawer fetches on the same host the catalog list came from. */
+const detailTarget = computed(() => catalogTarget());
+
+/** Pull (or Repair — same endpoint, missing files only) from the drawer. */
+function pullFromDrawer(entry: CatalogEntry) {
+  detailEntry.value = null;
+  pull(entry);
+}
+
 watch([() => props.query, source, family, includeNsfw], scheduleSearch);
 
 // Flipping to a media chip with no matching entries loaded yet continues the
@@ -280,6 +292,7 @@ onMounted(async () => {
           :pulling="pulling.has(entry.id)"
           :layout="layout"
           @pull="pull"
+          @open="detailEntry = $event"
         />
       </template>
     </div>
@@ -300,6 +313,16 @@ onMounted(async () => {
       :hosts="readyHosts"
       @close="pendingEntry = null"
       @select="(host) => pendingEntry && void pullTo(pendingEntry, host)"
+    />
+
+    <CatalogDetailDrawer
+      v-if="detailEntry"
+      :entry="detailEntry"
+      :pulling="pulling.has(detailEntry.id)"
+      :target="detailTarget.target"
+      :forward-credentials="detailTarget.forward"
+      @close="detailEntry = null"
+      @pull="pullFromDrawer"
     />
   </div>
 </template>

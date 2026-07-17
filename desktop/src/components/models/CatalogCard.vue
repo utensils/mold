@@ -18,15 +18,19 @@ import type { CatalogEntry } from "../../lib/api/types";
 
 /**
  * One catalog search result. Owns its lazy size resolution (HF summary
- * rows arrive without `size_bytes`) and the link-out to the model's page
- * on huggingface.co / civitai.com; install state and the Pull action stay
- * with the parent tab via the `pull` event.
+ * rows arrive without `size_bytes`). Clicking the card body or title emits
+ * `open` — the in-app detail drawer; the external-link icon stays a
+ * secondary action out to huggingface.co / civitai.com. Install state and
+ * the Pull action stay with the parent tab via the `pull` event.
  */
 const props = withDefaults(
   defineProps<{ entry: CatalogEntry; pulling: boolean; layout?: "grid" | "table" }>(),
   { layout: "grid" },
 );
-const emit = defineEmits<{ (e: "pull", entry: CatalogEntry): void }>();
+const emit = defineEmits<{
+  (e: "pull", entry: CatalogEntry): void;
+  (e: "open", entry: CatalogEntry): void;
+}>();
 
 const glyphSource = computed<ModelSource>(() =>
   props.entry.source === "civitai" ? "civitai" : "hf",
@@ -73,10 +77,11 @@ function openPage(): void {
 
 <template>
   <div
-    class="catalog-card-contained border-edge rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench"
+    class="catalog-card-contained border-edge cursor-pointer rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench"
     :class="layout === 'grid' ? 'flex flex-col' : 'flex min-h-16 items-center gap-3 p-2'"
     data-test="catalog-card"
     :data-layout="layout"
+    @click="emit('open', entry)"
   >
     <!-- Civitai preview image (public URL); shimmer while loading and use a
          local family mark when no custom image is available. -->
@@ -110,17 +115,14 @@ function openPage(): void {
         <span class="flex min-w-0 items-center gap-1.5">
           <SourceGlyph :source="glyphSource" :size="16" class="text-ink-3" />
           <button
-            v-if="pageUrl"
             type="button"
             class="truncate text-left text-body text-ink transition-colors duration-100 hover:text-safelight"
-            :title="`${entry.name} — open model page`"
-            @click="openPage"
+            :title="`${entry.name} — view details`"
+            data-test="card-title"
+            @click.stop="emit('open', entry)"
           >
             {{ entry.name }}
           </button>
-          <span v-else class="truncate text-body text-ink" :title="entry.name">{{
-            entry.name
-          }}</span>
         </span>
         <span class="flex shrink-0 items-center gap-1.5">
           <button
@@ -130,7 +132,7 @@ function openPage(): void {
             :aria-label="`Open ${entry.name} model page`"
             title="Open model page"
             data-test="page-link"
-            @click="openPage"
+            @click.stop="openPage"
           >
             <svg
               viewBox="0 0 12 12"
@@ -194,7 +196,7 @@ function openPage(): void {
           data-test="pull"
           class="border-edge h-7 rounded-control border px-2.5 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-50"
           :disabled="pulling"
-          @click="emit('pull', entry)"
+          @click.stop="emit('pull', entry)"
         >
           {{ pulling ? "Pulling…" : layout === "table" ? "Pull" : catalogPullLabel(sizeInfo) }}
         </button>

@@ -121,6 +121,28 @@ describe("CatalogCard", () => {
     expect(openExternalMock).toHaveBeenCalledWith(
       "https://civitai.com/models/9001?modelVersionId=8001",
     );
+    // The external link is a secondary action — it must not open the drawer.
+    expect(wrapper.emitted("open")).toBeUndefined();
+  });
+
+  it("emits open (the detail drawer) from the card body and title, not the browser", async () => {
+    const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
+    await flushPromises();
+
+    await wrapper.get('[data-test="catalog-card"]').trigger("click");
+    await wrapper.get('[data-test="card-title"]').trigger("click");
+    expect(wrapper.emitted("open")).toHaveLength(2);
+    expect(wrapper.emitted("open")?.[0]?.[0]).toMatchObject({ id: "cv:8001" });
+    expect(openExternalMock).not.toHaveBeenCalled();
+  });
+
+  it("does not open the drawer from the Pull button", async () => {
+    const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='pull']").trigger("click");
+    expect(wrapper.emitted("pull")).toHaveLength(1);
+    expect(wrapper.emitted("open")).toBeUndefined();
   });
 
   it("hides the link-out when no page url can be derived", async () => {

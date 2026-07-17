@@ -7,6 +7,7 @@ import { isVideoFamily } from "../../lib/capabilities";
 import { groupInstalledModels, isUtilityModel, modelDiskBytes, quantTag } from "../../lib/models";
 import { modelSource } from "../../lib/modelSource";
 import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../../lib/api/models";
+import { startCatalogDownload } from "../../lib/api/catalog";
 import { ApiError } from "../../lib/api/client";
 import { formatGB, percent } from "../../lib/format";
 import { openExternal } from "../../lib/openExternal";
@@ -119,6 +120,43 @@ function barWidth(m: ModelEntry): string {
 function componentList(name: string): ModelComponentStatus[] {
   const c = components[name];
   return Array.isArray(c) ? c : [];
+}
+
+/** Component rows currently mid-repair, keyed `model/component`. */
+const repairing = ref<Set<string>>(new Set());
+
+function repairKey(m: ModelEntry, c: ModelComponentStatus): string {
+  return `${m.name}/${c.name}`;
+}
+
+/**
+ * Re-fetch a missing component without deleting the model: the download
+ * queue is keyed on the server-provided `repair_model` and skips files
+ * already on disk, so only what's missing is pulled. Targets the same API
+ * host the component listing came from (this view's current target) —
+ * ModelsView already holds the downloads stream open, so progress lands in
+ * the tray. On success the row flips once the listing is re-read.
+ */
+async function repairComponent(m: ModelEntry, c: ModelComponentStatus) {
+  if (!c.repair_model) return;
+  const key = repairKey(m, c);
+  repairing.value.add(key);
+  try {
+    await startCatalogDownload(c.repair_model);
+    toasts.push(`Repairing ${m.name} — re-fetching ${c.name}`);
+    // Re-read presence after the pull lands; cheap and self-healing even if
+    // the download is still in flight (the user can re-open Info later).
+    components[m.name] = (await fetchModelComponents(m.name)).components;
+  } catch (err) {
+    toasts.push(
+      err instanceof ApiError && err.status === 409
+        ? `${c.repair_model} is already queued.`
+        : String(err),
+      "error",
+    );
+  } finally {
+    repairing.value.delete(key);
+  }
 }
 </script>
 
@@ -267,6 +305,17 @@ function componentList(name: string): ModelComponentStatus[] {
               />
               <span class="text-caption text-ink-2">{{ c.name }}</span>
               <span class="edge-code ml-auto">{{ c.kind }}</span>
+              <button
+                v-if="!c.present && c.repair_model"
+                type="button"
+                data-test="component-repair"
+                class="border-edge h-6 shrink-0 rounded-control border px-2 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-40"
+                :disabled="repairing.has(repairKey(m, c))"
+                :title="`Re-download the missing ${c.name} for ${m.name}`"
+                @click="repairComponent(m, c)"
+              >
+                {{ repairing.has(repairKey(m, c)) ? "Repairing…" : "Repair" }}
+              </button>
             </div>
           </div>
         </div>
