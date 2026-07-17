@@ -96,10 +96,23 @@ function hostDot(host: HostView): string {
   }
 }
 
-/** Connect a detected host in place when its key is already stored. */
+/** Connect a detected host in place when its key is already stored — under
+ *  its advertised URL slug, or under the slug of a remembered host with the
+ *  same instance id (a box remembered by hostname is often advertised by IP
+ *  under a different slug). */
 async function connectDetected(host: DiscoveredHost) {
   const id = hostIdFromUrl(host.url);
-  const key = await ipc.secretGet(`remote-api-key.${id}`);
+  let key = await ipc.secretGet(`remote-api-key.${id}`);
+  if (!key && host.instanceId) {
+    try {
+      const saved = (await ipc.appSettingsGet()).savedHosts.find(
+        (s) => s.instanceId === host.instanceId,
+      );
+      if (saved && saved.id !== id) key = await ipc.secretGet(`remote-api-key.${saved.id}`);
+    } catch {
+      // Settings unreadable — fall through to the key prompt.
+    }
+  }
   if (host.authRequired && !key) {
     toasts.push(`${host.name} needs an API key — add it in Settings → Hosts.`);
     void router.push("/settings");

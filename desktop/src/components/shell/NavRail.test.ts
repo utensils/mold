@@ -1,11 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
 import NavRail from "./NavRail.vue";
+import { ipc } from "../../lib/ipc";
 import { useConnectionStore } from "../../stores/connection";
 import { useContextMenuStore, type MenuItem } from "../../stores/contextMenu";
-import { useHostsStore } from "../../stores/hosts";
+import { useHostsStore, type HostView } from "../../stores/hosts";
 
 const stub = { template: "<div />" };
 
@@ -192,6 +193,67 @@ describe("NavRail host context menu", () => {
     expect(labels).not.toContain("Forget");
     expect(labels).not.toContain("Rename…");
     expect(labels).not.toContain("Switch to built-in engine");
+  });
+});
+
+describe("NavRail detected hosts", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("connectDetected finds a stored key under the saved instance-id twin's slug", async () => {
+    // hal9000 was remembered (and keyed) by hostname; mDNS advertises the
+    // same box by IP under a different slug but the same instance id. The
+    // rail must find the stored key instead of bouncing to Settings.
+    const base = await ipc.appSettingsGet();
+    vi.spyOn(ipc, "discoverServers").mockResolvedValue([
+      {
+        name: "hal9000",
+        url: "http://192.168.1.50:7680",
+        host: "192.168.1.50",
+        port: 7680,
+        version: "0.18.0",
+        authRequired: true,
+        instanceId: "uuid-1",
+        isThisMachine: false,
+      },
+    ]);
+    vi.spyOn(ipc, "appSettingsGet").mockResolvedValue({
+      ...base,
+      savedHosts: [
+        {
+          id: "hal9000-7680",
+          name: "hal9000",
+          url: "http://hal9000:7680",
+          lastUsedMs: 1,
+          instanceId: "uuid-1",
+        },
+      ],
+    });
+    vi.spyOn(ipc, "secretGet").mockImplementation((name) =>
+      Promise.resolve(name === "remote-api-key.hal9000-7680" ? "stored-key" : null),
+    );
+    const wrapper = await mountAt("/generate");
+    await flushPromises();
+    const hosts = useHostsStore();
+    const connect = vi.spyOn(hosts, "connect").mockResolvedValue({
+      id: "hal9000-7680",
+      label: "hal9000",
+      kind: "remote",
+      baseUrl: "http://192.168.1.50:7680",
+      apiKey: "stored-key",
+      status: "ready",
+      primary: false,
+      queueDepth: null,
+      queueCapacity: null,
+      version: null,
+      instanceId: "uuid-1",
+    } satisfies HostView);
+    await wrapper.get("[data-test='detected-host-connect']").trigger("click");
+    await flushPromises();
+    expect(connect).toHaveBeenCalledWith("http://192.168.1.50:7680", "stored-key", "hal9000");
+    // Not bounced to Settings for a key the app already holds.
+    expect(router.currentRoute.value.path).toBe("/generate");
   });
 });
 

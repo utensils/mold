@@ -48,6 +48,16 @@ async function testConnection() {
   testResult.value = null;
   try {
     testResult.value = await ipc.testRemoteHost(addUrl.value, addKey.value || null);
+  } catch (err) {
+    // Malformed input rejects before the probe (normalize_host_url) — surface
+    // it in the same slot a failed probe uses instead of failing silently.
+    testResult.value = {
+      ok: false,
+      version: null,
+      error: String(err),
+      instanceId: null,
+      hostname: null,
+    };
   } finally {
     testing.value = false;
   }
@@ -167,9 +177,23 @@ async function scan() {
   }
 }
 
-/** One-click add of a discovered host; focus the key field when it needs one. */
+/** A stored key for a discovered host: its URL slug's secret, or — when the
+ *  advertisement carries an instance id matching a remembered host — that
+ *  saved slug's secret (a box remembered by hostname is often advertised by
+ *  IP under a different slug). */
+async function storedKeyFor(host: DiscoveredHost): Promise<string | null> {
+  const bySlug = await ipc.secretGet(`remote-api-key.${hostIdFromUrl(host.url)}`);
+  if (bySlug) return bySlug;
+  if (!host.instanceId) return null;
+  const saved = savedHosts.value.find((s) => s.instanceId === host.instanceId);
+  return saved ? await ipc.secretGet(`remote-api-key.${saved.id}`) : null;
+}
+
+/** One-click add of a discovered host; a key the app already holds is reused,
+ *  and the key field is only focused when no key exists anywhere. */
 async function addDiscovered(host: DiscoveredHost) {
-  if (host.authRequired && !addKey.value) {
+  const storedKey = addKey.value ? null : await storedKeyFor(host);
+  if (host.authRequired && !addKey.value && !storedKey) {
     addUrl.value = host.url;
     await nextTick();
     addKeyInput.value?.focus();
@@ -178,7 +202,7 @@ async function addDiscovered(host: DiscoveredHost) {
   adding.value = true;
   addError.value = null;
   try {
-    const view = await hosts.connect(host.url, addKey.value || null, host.name);
+    const view = await hosts.connect(host.url, addKey.value || storedKey, host.name);
     toasts.push(`Connected to ${view.label}`);
     addKey.value = "";
     savedHosts.value = (await ipc.appSettingsGet()).savedHosts ?? [];

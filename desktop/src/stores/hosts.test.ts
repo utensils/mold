@@ -417,6 +417,41 @@ describe("hosts store", () => {
     expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("render box");
   });
 
+  it("keeps the last-known hostname label across a failed poll", async () => {
+    installSettings(settings({ savedHosts: [{ ...hal, name: null }], connectedHostIds: [hal.id] }));
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: null,
+      hostname: "hal9000",
+    });
+    const hosts = useHostsStore();
+    await hosts.init();
+    // The boot probe already reported the hostname — the row must not sit on
+    // the raw URL until the first poll.
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("hal9000");
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 0,
+      queue_capacity: 8,
+      version: null,
+      hostname: "hal9000",
+    });
+    await hosts.refresh();
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("hal9000");
+    // A wifi blip fails one poll: telemetry is dropped, but the label must
+    // not flip back to the raw URL until the next successful poll.
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      target.baseUrl.includes("hal9000")
+        ? Promise.reject(new Error("timeout"))
+        : Promise.resolve({ queue_depth: 0, queue_capacity: 8, version: null }),
+    );
+    await hosts.refresh();
+    const row = hosts.all.find((h) => h.id === hal.id);
+    expect(row?.status).toBe("error");
+    expect(row?.label).toBe("hal9000");
+  });
+
   it("disconnect() clears a sticky generation target pointing at the removed host", async () => {
     installSettings(settings({ generateTargetHost: "hal9000-7680" }));
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });

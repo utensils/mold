@@ -186,6 +186,61 @@ describe("HostsSection add flow", () => {
     await flushPromises();
     expect(testRemoteHost).toHaveBeenCalledWith("http://okra:7680", null);
   });
+
+  it("Test connection surfaces invalid-input rejections instead of failing silently", async () => {
+    // The Rust command rejects on malformed input (normalize_host_url) —
+    // the rejection must land in the same error slot the probe uses.
+    testRemoteHost.mockRejectedValueOnce("Enter a valid host.");
+    const wrapper = await mountSection();
+    await wrapper.get('[data-test="add-host-url"]').setValue("hal 9000");
+    const testBtn = wrapper.findAll("button").find((b) => b.text() === "Test connection");
+    await testBtn!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Enter a valid host.");
+  });
+
+  it("adding a discovered host reuses the key stored under its URL slug", async () => {
+    discoverServers.mockResolvedValue([
+      host({ name: "hal9000-7680", url: "http://192.168.1.10:7680", authRequired: true }),
+    ]);
+    secretGet.mockImplementation((name: string) =>
+      Promise.resolve(name === "remote-api-key.192-168-1-10-7680" ? "slug-key" : null),
+    );
+    const wrapper = await mountSection();
+    await wrapper.get('[data-test="discovered-host-add"]').trigger("click");
+    await flushPromises();
+    // No key re-typing: the stored key is used instead of focusing the field.
+    expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.10:7680", "slug-key");
+  });
+
+  it("adding a discovered host reuses the key stored for its saved instance-id twin", async () => {
+    // hal9000 was remembered (and keyed) by hostname; mDNS advertises the
+    // same box by IP under a different slug but the same instance id.
+    savedHosts = [
+      {
+        id: "hal9000-7680",
+        name: "hal9000",
+        url: "http://hal9000:7680",
+        lastUsedMs: 1,
+        instanceId: "uuid-1",
+      },
+    ];
+    discoverServers.mockResolvedValue([
+      host({
+        name: "hal-by-ip",
+        url: "http://192.168.1.10:7680",
+        authRequired: true,
+        instanceId: "uuid-1",
+      }),
+    ]);
+    secretGet.mockImplementation((name: string) =>
+      Promise.resolve(name === "remote-api-key.hal9000-7680" ? "stored-key" : null),
+    );
+    const wrapper = await mountSection();
+    await wrapper.get('[data-test="discovered-host-add"]').trigger("click");
+    await flushPromises();
+    expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.10:7680", "stored-key");
+  });
 });
 
 describe("HostsSection remembered hosts", () => {

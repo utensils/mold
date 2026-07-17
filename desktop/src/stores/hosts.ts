@@ -161,8 +161,9 @@ export const useHostsStore = defineStore("hosts", {
           continue;
         rows.push({
           id: extra.id,
-          // User rename wins; otherwise the server hostname; otherwise the URL.
-          label: this.names[extra.id] ?? t?.hostname ?? extra.label,
+          // User rename wins; otherwise the last-known server hostname (sticky
+          // across failed polls); otherwise the URL.
+          label: this.names[extra.id] ?? hostnameOf(extra.id) ?? extra.label,
           kind: "remote",
           baseUrl: extra.url,
           apiKey: extra.apiKey,
@@ -210,6 +211,9 @@ export const useHostsStore = defineStore("hosts", {
           this.extras.push(extra);
           const live = this.extras.find((h) => h.id === id)!;
           const test = await ipc.testRemoteHost(saved.url, key);
+          // Seed the sticky hostname from the probe so the row is labeled by
+          // the server's name (not the raw URL) before the first poll.
+          if (test.hostname) this.hostnames[id] = test.hostname;
           if (test.ok) {
             live.status = "ready";
           } else {
