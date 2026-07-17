@@ -65,16 +65,25 @@ function startResourceStream() {
   });
 }
 
-/** One-shot status fetch for models-disk stats (and fresher queue fields). */
+let statusAbort: AbortController | null = null;
+
+/** One-shot status fetch for models-disk stats (and fresher queue fields).
+ *  Guarded per request: the :id param retargets this reused component in
+ *  place, and a slow host's late response must never populate the page of
+ *  the host the user navigated to next. */
 async function fetchStatus() {
+  statusAbort?.abort();
+  const abort = new AbortController();
+  statusAbort = abort;
   status.value = null;
   const target = hostTarget();
   if (!target) return;
   try {
-    status.value = await apiJsonTo<ServerStatus>(target, "/api/status");
+    const res = await apiJsonTo<ServerStatus>(target, "/api/status", { signal: abort.signal });
+    if (!abort.signal.aborted) status.value = res;
   } catch {
-    // Unreachable or older server — the storage card simply hides and the
-    // telemetry cards fall back to the polled gpu_info summary.
+    // Unreachable, superseded, or older server — the storage card simply
+    // hides and the telemetry cards fall back to the polled gpu_info summary.
   }
 }
 
@@ -91,6 +100,8 @@ watch(
 onUnmounted(() => {
   resourceAbort?.abort();
   resourceAbort = null;
+  statusAbort?.abort();
+  statusAbort = null;
 });
 onMounted(() => void hostModels.refresh());
 

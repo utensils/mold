@@ -22,6 +22,35 @@ async function openPalette() {
   return wrapper;
 }
 
+describe("CommandPalette command registry", () => {
+  it("navigates to the Catalog for both 'catalog' and 'models' queries", async () => {
+    const wrapper = await openPalette();
+    const input = wrapper.get("input");
+
+    await input.setValue("catalog");
+    let texts = wrapper.findAll("[role='option']").map((o) => o.text());
+    expect(texts.some((t) => t.includes("Go to Catalog"))).toBe(true);
+
+    // Muscle memory: the old "models" name still finds the Catalog entry.
+    await input.setValue("models");
+    texts = wrapper.findAll("[role='option']").map((o) => o.text());
+    expect(texts.some((t) => t.includes("Go to Catalog"))).toBe(true);
+    expect(texts.some((t) => t.includes("Go to Models"))).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("no longer offers the retired 'Switch to built-in engine' command", async () => {
+    // The built-in engine is always the primary now — there is no remote
+    // primary to switch away from; recovery is "Restart engine".
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("engine");
+    const texts = wrapper.findAll("[role='option']").map((o) => o.text());
+    expect(texts.some((t) => t.includes("Switch to built-in engine"))).toBe(false);
+    expect(texts.some((t) => t.includes("Restart engine"))).toBe(true);
+    wrapper.unmount();
+  });
+});
+
 describe("CommandPalette a11y semantics", () => {
   it("is a modal dialog wrapping a combobox and listbox", async () => {
     const wrapper = await openPalette();

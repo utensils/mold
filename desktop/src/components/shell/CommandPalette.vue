@@ -70,7 +70,13 @@ const staticCommands = computed<Command[]>(() => {
     { id: "nav-generate", title: "Go to Generate", run: () => go("/generate") },
     { id: "nav-gallery", title: "Go to Gallery", run: () => go("/gallery") },
     { id: "nav-chains", title: "Go to Chains", run: () => go("/chains") },
-    { id: "nav-models", title: "Go to Models", run: () => go("/models") },
+    {
+      id: "nav-models",
+      title: "Go to Catalog",
+      // "models" keeps the pre-rename muscle memory working.
+      keywords: ["models", "catalog"],
+      run: () => go("/models"),
+    },
     { id: "nav-history", title: "Go to History", run: () => go("/history") },
     {
       id: "nav-runpod",
@@ -96,15 +102,8 @@ const staticCommands = computed<Command[]>(() => {
         go("/generate");
       },
     },
-    {
-      id: "act-engine-local",
-      title: "Switch to built-in engine",
-      keywords: ["local", "engine"],
-      run: () => {
-        void conn.useLocal();
-        close();
-      },
-    },
+    // No "Switch to built-in engine" command: the built-in engine is always
+    // the primary now — recovery is covered by "Restart engine" below.
     {
       id: "act-add-host",
       title: "Add host…",

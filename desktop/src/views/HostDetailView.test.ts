@@ -263,6 +263,55 @@ describe("HostDetailView storage and queue", () => {
   });
 });
 
+describe("HostDetailView stale status responses", () => {
+  it("ignores a late /api/status response from a previously viewed host", async () => {
+    // hal9000 responds slowly (TCP-retry limbo); the user navigates to the
+    // local host before it resolves. The late response must not populate the
+    // local host's page.
+    let resolveHal: ((v: unknown) => void) | null = null;
+    apiJsonTo.mockImplementation((target: unknown, path: string) => {
+      const base = (target as { baseUrl: string }).baseUrl;
+      if (path === "/api/models") return Promise.resolve([]);
+      if (path === "/api/status") {
+        if (base.includes("hal9000")) {
+          return new Promise((resolve) => {
+            resolveHal = resolve;
+          });
+        }
+        return Promise.resolve({
+          version: "0.17.0",
+          models_loaded: [],
+          uptime_secs: 5,
+          models_disk: { total_bytes: 1_000_000_000_000, free_bytes: 900_000_000_000 },
+        });
+      }
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+    const wrapper = await mountView(); // /hosts/hal9000-7680 — status pending
+
+    await router.push("/hosts/local");
+    await flushPromises();
+    expect(wrapper.get("[data-test='storage-card']").text()).toContain(
+      "900.0 GB free of 1000.0 GB",
+    );
+
+    // Seconds later, hal9000's status finally arrives — for the OLD page.
+    resolveHal!({
+      version: "0.9.9",
+      models_loaded: [],
+      uptime_secs: 1,
+      queue_depth: 9,
+      queue_capacity: 9,
+      models_disk: { total_bytes: 2_000_000_000_000, free_bytes: 500_000_000_000 },
+    });
+    await flushPromises();
+
+    const card = wrapper.get("[data-test='storage-card']");
+    expect(card.text()).toContain("900.0 GB free of 1000.0 GB");
+    expect(card.text()).not.toContain("500.0 GB");
+  });
+});
+
 describe("HostDetailView models", () => {
   it("lists this host's installed models with family", async () => {
     const wrapper = await mountView();
