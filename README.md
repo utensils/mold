@@ -79,7 +79,16 @@ Mold also has a native desktop app for macOS and Linux. It brings Generate,
 Gallery, Models, Chains, History, Jobs, RunPod, and Settings into one interface,
 and can use this device alongside multiple remote Mold hosts. The unified
 Catalog keeps installed models above the live catalog with image/video filters
-and pinned downloads, and lets you choose which host receives a download.
+and pinned downloads, and lets you choose which host receives a download. Its
+Installed shelf merges every connected host with host badges, while both that
+screen and each host detail page show host-scoped pull progress. Size labels
+separate checkpoint weights from the larger footprint including shared runtime
+components.
+Curated built-in variants take precedence over ambiguous multi-checkpoint
+Hugging Face repositories, so a pull targets one runnable model instead of an
+entire aggregate repository.
+Every remembered remote host is retried immediately whenever the app launches,
+independently of This Mac's startup; unreachable hosts stay visible and retry.
 
 **[Download Mold for macOS](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** · **[Desktop guide](https://utensils.io/mold/guide/desktop)**
 

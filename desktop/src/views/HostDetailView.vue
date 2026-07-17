@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
+import DownloadsTray from "../components/models/DownloadsTray.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import { formatGB, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
+import { modelSizeLabels } from "../lib/models";
 import { ipc } from "../lib/ipc";
 import type { GpuSnapshot, ResourceSnapshot, ServerStatus } from "../lib/api/types";
 import { useAppPrefsStore } from "../stores/appPrefs";
+import { useDownloadsStore } from "../stores/downloads";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useToastStore } from "../stores/toasts";
@@ -23,6 +26,7 @@ type DetailSnapshot = ResourceSnapshot & {
 const route = useRoute();
 const router = useRouter();
 const appPrefs = useAppPrefsStore();
+const downloads = useDownloadsStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const toasts = useToastStore();
@@ -90,10 +94,18 @@ async function fetchStatus() {
 // Immediate + retargeting: covers first render, the :id param changing in
 // place, and a host whose baseUrl appears after a late connect.
 watch(
-  () => [hostId.value, host.value?.baseUrl] as const,
+  () => [hostId.value, host.value?.baseUrl, host.value?.status, host.value?.apiKey] as const,
   () => {
     startResourceStream();
     void fetchStatus();
+    const current = host.value;
+    if (current?.status === "ready") {
+      void downloads.subscribe(current).catch(() => {
+        // Host status and the model list still render if an older server lacks
+        // the download stream; reconnect retries are owned by the SSE helper.
+      });
+      void hostModels.refresh(true);
+    }
   },
   { immediate: true },
 );
@@ -103,7 +115,6 @@ onUnmounted(() => {
   statusAbort?.abort();
   statusAbort = null;
 });
-onMounted(() => void hostModels.refresh());
 
 // ── Derived display data ──────────────────────────────────────────────────
 
@@ -212,6 +223,7 @@ async function forget() {
   <div class="h-full overflow-y-auto p-6">
     <div class="mx-auto max-w-3xl">
       <template v-if="host">
+        <DownloadsTray :host-id="hostId" data-test="host-downloads" />
         <!-- Header -->
         <div class="flex items-center gap-3">
           <span
@@ -455,7 +467,17 @@ async function forget() {
             <span class="min-w-0 truncate text-body text-ink">{{ m.name }}</span>
             <span class="text-caption text-ink-3">{{ m.family }}</span>
             <div class="flex-1" />
-            <span v-if="m.size_gb" class="data-mono text-ink-3">{{ m.size_gb.toFixed(1) }} GB</span>
+            <span class="shrink-0 text-right">
+              <span class="data-mono block text-caption text-ink-2">
+                {{ modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? "Size unavailable" }}
+              </span>
+              <span
+                v-if="modelSizeLabels(m).runtime && modelSizeLabels(m).weights"
+                class="data-mono block text-[10px] text-ink-3"
+              >
+                {{ modelSizeLabels(m).runtime }}
+              </span>
+            </span>
           </li>
         </ul>
         <p v-else class="mt-2 text-caption text-ink-3">No installed models reported</p>
