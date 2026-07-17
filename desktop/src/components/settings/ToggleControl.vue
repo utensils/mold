@@ -22,7 +22,8 @@ const emit = defineEmits<{ (e: "commit", value: boolean): void }>();
     @click="emit('commit', !props.modelValue)"
   >
     <span
-      class="absolute top-0.5 h-4 w-4 rounded-full bg-rebate transition-[left] duration-150"
+      class="absolute top-0.5 h-4 w-4 rounded-full transition-[left] duration-150"
+      :class="props.modelValue ? 'bg-on-accent' : 'bg-rebate'"
       :style="{ left: props.modelValue ? '18px' : '2px' }"
     />
   </button>

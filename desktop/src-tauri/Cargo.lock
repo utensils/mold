@@ -3988,6 +3988,7 @@ dependencies = [
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-server",
+ "objc2-foundation",
  "percent-encoding",
  "plist",
  "reqwest 0.12.28",

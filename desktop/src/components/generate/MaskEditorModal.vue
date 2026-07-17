@@ -228,7 +228,7 @@ function applyMask() {
             class="rounded-control px-3 py-1 text-body transition-colors duration-100"
             :class="
               mode === 'brush'
-                ? 'bg-safelight font-semibold text-[#141110]'
+                ? 'bg-safelight font-semibold text-on-accent'
                 : 'border-edge border text-ink-2 hover:text-ink'
             "
             data-test="mask-mode-brush"
@@ -241,7 +241,7 @@ function applyMask() {
             class="rounded-control px-3 py-1 text-body transition-colors duration-100"
             :class="
               mode === 'erase'
-                ? 'bg-safelight font-semibold text-[#141110]'
+                ? 'bg-safelight font-semibold text-on-accent'
                 : 'border-edge border text-ink-2 hover:text-ink'
             "
             data-test="mask-mode-erase"
@@ -331,7 +331,7 @@ function applyMask() {
           </button>
           <button
             type="button"
-            class="rounded-control bg-safelight px-4 py-2 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
+            class="rounded-control bg-safelight px-4 py-2 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
             data-test="mask-apply"
             @click="applyMask"
           >

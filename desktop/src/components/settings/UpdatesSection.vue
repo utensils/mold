@@ -115,7 +115,7 @@ onMounted(() => void updater.init());
         <button
           type="button"
           data-test="install-update"
-          class="mt-4 h-8 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] hover:brightness-105 active:translate-y-px"
+          class="mt-4 h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105 active:translate-y-px"
           @click="updater.install()"
         >
           Update and restart

@@ -82,13 +82,17 @@ function clearSlot(slot: Slot) {
       />
       <div
         v-if="!form.sourceImage"
-        class="flex h-24 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors"
+        role="button"
+        tabindex="0"
+        class="flex h-24 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors focus-visible:outline-2 focus-visible:outline-safelight"
         :class="
           dragOver === 'source'
             ? 'border-safelight text-safelight'
-            : 'border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] text-ink-3'
+            : 'border-control-edge text-ink-3'
         "
         @click="pick('source')"
+        @keydown.enter.prevent="pick('source')"
+        @keydown.space.prevent="pick('source')"
         @dragover.prevent="dragOver = 'source'"
         @dragleave="dragOver = null"
         @drop.prevent="onDrop('source', $event)"
@@ -159,13 +163,17 @@ function clearSlot(slot: Slot) {
       <div class="mt-1">
         <div
           v-if="!form.maskImage"
-          class="flex h-16 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors"
+          role="button"
+          tabindex="0"
+          class="flex h-16 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors focus-visible:outline-2 focus-visible:outline-safelight"
           :class="
             dragOver === 'mask'
               ? 'border-safelight text-safelight'
-              : 'border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] text-ink-3'
+              : 'border-control-edge text-ink-3'
           "
           @click="pick('mask')"
+          @keydown.enter.prevent="pick('mask')"
+          @keydown.space.prevent="pick('mask')"
           @dragover.prevent="dragOver = 'mask'"
           @dragleave="dragOver = null"
           @drop.prevent="onDrop('mask', $event)"
@@ -204,13 +212,17 @@ function clearSlot(slot: Slot) {
       <div class="mt-1">
         <div
           v-if="!form.controlImage"
-          class="flex h-16 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors"
+          role="button"
+          tabindex="0"
+          class="flex h-16 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors focus-visible:outline-2 focus-visible:outline-safelight"
           :class="
             dragOver === 'control'
               ? 'border-safelight text-safelight'
-              : 'border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] text-ink-3'
+              : 'border-control-edge text-ink-3'
           "
           @click="pick('control')"
+          @keydown.enter.prevent="pick('control')"
+          @keydown.space.prevent="pick('control')"
           @dragover.prevent="dragOver = 'control'"
           @dragleave="dragOver = null"
           @drop.prevent="onDrop('control', $event)"

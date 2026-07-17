@@ -483,7 +483,8 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
           class="flex min-h-0 flex-1 items-center justify-center overflow-hidden"
         >
           <div
-            class="relative w-full overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_18%,transparent)] bg-print-surface"
+            class="relative w-full overflow-hidden rounded-media border border-control-edge"
+            :class="job ? 'bg-print-surface' : 'bg-empty-surface'"
             data-test="preview-frame"
             :style="previewFrameStyle"
             @contextmenu="job && contextMenu.open($event, canvasMenu())"
@@ -587,7 +588,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
       <!-- Composer -->
       <div
         data-test="generate-composer"
-        class="mt-4 shrink-0 rounded-chrome border border-edge bg-bench p-3 transition-colors duration-100 focus-within:border-safelight"
+        class="mt-4 shrink-0 rounded-chrome border border-control-edge bg-bench p-3 transition-colors duration-100 focus-within:border-safelight"
       >
         <textarea
           ref="promptEl"
@@ -615,12 +616,12 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
             <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
             <button
               type="button"
-              class="h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-60"
+              class="h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-60"
               :disabled="!form.prompt.trim() || !form.model"
               @click="generate"
             >
               {{ buttonLabel }}
-              <kbd class="kbd-hint ml-1.5 opacity-70">{{ shortcutLabel("↩") }}</kbd>
+              <kbd class="kbd-hint ml-1.5 opacity-80">{{ shortcutLabel("↩") }}</kbd>
             </button>
           </div>
         </div>

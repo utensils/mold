@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import source from "./GenerateView.vue?raw";
 
+function tagFor(testId: string): string {
+  return source.match(new RegExp(`<[^>]*data-test="${testId}"[^>]*>`, "s"))?.[0] ?? "";
+}
+
 function classesFor(testId: string): string {
-  const tag = source.match(new RegExp(`<[^>]*data-test="${testId}"[^>]*>`, "s"))?.[0] ?? "";
-  return tag.match(/class="([^"]*)"/s)?.[1] ?? "";
+  return tagFor(testId).match(/class="([^"]*)"/s)?.[1] ?? "";
 }
 
 describe("GenerateView layout", () => {
@@ -24,7 +27,10 @@ describe("GenerateView layout", () => {
   });
 
   it("renders an instructive blank-canvas placeholder before the first print", () => {
+    const previewFrame = tagFor("preview-frame");
     expect(source).toContain('data-test="empty-canvas"');
+    expect(previewFrame).toContain("bg-print-surface");
+    expect(previewFrame).toContain("bg-empty-surface");
     expect(source).toContain("No print yet");
     expect(source).toContain("Choose a model, describe your print, then generate.");
   });

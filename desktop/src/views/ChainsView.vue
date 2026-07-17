@@ -362,7 +362,7 @@ onMounted(() => {
         </button>
         <button
           type="button"
-          class="h-8 rounded-chrome bg-safelight px-4 text-body font-semibold text-[#141110] hover:brightness-105 disabled:opacity-50"
+          class="h-8 rounded-chrome bg-safelight px-4 text-body font-semibold text-on-accent hover:brightness-105 disabled:opacity-50"
           :disabled="!canRender"
           @click="render"
         >

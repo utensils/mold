@@ -158,7 +158,7 @@ function onDelete() {
     <button
       ref="closeBtn"
       type="button"
-      class="absolute top-4 left-4 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/55 text-body-lg text-rebate transition-colors duration-100 hover:bg-black/80"
+      class="absolute top-4 left-4 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/55 text-body-lg text-on-media transition-colors duration-100 hover:bg-black/80"
       title="Close (Esc)"
       aria-label="Close"
       @click="emit('close')"
@@ -250,7 +250,7 @@ function onDelete() {
 
       <button
         type="button"
-        class="h-8 w-full rounded-control bg-safelight text-body font-semibold text-[#141110] transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
+        class="h-8 w-full rounded-control bg-safelight text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px"
         @click="reuseSettings"
       >
         Reuse settings
@@ -268,7 +268,7 @@ function onDelete() {
         class="border-edge mt-2 h-8 w-full rounded-control border text-body transition-colors duration-100"
         :class="
           confirmingDelete
-            ? 'border-stop bg-stop font-semibold text-[#141110]'
+            ? 'border-stop bg-stop font-semibold text-on-accent'
             : 'text-ink-2 hover:text-stop'
         "
         @blur="confirmingDelete = false"

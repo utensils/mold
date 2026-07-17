@@ -202,7 +202,7 @@ async function restartEngine() {
     <div class="border-edge rounded-chrome border bg-bench p-4">
       <div class="flex items-center gap-3">
         <div
-          class="border-edge flex rounded-control border bg-bath p-0.5"
+          class="flex rounded-control border border-control-edge bg-bath p-0.5"
           role="group"
           aria-label="Engine"
         >
@@ -341,7 +341,7 @@ async function restartEngine() {
         <div class="mt-3 flex items-center gap-3">
           <button
             type="button"
-            class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] hover:brightness-105 active:translate-y-px disabled:opacity-50"
+            class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
             :disabled="switching || !remoteUrl"
             @click="useRemote"
           >

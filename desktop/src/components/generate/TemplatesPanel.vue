@@ -106,7 +106,7 @@ function requestDelete(template: GenerationTemplate) {
       <button
         type="button"
         data-test="template-save"
-        class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] hover:brightness-105 active:translate-y-px"
+        class="h-8 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105 active:translate-y-px"
         @click="saveCurrent"
       >
         Save

@@ -21,7 +21,7 @@ const candidate = computed(() => updater.candidate);
     <button
       type="button"
       data-test="banner-install-update"
-      class="h-7 shrink-0 rounded-control bg-safelight px-3 text-body font-semibold text-[#141110] hover:brightness-105"
+      class="h-7 shrink-0 rounded-control bg-safelight px-3 text-body font-semibold text-on-accent hover:brightness-105"
       @click="updater.install()"
     >
       Update and restart

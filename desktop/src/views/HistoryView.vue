@@ -280,7 +280,7 @@ const timeOf = (e: HistoryEntry) =>
         History
       </span>
       <div
-        class="border-edge flex rounded-control border bg-bath p-0.5"
+        class="flex rounded-control border border-control-edge bg-bath p-0.5"
         role="group"
         aria-label="History view"
       >
@@ -319,7 +319,7 @@ const timeOf = (e: HistoryEntry) =>
         class="border-edge h-7 rounded-control border px-2.5 text-body transition-colors duration-100"
         :class="
           confirmingClear
-            ? 'border-stop bg-stop font-semibold text-[#141110]'
+            ? 'border-stop bg-stop font-semibold text-on-accent'
             : 'text-ink-2 hover:text-stop'
         "
         @blur="confirmingClear = false"

@@ -53,6 +53,13 @@ textarea,
   cursor: auto;
 }
 
+/* Decorative rules stay quiet, but native control boundaries must remain
+   visible at 3:1 in every theme (WCAG 1.4.11). Overriding the token preserves
+   explicit hover, focus, and error border utilities. */
+:where(input, textarea, select, button).border-edge {
+  --edge: var(--control-edge);
+}
+
 :focus-visible {
   outline: 2px solid var(--safelight);
   outline-offset: 2px;
@@ -88,7 +95,7 @@ textarea,
   font-stretch: 87.5%;
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
-  color: color-mix(in srgb, var(--rebate) 50%, transparent);
+  color: var(--ink-3);
   white-space: nowrap;
 }
 

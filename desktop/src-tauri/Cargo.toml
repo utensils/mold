@@ -71,6 +71,8 @@ mdns-sd-discovery = "0.2.0"
 # Tauri's notification wrapper does not forward its icon option on macOS.
 # Send with the bundled identity image so Notification Center shows Mold.
 mac-notification-sys = "0.6.15"
+# Give debug builds an unmistakable native menu and Dock identity.
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString"] }
 
 [features]
 default = []

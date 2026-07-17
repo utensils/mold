@@ -15,17 +15,39 @@ fn accelerator(key: &str) -> String {
     format!("{modifier}+{key}")
 }
 
-pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+fn app_name(is_development: bool) -> &'static str {
+    if is_development {
+        "mold-dev"
+    } else {
+        "Mold"
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_process_name(is_development: bool) {
+    if is_development {
+        use objc2_foundation::{NSProcessInfo, NSString};
+
+        NSProcessInfo::processInfo().setProcessName(&NSString::from_str(app_name(true)));
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_process_name(_is_development: bool) {}
+
+pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Result<Menu<R>> {
+    let app_name = app_name(is_development);
+    let about_label = format!("About {app_name}");
     let about = AboutMetadata {
-        name: Some("Mold".into()),
+        name: Some(app_name.into()),
         comments: Some("Local AI image and video generation.".into()),
         ..Default::default()
     };
 
-    let app_menu = SubmenuBuilder::new(app, "Mold")
+    let app_menu = SubmenuBuilder::new(app, app_name)
         .item(&PredefinedMenuItem::about(
             app,
-            Some("About Mold"),
+            Some(&about_label),
             Some(about),
         )?)
         .separator()
@@ -184,7 +206,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
 #[cfg(test)]
 mod tests {
-    use super::accelerator;
+    use super::{accelerator, app_name};
 
     #[test]
     fn uses_the_platform_primary_modifier() {
@@ -194,5 +216,11 @@ mod tests {
             "Ctrl+K"
         };
         assert_eq!(accelerator("K"), expected);
+    }
+
+    #[test]
+    fn development_menu_identity_is_distinct_from_release() {
+        assert_eq!(app_name(true), "mold-dev");
+        assert_eq!(app_name(false), "Mold");
     }
 }

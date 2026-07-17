@@ -447,20 +447,20 @@ onUnmounted(() => {
             />
             <span
               v-if="isVideo(laid.item)"
-              class="absolute top-1.5 right-1.5 rounded-control bg-black/55 px-1 text-caption text-rebate"
+              class="absolute top-1.5 right-1.5 rounded-control bg-black/60 px-1 text-caption text-on-media"
             >
               ▶
             </span>
             <span
               v-if="showBadges"
               data-test="host-badge"
-              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/55 px-1 !text-rebate"
+              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media"
               :title="`Available on ${availabilityLabel(laid.entry)}`"
             >
               {{ availabilityLabel(laid.entry) }}
             </span>
             <span
-              class="edge-code absolute right-0 bottom-0 left-0 translate-y-full bg-black/60 px-1.5 py-0.5 text-left transition-transform duration-100 group-hover:translate-y-0"
+              class="edge-code absolute right-0 bottom-0 left-0 translate-y-full bg-black/60 px-1.5 py-0.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
             >
               {{ laid.item.metadata.model }} · S {{ laid.item.metadata.seed }}
             </span>
