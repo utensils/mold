@@ -199,6 +199,19 @@ describe("HostsSection add flow", () => {
     expect(wrapper.text()).toContain("Enter a valid host.");
   });
 
+  it("editing the host input clears a stale test verdict", async () => {
+    testRemoteHost.mockRejectedValueOnce("Enter a valid host.");
+    const wrapper = await mountSection();
+    await wrapper.get('[data-test="add-host-url"]').setValue("hal 9000");
+    const testBtn = wrapper.findAll("button").find((b) => b.text() === "Test connection");
+    await testBtn!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Enter a valid host.");
+    await wrapper.get('[data-test="add-host-url"]').setValue("");
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("Enter a valid host.");
+  });
+
   it("adding a discovered host reuses the key stored under its URL slug", async () => {
     discoverServers.mockResolvedValue([
       host({ name: "hal9000-7680", url: "http://192.168.1.10:7680", authRequired: true }),

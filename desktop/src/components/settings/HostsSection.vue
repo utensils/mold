@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import ConfigSettingRow from "./ConfigSettingRow.vue";
 import { ipc, type DiscoveredHost, type HostTest, type SavedHost } from "../../lib/ipc";
 import { addressLabel, prepareHosts, versionLabel } from "../../lib/discovery";
@@ -42,6 +42,12 @@ const testResult = ref<HostTest | null>(null);
 const testing = ref(false);
 const adding = ref(false);
 const addError = ref<string | null>(null);
+
+// A stale probe verdict is misleading once the input it judged has changed.
+watch(addUrl, () => {
+  testResult.value = null;
+  addError.value = null;
+});
 
 async function testConnection() {
   testing.value = true;
