@@ -200,6 +200,75 @@ pub struct AppState {
             std::collections::HashMap<String, mold_catalog::synthesis::CatalogModelIntent>,
         >,
     >,
+    /// Cached disk snapshot for the models dir, served by `/api/status`.
+    /// Refreshed off the request path — statvfs can hang outright on a
+    /// wedged FUSE mount, so the handler must never wait on a disk scan.
+    pub models_disk_cache: Arc<ModelsDiskCache>,
+}
+
+/// TTL for the cached models-disk snapshot. Matches the ~10s status poll
+/// cadence: pollers see numbers at most one refresh stale.
+pub const MODELS_DISK_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Last-good disk stats for the models dir plus a single-flight refresh
+/// claim. `/api/status` reads the snapshot synchronously and — when it has
+/// gone stale — at most one request wins the claim and kicks a background
+/// `spawn_blocking` refresh; everyone else keeps serving the last-good value.
+/// A hung statvfs therefore costs one leaked blocking-pool thread and a stale
+/// stat, never a parked runtime worker.
+#[derive(Default)]
+pub struct ModelsDiskCache {
+    inner: std::sync::Mutex<ModelsDiskSnapshot>,
+    refreshing: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Default)]
+struct ModelsDiskSnapshot {
+    usage: Option<mold_core::DiskUsage>,
+    fetched_at: Option<Instant>,
+}
+
+impl ModelsDiskCache {
+    /// Current snapshot plus whether the caller won the refresh claim.
+    /// Returns `true` at most once per stale period — the winner must call
+    /// [`ModelsDiskCache::store`] (or [`ModelsDiskCache::release`]) to let
+    /// the next refresh happen.
+    pub fn read(&self) -> (Option<mold_core::DiskUsage>, bool) {
+        self.read_at(Instant::now())
+    }
+
+    fn read_at(&self, now: Instant) -> (Option<mold_core::DiskUsage>, bool) {
+        let (usage, stale) = {
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let stale = inner
+                .fetched_at
+                .is_none_or(|at| now.duration_since(at) >= MODELS_DISK_TTL);
+            (inner.usage.clone(), stale)
+        };
+        if !stale {
+            return (usage, false);
+        }
+        let won_claim = !self
+            .refreshing
+            .swap(true, std::sync::atomic::Ordering::AcqRel);
+        (usage, won_claim)
+    }
+
+    /// Publish a fresh snapshot and release the refresh claim.
+    pub fn store(&self, usage: Option<mold_core::DiskUsage>) {
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.usage = usage;
+            inner.fetched_at = Some(Instant::now());
+        }
+        self.release();
+    }
+
+    /// Release the refresh claim without publishing (refresh task failed).
+    pub fn release(&self) {
+        self.refreshing
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 /// Default TTL for the live-search cache. Five minutes is long enough
@@ -337,6 +406,7 @@ impl AppState {
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            models_disk_cache: Arc::new(ModelsDiskCache::default()),
         }
     }
 
@@ -372,6 +442,7 @@ impl AppState {
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            models_disk_cache: Arc::new(ModelsDiskCache::default()),
         }
     }
 
@@ -422,6 +493,7 @@ impl AppState {
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            models_disk_cache: Arc::new(ModelsDiskCache::default()),
         }
     }
 
@@ -459,6 +531,7 @@ impl AppState {
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            models_disk_cache: Arc::new(ModelsDiskCache::default()),
         };
         (state, rx)
     }
@@ -496,6 +569,7 @@ impl AppState {
             catalog_live_cache: default_live_cache(),
             catalog_live_civitai_base: Arc::new(CATALOG_LIVE_CIVITAI_BASE.to_string()),
             catalog_intents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            models_disk_cache: Arc::new(ModelsDiskCache::default()),
         }
     }
 
@@ -511,6 +585,54 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn models_disk_cache_serves_last_good_and_single_flights_refreshes() {
+        let cache = ModelsDiskCache::default();
+
+        // Fresh cache: nothing to serve, first reader wins the refresh claim…
+        let (usage, refresh) = cache.read();
+        assert_eq!(usage, None);
+        assert!(refresh, "first reader must win the refresh claim");
+        // …and nobody else does until the refresh completes (single-flight —
+        // a hung statvfs must not leak one blocking thread per status poll).
+        let (usage, refresh) = cache.read();
+        assert_eq!(usage, None);
+        assert!(!refresh, "claim must not be handed out twice");
+
+        // A completed refresh publishes and is served without re-claiming.
+        let stats = mold_core::DiskUsage {
+            total_bytes: 500,
+            free_bytes: 50,
+        };
+        cache.store(Some(stats.clone()));
+        let (usage, refresh) = cache.read();
+        assert_eq!(usage, Some(stats.clone()));
+        assert!(!refresh, "fresh snapshot must not trigger a refresh");
+
+        // Past the TTL the stale value keeps being served while exactly one
+        // reader wins the next refresh claim.
+        let later = Instant::now() + MODELS_DISK_TTL;
+        let (usage, refresh) = cache.read_at(later);
+        assert_eq!(usage, Some(stats.clone()), "stale value still served");
+        assert!(refresh, "stale snapshot must trigger one refresh");
+        let (usage, refresh) = cache.read_at(later);
+        assert_eq!(usage, Some(stats));
+        assert!(!refresh);
+    }
+
+    #[test]
+    fn models_disk_cache_release_reopens_the_claim_without_publishing() {
+        let cache = ModelsDiskCache::default();
+        let (_, refresh) = cache.read();
+        assert!(refresh);
+        // A refresh task that failed must hand the claim back, or the cache
+        // would never refresh again for the life of the process.
+        cache.release();
+        let (usage, refresh) = cache.read();
+        assert_eq!(usage, None, "release publishes nothing");
+        assert!(refresh, "claim must be available again after release");
+    }
 
     #[test]
     fn engine_snapshot_default_is_unloaded() {

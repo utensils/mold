@@ -2069,10 +2069,20 @@ fn disk_usage_for_path(
         })
 }
 
-/// Snapshot disk stats for the filesystem backing the models dir. Refreshing
-/// the disk list per call is cheap enough for the 10s status poll (same
-/// throwaway-refresh style as `resources::ram_snapshot`).
+/// Resolve symlinks in the models dir before mount matching — a symlinked
+/// models dir (`ln -s /Volumes/Big/models ~/.mold/models`) must report the
+/// target's volume, not the symlink's. Falls back to the literal path when
+/// canonicalization fails (missing dir, permissions).
+fn canonical_models_dir(dir: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// Snapshot disk stats for the filesystem backing the models dir. Blocking:
+/// canonicalize hits the filesystem and the disk refresh calls statvfs(2) on
+/// every mount (which can stall on wedged FUSE mounts) — callers on the async
+/// path must wrap this in `spawn_blocking`.
 fn models_disk_usage(dir: &std::path::Path) -> Option<DiskUsage> {
+    let dir = canonical_models_dir(dir);
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let entries: Vec<(std::path::PathBuf, u64, u64)> = disks
         .list()
@@ -2085,7 +2095,7 @@ fn models_disk_usage(dir: &std::path::Path) -> Option<DiskUsage> {
             )
         })
         .collect();
-    disk_usage_for_path(&entries, dir)
+    disk_usage_for_path(&entries, &dir)
 }
 
 #[utoipa::path(
@@ -2097,7 +2107,17 @@ fn models_disk_usage(dir: &std::path::Path) -> Option<DiskUsage> {
     )
 )]
 async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
-    let models_dir = state.config.read().await.resolved_models_dir();
+    // Disk stats are blocking syscalls (canonicalize + statvfs per mount, and
+    // statvfs can hang outright on a wedged FUSE mount) — never run or await
+    // them on the request path. Serve the cached snapshot; when it has gone
+    // stale, the single winning request kicks a background refresh. The first
+    // poll after boot reports no disk stats — pollers pick them up next round.
+    let (models_disk, needs_disk_refresh) = state.models_disk_cache.read();
+    if needs_disk_refresh {
+        let cache = state.models_disk_cache.clone();
+        let models_dir = state.config.read().await.resolved_models_dir();
+        tokio::task::spawn_blocking(move || cache.store(models_disk_usage(&models_dir)));
+    }
 
     // Aggregate GPU status from the pool.
     let gpu_statuses = state.gpu_pool.gpu_status();
@@ -2176,7 +2196,7 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         queue_capacity: Some(state.queue_capacity),
         queue_paused: Some(state.queue_pause.is_paused()),
         instance_id: Some(state.instance_id.as_ref().clone()),
-        models_disk: models_disk_usage(&models_dir),
+        models_disk,
     })
 }
 
@@ -3674,6 +3694,44 @@ mod tests {
             disk_usage_for_path(&disks, std::path::Path::new("relative/models")),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_models_dir_resolves_symlinks_for_mount_matching() {
+        // A symlinked models dir (`ln -s /Volumes/Big/models ~/.mold/models`)
+        // must resolve to the target's filesystem: the longest-prefix mount
+        // match has to run against the canonical target path, not the
+        // symlink's own location.
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonicalize the tempdir itself so the fake mount table matches on
+        // platforms where the temp root is itself a symlink (/tmp, /var).
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let target = root.join("big-volume").join("models");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = root.join("link-models");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let resolved = canonical_models_dir(&link);
+        assert_eq!(resolved, target);
+
+        // With a mount table containing the symlink target's volume, the
+        // canonicalized path must pick that mount over the root fallback.
+        let disks = vec![
+            (std::path::PathBuf::from("/"), 100, 10),
+            (root.join("big-volume"), 500, 50),
+        ];
+        let usage = disk_usage_for_path(&disks, &resolved).unwrap();
+        assert_eq!(usage.total_bytes, 500);
+        assert_eq!(usage.free_bytes, 50);
+    }
+
+    #[test]
+    fn canonical_models_dir_falls_back_to_the_literal_path() {
+        // A models dir that doesn't exist yet must not panic or change the
+        // matching behavior — the raw path is used as-is.
+        let missing = std::path::Path::new("/definitely/not/a/real/mold/models/dir");
+        assert_eq!(canonical_models_dir(missing), missing.to_path_buf());
     }
 
     #[test]
