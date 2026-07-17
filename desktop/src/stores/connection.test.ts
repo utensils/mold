@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "./connection";
-import { useToastStore } from "./toasts";
 import { ipc } from "../lib/ipc";
 
 vi.mock("../lib/ipc", () => ({
@@ -69,87 +68,31 @@ describe("connection store", () => {
     expect(store.mode).toBe("local");
   });
 
-  it("reconnects a saved remote host", async () => {
+  it("brings the built-in engine online regardless of a legacy remote setting", async () => {
+    // Remote-primary is retired; the Rust boot migration has already flipped
+    // mode to local, but even a stale mode:remote must just boot local.
     mocked.appSettingsGet.mockResolvedValue({
       ...defaults,
       mode: "remote",
       remoteUrl: remote.baseUrl,
     });
-    mocked.setRemoteHost.mockResolvedValue(remote);
-    const store = useConnectionStore();
-    await store.init();
-    expect(mocked.setRemoteHost).toHaveBeenCalledWith(remote.baseUrl, null);
-    expect(store.mode).toBe("remote");
-    expect(store.localInfo).toEqual(localServer);
-    expect(store.localStatus).toBe("ready");
-  });
-
-  it("keeps a usable remote primary when the local server fails to start", async () => {
-    mocked.appSettingsGet.mockResolvedValue({
-      ...defaults,
-      mode: "remote",
-      remoteUrl: remote.baseUrl,
-    });
-    mocked.ensureLocalServer.mockRejectedValue("No local port available");
-    mocked.setRemoteHost.mockResolvedValue(remote);
-
-    const store = useConnectionStore();
-    await store.init();
-
-    expect(store.mode).toBe("remote");
-    expect(store.ready).toBe(true);
-    expect(store.localStatus).toBe("error");
-    expect(store.localError).toContain("No local port available");
-  });
-
-  it("falls back to the local engine when the saved remote host is unreachable", async () => {
-    mocked.appSettingsGet.mockResolvedValue({
-      ...defaults,
-      mode: "remote",
-      remoteUrl: remote.baseUrl,
-    });
-    mocked.setRemoteHost.mockRejectedValue("Can't reach http://studio.local:7680");
     mocked.startLocalEngine.mockResolvedValue(local);
     const store = useConnectionStore();
     await store.init();
-    // Launch must never dead-end on an unreachable host: fall back cleanly.
     expect(store.ready).toBe(true);
     expect(store.mode).toBe("local");
-    const toasts = useToastStore();
-    expect(toasts.items.map((t) => t.message).join(" ")).toContain("studio.local");
+    // The connection never switches to a remote host on its own.
+    expect(mocked.setRemoteHost).not.toHaveBeenCalled();
   });
 
-  it("keeps the remote preference for the next launch after falling back", async () => {
-    mocked.appSettingsGet.mockResolvedValue({
-      ...defaults,
-      mode: "remote",
-      remoteUrl: remote.baseUrl,
-    });
-    mocked.setRemoteHost.mockRejectedValue("unreachable");
-    mocked.startLocalEngine.mockResolvedValue(local);
+  it("errors cleanly when the local server can't start", async () => {
+    mocked.appSettingsGet.mockResolvedValue(defaults);
+    mocked.ensureLocalServer.mockRejectedValue("No local port available");
     const store = useConnectionStore();
     await store.init();
-    // The fallback is for this session only — settings.mode stays "remote"
-    // so the preferred host is retried on the next launch.
-    expect(mocked.appSettingsSet).not.toHaveBeenCalled();
-  });
-
-  it("keeps an unreachable saved remote visible as an errored extra host", async () => {
-    mocked.appSettingsGet.mockResolvedValue({
-      ...defaults,
-      mode: "remote",
-      remoteUrl: remote.baseUrl,
-      savedHosts: [{ id: "studio-local-7680", name: "studio", url: remote.baseUrl, lastUsedMs: 1 }],
-    });
-    mocked.setRemoteHost.mockRejectedValue("unreachable");
-    mocked.startLocalEngine.mockResolvedValue(local);
-    const store = useConnectionStore();
-    await store.init();
-    // The preferred host must not silently vanish from the sidebar — it stays
-    // listed as an errored row the refresh poll (or a click) can reconnect.
-    const { useHostsStore } = await import("./hosts");
-    const row = useHostsStore().extras.find((h) => h.id === "studio-local-7680");
-    expect(row).toMatchObject({ status: "error", url: remote.baseUrl, label: "studio" });
+    expect(store.status).toBe("error");
+    expect(store.localStatus).toBe("error");
+    expect(store.localError).toContain("No local port available");
   });
 
   it("surfaces engine-start failures as error state", async () => {

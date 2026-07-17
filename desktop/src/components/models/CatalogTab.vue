@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useDownloadsStore } from "../../stores/downloads";
-import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import { ApiError } from "../../lib/api/client";
@@ -22,7 +21,6 @@ const props = defineProps<{
 
 const downloads = useDownloadsStore();
 const toasts = useToastStore();
-const conn = useConnectionStore();
 const hosts = useHostsStore();
 
 const PAGE_SIZE = 24;
@@ -71,7 +69,8 @@ async function runSearch(reset: boolean) {
         page: page.value,
         page_size: PAGE_SIZE,
       },
-      conn.mode === "remote",
+      // Catalog search targets the local primary, which reads its own creds.
+      false,
     );
     entries.value = reset ? res.entries : [...entries.value, ...res.entries];
     hasMore.value = res.entries.length === PAGE_SIZE;
@@ -104,11 +103,7 @@ async function pullTo(entry: CatalogEntry, host: HostView | null) {
     // Attach the snapshot-first stream before enqueueing so a cached,
     // near-instant pull still produces a visible terminal event and refresh.
     await downloads.subscribe(host ?? undefined);
-    await startCatalogDownload(
-      entry.id,
-      target,
-      host ? host.kind === "remote" : conn.mode === "remote",
-    );
+    await startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false);
     toasts.push(`Pulling ${entry.name}${host ? ` on ${host.label}` : ""}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
@@ -134,7 +129,7 @@ watch([() => props.query, source, family, includeNsfw], scheduleSearch);
 
 onMounted(async () => {
   try {
-    families.value = await fetchCatalogFamilies(conn.mode === "remote");
+    families.value = await fetchCatalogFamilies(false);
   } catch {
     /* families are a nicety; search still works without them */
   }

@@ -72,8 +72,6 @@ const engineChip = computed(() => {
       return "⌁ local";
     case "external":
       return "⌁ local (shared)";
-    case "remote":
-      return `⇄ ${conn.baseUrl?.replace(/^https?:\/\//, "") ?? "remote"}`;
     default:
       return "⌁ engine off";
   }

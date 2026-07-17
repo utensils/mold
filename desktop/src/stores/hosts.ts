@@ -89,19 +89,16 @@ export const useHostsStore = defineStore("hosts", {
     initialized: false,
   }),
   getters: {
-    /** The primary connection as a host row (this device or the remote). */
+    /** The primary connection as a host row. The built-in engine is always the
+     *  internal primary (host id "local"); remotes are additive list entries. */
     primaryHost(state): HostView | null {
       const conn = useConnectionStore();
       if (!conn.info?.baseUrl) return null;
-      const remote = conn.info.mode === "remote";
-      const id = remote ? hostIdFromUrl(conn.info.baseUrl) : "local";
-      const t = state.telemetry[id];
+      const t = state.telemetry.local;
       return {
-        id,
-        label: remote
-          ? (state.names[id] ?? conn.info.baseUrl.replace(/^https?:\/\//, ""))
-          : PLATFORM_UI.deviceLabel,
-        kind: remote ? "remote" : "local",
+        id: "local",
+        label: PLATFORM_UI.deviceLabel,
+        kind: "local",
         baseUrl: conn.info.baseUrl,
         apiKey: conn.info.apiKey,
         status:
@@ -113,34 +110,13 @@ export const useHostsStore = defineStore("hosts", {
         instanceId: t?.instanceId ?? null,
       };
     },
-    /** Every host, primary first; an extra shadowed by the primary is hidden.
-     *  Dedupe by URL as well as id — the local primary's id is the literal
-     *  "local", so a loopback extra pointing at the same server would
-     *  otherwise be listed (and routed to) twice. */
+    /** Every host, the local primary first. Dedupe extras by id, loopback URL,
+     *  and instance id — the local primary's id is the literal "local", so a
+     *  loopback extra pointing at the same server would otherwise be listed
+     *  (and routed to) twice. */
     all(state): HostView[] {
       const primary = this.primaryHost;
       const rows: HostView[] = primary ? [primary] : [];
-      const conn = useConnectionStore();
-      if (primary?.kind !== "local" && conn.localStatus !== "idle") {
-        rows.push({
-          id: "local",
-          label: PLATFORM_UI.deviceLabel,
-          kind: "local",
-          baseUrl: conn.localInfo?.baseUrl ?? null,
-          apiKey: conn.localInfo?.apiKey ?? null,
-          status:
-            conn.localStatus === "ready"
-              ? "ready"
-              : conn.localStatus === "starting"
-                ? "connecting"
-                : "error",
-          primary: false,
-          queueDepth: state.telemetry.local?.queueDepth ?? null,
-          queueCapacity: state.telemetry.local?.queueCapacity ?? null,
-          version: state.telemetry.local?.version ?? null,
-          instanceId: state.telemetry.local?.instanceId ?? null,
-        });
-      }
       for (const extra of state.extras) {
         const t = state.telemetry[extra.id];
         const instanceId = t?.instanceId ?? extra.instanceId ?? null;
@@ -194,21 +170,6 @@ export const useHostsStore = defineStore("hosts", {
           // don't duplicate the row or re-probe it.
           if (this.extras.some((h) => h.id === id)) continue;
           const key = await ipc.secretGet(`remote-api-key.${id}`);
-          // Shadowed by the live primary: same server, already connected.
-          // List it (so switching the primary away mid-session keeps the
-          // host around) but skip the redundant probe; `all` hides the row.
-          if (id === this.primaryHost?.id) {
-            this.extras.push({
-              id,
-              label: saved.name ?? saved.url.replace(/^https?:\/\//, ""),
-              url: saved.url,
-              apiKey: key,
-              status: "ready",
-              error: null,
-              instanceId: saved.instanceId ?? null,
-            });
-            continue;
-          }
           const extra: ExtraHost = {
             id,
             label: saved.name ?? saved.url.replace(/^https?:\/\//, ""),
@@ -303,24 +264,6 @@ export const useHostsStore = defineStore("hosts", {
         const prefs = useAppPrefsStore();
         if (prefs.settings) prefs.settings = { ...prefs.settings, generateTargetHost: null };
       }
-    },
-    /**
-     * List a host that could not be reached (e.g. the persisted primary at
-     * launch) as an errored extra, so it stays visible in the sidebar for
-     * one-click reconnect instead of silently vanishing. The regular refresh
-     * poll self-heals it the moment the host answers again.
-     */
-    adopt(id: string, url: string, apiKey: string | null, label?: string | null) {
-      if (this.extras.some((h) => h.id === id)) return;
-      this.extras.push({
-        id,
-        label: label ?? this.names[id] ?? url.replace(/^https?:\/\//, ""),
-        url,
-        apiKey,
-        status: "error",
-        error: "Unreachable at launch",
-        instanceId: null,
-      });
     },
     /**
      * Keep a remote primary live as an extra while the app returns to the

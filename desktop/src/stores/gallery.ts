@@ -7,7 +7,6 @@ import {
   type GallerySource,
 } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
-import { useConnectionStore } from "./connection";
 import { useHostsStore, type HostView } from "./hosts";
 import type { GalleryImage, ServerEvent } from "../lib/api/types";
 
@@ -66,15 +65,13 @@ export const useGalleryStore = defineStore("gallery", {
   }),
   getters: {
     /**
-     * Which buckets should exist right now: one per ready host (the primary
-     * included — its id is "local" when the primary is the built-in or
-     * external engine). A separate "local" (This Mac via IPC) bucket exists
-     * ONLY when the primary is remote: when the primary is the built-in or
-     * external engine, its bucket IS this Mac's gallery — listing both
-     * would show every print twice.
+     * Which buckets should exist right now: one per ready host. The built-in
+     * engine is always the internal primary (host id "local"), and its
+     * `/api/gallery` on the local server already covers IPC-saved files (a
+     * saved remote print writes a best-effort DB row into the same mold.db),
+     * so there is no separate This-Mac IPC bucket.
      */
     sources(): GallerySourceRef[] {
-      const conn = useConnectionStore();
       const hosts = useHostsStore();
       const refs: GallerySourceRef[] = [];
       const keys = new Set<string>();
@@ -83,7 +80,6 @@ export const useGalleryStore = defineStore("gallery", {
         keys.add(source.key);
         refs.push(source);
       };
-      if (conn.mode === "remote") add({ key: "local", label: "This Mac" });
       for (const host of hosts.all) {
         if (host.status !== "ready") continue;
         add({ key: host.id, label: host.label });

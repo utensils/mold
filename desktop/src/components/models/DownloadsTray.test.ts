@@ -71,14 +71,15 @@ describe("DownloadsTray a11y", () => {
     expect(wrapper.find('[data-source="civitai"]').exists()).toBe(true);
   });
 
-  it("labels primary rows with the primary host's name when one is connected", () => {
+  it("labels primary rows with the built-in engine's name", () => {
     const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://host-a:7680", apiKey: null };
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
     const store = useDownloadsStore();
     store.activeJobs = [job()];
     const wrapper = mount(DownloadsTray);
 
-    expect(wrapper.get('[data-test="download-host"]').text()).toContain("host-a:7680");
+    // The primary is always the built-in engine (host id "local").
+    expect(wrapper.get('[data-test="download-host"]').text()).toContain("This device");
   });
 
   it("shows and cancels downloads on an explicitly selected extra host", async () => {

@@ -161,20 +161,6 @@ describe("NavRail host context menu", () => {
     expect(labels).not.toContain("Rename…");
     expect(labels).not.toContain("Switch to built-in engine");
   });
-
-  it("offers switch-to-built-in and rename for a remote primary", async () => {
-    const wrapper = await mountAt("/generate");
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
-    conn.status = "ready";
-    await flushPromises();
-    const rows = wrapper.findAll("[data-test='host-row']");
-    await rows[0]!.trigger("contextmenu");
-    const labels = menuLabels();
-    expect(labels).toContain("Switch to built-in engine");
-    expect(labels).toContain("Rename…");
-    expect(labels).toContain("Manage in Settings");
-  });
 });
 
 describe("NavRail a11y", () => {

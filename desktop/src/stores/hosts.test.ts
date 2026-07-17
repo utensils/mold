@@ -133,30 +133,6 @@ describe("hosts store", () => {
     });
   });
 
-  it("keeps this device routable when a remote host is primary", () => {
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: "remote-key" };
-    conn.localInfo = {
-      kind: "embedded",
-      baseUrl: "http://127.0.0.1:7680",
-      apiKey: "local-key",
-      port: 7680,
-    };
-    conn.localStatus = "ready";
-
-    const hosts = useHostsStore();
-    expect(hosts.all.map((host) => host.id)).toEqual(["hal9000-7680", "local"]);
-    expect(hosts.all[1]).toMatchObject({
-      label: "This device",
-      kind: "local",
-      primary: false,
-      status: "ready",
-      baseUrl: "http://127.0.0.1:7680",
-      apiKey: "local-key",
-    });
-    expect(hosts.resolveRoute("local")?.hostId).toBe("local");
-  });
-
   it("reconnects remembered extra hosts at boot with their own keys", async () => {
     installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
     secretGet.mockResolvedValue("host-key");
@@ -168,34 +144,30 @@ describe("hosts store", () => {
     expect(extra).toMatchObject({ status: "ready", apiKey: "host-key", primary: false });
   });
 
-  it("restores the persisted remote primary and extra-host set together", async () => {
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: hal.url, apiKey: "primary-key" };
+  it("reconnects the whole remembered host set at boot, local primary first", async () => {
     installSettings(
       settings({
-        mode: "remote",
-        remoteUrl: hal.url,
         savedHosts: [studio, hal],
         connectedHostIds: [hal.id, studio.id],
       }),
     );
     secretGet.mockImplementation((key: string) =>
-      Promise.resolve(key.endsWith(studio.id) ? "studio-key" : "primary-key"),
+      Promise.resolve(key.endsWith(studio.id) ? "studio-key" : "hal-key"),
     );
     testRemoteHost.mockResolvedValue({ ok: true, version: "0.17.1", error: null });
 
     const hosts = useHostsStore();
     await hosts.init();
 
-    expect(hosts.all.map((host) => host.id)).toEqual([hal.id, studio.id]);
-    expect(hosts.primaryHost).toMatchObject({ id: hal.id, primary: true });
-    expect(hosts.all[1]).toMatchObject({
-      id: studio.id,
+    // The built-in engine is always the primary; every remembered host follows.
+    expect(hosts.primaryHost).toMatchObject({ id: "local", primary: true });
+    expect(hosts.all.map((host) => host.id)).toEqual(["local", hal.id, studio.id]);
+    expect(hosts.all.find((h) => h.id === studio.id)).toMatchObject({
       status: "ready",
       apiKey: "studio-key",
       primary: false,
     });
-    expect(testRemoteHost).toHaveBeenCalledOnce();
+    expect(testRemoteHost).toHaveBeenCalledWith(hal.url, "hal-key");
     expect(testRemoteHost).toHaveBeenCalledWith(studio.url, "studio-key");
   });
 
@@ -397,21 +369,20 @@ describe("hosts store", () => {
     expect(persisted.savedHosts[0]).toMatchObject({ id: "hal9000-7680", name: "hal9000" });
   });
 
-  it("adopt() lists an unreachable host as an errored extra, idempotently", () => {
-    const hosts = useHostsStore();
-    hosts.adopt("hal9000-7680", "http://hal9000:7680", "key", "hal9000");
-    hosts.adopt("hal9000-7680", "http://hal9000:7680", "key", "hal9000");
-    expect(hosts.extras).toHaveLength(1);
-    const row = hosts.all.find((h) => h.id === "hal9000-7680");
-    expect(row).toMatchObject({ status: "error", primary: false, apiKey: "key" });
-    expect(row?.label).toBe("hal9000");
-  });
-
-  it("init() does not duplicate a host that was already adopted", async () => {
+  it("init() does not duplicate a host already listed as an extra", async () => {
     installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
     const hosts = useHostsStore();
-    hosts.adopt(hal.id, hal.url, null, null);
+    // Pre-listed (e.g. connected earlier this session) — init must not re-add.
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
     await hosts.init();
     expect(hosts.extras.filter((h) => h.id === hal.id)).toHaveLength(1);
   });
@@ -427,31 +398,22 @@ describe("hosts store", () => {
     expect(persisted.savedHosts[0]).toMatchObject({ id: hal.id, name: "render box" });
   });
 
-  it("labels a remote primary with its saved friendly name", async () => {
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
-    installSettings(settings({ savedHosts: [hal] }));
+  it("names a remote extra by its server hostname when the user hasn't renamed it", async () => {
+    installSettings(settings({ savedHosts: [{ ...hal, name: null }], connectedHostIds: [hal.id] }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 0,
+      queue_capacity: 8,
+      version: null,
+      hostname: "hal9000",
+    });
     const hosts = useHostsStore();
     await hosts.init();
-    expect(hosts.primaryHost?.label).toBe("hal9000");
+    await hosts.refresh();
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("hal9000");
+    // A user rename still wins over the server hostname.
     await hosts.rename(hal.id, "render box");
-    expect(hosts.primaryHost?.label).toBe("render box");
-  });
-
-  it("init() lists a host shadowed by the primary without re-probing it", async () => {
-    // Review follow-up: the primary's id now lands in connectedHostIds, so
-    // init used to burn a testRemoteHost probe on a server the app is
-    // already connected to. The row still exists (so switching the primary
-    // away mid-session keeps the host live) but stays hidden and unprobed.
-    const conn = useConnectionStore();
-    conn.info = { mode: "remote", baseUrl: "http://hal9000:7680", apiKey: null };
-    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
-    const hosts = useHostsStore();
-    await hosts.init();
-    expect(testRemoteHost).not.toHaveBeenCalled();
-    expect(hosts.extras.find((h) => h.id === hal.id)?.status).toBe("ready");
-    // Hidden while shadowed by the primary.
-    expect(hosts.all.filter((h) => h.id === hal.id)).toHaveLength(1);
+    expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("render box");
   });
 
   it("disconnect() clears a sticky generation target pointing at the removed host", async () => {
@@ -467,7 +429,16 @@ describe("hosts store", () => {
   it("rename() persists even when the saved-hosts entry was pruned", async () => {
     installSettings(settings({ savedHosts: [], connectedHostIds: [] }));
     const hosts = useHostsStore();
-    hosts.adopt(hal.id, hal.url, null, null);
+    // A live extra whose MRU row was pruned still deserves a sticky name.
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
     await hosts.rename(hal.id, "render box");
     const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
     expect(persisted.savedHosts[0]).toMatchObject({ id: hal.id, url: hal.url, name: "render box" });

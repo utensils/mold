@@ -5,7 +5,6 @@ import { sseStream } from "../lib/api/sse";
 import { ipc } from "../lib/ipc";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import { useAppPrefsStore } from "./appPrefs";
-import { useConnectionStore } from "./connection";
 import { useGalleryStore } from "./gallery";
 import { useHostsStore } from "./hosts";
 import type { CompleteEvent, GenerateRequest, ProgressEvent } from "../lib/api/types";
@@ -17,11 +16,6 @@ export interface JobRoute {
   label: string;
   kind: "local" | "remote";
   target: ApiTarget;
-}
-
-/** Whether the primary connection points at a remote host. */
-function primaryIsRemote(): boolean {
-  return useConnectionStore().mode === "remote";
 }
 
 /** Filesystem-safe local filename for a saved output. */
@@ -336,9 +330,9 @@ export const useGenerationStore = defineStore("generation", {
           job.remote = route.kind === "remote";
           targets.set(job.clientId, route.target);
         } else {
-          // Unrouted = the primary connection, which may itself be remote
-          // (single-host remote mode) — those prints get saved locally too.
-          job.remote = primaryIsRemote();
+          // Unrouted = the local primary engine — its prints are already in
+          // this device's gallery, so they never trigger the remote auto-save.
+          job.remote = false;
           // And snapshot the PRIMARY target at submit time: queued batch
           // siblings open their streams later, and cancels resolve later
           // still — both must hit the host the job was submitted to, not
