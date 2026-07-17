@@ -102,12 +102,16 @@ describe("DownloadsTray a11y", () => {
       version: null,
     };
     store.subscribeHost(host);
+    store.hostStates.hal9000!.activeJobs = [job()];
+    store.hostStates.hal9000!.cancelling = ["j1"];
     const oldSignal = store.hostStates.hal9000!.abort!.signal;
 
     store.subscribeHost({ ...host, apiKey: "new-key" });
 
     expect(oldSignal.aborted).toBe(true);
     expect(store.hostStates.hal9000!.target.apiKey).toBe("new-key");
+    expect(store.hostStates.hal9000!.activeJobs).toEqual([job()]);
+    expect(store.hostStates.hal9000!.cancelling).toEqual(["j1"]);
     expect(sseStream).toHaveBeenCalledTimes(2);
   });
 

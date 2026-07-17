@@ -65,8 +65,34 @@ fn combined_search_replaces_each_rejected_server_credential() {
         &hf_error, &mut opts, &forwarded,
     ));
     assert_eq!(opts.hf_token.as_deref(), Some("hf_desktop"));
+    assert!(super::replace_failed_search_credential(
+        &hf_error, &mut opts, &forwarded,
+    ));
+    assert_eq!(opts.hf_token, None);
     assert!(!super::replace_failed_search_credential(
         &hf_error, &mut opts, &forwarded,
+    ));
+}
+
+#[test]
+fn combined_search_retries_without_auth_when_the_server_credential_is_rejected() {
+    let forwarded = super::ForwardedCatalogCredentials::default();
+    let mut opts = mold_catalog::live::LiveSearchOpts {
+        hf_token: Some("hf_server".into()),
+        ..Default::default()
+    };
+    let error = mold_catalog::live::LiveSearchError::Upstream {
+        host: "huggingface.co",
+        status: 401,
+        body: "stale".into(),
+    };
+
+    assert!(super::replace_failed_search_credential(
+        &error, &mut opts, &forwarded,
+    ));
+    assert_eq!(opts.hf_token, None);
+    assert!(!super::replace_failed_search_credential(
+        &error, &mut opts, &forwarded,
     ));
 }
 use tower::ServiceExt;

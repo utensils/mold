@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import DownloadTargetDialog from "./DownloadTargetDialog.vue";
 import type { HostView } from "../../stores/hosts";
 
@@ -31,6 +31,10 @@ const hosts: HostView[] = [
 ];
 
 describe("DownloadTargetDialog", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
   it("offers every ready host and returns the selected target", async () => {
     const wrapper = mount(DownloadTargetDialog, {
       props: { modelName: "Flux Dev", hosts },
@@ -48,5 +52,21 @@ describe("DownloadTargetDialog", () => {
     ).click();
     expect(wrapper.emitted("select")?.[0]).toEqual([hosts[1]]);
     wrapper.unmount();
+  });
+
+  it("moves focus into the dialog and restores it when closed", async () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    const wrapper = mount(DownloadTargetDialog, {
+      props: { modelName: "Flux Dev", hosts },
+      attachTo: document.body,
+    });
+
+    await wrapper.vm.$nextTick();
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Close download target picker");
+
+    wrapper.unmount();
+    expect(document.activeElement).toBe(opener);
   });
 });

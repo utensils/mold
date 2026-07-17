@@ -205,7 +205,8 @@ pub async fn search(
         entries.extend(civitai_search(civitai_base, opts).await?);
     }
     if !matches!(opts.source, Some(Source::Civitai)) {
-        // HF errors must not nuke Civitai results. Log and continue.
+        // Authentication errors must surface so the server can retry with its
+        // next credential candidate; other combined-search failures stay soft.
         match hf_search(hf_base, opts).await {
             Ok(rows) => entries.extend(rows),
             Err(

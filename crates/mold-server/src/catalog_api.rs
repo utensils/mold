@@ -135,16 +135,20 @@ fn replace_failed_search_credential(
     else {
         return false;
     };
-    let (current, replacement) = if *host == "civitai.com" {
+    let (current, forwarded) = if *host == "civitai.com" {
         (&mut opts.civitai_token, forwarded.civitai.as_ref())
     } else {
         (&mut opts.hf_token, forwarded.hf.as_ref())
     };
-    let Some(replacement) = replacement.filter(|replacement| current.as_ref() != Some(replacement))
-    else {
+    if current.is_none() {
         return false;
-    };
-    *current = Some(replacement.clone());
+    }
+    if let Some(replacement) = forwarded.filter(|replacement| current.as_ref() != Some(replacement))
+    {
+        *current = Some(replacement.clone());
+        return true;
+    }
+    *current = None;
     true
 }
 

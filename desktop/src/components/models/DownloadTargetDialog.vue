@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, onUnmounted, ref } from "vue";
 import type { HostView } from "../../stores/hosts";
 
 defineProps<{ modelName: string; hosts: HostView[] }>();
@@ -7,13 +7,20 @@ const emit = defineEmits<{
   (e: "select", host: HostView): void;
   (e: "close"): void;
 }>();
+const closeBtn = ref<HTMLButtonElement | null>(null);
+let restoreFocusEl: HTMLElement | null = null;
 
 function onKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") emit("close");
 }
 
-onMounted(() => window.addEventListener("keydown", onKeydown));
+onMounted(() => {
+  restoreFocusEl = document.activeElement as HTMLElement | null;
+  window.addEventListener("keydown", onKeydown);
+  void nextTick(() => closeBtn.value?.focus());
+});
 onUnmounted(() => window.removeEventListener("keydown", onKeydown));
+onBeforeUnmount(() => restoreFocusEl?.focus?.());
 </script>
 
 <template>
@@ -38,6 +45,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             </p>
           </div>
           <button
+            ref="closeBtn"
             type="button"
             class="h-7 rounded-control px-2 text-ink-2 hover:bg-bath hover:text-ink"
             aria-label="Close download target picker"

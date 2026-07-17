@@ -47,8 +47,10 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
           options.onOpenError?.(error);
           throw error;
         }
-        opened = true;
-        options.onOpen?.();
+        if (!opened) {
+          opened = true;
+          options.onOpen?.();
+        }
         return Promise.resolve();
       },
       onmessage(msg) {

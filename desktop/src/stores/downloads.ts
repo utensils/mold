@@ -295,12 +295,12 @@ export const useDownloadsStore = defineStore("downloads", {
       );
       void ready.catch(() => {});
       this.hostStates[host.id] = {
-        ...(this.hostStates[host.id] ?? emptyDownloadsState()),
+        ...(existing ?? emptyDownloadsState()),
         label: host.label,
         target,
         subscribed: true,
         abort,
-        cancelling: this.hostStates[host.id]?.cancelling ?? [],
+        cancelling: existing?.cancelling ?? [],
         ready,
       };
       void sseStream("/api/downloads/stream", {
