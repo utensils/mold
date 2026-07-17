@@ -9,6 +9,7 @@ import { useToastStore } from "../../stores/toasts";
 import { useUiStore } from "../../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { copyImageBytesToClipboard } from "../../lib/clipboard";
+import { formatBytes, formatScheduler } from "../../lib/format";
 import type { ApiTarget } from "../../lib/api/client";
 import type { GalleryImage } from "../../lib/api/types";
 
@@ -61,6 +62,21 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
 
 const meta = computed(() => props.item.metadata);
 
+/** Full LoRA stack; a legacy single `lora`/`lora_scale` pair becomes one row. */
+const loraStack = computed(() => {
+  const m = meta.value;
+  if (m.loras?.length) return m.loras;
+  return m.lora ? [{ path: m.lora, scale: m.lora_scale ?? 1.0 }] : [];
+});
+
+const schedulerName = computed(() => formatScheduler(meta.value.scheduler));
+const frames = computed(() => meta.value.frames ?? meta.value.video_frames ?? null);
+const fps = computed(() => meta.value.fps ?? meta.value.video_fps ?? null);
+const fileFormat = computed(() => props.item.format ?? meta.value.output_format ?? null);
+const fileSize = computed(() =>
+  props.item.size_bytes != null ? formatBytes(props.item.size_bytes) : null,
+);
+
 const edgeCode = computed(() => {
   const m = meta.value;
   return [
@@ -79,17 +95,10 @@ const when = computed(() =>
 );
 
 function reuseSettings() {
-  const m = meta.value;
-  composer.set({
-    prompt: m.prompt,
-    model: m.model,
-    seed: m.seed,
-    width: m.generation_width ?? m.width,
-    height: m.generation_height ?? m.height,
-    steps: m.steps,
-    guidance: m.guidance,
-    upscaleModel: m.upscale_model ?? "",
-  });
+  // Ship the full metadata — `applyPrefillToForm` restores every serialized
+  // knob (negative prompt, LoRA stack, scheduler, strength, video params, …)
+  // and prefers the pre-upscale generation canvas over the raster size.
+  composer.set({ metadata: meta.value });
   emit("close");
   void router.push("/generate");
 }
@@ -200,6 +209,24 @@ function onDelete() {
       >
         {{ meta.prompt }}
       </p>
+      <p
+        v-if="meta.original_prompt"
+        data-test="lightbox-original"
+        data-selectable
+        class="mt-2 max-h-24 overflow-y-auto text-caption text-ink-2"
+        :title="meta.original_prompt"
+      >
+        <span class="text-ink-3">Original</span> {{ meta.original_prompt }}
+      </p>
+      <p
+        v-if="meta.negative_prompt"
+        data-test="lightbox-negative"
+        data-selectable
+        class="mt-2 max-h-24 overflow-y-auto text-caption text-ink-2"
+        :title="meta.negative_prompt"
+      >
+        <span class="text-ink-3">Negative</span> {{ meta.negative_prompt }}
+      </p>
 
       <dl class="mt-4 space-y-1.5">
         <div class="flex justify-between gap-2">
@@ -229,11 +256,46 @@ function onDelete() {
             {{ meta.steps }} · {{ meta.guidance.toFixed(1) }}
           </dd>
         </div>
-        <div v-if="meta.lora" class="flex justify-between gap-2">
-          <dt class="text-caption text-ink-3">LoRA</dt>
-          <dd class="data-mono truncate text-caption text-ink">
-            {{ meta.lora }} {{ meta.lora_scale?.toFixed(2) ?? "" }}
+        <div v-if="schedulerName" class="flex justify-between gap-2" data-test="lightbox-scheduler">
+          <dt class="text-caption text-ink-3">Scheduler</dt>
+          <dd class="data-mono text-caption text-ink">{{ schedulerName }}</dd>
+        </div>
+        <div v-if="meta.cfg_plus" class="flex justify-between gap-2" data-test="lightbox-cfg-plus">
+          <dt class="text-caption text-ink-3">CFG++</dt>
+          <dd class="data-mono text-caption text-ink">on</dd>
+        </div>
+        <div
+          v-if="meta.strength != null"
+          class="flex justify-between gap-2"
+          data-test="lightbox-strength"
+        >
+          <dt class="text-caption text-ink-3">img2img strength</dt>
+          <dd class="data-mono text-caption text-ink">{{ meta.strength.toFixed(2) }}</dd>
+        </div>
+        <div v-if="frames" class="flex justify-between gap-2" data-test="lightbox-video">
+          <dt class="text-caption text-ink-3">Frames</dt>
+          <dd class="data-mono text-caption text-ink">
+            {{ frames }}<template v-if="fps"> · {{ fps }} fps</template>
           </dd>
+        </div>
+        <div
+          v-for="l in loraStack"
+          :key="l.path"
+          class="flex justify-between gap-2"
+          data-test="lightbox-lora"
+        >
+          <dt class="text-caption text-ink-3">LoRA</dt>
+          <dd class="data-mono truncate text-caption text-ink" :title="l.path">
+            {{ l.path }} × {{ l.scale.toFixed(2) }}
+          </dd>
+        </div>
+        <div v-if="fileSize" class="flex justify-between gap-2" data-test="lightbox-file-size">
+          <dt class="text-caption text-ink-3">File size</dt>
+          <dd class="data-mono text-caption text-ink">{{ fileSize }}</dd>
+        </div>
+        <div v-if="fileFormat" class="flex justify-between gap-2" data-test="lightbox-format">
+          <dt class="text-caption text-ink-3">Format</dt>
+          <dd class="data-mono text-caption text-ink">{{ fileFormat.toUpperCase() }}</dd>
         </div>
         <div class="flex justify-between gap-2">
           <dt class="text-caption text-ink-3">Created</dt>
@@ -244,6 +306,13 @@ function onDelete() {
           <dd class="data-mono truncate text-caption text-ink">{{ hostLabel }}</dd>
         </div>
       </dl>
+      <span
+        v-if="meta.version"
+        class="data-mono mt-2 text-caption text-ink-3"
+        data-test="lightbox-version"
+      >
+        mold {{ meta.version }}
+      </span>
       <span v-if="item.metadata_synthetic" class="edge-code mt-2">SYNTHETIC METADATA</span>
 
       <div class="flex-1" />
