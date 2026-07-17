@@ -77,9 +77,9 @@ Pre-built binaries on the [releases page](https://github.com/utensils/mold/relea
 
 Mold also has a native desktop app for macOS and Linux. It brings Generate,
 Gallery, Models, Chains, History, Jobs, RunPod, and Settings into one interface,
-and can use this device alongside multiple remote Mold hosts. The unified model
-library keeps installed models first, supports Grid and Table layouts, and lets
-you choose which host receives a download.
+and can use this device alongside multiple remote Mold hosts. The unified
+Catalog keeps installed models above the live catalog with image/video filters
+and pinned downloads, and lets you choose which host receives a download.
 
 **[Download Mold for macOS](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** · **[Desktop guide](https://utensils.io/mold/guide/desktop)**
 

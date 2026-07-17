@@ -122,15 +122,17 @@ mold run flux-dev:bf16 "epic shot" \
   --lora dramatic-lighting.safetensors --lora-scale 0.4
 ```
 
-**Catalog browse:** Desktop Models is one installed-first searchable library
-with All / Installed / Available filters and Grid / Table layouts; its catalog
-uses cache-stable 512 px Civitai derivatives plus lazy async decoding and
-per-card layout/paint containment instead of source-resolution preview images.
+**Catalog browse:** the desktop's single **Catalog** view stacks installed
+models above the live catalog with **All / Images / Video** media chips and
+Grid / Table layouts; active downloads pin to the top with a source glyph and
+target host. The catalog uses cache-stable 512 px Civitai derivatives plus
+lazy async decoding and per-card layout/paint containment instead of
+source-resolution preview images.
 Entries without working preview art use a local model-family mark instead of a
 blank card or another image request.
 The catalog section proxies live HF + Civitai searches (filter by **LoRAs** to narrow).
 Install with `mold pull cv:<id>` / `mold pull hf:<author>/<repo>` or Pull in
-Models. With several ready desktop hosts, Pull asks for the destination. Remote
+the Catalog. With several ready desktop hosts, Pull asks for the destination. Remote
 desktop catalog requests can carry request-scoped HF/Civitai fallback tokens;
 server env tokens retain precedence and forwarded values are not persisted.
 Once installed, the LoRA appears in the **Generate → Settings → LoRA**
@@ -725,7 +727,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `GET /api/models` · `GET /api/loras` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
 - `DELETE /api/models/:model` — remove a downloaded model (HTTP `mold rm`): deletes only exclusively-owned files, keeps shared components, returns `{ removed, kept, freed_bytes }`; 409 while loaded
 - `GET /api/gallery` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`
-- `GET/POST /api/downloads` · `DELETE /api/downloads/:id` · `GET /api/downloads/stream` — bounded-parallel model pulls (two active per host); listings expose `active_jobs` plus legacy first-job `active`; cancel works for queued and active jobs. Desktop keeps one host-keyed stream per selected download target so progress, completion refresh, and cancellation stay routed to the correct server.
+- `GET/POST /api/downloads` · `DELETE /api/downloads/:id` · `GET /api/downloads/stream` — bounded-parallel model pulls (two active per host); listings expose `active_jobs` plus legacy first-job `active`; cancel works for queued and active jobs. Desktop keeps one host-keyed stream per selected download target — active pulls pin to the top of the Catalog view with a source glyph and target host — so progress, completion refresh, and cancellation stay routed to the correct server.
 - `POST /api/upscale` · `POST /api/upscale/stream`
 - `GET /api/queue` — authoritative server-side job listing for SPA reconciliation (queued + running jobs with UUIDv4 ids)
 - `DELETE /api/queue/:id` — cancel a still-queued generation job (204; 404 unknown; 409 once running)
@@ -872,7 +874,7 @@ services.mold.discord = {
 
 ## Desktop App
 
-An experimental native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/`. It auto-detects a running server on `localhost:7680` or embeds an authenticated Metal server bound to the LAN and advertised over mDNS. That local server stays online and routable as **This Mac** even when a remote host is primary; its persistent API key is copyable in Settings → Engine. Generate uses the union of models installed on every connected host and shows the first-model pull screen only after all hosts report none, so remote-only models route without a local download. The app covers the generation workspace (live "Develop" progress), unified multi-host galleries/history/jobs, parallel cancellable model pulls, the chains editing bench, full RunPod pod and network-volume lifecycle management, full-resolution image clipboard copy, persistent 80–130% whole-app scaling (⌘+/⌘−/⌘0), and provenance-tagged settings, with a ⌘K command palette. RunPod volume selection persists; volume-backed launches force Secure Cloud in the volume's datacenter and omit the redundant workspace disk.
+An experimental native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/`. It auto-detects a running server on `localhost:7680` or embeds an authenticated Metal server bound to the LAN and advertised over mDNS. That local server is permanently the app's own engine (**This device**); remote servers are host-list entries managed in **Settings → Hosts** (This-device card with a copyable persistent API key, Add host, Connected, Remembered, and network discovery), deduplicated by each server's stable instance UUID with display names that follow the server hostname — old remote-primary installs migrate into the list automatically. Clicking a host in the sidebar opens a detail view with live GPU/CPU/RAM telemetry, models-disk usage, queue state, and that host's installed models. Generate uses the union of models installed on every connected host and shows the first-model pull screen only after all hosts report none, so remote-only models route without a local download. The app covers the generation workspace (live "Develop" progress), unified multi-host galleries/history/jobs, the single Catalog model view with pinned parallel cancellable pulls, the chains editing bench, full RunPod pod and network-volume lifecycle management, full-resolution image clipboard copy, persistent 80–130% whole-app scaling (⌘+/⌘−/⌘0), and provenance-tagged settings, with a ⌘K command palette. RunPod volume selection persists; volume-backed launches force Secure Cloud in the volume's datacenter and omit the redundant workspace disk.
 
 Signed builds also expose **Settings → Updates** with persisted **Stable** and **Nightly** channels. Startup performs a best-effort check only; available updates appear in a persistent app banner and as a native notification while backgrounded, the menu and Settings offer the same manual check, and nothing downloads or installs until the user chooses **Update and restart**. Stable follows tagged releases through the public `mold-desktop-stable.json` manifest. Nightly follows signed, notarized builds from desktop-relevant `main` commits through the rolling `mold-desktop-nightly.json` manifest. Before touching the installed app, Tauri verifies the Minisign signature and Mold fully extracts the archive to temporary storage, binds the bundle ID/version to the manifest, runs strict Apple signature and Gatekeeper checks, validates the running bundle and install location, and proves the bundle can be replaced. Only then does Mold atomically exchange the staged and installed bundles with macOS `RENAME_SWAP` and restart. There is no post-launch watchdog or automatic rollback: the update either passes preflight and installs or fails while the running version remains installed. Selecting Stable from a newer Nightly does not downgrade immediately; it waits for a newer stable version.
 

@@ -39,7 +39,7 @@ mold server discover
 
 Add `--probe` for a `/health` latency column, `--json` for machine-readable
 output, or `--timeout-secs N` to browse longer on a busy network. The desktop
-app shows the same list under Settings → Engine with a one-click **Use** button.
+app shows the same list under Settings → Hosts with a one-click **Add** button.
 
 Advertising is on by default; a server can opt out with `mold serve --no-mdns`
 or `MOLD_MDNS=0` (for example on a shared or untrusted LAN). Loopback-only binds
