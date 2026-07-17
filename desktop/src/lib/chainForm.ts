@@ -14,6 +14,8 @@ export interface ChainStageForm {
   transition: TransitionMode;
   fadeFrames: number;
   negativePrompt: string;
+  /** Per-stage starting image, base64 (no data-URI prefix). Null = none. */
+  sourceImage: string | null;
 }
 
 export interface ChainForm {
@@ -28,6 +30,13 @@ export interface ChainForm {
   strength: number;
   motionTailFrames: number;
   enableAudio: boolean;
+  /**
+   * Chain-level starting image, base64. Sugar for "seed the film from this
+   * still": projected onto `stages[0].source_image` when stage 0 has no image
+   * of its own (the server ignores top-level `source_image` in canonical
+   * `stages` form, so it must ride on stage 0).
+   */
+  startImage: string | null;
   stages: ChainStageForm[];
 }
 
@@ -38,6 +47,7 @@ export function newStage(prompt = ""): ChainStageForm {
     transition: "smooth",
     fadeFrames: DEFAULT_FADE_FRAMES,
     negativePrompt: "",
+    sourceImage: null,
   };
 }
 
@@ -53,17 +63,22 @@ export function newChainForm(): ChainForm {
     strength: 1.0,
     motionTailFrames: DEFAULT_MOTION_TAIL_FRAMES,
     enableAudio: false,
+    startImage: null,
     stages: [newStage()],
   };
 }
 
 /** Project a form stage onto a wire `ChainStage`. Stage 0's transition is
- * always coerced to smooth (the server does this too — nothing precedes it). */
-function stageToWire(stage: ChainStageForm, idx: number): ChainStage {
+ * always coerced to smooth (the server does this too — nothing precedes it).
+ * The chain-level `startImage` rides on stage 0, unless stage 0 carries its
+ * own (more specific) image. */
+function stageToWire(stage: ChainStageForm, idx: number, startImage: string | null): ChainStage {
   const transition: TransitionMode = idx === 0 ? "smooth" : stage.transition;
   const wire: ChainStage = { prompt: stage.prompt.trim(), frames: stage.frames, transition };
   if (transition === "fade") wire.fade_frames = stage.fadeFrames;
   if (stage.negativePrompt.trim()) wire.negative_prompt = stage.negativePrompt.trim();
+  const image = stage.sourceImage || (idx === 0 ? startImage : null);
+  if (image) wire.source_image = image;
   return wire;
 }
 
@@ -71,7 +86,7 @@ export function chainFormToRequest(form: ChainForm): ChainRequest {
   const seed = form.seed.trim() === "" ? undefined : Number(form.seed);
   const req: ChainRequest = {
     model: form.model,
-    stages: form.stages.map(stageToWire),
+    stages: form.stages.map((s, i) => stageToWire(s, i, form.startImage)),
     motion_tail_frames: form.motionTailFrames,
     width: form.width,
     height: form.height,
@@ -94,6 +109,32 @@ function str(v: unknown, fallback = ""): string {
 }
 function asTransition(v: unknown): TransitionMode {
   return v === "cut" || v === "fade" ? v : "smooth";
+}
+
+/**
+ * Extract a stage's starting image from its TOML table. Mirrors
+ * `mold_core::chain_toml::resolve_stage_source_image`: `source_image_b64`
+ * (authoring form) and canonical `source_image` are both accepted, at most
+ * one image field may be set, and `source_image_path` is rejected — the
+ * composer has no script directory to resolve it against.
+ */
+function stageSourceImage(s: Record<string, unknown>, idx: number): string | null {
+  const fields = ["source_image", "source_image_path", "source_image_b64"].filter(
+    (k) => s[k] != null,
+  );
+  if (fields.length > 1) {
+    throw new Error(
+      `Stage ${idx + 1}: set at most one of source_image, source_image_path, source_image_b64.`,
+    );
+  }
+  if (s.source_image_path != null) {
+    throw new Error(
+      `Stage ${idx + 1} uses source_image_path, which needs the script's folder to resolve. ` +
+        "Inline the image as source_image_b64 to open it here.",
+    );
+  }
+  const b64 = s.source_image_b64 ?? s.source_image;
+  return typeof b64 === "string" && b64.length > 0 ? b64 : null;
 }
 
 /**
@@ -129,6 +170,7 @@ export function tomlToChainForm(toml: string): ChainForm {
     transition: idx === 0 ? "smooth" : asTransition(s.transition),
     fadeFrames: num(s.fade_frames, DEFAULT_FADE_FRAMES),
     negativePrompt: str(s.negative_prompt),
+    sourceImage: stageSourceImage(s, idx),
   }));
 
   return {
@@ -142,6 +184,8 @@ export function tomlToChainForm(toml: string): ChainForm {
     strength: num(c.strength, defaults.strength),
     motionTailFrames: num(c.motion_tail_frames, DEFAULT_MOTION_TAIL_FRAMES),
     enableAudio: c.enable_audio === true,
+    // TOML has no chain-level image — a start image round-trips on stage 0.
+    startImage: null,
     stages: stages.length > 0 ? stages : defaults.stages,
   };
 }
@@ -163,6 +207,6 @@ export function chainFormToScript(form: ChainForm): ChainScript {
       output_format: "mp4",
       ...(form.enableAudio ? { enable_audio: true } : {}),
     },
-    stage: form.stages.map(stageToWire),
+    stage: form.stages.map((s, i) => stageToWire(s, i, form.startImage)),
   };
 }

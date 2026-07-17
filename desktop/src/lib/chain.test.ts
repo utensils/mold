@@ -8,7 +8,13 @@ import {
   isLtx2FrameCount,
   snapFrames,
 } from "./chain";
-import { chainFormToScript, newChainForm, newStage, tomlToChainForm } from "./chainForm";
+import {
+  chainFormToRequest,
+  chainFormToScript,
+  newChainForm,
+  newStage,
+  tomlToChainForm,
+} from "./chainForm";
 import type { ChainStage, TransitionMode } from "./api/types";
 
 describe("frame-count validation", () => {
@@ -193,5 +199,190 @@ describe("tomlToChainForm", () => {
 
   it("throws on malformed TOML", () => {
     expect(() => tomlToChainForm("this is not = = toml")).toThrow();
+  });
+});
+
+// Base64 for a 1x1 PNG-ish payload — content doesn't matter, only plumbing.
+const IMG_A = "aGVyby1zdGlsbA==";
+const IMG_B = "c3RhZ2UtdHdv";
+
+describe("chain source images", () => {
+  it("projects per-stage sourceImage onto the wire stages", () => {
+    const form = newChainForm();
+    form.model = "ltx2:fp8";
+    form.stages = [newStage("dawn"), { ...newStage("storm"), sourceImage: IMG_B }];
+    const req = chainFormToRequest(form);
+    expect(req.stages[0]!.source_image).toBeUndefined();
+    expect(req.stages[1]!.source_image).toBe(IMG_B);
+  });
+
+  it("projects the chain-level startImage onto stage 0 only", () => {
+    const form = newChainForm();
+    form.model = "ltx2:fp8";
+    form.startImage = IMG_A;
+    form.stages = [newStage("dawn"), newStage("storm")];
+    const req = chainFormToRequest(form);
+    expect(req.stages[0]!.source_image).toBe(IMG_A);
+    expect(req.stages[1]!.source_image).toBeUndefined();
+    // Canonical form: the server ignores top-level source_image, so the
+    // request must carry the start image on stages[0], not the chain.
+    expect("source_image" in req).toBe(false);
+  });
+
+  it("prefers stage 0's own image over the chain-level startImage", () => {
+    const form = newChainForm();
+    form.model = "ltx2:fp8";
+    form.startImage = IMG_A;
+    form.stages = [{ ...newStage("dawn"), sourceImage: IMG_B }];
+    expect(chainFormToRequest(form).stages[0]!.source_image).toBe(IMG_B);
+    expect(chainFormToScript(form).stage[0]!.source_image).toBe(IMG_B);
+  });
+
+  it("omits source_image entirely when nothing is attached", () => {
+    const form = newChainForm();
+    form.model = "ltx2:fp8";
+    const req = chainFormToRequest(form);
+    expect("source_image" in req.stages[0]!).toBe(false);
+    expect(chainToToml(chainFormToScript(form))).not.toContain("source_image");
+  });
+
+  it("keeps images aligned to their stages across reorder and removal", () => {
+    const form = newChainForm();
+    form.model = "ltx2:fp8";
+    form.stages = [
+      newStage("one"),
+      { ...newStage("two"), sourceImage: IMG_B },
+      { ...newStage("three"), sourceImage: IMG_A },
+    ];
+    // Move stage 2 ("two") to the front, then drop the middle stage.
+    const [moved] = form.stages.splice(1, 1);
+    form.stages.splice(0, 0, moved!);
+    form.stages.splice(1, 1); // removes "one"
+    const req = chainFormToRequest(form);
+    expect(req.stages.map((s) => [s.prompt, s.source_image ?? null])).toEqual([
+      ["two", IMG_B],
+      ["three", IMG_A],
+    ]);
+  });
+
+  it("emits source_image_b64 per stage in TOML export (start image folded into stage 0)", () => {
+    const form = newChainForm();
+    form.model = "ltx2:fp8";
+    form.startImage = IMG_A;
+    form.stages = [newStage("dawn"), { ...newStage("storm"), sourceImage: IMG_B }];
+    const toml = chainToToml(chainFormToScript(form));
+    expect(toml).toContain(`source_image_b64 = "${IMG_A}"`);
+    expect(toml).toContain(`source_image_b64 = "${IMG_B}"`);
+    expect(toml).not.toContain("bytes omitted");
+  });
+
+  it("parses source_image_b64 back into the stage form", () => {
+    const toml = [
+      "[chain]",
+      'model = "ltx2:fp8"',
+      "width = 704",
+      "height = 416",
+      "fps = 24",
+      "steps = 8",
+      "guidance = 3.0",
+      "strength = 1.0",
+      "motion_tail_frames = 17",
+      'output_format = "mp4"',
+      "",
+      "[[stage]]",
+      'prompt = "a bird"',
+      "frames = 33",
+      `source_image_b64 = "${IMG_A}"`,
+    ].join("\n");
+    const form = tomlToChainForm(toml);
+    expect(form.stages[0]!.sourceImage).toBe(IMG_A);
+    expect(form.startImage).toBeNull();
+  });
+
+  it("accepts the canonical source_image key on import", () => {
+    const toml = [
+      "[chain]",
+      'model = "ltx2:fp8"',
+      "width = 704",
+      "height = 416",
+      "fps = 24",
+      "steps = 8",
+      "guidance = 3.0",
+      "strength = 1.0",
+      "motion_tail_frames = 17",
+      'output_format = "mp4"',
+      "",
+      "[[stage]]",
+      'prompt = "a bird"',
+      "frames = 33",
+      `source_image = "${IMG_A}"`,
+    ].join("\n");
+    expect(tomlToChainForm(toml).stages[0]!.sourceImage).toBe(IMG_A);
+  });
+
+  it("rejects source_image_path with a clear error", () => {
+    const toml = [
+      "[chain]",
+      'model = "ltx2:fp8"',
+      "width = 704",
+      "height = 416",
+      "fps = 24",
+      "steps = 8",
+      "guidance = 3.0",
+      "strength = 1.0",
+      "motion_tail_frames = 17",
+      'output_format = "mp4"',
+      "",
+      "[[stage]]",
+      'prompt = "a bird"',
+      "frames = 33",
+      'source_image_path = "./hero.png"',
+    ].join("\n");
+    expect(() => tomlToChainForm(toml)).toThrow(/source_image_b64/);
+  });
+
+  it("rejects a stage that sets more than one image field (matches chain_toml.rs)", () => {
+    const toml = [
+      "[chain]",
+      'model = "ltx2:fp8"',
+      "width = 704",
+      "height = 416",
+      "fps = 24",
+      "steps = 8",
+      "guidance = 3.0",
+      "strength = 1.0",
+      "motion_tail_frames = 17",
+      'output_format = "mp4"',
+      "",
+      "[[stage]]",
+      'prompt = "a bird"',
+      "frames = 33",
+      `source_image = "${IMG_A}"`,
+      `source_image_b64 = "${IMG_B}"`,
+    ].join("\n");
+    expect(() => tomlToChainForm(toml)).toThrow(/at most one/);
+  });
+
+  it("round-trips per-stage images through TOML exactly", () => {
+    const form = newChainForm();
+    form.model = "ltx-2-19b-distilled:fp8";
+    form.stages = [
+      { ...newStage("dawn"), sourceImage: IMG_A },
+      { ...newStage("storm"), transition: "cut", sourceImage: IMG_B },
+    ];
+    const parsed = tomlToChainForm(chainToToml(chainFormToScript(form)));
+    expect(parsed).toEqual(form);
+  });
+
+  it("round-trips a chain-level start image as a wire-equivalent form", () => {
+    const form = newChainForm();
+    form.model = "ltx2:fp8";
+    form.startImage = IMG_A;
+    const parsed = tomlToChainForm(chainToToml(chainFormToScript(form)));
+    // The start image comes back attached to stage 0 (TOML has no chain-level
+    // image), so the forms differ — but the requests they build must match.
+    expect(parsed.startImage).toBeNull();
+    expect(parsed.stages[0]!.sourceImage).toBe(IMG_A);
+    expect(chainFormToRequest(parsed)).toEqual(chainFormToRequest(form));
   });
 });

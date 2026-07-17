@@ -75,9 +75,9 @@ function tomlString(s: string): string {
 /**
  * Serialize a `ChainScript` to canonical `mold.chain.v1` TOML. Pure and
  * round-trip-shaped: emits the `[chain]` table and one `[[stage]]` table per
- * stage, omitting optional fields that are unset. Binary `source_image` bytes
- * are intentionally NOT emitted (they'd bloat the file); a comment marks
- * stages that carried one so the omission is visible.
+ * stage, omitting optional fields that are unset. Stage `source_image` bytes
+ * are emitted as `source_image_b64` (the schema's inline authoring field) so
+ * exported scripts round-trip through Open and `mold run --script` intact.
  */
 export function chainToToml(script: ChainScript): string {
   const c = script.chain;
@@ -103,7 +103,10 @@ export function chainToToml(script: ChainScript): string {
       lines.push(`fade_frames = ${stage.fade_frames}`);
     }
     if (stage.negative_prompt) lines.push(`negative_prompt = ${tomlString(stage.negative_prompt)}`);
-    if (stage.source_image) lines.push("# source_image attached (bytes omitted from TOML)");
+    // `source_image_b64` is the mold.chain.v1 authoring form of the canonical
+    // `source_image` wire field (see mold-core chain_toml.rs) — the CLI's
+    // `read_script_resolving_paths` folds it back into `source_image`.
+    if (stage.source_image) lines.push(`source_image_b64 = ${tomlString(stage.source_image)}`);
   }
 
   return lines.join("\n") + "\n";

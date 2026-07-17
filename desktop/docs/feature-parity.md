@@ -179,6 +179,8 @@ Post-generation upscale persists distinct `-original` and `-upscaled` entries on
 - Web: `createChainJob`, `listChainJobs`, `getChainJob`, `resumeChainJob`, `retakeChainJob`, `cancelChainJob`, `deleteChainJob`, `gcChainJobs`, per-stage preview URL, SSE events URL. Components: `ScriptComposer.vue`, `StageCard.vue`, `ChainJobCard.vue`, `JobsPanel.vue`. TUI has full script composer (add/reorder/delete stages, cycle transition, edit prompt/frames modals, save/load).
 - Chain limits: `GET /api/chain/limits` per model; VRAM preflight estimate (worst_case_bytes, fits).
 
+Desktop parity: the Chains view's filmstrip builder supports per-stage **source images** (attach / replace / clear well on each `StageCard.vue`, thumbnail from base64) plus a chain-level **Start image** in the header, both picked via the shared `ImagePickerModal.vue` (upload or any connected host's gallery). The start image is projected onto `stages[0].source_image` at request/script build time (canonical `stages` form ignores top-level `source_image`); a stage's own image wins over the chain-level one. TOML **Export** emits inline `source_image_b64` per stage and **Open** parses `source_image_b64` / canonical `source_image` back (matching `mold_core::chain_toml` semantics, including the at-most-one-image-field rule); `source_image_path` is rejected with a pointer to `source_image_b64` since the composer has no script directory to resolve against. Images are b64-inlined in the `POST /api/chain-jobs` body, so multi-host routing is unaffected.
+
 ---
 
 ## 8. Queue & job lifecycle

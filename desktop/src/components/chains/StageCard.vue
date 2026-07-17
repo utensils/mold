@@ -5,6 +5,7 @@ import type { DevelopPhase } from "../../lib/develop/grain";
 import type { ChainStageForm } from "../../lib/chainForm";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
 import { authedMediaUrl } from "../../lib/gallery/media";
+import { base64ToDataUrl } from "../../lib/image";
 import type { ChainJobStageDetail } from "../../lib/api/types";
 
 const props = defineProps<{
@@ -22,6 +23,8 @@ const emit = defineEmits<{
   (e: "remove"): void;
   (e: "move-left"): void;
   (e: "move-right"): void;
+  (e: "pick-image"): void;
+  (e: "clear-image"): void;
 }>();
 
 const editing = ref(false);
@@ -108,6 +111,41 @@ function snapFramesField() {
         {{ progress.step }}/{{ progress.total }}
       </div>
     </div>
+
+    <!-- source image well: attach / replace / clear a starting still -->
+    <div v-if="stage.sourceImage" class="relative">
+      <button
+        type="button"
+        data-test="stage-image-thumb"
+        class="border-edge block h-10 w-full overflow-hidden rounded-media border hover:brightness-110"
+        title="Replace source image"
+        aria-label="Replace source image"
+        @click="emit('pick-image')"
+      >
+        <img :src="base64ToDataUrl(stage.sourceImage)" alt="" class="h-full w-full object-cover" />
+      </button>
+      <button
+        type="button"
+        data-test="stage-image-clear"
+        class="border-edge absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full border bg-bath text-[10px] text-ink-2 hover:text-stop"
+        title="Remove source image"
+        aria-label="Remove source image"
+        @click="emit('clear-image')"
+      >
+        ✕
+      </button>
+    </div>
+    <button
+      v-else
+      type="button"
+      data-test="stage-image-attach"
+      class="border-edge h-6 w-full rounded-control border border-dashed text-caption text-ink-3 hover:text-ink"
+      title="Attach a starting image for this stage"
+      aria-label="Attach source image"
+      @click="emit('pick-image')"
+    >
+      + Image
+    </button>
 
     <!-- prompt (click to edit) -->
     <button
