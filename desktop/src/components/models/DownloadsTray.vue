@@ -3,6 +3,7 @@ import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore } from "../../stores/hosts";
 import { modelSource } from "../../lib/modelSource";
 import { formatGB, percent } from "../../lib/format";
+import { PLATFORM_UI } from "../../lib/platform";
 import SourceGlyph from "../generate/SourceGlyph.vue";
 
 const downloads = useDownloadsStore();
@@ -10,7 +11,7 @@ const hosts = useHostsStore();
 
 /** Primary rows carry a null label; resolve them to the primary host's name. */
 function hostLabel(label: string | null): string {
-  return label ?? hosts.primaryHost?.label ?? "This device";
+  return label ?? hosts.primaryHost?.label ?? PLATFORM_UI.deviceLabel;
 }
 </script>
 
