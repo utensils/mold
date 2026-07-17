@@ -156,6 +156,41 @@ describe("merged grid", () => {
     gallery.filter = "gone-host";
     expect(gallery.filtered).toHaveLength(1);
   });
+
+  it("dedupes matching filenames in All, prefers This Mac, and lists every location", async () => {
+    connectRemote();
+    addExtra();
+    vi.mocked(ipc.localGalleryList).mockResolvedValue([img("shared.png", 200)]);
+    vi.mocked(apiJsonTo).mockImplementation(
+      (target, _path) =>
+        Promise.resolve(
+          (target as { baseUrl: string }).baseUrl.includes("hal9000")
+            ? [img("shared.png", 201), img("remote-only.png", 100)]
+            : [img("shared.png", 202)],
+        ) as never,
+    );
+    const gallery = useGalleryStore();
+
+    await gallery.fetchAll();
+
+    expect(gallery.merged.map((e) => e.item.filename)).toEqual(["shared.png", "remote-only.png"]);
+    expect(gallery.merged[0]).toMatchObject({
+      sourceKey: "local",
+      hostLabel: "This Mac",
+      availableOn: [
+        { key: "local", label: "This Mac" },
+        { key: "hal9000-7680", label: "hal9000:7680" },
+        { key: "okra-7680", label: "okra" },
+      ],
+    });
+
+    gallery.filter = "hal9000-7680";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["shared.png", "remote-only.png"]);
+    expect(gallery.filtered[0]).toMatchObject({
+      sourceKey: "hal9000-7680",
+      availableOn: [{ key: "hal9000-7680", label: "hal9000:7680" }],
+    });
+  });
 });
 
 describe("per-bucket isolation", () => {

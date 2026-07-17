@@ -34,6 +34,8 @@ export interface MergedPrint {
   item: GalleryImage;
   sourceKey: string;
   hostLabel: string;
+  /** Every gallery bucket that contains this filename. */
+  availableOn: GallerySourceRef[];
 }
 
 export interface GalleryChip {
@@ -82,23 +84,56 @@ export const useGalleryStore = defineStore("gallery", {
       }
       return refs;
     },
-    /** Every loaded print across buckets, newest first. */
+    /**
+     * Every loaded print across buckets, newest first. Matching filenames are
+     * one logical print in the All view: saved remote results retain their
+     * filename when copied locally, so the filename is the cross-host identity
+     * available in the gallery wire contract. Prefer the local copy for media
+     * and actions, while retaining every location for display.
+     */
     merged(): MergedPrint[] {
-      const rows: MergedPrint[] = [];
+      const byFilename = new Map<string, MergedPrint>();
       for (const source of this.sources) {
         const bucket = this.buckets[source.key];
         if (!bucket) continue;
         for (const item of bucket.items) {
-          rows.push({ item, sourceKey: source.key, hostLabel: source.label });
+          const existing = byFilename.get(item.filename);
+          if (!existing) {
+            byFilename.set(item.filename, {
+              item,
+              sourceKey: source.key,
+              hostLabel: source.label,
+              availableOn: [source],
+            });
+            continue;
+          }
+          existing.availableOn.push(source);
+          if (source.key === "local" && existing.sourceKey !== "local") {
+            existing.item = item;
+            existing.sourceKey = source.key;
+            existing.hostLabel = source.label;
+          }
         }
       }
-      return rows.sort((a, b) => b.item.timestamp - a.item.timestamp);
+      return [...byFilename.values()].sort((a, b) => b.item.timestamp - a.item.timestamp);
     },
-    /** `merged` with the chip filter applied (an unknown filter = all). */
+    /**
+     * `merged` in All; an individual host remains its complete raw bucket so
+     * a print represented by This Mac in All is still visible on a host chip.
+     * An unknown filter falls back to All.
+     */
     filtered(): MergedPrint[] {
       if (this.filter === "all") return this.merged;
-      if (!this.sources.some((s) => s.key === this.filter)) return this.merged;
-      return this.merged.filter((e) => e.sourceKey === this.filter);
+      const source = this.sources.find((s) => s.key === this.filter);
+      if (!source) return this.merged;
+      return (this.buckets[source.key]?.items ?? [])
+        .map((item) => ({
+          item,
+          sourceKey: source.key,
+          hostLabel: source.label,
+          availableOn: [source],
+        }))
+        .sort((a, b) => b.item.timestamp - a.item.timestamp);
     },
     /** Per-source chips for the gallery header (HostFilterChips adds All). */
     chipCounts(): GalleryChip[] {

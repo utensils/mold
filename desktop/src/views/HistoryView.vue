@@ -45,6 +45,8 @@ const query = ref("");
 /** The Gallery's chip filter narrows both tabs; row chips only in All view. */
 const showChips = computed(() => gallery.chipCounts.length > 1);
 const showBadges = computed(() => gallery.filter === "all" && gallery.chipCounts.length > 1);
+const availabilityLabel = (entry: MergedPrint) =>
+  entry.availableOn.map((source) => source.label).join(" · ");
 
 // ── Runs (gallery-backed, merged across every connected host) ──────────────
 
@@ -329,7 +331,11 @@ const timeOf = (e: HistoryEntry) =>
 
     <!-- One origin filter for both tabs — the same chips the Gallery uses -->
     <div v-if="showChips" class="border-edge flex items-center border-b px-4 py-2">
-      <HostFilterChips v-model="gallery.filter" :chips="gallery.chipCounts" />
+      <HostFilterChips
+        v-model="gallery.filter"
+        :chips="gallery.chipCounts"
+        :all-count="gallery.merged.length"
+      />
     </div>
 
     <!-- Runs: every finished generation with print + settings -->
@@ -384,7 +390,7 @@ const timeOf = (e: HistoryEntry) =>
             data-test="host-badge"
             class="edge-code max-w-32 shrink-0 truncate"
           >
-            {{ entry.hostLabel }}
+            {{ availabilityLabel(entry) }}
           </span>
           <span class="data-mono shrink-0 text-caption text-ink-3">{{ runTime(entry.item) }}</span>
           <span

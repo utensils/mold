@@ -43,9 +43,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
   before you press Generate.
 - **Gallery** — a justified, virtualized contact-sheet grid. **Space** opens
   Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Generate with
-  every parameter restored. When the active engine is remote, **This device**
-  remains available as a separate local-gallery source. Still images offer
-  full-resolution **Copy image** from tile and lightbox right-click menus.
+  every parameter restored. All merges every connected host without repeating
+  matching saved prints, prefers the copy on **This device**, and labels every
+  host where a print is available; source filters retain each host's full
+  gallery. Still images offer full-resolution **Copy image** from tile and
+  lightbox right-click menus.
 - **Models & catalog** — one searchable installed-first library with All,
   Installed, and Available filters plus compact Grid and Table layouts. The
   desktop reuses cacheable 512 px Civitai thumbnails across both layouts,

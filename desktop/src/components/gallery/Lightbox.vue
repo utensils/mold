@@ -240,7 +240,7 @@ function onDelete() {
           <dd class="text-caption text-ink">{{ when }}</dd>
         </div>
         <div v-if="hostLabel" class="flex justify-between gap-2" data-test="lightbox-host">
-          <dt class="text-caption text-ink-3">Host</dt>
+          <dt class="text-caption text-ink-3">Available on</dt>
           <dd class="data-mono truncate text-caption text-ink">{{ hostLabel }}</dd>
         </div>
       </dl>

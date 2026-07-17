@@ -24,6 +24,16 @@ describe("HostFilterChips", () => {
     expect(tabs[2]!.text()).toContain("3");
   });
 
+  it("can show a deduplicated All count without changing per-source counts", () => {
+    const wrapper = mount(HostFilterChips, {
+      props: { chips, modelValue: "all", allCount: 4 },
+    });
+    const tabs = wrapper.findAll("[role='tab']");
+    expect(tabs[0]!.text()).toContain("4");
+    expect(tabs[1]!.text()).toContain("2");
+    expect(tabs[2]!.text()).toContain("3");
+  });
+
   it("marks the active chip selected", () => {
     const wrapper = mountChips("hal9000-7680");
     const tabs = wrapper.findAll("[role='tab']");
