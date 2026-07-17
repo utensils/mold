@@ -77,10 +77,16 @@ export const useGalleryStore = defineStore("gallery", {
       const conn = useConnectionStore();
       const hosts = useHostsStore();
       const refs: GallerySourceRef[] = [];
-      if (conn.mode === "remote") refs.push({ key: "local", label: "This Mac" });
+      const keys = new Set<string>();
+      const add = (source: GallerySourceRef) => {
+        if (keys.has(source.key)) return;
+        keys.add(source.key);
+        refs.push(source);
+      };
+      if (conn.mode === "remote") add({ key: "local", label: "This Mac" });
       for (const host of hosts.all) {
         if (host.status !== "ready") continue;
-        refs.push({ key: host.id, label: host.label });
+        add({ key: host.id, label: host.label });
       }
       return refs;
     },

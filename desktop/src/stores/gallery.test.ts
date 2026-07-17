@@ -98,6 +98,22 @@ describe("gallery sources", () => {
     );
   });
 
+  it("does not duplicate the local source when a remote primary keeps the local engine ready", () => {
+    connectRemote();
+    const conn = useConnectionStore();
+    conn.localInfo = {
+      kind: "embedded",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+      port: 7680,
+    };
+    conn.localStatus = "ready";
+
+    const gallery = useGalleryStore();
+
+    expect(gallery.sources.map((source) => source.key)).toEqual(["local", "hal9000-7680"]);
+  });
+
   it("only ready hosts get buckets", () => {
     connectLocal();
     addExtra();
