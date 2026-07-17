@@ -101,7 +101,7 @@ async function connectDetected(host: DiscoveredHost) {
   const id = hostIdFromUrl(host.url);
   const key = await ipc.secretGet(`remote-api-key.${id}`);
   if (host.authRequired && !key) {
-    toasts.push(`${host.name} needs an API key — add it in Settings → Engine.`);
+    toasts.push(`${host.name} needs an API key — add it in Settings → Hosts.`);
     void router.push("/settings");
     return;
   }
@@ -185,12 +185,6 @@ function hostMenu(host: HostView): MenuEntry[] {
   }
   entries.push({ separator: true });
   if (host.primary) {
-    if (host.kind === "remote") {
-      entries.push({
-        label: "Switch to built-in engine",
-        action: () => void hosts.demoteToExtra(host),
-      });
-    }
     entries.push({ label: "Manage in Settings", action: () => void router.push("/settings") });
     return entries;
   }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import EngineSection from "../components/settings/EngineSection.vue";
+import HostsSection from "../components/settings/HostsSection.vue";
 import PerformanceSection from "../components/settings/PerformanceSection.vue";
 import GenerationSection from "../components/settings/GenerationSection.vue";
 import ExpansionSection from "../components/settings/ExpansionSection.vue";
@@ -32,7 +32,7 @@ const router = useRouter();
 function sectionFromQuery(value: unknown): SectionId {
   return typeof value === "string" && SECTIONS.some((candidate) => candidate.id === value)
     ? (value as SectionId)
-    : "engine";
+    : "hosts";
 }
 
 const section = ref<SectionId>(sectionFromQuery(route.query.section));
@@ -50,7 +50,7 @@ function selectSection(next: SectionId) {
   section.value = next;
   query.value = "";
   const nextQuery = { ...route.query };
-  if (next === "engine") delete nextQuery.section;
+  if (next === "hosts") delete nextQuery.section;
   else nextQuery.section = next;
   void router.replace({ query: nextQuery });
 }
@@ -84,7 +84,7 @@ const matchedAdvanced = computed(() =>
 );
 
 const componentFor: Record<SectionId, unknown> = {
-  engine: EngineSection,
+  hosts: HostsSection,
   performance: PerformanceSection,
   generation: GenerationSection,
   expansion: ExpansionSection,

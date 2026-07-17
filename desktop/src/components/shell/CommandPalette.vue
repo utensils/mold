@@ -106,10 +106,10 @@ const staticCommands = computed<Command[]>(() => {
       },
     },
     {
-      id: "act-engine-remote",
-      title: "Set remote host…",
-      keywords: ["engine", "server"],
-      run: () => go("/settings"),
+      id: "act-add-host",
+      title: "Add host…",
+      keywords: ["engine", "server", "host", "remote"],
+      run: () => go("/settings?section=hosts"),
     },
     {
       id: "act-engine-restart",

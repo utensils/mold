@@ -9,7 +9,7 @@
  */
 
 export type SectionId =
-  | "engine"
+  | "hosts"
   | "performance"
   | "generation"
   | "expansion"
@@ -26,7 +26,7 @@ export interface SectionInfo {
 }
 
 export const SECTIONS: SectionInfo[] = [
-  { id: "engine", label: "Engine" },
+  { id: "hosts", label: "Hosts" },
   { id: "performance", label: "Performance" },
   { id: "generation", label: "Generation" },
   { id: "expansion", label: "Prompt expansion" },
@@ -61,17 +61,17 @@ export interface KeySchema {
 export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
   {
     key: "models_dir",
-    section: "engine",
+    section: "hosts",
     label: "Models directory",
-    help: "Where pulled model weights live. Moving it does not copy existing models.",
+    help: "Where pulled model weights live on this host. Moving it does not copy existing models.",
     editor: "path",
     needsEngineRestart: true,
   },
   {
     key: "output_dir",
-    section: "engine",
+    section: "hosts",
     label: "Output directory",
-    help: "Where finished prints are written. The Gallery reads from here.",
+    help: "Where finished prints are written on this host. The Gallery reads from here.",
     editor: "path",
     needsEngineRestart: true,
   },
