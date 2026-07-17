@@ -124,59 +124,96 @@ pub fn forget_host(settings: &mut AppSettings, id: &str) {
 /// existing boot-reconnect path (`hosts.init`) brings it back as a normal host
 /// on this launch — the frontend needs no migration code of its own.
 ///
-/// Idempotent: once `mode` is no longer `Remote` it is a no-op. Returns true
-/// when it changed anything, so the caller knows to persist.
+/// The mode flip is idempotent on `mode != Remote`. The secret carry has its
+/// own idempotence key: `remote_url` staying set while mode is Local marks an
+/// incomplete carry (a failed `secrets.json` write on an earlier boot), so
+/// the carry re-runs each launch until the key is durably moved — only then
+/// are the shared slot and legacy plaintext field cleared. A credential must
+/// never be wiped from its source before it exists somewhere else on disk.
+///
+/// Returns true when it changed anything, so the caller knows to persist.
 pub fn migrate_remote_primary(settings: &mut AppSettings, secrets: &SecretStore) -> bool {
-    if settings.mode != ConnectionMode::Remote {
-        return false;
-    }
-    settings.mode = ConnectionMode::Local;
-    if let Some(url) = settings.remote_url.take() {
-        let id = crate::connection::host_id(&url);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        // Name-preserving: a nameless re-home must not wipe a discovered name.
-        upsert_saved_host(&mut settings.saved_hosts, &id, &url, None, now_ms);
-        remember_connected_host(settings, &id);
+    let mut changed = false;
+    if settings.mode == ConnectionMode::Remote {
+        settings.mode = ConnectionMode::Local;
+        changed = true;
+        if let Some(url) = settings.remote_url.clone() {
+            let id = crate::connection::host_id(&url);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            // Name-preserving: a nameless re-home must not wipe a discovered
+            // name.
+            upsert_saved_host(&mut settings.saved_hosts, &id, &url, None, now_ms);
+            remember_connected_host(settings, &id);
 
-        // Carry the primary's key into its per-host slot when that slot is
-        // empty. `set_remote_host` has always written both the shared and the
-        // per-host slot identically, so an existing per-host value is never
-        // worse; the legacy plaintext field is the last resort.
-        let per_host = format!("remote-api-key.{id}");
-        let has_per_host = secrets
-            .get(&per_host)
-            .ok()
-            .flatten()
-            .is_some_and(|k| !k.is_empty());
-        if !has_per_host {
-            let carried = secrets
-                .get("remote-api-key")
-                .ok()
-                .flatten()
-                .filter(|k| !k.is_empty())
-                .or_else(|| settings.remote_api_key.clone().filter(|k| !k.is_empty()));
-            if let Some(key) = carried {
-                if let Err(e) = secrets.set(&per_host, &key) {
-                    tracing::warn!("failed to carry remote-primary key to per-host slot: {e}");
-                }
+            // A remote-primary user expects generations to keep landing on
+            // that host; model-aware Auto might route locally otherwise. Pin
+            // it once — the user can flip back to Auto.
+            if settings.generate_target_host.is_none() {
+                settings.generate_target_host = Some(id);
             }
         }
+    }
 
-        // A remote-primary user expects generations to keep landing on that
-        // host; model-aware Auto might route locally otherwise. Pin it once —
-        // the user can flip back to Auto.
-        if settings.generate_target_host.is_none() {
-            settings.generate_target_host = Some(id);
+    // Secret carry — on the migration boot and again on any later boot while
+    // an ex-primary URL still holds unfinished carry work. Sources are only
+    // cleared once the carry is durable; a failed write leaves them in place
+    // (a failed `secrets.set` still mutates the in-memory store, so this
+    // session keeps working) and the next launch retries.
+    if settings.mode == ConnectionMode::Local && settings.remote_url.is_some() {
+        let url = settings.remote_url.clone().expect("checked above");
+        let id = crate::connection::host_id(&url);
+        if carry_remote_primary_key(settings, secrets, &id) {
+            // The ex-primary URL and the shared/legacy key slots are dead
+            // after a completed migration.
+            settings.remote_url = None;
+            settings.remote_api_key = None;
+            changed = true;
         }
     }
-    // The shared slot and legacy plaintext field are dead after migration.
-    if let Err(e) = secrets.clear("remote-api-key") {
-        tracing::warn!("failed to clear shared remote-api-key after migration: {e}");
+    changed
+}
+
+/// Move the shared-slot (or legacy plaintext) API key into
+/// `remote-api-key.<id>`. Returns true only when the migration's secret work
+/// is fully durable: the per-host slot holds the key (or there was never one
+/// to carry) *and* the shared slot is cleared on disk. Any write failure
+/// returns false so the caller leaves the sources intact for a retry.
+fn carry_remote_primary_key(settings: &AppSettings, secrets: &SecretStore, id: &str) -> bool {
+    // `set_remote_host` has always written both the shared and the per-host
+    // slot identically, so an existing per-host value is never worse; the
+    // legacy plaintext field is the last resort.
+    let per_host = format!("remote-api-key.{id}");
+    let has_per_host = secrets
+        .get(&per_host)
+        .ok()
+        .flatten()
+        .is_some_and(|k| !k.is_empty());
+    if !has_per_host {
+        let carried = secrets
+            .get("remote-api-key")
+            .ok()
+            .flatten()
+            .filter(|k| !k.is_empty())
+            .or_else(|| settings.remote_api_key.clone().filter(|k| !k.is_empty()));
+        if let Some(key) = carried {
+            if let Err(e) = secrets.set(&per_host, &key) {
+                tracing::warn!(
+                    "failed to carry remote-primary key to per-host slot (will retry next \
+                     launch): {e}"
+                );
+                return false;
+            }
+        }
     }
-    settings.remote_api_key = None;
+    if let Err(e) = secrets.clear("remote-api-key") {
+        tracing::warn!(
+            "failed to clear shared remote-api-key after migration (will retry next launch): {e}"
+        );
+        return false;
+    }
     true
 }
 
@@ -645,6 +682,101 @@ mod tests {
         assert!(migrate_remote_primary(&mut settings, &secrets));
         // remember_connected_host must not duplicate the entry.
         assert_eq!(settings.connected_host_ids, vec!["hal9000-7680"]);
+    }
+
+    /// Block every `secrets.json` write by squatting a directory on the
+    /// atomic-write temp path (`fs::write` fails with EISDIR). Reads still
+    /// work, mirroring a transient disk/AV failure on the write path.
+    fn block_secret_writes(dir: &tempfile::TempDir) {
+        std::fs::create_dir_all(dir.path().join("secrets.json.tmp")).unwrap();
+    }
+
+    fn unblock_secret_writes(dir: &tempfile::TempDir) {
+        std::fs::remove_dir_all(dir.path().join("secrets.json.tmp")).unwrap();
+    }
+
+    #[test]
+    fn migrate_remote_primary_failed_carry_leaves_sources_for_retry() {
+        let (secrets, dir) = secret_store();
+        secrets.set("remote-api-key", "shared-key").unwrap();
+        block_secret_writes(&dir);
+        let mut settings = remote_primary_settings();
+
+        // The mode migration itself still proceeds…
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        assert_eq!(settings.mode, ConnectionMode::Local);
+        assert_eq!(settings.connected_host_ids, vec!["hal9000-7680"]);
+        assert_eq!(
+            settings.generate_target_host.as_deref(),
+            Some("hal9000-7680")
+        );
+        // …but the carry sources stay put: `remote_url` is the retry marker,
+        // and on disk the shared slot is untouched while the per-host slot
+        // was never durably written.
+        assert_eq!(settings.remote_url.as_deref(), Some("http://hal9000:7680"));
+        let reloaded = SecretStore::new(dir.path().to_path_buf());
+        assert_eq!(
+            reloaded.get("remote-api-key").unwrap().as_deref(),
+            Some("shared-key")
+        );
+        assert_eq!(reloaded.get("remote-api-key.hal9000-7680").unwrap(), None);
+
+        // Next boot (fresh store, writes healthy): the carry completes and
+        // only then are the sources cleared.
+        unblock_secret_writes(&dir);
+        let secrets = SecretStore::new(dir.path().to_path_buf());
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        assert_eq!(settings.remote_url, None);
+        assert_eq!(
+            secrets
+                .get("remote-api-key.hal9000-7680")
+                .unwrap()
+                .as_deref(),
+            Some("shared-key")
+        );
+        assert_eq!(secrets.get("remote-api-key").unwrap(), None);
+        // And the migration is finally settled.
+        assert!(!migrate_remote_primary(&mut settings, &secrets));
+    }
+
+    #[test]
+    fn migrate_remote_primary_failed_carry_never_destroys_the_plaintext_key() {
+        let (secrets, dir) = secret_store();
+        block_secret_writes(&dir);
+        let mut settings = AppSettings {
+            remote_api_key: Some("legacy-plaintext".into()),
+            ..remote_primary_settings()
+        };
+
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        // The legacy credential must survive in settings.json until it exists
+        // somewhere else on disk.
+        assert_eq!(settings.remote_api_key.as_deref(), Some("legacy-plaintext"));
+        assert_eq!(settings.remote_url.as_deref(), Some("http://hal9000:7680"));
+
+        unblock_secret_writes(&dir);
+        let secrets = SecretStore::new(dir.path().to_path_buf());
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        assert_eq!(
+            secrets
+                .get("remote-api-key.hal9000-7680")
+                .unwrap()
+                .as_deref(),
+            Some("legacy-plaintext")
+        );
+        assert_eq!(settings.remote_api_key, None);
+        assert_eq!(settings.remote_url, None);
+    }
+
+    #[test]
+    fn migrate_remote_primary_with_nothing_to_carry_clears_sources_immediately() {
+        let (secrets, _dir) = secret_store();
+        let mut settings = remote_primary_settings();
+        assert!(migrate_remote_primary(&mut settings, &secrets));
+        // No key anywhere → the migration settles in one pass.
+        assert_eq!(settings.remote_url, None);
+        assert_eq!(settings.remote_api_key, None);
+        assert!(!migrate_remote_primary(&mut settings, &secrets));
     }
 
     #[test]
