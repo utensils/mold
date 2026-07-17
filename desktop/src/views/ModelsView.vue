@@ -79,7 +79,7 @@ watch(
   () =>
     hosts.all
       .filter((host) => host.status === "ready" && host.baseUrl)
-      .map((host) => `${host.id}:${host.baseUrl}`)
+      .map((host) => `${host.id}:${host.baseUrl}:${host.status}:${host.apiKey ?? ""}`)
       .join("|"),
   () => {
     for (const host of hosts.all.filter((candidate) => candidate.status === "ready")) {

@@ -124,7 +124,7 @@ const displayEntries = computed(() =>
     (entry) =>
       !(
         props.excludeInstalled &&
-        (entry.installed || (props.installedIds ?? []).includes(entry.id))
+        (entry.installed || (props.installedIds ?? []).includes(entry.name))
       ) && matchesMediaType(entry),
   ),
 );

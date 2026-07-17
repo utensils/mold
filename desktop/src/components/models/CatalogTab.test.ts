@@ -64,6 +64,30 @@ beforeEach(() => {
 });
 
 describe("CatalogTab media filter under pagination", () => {
+  it("excludes an installed model by name when its catalog id is source-prefixed", async () => {
+    setActivePinia(createPinia());
+    searchCatalog.mockResolvedValue({
+      entries: [entry("flux-dev:q8", "flux")],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+
+    const wrapper = mount(CatalogTab, {
+      props: {
+        query: "",
+        layout: "grid" as const,
+        excludeInstalled: true,
+        installedIds: ["flux-dev:q8"],
+      },
+      global: { plugins: [] },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("flux-dev:q8");
+    expect(wrapper.get("[data-test='catalog-empty']").text()).toContain("already installed");
+  });
+
   it("offers safe manifest variants and hides aggregate HF rows for the same repo", async () => {
     setActivePinia(createPinia());
     useModelStore().all = [

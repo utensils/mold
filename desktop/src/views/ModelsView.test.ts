@@ -170,6 +170,27 @@ describe("ModelsView unified catalog", () => {
     expect(wrapper.find("[aria-label='Downloading qwen-image:q4 on hal9000']").exists()).toBe(true);
   });
 
+  it("resubscribes a ready host's download stream when its API key changes", async () => {
+    await mountView();
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    await flushPromises();
+    expect(useDownloadsStore().hostStates["hal9000-7680"]?.target.apiKey).toBeNull();
+
+    hosts.extras[0]!.apiKey = "rotated-key";
+    await flushPromises();
+
+    expect(useDownloadsStore().hostStates["hal9000-7680"]?.target.apiKey).toBe("rotated-key");
+  });
+
   it("filters installed and catalog entries to video families for ?type=video", async () => {
     const wrapper = await mountView("/models?type=video");
     expect(wrapper.text()).toContain("ltx-2:q8");

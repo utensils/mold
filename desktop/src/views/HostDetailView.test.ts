@@ -358,6 +358,33 @@ describe("HostDetailView models", () => {
     expect(tray.text()).toContain("2.5 GB / 10.0 GB");
     expect(tray.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");
   });
+
+  it("refreshes models once and reopens host streams when status or credentials change", async () => {
+    await mountView();
+    expect(
+      apiJsonTo.mock.calls.filter(
+        (call) =>
+          call[1] === "/api/models" &&
+          (call[0] as { baseUrl: string }).baseUrl === "http://hal9000:7680",
+      ),
+    ).toHaveLength(1);
+
+    const remote = useHostsStore().extras[0]!;
+    remote.status = "connecting";
+    await flushPromises();
+    remote.apiKey = "rotated-key";
+    remote.status = "ready";
+    await flushPromises();
+
+    expect(lastStream().options.target).toEqual({
+      baseUrl: "http://hal9000:7680",
+      apiKey: "rotated-key",
+    });
+    expect(lastStream("/api/downloads/stream").options.target).toEqual({
+      baseUrl: "http://hal9000:7680",
+      apiKey: "rotated-key",
+    });
+  });
 });
 
 describe("HostDetailView forget", () => {

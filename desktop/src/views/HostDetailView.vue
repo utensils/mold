@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
@@ -94,7 +94,7 @@ async function fetchStatus() {
 // Immediate + retargeting: covers first render, the :id param changing in
 // place, and a host whose baseUrl appears after a late connect.
 watch(
-  () => [hostId.value, host.value?.baseUrl] as const,
+  () => [hostId.value, host.value?.baseUrl, host.value?.status, host.value?.apiKey] as const,
   () => {
     startResourceStream();
     void fetchStatus();
@@ -115,7 +115,6 @@ onUnmounted(() => {
   statusAbort?.abort();
   statusAbort = null;
 });
-onMounted(() => void hostModels.refresh(true));
 
 // ── Derived display data ──────────────────────────────────────────────────
 
