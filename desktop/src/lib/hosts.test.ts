@@ -3,13 +3,16 @@ import {
   backendRank,
   hostIdFromUrl,
   inferBackendFromGpuName,
+  mergeSavedHostsByInstanceId,
   modelAvailabilityTag,
   normalizeHostUrl,
   pickAutoHost,
   pickDisplayHost,
   pickMostCapableHost,
+  resolveHostDisplayName,
   type CapableHost,
   type RoutableHost,
+  type SavedHostLike,
 } from "./hosts";
 
 describe("hostIdFromUrl", () => {
@@ -249,6 +252,79 @@ describe("modelAvailabilityTag", () => {
 
   it("ignores host ids that are no longer connected", () => {
     expect(modelAvailabilityTag(["gone-host"], fleet)).toBeNull();
+  });
+});
+
+describe("resolveHostDisplayName", () => {
+  it("prefers a user-assigned name over everything", () => {
+    expect(
+      resolveHostDisplayName({ name: "Render box", url: "http://192.168.1.5:7680" }, "hal9000"),
+    ).toBe("Render box");
+  });
+
+  it("uses the server hostname when there is no user name", () => {
+    expect(resolveHostDisplayName({ name: null, url: "http://192.168.1.5:7680" }, "hal9000")).toBe(
+      "hal9000",
+    );
+  });
+
+  it("falls back to the scheme-stripped URL when hostname is unknown", () => {
+    expect(resolveHostDisplayName({ name: null, url: "http://192.168.1.5:7680" }, null)).toBe(
+      "192.168.1.5:7680",
+    );
+    expect(resolveHostDisplayName(null, undefined)).toBe("");
+  });
+});
+
+describe("mergeSavedHostsByInstanceId", () => {
+  const host = (over: Partial<SavedHostLike>): SavedHostLike => ({
+    id: "id",
+    url: "http://h:7680",
+    lastUsedMs: 1,
+    ...over,
+  });
+
+  it("collapses the same box reached by hostname and by IP into one entry", () => {
+    const byName = host({
+      id: "hal9000-7680",
+      url: "http://hal9000:7680",
+      instanceId: "uuid-1",
+      lastUsedMs: 200,
+    });
+    const byIp = host({
+      id: "192-168-1-114-7680",
+      url: "http://192.168.1.114:7680",
+      instanceId: "uuid-1",
+      lastUsedMs: 100,
+    });
+    const { hosts, dropped } = mergeSavedHostsByInstanceId([byName, byIp]);
+    // Survivor is the most-recently-used slug; the IP entry drops.
+    expect(hosts.map((h) => h.id)).toEqual(["hal9000-7680"]);
+    expect(dropped).toEqual([{ loser: "192-168-1-114-7680", survivor: "hal9000-7680" }]);
+  });
+
+  it("keeps the entry with the most recent lastUsedMs as survivor", () => {
+    const older = host({ id: "a", instanceId: "u", lastUsedMs: 10 });
+    const newer = host({ id: "b", instanceId: "u", lastUsedMs: 99 });
+    const { hosts, dropped } = mergeSavedHostsByInstanceId([older, newer]);
+    expect(hosts.map((h) => h.id)).toEqual(["b"]);
+    expect(dropped).toEqual([{ loser: "a", survivor: "b" }]);
+  });
+
+  it("carries a user name from a duplicate onto an unnamed survivor", () => {
+    const survivor = host({ id: "a", instanceId: "u", lastUsedMs: 50, name: null });
+    const loser = host({ id: "b", instanceId: "u", lastUsedMs: 10, name: "Render box" });
+    const { hosts } = mergeSavedHostsByInstanceId([survivor, loser]);
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0]).toMatchObject({ id: "a", name: "Render box" });
+  });
+
+  it("never merges entries that have no instance id (falls back to slug identity)", () => {
+    const a = host({ id: "hal9000-7680", instanceId: null });
+    const b = host({ id: "192-168-1-114-7680", instanceId: null });
+    const { hosts, dropped } = mergeSavedHostsByInstanceId([a, b]);
+    expect(hosts.map((h) => h.id)).toEqual(["hal9000-7680", "192-168-1-114-7680"]);
+    expect(dropped).toEqual([]);
   });
 });
 

@@ -53,6 +53,7 @@ describe("NavRail hosts section", () => {
       apiKey: null,
       status: "ready",
       error: null,
+      instanceId: null,
     });
     hosts.telemetry["hal9000-7680"] = { queueDepth: 3, queueCapacity: 8, version: null };
     await flushPromises();
@@ -84,6 +85,7 @@ describe("NavRail host context menu", () => {
       apiKey: null,
       status: "ready",
       error: null,
+      instanceId: null,
     });
     await flushPromises();
     return { wrapper, hosts };

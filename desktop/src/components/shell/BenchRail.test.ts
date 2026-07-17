@@ -45,6 +45,7 @@ function addRemoteHost() {
     apiKey: null,
     status: "ready",
     error: null,
+    instanceId: null,
   });
   hosts.telemetry["hal9000-7680"] = {
     queueDepth: 2,

@@ -4,6 +4,7 @@
  */
 
 import type { DiscoveredHost } from "./ipc";
+import { hostIdFromUrl } from "./hosts";
 
 /**
  * Order discovered hosts for display: this machine first, then alphabetically
@@ -37,6 +38,24 @@ export function dedupeHosts(hosts: DiscoveredHost[]): DiscoveredHost[] {
 /** Sorted + de-duplicated hosts, ready to render. */
 export function prepareHosts(hosts: DiscoveredHost[]): DiscoveredHost[] {
   return sortHosts(dedupeHosts(hosts));
+}
+
+/**
+ * Discovered hosts worth offering to connect: not this machine, and not
+ * already connected — deduped by URL-derived slug AND by instance id, so a box
+ * reached by hostname isn't re-offered when mDNS advertises it by IP.
+ */
+export function detectedHosts(
+  discovered: DiscoveredHost[],
+  connectedIds: ReadonlySet<string>,
+  connectedInstanceIds: ReadonlySet<string>,
+): DiscoveredHost[] {
+  return discovered.filter(
+    (d) =>
+      !d.isThisMachine &&
+      !connectedIds.has(hostIdFromUrl(d.url)) &&
+      !(d.instanceId && connectedInstanceIds.has(d.instanceId)),
+  );
 }
 
 /** `host:port` label for the mono address chip. */

@@ -91,6 +91,7 @@ async function mountView({ extra = false } = {}) {
       apiKey: null,
       status: "ready",
       error: null,
+      instanceId: null,
     });
     gallery.buckets["okra-7680"] = {
       items: [run("o.png", "a remote heron", 1_700_000_050)],

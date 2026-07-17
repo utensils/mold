@@ -62,6 +62,12 @@ pub struct SavedHost {
     /// Unix epoch milliseconds of the last successful connection.
     #[serde(default)]
     pub last_used_ms: Option<u64>,
+    /// Stable server-installation UUID (`ServerStatus::instance_id`), learned
+    /// on connect/poll. Used to dedupe the same box reached by a different
+    /// address. Absent on servers that predate instance identity, and on
+    /// entries saved before this field existed (old settings.json loads fine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 
 /// Move `url` to the front of the MRU list (inserting if new), stamping
@@ -74,11 +80,11 @@ pub fn upsert_saved_host(
     now_ms: u64,
 ) {
     // A fresh name wins, but a nameless reconnect (typed hostname, boot-time
-    // restore) must not wipe the friendly name a discovery scan gave us.
-    let existing_name = hosts
-        .iter()
-        .find(|h| h.id == id)
-        .and_then(|h| h.name.clone());
+    // restore) must not wipe the friendly name a discovery scan gave us — and
+    // likewise must not drop the instance id a previous poll learned.
+    let existing = hosts.iter().find(|h| h.id == id);
+    let existing_name = existing.and_then(|h| h.name.clone());
+    let existing_instance_id = existing.and_then(|h| h.instance_id.clone());
     hosts.retain(|h| h.id != id);
     hosts.insert(
         0,
@@ -87,6 +93,7 @@ pub fn upsert_saved_host(
             name: name.or(existing_name),
             url: url.to_string(),
             last_used_ms: Some(now_ms),
+            instance_id: existing_instance_id,
         },
     );
     hosts.truncate(MAX_SAVED_HOSTS);
@@ -314,6 +321,7 @@ mod tests {
                 name: Some("hal9000".into()),
                 url: "http://hal9000:7680".into(),
                 last_used_ms: Some(1_700_000_000_000),
+                instance_id: Some("0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58".into()),
             }],
             connected_host_ids: vec!["hal9000-7680".into()],
             generate_target_host: Some("hal9000-7680".into()),
@@ -358,6 +366,25 @@ mod tests {
     }
 
     #[test]
+    fn saved_host_without_instance_id_loads_and_omits_it_on_save() {
+        // Files written before instance identity existed must load with the
+        // field unset, and a None must not serialize (skip_serializing_if).
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(&dir);
+        std::fs::write(
+            &path,
+            r#"{"mode":"local","savedHosts":[{"id":"hal9000-7680","name":"hal","url":"http://hal9000:7680","lastUsedMs":1}]}"#,
+        )
+        .unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.saved_hosts[0].instance_id, None);
+        save(&path, &loaded).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("instanceId"));
+    }
+
+    #[test]
     fn legacy_settings_json_defaults_to_no_saved_hosts() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
@@ -399,6 +426,7 @@ mod tests {
                 name: None,
                 url: "http://hal9000:7680".into(),
                 last_used_ms: Some(1),
+                instance_id: None,
             }],
             ..AppSettings::default()
         };
@@ -421,6 +449,7 @@ mod tests {
                 name: None,
                 url: "http://studio.local:7680".into(),
                 last_used_ms: Some(1),
+                instance_id: None,
             }],
             ..AppSettings::default()
         };

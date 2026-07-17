@@ -120,6 +120,7 @@ describe("DownloadsTray a11y", () => {
       queueDepth: 0,
       queueCapacity: 8,
       version: null,
+      instanceId: null,
     };
     store.subscribeHost(host);
     store.hostStates.hal9000!.activeJobs = [job()];
@@ -148,6 +149,7 @@ describe("DownloadsTray a11y", () => {
       queueDepth: 0,
       queueCapacity: 8,
       version: null,
+      instanceId: null,
     };
     await store.subscribe(primary);
     const oldSignal = store.abort!.signal;
@@ -190,6 +192,7 @@ describe("DownloadsTray a11y", () => {
       queueDepth: 0,
       queueCapacity: 8,
       version: null,
+      instanceId: null,
     });
 
     await expect(opening).rejects.toThrow("HTTP 401");
@@ -223,6 +226,7 @@ describe("DownloadsTray a11y", () => {
       queueDepth: 0,
       queueCapacity: 8,
       version: null,
+      instanceId: null,
     });
 
     expect(extraAbort.signal.aborted).toBe(true);

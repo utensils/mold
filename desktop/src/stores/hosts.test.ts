@@ -508,4 +508,101 @@ describe("hosts store", () => {
     expect(hosts.telemetry["hal9000-7680"]?.modelsLoaded).toEqual(["flux2-klein:q4"]);
     expect(hosts.telemetry["hal9000-7680"]?.gpuInfo?.vram_total_mb).toBe(24564);
   });
+
+  it("connect() dedupes a server already connected under another address by instance id", async () => {
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: "uuid-1",
+      hostname: "hal9000",
+    });
+    const hosts = useHostsStore();
+    const first = await hosts.connect("http://hal9000:7680", null, null);
+    // Same physical box, reached by IP this time — one row, not two.
+    const second = await hosts.connect("http://192.168.1.114:7680", null, null);
+    expect(second.id).toBe(first.id);
+    expect(hosts.all.filter((h) => h.id !== "local").map((h) => h.id)).toEqual(["hal9000-7680"]);
+  });
+
+  it("connect() adopts a provided key onto the existing slug when deduping by instance id", async () => {
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: "uuid-1",
+      hostname: "hal9000",
+    });
+    const hosts = useHostsStore();
+    await hosts.connect("http://hal9000:7680", null, null);
+    secretGet.mockResolvedValue(null); // survivor slug has no stored key yet
+    await hosts.connect("http://192.168.1.114:7680", "ip-key", null);
+    expect(secretSet).toHaveBeenCalledWith("remote-api-key.hal9000-7680", "ip-key");
+  });
+
+  it("connect() refuses a URL whose slug collides with the built-in engine id", async () => {
+    const hosts = useHostsStore();
+    await expect(hosts.connect("https://local", null, null)).rejects.toThrow(/built-in engine/);
+    expect(testRemoteHost).not.toHaveBeenCalled();
+  });
+
+  it("refresh() stamps instance id + hostname and persists the id onto the saved host", async () => {
+    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve({
+        queue_depth: 0,
+        queue_capacity: 8,
+        version: "0.18.0",
+        instance_id: target.baseUrl.includes("hal9000") ? "uuid-hal" : "uuid-local",
+        hostname: target.baseUrl.includes("hal9000") ? "hal9000" : "this-mac",
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.refresh();
+    expect(hosts.telemetry[hal.id]?.instanceId).toBe("uuid-hal");
+    expect(hosts.telemetry[hal.id]?.hostname).toBe("hal9000");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.savedHosts.find((h: SavedHost) => h.id === hal.id)?.instanceId).toBe(
+      "uuid-hal",
+    );
+  });
+
+  it("refresh() collapses two saved slugs that report the same instance id", async () => {
+    const ip: SavedHost = {
+      id: "192-168-1-114-7680",
+      name: null,
+      url: "http://192.168.1.114:7680",
+      lastUsedMs: 1,
+    };
+    installSettings(
+      settings({
+        savedHosts: [hal, ip],
+        connectedHostIds: [hal.id, ip.id],
+        generateTargetHost: ip.id,
+      }),
+    );
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    // The two remote slugs answer with the SAME instance id — one physical box;
+    // the local engine keeps its own id.
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve({
+        queue_depth: 0,
+        queue_capacity: 8,
+        version: "0.18.0",
+        instance_id: target.baseUrl.includes("127.0.0.1") ? "uuid-local" : "uuid-shared",
+        hostname: "hal9000",
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.refresh();
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    // Survivor is hal (more recent lastUsedMs); the IP slug is dropped and the
+    // sticky target re-homed onto the survivor.
+    expect(persisted.savedHosts.map((h: SavedHost) => h.id)).toEqual([hal.id]);
+    expect(persisted.connectedHostIds).toEqual([hal.id]);
+    expect(persisted.generateTargetHost).toBe(hal.id);
+  });
 });

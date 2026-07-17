@@ -18,6 +18,7 @@ import { useGalleryStore } from "../../stores/gallery";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import { hostIdFromUrl } from "../../lib/hosts";
+import { detectedHosts as computeDetectedHosts } from "../../lib/discovery";
 import { dragWidth } from "../../lib/panelResize";
 import { ipc, type DiscoveredHost } from "../../lib/ipc";
 import { shortcutLabel } from "../../lib/platform";
@@ -73,11 +74,16 @@ onUnmounted(() => {
   if (scanTimer) clearInterval(scanTimer);
 });
 
-/** Detected on the network but not connected (and not this machine). */
-const detectedHosts = computed(() => {
-  const connected = new Set(hosts.all.map((h) => h.id));
-  return discovered.value.filter((d) => !d.isThisMachine && !connected.has(hostIdFromUrl(d.url)));
-});
+/** Detected on the network but not connected (and not this machine). Deduped
+ *  by slug AND instance id, so a box already connected by hostname isn't
+ *  re-offered when mDNS advertises it by IP. */
+const detectedHosts = computed(() =>
+  computeDetectedHosts(
+    discovered.value,
+    new Set(hosts.all.map((h) => h.id)),
+    new Set(hosts.all.map((h) => h.instanceId).filter((id): id is string => !!id)),
+  ),
+);
 
 function hostDot(host: HostView): string {
   switch (host.status) {

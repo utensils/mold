@@ -309,6 +309,13 @@ pub struct HostTest {
     pub ok: bool,
     pub version: Option<String>,
     pub error: Option<String>,
+    /// Stable server-installation UUID (`ServerStatus::instance_id`); used to
+    /// dedupe the same box reached by a different address. Absent on older
+    /// servers.
+    pub instance_id: Option<String>,
+    /// Server-reported hostname (`ServerStatus::hostname`); the stable display
+    /// name regardless of how we connected. Absent on older servers.
+    pub hostname: Option<String>,
 }
 
 async fn probe_host(url: &str, api_key: Option<&str>) -> HostTest {
@@ -325,6 +332,8 @@ async fn probe_host(url: &str, api_key: Option<&str>) -> HostTest {
                 ok: false,
                 version: None,
                 error: Some(format!("{url} answered {} on /health.", resp.status())),
+                instance_id: None,
+                hostname: None,
             }
         }
         Err(e) => {
@@ -332,6 +341,8 @@ async fn probe_host(url: &str, api_key: Option<&str>) -> HostTest {
                 ok: false,
                 version: None,
                 error: Some(format!("Can't reach {url}: {e}")),
+                instance_id: None,
+                hostname: None,
             }
         }
     }
@@ -346,28 +357,36 @@ async fn probe_host(url: &str, api_key: Option<&str>) -> HostTest {
             ok: false,
             version: None,
             error: Some("This host requires an API key.".into()),
+            instance_id: None,
+            hostname: None,
         },
         Ok(resp) if resp.status().is_success() => {
-            let version = resp
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|v| v.get("version")?.as_str().map(str::to_string));
+            let body = resp.json::<serde_json::Value>().await.ok();
+            let field = |key: &str| {
+                body.as_ref()
+                    .and_then(|v| v.get(key)?.as_str().map(str::to_string))
+            };
             HostTest {
                 ok: true,
-                version,
+                version: field("version"),
                 error: None,
+                instance_id: field("instance_id"),
+                hostname: field("hostname"),
             }
         }
         Ok(resp) => HostTest {
             ok: false,
             version: None,
             error: Some(format!("{url} answered {} on /api/status.", resp.status())),
+            instance_id: None,
+            hostname: None,
         },
         Err(e) => HostTest {
             ok: false,
             version: None,
             error: Some(format!("Can't reach {url}: {e}")),
+            instance_id: None,
+            hostname: None,
         },
     }
 }

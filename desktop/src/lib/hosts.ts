@@ -12,6 +12,72 @@ export function hostIdFromUrl(url: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+/**
+ * Display name for a host: a user-assigned name always wins; otherwise the
+ * server-reported hostname (stable regardless of whether we reached the box by
+ * hostname, mDNS `.local`, or IP); otherwise the URL with its scheme stripped.
+ */
+export function resolveHostDisplayName(
+  saved: { name?: string | null; url: string } | null,
+  telemetryHostname: string | null | undefined,
+): string {
+  if (saved?.name) return saved.name;
+  if (telemetryHostname) return telemetryHostname;
+  return saved?.url.replace(/^https?:\/\//, "") ?? "";
+}
+
+/** The shape the saved-host merge reasons over (a superset of `SavedHost`). */
+export interface SavedHostLike {
+  id: string;
+  name?: string | null;
+  url: string;
+  lastUsedMs?: number | null;
+  instanceId?: string | null;
+}
+
+/**
+ * Collapse saved hosts that resolve to the same physical server (same
+ * `instanceId`) — the same box reached by hostname, mDNS name, and IP produces
+ * three slugs otherwise. The survivor is the entry with the most recent
+ * `lastUsedMs` (ties broken by input order), keeping its slug (and thus its
+ * `remote-api-key.<id>` secret and routing keys); a user-assigned name on any
+ * duplicate is preserved. Entries with no `instanceId` are never merged.
+ * Returns the deduped list (input order, losers removed) and the
+ * loser→survivor id pairs so callers can re-home secrets, connected ids, and
+ * a sticky generation target.
+ */
+export function mergeSavedHostsByInstanceId<T extends SavedHostLike>(
+  hosts: T[],
+): { hosts: T[]; dropped: Array<{ loser: string; survivor: string }> } {
+  const survivorByInstance = new Map<string, T>();
+  for (const host of hosts) {
+    const uuid = host.instanceId;
+    if (!uuid) continue;
+    const current = survivorByInstance.get(uuid);
+    if (!current || (host.lastUsedMs ?? 0) > (current.lastUsedMs ?? 0)) {
+      survivorByInstance.set(uuid, host);
+    }
+  }
+  const dropped: Array<{ loser: string; survivor: string }> = [];
+  const out: T[] = [];
+  for (const host of hosts) {
+    const uuid = host.instanceId;
+    const survivor = uuid ? survivorByInstance.get(uuid) : undefined;
+    if (!survivor || survivor.id === host.id) {
+      // The survivor inherits a user name from any duplicate it lacked.
+      if (survivor && !survivor.name) {
+        const named = hosts.find((h) => h.instanceId === uuid && h.name);
+        out.push(named ? { ...survivor, name: named.name } : survivor);
+      } else {
+        out.push(host);
+      }
+      continue;
+    }
+    dropped.push({ loser: host.id, survivor: survivor.id });
+  }
+  return { hosts: out, dropped };
+}
+
 /** Default scheme/port, strip trailing slashes. Throws on garbage input. */
 export function normalizeHostUrl(input: string): string {
   const trimmed = input.trim().replace(/\/+$/, "");

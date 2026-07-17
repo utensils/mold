@@ -55,6 +55,7 @@ function setup(withExtra: boolean) {
       apiKey: null,
       status: "ready",
       error: null,
+      instanceId: null,
     });
     hosts.telemetry["hal9000-7680"] = { queueDepth: 2, queueCapacity: 8, version: null };
   }

@@ -57,6 +57,7 @@ function addExtra(id = "okra-7680", url = "http://okra:7680") {
     apiKey: null,
     status: "ready",
     error: null,
+    instanceId: null,
   });
 }
 

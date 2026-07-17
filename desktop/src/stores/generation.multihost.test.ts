@@ -168,6 +168,7 @@ describe("generation store multi-host routing", () => {
       apiKey: "hk",
       status: "ready",
       error: null,
+      instanceId: null,
     });
     const gallery = useGalleryStore();
     gallery.buckets["hal9000-7680"] = { items: [], loading: false, error: null, loaded: true };

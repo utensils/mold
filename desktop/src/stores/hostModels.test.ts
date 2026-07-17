@@ -47,6 +47,7 @@ function addExtra(id: string, url: string, status: "ready" | "error" = "ready") 
     apiKey: null,
     status,
     error: null,
+    instanceId: null,
   });
 }
 
