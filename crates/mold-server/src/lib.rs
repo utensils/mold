@@ -8,6 +8,7 @@ pub mod downloads;
 pub mod events;
 pub mod gpu_pool;
 pub mod gpu_worker;
+pub mod instance;
 pub mod job_registry;
 pub mod logging;
 #[cfg(feature = "mdns")]
@@ -268,6 +269,15 @@ pub async fn run_server(
         }
     }
 
+    // Resolve the persistent instance id (ephemeral when the DB is
+    // unavailable). Captured for mDNS here because `state` is moved into the
+    // router before the TXT records are built.
+    state.instance_id = std::sync::Arc::new(instance::resolve_instance_id(
+        state.metadata_db.as_ref().as_ref(),
+    ));
+    #[cfg(feature = "mdns")]
+    let mdns_instance_id = state.instance_id.clone();
+
     if state.metadata_db.is_some() {
         let Some(jobs_root) = Config::mold_dir().map(|dir| dir.join("jobs")) else {
             anyhow::bail!("metadata DB opened but MOLD_HOME could not be resolved for chain jobs");
@@ -523,6 +533,7 @@ pub async fn run_server(
                 mdns_auth_required,
                 &mdns_gpu_summary,
                 queue_size,
+                &mdns_instance_id,
             );
             match mdns::register(bind, bound_port, txt) {
                 Ok(guard) => Some(guard),

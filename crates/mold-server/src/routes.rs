@@ -10,7 +10,7 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    types::GpuSelection, ActiveGenerationStatus, GenerateRequest, GpuBackend, GpuInfo,
+    types::GpuSelection, ActiveGenerationStatus, DiskUsage, GenerateRequest, GpuBackend, GpuInfo,
     GpuWorkerState, ModelInfoExtended, ResourceSnapshot, ServerStatus, SseErrorEvent,
     SseProgressEvent,
 };
@@ -225,6 +225,7 @@ use crate::queue::clean_error_message;
         mold_core::ServerStatus,
         mold_core::ActiveGenerationStatus,
         mold_core::GpuInfo,
+        mold_core::DiskUsage,
         mold_core::SseProgressEvent,
         mold_core::SseCompleteEvent,
         mold_core::SseErrorEvent,
@@ -2051,6 +2052,42 @@ async fn delete_model(
 
 // ── /api/status ───────────────────────────────────────────────────────────────
 
+/// Disk usage for the filesystem holding `dir`: among mounts that are a
+/// prefix of the path, the longest one wins (`/data/models` must resolve to
+/// the `/data` mount, not `/`). `None` when no mount matches.
+fn disk_usage_for_path(
+    disks: &[(std::path::PathBuf, u64, u64)],
+    dir: &std::path::Path,
+) -> Option<DiskUsage> {
+    disks
+        .iter()
+        .filter(|(mount, _, _)| dir.starts_with(mount))
+        .max_by_key(|(mount, _, _)| mount.as_os_str().len())
+        .map(|&(_, total_bytes, free_bytes)| DiskUsage {
+            total_bytes,
+            free_bytes,
+        })
+}
+
+/// Snapshot disk stats for the filesystem backing the models dir. Refreshing
+/// the disk list per call is cheap enough for the 10s status poll (same
+/// throwaway-refresh style as `resources::ram_snapshot`).
+fn models_disk_usage(dir: &std::path::Path) -> Option<DiskUsage> {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let entries: Vec<(std::path::PathBuf, u64, u64)> = disks
+        .list()
+        .iter()
+        .map(|d| {
+            (
+                d.mount_point().to_path_buf(),
+                d.total_space(),
+                d.available_space(),
+            )
+        })
+        .collect();
+    disk_usage_for_path(&entries, dir)
+}
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -2060,6 +2097,8 @@ async fn delete_model(
     )
 )]
 async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
+    let models_dir = state.config.read().await.resolved_models_dir();
+
     // Aggregate GPU status from the pool.
     let gpu_statuses = state.gpu_pool.gpu_status();
     let has_gpus = !gpu_statuses.is_empty();
@@ -2136,6 +2175,8 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         queue_depth: Some(state.queue.pending()),
         queue_capacity: Some(state.queue_capacity),
         queue_paused: Some(state.queue_pause.is_paused()),
+        instance_id: Some(state.instance_id.as_ref().clone()),
+        models_disk: models_disk_usage(&models_dir),
     })
 }
 
@@ -3603,6 +3644,36 @@ mod tests {
     fn env_lock() -> &'static std::sync::Mutex<()> {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         &ENV_LOCK
+    }
+
+    #[test]
+    fn disk_usage_for_path_picks_longest_matching_mount() {
+        let disks = vec![
+            (std::path::PathBuf::from("/"), 100, 10),
+            (std::path::PathBuf::from("/data"), 500, 50),
+        ];
+        let usage = disk_usage_for_path(&disks, std::path::Path::new("/data/models")).unwrap();
+        assert_eq!(usage.total_bytes, 500);
+        assert_eq!(usage.free_bytes, 50);
+        // A path outside /data falls back to the root mount.
+        let usage = disk_usage_for_path(&disks, std::path::Path::new("/home/u/models")).unwrap();
+        assert_eq!(usage.total_bytes, 100);
+    }
+
+    #[test]
+    fn disk_usage_for_path_component_boundaries_and_no_match() {
+        let disks = vec![(std::path::PathBuf::from("/data"), 500, 50)];
+        // `/database` is not under the `/data` mount — prefix matching must be
+        // per path component, not per byte.
+        assert_eq!(
+            disk_usage_for_path(&disks, std::path::Path::new("/database/models")),
+            None
+        );
+        // No mount matches at all (e.g. relative path) → None.
+        assert_eq!(
+            disk_usage_for_path(&disks, std::path::Path::new("relative/models")),
+            None
+        );
     }
 
     #[test]

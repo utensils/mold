@@ -111,6 +111,8 @@ export interface DiscoveredHost {
   port: number;
   version: string | null;
   authRequired: boolean;
+  /** Stable server-installation UUID from the mDNS `id` TXT record; absent on older servers. */
+  instanceId?: string | null;
   isThisMachine: boolean;
 }
 

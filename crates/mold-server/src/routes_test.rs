@@ -2999,6 +2999,7 @@ mod tests {
         let mut cache = crate::model_cache::ModelCache::new(3);
         cache.insert(Box::new(engine), 0);
         let state = AppState {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
@@ -3061,6 +3062,7 @@ mod tests {
         let mut cache = crate::model_cache::ModelCache::new(3);
         cache.insert(Box::new(engine), 0);
         let state = AppState {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
@@ -3326,6 +3328,7 @@ mod tests {
         let mut cache = crate::model_cache::ModelCache::new(3);
         cache.insert(Box::new(engine), 0);
         let state = AppState {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),

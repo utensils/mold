@@ -628,6 +628,7 @@ mod tests {
                 url: url.to_string(),
                 version: version.map(String::from),
                 auth_required: auth,
+                instance_id: None,
                 txt,
             }
         }

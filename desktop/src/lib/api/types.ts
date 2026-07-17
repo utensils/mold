@@ -47,6 +47,10 @@ export interface ServerStatus {
   gpu_info?: GpuInfo | null;
   queue_depth?: number | null;
   queue_capacity?: number | null;
+  /** Stable server-installation UUID; absent on older servers. */
+  instance_id?: string | null;
+  /** Disk stats for the filesystem holding the models dir; absent on older servers. */
+  models_disk?: { total_bytes: number; free_bytes: number } | null;
 }
 
 export interface ServerCapabilities {

@@ -388,6 +388,9 @@ pub struct DiscoveredHost {
     pub port: u16,
     pub version: Option<String>,
     pub auth_required: bool,
+    /// Stable server-installation UUID from the mDNS `id` TXT record. Absent
+    /// on servers that predate instance identity.
+    pub instance_id: Option<String>,
     /// True when the advertisement resolves to one of this machine's own
     /// interface addresses (or its hostname) — i.e. our embedded/local server.
     pub is_this_machine: bool,
@@ -508,6 +511,7 @@ pub async fn discover_servers(timeout_ms: Option<u64>) -> Result<Vec<DiscoveredH
                 port: s.port,
                 version: s.version,
                 auth_required: s.auth_required,
+                instance_id: s.instance_id,
                 is_this_machine,
             }
         })
@@ -696,15 +700,18 @@ mod tests {
             port: 7680,
             version: Some("0.14.0".into()),
             auth_required: true,
+            instance_id: Some("0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58".into()),
             is_this_machine: false,
         };
         let json = serde_json::to_value(&host).unwrap();
         assert_eq!(json["authRequired"], true);
         assert_eq!(json["isThisMachine"], false);
         assert_eq!(json["url"], "http://192.168.1.10:7680");
+        assert_eq!(json["instanceId"], "0b5c1a4e-9f3d-4c8a-b2e7-6d1f0a9c3e58");
         // Snake-case keys must not leak through.
         assert!(json.get("auth_required").is_none());
         assert!(json.get("is_this_machine").is_none());
+        assert!(json.get("instance_id").is_none());
     }
 
     #[test]

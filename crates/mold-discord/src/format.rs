@@ -811,6 +811,8 @@ mod tests {
             queue_depth: None,
             queue_capacity: None,
             queue_paused: None,
+            instance_id: None,
+            models_disk: None,
         };
         let embed = format_server_status(&status);
         assert_eq!(embed.title, "Server Status");
@@ -843,6 +845,8 @@ mod tests {
             queue_depth: None,
             queue_capacity: None,
             queue_paused: None,
+            instance_id: None,
+            models_disk: None,
         };
         let embed = format_server_status(&status);
         assert!(embed

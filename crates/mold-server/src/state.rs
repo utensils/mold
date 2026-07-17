@@ -129,6 +129,11 @@ impl QueueHandle {
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Stable UUID identifying this server installation. `run_server`
+    /// overwrites the constructor's ephemeral default with the persisted id
+    /// from `crate::instance::resolve_instance_id` before the router (and the
+    /// mDNS TXT records) are built.
+    pub instance_id: Arc<String>,
     // ── Multi-GPU fields ────────────────────────────────────────────────────
     /// GPU worker pool for multi-GPU dispatch.
     pub gpu_pool: Arc<GpuPool>,
@@ -309,6 +314,7 @@ impl AppState {
         cache.insert(engine, 0);
         let events = EventBroadcaster::new();
         Self {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool,
             queue_capacity,
             model_cache: Arc::new(Mutex::new(cache)),
@@ -343,6 +349,7 @@ impl AppState {
     ) -> Self {
         let events = EventBroadcaster::new();
         Self {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool,
             queue_capacity,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
@@ -392,6 +399,7 @@ impl AppState {
         cache.insert(Box::new(engine), 0);
         let events = EventBroadcaster::new();
         Self {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool: Self::empty_gpu_pool(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
@@ -428,6 +436,7 @@ impl AppState {
         cache.insert(Box::new(engine), 0);
         let events = EventBroadcaster::new();
         let state = Self {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool: Self::empty_gpu_pool(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
@@ -462,6 +471,7 @@ impl AppState {
         let queue = QueueHandle::new(tx);
         let events = EventBroadcaster::new();
         Self {
+            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             gpu_pool: Arc::new(GpuPool {
                 workers: Vec::new(),
             }),
