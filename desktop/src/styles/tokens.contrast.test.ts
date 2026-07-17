@@ -77,8 +77,14 @@ function token(theme: Palette, name: string): string {
 const base = declarations(":root");
 const themes = {
   "Safelight dark": base,
+  "Safelight system light": { ...base, ...declarations(':root:not([data-theme="dark"])') },
   "Safelight light": { ...base, ...declarations(':root[data-theme="light"]') },
   "Mold dark": { ...base, ...declarations(':root[data-theme-family="mold"]') },
+  "Mold system light": {
+    ...base,
+    ...declarations(':root[data-theme-family="mold"]'),
+    ...declarations(':root[data-theme-family="mold"]:not([data-theme="dark"])'),
+  },
   "Mold light": {
     ...base,
     ...declarations(':root[data-theme-family="mold"]'),
@@ -123,7 +129,12 @@ describe("desktop theme contrast", () => {
   }
 
   it("uses a light, readable empty work surface in light themes", () => {
-    for (const name of ["Safelight light", "Mold light"] as const) {
+    for (const name of [
+      "Safelight system light",
+      "Safelight light",
+      "Mold system light",
+      "Mold light",
+    ] as const) {
       const theme = themes[name];
       expect(luminance(theme["empty-surface"]!), name).toBeGreaterThan(0.9);
       expect(contrast(theme.rebate!, theme["empty-surface"]!), name).toBeGreaterThanOrEqual(4.5);
