@@ -52,8 +52,10 @@ const availabilityLabel = (entry: MergedPrint) =>
 
 const runs = computed<MergedPrint[]>(() => {
   const q = query.value.trim().toLowerCase();
-  // Same filtered set the Gallery renders, so the two views can't drift.
-  const entries = gallery.filtered;
+  // Same host-chip set the Gallery renders. Deliberately NOT `filtered`:
+  // the Gallery view's own search box and Images/Video chips must not
+  // invisibly narrow History runs (this tab has its own search).
+  const entries = gallery.hostFiltered;
   if (!q) return entries;
   return entries.filter(
     (e) =>

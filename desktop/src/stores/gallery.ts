@@ -4,6 +4,7 @@ import {
   evictHostMedia,
   evictMedia,
   galleryMediaPath,
+  isVideoItem,
   type GallerySource,
 } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
@@ -44,6 +45,16 @@ export interface GalleryChip {
   count: number;
 }
 
+/** Media-kind chip filter: everything, stills only, or video only. */
+export type GalleryKindFilter = "all" | "image" | "video";
+
+/** Per-kind counts over the host-chip-filtered set (kind chip labels). */
+export interface GalleryKindCounts {
+  all: number;
+  image: number;
+  video: number;
+}
+
 const emptyBucket = (): GalleryBucket => ({
   items: [],
   loading: false,
@@ -63,6 +74,11 @@ export const useGalleryStore = defineStore("gallery", {
     buckets: {} as Record<string, GalleryBucket>,
     /** Session-only chip filter: "all" or a bucket key. */
     filter: "all" as string,
+    /** Session-only media-kind chip: all / image / video. */
+    mediaKind: "all" as GalleryKindFilter,
+    /** Session-only text query over filename/model/prompt. The view owns
+     *  debouncing; the store only holds the settled value. */
+    query: "" as string,
   }),
   getters: {
     /**
@@ -128,9 +144,11 @@ export const useGalleryStore = defineStore("gallery", {
     /**
      * `merged` in All; an individual host remains its complete raw bucket so
      * a print represented by This Mac in All is still visible on a host chip.
-     * An unknown filter falls back to All.
+     * An unknown filter falls back to All. This is the chip-only set —
+     * consumers that must not inherit the Gallery view's kind/search
+     * narrowing (History → Runs) read this instead of `filtered`.
      */
-    filtered(): MergedPrint[] {
+    hostFiltered(): MergedPrint[] {
       if (this.filter === "all") return this.merged;
       const source = this.sources.find((s) => s.key === this.filter);
       if (!source) return this.merged;
@@ -142,6 +160,33 @@ export const useGalleryStore = defineStore("gallery", {
           availableOn: [source],
         }))
         .sort((a, b) => b.item.timestamp - a.item.timestamp);
+    },
+    /** What the Gallery grid renders: host chip → media kind → text query. */
+    filtered(): MergedPrint[] {
+      let entries = this.hostFiltered;
+      if (this.mediaKind !== "all") {
+        const wantVideo = this.mediaKind === "video";
+        entries = entries.filter((e) => isVideoItem(e.item) === wantVideo);
+      }
+      const q = this.query.trim().toLowerCase();
+      if (q) {
+        entries = entries.filter(
+          (e) =>
+            e.item.filename.toLowerCase().includes(q) ||
+            e.item.metadata.model.toLowerCase().includes(q) ||
+            e.item.metadata.prompt.toLowerCase().includes(q),
+        );
+      }
+      return entries;
+    },
+    /** Per-kind counts for the All/Images/Video chips. Computed over the
+     *  host-chip-filtered set only, so chip labels stay stable while the
+     *  kind chip or search narrows the grid. */
+    kindCounts(): GalleryKindCounts {
+      const entries = this.hostFiltered;
+      let video = 0;
+      for (const e of entries) if (isVideoItem(e.item)) video++;
+      return { all: entries.length, image: entries.length - video, video };
     },
     /** Per-source chips for the gallery header (HostFilterChips adds All). */
     chipCounts(): GalleryChip[] {
@@ -286,6 +331,29 @@ export const useGalleryStore = defineStore("gallery", {
       this.evictItemMedia(sourceKey, filename);
       const bucket = this.buckets[sourceKey];
       if (bucket) bucket.items = bucket.items.filter((i) => i.filename !== filename);
+    },
+    /**
+     * Bulk delete. Each print is deleted exactly like the single-delete
+     * path — `remove()` per item, routed to that item's represented origin
+     * (IPC for the host-less This-Mac bucket, authed HTTP for a host) — so
+     * bulk semantics can never drift from the tile's Delete action.
+     * Origins whose delete failed are refetched to reconverge with the
+     * server (a lost response may still have deleted server-side).
+     */
+    async removeMany(
+      items: Array<{ sourceKey: string; filename: string }>,
+    ): Promise<{ deleted: number; failed: number }> {
+      const results = await Promise.allSettled(
+        items.map((i) => this.remove(i.sourceKey, i.filename)),
+      );
+      let deleted = 0;
+      const failedOrigins = new Set<string>();
+      results.forEach((r, idx) => {
+        if (r.status === "fulfilled") deleted++;
+        else failedOrigins.add(items[idx]!.sourceKey);
+      });
+      await Promise.all([...failedOrigins].map((key) => this.refreshHost(key)));
+      return { deleted, failed: results.length - deleted };
     },
     evictItemMedia(sourceKey: string, filename: string) {
       const source = this.mediaSourceOf(sourceKey);
