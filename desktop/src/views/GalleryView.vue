@@ -7,10 +7,11 @@ import Lightbox from "../components/gallery/Lightbox.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import HostFilterChips from "../components/shell/HostFilterChips.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
-import { galleryMediaPath, mediaPath } from "../lib/gallery/media";
+import { galleryMediaPath, isVideoItem, mediaPath } from "../lib/gallery/media";
+import { applySelectionClick } from "../lib/gallery/selection";
 import { formatBytes } from "../lib/format";
 import { apiFetch, apiFetchTo, type ApiTarget } from "../lib/api/client";
-import { useGalleryStore, type MergedPrint } from "../stores/gallery";
+import { useGalleryStore, type GalleryKindFilter, type MergedPrint } from "../stores/gallery";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
@@ -211,6 +212,108 @@ const selected = ref<{ sourceKey: string; filename: string } | null>(null);
 const lightboxOpen = ref(false);
 const rowHeight = ref(180);
 
+// ── Search + media-kind chips ──────────────────────────────────────────────
+const SEARCH_DEBOUNCE_MS = 200;
+const searchInput = ref(gallery.query);
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+watch(searchInput, (value) => {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    searchTimer = null;
+    gallery.query = value;
+  }, SEARCH_DEBOUNCE_MS);
+});
+
+const kindChips = computed(() => [
+  { key: "image", label: "Images", count: gallery.kindCounts.image },
+  { key: "video", label: "Video", count: gallery.kindCounts.video },
+]);
+const setKind = (value: string) => (gallery.mediaKind = value as GalleryKindFilter);
+
+// ── Bulk select mode ───────────────────────────────────────────────────────
+// Selection is keyed by print identity (filename — the merged grid's
+// cross-host identity), never row index: the virtualized grid re-flows.
+// Drag-marquee selection is a deliberate follow-up — it fights the
+// virtualized justified grid; click / shift-range / meta-toggle ship first.
+const selectMode = ref(false);
+const bulkSelection = ref<Set<string>>(new Set());
+const bulkAnchor = ref<string | null>(null);
+const confirmingBulkDelete = ref(false);
+const bulkDeleting = ref(false);
+
+function setSelectMode(next: boolean) {
+  selectMode.value = next;
+  if (!next) {
+    bulkSelection.value = new Set();
+    bulkAnchor.value = null;
+    confirmingBulkDelete.value = false;
+  }
+}
+
+function onTileClick(entry: MergedPrint, e: MouseEvent) {
+  if (!selectMode.value) {
+    select(entry);
+    return;
+  }
+  const next = applySelectionClick(
+    bulkSelection.value,
+    bulkAnchor.value,
+    gallery.filtered.map((x) => x.item.filename),
+    entry.item.filename,
+    { shift: e.shiftKey, meta: e.metaKey || e.ctrlKey },
+  );
+  bulkSelection.value = next.selection;
+  bulkAnchor.value = next.anchor;
+}
+
+function onTileDblclick(entry: MergedPrint) {
+  if (selectMode.value) return;
+  select(entry);
+  lightboxOpen.value = true;
+}
+
+function selectAllInFilter() {
+  bulkSelection.value = new Set(gallery.filtered.map((e) => e.item.filename));
+}
+
+function clearBulkSelection() {
+  bulkSelection.value = new Set();
+  bulkAnchor.value = null;
+}
+
+async function deleteSelectedPrints() {
+  if (!confirmingBulkDelete.value) {
+    confirmingBulkDelete.value = true;
+    return;
+  }
+  confirmingBulkDelete.value = false;
+  if (bulkDeleting.value) return;
+  // Resolve filenames to their represented origin via the current filter —
+  // removeMany then mirrors the single-delete routing per item.
+  const targets = gallery.filtered.filter((e) => bulkSelection.value.has(e.item.filename));
+  if (targets.length === 0) return;
+  bulkDeleting.value = true;
+  try {
+    const { deleted, failed } = await gallery.removeMany(
+      targets.map((e) => ({ sourceKey: e.sourceKey, filename: e.item.filename })),
+    );
+    if (failed > 0) {
+      toasts.push(`Deleted ${deleted} of ${targets.length}. ${failed} failed.`, "error");
+    } else {
+      toasts.push(deleted === 1 ? "Deleted 1 print" : `Deleted ${deleted} prints`);
+    }
+  } finally {
+    bulkDeleting.value = false;
+  }
+  const remaining = new Set(gallery.filtered.map((e) => e.item.filename));
+  bulkSelection.value = new Set([...bulkSelection.value].filter((f) => remaining.has(f)));
+  if (bulkAnchor.value && !remaining.has(bulkAnchor.value)) bulkAnchor.value = null;
+  if (selected.value && !remaining.has(selected.value.filename)) {
+    selected.value = null;
+    lightboxOpen.value = false;
+  }
+}
+
 let resizeObserver: ResizeObserver | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -258,8 +361,8 @@ const selectedEntry = computed<MergedPrint | null>(
   () => gallery.filtered[selectedIndex.value] ?? null,
 );
 
-const isVideo = (i: GalleryImage) =>
-  i.format === "mp4" || i.filename.endsWith(".mp4") || !!i.metadata.video_frames;
+/** Shared with the store's kind filter so badge and chips never disagree. */
+const isVideo = (i: GalleryImage) => isVideoItem(i);
 
 async function copyImage(entry: MergedPrint) {
   try {
@@ -302,7 +405,8 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault();
     if (selected.value) lightboxOpen.value = !lightboxOpen.value;
   } else if (e.key === "Escape") {
-    lightboxOpen.value = false;
+    if (lightboxOpen.value) lightboxOpen.value = false;
+    else if (selectMode.value) setSelectMode(false);
   }
 }
 
@@ -358,11 +462,17 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
   resizeObserver?.disconnect();
+  // Flush a pending debounced search so the store matches the input.
+  if (searchTimer) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+    gallery.query = searchInput.value;
+  }
 });
 </script>
 
 <template>
-  <div class="flex h-full flex-col">
+  <div class="relative flex h-full flex-col">
     <header class="border-edge flex h-11 items-center gap-3 border-b px-4">
       <span class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
         Gallery
@@ -377,14 +487,43 @@ onUnmounted(() => {
         :chips="gallery.chipCounts"
         :all-count="gallery.merged.length"
       />
-      <span v-if="gallery.firstError" class="ml-auto text-caption text-stop">
+      <HostFilterChips
+        :chips="kindChips"
+        :model-value="gallery.mediaKind"
+        :all-count="gallery.kindCounts.all"
+        aria-label="Media kind"
+        @update:model-value="setKind"
+      />
+      <span v-if="gallery.firstError" class="text-caption text-stop">
         {{ gallery.firstError }}
       </span>
+      <input
+        v-model="searchInput"
+        data-selectable
+        type="search"
+        placeholder="Search prints…"
+        aria-label="Search prints"
+        class="border-edge ml-auto h-7 w-48 rounded-control border bg-bath px-2 text-body text-ink placeholder:text-ink-3"
+      />
+      <button
+        type="button"
+        class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-caption transition-colors duration-100"
+        :class="selectMode ? 'border-safelight text-safelight' : 'text-ink-2 hover:text-ink'"
+        :aria-pressed="selectMode"
+        @click="setSelectMode(!selectMode)"
+      >
+        Select
+      </button>
     </header>
 
     <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto" style="contain: strict">
       <EmptyState
-        v-if="gallery.loaded && gallery.filtered.length === 0"
+        v-if="gallery.loaded && gallery.filtered.length === 0 && gallery.hostFiltered.length > 0"
+        headline="No matching prints"
+        detail="Nothing here matches the current search or media filter."
+      />
+      <EmptyState
+        v-else-if="gallery.loaded && gallery.filtered.length === 0"
         headline="No prints here yet"
         :detail="
           gallery.filter === 'local'
@@ -411,20 +550,17 @@ onUnmounted(() => {
             type="button"
             class="group relative shrink-0 overflow-hidden rounded-media border transition-shadow duration-100"
             :class="
-              isSelected(laid.entry)
+              (selectMode ? bulkSelection.has(laid.item.filename) : isSelected(laid.entry))
                 ? 'border-transparent ring-2 ring-safelight'
                 : 'border-[color-mix(in_srgb,var(--rebate)_14%,transparent)]'
             "
             :style="{ width: `${laid.width}px`, height: `${laid.height}px` }"
-            @click="select(laid.entry)"
+            @click="onTileClick(laid.entry, $event)"
             @contextmenu="
               select(laid.entry);
               contextMenu.open($event, tileMenu(laid.entry));
             "
-            @dblclick="
-              select(laid.entry);
-              lightboxOpen = true;
-            "
+            @dblclick="onTileDblclick(laid.entry)"
           >
             <AuthedMedia
               :path="
@@ -446,6 +582,18 @@ onUnmounted(() => {
               ▶
             </span>
             <span
+              v-if="selectMode"
+              data-test="select-indicator"
+              class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-full text-caption"
+              :class="
+                bulkSelection.has(laid.item.filename)
+                  ? 'bg-safelight font-semibold text-on-accent'
+                  : 'border border-white/70 bg-black/40 text-on-media'
+              "
+            >
+              {{ bulkSelection.has(laid.item.filename) ? "✓" : "" }}
+            </span>
+            <span
               v-if="showBadges"
               data-test="host-badge"
               class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media"
@@ -461,6 +609,65 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
+    </div>
+
+    <!-- Floating bulk-action bar while select mode is active. -->
+    <div
+      v-if="selectMode"
+      data-test="bulk-action-bar"
+      class="border-edge absolute bottom-4 left-1/2 z-30 flex max-w-[calc(100%-2rem)] -translate-x-1/2 flex-wrap items-center gap-2 rounded-chrome border bg-bench px-3 py-2 shadow-lg"
+      role="toolbar"
+      aria-label="Selection actions"
+    >
+      <span class="data-mono px-1 text-caption text-ink">
+        {{ bulkSelection.size }}
+        <span class="text-ink-3">/ {{ gallery.filtered.length }} selected</span>
+      </span>
+      <button
+        type="button"
+        class="border-edge h-7 rounded-control border px-2.5 text-caption text-ink-2 transition-colors duration-100 hover:text-ink disabled:opacity-50"
+        :disabled="gallery.filtered.length === 0"
+        @click="selectAllInFilter"
+      >
+        Select all
+      </button>
+      <button
+        type="button"
+        class="border-edge h-7 rounded-control border px-2.5 text-caption text-ink-2 transition-colors duration-100 hover:text-ink disabled:opacity-50"
+        :disabled="bulkSelection.size === 0"
+        @click="clearBulkSelection"
+      >
+        Clear
+      </button>
+      <button
+        type="button"
+        class="border-edge h-7 rounded-control border px-2.5 text-caption transition-colors duration-100 disabled:opacity-50"
+        :class="
+          confirmingBulkDelete
+            ? 'border-stop bg-stop font-semibold text-on-accent'
+            : 'text-ink-2 hover:text-stop'
+        "
+        :disabled="bulkSelection.size === 0 || bulkDeleting"
+        @blur="confirmingBulkDelete = false"
+        @click="deleteSelectedPrints"
+      >
+        {{
+          bulkDeleting
+            ? "Deleting…"
+            : confirmingBulkDelete
+              ? `Delete ${bulkSelection.size} ${bulkSelection.size === 1 ? "print" : "prints"}? This can't be undone.`
+              : "Delete selected"
+        }}
+      </button>
+      <button
+        type="button"
+        class="flex h-7 w-7 items-center justify-center rounded-control text-ink-3 transition-colors duration-100 hover:text-ink"
+        aria-label="Exit select mode"
+        title="Exit select mode (Esc)"
+        @click="setSelectMode(false)"
+      >
+        ✕
+      </button>
     </div>
 
     <Lightbox

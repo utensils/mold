@@ -1,4 +1,5 @@
 import { apiFetch, apiFetchTo, type ApiTarget } from "../api/client";
+import type { GalleryImage } from "../api/types";
 
 /**
  * Gallery media sits behind X-Api-Key auth, and <img>/<video> cannot send
@@ -72,3 +73,11 @@ export const galleryMediaPath = (filename: string, source: GallerySource, thumbn
     : thumbnail
       ? thumbnailPath(filename)
       : mediaPath(filename);
+
+/**
+ * Whether a gallery print is a video. The single source of truth shared by
+ * the grid's ▶ badge, the store's Images/Video kind filter, and the chip
+ * counts — so they can never disagree.
+ */
+export const isVideoItem = (item: GalleryImage): boolean =>
+  item.format === "mp4" || item.filename.endsWith(".mp4") || !!item.metadata.video_frames;
