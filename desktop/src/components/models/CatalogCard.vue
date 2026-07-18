@@ -73,15 +73,31 @@ const thumbFailed = ref(false);
 function openPage(): void {
   if (pageUrl.value) void openExternal(pageUrl.value);
 }
+
+/**
+ * Enter/Space on the card opens the drawer, but keydown bubbles — a keypress
+ * on an inner control (Pull, the link-out) reaches here too. Only act when the
+ * card itself is focused so those controls keep their own single action.
+ */
+function onCardKeydown(event: KeyboardEvent): void {
+  if (event.target !== event.currentTarget) return;
+  event.preventDefault();
+  emit("open", props.entry);
+}
 </script>
 
 <template>
   <div
-    class="catalog-card-contained border-edge cursor-pointer rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench"
+    class="catalog-card-contained border-edge cursor-pointer rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench focus-visible:outline-2 focus-visible:outline-safelight"
     :class="layout === 'grid' ? 'flex flex-col' : 'flex min-h-16 items-center gap-3 p-2'"
+    role="button"
+    tabindex="0"
     data-test="catalog-card"
     :data-layout="layout"
+    :aria-label="`${entry.name} — view details`"
     @click="emit('open', entry)"
+    @keydown.enter="onCardKeydown"
+    @keydown.space="onCardKeydown"
   >
     <!-- Civitai preview image (public URL); shimmer while loading and use a
          local family mark when no custom image is available. -->

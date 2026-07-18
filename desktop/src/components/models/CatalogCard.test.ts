@@ -136,12 +136,40 @@ describe("CatalogCard", () => {
     expect(openExternalMock).not.toHaveBeenCalled();
   });
 
+  it("exposes the card as a keyboard-focusable button", async () => {
+    const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
+    await flushPromises();
+    const card = wrapper.get('[data-test="catalog-card"]');
+    expect(card.attributes("role")).toBe("button");
+    expect(card.attributes("tabindex")).toBe("0");
+  });
+
+  it("opens the drawer from Enter and Space on the focused card", async () => {
+    const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
+    await flushPromises();
+    const card = wrapper.get('[data-test="catalog-card"]');
+
+    await card.trigger("keydown.enter");
+    await card.trigger("keydown.space");
+    expect(wrapper.emitted("open")).toHaveLength(2);
+    expect(wrapper.emitted("open")?.[0]?.[0]).toMatchObject({ id: "cv:8001" });
+  });
+
   it("does not open the drawer from the Pull button", async () => {
     const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
     await flushPromises();
 
     await wrapper.get("[data-test='pull']").trigger("click");
     expect(wrapper.emitted("pull")).toHaveLength(1);
+    expect(wrapper.emitted("open")).toBeUndefined();
+  });
+
+  it("does not double-trigger open when a key is pressed on an inner control", async () => {
+    const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
+    await flushPromises();
+
+    // Enter bubbles from the Pull button to the card; the card must ignore it.
+    await wrapper.get("[data-test='pull']").trigger("keydown.enter");
     expect(wrapper.emitted("open")).toBeUndefined();
   });
 

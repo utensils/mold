@@ -92,20 +92,29 @@ describe("buildDownloadContents", () => {
 });
 
 describe("downloadContentsTotalBytes", () => {
-  it("sums known sizes, skipping unknown ones", () => {
+  it("sums known sizes but flags the total incomplete when some are unknown", () => {
     const total = downloadContentsTotalBytes([
       { key: "a", label: "a", kind: "primary", sizeBytes: 8_000_000_000 },
       { key: "b", label: "b", kind: "vae", sizeBytes: null },
       { key: "c", label: "c", kind: "text-encoder", sizeBytes: 16_000_000_000 },
     ]);
-    expect(total).toBe(24_000_000_000);
+    // Partial sum is a lower bound — the null-sized item is missing from it.
+    expect(total).toEqual({ bytes: 24_000_000_000, complete: false });
   });
 
-  it("is null when nothing has a size", () => {
-    expect(downloadContentsTotalBytes([])).toBeNull();
+  it("reports the total complete when every item has a size", () => {
+    const total = downloadContentsTotalBytes([
+      { key: "a", label: "a", kind: "primary", sizeBytes: 8_000_000_000 },
+      { key: "c", label: "c", kind: "text-encoder", sizeBytes: 16_000_000_000 },
+    ]);
+    expect(total).toEqual({ bytes: 24_000_000_000, complete: true });
+  });
+
+  it("has null bytes when nothing has a size", () => {
+    expect(downloadContentsTotalBytes([])).toEqual({ bytes: null, complete: true });
     expect(
       downloadContentsTotalBytes([{ key: "a", label: "a", kind: "vae", sizeBytes: null }]),
-    ).toBeNull();
+    ).toEqual({ bytes: null, complete: false });
   });
 });
 

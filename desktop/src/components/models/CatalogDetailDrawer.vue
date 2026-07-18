@@ -79,9 +79,19 @@ const actionLabel = computed(() => catalogActionLabel(merged.value));
 const downloadable = computed(() => canDownloadEntry(merged.value));
 const unsupported = computed(() => !downloadable.value);
 
+/**
+ * The itemized total, prefixed with "≥" when some items lack a size — the sum
+ * is then a lower bound, not the true download size. "—" when nothing reports.
+ */
+const downloadTotalLabel = computed(() => {
+  const { bytes, complete } = downloadTotal.value;
+  if (bytes == null) return "—";
+  return `${complete ? "" : "≥ "}${formatGB(bytes)}`;
+});
+
 const pullLabel = computed(() => {
   if (props.pulling) return "Pulling…";
-  return downloadTotal.value != null ? `Pull · ${formatGB(downloadTotal.value)}` : "Pull";
+  return downloadTotal.value.bytes != null ? `Pull · ${downloadTotalLabel.value}` : "Pull";
 });
 
 function formatSize(bytes: number | null): string {
@@ -205,7 +215,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         >
           <div class="mb-1.5 flex items-baseline justify-between">
             <span class="edge-code">DOWNLOAD CONTENTS</span>
-            <span class="data-mono text-caption text-ink">{{ formatSize(downloadTotal) }}</span>
+            <span class="data-mono text-caption text-ink">{{ downloadTotalLabel }}</span>
           </div>
           <ul class="flex flex-col gap-1">
             <li

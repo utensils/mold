@@ -104,6 +104,33 @@ describe("CatalogDetailDrawer", () => {
     expect(contents.text()).toContain("24.2 GB");
   });
 
+  it("marks the download total a lower bound when a companion omits its size", async () => {
+    fetchCatalogDetail.mockResolvedValue(
+      detail({
+        companion_details: [
+          {
+            name: "flux2-te-9b",
+            kind: "text-encoder",
+            repo: "black-forest-labs/FLUX.2-klein-9B",
+            size_bytes: 16_000_000_000,
+          },
+          { name: "flux2-vae", kind: "vae", size_bytes: null },
+        ],
+      }),
+    );
+    const wrapper = await mountDrawer(summary());
+    // 8 GB weights + 16 GB TE, VAE size unknown — the shown total is a floor.
+    expect(wrapper.get("[data-test='download-contents']").text()).toContain("≥ 24.0 GB");
+    expect(wrapper.get("[data-test='drawer-pull']").text()).toContain("Pull · ≥ 24.0 GB");
+  });
+
+  it("shows an exact download total when every item reports a size", async () => {
+    const wrapper = await mountDrawer(summary());
+    const pull = wrapper.get("[data-test='drawer-pull']");
+    expect(pull.text()).toContain("Pull · 24.2 GB");
+    expect(pull.text()).not.toContain("≥");
+  });
+
   it("targets the given host and forwards credentials for the detail fetch", async () => {
     const target = { baseUrl: "http://hal9000:7680", apiKey: "hk" };
     await mountDrawer(summary(), { target, forwardCredentials: true });

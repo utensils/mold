@@ -38,10 +38,26 @@ export function buildDownloadContents(
   return [...primary, ...companions];
 }
 
-/** Total of the known per-file sizes; null when nothing reports one. */
-export function downloadContentsTotalBytes(items: DownloadContentItem[]): number | null {
+export interface DownloadContentsTotal {
+  /** Sum of the known per-file sizes; null when nothing reports one. */
+  bytes: number | null;
+  /**
+   * `true` only when every item reported a size, so `bytes` is the exact
+   * total. `false` means some items lack a size and `bytes` is a lower bound
+   * (the drawer prefixes it with "≥").
+   */
+  complete: boolean;
+}
+
+/**
+ * Total of the known per-file sizes. When some items omit their size the sum
+ * is a lower bound, not the true total — `complete` distinguishes the two so
+ * callers can present the partial sum honestly.
+ */
+export function downloadContentsTotalBytes(items: DownloadContentItem[]): DownloadContentsTotal {
   const total = items.reduce((sum, item) => sum + (item.sizeBytes ?? 0), 0);
-  return total > 0 ? total : null;
+  const complete = items.every((item) => item.sizeBytes != null);
+  return { bytes: total > 0 ? total : null, complete };
 }
 
 /**
