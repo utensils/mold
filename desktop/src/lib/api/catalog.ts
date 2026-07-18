@@ -1,7 +1,12 @@
 import { apiFetchTo, apiJsonTo, currentTarget, type ApiTarget } from "./client";
 import { isCatalogId } from "../catalog";
 import { catalogCredentialHeaders } from "../catalogCredentials";
-import type { CatalogDownloadResponse, CatalogFamily, CatalogSearchResponse } from "./types";
+import type {
+  CatalogDownloadResponse,
+  CatalogEntry,
+  CatalogFamily,
+  CatalogSearchResponse,
+} from "./types";
 
 export interface CatalogSearchParams {
   q?: string | undefined;
@@ -47,6 +52,22 @@ export async function fetchCatalogFamilies(
     },
   );
   return res.families.map((f) => f.family);
+}
+
+/**
+ * Fetch one catalog entry's full detail — `GET /api/catalog/:id`. The single
+ * code path for the endpoint: the detail drawer reads everything, lazy card
+ * sizes (`lib/catalogSizes.ts`) read through it keeping only `size_bytes`.
+ * The id goes RAW in the path (colons and slashes are part of the wildcard
+ * route match — do not URL-encode it).
+ */
+export async function fetchCatalogDetail(
+  id: string,
+  forwardCredentials = false,
+  target?: ApiTarget,
+): Promise<CatalogEntry> {
+  const headers = await catalogCredentialHeaders(forwardCredentials);
+  return apiJsonTo<CatalogEntry>(target ?? currentTarget(), `/api/catalog/${id}`, { headers });
 }
 
 /**
