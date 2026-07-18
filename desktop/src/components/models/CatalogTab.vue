@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore, type HostView } from "../../stores/hosts";
+import { isGenerationModel, useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 import { ApiError, type ApiTarget } from "../../lib/api/client";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
@@ -16,6 +17,7 @@ const props = defineProps<{
   query: string;
   layout: "grid" | "table";
   excludeInstalled?: boolean;
+  installedIds?: string[];
   mediaType?: MediaType;
 }>();
 
@@ -24,6 +26,7 @@ const emit = defineEmits<{ (e: "clear-media-filter"): void }>();
 const downloads = useDownloadsStore();
 const toasts = useToastStore();
 const hosts = useHostsStore();
+const models = useModelStore();
 
 const PAGE_SIZE = 24;
 /**
@@ -56,19 +59,80 @@ function matchesMediaType(entry: CatalogEntry): boolean {
   return type === "all" || isVideoFamily(entry.family) === (type === "video");
 }
 
+/**
+ * Safe built-in pull targets. Live HF search can return a repository that
+ * contains many checkpoints (notably Lightricks/LTX-Video) as one aggregate
+ * recipe; the manifest registry already describes the actual per-model files,
+ * so those variants must win over a hundreds-of-GB whole-repo pull.
+ */
+const manifestEntries = computed<CatalogEntry[]>(() => {
+  const installed = new Set(props.installedIds ?? []);
+  const q = props.query.trim().toLowerCase();
+  if (source.value === "civitai") return [];
+  return models.all
+    .filter((model) => !model.downloaded && isGenerationModel(model))
+    .filter((model) => !installed.has(model.name))
+    .filter((model) => !q || model.name.toLowerCase().includes(q))
+    .filter((model) => !family.value || model.family === family.value)
+    .map((model) => {
+      const weights = Math.round(model.size_gb * 1_000_000_000);
+      const fetch = model.remaining_download_bytes ?? weights;
+      const shared = Math.max(0, fetch - weights);
+      return {
+        id: model.name,
+        source: "hf",
+        source_id: model.hf_repo || null,
+        name: model.name,
+        family: model.family,
+        kind: "checkpoint",
+        nsfw: false,
+        installed: false,
+        size_bytes: weights,
+        thumbnail_url: null,
+        page_url: model.hf_repo ? `https://huggingface.co/${model.hf_repo}` : null,
+        companion_details:
+          shared > 0 ? [{ name: "shared runtime components", size_bytes: shared }] : [],
+      };
+    });
+});
+
+const combinedEntries = computed(() => {
+  const knownRepos = new Set(
+    models.all.map((model) => model.hf_repo).filter((repo): repo is string => Boolean(repo)),
+  );
+  const safeLive = entries.value.filter(
+    (entry) =>
+      !(
+        entry.source === "hf" &&
+        entry.kind === "checkpoint" &&
+        (entry.bundling === "separated" ||
+          Boolean(entry.source_id && knownRepos.has(entry.source_id)))
+      ),
+  );
+  const byId = new Map<string, CatalogEntry>();
+  for (const entry of [...manifestEntries.value, ...safeLive]) {
+    if (!byId.has(entry.id)) byId.set(entry.id, entry);
+  }
+  return [...byId.values()];
+});
+
 // What you already have surfaces first; the divider marks where "available"
 // begins so installed models are visible at a glance. The media-type filter
 // is client-side on `entry.family` — the server query stays unchanged.
 const displayEntries = computed(() =>
-  sortInstalledFirst(entries.value).filter(
-    (entry) => !(props.excludeInstalled && entry.installed) && matchesMediaType(entry),
+  sortInstalledFirst(combinedEntries.value).filter(
+    (entry) =>
+      !(
+        props.excludeInstalled &&
+        (entry.installed || (props.installedIds ?? []).includes(entry.name))
+      ) && matchesMediaType(entry),
   ),
 );
 
 /** Why the grid is empty while entries exist — names the active filter. */
 const filteredEmptyMessage = computed(() => {
   const type = props.mediaType ?? "all";
-  if (type !== "all" && !entries.value.some(matchesMediaType)) {
+  if (type !== "all" && !combinedEntries.value.some(matchesMediaType)) {
     const noun = type === "video" ? "video" : "image";
     return hasMore.value
       ? `No ${noun} models in these results yet — load more or show all media types.`
@@ -133,7 +197,7 @@ async function runSearch(reset: boolean) {
       // the filter — otherwise the chip renders a blank, message-less grid.
       const filterActive = (props.mediaType ?? "all") !== "all";
       if (!filterActive || !hasMore.value || fetched >= MAX_AUTO_PAGES) break;
-      if (entries.value.some(matchesMediaType)) break;
+      if (combinedEntries.value.some(matchesMediaType)) break;
       page.value += 1;
     }
   } catch (err) {
@@ -192,7 +256,7 @@ watch(
   () => props.mediaType,
   () => {
     if ((props.mediaType ?? "all") === "all" || loading.value) return;
-    if (!entries.value.some(matchesMediaType) && hasMore.value) loadMore();
+    if (!combinedEntries.value.some(matchesMediaType) && hasMore.value) loadMore();
   },
 );
 
@@ -247,7 +311,7 @@ onMounted(async () => {
       class="p-8 text-center text-body text-ink-2"
       data-test="catalog-empty"
     >
-      <template v-if="entries.length === 0">
+      <template v-if="combinedEntries.length === 0">
         <template v-if="query">Nothing on the shelf for "{{ query }}".</template>
         <template v-else>Search the catalog to find models.</template>
       </template>

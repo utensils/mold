@@ -6,6 +6,7 @@ import type { ChainStageForm } from "../../lib/chainForm";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
 import { authedMediaUrl } from "../../lib/gallery/media";
 import { base64ToDataUrl } from "../../lib/image";
+import type { ApiTarget } from "../../lib/api/client";
 import type { ChainJobStageDetail } from "../../lib/api/types";
 
 const props = defineProps<{
@@ -15,6 +16,8 @@ const props = defineProps<{
   jobStage?: ChainJobStageDetail | null;
   progress?: { step: number; total: number } | null;
   jobId?: string | null;
+  apiTarget?: ApiTarget | null;
+  hostId?: string | null;
   canMoveLeft: boolean;
   canMoveRight: boolean;
   canRemove: boolean;
@@ -66,6 +69,10 @@ watch(
     if (jobId && hasPreview) {
       void authedMediaUrl(
         `/api/chain-jobs/${encodeURIComponent(jobId)}/stages/${props.index}/preview`,
+        {
+          ...(props.apiTarget ? { target: props.apiTarget } : {}),
+          ...(props.hostId ? { cacheKey: props.hostId } : {}),
+        },
       )
         .then((u) => (previewUrl.value = u))
         .catch(() => (previewUrl.value = null));

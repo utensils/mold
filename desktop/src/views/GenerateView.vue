@@ -40,7 +40,7 @@ import { copyBase64ImageToClipboard } from "../lib/clipboard";
 import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
-import { buildRequest } from "../lib/generateForm";
+import { applyPrefillToForm, buildRequest } from "../lib/generateForm";
 import type { GenerationTemplate } from "../lib/generationTemplates";
 import { autoGrowRows } from "../lib/autogrow";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCycler";
@@ -424,16 +424,9 @@ watch(
 function applyPrefill() {
   const prefill = composer.take();
   if (!prefill) return;
-  form.prompt = prefill.prompt;
-  form.model = prefill.model;
-  form.seed = prefill.seed !== null ? String(prefill.seed) : "";
-  form.width = prefill.width;
-  form.height = prefill.height;
-  form.steps = prefill.steps;
-  form.guidance = prefill.guidance;
-  form.upscaleModel = prefill.upscaleModel ?? "";
-  const m = findInstalledModel(installedModels.value, prefill.model);
-  if (m) form.family = m.family;
+  // Gallery reuse ships full metadata (full-fidelity restore); palette /
+  // history / jobs keep the legacy scalar copy.
+  applyPrefillToForm(form, prefill, installedModels.value);
   void nextTick(() => promptEl.value?.focus());
 }
 

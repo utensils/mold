@@ -178,6 +178,9 @@ onMounted(async () => {
   router.afterEach((to) => void appPrefs.rememberRoute(to.path));
   // Check in the background after preferences select the correct channel.
   void updater.init();
+  // Remembered remotes are independent of This Mac. Start both boot paths
+  // together so a slow local engine can never postpone host reconnects.
+  const hostStartup = hostsStore.init();
   const connectionStartup = connection.init();
   void listenForMenu();
   // The window starts hidden (tauri.conf.json visible:false) to avoid a
@@ -188,10 +191,9 @@ onMounted(async () => {
     await appWindow.maximize();
     await appWindow.show();
   }
-  await connectionStartup.catch(() => {});
-  // Extra hosts reconnect after the primary connection settles; failures
-  // surface as sidebar rows + a toast, never as a blocked launch.
-  void hostsStore.init();
+  // Neither failure blocks launch: host errors remain visible in the sidebar,
+  // while the local connection store owns its own error presentation.
+  await Promise.allSettled([connectionStartup, hostStartup]);
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
