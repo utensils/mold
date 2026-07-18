@@ -359,8 +359,9 @@ describe("HostDetailView models", () => {
     expect(tray.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");
   });
 
-  it("refreshes models once and reopens host streams when status or credentials change", async () => {
-    await mountView();
+  it("keeps live components mounted across health polls and only reopens streams for credentials", async () => {
+    installApi({ models_disk: { total_bytes: 2_000_000_000_000, free_bytes: 500_000_000_000 } });
+    const wrapper = await mountView();
     expect(
       apiJsonTo.mock.calls.filter(
         (call) =>
@@ -369,13 +370,61 @@ describe("HostDetailView models", () => {
       ),
     ).toHaveLength(1);
 
-    const remote = useHostsStore().extras[0]!;
-    remote.status = "connecting";
-    await flushPromises();
-    remote.apiKey = "rotated-key";
-    remote.status = "ready";
+    const firstResourceStream = lastStream();
+    firstResourceStream.options.onEvent(
+      "snapshot",
+      JSON.stringify({
+        hostname: "hal9000",
+        timestamp: 1,
+        gpus: [
+          {
+            ordinal: 0,
+            name: "NVIDIA GeForce RTX 4090",
+            backend: "cuda",
+            vram_total: 24_000_000_000,
+            vram_used: 18_000_000_000,
+            gpu_utilization: 97,
+          },
+        ],
+        system_ram: { total: 64_000_000_000, used: 21_000_000_000 },
+        cpu: { cores: 16, usage_percent: 43.2 },
+      }),
+    );
     await flushPromises();
 
+    const gpuCard = wrapper.get("[data-test='gpu-card']").element;
+    const cpuCard = wrapper.get("[data-test='cpu-card']").element;
+    const ramCard = wrapper.get("[data-test='ram-card']").element;
+    const storageCard = wrapper.get("[data-test='storage-card']").element;
+    const resourceStreamCount = sseCalls.filter(
+      (call) => call.path === "/api/resources/stream",
+    ).length;
+    const remote = useHostsStore().extras[0]!;
+    remote.status = "error";
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='gpu-card']").element).toBe(gpuCard);
+    expect(wrapper.get("[data-test='cpu-card']").element).toBe(cpuCard);
+    expect(wrapper.get("[data-test='ram-card']").element).toBe(ramCard);
+    expect(wrapper.get("[data-test='storage-card']").element).toBe(storageCard);
+    expect(sseCalls.filter((call) => call.path === "/api/resources/stream")).toHaveLength(
+      resourceStreamCount,
+    );
+
+    remote.status = "ready";
+    await flushPromises();
+    expect(wrapper.get("[data-test='gpu-card']").element).toBe(gpuCard);
+    expect(wrapper.get("[data-test='cpu-card']").element).toBe(cpuCard);
+    expect(wrapper.get("[data-test='ram-card']").element).toBe(ramCard);
+    expect(wrapper.get("[data-test='storage-card']").element).toBe(storageCard);
+    expect(sseCalls.filter((call) => call.path === "/api/resources/stream")).toHaveLength(
+      resourceStreamCount,
+    );
+
+    remote.apiKey = "rotated-key";
+    await flushPromises();
+
+    expect(firstResourceStream.options.signal.aborted).toBe(true);
     expect(lastStream().options.target).toEqual({
       baseUrl: "http://hal9000:7680",
       apiKey: "rotated-key",
