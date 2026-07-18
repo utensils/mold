@@ -429,6 +429,175 @@ describe("refreshHost", () => {
   });
 });
 
+describe("kind + text filtering", () => {
+  /** A print with controllable format/metadata for kind + search tests. */
+  const media = (
+    filename: string,
+    timestamp: number,
+    meta: Record<string, unknown> = {},
+    format: string | null = null,
+  ): GalleryImage =>
+    ({ filename, timestamp, format, metadata: { prompt: "p", model: "m", ...meta } }) as never;
+
+  it("filters the merged grid by media kind", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([
+      media("still.png", 40),
+      media("clip.mp4", 30),
+      media("named-mp4.mp4", 20),
+      media("frames.png", 10, { video_frames: 97 }),
+    ]);
+
+    gallery.mediaKind = "video";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual([
+      "clip.mp4",
+      "named-mp4.mp4",
+      "frames.png",
+    ]);
+
+    gallery.mediaKind = "image";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["still.png"]);
+
+    gallery.mediaKind = "all";
+    expect(gallery.filtered).toHaveLength(4);
+  });
+
+  it("filters by a case-insensitive query over filename, model, and prompt", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([
+      media("Sunset-01.png", 40, { prompt: "a beach", model: "flux-dev" }),
+      media("b.png", 30, { prompt: "a CAT in a hat", model: "flux-dev" }),
+      media("c.png", 20, { prompt: "a dog", model: "z-image-turbo" }),
+    ]);
+
+    gallery.query = "sunset";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["Sunset-01.png"]);
+
+    gallery.query = "cat";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["b.png"]);
+
+    gallery.query = "z-image";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["c.png"]);
+
+    gallery.query = "  ";
+    expect(gallery.filtered).toHaveLength(3);
+  });
+
+  it("chains host chip, kind, and query", () => {
+    connectLocalPlusHal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([media("local-cat.mp4", 40, { prompt: "cat" })]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([
+      media("hal-cat.mp4", 30, { prompt: "cat" }),
+      media("hal-cat.png", 20, { prompt: "cat" }),
+      media("hal-dog.mp4", 10, { prompt: "dog" }),
+    ]);
+
+    gallery.filter = "hal9000-7680";
+    gallery.mediaKind = "video";
+    gallery.query = "cat";
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["hal-cat.mp4"]);
+  });
+
+  it("kindCounts reports per-kind buckets and respects the host filter", () => {
+    connectLocalPlusHal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([media("l1.png", 40), media("l2.mp4", 30)]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([
+      media("h1.png", 20),
+      media("h2.png", 10),
+      media("h3.mp4", 5),
+    ]);
+
+    expect(gallery.kindCounts).toEqual({ all: 5, image: 3, video: 2 });
+
+    gallery.filter = "hal9000-7680";
+    expect(gallery.kindCounts).toEqual({ all: 3, image: 2, video: 1 });
+  });
+
+  it("kindCounts ignores the kind and query narrowing (chip labels stay stable)", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([media("a.png", 2), media("b.mp4", 1)]);
+
+    gallery.mediaKind = "video";
+    gallery.query = "zzz-no-match";
+    expect(gallery.kindCounts).toEqual({ all: 2, image: 1, video: 1 });
+  });
+
+  it("hostFiltered exposes the chip-only set (History runs must not inherit gallery search)", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([media("a.png", 2), media("b.mp4", 1)]);
+
+    gallery.mediaKind = "video";
+    gallery.query = "zzz-no-match";
+    expect(gallery.filtered).toHaveLength(0);
+    expect(gallery.hostFiltered).toHaveLength(2);
+  });
+});
+
+describe("removeMany", () => {
+  it("routes each delete per origin exactly like single remove and reports partial failure", async () => {
+    // Engine down: the "local" bucket routes over IPC; hal9000 over HTTP —
+    // the same mixed-origin routing the single-delete path uses.
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "error";
+    addExtra("hal9000-7680", "http://hal9000:7680", "hk");
+    const gallery = useGalleryStore();
+    gallery.buckets["local"] = loadedBucket([img("l.png", 30)]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([img("h1.png", 20), img("h2.png", 10)]);
+
+    vi.mocked(ipc.localGalleryDelete).mockResolvedValue();
+    vi.mocked(apiFetchTo).mockImplementation((_target, path) => {
+      if (String(path).includes("h2.png")) return Promise.reject(new Error("500"));
+      return Promise.resolve(new Response(null, { status: 200 })) as never;
+    });
+    // The post-failure refetch reflects the server's real state: h2 survived.
+    vi.mocked(apiJsonTo).mockResolvedValue([img("h2.png", 10)]);
+
+    const result = await gallery.removeMany([
+      { sourceKey: "local", filename: "l.png" },
+      { sourceKey: "hal9000-7680", filename: "h1.png" },
+      { sourceKey: "hal9000-7680", filename: "h2.png" },
+    ]);
+
+    expect(result).toEqual({ deleted: 2, failed: 1 });
+    expect(ipc.localGalleryDelete).toHaveBeenCalledWith("l.png");
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "hk" },
+      "/api/gallery/image/h1.png",
+      { method: "DELETE" },
+    );
+    expect(gallery.buckets["local"]!.items).toHaveLength(0);
+    // The failed origin's bucket was refetched to reconverge with the server.
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "hk" },
+      "/api/gallery",
+    );
+    expect(gallery.buckets["hal9000-7680"]!.items.map((i) => i.filename)).toEqual(["h2.png"]);
+  });
+
+  it("does not refetch any bucket when every delete succeeds", async () => {
+    connectLocalPlusHal();
+    const gallery = useGalleryStore();
+    gallery.buckets["hal9000-7680"] = loadedBucket([img("h1.png", 20), img("h2.png", 10)]);
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 200 }) as never);
+
+    const result = await gallery.removeMany([
+      { sourceKey: "hal9000-7680", filename: "h1.png" },
+      { sourceKey: "hal9000-7680", filename: "h2.png" },
+    ]);
+
+    expect(result).toEqual({ deleted: 2, failed: 0 });
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(gallery.buckets["hal9000-7680"]!.items).toHaveLength(0);
+  });
+});
+
 describe("bucket sync", () => {
   it("drops buckets whose source disappeared and evicts their media", async () => {
     connectLocalPlusHal();

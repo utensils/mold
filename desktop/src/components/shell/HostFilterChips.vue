@@ -13,6 +13,8 @@ const props = defineProps<{
   modelValue: string;
   /** Override when All collapses prints that exist on multiple hosts. */
   allCount?: number;
+  /** Accessible name for the chip group (also reused for kind chips). */
+  ariaLabel?: string;
 }>();
 const emit = defineEmits<{ "update:modelValue": [value: string] }>();
 
@@ -26,7 +28,7 @@ const options = computed(() => [{ key: "all", label: "All", count: total.value }
   <div
     class="flex rounded-control border border-control-edge bg-bath p-0.5"
     role="tablist"
-    aria-label="Gallery source"
+    :aria-label="ariaLabel ?? 'Gallery source'"
   >
     <button
       v-for="option in options"

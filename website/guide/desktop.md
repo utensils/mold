@@ -58,13 +58,22 @@ surface powers it, so anything the app does maps to a documented endpoint.
   image request. The catalog renders **SIZE vs FETCH** honestly. With several
   hosts connected, Pull asks which host should store the model, and each
   host's installed-model inventory refreshes when its pull completes. The
+  Installed shelf merges every ready host with per-host badges and routes its
+  model actions to the host that owns the row. Primary model **weights** are
+  labeled separately from the larger footprint **with shared runtime** (text
+  encoders and VAEs), so shared dependencies are not mistaken for checkpoint
+  size. Curated manifest variants take precedence over ambiguous
+  multi-checkpoint Hugging Face repositories, preventing a whole repository
+  from being presented as one oversized pull. The
   Chains and video Generate empty states deep-link straight to the video
   catalog.
 - **Chains** — a filmstrip editing bench for multi-stage video
   (`mold.chain.v1`): per-stage prompts and frame counts (validated `8n+1`),
   splice transitions (smooth / cut / fade) you click to cycle, a live
   fits/duration forecast against `/api/capabilities/chain-limits`, TOML
-  import/export, and a durable jobs list with resume, cancel, and retake.
+  import/export, and a durable jobs list with resume, cancel, and retake. Its
+  picker includes video models installed on every connected host; limits,
+  creation, events, previews, and job actions stay routed to the model's host.
 - **History** — a fast, searchable list of past prompts; ↩ refills the composer.
 - **RunPod** — secure account setup, balance and live spend, GPU and
   datacenter discovery, pod launch/lifecycle/connection, and persistent network
@@ -292,7 +301,11 @@ wire types as the CLI and web UI:
 
 - **Host detail** — click a host in the sidebar to open its detail view:
   live GPU, CPU, and RAM telemetry, disk usage for the filesystem holding its
-  models, current queue state, and the models installed on that host.
+  models, current queue state, active model-download progress, and a freshly
+  fetched inventory of the models installed on that host.
+- **Launch reconnect** — every remembered host is attempted immediately on
+  every app launch, in parallel with This Mac. An unreachable host stays in
+  the sidebar as an errored row and periodic polling lets it self-heal.
 
 ## Development
 

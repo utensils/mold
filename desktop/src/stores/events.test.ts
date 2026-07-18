@@ -116,6 +116,7 @@ describe("event routing", () => {
       entries: [],
       paused: false,
       caps: { canPause: true, canCancelAll: true },
+      gpuOrdinals: [],
       error: null,
     };
     const events = useEventsStore();

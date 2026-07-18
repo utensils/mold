@@ -40,7 +40,8 @@ import { copyBase64ImageToClipboard } from "../lib/clipboard";
 import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
-import { buildRequest } from "../lib/generateForm";
+import { decideChainRouting } from "../lib/chainRouting";
+import { applyPrefillToForm, buildRequest } from "../lib/generateForm";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
@@ -101,6 +102,12 @@ function onAsideReset() {
 const job = computed(() => generation.active);
 const siblings = computed(() => generation.siblings);
 const caps = computed(() => generationCapabilitiesForFamily(form.family));
+/** Over-budget video frames on a non-chainable model would fail server-side —
+ *  ParamPanel shows the reason under Frames; this blocks the submit. */
+const chainReject = computed(() => {
+  if (!caps.value.supportsVideo) return false;
+  return decideChainRouting(form.frames, form.family, form.model).kind === "reject";
+});
 const installedModels = computed(() =>
   mergeInstalledModels(models.installed, hostModels.unionInstalled),
 );
@@ -362,7 +369,7 @@ async function preprocessSourceFit(route: HostRoute | null): Promise<boolean> {
 }
 
 async function generate() {
-  if (!form.prompt.trim() || !form.model) return;
+  if (!form.prompt.trim() || !form.model || chainReject.value) return;
   const batch = caps.value.forcesBatchSizeOne ? 1 : form.batchSize;
   // With multiple live hosts — or a dead primary while another host can
   // serve — route the batch (sticky pick, Auto = least busy, or Most
@@ -476,16 +483,9 @@ watch(
 function applyPrefill() {
   const prefill = composer.take();
   if (!prefill) return;
-  form.prompt = prefill.prompt;
-  form.model = prefill.model;
-  form.seed = prefill.seed !== null ? String(prefill.seed) : "";
-  form.width = prefill.width;
-  form.height = prefill.height;
-  form.steps = prefill.steps;
-  form.guidance = prefill.guidance;
-  form.upscaleModel = prefill.upscaleModel ?? "";
-  const m = findInstalledModel(installedModels.value, prefill.model);
-  if (m) form.family = m.family;
+  // Gallery reuse ships full metadata (full-fidelity restore); palette /
+  // history / jobs keep the legacy scalar copy.
+  applyPrefillToForm(form, prefill, installedModels.value);
   void nextTick(() => promptEl.value?.focus());
 }
 
@@ -693,7 +693,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
             <button
               type="button"
               class="h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-60"
-              :disabled="!form.prompt.trim() || !form.model"
+              :disabled="!form.prompt.trim() || !form.model || chainReject"
               @click="generate"
             >
               {{ buttonLabel }}

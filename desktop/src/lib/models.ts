@@ -4,6 +4,7 @@
  * proportional usage bars scale against.
  */
 import type { ModelEntry } from "./api/types";
+import { formatGB } from "./format";
 
 /** Families that aren't image/video generators — grouped separately at the
  * bottom of the Installed tab. Mirrors `stores/models.ts`'s exclusion set. */
@@ -21,6 +22,29 @@ export function quantTag(name: string): string | null {
 
 export function modelDiskBytes(m: ModelEntry): number {
   return m.disk_usage_bytes ?? 0;
+}
+
+export interface ModelSizeLabels {
+  /** Primary model weights, excluding shared encoders/VAEs. */
+  weights: string | null;
+  /** Full runtime footprint when materially larger than the primary weights. */
+  runtime: string | null;
+}
+
+/**
+ * Keep the two server size concepts explicit. `size_gb` is the primary model
+ * weights; `disk_usage_bytes` includes every runtime file referenced by that
+ * model and can therefore include large shared encoders and VAEs.
+ */
+export function modelSizeLabels(m: ModelEntry): ModelSizeLabels {
+  const weightsBytes = m.size_gb > 0 ? m.size_gb * 1_000_000_000 : 0;
+  const runtimeBytes = modelDiskBytes(m);
+  const weights = weightsBytes > 0 ? `${m.size_gb.toFixed(1)} GB weights` : null;
+  const differs = runtimeBytes > 0 && Math.abs(runtimeBytes - weightsBytes) >= 50_000_000;
+  return {
+    weights,
+    runtime: differs ? `${formatGB(runtimeBytes)} with shared runtime` : null,
+  };
 }
 
 export interface InstalledGroups {

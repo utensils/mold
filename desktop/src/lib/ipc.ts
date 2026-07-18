@@ -88,7 +88,7 @@ export interface AppSettings {
   updateChannel: UpdateChannel;
   /** Remote hosts the app remembers, most recently used first. */
   savedHosts: SavedHost[];
-  /** Additional hosts (beyond the primary connection) to reconnect at boot. */
+  /** Legacy reconnect markers; every saved host is now attempted at boot. */
   connectedHostIds: string[];
   /** Sticky generation-target host id; null routes automatically. */
   generateTargetHost: string | null;

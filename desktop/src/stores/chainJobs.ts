@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { apiFetch, apiJson } from "../lib/api/client";
+import { apiFetch, apiFetchTo, apiJson, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import { notifyChainFinished } from "../lib/notify";
 import { useToastStore } from "./toasts";
@@ -27,6 +27,9 @@ export interface ChainJobLive {
 export function emptyChainJobLive(): ChainJobLive {
   return { detail: null, progress: {}, activeStage: null };
 }
+
+const sameTarget = (a: ApiTarget | null, b: ApiTarget | null) =>
+  a?.baseUrl === b?.baseUrl && a?.apiKey === b?.apiKey;
 
 function firstRunningStage(job: ChainJobDetail): number | null {
   const running = job.stages.find((s) => s.state === "running");
@@ -89,10 +92,23 @@ export const useChainJobsStore = defineStore("chainJobs", {
     watchingId: null as string | null,
     abort: null as AbortController | null,
     pollTimer: null as ReturnType<typeof setInterval> | null,
+    /** Host owning the currently displayed chain-job list and live stream. */
+    target: null as ApiTarget | null,
+    fetchVersion: 0,
   }),
   actions: {
-    async fetchJobs() {
-      const listing = await apiJson<ChainJobListing>("/api/chain-jobs");
+    async fetchJobs(target?: ApiTarget | null) {
+      const resolvedTarget = target === undefined ? this.target : target;
+      if (!sameTarget(this.target, resolvedTarget)) {
+        this.unwatch();
+        this.live = emptyChainJobLive();
+      }
+      this.target = resolvedTarget;
+      const fetchVersion = ++this.fetchVersion;
+      const listing = resolvedTarget
+        ? await apiJsonTo<ChainJobListing>(resolvedTarget, "/api/chain-jobs")
+        : await apiJson<ChainJobListing>("/api/chain-jobs");
+      if (fetchVersion !== this.fetchVersion) return;
       // Newest first.
       this.jobs = listing.jobs.sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms);
       // Chains land from any surface (CLI, web, another machine sharing the
@@ -105,19 +121,29 @@ export const useChainJobsStore = defineStore("chainJobs", {
         this.pollTimer = null;
       }
     },
-    async create(req: ChainRequest): Promise<string> {
-      const res = await apiJson<CreateChainJobResponse>("/api/chain-jobs", {
+    async create(req: ChainRequest, target: ApiTarget | null = null): Promise<string> {
+      if (!sameTarget(this.target, target)) {
+        this.unwatch();
+        this.live = emptyChainJobLive();
+      }
+      this.target = target;
+      const init = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(req),
-      });
-      await this.fetchJobs();
-      this.watch(res.job_id);
+      } satisfies RequestInit;
+      const res = target
+        ? await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", init)
+        : await apiJson<CreateChainJobResponse>("/api/chain-jobs", init);
+      await this.fetchJobs(target);
+      this.watch(res.job_id, target);
       return res.job_id;
     },
     /** Subscribe to one job's event stream, replacing any prior watch. */
-    watch(id: string) {
+    watch(id: string, target?: ApiTarget | null) {
+      const resolvedTarget = target === undefined ? this.target : target;
       this.unwatch();
+      this.target = resolvedTarget;
       this.watchingId = id;
       this.live = emptyChainJobLive();
       const abort = new AbortController();
@@ -125,6 +151,7 @@ export const useChainJobsStore = defineStore("chainJobs", {
       void sseStream(`/api/chain-jobs/${encodeURIComponent(id)}/events`, {
         signal: abort.signal,
         retry: true,
+        ...(resolvedTarget ? { target: resolvedTarget } : {}),
         onEvent: (_event, data) => {
           try {
             const ev = JSON.parse(data) as ChainJobEvent;
@@ -153,30 +180,45 @@ export const useChainJobsStore = defineStore("chainJobs", {
       }
     },
     async resume(id: string) {
-      await apiFetch(`/api/chain-jobs/${encodeURIComponent(id)}/resume`, { method: "POST" });
+      const path = `/api/chain-jobs/${encodeURIComponent(id)}/resume`;
+      const init = { method: "POST" } satisfies RequestInit;
+      if (this.target) await apiFetchTo(this.target, path, init);
+      else await apiFetch(path, init);
       await this.fetchJobs();
       this.watch(id);
     },
     async cancel(id: string) {
-      await apiFetch(`/api/chain-jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+      const path = `/api/chain-jobs/${encodeURIComponent(id)}/cancel`;
+      const init = { method: "POST" } satisfies RequestInit;
+      if (this.target) await apiFetchTo(this.target, path, init);
+      else await apiFetch(path, init);
       await this.fetchJobs();
     },
     async remove(id: string) {
-      await apiFetch(`/api/chain-jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const path = `/api/chain-jobs/${encodeURIComponent(id)}`;
+      const init = { method: "DELETE" } satisfies RequestInit;
+      if (this.target) await apiFetchTo(this.target, path, init);
+      else await apiFetch(path, init);
       if (this.watchingId === id) this.unwatch();
       this.jobs = this.jobs.filter((j) => j.id !== id);
     },
     async retake(id: string, req: RetakeRequest) {
-      await apiFetch(`/api/chain-jobs/${encodeURIComponent(id)}/retake`, {
+      const path = `/api/chain-jobs/${encodeURIComponent(id)}/retake`;
+      const init = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(req),
-      });
+      } satisfies RequestInit;
+      if (this.target) await apiFetchTo(this.target, path, init);
+      else await apiFetch(path, init);
       await this.fetchJobs();
       this.watch(id);
     },
     async gc(): Promise<GcOutcome> {
-      const outcome = await apiJson<GcOutcome>("/api/chain-jobs/gc", { method: "POST" });
+      const init = { method: "POST" } satisfies RequestInit;
+      const outcome = this.target
+        ? await apiJsonTo<GcOutcome>(this.target, "/api/chain-jobs/gc", init)
+        : await apiJson<GcOutcome>("/api/chain-jobs/gc", init);
       await this.fetchJobs();
       return outcome;
     },

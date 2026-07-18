@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
+import DownloadsTray from "../components/models/DownloadsTray.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import { formatGB, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
+import { modelSizeLabels } from "../lib/models";
 import { ipc } from "../lib/ipc";
 import type { GpuSnapshot, ResourceSnapshot, ServerStatus } from "../lib/api/types";
 import { useAppPrefsStore } from "../stores/appPrefs";
+import { useDownloadsStore } from "../stores/downloads";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useToastStore } from "../stores/toasts";
@@ -23,6 +26,7 @@ type DetailSnapshot = ResourceSnapshot & {
 const route = useRoute();
 const router = useRouter();
 const appPrefs = useAppPrefsStore();
+const downloads = useDownloadsStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const toasts = useToastStore();
@@ -42,11 +46,13 @@ function hostTarget(): ApiTarget | null {
   return h?.baseUrl ? { baseUrl: h.baseUrl, apiKey: h.apiKey } : null;
 }
 
-/** Reopen the stream against the CURRENT host; prior subscription aborts. */
-function startResourceStream() {
+/** Reopen the stream against the CURRENT host; prior subscription aborts.
+ *  Keep the last frame mounted when only credentials change so reconnecting
+ *  updates values in place instead of collapsing the telemetry layout. */
+function startResourceStream(reset = false) {
   resourceAbort?.abort();
   resourceAbort = null;
-  snapshot.value = null;
+  if (reset) snapshot.value = null;
   const target = hostTarget();
   if (!target) return;
   resourceAbort = new AbortController();
@@ -71,11 +77,11 @@ let statusAbort: AbortController | null = null;
  *  Guarded per request: the :id param retargets this reused component in
  *  place, and a slow host's late response must never populate the page of
  *  the host the user navigated to next. */
-async function fetchStatus() {
+async function fetchStatus(reset = false) {
   statusAbort?.abort();
   const abort = new AbortController();
   statusAbort = abort;
-  status.value = null;
+  if (reset) status.value = null;
   const target = hostTarget();
   if (!target) return;
   try {
@@ -87,15 +93,43 @@ async function fetchStatus() {
   }
 }
 
-// Immediate + retargeting: covers first render, the :id param changing in
-// place, and a host whose baseUrl appears after a late connect.
+function startReadyServices() {
+  const current = host.value;
+  if (current?.status !== "ready") return;
+  void downloads.subscribe(current).catch(() => {
+    // Host status and the model list still render if an older server lacks
+    // the download stream; reconnect retries are owned by the SSE helper.
+  });
+  void hostModels.refresh(true);
+}
+
+// Connection identity retargeting is the only event that replaces page data.
+// A health poll changing ready/error state must not clear and rebuild the
+// telemetry, storage, or models sections: those components keep their last
+// snapshot mounted while their own live sources update them in place.
 watch(
-  () => [hostId.value, host.value?.baseUrl] as const,
-  () => {
-    startResourceStream();
-    void fetchStatus();
+  [hostId, () => host.value?.baseUrl, () => host.value?.apiKey],
+  (identity, previous) => {
+    const hostChanged = !previous || identity[0] !== previous[0] || identity[1] !== previous[1];
+    startResourceStream(hostChanged);
+    void fetchStatus(hostChanged);
+    startReadyServices();
   },
   { immediate: true },
+);
+
+// Reconnect side effects follow readiness, without touching rendered data or
+// reopening the already self-healing resource stream.
+watch(
+  () => host.value?.status,
+  (current, previous) => {
+    if (current === "ready" && previous !== "ready") {
+      // A host may have been unreachable during the identity watch's initial
+      // request. Recover status-only fields without clearing the last snapshot.
+      void fetchStatus();
+      startReadyServices();
+    }
+  },
 );
 onUnmounted(() => {
   resourceAbort?.abort();
@@ -103,7 +137,6 @@ onUnmounted(() => {
   statusAbort?.abort();
   statusAbort = null;
 });
-onMounted(() => void hostModels.refresh());
 
 // ── Derived display data ──────────────────────────────────────────────────
 
@@ -212,6 +245,7 @@ async function forget() {
   <div class="h-full overflow-y-auto p-6">
     <div class="mx-auto max-w-3xl">
       <template v-if="host">
+        <DownloadsTray :host-id="hostId" data-test="host-downloads" />
         <!-- Header -->
         <div class="flex items-center gap-3">
           <span
@@ -455,7 +489,17 @@ async function forget() {
             <span class="min-w-0 truncate text-body text-ink">{{ m.name }}</span>
             <span class="text-caption text-ink-3">{{ m.family }}</span>
             <div class="flex-1" />
-            <span v-if="m.size_gb" class="data-mono text-ink-3">{{ m.size_gb.toFixed(1) }} GB</span>
+            <span class="shrink-0 text-right">
+              <span class="data-mono block text-caption text-ink-2">
+                {{ modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? "Size unavailable" }}
+              </span>
+              <span
+                v-if="modelSizeLabels(m).runtime && modelSizeLabels(m).weights"
+                class="data-mono block text-[10px] text-ink-3"
+              >
+                {{ modelSizeLabels(m).runtime }}
+              </span>
+            </span>
           </li>
         </ul>
         <p v-else class="mt-2 text-caption text-ink-3">No installed models reported</p>
