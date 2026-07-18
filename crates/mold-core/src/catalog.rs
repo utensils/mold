@@ -37,10 +37,19 @@ pub fn build_model_catalog(
                 is_loaded: loaded_model
                     .is_some_and(|name| engine_is_loaded && name == manifest.name),
                 last_used: None,
+                // Sharded checkpoints (e.g. qwen-image:bf16) carry their
+                // weights as TransformerShard files — without the fallback
+                // they'd report no repo and lose their source mark and
+                // model-page link in clients.
                 hf_repo: manifest
                     .files
                     .iter()
                     .find(|f| f.component == crate::manifest::ModelComponent::Transformer)
+                    .or_else(|| {
+                        manifest.files.iter().find(|f| {
+                            f.component == crate::manifest::ModelComponent::TransformerShard
+                        })
+                    })
                     .map(|f| f.hf_repo.clone())
                     .unwrap_or_default(),
             },
@@ -184,6 +193,19 @@ mod tests {
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
+    }
+
+    #[test]
+    fn sharded_checkpoints_report_their_transformer_shard_repo() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // qwen-image:bf16 has no single Transformer file — its weights are
+        // TransformerShard entries. The repo must come from the shards, not
+        // fall back to empty (which strips the source mark in clients).
+        let entry = build_model_catalog(&Config::default(), None, false)
+            .into_iter()
+            .find(|model| model.name == "qwen-image:bf16")
+            .expect("manifest model should exist");
+        assert_eq!(entry.info.hf_repo, "Qwen/Qwen-Image");
     }
 
     #[test]

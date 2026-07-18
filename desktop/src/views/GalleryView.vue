@@ -19,6 +19,7 @@ import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
 import { inTauri, ipc } from "../lib/ipc";
 import { copyImageBytesToClipboard } from "../lib/clipboard";
+import { primaryModifierPressed } from "../lib/platform";
 import type { GalleryImage } from "../lib/api/types";
 
 const GAP = 8;
@@ -224,6 +225,7 @@ const rowHeight = ref(180);
 // ── Search + media-kind chips ──────────────────────────────────────────────
 const SEARCH_DEBOUNCE_MS = 200;
 const searchInput = ref(gallery.query);
+const searchEl = ref<HTMLInputElement | null>(null);
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 watch(searchInput, (value) => {
   if (searchTimer) clearTimeout(searchTimer);
@@ -403,6 +405,12 @@ function moveSelection(delta: number) {
 }
 
 function onKeydown(e: KeyboardEvent) {
+  // ⌘F focuses the view's own search — the screen-level filter shortcut.
+  if (e.key === "f" && primaryModifierPressed(e) && !e.altKey) {
+    e.preventDefault();
+    searchEl.value?.focus();
+    return;
+  }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === "ArrowRight") {
     e.preventDefault();
@@ -443,6 +451,27 @@ watch(
     // exist yet (e.g. the host is still connecting) and narrows on its own
     // the moment the source appears.
     gallery.filter = typeof host === "string" && host ? host : "all";
+  },
+  { immediate: true },
+);
+
+// Deep link: /gallery?print=<filename> (a ⌘K gallery result) reveals that
+// print — filters reset so it can't be hidden, then selection + lightbox
+// open once the buckets deliver it. One-shot: the param drops after use so
+// closing the lightbox doesn't re-open it.
+watch(
+  [() => route.query.print, () => gallery.merged.length],
+  ([print]) => {
+    if (typeof print !== "string" || !print) return;
+    const entry = gallery.merged.find((e) => e.item.filename === print);
+    if (!entry) return;
+    gallery.filter = "all";
+    gallery.mediaKind = "all";
+    gallery.query = "";
+    searchInput.value = "";
+    select(entry);
+    lightboxOpen.value = true;
+    void router.replace({ query: { ...route.query, print: undefined } });
   },
   { immediate: true },
 );
@@ -507,6 +536,7 @@ onUnmounted(() => {
         {{ gallery.firstError }}
       </span>
       <input
+        ref="searchEl"
         v-model="searchInput"
         data-selectable
         type="search"

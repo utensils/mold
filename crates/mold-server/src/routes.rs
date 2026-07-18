@@ -698,9 +698,18 @@ async fn generate(
     // SSE clients. Cleanup happens unconditionally on every terminal
     // path (drop guard in `gpu_worker::process_job`).
     let job_id = uuid::Uuid::new_v4().to_string();
-    let cancel = state
-        .job_registry
-        .register_with_target_gpu(&job_id, &req.model, preferred_gpu);
+    // Metadata-shaped request params ride the queue listing so any client
+    // can inspect the job and reuse its settings (seed 0 = not pinned).
+    let queue_metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
+        &req,
+        req.seed.unwrap_or(0),
+        None,
+        mold_core::build_info::version_string(),
+    ));
+    let cancel =
+        state
+            .job_registry
+            .register_job(&job_id, &req.model, preferred_gpu, Some(queue_metadata));
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -1429,9 +1438,18 @@ async fn generate_stream(
     // Assign a server-side ID and register before submit so the entry is
     // visible to /api/queue from the moment we accept the request.
     let job_id = uuid::Uuid::new_v4().to_string();
-    let cancel = state
-        .job_registry
-        .register_with_target_gpu(&job_id, &req.model, preferred_gpu);
+    // Metadata-shaped request params ride the queue listing so any client
+    // can inspect the job and reuse its settings (seed 0 = not pinned).
+    let queue_metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
+        &req,
+        req.seed.unwrap_or(0),
+        None,
+        mold_core::build_info::version_string(),
+    ));
+    let cancel =
+        state
+            .job_registry
+            .register_job(&job_id, &req.model, preferred_gpu, Some(queue_metadata));
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,

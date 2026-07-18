@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useUiStore } from "../../stores/ui";
+import { useGalleryStore } from "../../stores/gallery";
 import { useModelStore } from "../../stores/models";
 import { useComposerStore } from "../../stores/composer";
 import { useGenerationStore } from "../../stores/generation";
@@ -21,6 +22,7 @@ interface Command extends Matchable {
 
 const ui = useUiStore();
 const router = useRouter();
+const gallery = useGalleryStore();
 const models = useModelStore();
 const composer = useComposerStore();
 const generation = useGenerationStore();
@@ -218,8 +220,30 @@ const historyCommands = computed<Command[]>(() =>
   })),
 );
 
+/** Prints matching the query — the same fields the Gallery search scans.
+ *  Selecting one deep-links to the gallery with that print's lightbox open. */
+const galleryCommands = computed<Command[]>(() => {
+  const q = query.value.trim().toLowerCase();
+  if (!q) return [];
+  return gallery.merged
+    .filter(
+      (e) =>
+        e.item.filename.toLowerCase().includes(q) ||
+        e.item.metadata.model.toLowerCase().includes(q) ||
+        e.item.metadata.prompt.toLowerCase().includes(q),
+    )
+    .slice(0, 6)
+    .map((e) => ({
+      id: `print-${e.sourceKey}-${e.item.filename}`,
+      title: e.item.metadata.prompt || e.item.filename,
+      subtitle: `${e.item.metadata.model} · gallery`,
+      run: () => go(`/gallery?print=${encodeURIComponent(e.item.filename)}`),
+    }));
+});
+
 const results = computed<Command[]>(() => [
   ...matchCommands(query.value, staticCommands.value),
+  ...galleryCommands.value,
   ...historyCommands.value,
 ]);
 
@@ -248,6 +272,9 @@ watch(
       void fetchHistory("", 6)
         .then((entries) => (history.value = entries))
         .catch(() => {});
+      // Warm the gallery buckets so print results can match, but never
+      // refetch on every open — a loaded store is reused as-is.
+      if (!gallery.loaded) void gallery.fetchAll();
       void nextTick(() => inputEl.value?.focus());
     } else {
       // Return focus to whatever launched the palette.

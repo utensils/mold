@@ -2,15 +2,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+const routerPush = vi.hoisted(() => vi.fn());
+vi.mock("vue-router", () => ({ useRouter: () => ({ push: routerPush }) }));
 vi.mock("../../lib/api/history", () => ({ fetchHistory: vi.fn().mockResolvedValue([]) }));
 vi.mock("../../lib/api/models", () => ({ loadModel: vi.fn(), unloadModel: vi.fn() }));
 
 import CommandPalette from "./CommandPalette.vue";
+import { useGalleryStore } from "../../stores/gallery";
 import { useUiStore } from "../../stores/ui";
+import type { GalleryImage } from "../../lib/api/types";
 
 beforeEach(() => {
   setActivePinia(createPinia());
+  routerPush.mockClear();
 });
 
 async function openPalette() {
@@ -47,6 +51,50 @@ describe("CommandPalette command registry", () => {
     const texts = wrapper.findAll("[role='option']").map((o) => o.text());
     expect(texts.some((t) => t.includes("Switch to built-in engine"))).toBe(false);
     expect(texts.some((t) => t.includes("Restart engine"))).toBe(true);
+    wrapper.unmount();
+  });
+});
+
+describe("CommandPalette gallery results", () => {
+  const print = (filename: string, prompt: string, model: string): GalleryImage =>
+    ({ filename, timestamp: 1, metadata: { prompt, model, seed: 1 } }) as never;
+
+  it("surfaces matching prints and deep-links to their lightbox", async () => {
+    const wrapper = await openPalette();
+    useGalleryStore().buckets["local"] = {
+      items: [
+        print("mold-flux-1.png", "a paper plane at dawn", "flux-dev:q8"),
+        print("other.png", "a cat", "sd15:fp16"),
+      ],
+      loading: false,
+      error: null,
+      loaded: true,
+    };
+    await wrapper.get("input").setValue("plane");
+    await wrapper.vm.$nextTick();
+
+    const options = wrapper.findAll("[role='option']");
+    const match = options.find((o) => o.text().includes("a paper plane at dawn"));
+    expect(match).toBeDefined();
+    expect(match!.text()).toContain("gallery");
+    expect(options.some((o) => o.text().includes("a cat"))).toBe(false);
+
+    await match!.trigger("click");
+    expect(routerPush).toHaveBeenCalledWith("/gallery?print=mold-flux-1.png");
+    wrapper.unmount();
+  });
+
+  it("offers no print rows for a blank query", async () => {
+    const wrapper = await openPalette();
+    useGalleryStore().buckets["local"] = {
+      items: [print("mold-flux-1.png", "a paper plane at dawn", "flux-dev:q8")],
+      loading: false,
+      error: null,
+      loaded: true,
+    };
+    await wrapper.vm.$nextTick();
+    const texts = wrapper.findAll("[role='option']").map((o) => o.text());
+    expect(texts.some((t) => t.includes("a paper plane at dawn"))).toBe(false);
     wrapper.unmount();
   });
 });

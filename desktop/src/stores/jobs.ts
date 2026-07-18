@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
-import type { ServerStatus } from "../lib/api/types";
+import type { OutputMetadata, ServerStatus } from "../lib/api/types";
 import { useHostsStore, type HostView } from "./hosts";
 import { useToastStore } from "./toasts";
 import type { Job } from "./generation";
@@ -16,6 +16,9 @@ export interface QueueEntry {
   position: number;
   gpu?: number;
   target_gpu?: number;
+  /** The submitted request's settings, metadata-shaped (additive; absent on
+   * older servers; never carries image payloads). */
+  metadata?: OutputMetadata | null;
 }
 
 /** Queue controls a host supports (from `GET /api/capabilities`). */
