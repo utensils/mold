@@ -91,6 +91,10 @@ async function preview() {
   if (!original || previewing.value) return;
   previewing.value = true;
   previewError.value = null;
+  // Drop any prior candidates up front so a failed re-preview can't leave
+  // stale, clickable suggestions from an earlier run.
+  candidates.value = [];
+  previewOriginal.value = null;
   try {
     const res = await expandPrompt(original, requestOptions.value);
     candidates.value = res.expanded.map((t) => t.trim()).filter(Boolean);
@@ -117,7 +121,8 @@ function undo() {
 
 function onDocumentMousedown(e: MouseEvent) {
   if (!open.value) return;
-  if (root.value && !root.value.contains(e.target as Node)) open.value = false;
+  const target = e.target;
+  if (root.value && !(target instanceof Node && root.value.contains(target))) open.value = false;
 }
 function onDocumentKeydown(e: KeyboardEvent) {
   if (open.value && e.key === "Escape") open.value = false;

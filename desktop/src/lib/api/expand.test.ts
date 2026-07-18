@@ -38,4 +38,16 @@ describe("expandPrompt", () => {
     expect(body).toEqual({ prompt: "a cat", variations: 3 });
     expect("model_family" in body).toBe(false);
   });
+
+  it("omits a whitespace-only family instead of sending it", async () => {
+    await expandPrompt("a cat", { modelFamily: "   ", variations: 2 });
+    const body = sentBody();
+    expect(body).toEqual({ prompt: "a cat", variations: 2 });
+    expect("model_family" in body).toBe(false);
+  });
+
+  it("trims surrounding whitespace from the family override", async () => {
+    await expandPrompt("a cat", { modelFamily: "  sdxl  " });
+    expect(sentBody()).toEqual({ prompt: "a cat", model_family: "sdxl", variations: 1 });
+  });
 });

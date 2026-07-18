@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import ExpandControl from "./ExpandControl.vue";
@@ -13,10 +13,16 @@ vi.mock("../../lib/api/catalog", () => ({
 
 const expandPromptMock = vi.mocked(expandPrompt);
 
+// The component registers document-level mousedown/keydown listeners on mount,
+// so every mounted wrapper must be unmounted to avoid cross-test leakage.
+const wrappers: ReturnType<typeof mount>[] = [];
+
 function mountControl(props: Partial<{ prompt: string; family: string }> = {}) {
-  return mount(ExpandControl, {
+  const wrapper = mount(ExpandControl, {
     props: { prompt: "a cat", family: "flux", ...props },
   });
+  wrappers.push(wrapper);
+  return wrapper;
 }
 
 async function openPopover(wrapper: ReturnType<typeof mountControl>) {
@@ -26,6 +32,10 @@ async function openPopover(wrapper: ReturnType<typeof mountControl>) {
 beforeEach(() => {
   setActivePinia(createPinia());
   expandPromptMock.mockReset();
+});
+
+afterEach(() => {
+  while (wrappers.length) wrappers.pop()!.unmount();
 });
 
 describe("ExpandControl one-shot fast path (regression)", () => {
@@ -127,5 +137,22 @@ describe("ExpandControl variations popover", () => {
 
     expect(wrapper.get('[data-test="expand-preview-error"]').text()).toContain("backend down");
     expect(wrapper.emitted("apply")).toBeUndefined();
+  });
+
+  it("clears stale candidates when a later preview fails", async () => {
+    expandPromptMock.mockResolvedValueOnce({ original: "a cat", expanded: ["a", "b"] });
+    const wrapper = mountControl();
+    await openPopover(wrapper);
+    await wrapper.get('[data-test="expand-preview"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll('[data-test="expand-candidate"]')).toHaveLength(2);
+
+    // A failed re-preview must not leave the earlier suggestions clickable.
+    expandPromptMock.mockRejectedValueOnce(new Error("backend down"));
+    await wrapper.get('[data-test="expand-preview"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.findAll('[data-test="expand-candidate"]')).toHaveLength(0);
+    expect(wrapper.get('[data-test="expand-preview-error"]').text()).toContain("backend down");
   });
 });

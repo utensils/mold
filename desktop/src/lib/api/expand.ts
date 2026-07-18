@@ -20,7 +20,8 @@ export function expandPrompt(
   opts: ExpandPromptOptions = {},
 ): Promise<ExpandResponse> {
   const body: ExpandRequest = { prompt, variations: opts.variations ?? 1 };
-  if (opts.modelFamily) body.model_family = opts.modelFamily;
+  const family = opts.modelFamily?.trim();
+  if (family) body.model_family = family;
   return apiJson<ExpandResponse>("/api/expand", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
