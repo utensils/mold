@@ -11,6 +11,7 @@ const { searchCatalog, fetchCatalogFamilies } = vi.hoisted(() => ({
 vi.mock("../lib/api/catalog", () => ({
   searchCatalog,
   fetchCatalogFamilies,
+  fetchCatalogDetail: vi.fn().mockRejectedValue(new Error("no detail in tests")),
   startCatalogDownload: vi.fn(),
 }));
 vi.mock("../lib/api/client", () => ({
@@ -32,10 +33,12 @@ vi.mock("../lib/catalogSizes", () => ({
 }));
 
 import ModelsView from "./ModelsView.vue";
+import { getActivePinia } from "pinia";
 import { useDownloadsStore } from "../stores/downloads";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
+import { useUiStore } from "../stores/ui";
 import type { DownloadJob } from "../lib/api/types";
 
 const stub = { template: "<div />" };
@@ -242,5 +245,28 @@ describe("ModelsView unified catalog", () => {
     expect(cta).toBeDefined();
     await cta!.trigger("click");
     expect(scrollIntoView).toHaveBeenCalled();
+  });
+});
+
+describe("ModelsView catalog layout", () => {
+  it("defaults to the table layout", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.get("[data-test='layout-table']").attributes("aria-checked")).toBe("true");
+    expect(wrapper.get("[data-test='layout-grid']").attributes("aria-checked")).toBe("false");
+  });
+
+  it("persists the chosen layout for the app session, not just the mounted view", async () => {
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='layout-grid']").trigger("click");
+    expect(useUiStore().catalogLayout).toBe("grid");
+    wrapper.unmount();
+
+    // Same pinia = same app session: leaving Catalog and coming back keeps
+    // the choice, while a fresh session (new pinia) resets to table.
+    const again = mount(ModelsView, { global: { plugins: [getActivePinia()!, router] } });
+    await flushPromises();
+    expect(again.get("[data-test='layout-grid']").attributes("aria-checked")).toBe("true");
+    expect(again.get("[data-test='layout-table']").attributes("aria-checked")).toBe("false");
+    again.unmount();
   });
 });

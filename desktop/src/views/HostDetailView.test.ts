@@ -377,6 +377,14 @@ describe("HostDetailView models", () => {
     expect(rows[1]!.text()).toContain("z-image:q8");
   });
 
+  it("opens the shared model detail drawer from a model row", async () => {
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='model-row'] [data-test='row-title']").trigger("click");
+    await flushPromises();
+    const drawer = wrapper.get("[data-test='catalog-detail-drawer']");
+    expect(drawer.text()).toContain("flux-dev:q8");
+  });
+
   it("shows this host's active model-download progress", async () => {
     const wrapper = await mountView();
     const stream = lastStream("/api/downloads/stream");

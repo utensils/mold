@@ -159,7 +159,8 @@ function onRowKeydown(event: KeyboardEvent): void {
       </span>
     </div>
 
-    <div v-if="$slots.actions" class="flex shrink-0 items-center gap-1">
+    <!-- Clicks on parent-provided actions must never open the row. -->
+    <div v-if="$slots.actions" class="flex shrink-0 items-center gap-1" @click.stop>
       <slot name="actions" />
     </div>
   </div>

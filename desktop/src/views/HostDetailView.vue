@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
+import CatalogDetailDrawer from "../components/models/CatalogDetailDrawer.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
 import ModelTableRow from "../components/models/ModelTableRow.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
-import { apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { startCatalogDownload } from "../lib/api/catalog";
+import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { formatEta, formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
@@ -259,6 +262,28 @@ const installedTotalLabel = computed(() => {
 const maxModelDiskBytes = computed(() =>
   installedModels.value.reduce((max, m) => Math.max(max, modelDiskBytes(m)), 0),
 );
+
+// Clicking a model row opens the shared detail drawer against THIS host.
+const detailModel = ref<(typeof installedModels.value)[number] | null>(null);
+const drawerRepairing = ref(false);
+
+async function repairFromDrawer() {
+  const m = detailModel.value;
+  const h = host.value;
+  if (!m || !h) return;
+  drawerRepairing.value = true;
+  try {
+    await startCatalogDownload(m.name, hostTarget() ?? undefined, h.kind === "remote");
+    toasts.push(`Repairing ${m.name} on ${h.label}`);
+  } catch (err) {
+    toasts.push(
+      err instanceof ApiError && err.status === 409 ? `${m.name} is already queued.` : String(err),
+      "error",
+    );
+  } finally {
+    drawerRepairing.value = false;
+  }
+}
 
 function statusDot(s: "connecting" | "ready" | "error"): string {
   switch (s) {
@@ -647,11 +672,24 @@ async function forget() {
                   : null
               "
               :bar-percent="percent(modelDiskBytes(m), maxModelDiskBytes)"
+              clickable
               class="px-3 py-2"
+              @open="detailModel = m"
             />
           </li>
         </ul>
         <p v-else class="mt-2 text-caption text-ink-3">No installed models reported</p>
+
+        <!-- One consistent model-detail drawer, shared with the catalog. -->
+        <CatalogDetailDrawer
+          v-if="detailModel"
+          :entry="installedModelToEntry(detailModel)"
+          :pulling="drawerRepairing"
+          :target="hostTarget() ?? undefined"
+          :forward-credentials="host.kind === 'remote'"
+          @close="detailModel = null"
+          @pull="repairFromDrawer"
+        />
 
         <RenameDialog
           :open="renameOpen"

@@ -5,7 +5,32 @@
  * Pull-vs-Repair action state. Framework-free so the contracts are unit
  * testable (project test rule).
  */
-import type { CatalogEntry } from "./api/types";
+import type { CatalogEntry, ModelEntry } from "./api/types";
+
+/**
+ * Present an installed model (`GET /api/models` row) in the drawer's entry
+ * shape, so the Installed shelf and host pages open the same detail drawer
+ * as the catalog. Catalog installs are already named by their catalog id
+ * (`cv:…` / `hf:…`), and manifest models resolve by name — either way the
+ * drawer's `GET /api/catalog/:id` enrichment and component listing key off
+ * `id`, and `installed: true` flips the action to Repair.
+ */
+export function installedModelToEntry(m: ModelEntry): CatalogEntry {
+  return {
+    id: m.name,
+    source: m.name.startsWith("cv:") ? "civitai" : "hf",
+    source_id: m.hf_repo || null,
+    name: m.name,
+    family: m.family,
+    kind: "checkpoint",
+    nsfw: false,
+    installed: true,
+    size_bytes: m.size_gb > 0 ? Math.round(m.size_gb * 1_000_000_000) : null,
+    page_url: m.hf_repo ? `https://huggingface.co/${m.hf_repo}` : null,
+    description: m.description || null,
+    thumbnail_url: null,
+  };
+}
 
 export interface DownloadContentItem {
   /** Stable render key (`primary:<dest>` / `companion:<name>`). */

@@ -2,7 +2,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import SourceGlyph from "../generate/SourceGlyph.vue";
 import ModelFamilyPlaceholder from "./ModelFamilyPlaceholder.vue";
-import { fetchCatalogDetail } from "../../lib/api/catalog";
+import { fetchCatalogDetail, startCatalogDownload } from "../../lib/api/catalog";
+import { fetchModelComponents } from "../../lib/api/models";
 import {
   buildDownloadContents,
   canDownloadEntry,
@@ -11,9 +12,10 @@ import {
 } from "../../lib/catalogDetail";
 import { catalogThumbnailUrl } from "../../lib/catalogThumbnails";
 import { formatCount, formatGB } from "../../lib/format";
-import type { ApiTarget } from "../../lib/api/client";
+import { useToastStore } from "../../stores/toasts";
+import { ApiError, type ApiTarget } from "../../lib/api/client";
 import type { ModelSource } from "../../lib/modelSource";
-import type { CatalogEntry } from "../../lib/api/types";
+import type { CatalogEntry, ModelComponentStatus } from "../../lib/api/types";
 
 /**
  * In-app catalog detail: description, license, tags, modality/format, and
@@ -40,9 +42,17 @@ const emit = defineEmits<{
 const detail = ref<CatalogEntry | null>(null);
 const loading = ref(false);
 
-/** Summary fields render immediately; the detail overlays as it arrives. */
+/** Summary fields render immediately; the detail overlays as it arrives.
+ *  `installed` never downgrades: the opener knows the model is on its host
+ *  even when the detail endpoint (possibly another host) says otherwise. */
 const merged = computed<CatalogEntry>(() =>
-  detail.value ? { ...props.entry, ...detail.value } : props.entry,
+  detail.value
+    ? {
+        ...props.entry,
+        ...detail.value,
+        installed: props.entry.installed || detail.value.installed,
+      }
+    : props.entry,
 );
 
 async function loadDetail(): Promise<void> {
@@ -64,6 +74,61 @@ async function loadDetail(): Promise<void> {
 }
 
 watch(() => props.entry.id, loadDetail, { immediate: true });
+
+// ── On-disk component state (installed models only) ───────────────────────
+
+const components = ref<ModelComponentStatus[] | "loading" | "error" | null>(null);
+
+/** Per-component presence from the owning host; quietly absent elsewhere. */
+async function loadComponents(): Promise<void> {
+  if (!merged.value.installed) {
+    components.value = null;
+    return;
+  }
+  components.value = "loading";
+  try {
+    components.value = (await fetchModelComponents(props.entry.id, props.target)).components;
+  } catch {
+    // Not an installed manifest/catalog model on this host, or an older
+    // server — the section simply hides.
+    components.value = "error";
+  }
+}
+
+watch([() => props.entry.id, () => merged.value.installed], loadComponents, { immediate: true });
+
+const componentList = computed<ModelComponentStatus[]>(() =>
+  Array.isArray(components.value) ? components.value : [],
+);
+const componentsPresent = computed(() => componentList.value.filter((c) => c.present).length);
+
+/** Component rows currently mid-repair, keyed by component name. */
+const repairing = ref<Set<string>>(new Set());
+
+/**
+ * Re-fetch one missing component without deleting the model: the download
+ * queue is keyed on the server-provided `repair_model` and skips files
+ * already on disk. Targets the same host the component listing came from.
+ */
+async function repairComponent(c: ModelComponentStatus): Promise<void> {
+  if (!c.repair_model || repairing.value.has(c.name)) return;
+  const toasts = useToastStore();
+  repairing.value.add(c.name);
+  try {
+    await startCatalogDownload(c.repair_model, props.target, props.forwardCredentials ?? false);
+    toasts.push(`Repairing ${merged.value.name} — re-fetching ${c.name}`);
+    await loadComponents();
+  } catch (err) {
+    toasts.push(
+      err instanceof ApiError && err.status === 409
+        ? `${c.repair_model} is already queued.`
+        : String(err),
+      "error",
+    );
+  } finally {
+    repairing.value.delete(c.name);
+  }
+}
 
 const glyphSource = computed<ModelSource>(() =>
   merged.value.source === "civitai" ? "civitai" : "hf",
@@ -229,6 +294,49 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
               <span class="data-mono text-caption text-ink-3">
                 {{ item.kind }} · {{ formatSize(item.sizeBytes) }}
               </span>
+            </li>
+          </ul>
+        </section>
+
+        <!-- On-disk components (installed models) -->
+        <section
+          v-if="componentList.length"
+          class="border-edge border-t pt-3"
+          data-test="component-list"
+        >
+          <div class="mb-1.5 flex items-baseline justify-between">
+            <span class="edge-code">ON THIS HOST</span>
+            <span class="data-mono text-caption text-ink">
+              {{ componentsPresent }}/{{ componentList.length }} present
+            </span>
+          </div>
+          <ul class="flex flex-col gap-1">
+            <li
+              v-for="c in componentList"
+              :key="c.name"
+              class="flex items-center gap-2"
+              data-test="component-row"
+            >
+              <span
+                class="h-1.5 w-1.5 shrink-0 rounded-full"
+                :class="c.present ? 'bg-halide' : 'bg-stop'"
+                role="img"
+                :title="c.present ? 'Present' : 'Missing'"
+                :aria-label="c.present ? 'Present' : 'Missing'"
+              />
+              <span class="min-w-0 truncate text-caption text-ink-2">{{ c.name }}</span>
+              <span class="edge-code ml-auto shrink-0">{{ c.kind }}</span>
+              <button
+                v-if="!c.present && c.repair_model"
+                type="button"
+                data-test="component-repair"
+                class="border-edge h-6 shrink-0 rounded-control border px-2 text-caption text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-40"
+                :disabled="repairing.has(c.name)"
+                :title="`Re-download the missing ${c.name}`"
+                @click="repairComponent(c)"
+              >
+                {{ repairing.has(c.name) ? "Repairing…" : "Repair" }}
+              </button>
             </li>
           </ul>
         </section>

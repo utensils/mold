@@ -191,7 +191,10 @@ models stacked above the live catalog — no All / Installed / Available toggle 
 filtered by **All / Images / Video** media chips (`?type=` deep links; the
 Chains and video Generate empty states link straight to `/models?type=video`;
 legacy `?tab=` / `?availability=` params still parse), with active
-**Downloads** pinned at the top.
+**Downloads** pinned at the top. The Table / Grid switcher is an icon
+segmented control whose active segment carries the Safelight fill; **Table is
+the default**, and the choice persists for the app session (ui store, not
+disk).
 
 ```
 │ CATALOG  [All] [Images] [Video]            [Search ⌘F]          [Grid|Table]│
@@ -202,7 +205,7 @@ legacy `?tab=` / `?availability=` params still parse), with active
 │ ── CATALOG — Hugging Face and Civitai ───────────────────────────────────  │
 ```
 
-- **Installed models:** surface first; rows show quant chip, disk usage, residency, and per-row actions. **Info** expands components (`/api/models/:model/components`) with per-component download/verify state and a "Verify checksums" action. Removing warns about shared components: "Keeps t5-xxl (used by 3 models)."
+- **Installed models:** surface first; rows are shared `ModelTableRow`s in the same divided bench panel as the catalog table and host pages, showing quant chip, disk usage, residency, and per-row Load / Unload / Remove actions. **Clicking a row opens the model detail drawer** (no separate Info button) — the same drawer as the catalog, with an **ON THIS HOST** section listing per-component presence (`/api/models/:model/components`) and per-component Repair, plus whole-model Repair in the footer. This one drawer is the model info surface everywhere: catalog grid cards, catalog table rows, Installed rows, and host-page model rows all open it. Removing warns about shared components: "Keeps t5-xxl (used by 3 models)."
 - **Catalog results:** share the same search and layout controls; already-installed entries are excluded. Grid cards use a bounded preview height and responsive 260px minimum columns; Table rows are the app-wide shared model row (`ModelTableRow` via `CatalogTableRow`) — source glyph, name, family, popularity, `SIZE` / `FETCH` lines, page link, Pull — with **no preview thumbnail**, in the same divided bench panel as the Installed shelf and host pages. Civitai previews use one cache-stable 512 px CDN derivative in both layouts, async lazy decoding, and per-card layout/paint containment; the desktop also normalizes raw preview URLs returned by older remote servers. Missing or failed previews use a local family-aware mark at the same dimensions so cards keep their visual rhythm without another fetch. Source, Family, and NSFW filters refine paged `/api/catalog/search` results. Pulling with several ready hosts opens a labelled target dialog; a single-host setup starts immediately. Result cards keep **SIZE vs FETCH** honest.
 - **Downloads:** pinned above Installed while any connected host's `/api/downloads/stream` has activity: up to two active downloads per host plus each remaining queue, each row with a source glyph (HF / Civitai), its target host (primary rows resolve to the local host's label), progress (bytes + %), and cancellation (✕ → that host's `DELETE /api/downloads/:id`) that stays visibly pending until the engine confirms termination. Companion downloads remain grouped under their primary. Progress bars here are plain Safelight fills; the Develop is reserved for generation.
 - Built-in catalog entries and `hf:`/`cv:` live entries are visually identical; the id chip (`cv:12345`) is copyable.

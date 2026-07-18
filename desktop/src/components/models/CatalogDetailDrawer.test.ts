@@ -2,10 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import type { CatalogEntry } from "../../lib/api/types";
 
-const { fetchCatalogDetail } = vi.hoisted(() => ({
+const { fetchCatalogDetail, startCatalogDownload } = vi.hoisted(() => ({
   fetchCatalogDetail: vi.fn(),
+  startCatalogDownload: vi.fn(),
 }));
-vi.mock("../../lib/api/catalog", () => ({ fetchCatalogDetail }));
+vi.mock("../../lib/api/catalog", () => ({ fetchCatalogDetail, startCatalogDownload }));
+const { fetchModelComponents } = vi.hoisted(() => ({ fetchModelComponents: vi.fn() }));
+vi.mock("../../lib/api/models", () => ({ fetchModelComponents }));
 
 import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
 
@@ -74,9 +77,35 @@ async function mountDrawer(
 beforeEach(() => {
   vi.clearAllMocks();
   fetchCatalogDetail.mockResolvedValue(detail());
+  fetchModelComponents.mockRejectedValue(new Error("not installed here"));
 });
 
 describe("CatalogDetailDrawer", () => {
+  it("lists on-disk component state with a presence summary for installed entries", async () => {
+    fetchModelComponents.mockResolvedValue({
+      model: "cv:8001",
+      components: [
+        { kind: "vae", name: "vae", present: true },
+        { kind: "text-encoder", name: "clip-l", present: false, repair_model: "cv:8001" },
+        { kind: "clip", name: "orphan", present: false, repair_model: null },
+      ],
+    });
+    const wrapper = await mountDrawer(summary({ installed: true }));
+
+    expect(fetchModelComponents).toHaveBeenCalledWith("cv:8001", undefined);
+    const section = wrapper.get("[data-test='component-list']");
+    expect(section.text()).toContain("1/3 present");
+    expect(section.findAll("[data-test='component-row']")).toHaveLength(3);
+    // Repair only where the server names a repair_model for a missing part.
+    expect(section.findAll("[data-test='component-repair']")).toHaveLength(1);
+  });
+
+  it("never queries component state for entries that are not installed", async () => {
+    const wrapper = await mountDrawer(summary());
+    expect(fetchModelComponents).not.toHaveBeenCalled();
+    expect(wrapper.find("[data-test='component-list']").exists()).toBe(false);
+  });
+
   it("fetches the detail for the entry and renders description, license, and tags", async () => {
     const wrapper = await mountDrawer(summary());
     expect(fetchCatalogDetail).toHaveBeenCalledWith("cv:8001", false, undefined);
