@@ -133,8 +133,17 @@ function stageSourceImage(s: Record<string, unknown>, idx: number): string | nul
         "Inline the image as source_image_b64 to open it here.",
     );
   }
-  const b64 = s.source_image_b64 ?? s.source_image;
-  return typeof b64 === "string" && b64.length > 0 ? b64 : null;
+  // Prefer the authoring key, else the canonical one; validate whichever is
+  // present. A present-but-non-string value is a malformed script, not "no
+  // image" — surface it rather than silently dropping the field. base64
+  // *validity* is left to the server, which already decodes and rejects it.
+  const key = s.source_image_b64 != null ? "source_image_b64" : "source_image";
+  const value = s[key];
+  if (value == null) return null;
+  if (typeof value !== "string") {
+    throw new Error(`Stage ${idx + 1}: ${key} must be a string.`);
+  }
+  return value.length > 0 ? value : null;
 }
 
 /**

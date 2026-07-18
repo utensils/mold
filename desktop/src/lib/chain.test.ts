@@ -363,6 +363,32 @@ describe("chain source images", () => {
     expect(() => tomlToChainForm(toml)).toThrow(/at most one/);
   });
 
+  it("rejects a non-string source_image_b64 with a stage-specific error", () => {
+    const toml = [
+      "[chain]",
+      'model = "ltx2:fp8"',
+      "",
+      "[[stage]]",
+      'prompt = "a bird"',
+      "frames = 33",
+      "source_image_b64 = 42",
+    ].join("\n");
+    expect(() => tomlToChainForm(toml)).toThrow(/Stage 1: source_image_b64 must be a string/);
+  });
+
+  it("rejects a non-string canonical source_image with a stage-specific error", () => {
+    const toml = [
+      "[chain]",
+      'model = "ltx2:fp8"',
+      "",
+      "[[stage]]",
+      'prompt = "a bird"',
+      "frames = 33",
+      "source_image = [1, 2, 3]",
+    ].join("\n");
+    expect(() => tomlToChainForm(toml)).toThrow(/Stage 1: source_image must be a string/);
+  });
+
   it("round-trips per-stage images through TOML exactly", () => {
     const form = newChainForm();
     form.model = "ltx-2-19b-distilled:fp8";
