@@ -420,6 +420,7 @@ describe("HostDetailView models", () => {
     expect(sseCalls.filter((call) => call.path === "/api/resources/stream")).toHaveLength(
       resourceStreamCount,
     );
+    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/status")).toHaveLength(2);
 
     remote.apiKey = "rotated-key";
     await flushPromises();

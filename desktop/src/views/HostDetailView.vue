@@ -123,7 +123,12 @@ watch(
 watch(
   () => host.value?.status,
   (current, previous) => {
-    if (current === "ready" && previous !== "ready") startReadyServices();
+    if (current === "ready" && previous !== "ready") {
+      // A host may have been unreachable during the identity watch's initial
+      // request. Recover status-only fields without clearing the last snapshot.
+      void fetchStatus();
+      startReadyServices();
+    }
   },
 );
 onUnmounted(() => {
