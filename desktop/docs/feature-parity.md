@@ -200,6 +200,7 @@ Desktop parity: the Chains view's filmstrip builder supports per-stage **source 
 - **Single model at a time**: `tokio::Mutex` + `spawn_blocking`. `AppState.model_cache` = LRU (max 3, `MOLD_MAX_CACHED_MODELS`) with `ModelResidency { Gpu, Parked, Unloaded }` — at most one GPU-resident.
 - **Job states** (`JobLifecycle`): `Queued` → `Running`; target-GPU editable only while Queued. Queue max size (`--queue-size`/`MOLD_QUEUE_SIZE`, default 200) → 503 when full. Look-ahead/deferral tuning envs.
 - Endpoints: `GET /api/queue`, `PATCH /api/queue/:id` (retarget GPU), SSE progress (`generate/stream`, includes `Queued`/step progress). Web `RunningStrip`, `RunningJobCard`, `JobsPanel`, `useQueue`, `useQueueReconciler`.
+- **Desktop parity (Jobs view)**: multi-GPU hosts render per-GPU queue lanes (`lib/queueLanes.ts`, ported from web `RunningStrip` lane logic; ordinals from `/api/status.gpus`, additive field). Queued rows drag between lanes of the **same** host or move via right-click "Move to GPU N"; both call `jobs.reassignGpu` → `PATCH /api/queue/:id` on the owning host, then re-sync from the server (never optimistic; 404/409/422 → error toast + refetch). Cross-host drops are rejected (`resolveDropAction`) — jobs cannot migrate between servers. Single-GPU hosts keep the flat list.
 - **Generation estimate**: `POST /api/generate/estimate` (VRAM/time preflight).
 
 ---

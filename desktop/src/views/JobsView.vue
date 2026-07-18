@@ -7,6 +7,15 @@ import { useHostsStore, type HostView } from "../stores/hosts";
 import { enrichQueueEntries, useJobsStore, type EnrichedQueueEntry } from "../stores/jobs";
 import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
+import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
+import {
+  computeQueueLanes,
+  laneForEntry,
+  resolveDropAction,
+  type DraggedQueueRow,
+  type LaneKey,
+  type QueueLane,
+} from "../lib/queueLanes";
 
 const router = useRouter();
 const generation = useGenerationStore();
@@ -20,10 +29,29 @@ onUnmounted(() => jobs.stopPolling());
 
 const primaryId = computed(() => hosts.primaryHost?.id ?? null);
 
-function hostEntries(host: HostView): EnrichedQueueEntry[] {
-  const snapshot = jobs.queues[host.id];
-  if (!snapshot) return [];
-  return enrichQueueEntries(snapshot.entries, host.id, generation.jobs, primaryId.value);
+/**
+ * Per-host lanes, computed once per reactive update and cached by host id so
+ * row/lane rendering never re-enriches or re-groups the queue for every row.
+ */
+const laneCache = computed(() => {
+  const map = new Map<string, QueueLane<EnrichedQueueEntry>[]>();
+  for (const host of hosts.all) {
+    const snapshot = jobs.queues[host.id];
+    const entries = snapshot
+      ? enrichQueueEntries(snapshot.entries, host.id, generation.jobs, primaryId.value)
+      : [];
+    map.set(host.id, computeQueueLanes(entries, snapshot?.gpuOrdinals ?? []));
+  }
+  return map;
+});
+
+function hostLanes(host: HostView): QueueLane<EnrichedQueueEntry>[] {
+  return laneCache.value.get(host.id) ?? [];
+}
+
+/** Whether a host has any queued/running rows across all its lanes. */
+function hostHasEntries(host: HostView): boolean {
+  return hostLanes(host).some((lane) => lane.entries.length > 0);
 }
 
 /** This app's job behind a queue row, for thumbnails and live progress. */
@@ -39,6 +67,66 @@ function entryCode(entry: EnrichedQueueEntry): string {
     return entry.gpu !== undefined ? `RUNNING · GPU ${entry.gpu}` : "RUNNING";
   }
   return entry.position > 0 ? `QUEUED #${entry.position}` : "QUEUED";
+}
+
+// ── Per-GPU lanes (multi-GPU hosts only) ─────────────────────────────────
+const contextMenu = useContextMenuStore();
+const dragged = ref<DraggedQueueRow | null>(null);
+
+/** Numeric lane keys of a host — empty means the flat single-queue layout. */
+function laneOrdinals(host: HostView): number[] {
+  return hostLanes(host)
+    .map((l) => l.key)
+    .filter((k): k is number => k !== "queue");
+}
+
+function canDragEntry(host: HostView, entry: EnrichedQueueEntry): boolean {
+  return entry.state === "queued" && laneOrdinals(host).length > 0;
+}
+
+function onDragStart(host: HostView, entry: EnrichedQueueEntry, event: DragEvent) {
+  if (!canDragEntry(host, entry)) {
+    dragged.value = null;
+    return;
+  }
+  dragged.value = { hostId: host.id, entryId: entry.id, lane: laneForEntry(entry) };
+  event.dataTransfer?.setData("text/plain", entry.id);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+
+function onLaneDrop(host: HostView, laneKey: LaneKey) {
+  const action = resolveDropAction(dragged.value, host.id, laneKey);
+  dragged.value = null;
+  if (action.kind === "reject-cross-host") {
+    toasts.push("Jobs can't move between hosts.", "error");
+    return;
+  }
+  if (action.kind === "reassign") {
+    void jobs.reassignGpu(action.hostId, action.entryId, action.targetGpu);
+  }
+}
+
+/** Accessible non-drag fallback: right-click → Move to GPU N. */
+function openEntryMenu(host: HostView, entry: EnrichedQueueEntry, event: MouseEvent) {
+  const ordinals = laneOrdinals(host);
+  if (entry.state !== "queued" || ordinals.length === 0) return;
+  const current = laneForEntry(entry);
+  const items: MenuEntry[] = ordinals.map((ordinal) => ({
+    label: `Move to GPU ${ordinal}`,
+    disabled: ordinal === current,
+    action: () => void jobs.reassignGpu(host.id, entry.id, ordinal),
+  }));
+  contextMenu.open(event, items);
+}
+
+/** Highlight a lane while a same-host drag could land on it. */
+function laneDroppable(host: HostView, laneKey: LaneKey): boolean {
+  return (
+    dragged.value !== null &&
+    dragged.value.hostId === host.id &&
+    laneKey !== "queue" &&
+    laneKey !== dragged.value.lane
+  );
 }
 
 async function cancelEntry(host: HostView, entry: EnrichedQueueEntry) {
@@ -153,7 +241,7 @@ function reuse(job: Job) {
             {{ jobs.queues[host.id]?.paused ? "Resume" : "Pause" }}
           </button>
           <button
-            v-if="jobs.queues[host.id]?.caps?.canCancelAll && hostEntries(host).length"
+            v-if="jobs.queues[host.id]?.caps?.canCancelAll && hostHasEntries(host)"
             type="button"
             data-test="cancel-all"
             class="h-7 rounded-control px-2.5 text-body"
@@ -169,51 +257,95 @@ function reuse(job: Job) {
           {{ jobs.queues[host.id]?.error }}
         </p>
 
-        <ul v-if="hostEntries(host).length" class="mt-2 space-y-1.5">
-          <li
-            v-for="entry in hostEntries(host)"
-            :key="entry.id"
-            data-test="queue-row"
-            class="border-edge flex items-center gap-3 rounded-control border bg-bench px-3 py-2"
+        <!-- Multi-GPU hosts split into per-GPU lanes (drag a queued row between
+             lanes, or right-click → Move to GPU N); single-GPU hosts keep the
+             flat list below unchanged. -->
+        <template v-if="hostHasEntries(host)">
+          <div
+            v-for="lane in hostLanes(host)"
+            :key="lane.key"
+            :data-test="lane.key === 'queue' ? 'queue-flat' : `gpu-lane-${lane.key}`"
+            class="rounded-control border"
+            :class="
+              laneDroppable(host, lane.key) ? 'border-edge border-dashed' : 'border-transparent'
+            "
+            @dragover.prevent
+            @drop.prevent="onLaneDrop(host, lane.key)"
           >
-            <div
-              class="h-12 w-12 shrink-0 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_14%,transparent)] bg-print-surface"
-            >
-              <img
-                v-if="ownJob(entry)?.previewUrl"
-                :src="ownJob(entry)!.previewUrl!"
-                alt=""
-                class="h-full w-full object-cover"
-                style="filter: blur(1px)"
-              />
-              <DevelopCanvas
-                v-else
-                :seed="ownJob(entry)?.visualSeed ?? entry.id"
-                :progress="ownJob(entry) ? jobProgress(ownJob(entry)!) : 0.2"
-                :phase="ownJob(entry) ? jobPhase(ownJob(entry)!) : 'latent'"
-              />
+            <div v-if="lane.key !== 'queue'" class="mt-3 flex items-center gap-2">
+              <span class="edge-code text-ink-3">GPU {{ lane.key }}</span>
+              <div class="border-edge h-px flex-1 border-t" />
             </div>
-            <div class="min-w-0 flex-1">
-              <div class="truncate text-body text-ink" :title="ownJob(entry)?.prompt">
-                {{ ownJob(entry)?.prompt ?? entry.model }}
-              </div>
-              <div class="mt-0.5 flex items-center gap-2">
-                <span class="edge-code">{{ entryCode(entry) }}</span>
-                <span class="text-caption text-ink-3">{{ entry.model }}</span>
-                <span v-if="!entry.mine" class="edge-code text-ink-3">OTHER CLIENT</span>
-              </div>
-            </div>
-            <button
-              v-if="entry.state === 'queued' || entry.mine"
-              type="button"
-              data-test="cancel-entry"
-              class="h-7 shrink-0 rounded-control px-2.5 text-body text-ink-3 hover:text-stop"
-              @click="cancelEntry(host, entry)"
+            <ul v-if="lane.entries.length" class="mt-2 space-y-1.5">
+              <li
+                v-for="entry in lane.entries"
+                :key="entry.id"
+                data-test="queue-row"
+                class="border-edge flex items-center gap-3 rounded-control border bg-bench px-3 py-2"
+                :class="canDragEntry(host, entry) ? 'cursor-grab active:cursor-grabbing' : ''"
+                :draggable="canDragEntry(host, entry)"
+                @dragstart="onDragStart(host, entry, $event)"
+                @dragend="dragged = null"
+                @contextmenu="openEntryMenu(host, entry, $event)"
+              >
+                <div
+                  class="h-12 w-12 shrink-0 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_14%,transparent)] bg-print-surface"
+                >
+                  <img
+                    v-if="ownJob(entry)?.previewUrl"
+                    :src="ownJob(entry)!.previewUrl!"
+                    alt=""
+                    class="h-full w-full object-cover"
+                    style="filter: blur(1px)"
+                  />
+                  <DevelopCanvas
+                    v-else
+                    :seed="ownJob(entry)?.visualSeed ?? entry.id"
+                    :progress="ownJob(entry) ? jobProgress(ownJob(entry)!) : 0.2"
+                    :phase="ownJob(entry) ? jobPhase(ownJob(entry)!) : 'latent'"
+                  />
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="truncate text-body text-ink" :title="ownJob(entry)?.prompt">
+                    {{ ownJob(entry)?.prompt ?? entry.model }}
+                  </div>
+                  <div class="mt-0.5 flex items-center gap-2">
+                    <span class="edge-code">{{ entryCode(entry) }}</span>
+                    <span
+                      v-if="
+                        lane.key !== 'queue' &&
+                        entry.state === 'queued' &&
+                        laneForEntry(entry) === null
+                      "
+                      class="edge-code text-ink-3"
+                      title="No GPU requested — the server picks"
+                    >
+                      AUTO
+                    </span>
+                    <span class="text-caption text-ink-3">{{ entry.model }}</span>
+                    <span v-if="!entry.mine" class="edge-code text-ink-3">OTHER CLIENT</span>
+                  </div>
+                </div>
+                <button
+                  v-if="entry.state === 'queued' || entry.mine"
+                  type="button"
+                  data-test="cancel-entry"
+                  class="h-7 shrink-0 rounded-control px-2.5 text-body text-ink-3 hover:text-stop"
+                  @click="cancelEntry(host, entry)"
+                >
+                  Cancel
+                </button>
+              </li>
+            </ul>
+            <p
+              v-else-if="lane.key !== 'queue'"
+              class="mt-2 px-3 py-2 text-caption text-ink-3"
+              data-test="empty-lane"
             >
-              Cancel
-            </button>
-          </li>
-        </ul>
+              Nothing on GPU {{ lane.key }}
+            </p>
+          </div>
+        </template>
         <p v-else class="mt-2 text-caption text-ink-3">Nothing queued</p>
       </section>
 
