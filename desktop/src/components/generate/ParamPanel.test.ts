@@ -240,3 +240,136 @@ describe("ParamPanel — seed mode edge cases", () => {
     expect(wrapper.find("[data-test='seed-hint']").exists()).toBe(false);
   });
 });
+
+describe("ParamPanel — chained-clip routing cue", () => {
+  function distilledForm(): GenerateForm {
+    const form = formFor("ltx2");
+    form.model = "ltx-2.3-22b-distilled:fp8";
+    return form;
+  }
+
+  it("shows no cue at or below the single-clip cap", () => {
+    const form = distilledForm();
+    form.frames = 97;
+    const wrapper = mount(ParamPanel, { props: { form } });
+    expect(wrapper.find("[data-test='chain-cue']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='chain-reject']").exists()).toBe(false);
+  });
+
+  it("shows the chained-clips cue when frames exceed one clip for a chainable model", () => {
+    const form = distilledForm();
+    form.frames = 241;
+    const wrapper = mount(ParamPanel, { props: { form } });
+    const cue = wrapper.get("[data-test='chain-cue']");
+    expect(cue.text()).toContain("Will render as");
+    expect(cue.text()).toContain("3");
+    expect(cue.text()).toContain("chained clips of 97 frames (motion-tail 17)");
+    expect(cue.text()).toContain("substantially longer");
+  });
+
+  it("shows the cue with motion-tail 0 for ltx-video (no context handoff)", () => {
+    const form = formFor("ltx-video");
+    form.model = "ltx-video-0.9.8-13b-dev:bf16";
+    form.frames = 241;
+    const wrapper = mount(ParamPanel, { props: { form } });
+    expect(wrapper.get("[data-test='chain-cue']").text()).toContain("(motion-tail 0)");
+  });
+
+  it("shows the reject message for a non-chainable model over budget", () => {
+    const form = formFor("ltx2");
+    form.model = "ltx-2-19b:fp8";
+    form.frames = 241;
+    const wrapper = mount(ParamPanel, { props: { form } });
+    expect(wrapper.find("[data-test='chain-cue']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='chain-reject']").text()).toContain(
+      "does not support chained video generation",
+    );
+  });
+});
+
+describe("ParamPanel — camera motion (LTX-2)", () => {
+  it("is hidden for still-image and plain ltx-video families", () => {
+    expect(
+      mount(ParamPanel, { props: { form: formFor("flux") } })
+        .find("[data-test='camera-motion']")
+        .exists(),
+    ).toBe(false);
+    expect(
+      mount(ParamPanel, { props: { form: formFor("ltx-video") } })
+        .find("[data-test='camera-motion']")
+        .exists(),
+    ).toBe(false);
+  });
+
+  it("offers None, the seven presets, and a custom-path option for ltx2", () => {
+    const wrapper = mount(ParamPanel, { props: { form: formFor("ltx2") } });
+    const options = wrapper
+      .get("[data-test='camera-motion']")
+      .findAll("option")
+      .map((o) => o.attributes("value"));
+    expect(options).toEqual([
+      "",
+      "dolly-in",
+      "dolly-left",
+      "dolly-out",
+      "dolly-right",
+      "jib-down",
+      "jib-up",
+      "static",
+      "custom",
+    ]);
+  });
+
+  it("maps a preset pick onto the form and None back to null", async () => {
+    const form = formFor("ltx2");
+    const wrapper = mount(ParamPanel, { props: { form } });
+    await wrapper.get("[data-test='camera-motion']").setValue("dolly-in");
+    expect(form.cameraControl).toBe("dolly-in");
+    await wrapper.get("[data-test='camera-motion']").setValue("");
+    expect(form.cameraControl).toBeNull();
+  });
+
+  it("reveals a path input for Custom and writes the typed path to the form", async () => {
+    const form = formFor("ltx2");
+    const wrapper = mount(ParamPanel, { props: { form } });
+    expect(wrapper.find("[data-test='camera-motion-custom']").exists()).toBe(false);
+    await wrapper.get("[data-test='camera-motion']").setValue("custom");
+    const input = wrapper.get("[data-test='camera-motion-custom']");
+    await input.setValue("/loras/pan-up.safetensors");
+    expect(form.cameraControl).toBe("/loras/pan-up.safetensors");
+  });
+
+  it("hydrates the select from an existing form value (preset and custom path)", () => {
+    const preset = formFor("ltx2");
+    preset.cameraControl = "jib-down";
+    expect(
+      (
+        mount(ParamPanel, { props: { form: preset } }).get("[data-test='camera-motion']")
+          .element as HTMLSelectElement
+      ).value,
+    ).toBe("jib-down");
+
+    const custom = formFor("ltx2");
+    custom.cameraControl = "/loras/x.safetensors";
+    const wrapper = mount(ParamPanel, { props: { form: custom } });
+    expect((wrapper.get("[data-test='camera-motion']").element as HTMLSelectElement).value).toBe(
+      "custom",
+    );
+    expect(
+      (wrapper.get("[data-test='camera-motion-custom']").element as HTMLInputElement).value,
+    ).toBe("/loras/x.safetensors");
+  });
+
+  it("disables presets for LTX-2.3 models and explains why (custom path stays open)", () => {
+    const form = formFor("ltx2");
+    form.model = "ltx-2.3-22b-distilled:fp8";
+    const wrapper = mount(ParamPanel, { props: { form } });
+    const options = wrapper.get("[data-test='camera-motion']").findAll("option");
+    for (const o of options) {
+      const value = o.attributes("value");
+      const shouldDisable = value !== "" && value !== "custom";
+      expect(o.attributes("disabled") !== undefined).toBe(shouldDisable);
+    }
+    expect(wrapper.get("[data-test='camera-motion-23-hint']").text()).toContain("LTX-2 19B");
+  });
+});
