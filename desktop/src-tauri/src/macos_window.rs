@@ -1,5 +1,6 @@
 use objc2::msg_send;
 use objc2_app_kit::{NSColor, NSWindow, NSWindowButton};
+use objc2_quartz_core::CALayer;
 use tauri::Window;
 
 const INACTIVE_FILL_WHITE: f64 = 0.827;
@@ -21,11 +22,22 @@ fn traffic_light_style(focused: bool) -> Option<TrafficLightStyle> {
     })
 }
 
+fn set_layer_shape(layer: &CALayer, border_width: f64, corner_radius: f64) {
+    // SAFETY: These are public CALayer selectors whose arguments are CGFloat;
+    // Mold supports only 64-bit macOS targets, where CGFloat is f64.
+    unsafe {
+        let _: () = msg_send![layer, setBorderWidth: border_width];
+        let _: () = msg_send![layer, setCornerRadius: corner_radius];
+    }
+}
+
 /// macOS 26 can leave the standard controls present and accessible but make
 /// their inactive overlay-titlebar appearance fully transparent. A backing
 /// layer on the native buttons restores AppKit's expected gray inactive state
 /// without replacing their actions, hit testing, accessibility, or active art.
 pub fn set_traffic_light_focus(window: &Window, focused: bool) -> tauri::Result<()> {
+    // SAFETY: On macOS Tauri documents ns_window() as a pointer to this live
+    // NSWindow. The callback borrows it only for the current window event.
     let ns_window = unsafe { &*(window.ns_window()? as *mut NSWindow) };
     let style = traffic_light_style(focused);
     let fill = style
@@ -53,17 +65,11 @@ pub fn set_traffic_light_focus(window: &Window, focused: bool) -> tauri::Result<
             let border_color = border.as_ref().expect("inactive border").CGColor();
             layer.setBackgroundColor(Some(&fill_color));
             layer.setBorderColor(Some(&border_color));
-            unsafe {
-                let _: () = msg_send![&*layer, setBorderWidth: 0.5f64];
-                let _: () = msg_send![&*layer, setCornerRadius: style.radius];
-            }
+            set_layer_shape(&layer, 0.5, style.radius);
         } else {
             layer.setBackgroundColor(None);
             layer.setBorderColor(None);
-            unsafe {
-                let _: () = msg_send![&*layer, setBorderWidth: 0.0f64];
-                let _: () = msg_send![&*layer, setCornerRadius: 0.0f64];
-            }
+            set_layer_shape(&layer, 0.0, 0.0);
         }
         layer.setNeedsDisplay();
     }
