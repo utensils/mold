@@ -602,10 +602,12 @@ onUnmounted(() => {
             >
               {{ bulkSelection.has(laid.item.filename) ? "✓" : "" }}
             </span>
+            <!-- The badge yields to the rising edge code on hover — both live
+                 in the tile's bottom margin and must never overlap. -->
             <span
               v-if="showBadges"
               data-test="host-badge"
-              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media"
+              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media transition-opacity duration-100 group-hover:opacity-0"
               :title="`Available on ${availabilityLabel(laid.entry)}`"
             >
               {{ availabilityLabel(laid.entry) }}
