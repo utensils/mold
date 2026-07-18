@@ -14,7 +14,7 @@
  * NOT cached — a transient upstream hiccup shouldn't hide sizes for the
  * whole session, so a later render retries.
  */
-import { apiJson } from "./api/client";
+import { fetchCatalogDetail } from "./api/catalog";
 import type { CatalogEntry } from "./api/types";
 
 const MAX_IN_FLIGHT = 4;
@@ -44,7 +44,9 @@ function release(): void {
 async function fetchSizeBytes(id: string): Promise<number | null> {
   await acquire();
   try {
-    const detail = await apiJson<CatalogEntry>(`/api/catalog/${id}`);
+    // Read through the shared detail fetch (`lib/api/catalog.ts`) so the
+    // drawer and size resolution share one `GET /api/catalog/:id` code path.
+    const detail = await fetchCatalogDetail(id);
     return detail.size_bytes ?? null;
   } finally {
     release();
