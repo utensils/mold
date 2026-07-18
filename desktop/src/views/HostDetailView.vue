@@ -46,11 +46,13 @@ function hostTarget(): ApiTarget | null {
   return h?.baseUrl ? { baseUrl: h.baseUrl, apiKey: h.apiKey } : null;
 }
 
-/** Reopen the stream against the CURRENT host; prior subscription aborts. */
-function startResourceStream() {
+/** Reopen the stream against the CURRENT host; prior subscription aborts.
+ *  Keep the last frame mounted when only credentials change so reconnecting
+ *  updates values in place instead of collapsing the telemetry layout. */
+function startResourceStream(reset = false) {
   resourceAbort?.abort();
   resourceAbort = null;
-  snapshot.value = null;
+  if (reset) snapshot.value = null;
   const target = hostTarget();
   if (!target) return;
   resourceAbort = new AbortController();
@@ -75,11 +77,11 @@ let statusAbort: AbortController | null = null;
  *  Guarded per request: the :id param retargets this reused component in
  *  place, and a slow host's late response must never populate the page of
  *  the host the user navigated to next. */
-async function fetchStatus() {
+async function fetchStatus(reset = false) {
   statusAbort?.abort();
   const abort = new AbortController();
   statusAbort = abort;
-  status.value = null;
+  if (reset) status.value = null;
   const target = hostTarget();
   if (!target) return;
   try {
@@ -91,23 +93,43 @@ async function fetchStatus() {
   }
 }
 
-// Immediate + retargeting: covers first render, the :id param changing in
-// place, and a host whose baseUrl appears after a late connect.
+function startReadyServices() {
+  const current = host.value;
+  if (current?.status !== "ready") return;
+  void downloads.subscribe(current).catch(() => {
+    // Host status and the model list still render if an older server lacks
+    // the download stream; reconnect retries are owned by the SSE helper.
+  });
+  void hostModels.refresh(true);
+}
+
+// Connection identity retargeting is the only event that replaces page data.
+// A health poll changing ready/error state must not clear and rebuild the
+// telemetry, storage, or models sections: those components keep their last
+// snapshot mounted while their own live sources update them in place.
 watch(
-  () => [hostId.value, host.value?.baseUrl, host.value?.status, host.value?.apiKey] as const,
-  () => {
-    startResourceStream();
-    void fetchStatus();
-    const current = host.value;
-    if (current?.status === "ready") {
-      void downloads.subscribe(current).catch(() => {
-        // Host status and the model list still render if an older server lacks
-        // the download stream; reconnect retries are owned by the SSE helper.
-      });
-      void hostModels.refresh(true);
-    }
+  [hostId, () => host.value?.baseUrl, () => host.value?.apiKey],
+  (identity, previous) => {
+    const hostChanged = !previous || identity[0] !== previous[0] || identity[1] !== previous[1];
+    startResourceStream(hostChanged);
+    void fetchStatus(hostChanged);
+    startReadyServices();
   },
   { immediate: true },
+);
+
+// Reconnect side effects follow readiness, without touching rendered data or
+// reopening the already self-healing resource stream.
+watch(
+  () => host.value?.status,
+  (current, previous) => {
+    if (current === "ready" && previous !== "ready") {
+      // A host may have been unreachable during the identity watch's initial
+      // request. Recover status-only fields without clearing the last snapshot.
+      void fetchStatus();
+      startReadyServices();
+    }
+  },
 );
 onUnmounted(() => {
   resourceAbort?.abort();

@@ -284,7 +284,7 @@ A RunPod host participates in the unified Gallery like any other connected host 
 
 ### 4.8 Host detail — the machine card
 
-Clicking a host row in the sidebar opens a per-host detail view: bench-style cards with live GPU / CPU / RAM telemetry (that host's `/api/resources/stream`), a storage bar for the models filesystem (`/api/status.models_disk` total vs free — absent on older servers, the bar simply hides), queue state, and the models installed on that host. Same Bath/Safelight vocabulary as the Bench rail popover — meters, not dashboards.
+Clicking a host row in the sidebar opens a per-host detail view: bench-style cards with live GPU / CPU / RAM telemetry (that host's `/api/resources/stream`), a storage bar for the models filesystem (`/api/status.models_disk` total vs free — absent on older servers, the bar simply hides), queue state, and the models installed on that host. Background health polls update those mounted components in place; a transient connectivity change preserves the last good snapshot instead of clearing and rebuilding the page. Same Bath/Safelight vocabulary as the Bench rail popover — meters, not dashboards.
 
 ## 5. States
 
