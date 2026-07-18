@@ -18,6 +18,7 @@ interface SseCall {
   options: {
     signal: AbortSignal;
     target?: { baseUrl: string; apiKey: string | null };
+    onOpen?: () => void;
     onEvent: (event: string, data: string) => void;
   };
 }
@@ -25,6 +26,7 @@ const sseCalls: SseCall[] = [];
 vi.mock("../lib/api/sse", () => ({
   sseStream: (path: string, options: SseCall["options"]) => {
     sseCalls.push({ path, options });
+    options.onOpen?.();
     return new Promise(() => {});
   },
 }));
@@ -63,7 +65,8 @@ function installApi(status: Partial<ServerStatus> = {}) {
         ...status,
       });
     }
-    if (path === "/api/models") return Promise.resolve([]);
+    if (path === "/api/models")
+      return Promise.resolve([model("flux-dev:q8", "flux"), model("z-image:q8", "z-image")]);
     return Promise.reject(new Error(`unexpected ${path}`));
   });
 }
@@ -137,8 +140,8 @@ async function mountView(path = `/hosts/${REMOTE_ID}`) {
 }
 
 /** The resources stream opened for the remote host (the newest matching call). */
-function lastStream(): SseCall {
-  const call = sseCalls.at(-1);
+function lastStream(path = "/api/resources/stream"): SseCall {
+  const call = [...sseCalls].reverse().find((candidate) => candidate.path === path);
   if (!call) throw new Error("no sseStream call recorded");
   return call;
 }
@@ -320,6 +323,67 @@ describe("HostDetailView models", () => {
     expect(rows[0]!.text()).toContain("flux-dev:q8");
     expect(rows[0]!.text()).toContain("flux");
     expect(rows[1]!.text()).toContain("z-image:q8");
+  });
+
+  it("shows this host's active model-download progress", async () => {
+    const wrapper = await mountView();
+    const stream = lastStream("/api/downloads/stream");
+    expect(stream.options.target).toEqual({ baseUrl: "http://hal9000:7680", apiKey: "sekrit" });
+
+    stream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: {
+          active_jobs: [
+            {
+              id: "pull-1",
+              model: "qwen-image:q4",
+              status: "active",
+              files_done: 1,
+              files_total: 4,
+              bytes_done: 2_500_000_000,
+              bytes_total: 10_000_000_000,
+            },
+          ],
+          queued: [],
+          history: [],
+        },
+      }),
+    );
+    await flushPromises();
+
+    const tray = wrapper.get("[data-test='host-downloads']");
+    expect(tray.text()).toContain("qwen-image:q4");
+    expect(tray.text()).toContain("2.5 GB / 10.0 GB");
+    expect(tray.get("[role='progressbar']").attributes("aria-valuenow")).toBe("25");
+  });
+
+  it("refreshes models once and reopens host streams when status or credentials change", async () => {
+    await mountView();
+    expect(
+      apiJsonTo.mock.calls.filter(
+        (call) =>
+          call[1] === "/api/models" &&
+          (call[0] as { baseUrl: string }).baseUrl === "http://hal9000:7680",
+      ),
+    ).toHaveLength(1);
+
+    const remote = useHostsStore().extras[0]!;
+    remote.status = "connecting";
+    await flushPromises();
+    remote.apiKey = "rotated-key";
+    remote.status = "ready";
+    await flushPromises();
+
+    expect(lastStream().options.target).toEqual({
+      baseUrl: "http://hal9000:7680",
+      apiKey: "rotated-key",
+    });
+    expect(lastStream("/api/downloads/stream").options.target).toEqual({
+      baseUrl: "http://hal9000:7680",
+      apiKey: "rotated-key",
+    });
   });
 });
 

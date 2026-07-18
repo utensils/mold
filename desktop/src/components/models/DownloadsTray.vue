@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { useDownloadsStore, type HostedDownloadJob } from "../../stores/downloads";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
@@ -12,6 +12,13 @@ import type { DownloadJobStatus } from "../../lib/api/types";
 const downloads = useDownloadsStore();
 const hosts = useHostsStore();
 const toasts = useToastStore();
+const props = defineProps<{ hostId?: string }>();
+
+const rows = computed(() =>
+  props.hostId
+    ? downloads.hostedInFlight.filter((row) => row.hostId === props.hostId)
+    : downloads.hostedInFlight,
+);
 
 /** History stays collapsed by default — the tray is a strip, not a page. */
 const historyOpen = ref(false);
@@ -58,13 +65,14 @@ async function retry(row: HostedDownloadJob) {
 
 <template>
   <div
-    v-if="downloads.hasActivity || downloads.hostedHistory.length > 0"
+    v-if="rows.length || downloads.hostedHistory.length > 0"
     class="border-edge border-b bg-bench px-4 py-2"
+    data-test="downloads-tray"
   >
     <div class="edge-code mb-2">Downloads</div>
     <div class="flex flex-col gap-2">
       <div
-        v-for="row in downloads.hostedInFlight"
+        v-for="row in rows"
         :key="rowKey(row)"
         class="-mx-1 flex flex-col gap-1 rounded-control px-1 transition-colors duration-100 hover:bg-bath"
       >

@@ -9,6 +9,7 @@ import type {
 } from "../../lib/api/types";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../../lib/capabilities";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
+import { decideChainRouting, type ChainRoutingDecision } from "../../lib/chainRouting";
 import { fileToBase64 } from "../../lib/image";
 import {
   aspectRatioLabel,
@@ -33,6 +34,15 @@ const props = withDefaults(
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const formats = computed(() => outputFormatsForFamily(props.form.family));
 const framesError = computed(() => frames8n1Error(props.form.frames));
+
+// Long-video routing cue: when the frame count exceeds one clip the server
+// auto-chains chain-capable models; non-chainable models would fail, so show
+// the reject reason instead (GenerateView also blocks submit on it).
+const chainDecision = computed<ChainRoutingDecision>(() =>
+  caps.value.supportsVideo
+    ? decideChainRouting(props.form.frames, props.form.family, props.form.model)
+    : { kind: "single" },
+);
 
 // ── Size presets ────────────────────────────────────────────────────────────
 const presets = computed(() => presetsForFamily(props.form.family));
@@ -85,6 +95,51 @@ const seedHint = computed(() => {
   if (!Number.isFinite(Number(raw))) return "Not a number — a random seed will be used.";
   return null;
 });
+
+// ── Camera motion (ltx2 only) ─────────────────────────────────────────────
+// Curated LTX-2 camera-motion LoRA presets (mirrors `mold run
+// --camera-control`); "custom" reveals a raw `.safetensors` path input.
+const CAMERA_MOTION_PRESETS = [
+  { id: "dolly-in", label: "Dolly in" },
+  { id: "dolly-left", label: "Dolly left" },
+  { id: "dolly-out", label: "Dolly out" },
+  { id: "dolly-right", label: "Dolly right" },
+  { id: "jib-down", label: "Jib down" },
+  { id: "jib-up", label: "Jib up" },
+  { id: "static", label: "Static" },
+] as const;
+
+/** Presets are published for LTX-2 19B only — the CLI rejects them on
+ * LTX-2.3 by model-name substring, mirrored here (custom paths stay open). */
+const isLtx23Model = computed(() => props.form.model.includes("ltx-2.3"));
+
+function cameraModeFor(value: string | null): string {
+  if (!value) return "";
+  return CAMERA_MOTION_PRESETS.some((p) => p.id === value) ? value : "custom";
+}
+// Like the seed control, the select owns its mode: deriving it from the form
+// would collapse "Custom" back to "None" the moment the path input is empty.
+const uiCameraMode = ref(cameraModeFor(props.form.cameraControl));
+watch(
+  () => props.form.cameraControl,
+  (value) => {
+    // External writes (template hydration, prefill) resync the mode — but an
+    // emptied path mid-edit keeps the custom input mounted.
+    if (uiCameraMode.value === "custom" && (value === "" || cameraModeFor(value) === "custom")) {
+      return;
+    }
+    uiCameraMode.value = cameraModeFor(value);
+  },
+);
+function setCameraMode(mode: string) {
+  uiCameraMode.value = mode;
+  if (mode === "custom") {
+    // Don't let a previously-picked preset ship while the path is being typed.
+    if (cameraModeFor(props.form.cameraControl) !== "custom") props.form.cameraControl = "";
+  } else {
+    props.form.cameraControl = mode === "" ? null : mode;
+  }
+}
 
 // ── LTX-2 advanced video (ltx2 only) ──────────────────────────────────────
 const advancedOpen = ref(false);
@@ -442,6 +497,25 @@ const schedulerLabel: Record<string, string> = {
       />
       <p v-if="framesError" class="mt-1 text-caption text-stop">{{ framesError }}</p>
 
+      <div
+        v-if="chainDecision.kind === 'chain'"
+        data-test="chain-cue"
+        class="border-edge mt-1.5 rounded-control border bg-[color-mix(in_srgb,var(--safelight)_10%,transparent)] px-2 py-1.5 text-caption text-ink-2"
+      >
+        Will render as
+        <span class="data-mono font-semibold text-ink">{{ chainDecision.stageCount }}</span>
+        chained clips of {{ chainDecision.clipFrames }} frames (motion-tail
+        {{ chainDecision.motionTail }}) — expect this to take substantially longer than a single
+        clip.
+      </div>
+      <p
+        v-else-if="chainDecision.kind === 'reject'"
+        data-test="chain-reject"
+        class="mt-1.5 text-caption text-stop"
+      >
+        {{ chainDecision.reason }}
+      </p>
+
       <label class="mt-3 text-caption text-ink-2">FPS</label>
       <input
         v-model.number="form.fps"
@@ -451,6 +525,47 @@ const schedulerLabel: Record<string, string> = {
         aria-label="Frames per second"
         class="border-edge data-mono mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
       />
+
+      <!-- Camera motion (ltx2 only) — ships as a camera-control loras[] entry -->
+      <template v-if="caps.supportsAdvancedVideo">
+        <label class="mt-3 text-caption text-ink-2">Camera motion</label>
+        <select
+          data-test="camera-motion"
+          aria-label="Camera motion"
+          class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+          :value="uiCameraMode"
+          @change="setCameraMode(($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">None</option>
+          <option
+            v-for="p in CAMERA_MOTION_PRESETS"
+            :key="p.id"
+            :value="p.id"
+            :disabled="isLtx23Model"
+          >
+            {{ p.label }}
+          </option>
+          <option value="custom">Custom LoRA path…</option>
+        </select>
+        <input
+          v-if="uiCameraMode === 'custom'"
+          data-test="camera-motion-custom"
+          data-selectable
+          type="text"
+          placeholder="/path/to/lora.safetensors"
+          aria-label="Camera motion LoRA path"
+          class="border-edge data-mono mt-1.5 h-7 w-full rounded-control border bg-bath px-1.5 text-ink placeholder:text-ink-3"
+          :value="form.cameraControl ?? ''"
+          @input="form.cameraControl = ($event.target as HTMLInputElement).value"
+        />
+        <p
+          v-if="isLtx23Model"
+          data-test="camera-motion-23-hint"
+          class="mt-1 text-caption text-ink-3"
+        >
+          Presets are published for LTX-2 19B only — use a custom LoRA path for LTX-2.3.
+        </p>
+      </template>
 
       <label
         v-if="caps.supportsAudio"
