@@ -121,6 +121,54 @@ describe("generation store multi-host routing", () => {
     expect(upscaledB64).toBe("aGVsbG8=");
   });
 
+  it("keeps the server's gallery filenames and metadata on auto-saved copies", async () => {
+    const metadata = {
+      prompt: "a cheetah at dusk",
+      model: "flux2-klein",
+      seed: 7,
+      steps: 28,
+      guidance: 3.5,
+      width: 512,
+      height: 512,
+    };
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "complete",
+          JSON.stringify({
+            ...JSON.parse(completeFrame()),
+            filename: "flux2-klein-999-upscaled.png",
+            original_filename: "flux2-klein-999-original.png",
+            metadata,
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { settled } = store.submitBatch(request(), 1, halRoute);
+    await settled;
+
+    expect(saveOutputBytes).toHaveBeenCalledTimes(2);
+    const [originalName, , originalMeta] = saveOutputBytes.mock.calls[0] as [
+      string,
+      string,
+      Record<string, unknown>,
+    ];
+    const [upscaledName, , upscaledMeta] = saveOutputBytes.mock.calls[1] as [
+      string,
+      string,
+      Record<string, unknown>,
+    ];
+    // The origin's names are kept verbatim — the copy and the original stay
+    // one logical print in the merged gallery.
+    expect(originalName).toBe("flux2-klein-999-original.png");
+    expect(upscaledName).toBe("flux2-klein-999-upscaled.png");
+    // The recorded metadata rides along; the original gets its true dims.
+    expect(upscaledMeta).toMatchObject({ seed: 7, width: 512, height: 512 });
+    expect(originalMeta).toMatchObject({ seed: 7, width: 128, height: 128 });
+  });
+
   it("refreshes the local gallery when only one paired remote save succeeds", async () => {
     saveOutputBytes
       .mockRejectedValueOnce(new Error("original save failed"))

@@ -127,10 +127,10 @@ fn save_image_to_dir_with_suffix(
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
-) {
+) -> Option<String> {
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
-        return;
+        return None;
     }
     let timestamp_ms = mold_core::time::now_epoch_ms_u64();
     let ext = img.format.to_string();
@@ -147,7 +147,7 @@ fn save_image_to_dir_with_suffix(
         Ok(()) => tracing::info!("saved image to {}", path.display()),
         Err(e) => {
             tracing::warn!("failed to save image to {}: {e}", path.display());
-            return;
+            return None;
         }
     }
     let mut image_row = None;
@@ -171,10 +171,21 @@ fn save_image_to_dir_with_suffix(
     // `/api/gallery` instead of inserting in place.
     if let Some(events) = events {
         events.publish(mold_core::ServerEvent::GalleryAdded {
-            filename,
+            filename: filename.clone(),
             image: image_row,
         });
     }
+    Some(filename)
+}
+
+/// Gallery filenames a generation's outputs were saved under, threaded into
+/// the SSE complete event so mirroring clients keep the same identity.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct SavedOutputNames {
+    /// The payload the complete event carries (upscaled when upscaling ran).
+    pub output: Option<String>,
+    /// The pre-upscale original, when one was saved separately.
+    pub original: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -188,11 +199,12 @@ pub(crate) fn save_generated_image_outputs(
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
-) {
+) -> SavedOutputNames {
+    let mut names = SavedOutputNames::default();
     if let Some(original) = original {
         let mut original_metadata = metadata.clone();
         apply_output_dimensions_to_metadata(&mut original_metadata, original);
-        save_image_to_dir_with_suffix(
+        names.original = save_image_to_dir_with_suffix(
             dir,
             original,
             model,
@@ -206,7 +218,7 @@ pub(crate) fn save_generated_image_outputs(
     }
     let mut output_metadata = metadata.clone();
     apply_output_dimensions_to_metadata(&mut output_metadata, output);
-    save_image_to_dir_with_suffix(
+    names.output = save_image_to_dir_with_suffix(
         dir,
         output,
         model,
@@ -217,6 +229,7 @@ pub(crate) fn save_generated_image_outputs(
         db,
         events,
     );
+    names
 }
 
 /// Save a video file to disk and (best-effort) record its metadata row.
@@ -239,10 +252,10 @@ pub(crate) fn save_video_to_dir(
     generation_time_ms: Option<i64>,
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
-) {
+) -> Option<String> {
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
-        return;
+        return None;
     }
     let ts = mold_core::time::now_epoch_ms_u64();
     let ext = format.extension();
@@ -250,7 +263,7 @@ pub(crate) fn save_video_to_dir(
     let path = dir.join(&filename);
     if let Err(e) = std::fs::write(&path, bytes) {
         tracing::error!("failed to save video to {}: {e}", path.display());
-        return;
+        return None;
     }
     if !gif_preview.is_empty() {
         save_video_preview_gif(&filename, gif_preview);
@@ -274,10 +287,11 @@ pub(crate) fn save_video_to_dir(
     }
     if let Some(events) = events {
         events.publish(mold_core::ServerEvent::GalleryAdded {
-            filename,
+            filename: filename.clone(),
             image: image_row,
         });
     }
+    Some(filename)
 }
 
 fn requested_post_upscale_model(req: &mold_core::GenerateRequest) -> Option<&str> {
@@ -582,8 +596,19 @@ pub(crate) fn build_sse_complete_event(
     response: &mold_core::GenerateResponse,
     img: &mold_core::ImageData,
     original: Option<&mold_core::ImageData>,
+    metadata: Option<&OutputMetadata>,
+    saved: &SavedOutputNames,
 ) -> SseCompleteEvent {
     let b64 = base64::engine::general_purpose::STANDARD;
+    // Mirror exactly what the save path records: video metadata is used
+    // as-built, image metadata gets the payload's actual dimensions.
+    let event_metadata = metadata.map(|meta| {
+        let mut meta = meta.clone();
+        if response.video.is_none() {
+            apply_output_dimensions_to_metadata(&mut meta, img);
+        }
+        Box::new(meta)
+    });
     if let Some(ref video) = response.video {
         SseCompleteEvent {
             image: b64.encode(&video.data),
@@ -609,6 +634,9 @@ pub(crate) fn build_sse_complete_event(
             video_audio_sample_rate: video.audio_sample_rate,
             video_audio_channels: video.audio_channels,
             gpu: response.gpu,
+            filename: saved.output.clone(),
+            original_filename: None,
+            metadata: event_metadata,
         }
     } else {
         SseCompleteEvent {
@@ -631,6 +659,9 @@ pub(crate) fn build_sse_complete_event(
             video_audio_sample_rate: None,
             video_audio_channels: None,
             gpu: response.gpu,
+            filename: saved.output.clone(),
+            original_filename: saved.original.clone(),
+            metadata: event_metadata,
         }
     }
 }
@@ -1135,27 +1166,30 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 
             // Save to output directory if configured.
             // Builds OutputMetadata from the request + the engine's actual
-            // seed_used so the DB and embedded chunks agree.
+            // seed_used so the DB and embedded chunks agree. Awaited (still
+            // off the async loop via spawn_blocking) so the complete event
+            // below can carry the saved gallery filenames.
+            let metadata = OutputMetadata::from_generate_request(
+                &job.request,
+                response.seed_used,
+                None,
+                mold_core::build_info::version_string(),
+            );
+            let mut saved_names = SavedOutputNames::default();
             if let Some(ref dir) = job.output_dir {
                 let dir = dir.clone();
                 let model = job.request.model.clone();
                 let batch_size = job.request.batch_size;
                 let generation_time_ms = response.generation_time_ms as i64;
-                let metadata = OutputMetadata::from_generate_request(
-                    &job.request,
-                    response.seed_used,
-                    None,
-                    mold_core::build_info::version_string(),
-                );
                 let db = state.metadata_db.clone();
                 let events = state.events.clone();
-                if let Some(ref video) = response.video {
+                let save_task = if let Some(ref video) = response.video {
                     let video_data = video.data.clone();
                     let video_gif_preview = video.gif_preview.clone();
                     let video_format = video.format;
                     let video_metadata = metadata.clone();
-                    tokio::task::spawn_blocking(move || {
-                        save_video_to_dir(
+                    tokio::task::spawn_blocking(move || SavedOutputNames {
+                        output: save_video_to_dir(
                             &dir,
                             &video_data,
                             &video_gif_preview,
@@ -1165,8 +1199,9 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                             Some(generation_time_ms),
                             db.as_ref().as_ref(),
                             Some(&events),
-                        );
-                    });
+                        ),
+                        original: None,
+                    })
                 } else {
                     let img_clone = img.clone();
                     let original_clone = original_img.clone();
@@ -1182,15 +1217,22 @@ async fn process_job(state: &AppState, job: GenerationJob) {
                             Some(generation_time_ms),
                             db.as_ref().as_ref(),
                             Some(&events),
-                        );
-                    });
-                }
+                        )
+                    })
+                };
+                saved_names = save_task.await.unwrap_or_default();
             }
 
             // Send SSE complete event
             if let Some(ref tx) = job.progress_tx {
-                let event = build_sse_complete_event(&response, &img, original_img.as_ref());
-                let _ = tx.send(SseMessage::Complete(event));
+                let event = build_sse_complete_event(
+                    &response,
+                    &img,
+                    original_img.as_ref(),
+                    Some(&metadata),
+                    &saved_names,
+                );
+                let _ = tx.send(SseMessage::Complete(Box::new(event)));
             }
 
             // Send result through oneshot
@@ -2115,7 +2157,8 @@ mod tests {
             index: 0,
         };
 
-        let event = build_sse_complete_event(&resp, &thumb_img, None);
+        let event =
+            build_sse_complete_event(&resp, &thumb_img, None, None, &SavedOutputNames::default());
 
         let b64 = base64::engine::general_purpose::STANDARD;
         assert_eq!(event.image, b64.encode(&video.data));
@@ -2156,7 +2199,13 @@ mod tests {
             seed_used: 0,
             gpu: None,
         };
-        let event = build_sse_complete_event(&resp, &fake_image(), None);
+        let event = build_sse_complete_event(
+            &resp,
+            &fake_image(),
+            None,
+            None,
+            &SavedOutputNames::default(),
+        );
         assert!(event.video_gif_preview.is_none());
         assert!(!event.video_has_audio);
     }
@@ -2171,7 +2220,13 @@ mod tests {
             seed_used: 5,
             gpu: None,
         };
-        let event = build_sse_complete_event(&resp, &fake_image(), None);
+        let event = build_sse_complete_event(
+            &resp,
+            &fake_image(),
+            None,
+            None,
+            &SavedOutputNames::default(),
+        );
         assert_eq!(event.format, OutputFormat::Png);
         assert!(event.video_frames.is_none());
         assert!(event.video_fps.is_none());
@@ -2179,6 +2234,37 @@ mod tests {
         assert!(event.video_gif_preview.is_none());
         assert!(!event.video_has_audio);
         assert!(event.video_duration_ms.is_none());
+    }
+
+    #[test]
+    fn build_sse_complete_event_carries_saved_names_and_recorded_metadata() {
+        let req = fake_request("flux-dev:q4");
+        let resp = mold_core::GenerateResponse {
+            images: vec![fake_image()],
+            video: None,
+            generation_time_ms: 100,
+            model: "flux-dev:q4".to_string(),
+            seed_used: 5,
+            gpu: None,
+        };
+        let metadata =
+            OutputMetadata::from_generate_request(&req, resp.seed_used, None, "test-version");
+        let saved = SavedOutputNames {
+            output: Some("flux-dev-q4-123.png".to_string()),
+            original: Some("flux-dev-q4-123-original.png".to_string()),
+        };
+        let event = build_sse_complete_event(&resp, &fake_image(), None, Some(&metadata), &saved);
+        assert_eq!(event.filename.as_deref(), Some("flux-dev-q4-123.png"));
+        assert_eq!(
+            event.original_filename.as_deref(),
+            Some("flux-dev-q4-123-original.png")
+        );
+        // The event metadata mirrors what the save path records: the
+        // payload's actual dimensions, not the request's.
+        let meta = event.metadata.expect("metadata rides the complete event");
+        assert_eq!(meta.seed, 5);
+        assert_eq!(meta.width, fake_image().width);
+        assert_eq!(meta.height, fake_image().height);
     }
 
     #[test]
@@ -2211,7 +2297,13 @@ mod tests {
 
         let next = apply_upscale_response_to_image_generation(&req, &mut response, img, upscaled)
             .expect("image upscale should apply");
-        let event = build_sse_complete_event(&response, &next, Some(&fake_image()));
+        let event = build_sse_complete_event(
+            &response,
+            &next,
+            Some(&fake_image()),
+            None,
+            &SavedOutputNames::default(),
+        );
         assert!(event.original_image.is_some());
         assert_eq!(event.original_width, Some(512));
         assert_eq!(event.original_height, Some(512));

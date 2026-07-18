@@ -1204,6 +1204,22 @@ pub struct SseCompleteEvent {
     /// GPU ordinal that handled this request (multi-GPU only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<usize>,
+
+    // ── Gallery provenance (additive; absent on older servers) ──────────
+    /// Filename this payload was saved under in the server's gallery, when
+    /// the server persisted it. Clients that mirror the output locally keep
+    /// this name so the copy and the original stay one logical print.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// Gallery filename of the pre-upscale original, when one was saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_filename: Option<String>,
+    /// The exact `OutputMetadata` the server recorded for this payload, so
+    /// mirroring clients don't have to re-parse (or, for video formats that
+    /// embed nothing, synthesize) it from the file bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub metadata: Option<Box<OutputMetadata>>,
 }
 
 /// SSE event emitted when an upscale request completes.
@@ -1921,6 +1937,9 @@ mod tests {
             video_audio_sample_rate: None,
             video_audio_channels: None,
             gpu: Some(1),
+            filename: None,
+            original_filename: None,
+            metadata: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         // Video fields should be absent from the serialized JSON
@@ -2707,6 +2726,9 @@ mod tests {
             video_audio_sample_rate: Some(44100),
             video_audio_channels: Some(2),
             gpu: None,
+            filename: None,
+            original_filename: None,
+            metadata: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("video_frames"));
@@ -2752,6 +2774,9 @@ mod tests {
             video_audio_sample_rate: None,
             video_audio_channels: None,
             gpu: None,
+            filename: None,
+            original_filename: None,
+            metadata: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         // Audio-related fields should be absent when not set
@@ -2787,6 +2812,20 @@ mod tests {
     }
 
     #[test]
+    fn sse_complete_event_backward_compat_no_gallery_fields() {
+        // Older servers predate filename / original_filename / metadata.
+        let json = r#"{"image":"aW1n","format":"png","width":1024,"height":1024,"seed_used":42,"generation_time_ms":5000,"model":"flux-dev:q8"}"#;
+        let event: SseCompleteEvent = serde_json::from_str(json).unwrap();
+        assert!(event.filename.is_none());
+        assert!(event.original_filename.is_none());
+        assert!(event.metadata.is_none());
+        // And when unset they stay off the wire for older clients.
+        let out = serde_json::to_string(&event).unwrap();
+        assert!(!out.contains("filename"));
+        assert!(!out.contains("\"metadata\""));
+    }
+
+    #[test]
     fn sse_complete_event_image_no_video_fields_in_json() {
         // An image-only event should not include any video_* keys in JSON
         let event = SseCompleteEvent {
@@ -2809,6 +2848,9 @@ mod tests {
             video_audio_sample_rate: None,
             video_audio_channels: None,
             gpu: None,
+            filename: None,
+            original_filename: None,
+            metadata: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(!json.contains("video_"));

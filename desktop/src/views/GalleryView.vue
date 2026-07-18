@@ -45,8 +45,11 @@ const canReveal = (entry: MergedPrint) =>
   entry.sourceKey === "local" || gallery.hostFor(entry.sourceKey)?.kind === "local";
 
 /** Prints on a remote host can be pulled into this Mac's gallery. */
+/** Copyable to this Mac: a remote-origin tile with no local copy yet (by
+ *  filename or byte identity). The menu item stays visible and grays out
+ *  once a local copy exists. */
 const canSaveLocally = (entry: MergedPrint) =>
-  inTauri() && gallery.hostFor(entry.sourceKey)?.kind === "remote";
+  inTauri() && gallery.hostFor(entry.sourceKey)?.kind === "remote" && !gallery.existsLocally(entry);
 
 async function blobToBase64(blob: Blob): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -67,7 +70,13 @@ async function fetchItemBase64(entry: MergedPrint): Promise<string> {
 
 async function saveToThisMac(entry: MergedPrint) {
   try {
-    const saved = await ipc.saveOutputBytes(entry.item.filename, await fetchItemBase64(entry));
+    // The origin row's metadata rides along so the local DB row matches the
+    // origin exactly — videos embed nothing in the file itself.
+    const saved = await ipc.saveOutputBytes(
+      entry.item.filename,
+      await fetchItemBase64(entry),
+      entry.item.metadata,
+    );
     toasts.push(`Saved to this Mac — ${saved}`);
     void gallery.refreshHost("local");
   } catch (err) {

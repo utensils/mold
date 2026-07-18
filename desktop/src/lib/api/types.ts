@@ -284,6 +284,15 @@ export interface CompleteEvent {
   model: string;
   video_frames?: number | null;
   video_fps?: number | null;
+  /** Gallery filename the server saved this payload under (additive; absent
+   * on older servers). Mirrored saves keep it so the local copy and the
+   * origin stay one logical print in the merged gallery. */
+  filename?: string | null;
+  /** Gallery filename of the pre-upscale original, when one was saved. */
+  original_filename?: string | null;
+  /** The exact metadata the server recorded for this payload — the local DB
+   * row for a mirrored save uses it verbatim (videos embed nothing). */
+  metadata?: OutputMetadata | null;
 }
 
 // ── Gallery ──────────────────────────────────────────────────────────────

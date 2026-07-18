@@ -63,6 +63,20 @@ const emptyBucket = (): GalleryBucket => ({
 });
 
 /**
+ * Cross-host identity beyond the filename: mirrored copies of one print are
+ * byte-identical, so seed + exact byte size pins them together even when an
+ * old auto-save invented its own filename or a video copy synthesized its
+ * metadata (the seed survives in the filename either way). Rows missing
+ * either signal opt out of identity matching entirely.
+ */
+export function printIdentity(item: GalleryImage): string | null {
+  const size = item.size_bytes;
+  const seed = item.metadata?.seed;
+  if (!size || seed == null) return null;
+  return `${seed}:${size}`;
+}
+
+/**
  * Unified multi-host gallery: one bucket per origin, merged into a single
  * date-sorted grid. Buckets are keyed by "local" (This Mac via native IPC)
  * or a host id from the hosts store; API targets are always resolved at
@@ -117,21 +131,37 @@ export const useGalleryStore = defineStore("gallery", {
      */
     merged(): MergedPrint[] {
       const byFilename = new Map<string, MergedPrint>();
+      // Second-level identity (seed + byte size) collapses copies whose
+      // filenames diverged — auto-saves from before the server shipped its
+      // gallery filename on the complete event minted their own names.
+      const byIdentity = new Map<string, MergedPrint>();
+      const prints: MergedPrint[] = [];
       for (const source of this.sources) {
         const bucket = this.buckets[source.key];
         if (!bucket) continue;
         for (const item of bucket.items) {
-          const existing = byFilename.get(item.filename);
+          const identity = printIdentity(item);
+          const existing =
+            byFilename.get(item.filename) ?? (identity ? byIdentity.get(identity) : undefined);
           if (!existing) {
-            byFilename.set(item.filename, {
+            const print: MergedPrint = {
               item,
               sourceKey: source.key,
               hostLabel: source.label,
               availableOn: [source],
-            });
+            };
+            byFilename.set(item.filename, print);
+            if (identity) byIdentity.set(identity, print);
+            prints.push(print);
             continue;
           }
-          existing.availableOn.push(source);
+          // A copy under a different name still joins the print, and its
+          // name is indexed too so further copies under either name merge.
+          byFilename.set(item.filename, existing);
+          if (identity && !byIdentity.has(identity)) byIdentity.set(identity, existing);
+          if (!existing.availableOn.some((s) => s.key === source.key)) {
+            existing.availableOn.push(source);
+          }
           if (source.key === "local" && existing.sourceKey !== "local") {
             existing.item = item;
             existing.sourceKey = source.key;
@@ -139,7 +169,7 @@ export const useGalleryStore = defineStore("gallery", {
           }
         }
       }
-      return [...byFilename.values()].sort((a, b) => b.item.timestamp - a.item.timestamp);
+      return prints.sort((a, b) => b.item.timestamp - a.item.timestamp);
     },
     /**
      * `merged` in All; an individual host remains its complete raw bucket so
@@ -160,6 +190,24 @@ export const useGalleryStore = defineStore("gallery", {
           availableOn: [source],
         }))
         .sort((a, b) => b.item.timestamp - a.item.timestamp);
+    },
+    /**
+     * True when this print already lives in this Mac's gallery — by filename
+     * or by byte identity — whatever source the given tile came from. Host
+     * -chip tiles carry only their own bucket in `availableOn`, so the local
+     * bucket is probed directly.
+     */
+    existsLocally(): (entry: MergedPrint) => boolean {
+      return (entry) => {
+        if (entry.sourceKey === "local") return true;
+        if (entry.availableOn.some((s) => s.key === "local")) return true;
+        const identity = printIdentity(entry.item);
+        return (this.buckets["local"]?.items ?? []).some(
+          (item) =>
+            item.filename === entry.item.filename ||
+            (identity !== null && printIdentity(item) === identity),
+        );
+      };
     },
     /** What the Gallery grid renders: host chip → media kind → text query. */
     filtered(): MergedPrint[] {
