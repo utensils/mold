@@ -11,8 +11,28 @@ interface CapturedOptions {
   method?: string;
   body?: unknown;
   target?: { baseUrl: string; apiKey: string | null };
+  signal: AbortSignal;
   onEvent: (event: string, data: string) => void;
   onClose?: (error: Error | null) => void;
+}
+
+// Mirror the real sseStream: emit some frames, then keep the connection open
+// until the caller aborts (or the signal was already aborted), at which point
+// close cleanly with no error — exactly what fetchEventSource does on abort.
+function openUntilAborted(
+  emit: (options: CapturedOptions) => void,
+): (path: string, options: CapturedOptions) => Promise<void> {
+  return (_path, options) => {
+    emit(options);
+    return new Promise<void>((resolve) => {
+      const finish = () => {
+        options.onClose?.(null);
+        resolve();
+      };
+      if (options.signal.aborted) finish();
+      else options.signal.addEventListener("abort", finish, { once: true });
+    });
+  };
 }
 
 describe("upscaleImage", () => {
@@ -64,5 +84,29 @@ describe("upscaleImage", () => {
     });
 
     await expect(upscaleImage({ model: "m", image: "SRC" })).rejects.toThrow("connection reset");
+  });
+
+  it("rejects promptly on an error frame even when the stream stays open", async () => {
+    // Server reports an error but never closes the SSE stream. Without wiring
+    // the AbortController, upscaleImage would hang until connection close.
+    sseStream.mockImplementation(
+      openUntilAborted((options) => {
+        options.onEvent("error", JSON.stringify({ error: "boom" }));
+      }),
+    );
+
+    await expect(upscaleImage({ model: "m", image: "SRC" })).rejects.toThrow("boom");
+  });
+
+  it("resolves on a complete frame even when the stream stays open", async () => {
+    // The abort we fire after the terminal frame must not become a spurious
+    // rejection — a clean close on an aborted stream still resolves the image.
+    sseStream.mockImplementation(
+      openUntilAborted((options) => {
+        options.onEvent("complete", JSON.stringify({ image: "OK", format: "png" }));
+      }),
+    );
+
+    await expect(upscaleImage({ model: "m", image: "SRC" })).resolves.toBe("OK");
   });
 });

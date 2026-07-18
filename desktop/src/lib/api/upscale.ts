@@ -27,13 +27,21 @@ export interface UpscaleImageOptions {
 export async function upscaleImage(options: UpscaleImageOptions): Promise<string> {
   let image: string | null = null;
   let failure: Error | null = null;
+  // Always drive our own controller so we can cut the stream the moment a
+  // terminal frame lands. A server that emits `error` (or even `complete`)
+  // without closing the connection would otherwise leave sseStream's promise
+  // pending until connection close, hanging the submit path. Forward the
+  // caller's signal into it so external cancellation is still honored.
   const abort = new AbortController();
-  const signal = options.signal ?? abort.signal;
+  if (options.signal) {
+    if (options.signal.aborted) abort.abort();
+    else options.signal.addEventListener("abort", () => abort.abort(), { once: true });
+  }
 
   await sseStream("/api/upscale/stream", {
     method: "POST",
     body: { model: options.model, image: options.image, output_format: "png" },
-    signal,
+    signal: abort.signal,
     retry: false,
     ...(options.target ? { target: options.target } : {}),
     onEvent: (event, data) => {
@@ -46,6 +54,7 @@ export async function upscaleImage(options: UpscaleImageOptions): Promise<string
           /* non-JSON error body — keep the raw text */
         }
         failure = new Error(message);
+        abort.abort();
         return;
       }
       try {
@@ -55,6 +64,7 @@ export async function upscaleImage(options: UpscaleImageOptions): Promise<string
           if (message) options.onProgress?.(message);
         } else if (event === "complete") {
           image = (JSON.parse(data) as { image: string }).image;
+          abort.abort();
         }
       } catch {
         /* skip malformed frame */
