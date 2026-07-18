@@ -77,7 +77,7 @@ async function saveToThisMac(entry: MergedPrint) {
       await fetchItemBase64(entry),
       entry.item.metadata,
     );
-    toasts.push(`Saved to this Mac — ${saved}`);
+    toasts.push(`Saved locally — ${saved}`);
     void gallery.refreshHost("local");
   } catch (err) {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
@@ -137,7 +137,7 @@ async function upscaleItem(entry: MergedPrint) {
     // the durable copy.
     const stem = entry.item.filename.replace(/\.[^.]+$/, "");
     const saved = await ipc.saveOutputBytes(`${stem}-upscaled.png`, upscaled);
-    toasts.push(`Upscaled — saved to this Mac as ${saved}`);
+    toasts.push(`Upscaled — saved locally as ${saved}`);
     // The save landed in this Mac's output dir: on a local/external primary
     // the engine bucket reads that same dir; on a remote primary it's the
     // IPC bucket. Refresh whichever of the two is loaded.
@@ -191,7 +191,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
       action: () => void upscaleItem(entry),
     },
     {
-      label: "Save to this Mac",
+      label: "Save locally",
       disabled: !canSaveLocally(entry),
       action: () => void saveToThisMac(entry),
     },

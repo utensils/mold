@@ -63,6 +63,21 @@ const emptyBucket = (): GalleryBucket => ({
 });
 
 /**
+ * Seed used for cross-host identity. Video files embed no `mold:parameters`,
+ * so rows for old locally-mirrored videos were synthesized with `seed: 0` —
+ * but the desktop's own auto-save filenames encode the real seed
+ * (`mold-<model>-<seed>-<epochMs>[-role].<ext>`), so synthetic rows recover
+ * it from the name. Non-synthetic rows trust their recorded metadata.
+ */
+export function identitySeed(item: GalleryImage): number | null {
+  if (item.metadata_synthetic) {
+    const match = /-(\d+)-(\d+)(?:-(?:original|upscaled))?\.[a-z0-9]+$/i.exec(item.filename);
+    if (match) return Number(match[1]);
+  }
+  return item.metadata?.seed ?? null;
+}
+
+/**
  * Cross-host identity beyond the filename: mirrored copies of one print are
  * byte-identical, so seed + exact byte size pins them together even when an
  * old auto-save invented its own filename or a video copy synthesized its
@@ -71,7 +86,7 @@ const emptyBucket = (): GalleryBucket => ({
  */
 export function printIdentity(item: GalleryImage): string | null {
   const size = item.size_bytes;
-  const seed = item.metadata?.seed;
+  const seed = identitySeed(item);
   if (!size || seed == null) return null;
   return `${seed}:${size}`;
 }

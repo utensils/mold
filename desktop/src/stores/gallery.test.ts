@@ -224,6 +224,39 @@ describe("identity dedupe", () => {
     expect(print.availableOn.map((s) => s.key).sort()).toEqual(["hal9000-7680", "local"]);
   });
 
+  it("recovers the seed from auto-save filenames for synthesized video rows", async () => {
+    connectLocalPlusHal();
+    // The origin recorded real metadata; the old local mirror's row was
+    // synthesized (videos embed nothing) with seed 0 — but the desktop's
+    // auto-save filename encodes the real seed.
+    const origin = {
+      filename: "mold-ltx-2-3-22b-dev-fp8-1721312345678.mp4",
+      timestamp: 300,
+      size_bytes: 9_000,
+      metadata: { prompt: "a cheetah", seed: 852494036 },
+    } as never as GalleryImage;
+    const mirror = {
+      filename: "mold-ltx-2-3-22b-dev-fp8-852494036-1721312349999.mp4",
+      timestamp: 301,
+      size_bytes: 9_000,
+      metadata_synthetic: true,
+      metadata: { prompt: "", seed: 0 },
+    } as never as GalleryImage;
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000")) return Promise.resolve([origin]) as never;
+      return Promise.resolve([mirror]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+
+    expect(gallery.merged).toHaveLength(1);
+    expect(gallery.merged[0]!.availableOn.map((s) => s.key).sort()).toEqual([
+      "hal9000-7680",
+      "local",
+    ]);
+  });
+
   it("never collapses rows that lack a seed or byte size", async () => {
     connectLocalPlusHal();
     vi.mocked(apiJsonTo).mockImplementation((target) => {
