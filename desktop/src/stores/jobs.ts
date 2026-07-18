@@ -16,6 +16,9 @@ export interface QueueEntry {
   position: number;
   gpu?: number;
   target_gpu?: number;
+  /** Whether the request pinned a seed — distinguishes an explicit seed 0
+   * from "let the server pick" (additive; absent on older servers). */
+  seed_pinned?: boolean | null;
   /** The submitted request's settings, metadata-shaped (additive; absent on
    * older servers; never carries image payloads). */
   metadata?: OutputMetadata | null;

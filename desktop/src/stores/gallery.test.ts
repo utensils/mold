@@ -257,6 +257,41 @@ describe("identity dedupe", () => {
     ]);
   });
 
+  it("never collapses different models that share a seed and byte size", async () => {
+    connectLocalPlusHal();
+    const withModel = (filename: string, model: string): GalleryImage =>
+      ({
+        filename,
+        timestamp: 300,
+        size_bytes: 9_000,
+        metadata: { prompt: "p", seed: 42, model },
+      }) as never;
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000"))
+        return Promise.resolve([withModel("a.png", "flux-dev:q8")]) as never;
+      return Promise.resolve([withModel("b.png", "sd15:fp16")]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+    expect(gallery.merged).toHaveLength(2);
+  });
+
+  it("never collapses identity matches written far apart (re-generations)", async () => {
+    connectLocalPlusHal();
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      // Same seed, size, and model — but two days apart: a re-generation,
+      // not a mirror.
+      if (url.includes("hal9000"))
+        return Promise.resolve([identified("a.png", 200_000, 42, 9_000)]) as never;
+      return Promise.resolve([identified("b.png", 27_200, 42, 9_000)]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+    expect(gallery.merged).toHaveLength(2);
+  });
+
   it("never collapses rows that lack a seed or byte size", async () => {
     connectLocalPlusHal();
     vi.mocked(apiJsonTo).mockImplementation((target) => {

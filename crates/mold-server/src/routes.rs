@@ -699,17 +699,22 @@ async fn generate(
     // path (drop guard in `gpu_worker::process_job`).
     let job_id = uuid::Uuid::new_v4().to_string();
     // Metadata-shaped request params ride the queue listing so any client
-    // can inspect the job and reuse its settings (seed 0 = not pinned).
+    // can inspect the job and reuse its settings. `seed_pinned` records
+    // whether the request pinned a seed — metadata's required seed field
+    // can't distinguish an explicit 0 from "let the server pick".
     let queue_metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
         &req,
         req.seed.unwrap_or(0),
-        None,
+        req.scheduler,
         mold_core::build_info::version_string(),
     ));
-    let cancel =
-        state
-            .job_registry
-            .register_job(&job_id, &req.model, preferred_gpu, Some(queue_metadata));
+    let cancel = state.job_registry.register_job(
+        &job_id,
+        &req.model,
+        preferred_gpu,
+        Some(req.seed.is_some()),
+        Some(queue_metadata),
+    );
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -1439,17 +1444,22 @@ async fn generate_stream(
     // visible to /api/queue from the moment we accept the request.
     let job_id = uuid::Uuid::new_v4().to_string();
     // Metadata-shaped request params ride the queue listing so any client
-    // can inspect the job and reuse its settings (seed 0 = not pinned).
+    // can inspect the job and reuse its settings. `seed_pinned` records
+    // whether the request pinned a seed — metadata's required seed field
+    // can't distinguish an explicit 0 from "let the server pick".
     let queue_metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
         &req,
         req.seed.unwrap_or(0),
-        None,
+        req.scheduler,
         mold_core::build_info::version_string(),
     ));
-    let cancel =
-        state
-            .job_registry
-            .register_job(&job_id, &req.model, preferred_gpu, Some(queue_metadata));
+    let cancel = state.job_registry.register_job(
+        &job_id,
+        &req.model,
+        preferred_gpu,
+        Some(req.seed.is_some()),
+        Some(queue_metadata),
+    );
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,

@@ -77,18 +77,38 @@ export function identitySeed(item: GalleryImage): number | null {
   return item.metadata?.seed ?? null;
 }
 
+/** Filename-style slug of a model name — matches the auto-save filename
+ *  vocabulary, so synthesized rows (model recovered from the name) compare
+ *  equal to origin rows carrying the real `model:tag`. */
+function modelIdentitySlug(model: string | undefined): string {
+  return (model ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 /**
  * Cross-host identity beyond the filename: mirrored copies of one print are
- * byte-identical, so seed + exact byte size pins them together even when an
- * old auto-save invented its own filename or a video copy synthesized its
- * metadata (the seed survives in the filename either way). Rows missing
- * either signal opt out of identity matching entirely.
+ * byte-identical, so seed + exact byte size + model pins them together even
+ * when an old auto-save invented its own filename or a video copy
+ * synthesized its metadata (seed and model survive in the filename either
+ * way). Rows missing seed or size opt out of identity matching entirely.
  */
 export function printIdentity(item: GalleryImage): string | null {
   const size = item.size_bytes;
   const seed = identitySeed(item);
   if (!size || seed == null) return null;
-  return `${seed}:${size}`;
+  return `${seed}:${size}:${modelIdentitySlug(item.metadata?.model)}`;
+}
+
+/** Identity matches only count as one print when the rows were written
+ *  around the same time: mirrors land within seconds of their origin, while
+ *  a genuine re-generation that happens to reuse a seed (and byte length)
+ *  lands much later and must stay a separate print. */
+export const IDENTITY_WINDOW_SECS = 3600;
+
+export function withinIdentityWindow(a: GalleryImage, b: GalleryImage): boolean {
+  return Math.abs(a.timestamp - b.timestamp) <= IDENTITY_WINDOW_SECS;
 }
 
 /**
@@ -156,8 +176,11 @@ export const useGalleryStore = defineStore("gallery", {
         if (!bucket) continue;
         for (const item of bucket.items) {
           const identity = printIdentity(item);
-          const existing =
-            byFilename.get(item.filename) ?? (identity ? byIdentity.get(identity) : undefined);
+          let existing = byFilename.get(item.filename);
+          if (!existing && identity) {
+            const candidate = byIdentity.get(identity);
+            if (candidate && withinIdentityWindow(candidate.item, item)) existing = candidate;
+          }
           if (!existing) {
             const print: MergedPrint = {
               item,
@@ -220,7 +243,9 @@ export const useGalleryStore = defineStore("gallery", {
         return (this.buckets["local"]?.items ?? []).some(
           (item) =>
             item.filename === entry.item.filename ||
-            (identity !== null && printIdentity(item) === identity),
+            (identity !== null &&
+              printIdentity(item) === identity &&
+              withinIdentityWindow(item, entry.item)),
         );
       };
     },

@@ -117,10 +117,10 @@ pub async fn save_output_bytes(
             .map_err(|e| format!("Invalid image data: {e}"))?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let existing = dir.join(&filename);
-        let path = if std::fs::metadata(&existing)
-            .map(|m| m.len() == bytes.len() as u64)
-            .unwrap_or(false)
-        {
+        // Idempotence requires byte-identical content, not just a matching
+        // name and length — a different print under the same name must not
+        // be silently dropped or re-recorded with the wrong provenance.
+        let path = if std::fs::read(&existing).map(|d| d == bytes).unwrap_or(false) {
             existing
         } else {
             let path = unique_output_path(&dir, &filename);

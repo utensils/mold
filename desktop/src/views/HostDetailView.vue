@@ -277,11 +277,12 @@ watch(queueEntries, (entries) => {
   if (updated) queueDetail.value = updated;
 });
 
-/** Seed 0 on the queue wire means "not pinned" — restore it as random. */
+/** Unpinned seeds restore as random; `seed_pinned` disambiguates an
+ *  explicit seed 0 on newer servers. */
 function loadQueueSettings(metadata: OutputMetadata) {
+  const pinned = queueDetail.value?.seed_pinned ?? metadata.seed !== 0;
   composer.set({
-    metadata:
-      metadata.seed === 0 ? ({ ...metadata, seed: null } as unknown as OutputMetadata) : metadata,
+    metadata: pinned ? metadata : ({ ...metadata, seed: null } as unknown as OutputMetadata),
   });
   queueDetail.value = null;
   void router.push("/generate");

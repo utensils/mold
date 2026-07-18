@@ -27,8 +27,12 @@ function onKeydown(event: KeyboardEvent): void {
 onMounted(() => window.addEventListener("keydown", onKeydown));
 onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
-function seedLabel(metadata: OutputMetadata): string {
-  return metadata.seed === 0 ? "Random" : String(metadata.seed);
+function seedLabel(entry: EnrichedQueueEntry): string {
+  if (!entry.metadata) return "";
+  // Newer servers say exactly whether the seed was pinned; older wire data
+  // falls back to "0 means unpinned".
+  const pinned = entry.seed_pinned ?? entry.metadata.seed !== 0;
+  return pinned ? String(entry.metadata.seed) : "Random";
 }
 </script>
 
@@ -117,7 +121,7 @@ function seedLabel(metadata: OutputMetadata): string {
               </div>
               <div>
                 <dt class="text-caption text-ink-3">Seed</dt>
-                <dd class="data-mono text-body text-ink-2">{{ seedLabel(entry.metadata) }}</dd>
+                <dd class="data-mono text-body text-ink-2">{{ seedLabel(entry) }}</dd>
               </div>
               <div v-if="entry.metadata.frames">
                 <dt class="text-caption text-ink-3">Frames</dt>

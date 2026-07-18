@@ -54,6 +54,10 @@ pub struct JobEntry {
     /// Preferred GPU ordinal for queued jobs (`None` means Auto).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_gpu: Option<usize>,
+    /// Whether the submitted request pinned a seed. Additive — `metadata`'s
+    /// required seed field can't distinguish an explicit 0 from unpinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_pinned: Option<bool>,
     /// The submitted request's parameters, metadata-shaped so any client can
     /// inspect a queued job and reuse its settings. Additive — absent on
     /// older servers; never carries image payloads.
@@ -78,6 +82,7 @@ struct EntryInternal {
     started_at_unix_ms: u64,
     gpu: Option<usize>,
     target_gpu: Option<usize>,
+    seed_pinned: Option<bool>,
     metadata: Option<Box<mold_core::OutputMetadata>>,
     /// Cancellation signal for `DELETE /api/queue/:id`. The submitting
     /// handler holds the clone returned by `register*()` and selects on
@@ -161,7 +166,7 @@ impl JobRegistry {
         model: impl Into<String>,
         target_gpu: Option<usize>,
     ) -> Arc<Notify> {
-        self.register_job(id, model, target_gpu, None)
+        self.register_job(id, model, target_gpu, None, None)
     }
 
     /// Full-form insert: `register_with_target_gpu` plus the request's
@@ -171,6 +176,7 @@ impl JobRegistry {
         id: impl Into<String>,
         model: impl Into<String>,
         target_gpu: Option<usize>,
+        seed_pinned: Option<bool>,
         metadata: Option<Box<mold_core::OutputMetadata>>,
     ) -> Arc<Notify> {
         let started_at_unix_ms = SystemTime::now()
@@ -189,6 +195,7 @@ impl JobRegistry {
                 started_at_unix_ms,
                 gpu: None,
                 target_gpu,
+                seed_pinned,
                 metadata,
                 cancel: cancel.clone(),
             });
@@ -302,6 +309,7 @@ impl JobRegistry {
                 position: i,
                 gpu: e.gpu,
                 target_gpu: e.target_gpu,
+                seed_pinned: e.seed_pinned,
                 metadata: e.metadata.clone(),
             })
         })
@@ -342,6 +350,7 @@ impl JobRegistry {
                 position: i,
                 gpu: e.gpu,
                 target_gpu: e.target_gpu,
+                seed_pinned: e.seed_pinned,
                 metadata: e.metadata.clone(),
             })
             .collect();
@@ -571,12 +580,13 @@ mod tests {
             None,
             "test-version",
         ));
-        reg.register_job("rich", "flux-dev:fp16", None, Some(meta));
+        reg.register_job("rich", "flux-dev:fp16", None, Some(true), Some(meta));
 
         let snap = reg.snapshot();
         // Wire contract: rows without settings omit the key entirely.
         let plain_json = serde_json::to_string(&snap.entries[0]).unwrap();
         assert!(!plain_json.contains("metadata"), "got: {plain_json}");
+        assert_eq!(snap.entries[1].seed_pinned, Some(true));
         let rich = snap.entries[1].metadata.as_ref().expect("metadata rides");
         assert_eq!(rich.prompt, "a cat");
         assert_eq!(rich.width, 512);

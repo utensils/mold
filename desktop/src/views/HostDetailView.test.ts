@@ -69,6 +69,7 @@ interface WireQueueEntry {
   started_at_unix_ms: number;
   position: number;
   gpu?: number;
+  seed_pinned?: boolean;
   metadata?: Record<string, unknown>;
 }
 
@@ -601,6 +602,19 @@ describe("HostDetailView queue drawer", () => {
     expect(router.currentRoute.value.path).toBe("/generate");
     // Loading settings closes the drawer.
     expect(wrapper.find("[data-test='queue-entry-drawer']").exists()).toBe(false);
+  });
+
+  it("keeps an explicitly pinned seed 0 instead of restoring it as random", async () => {
+    installApi({}, [{ ...runningEntry({ ...wireMetadata }), seed_pinned: true }]);
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='host-queue-row']").trigger("click");
+    const drawer = wrapper.get("[data-test='queue-entry-drawer']");
+    expect(drawer.text()).not.toContain("Random");
+
+    await drawer.get("[data-test='queue-load-settings']").trigger("click");
+    await flushPromises();
+    const prefill = useComposerStore().prefill as { metadata: Record<string, unknown> };
+    expect(prefill.metadata).toMatchObject({ seed: 0 });
   });
 
   it("disables Load settings for hosts that don't share them", async () => {
