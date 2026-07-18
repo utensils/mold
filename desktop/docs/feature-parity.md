@@ -156,6 +156,8 @@ Post-generation upscale persists distinct `-original` and `-upscaled` entries on
 - CLI: `mold expand "<prompt>" --model --variations N --json --backend --expand-model`.
 - Config (`ExpandSettings`, DB `expand.*`): `enabled`, `backend` (`local` GGUF or OpenAI-compatible URL), `model` (default `qwen3-expand:q8`), `api_model` (e.g. `qwen2.5:3b`), `temperature`, `top_p`, `max_tokens`, `thinking` (Qwen3 reasoning), `system_prompt` (placeholders `{WORD_LIMIT}`,`{MODEL_NOTES}`), `batch_prompt` (placeholders `{N}`,`{WORD_LIMIT}`,`{MODEL_NOTES}`), per-family `families` overrides (word limit + style notes). Env: `MOLD_EXPAND*`.
 - Inline on generate via `--expand`; batch expansion produces per-image prompt variations.
+- Web (`ExpandModal.vue`): variations 1/3/5, Preview → clickable candidate list, advanced family override.
+- Desktop (`ExpandControl.vue`): parity — one-shot ⌘E in-place rewrite (single variation, restore-to-original undo) plus a popover with a 1/3/5 variation count, Preview that fetches candidates without touching the prompt, click-to-apply candidate list (same undo path), and a per-request family override (placeholder = current family).
 
 ---
 
