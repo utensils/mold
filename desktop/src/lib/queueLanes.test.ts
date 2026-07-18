@@ -46,18 +46,21 @@ describe("computeQueueLanes", () => {
     expect(lanes[1]!.entries.map((e) => e.id)).toEqual(["q1"]);
   });
 
-  it("puts Auto rows (no/unknown target_gpu) in the default lowest-ordinal lane", () => {
+  it("puts Auto rows (no target_gpu) in the default lowest-ordinal lane", () => {
     const rows = [entry({ id: "auto" })];
     const lanes = computeQueueLanes(rows, [0, 1]);
     expect(lanes[0]!.entries.map((e) => e.id)).toEqual(["auto"]);
     expect(lanes[1]!.entries).toEqual([]);
   });
 
-  it("unions lanes referenced by entries with host-reported ordinals", () => {
-    // Host status only knows GPU 0, but a row already targets GPU 1.
+  it("gives an unknown target_gpu its own lane (union with host-reported ordinals)", () => {
+    // Host status only knows GPU 0, but a row already targets GPU 1: GPU 1 is a
+    // real lane of its own, not folded into Auto/the default lane.
     const rows = [entry({ id: "q1", target_gpu: 1 })];
     const lanes = computeQueueLanes(rows, [0]);
     expect(lanes.map((l) => l.key)).toEqual([0, 1]);
+    expect(lanes[0]!.entries).toEqual([]);
+    expect(lanes[1]!.entries.map((e) => e.id)).toEqual(["q1"]);
   });
 
   it("orders each lane running-first, then by queue position", () => {

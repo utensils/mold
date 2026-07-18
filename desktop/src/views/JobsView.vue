@@ -29,10 +29,29 @@ onUnmounted(() => jobs.stopPolling());
 
 const primaryId = computed(() => hosts.primaryHost?.id ?? null);
 
-function hostEntries(host: HostView): EnrichedQueueEntry[] {
-  const snapshot = jobs.queues[host.id];
-  if (!snapshot) return [];
-  return enrichQueueEntries(snapshot.entries, host.id, generation.jobs, primaryId.value);
+/**
+ * Per-host lanes, computed once per reactive update and cached by host id so
+ * row/lane rendering never re-enriches or re-groups the queue for every row.
+ */
+const laneCache = computed(() => {
+  const map = new Map<string, QueueLane<EnrichedQueueEntry>[]>();
+  for (const host of hosts.all) {
+    const snapshot = jobs.queues[host.id];
+    const entries = snapshot
+      ? enrichQueueEntries(snapshot.entries, host.id, generation.jobs, primaryId.value)
+      : [];
+    map.set(host.id, computeQueueLanes(entries, snapshot?.gpuOrdinals ?? []));
+  }
+  return map;
+});
+
+function hostLanes(host: HostView): QueueLane<EnrichedQueueEntry>[] {
+  return laneCache.value.get(host.id) ?? [];
+}
+
+/** Whether a host has any queued/running rows across all its lanes. */
+function hostHasEntries(host: HostView): boolean {
+  return hostLanes(host).some((lane) => lane.entries.length > 0);
 }
 
 /** This app's job behind a queue row, for thumbnails and live progress. */
@@ -53,10 +72,6 @@ function entryCode(entry: EnrichedQueueEntry): string {
 // ── Per-GPU lanes (multi-GPU hosts only) ─────────────────────────────────
 const contextMenu = useContextMenuStore();
 const dragged = ref<DraggedQueueRow | null>(null);
-
-function hostLanes(host: HostView): QueueLane<EnrichedQueueEntry>[] {
-  return computeQueueLanes(hostEntries(host), jobs.queues[host.id]?.gpuOrdinals ?? []);
-}
 
 /** Numeric lane keys of a host — empty means the flat single-queue layout. */
 function laneOrdinals(host: HostView): number[] {
@@ -226,7 +241,7 @@ function reuse(job: Job) {
             {{ jobs.queues[host.id]?.paused ? "Resume" : "Pause" }}
           </button>
           <button
-            v-if="jobs.queues[host.id]?.caps?.canCancelAll && hostEntries(host).length"
+            v-if="jobs.queues[host.id]?.caps?.canCancelAll && hostHasEntries(host)"
             type="button"
             data-test="cancel-all"
             class="h-7 rounded-control px-2.5 text-body"
@@ -245,7 +260,7 @@ function reuse(job: Job) {
         <!-- Multi-GPU hosts split into per-GPU lanes (drag a queued row between
              lanes, or right-click → Move to GPU N); single-GPU hosts keep the
              flat list below unchanged. -->
-        <template v-if="hostEntries(host).length">
+        <template v-if="hostHasEntries(host)">
           <div
             v-for="lane in hostLanes(host)"
             :key="lane.key"
@@ -255,7 +270,7 @@ function reuse(job: Job) {
               laneDroppable(host, lane.key) ? 'border-edge border-dashed' : 'border-transparent'
             "
             @dragover.prevent
-            @drop="onLaneDrop(host, lane.key)"
+            @drop.prevent="onLaneDrop(host, lane.key)"
           >
             <div v-if="lane.key !== 'queue'" class="mt-3 flex items-center gap-2">
               <span class="edge-code text-ink-3">GPU {{ lane.key }}</span>
