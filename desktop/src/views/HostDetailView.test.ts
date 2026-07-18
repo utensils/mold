@@ -437,6 +437,64 @@ describe("HostDetailView models", () => {
   });
 });
 
+describe("HostDetailView layout", () => {
+  it("shows uptime from /api/status in the telemetry header", async () => {
+    installApi({ uptime_secs: 200_000 });
+    const wrapper = await mountView();
+    expect(wrapper.get("[data-test='host-uptime']").text()).toBe("UP 2d 7h");
+  });
+
+  it("renders the models-disk meter inside the telemetry panel, not a separate section", async () => {
+    installApi({ models_disk: { total_bytes: 2_000_000_000_000, free_bytes: 500_000_000_000 } });
+    const wrapper = await mountView();
+    const panel = wrapper.get("[data-test='telemetry-panel']");
+    expect(panel.find("[data-test='storage-card']").exists()).toBe(true);
+    expect(panel.find("[data-test='gpu-card']").exists()).toBe(true);
+  });
+
+  it("labels resident models LOADED so they can't read as queued jobs", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.get("[data-test='loaded-label']").text()).toBe("LOADED");
+    const chips = wrapper.findAll("[data-test='loaded-model-chip']");
+    expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
+  });
+
+  it("places the downloads tray in the models section, below the queue header", async () => {
+    const wrapper = await mountView();
+    const stream = lastStream("/api/downloads/stream");
+    stream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: {
+          active_jobs: [
+            {
+              id: "pull-1",
+              model: "qwen-image:q4",
+              status: "active",
+              files_done: 1,
+              files_total: 4,
+              bytes_done: 2_500_000_000,
+              bytes_total: 10_000_000_000,
+            },
+          ],
+          queued: [],
+          history: [],
+        },
+      }),
+    );
+    await flushPromises();
+    const queue = wrapper.get("[data-test='queue-depth']").element;
+    const tray = wrapper.get("[data-test='host-downloads']").element;
+    expect(queue.compareDocumentPosition(tray) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("summarizes installed model count and total size in the models header", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.get("[data-test='models-summary']").text()).toBe("2 · 24.8 GB");
+  });
+});
+
 describe("HostDetailView forget", () => {
   it("requires a confirming second click, then drops the host and returns to Hosts", async () => {
     const wrapper = await mountView();

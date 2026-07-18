@@ -284,7 +284,32 @@ A RunPod host participates in the unified Gallery like any other connected host 
 
 ### 4.8 Host detail — the machine card
 
-Clicking a host row in the sidebar opens a per-host detail view: bench-style cards with live GPU / CPU / RAM telemetry (that host's `/api/resources/stream`), a storage bar for the models filesystem (`/api/status.models_disk` total vs free — absent on older servers, the bar simply hides), queue state, and the models installed on that host. Background health polls update those mounted components in place; a transient connectivity change preserves the last good snapshot instead of clearing and rebuilding the page. Same Bath/Safelight vocabulary as the Bench rail popover — meters, not dashboards.
+Clicking a host row in the sidebar opens a per-host detail view, ordered identity → controls → machine → engine → library:
+
+```
+│ ● hal9000   REMOTE  v0.17.0                                                │
+│   http://192.168.1.114:7680 · 0f7a2c31-instance                            │
+│   [Use for generations] [Rename…] [Open web UI]      Disconnect  Forget    │
+│ TELEMETRY ─────────────────────────────────── UP 2D 7H  LIVE               │
+│ ┌ NVIDIA GeForce RTX 4090  CUDA                          97% util ┐        │
+│ │ VRAM ▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░  18.0 GB/24.0 GB   │        │
+│ │ CPU  ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  5% · 32 CORES     │        │
+│ │ RAM  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░  41.4 GB/67.1 GB   │        │
+│ │ DISK ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░  651 GB free of 2 TB │      │
+│ └─────────────────────────────────────────────────────────────────┘        │
+│ QUEUE ──────────────────────────────────────────────────── 0/200           │
+│ LOADED  (● jibmix-flux:fp8)                                                │
+│ MODELS ON THIS HOST ─────────────────────────── 14 · 96.4 GB   Catalog →   │
+│ [this host's active pulls — the downloads tray]                            │
+│ ┌ flux-schnell:q8  flux                          11.8 GB weights ┐         │
+│ │ flux-dev:bf16    flux                          22.2 GB weights │         │
+│ └──────────────────────────────────────────────────────────────────┘       │
+```
+
+- **One instrument panel, not stray cards:** GPU (per-GPU heading with backend + utilization), CPU, RAM, and the models filesystem (`/api/status.models_disk` — absent on older servers, the row simply hides) share a single three-column grid (label / bar / value), so every meter's bar and value align. Telemetry streams from that host's `/api/resources/stream`; the section header carries `UP <uptime>` from `/api/status` and a Safelight `LIVE` chip once the first frame lands. The VRAM fill warms to Safelight while the host has queued/running jobs and goes Stop past 92%.
+- **Queue vs residency, disambiguated:** queue depth/capacity lives in the QUEUE header; models resident in the engine render under an explicit `LOADED` label with a Safelight residency dot — they must never read as queue entries.
+- **The library owns its pulls:** the host-scoped downloads tray renders inside MODELS ON THIS HOST, above the installed list (mirroring Catalog's downloads-above-installed order), never above the page header. The section header totals count and weights; rows are one divided panel (name, family edge code, right-aligned weights/runtime sizes).
+- Background health polls update mounted components in place; a transient connectivity change preserves the last good snapshot instead of clearing and rebuilding the page. Same Bath/Safelight vocabulary as the Bench rail popover — meters, not dashboards.
 
 ## 5. States
 
