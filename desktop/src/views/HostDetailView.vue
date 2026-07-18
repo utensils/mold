@@ -14,7 +14,7 @@ import { inferBackendFromGpuName } from "../lib/hosts";
 import { modelDiskBytes, modelSizeLabels } from "../lib/models";
 import { modelSource } from "../lib/modelSource";
 import { ipc } from "../lib/ipc";
-import type { GpuSnapshot, ResourceSnapshot, ServerStatus } from "../lib/api/types";
+import type { GpuSnapshot, ModelEntry, ResourceSnapshot, ServerStatus } from "../lib/api/types";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useDownloadsStore } from "../stores/downloads";
 import { useGenerationStore } from "../stores/generation";
@@ -128,6 +128,11 @@ function startReadyServices() {
   void hostModels.refresh(true);
 }
 
+// Clicking a model row opens the shared detail drawer against THIS host.
+// Declared before the identity watch so its immediate run can reset it.
+const detailModel = ref<ModelEntry | null>(null);
+const drawerRepairing = ref(false);
+
 // Connection identity retargeting is the only event that replaces page data.
 // A health poll changing ready/error state must not clear and rebuild the
 // telemetry, storage, or models sections: those components keep their last
@@ -136,6 +141,9 @@ watch(
   [hostId, () => host.value?.baseUrl, () => host.value?.apiKey],
   (identity, previous) => {
     const hostChanged = !previous || identity[0] !== previous[0] || identity[1] !== previous[1];
+    // A drawer left open for the previous host must not retarget its model
+    // (and Repair action) at the next one.
+    if (hostChanged) detailModel.value = null;
     startResourceStream(hostChanged);
     void fetchStatus(hostChanged);
     startQueuePolling();
@@ -241,8 +249,14 @@ const hasTelemetry = computed(
   () => gpus.value.length > 0 || !!cpu.value || !!ram.value || !!modelsDisk.value,
 );
 
-/** Jobs on this host mean its GPU is developing — the VRAM meter warms. */
-const hostBusy = computed(() => (queueDepth.value ?? 0) > 0);
+/** Jobs on this host mean its GPU is developing — the VRAM meter warms.
+ *  The 5 s queue poll is the live signal; the one-shot status depth only
+ *  covers the window before the first snapshot lands. */
+const hostBusy = computed(() => {
+  const snap = queueSnapshot.value;
+  if (snap) return snap.entries.length > 0;
+  return (queueDepth.value ?? 0) > 0;
+});
 
 function vramFill(gpu: GpuSnapshot): string {
   if (vramLevel(gpu.vram_used, gpu.vram_total) === "critical") return "bg-stop";
@@ -262,10 +276,6 @@ const installedTotalLabel = computed(() => {
 const maxModelDiskBytes = computed(() =>
   installedModels.value.reduce((max, m) => Math.max(max, modelDiskBytes(m)), 0),
 );
-
-// Clicking a model row opens the shared detail drawer against THIS host.
-const detailModel = ref<(typeof installedModels.value)[number] | null>(null);
-const drawerRepairing = ref(false);
 
 async function repairFromDrawer() {
   const m = detailModel.value;

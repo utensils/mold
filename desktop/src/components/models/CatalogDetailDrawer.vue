@@ -55,21 +55,26 @@ const merged = computed<CatalogEntry>(() =>
     : props.entry,
 );
 
+/** Same staleness guard for the descriptive detail fetch. */
+let detailEpoch = 0;
+
 async function loadDetail(): Promise<void> {
+  const epoch = ++detailEpoch;
   detail.value = null;
   loading.value = true;
   try {
-    detail.value = await fetchCatalogDetail(
+    const res = await fetchCatalogDetail(
       props.entry.id,
       props.forwardCredentials ?? false,
       props.target,
     );
+    if (epoch === detailEpoch) detail.value = res;
   } catch {
     // Older server / live row not fetchable — the summary keeps the drawer
     // useful and the Pull action intact.
-    detail.value = null;
+    if (epoch === detailEpoch) detail.value = null;
   } finally {
-    loading.value = false;
+    if (epoch === detailEpoch) loading.value = false;
   }
 }
 
@@ -79,19 +84,26 @@ watch(() => props.entry.id, loadDetail, { immediate: true });
 
 const components = ref<ModelComponentStatus[] | "loading" | "error" | null>(null);
 
+/** Invalidates in-flight component fetches when a newer entry supersedes
+ *  them — a slow host's late response must not show (or Repair) the
+ *  previous model's components. */
+let componentsEpoch = 0;
+
 /** Per-component presence from the owning host; quietly absent elsewhere. */
 async function loadComponents(): Promise<void> {
+  const epoch = ++componentsEpoch;
   if (!merged.value.installed) {
     components.value = null;
     return;
   }
   components.value = "loading";
   try {
-    components.value = (await fetchModelComponents(props.entry.id, props.target)).components;
+    const res = await fetchModelComponents(props.entry.id, props.target);
+    if (epoch === componentsEpoch) components.value = res.components;
   } catch {
     // Not an installed manifest/catalog model on this host, or an older
     // server — the section simply hides.
-    components.value = "error";
+    if (epoch === componentsEpoch) components.value = "error";
   }
 }
 

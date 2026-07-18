@@ -20,6 +20,14 @@ const rows = computed(() =>
     : downloads.hostedInFlight,
 );
 
+/** History honors the same host scope — a host page must not leak other
+ *  hosts' settled downloads (or appear because of them). */
+const history = computed(() =>
+  props.hostId
+    ? downloads.hostedHistory.filter((row) => row.hostId === props.hostId)
+    : downloads.hostedHistory,
+);
+
 /** History stays collapsed by default — the tray is a strip, not a page. */
 const historyOpen = ref(false);
 const retrying = ref<string[]>([]);
@@ -65,7 +73,7 @@ async function retry(row: HostedDownloadJob) {
 
 <template>
   <div
-    v-if="rows.length || downloads.hostedHistory.length > 0"
+    v-if="rows.length || history.length > 0"
     class="border-edge border-b bg-bench px-4 py-2"
     data-test="downloads-tray"
   >
@@ -141,7 +149,7 @@ async function retry(row: HostedDownloadJob) {
         </div>
       </div>
     </div>
-    <div v-if="downloads.hostedHistory.length > 0" :class="downloads.hasActivity ? 'mt-2' : ''">
+    <div v-if="history.length > 0" :class="downloads.hasActivity ? 'mt-2' : ''">
       <button
         type="button"
         class="edge-code flex items-center gap-1 text-ink-3 hover:text-ink"
@@ -152,11 +160,11 @@ async function retry(row: HostedDownloadJob) {
         <span class="inline-block transition-transform" :class="historyOpen ? 'rotate-90' : ''">
           ▸
         </span>
-        History ({{ downloads.hostedHistory.length }})
+        History ({{ history.length }})
       </button>
       <ul v-if="historyOpen" class="mt-1 flex flex-col gap-1" data-test="history-list">
         <li
-          v-for="row in downloads.hostedHistory"
+          v-for="row in history"
           :key="rowKey(row)"
           class="-mx-1 flex items-center gap-3 rounded-control px-1 transition-colors duration-100 hover:bg-bath"
         >

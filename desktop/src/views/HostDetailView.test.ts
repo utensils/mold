@@ -310,6 +310,42 @@ describe("HostDetailView storage and queue", () => {
     expect(wrapper.find("[data-test='queue-empty']").exists()).toBe(false);
   });
 
+  it("warms the VRAM meter from the polled queue even when the status depth lags", async () => {
+    // status says an empty queue; the live queue poll disagrees (a job runs).
+    installApi({ queue_depth: 0, queue_capacity: 8 }, [
+      {
+        id: "srv-1",
+        model: "flux-dev:q8",
+        state: "running",
+        started_at_unix_ms: Date.now() - 5_000,
+        position: 0,
+        gpu: 0,
+      },
+    ]);
+    const wrapper = await mountView();
+    lastStream().options.onEvent(
+      "snapshot",
+      JSON.stringify({
+        hostname: "hal9000",
+        timestamp: 1,
+        gpus: [
+          {
+            ordinal: 0,
+            name: "NVIDIA GeForce RTX 4090",
+            backend: "cuda",
+            vram_total: 24_000_000_000,
+            vram_used: 18_000_000_000,
+            gpu_utilization: 97,
+          },
+        ],
+        system_ram: { total: 64_000_000_000, used: 21_000_000_000 },
+        cpu: { cores: 16, usage_percent: 43.2 },
+      }),
+    );
+    await flushPromises();
+    expect(wrapper.get("[data-test='gpu-card']").html()).toContain("bg-safelight");
+  });
+
   it("shows an empty queue line and a PAUSED marker from the queue snapshot", async () => {
     installApi({ queue_paused: true } as Partial<ServerStatus>);
     const wrapper = await mountView();
@@ -383,6 +419,19 @@ describe("HostDetailView models", () => {
     await flushPromises();
     const drawer = wrapper.get("[data-test='catalog-detail-drawer']");
     expect(drawer.text()).toContain("flux-dev:q8");
+  });
+
+  it("closes an open drawer when navigating to a different host", async () => {
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='model-row'] [data-test='row-title']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='catalog-detail-drawer']").exists()).toBe(true);
+
+    // The reused view must not retarget the previous host's model (and its
+    // Repair action) at the next host.
+    await router.push("/hosts/local");
+    await flushPromises();
+    expect(wrapper.find("[data-test='catalog-detail-drawer']").exists()).toBe(false);
   });
 
   it("shows this host's active model-download progress", async () => {

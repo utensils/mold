@@ -106,6 +106,40 @@ describe("CatalogDetailDrawer", () => {
     expect(wrapper.find("[data-test='component-list']").exists()).toBe(false);
   });
 
+  it("ignores a late component response from a previously shown entry", async () => {
+    // Entry A's host answers slowly; the drawer is retargeted to entry B
+    // before A resolves. A's stale list must not overwrite B's.
+    let resolveA: (v: unknown) => void = () => {};
+    fetchModelComponents.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveA = resolve;
+        }),
+    );
+    const wrapper = await mountDrawer(summary({ installed: true }));
+
+    fetchModelComponents.mockResolvedValueOnce({
+      model: "cv:9002",
+      components: [{ kind: "vae", name: "b-vae", present: true }],
+    });
+    await wrapper.setProps({ entry: summary({ id: "cv:9002", name: "Other", installed: true }) });
+    await flushPromises();
+
+    resolveA({
+      model: "cv:8001",
+      components: [
+        { kind: "vae", name: "a-vae", present: false, repair_model: "cv:8001" },
+        { kind: "clip", name: "a-clip", present: false, repair_model: "cv:8001" },
+      ],
+    });
+    await flushPromises();
+
+    const section = wrapper.get("[data-test='component-list']");
+    expect(section.text()).toContain("b-vae");
+    expect(section.text()).not.toContain("a-vae");
+    expect(section.text()).toContain("1/1 present");
+  });
+
   it("fetches the detail for the entry and renders description, license, and tags", async () => {
     const wrapper = await mountDrawer(summary());
     expect(fetchCatalogDetail).toHaveBeenCalledWith("cv:8001", false, undefined);
