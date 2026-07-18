@@ -177,6 +177,13 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
     form.temporalUpscale = null;
     form.audioFile = null;
     form.cameraControl = null;
+  } else if (m.name.includes("ltx-2.3")) {
+    // Camera-motion presets are published for 19B only; on LTX-2.3 buildRequest
+    // silently drops a preset value. Switching within the ltx2 family keeps the
+    // advanced-video block above from clearing it, so drop a stale preset here
+    // (a custom `.safetensors` path stays valid on 2.3).
+    const cam = form.cameraControl?.trim();
+    if (cam && !cam.endsWith(".safetensors")) form.cameraControl = null;
   }
 }
 

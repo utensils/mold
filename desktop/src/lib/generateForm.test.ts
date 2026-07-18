@@ -199,6 +199,24 @@ describe("buildRequest — camera control (LTX-2 motion LoRA presets)", () => {
     applyModelDefaults(form, { ...ltx2Model(), name: "flux:q8", family: "flux" });
     expect(form.cameraControl).toBeNull();
   });
+
+  it("clears a stale preset when switching from 19B to LTX-2.3 (buildRequest would drop it)", () => {
+    // Presets are published for 19B only; on LTX-2.3 buildRequest silently
+    // drops a preset value. Clear it on the model switch so the UI matches.
+    const form = ltx2Form();
+    form.model = "ltx-2-19b:fp8";
+    form.cameraControl = "dolly-in";
+    applyModelDefaults(form, { ...ltx2Model(), name: "ltx-2.3-22b-distilled:fp8", family: "ltx2" });
+    expect(form.cameraControl).toBeNull();
+  });
+
+  it("keeps a custom .safetensors path when switching into LTX-2.3 (still valid there)", () => {
+    const form = ltx2Form();
+    form.model = "ltx-2-19b:fp8";
+    form.cameraControl = "/loras/pan-up.safetensors";
+    applyModelDefaults(form, { ...ltx2Model(), name: "ltx-2.3-22b-distilled:fp8", family: "ltx2" });
+    expect(form.cameraControl).toBe("/loras/pan-up.safetensors");
+  });
 });
 
 describe("applyModelDefaults resets advanced video on family change", () => {

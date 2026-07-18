@@ -113,4 +113,37 @@ describe("decideChainRouting", () => {
       kind: "single",
     });
   });
+
+  it("treats the 'ltx-2' family alias like 'ltx2' (chains distilled above the cap)", () => {
+    // The server/manifest emit "ltx2", but the desktop capabilities layer also
+    // accepts the "ltx-2" alias — chain routing must recognise it too.
+    expect(decideChainRouting(241, "ltx-2", "ltx-2.3-22b-distilled:fp8")).toEqual({
+      kind: "chain",
+      clipFrames: 97,
+      motionTail: DEFAULT_MOTION_TAIL,
+      stageCount: 3,
+    });
+  });
+
+  it("normalizes whitespace and case in the family before matching", () => {
+    expect(decideChainRouting(241, "  LTX2  ", "ltx-2.3-22b-distilled:fp8")).toEqual({
+      kind: "chain",
+      clipFrames: 97,
+      motionTail: DEFAULT_MOTION_TAIL,
+      stageCount: 3,
+    });
+    expect(decideChainRouting(241, "  LTX-2  ", "ltx-2.3-22b-distilled:fp8")).toEqual({
+      kind: "chain",
+      clipFrames: 97,
+      motionTail: DEFAULT_MOTION_TAIL,
+      stageCount: 3,
+    });
+  });
+
+  it("applies the distilled-only chain gate to the 'ltx-2' alias too", () => {
+    // Non-distilled ltx2 (via the alias) still can't chain — only the distilled
+    // path implements chain rendering on the server.
+    const d = decideChainRouting(241, "ltx-2", "ltx-2-19b:fp8");
+    expect(d.kind).toBe("reject");
+  });
 });

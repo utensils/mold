@@ -5,6 +5,15 @@
  * chained clips" cue under the Frames input and to block over-budget
  * requests for non-chainable models before they reach the server.
  *
+ * Desktop-side normalization delta from the web sync source: the family is
+ * lower-cased/trimmed and the "ltx-2" alias is canonicalised to "ltx2" before
+ * matching — the same normalization the desktop capabilities layer applies
+ * (`capabilities.ts` VIDEO_FAMILIES / ADVANCED_VIDEO_FAMILIES accept both). The
+ * server/manifest emit the canonical "ltx2", but a form.family sourced from a
+ * catalog entry or older server can arrive as "ltx-2" / "  LTX2  ". The
+ * distilled-only chain gate applies to the alias form too. If the web mirror
+ * ever grows the same normalization, drop this note and re-sync verbatim.
+ *
  * The constants and branch structure match the Rust side exactly — if the
  * engine cap ever diverges from 97 we'd need to bump both (and ideally
  * expose it through a server capability). A regression test in chain.rs
@@ -43,6 +52,14 @@ const CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set(["ltx2", "ltx-video"
  * level) because there's no overlap region to trim. */
 const FAMILIES_WITH_CONTEXT_HANDOFF: ReadonlySet<string> = new Set(["ltx2"]);
 
+/** Normalize a raw family string to the canonical form the sets above use:
+ * lower-case, trimmed, with the "ltx-2" alias folded onto "ltx2". Mirrors the
+ * alias set the desktop capabilities layer accepts. */
+function canonicalizeFamily(family: string | null | undefined): string {
+  const fam = (family ?? "").trim().toLowerCase();
+  return fam === "ltx-2" ? "ltx2" : fam;
+}
+
 export function decideChainRouting(
   frames: number | null | undefined,
   family: string | null | undefined,
@@ -51,7 +68,7 @@ export function decideChainRouting(
 ): ChainRoutingDecision {
   if (!frames || frames <= 0) return { kind: "single" };
 
-  const fam = family ?? "";
+  const fam = canonicalizeFamily(family);
   const isChainCapable =
     CHAIN_CAPABLE_FAMILIES.has(fam) &&
     // ltx2 still requires a distilled checkpoint — only the distilled path
