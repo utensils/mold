@@ -3988,7 +3988,10 @@ dependencies = [
  "mold-ai-core",
  "mold-ai-db",
  "mold-ai-server",
+ "objc2",
+ "objc2-app-kit",
  "objc2-foundation",
+ "objc2-quartz-core",
  "percent-encoding",
  "plist",
  "reqwest 0.12.28",
@@ -4357,6 +4360,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation",
+ "objc2-quartz-core",
 ]
 
 [[package]]
@@ -4510,6 +4514,7 @@ dependencies = [
  "bitflags 2.13.0",
  "objc2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
 ]
 

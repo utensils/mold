@@ -73,6 +73,11 @@ mdns-sd-discovery = "0.2.0"
 mac-notification-sys = "0.6.15"
 # Give debug builds an unmistakable native menu and Dock identity.
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString"] }
+# macOS 26 can make standard overlay-titlebar controls fully transparent when
+# their window resigns key. Keep the native buttons and repair only that state.
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSButton", "NSColor", "NSView", "NSWindow", "objc2-core-graphics", "objc2-quartz-core"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["CALayer", "objc2-core-foundation", "objc2-core-graphics"] }
 
 [features]
 default = []
