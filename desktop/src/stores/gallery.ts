@@ -71,8 +71,11 @@ const emptyBucket = (): GalleryBucket => ({
  */
 export function identitySeed(item: GalleryImage): number | null {
   if (item.metadata_synthetic) {
+    // A synthesized row's recorded seed is a placeholder 0 ("unknown") — it
+    // must never act as a real seed. Only the auto-save filename pattern
+    // yields a trustworthy seed; otherwise the row opts out of identity.
     const match = /-(\d+)-(\d+)(?:-(?:original|upscaled))?\.[a-z0-9]+$/i.exec(item.filename);
-    if (match) return Number(match[1]);
+    return match ? Number(match[1]) : null;
   }
   return item.metadata?.seed ?? null;
 }

@@ -257,6 +257,28 @@ describe("identity dedupe", () => {
     ]);
   });
 
+  it("opts synthesized rows without a parseable filename out of identity", async () => {
+    connectLocalPlusHal();
+    // Both rows are synthetic with the placeholder seed 0 and equal sizes —
+    // without a real seed recovered from the filename they must never merge.
+    const synth = (filename: string): GalleryImage =>
+      ({
+        filename,
+        timestamp: 300,
+        size_bytes: 9_000,
+        metadata_synthetic: true,
+        metadata: { prompt: "", seed: 0, model: "unknown" },
+      }) as never;
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000")) return Promise.resolve([synth("clip-a.mp4")]) as never;
+      return Promise.resolve([synth("clip-b.mp4")]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+    expect(gallery.merged).toHaveLength(2);
+  });
+
   it("never collapses different models that share a seed and byte size", async () => {
     connectLocalPlusHal();
     const withModel = (filename: string, model: string): GalleryImage =>
