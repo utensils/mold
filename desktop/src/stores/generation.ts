@@ -156,6 +156,25 @@ export function jobProgress(job: Job): number {
   return job.step / job.total;
 }
 
+/** Compact, plain-language status shared by every jobs surface. */
+export function jobStatusCode(job: Job): string {
+  switch (job.status) {
+    case "denoising":
+      return `${job.step}/${job.total}`;
+    case "finishing":
+      return "FINALIZING";
+    case "loading":
+      return "LOADING";
+    case "queued":
+      return job.queuePosition && job.queuePosition > 0 ? `QUEUED #${job.queuePosition}` : "QUEUED";
+    case "complete":
+      return "DONE";
+    case "error":
+      return job.error === "Cancelled" ? "CANCELLED" : "FAILED";
+  }
+  return "UNKNOWN";
+}
+
 export function base64ToBlobUrl(b64: string, mime: string): string {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   return URL.createObjectURL(new Blob([bytes], { type: mime }));

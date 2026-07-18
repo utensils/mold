@@ -2,7 +2,13 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import DevelopCanvas from "../lib/develop/DevelopCanvas.vue";
-import { useGenerationStore, jobPhase, jobProgress, type Job } from "../stores/generation";
+import {
+  useGenerationStore,
+  jobPhase,
+  jobProgress,
+  jobStatusCode,
+  type Job,
+} from "../stores/generation";
 import { useHostsStore, type HostView } from "../stores/hosts";
 import { enrichQueueEntries, useJobsStore, type EnrichedQueueEntry } from "../stores/jobs";
 import { useComposerStore } from "../stores/composer";
@@ -177,11 +183,6 @@ const finished = computed(() =>
     .slice()
     .reverse(),
 );
-
-function finishedCode(job: Job): string {
-  if (job.status === "complete") return "FIXED";
-  return job.error === "Cancelled" ? "CANCELLED" : "STOPPED";
-}
 
 function reuse(job: Job) {
   composer.set({
@@ -382,7 +383,7 @@ function reuse(job: Job) {
               <div class="truncate text-body text-ink" :title="job.prompt">{{ job.prompt }}</div>
               <div class="mt-0.5 flex items-center gap-2">
                 <span class="edge-code" :class="job.status === 'error' ? 'text-stop' : ''">
-                  {{ finishedCode(job) }}
+                  {{ jobStatusCode(job) }}
                 </span>
                 <span class="text-caption text-ink-3">
                   {{ job.model }}<template v-if="job.hostLabel"> · {{ job.hostLabel }}</template>

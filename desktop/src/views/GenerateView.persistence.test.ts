@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { mount, flushPromises } from "@vue/test-utils";
+import { enableAutoUnmount, mount, flushPromises } from "@vue/test-utils";
 import GenerateView from "./GenerateView.vue";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useModelStore } from "../stores/models";
@@ -10,13 +10,16 @@ import { useHostsStore } from "../stores/hosts";
 import type { ModelEntry } from "../lib/api/types";
 
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+const apiJson = vi.fn();
 const apiJsonTo = vi.fn();
 vi.mock("../lib/api/client", () => ({
-  apiJson: vi.fn(() => Promise.resolve([])),
+  apiJson: (...args: unknown[]) => apiJson(...args),
   apiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
   apiFetch: vi.fn(),
 }));
 vi.mock("../lib/ipc", () => ({ ipc: {} }));
+
+enableAutoUnmount(afterEach);
 
 const model: ModelEntry = {
   name: "flux-dev:q8",
@@ -35,6 +38,8 @@ function mountView() {
 describe("GenerateView form persistence", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    apiJson.mockReset();
+    apiJson.mockResolvedValue([]);
     apiJsonTo.mockReset();
     apiJsonTo.mockResolvedValue([]);
   });
@@ -68,6 +73,24 @@ describe("GenerateView form persistence", () => {
 
     // The immediate auto-select watch must respect the existing choice.
     expect(store.form.model).toBe("flux-schnell:q8");
+  });
+
+  it("closes the model picker when the user clicks elsewhere", async () => {
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" };
+    conn.status = "ready";
+    useHostsStore().initialized = true;
+    apiJson.mockResolvedValue([model]);
+    useModelStore().all = [model];
+
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get('[data-test="selected-model-name"]').trigger("click");
+    expect(wrapper.find('[data-test="model-option-name"]').exists()).toBe(true);
+
+    await wrapper.get("textarea").trigger("pointerdown");
+    await flushPromises();
+    expect(wrapper.find('[data-test="model-option-name"]').exists()).toBe(false);
   });
 
   it("renders the workbench and auto-selects a model installed only on a remote host", async () => {
