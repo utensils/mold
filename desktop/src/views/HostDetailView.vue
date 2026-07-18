@@ -2,12 +2,14 @@
 import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
+import ModelTableRow from "../components/models/ModelTableRow.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
-import { modelSizeLabels } from "../lib/models";
+import { modelDiskBytes, modelSizeLabels } from "../lib/models";
+import { modelSource } from "../lib/modelSource";
 import { ipc } from "../lib/ipc";
 import type { GpuSnapshot, ResourceSnapshot, ServerStatus } from "../lib/api/types";
 import { useAppPrefsStore } from "../stores/appPrefs";
@@ -199,6 +201,11 @@ const installedTotalLabel = computed(() => {
   );
   return bytes > 0 ? formatGB(bytes) : null;
 });
+
+/** Denominator for the per-row relative usage bar, as on the Installed shelf. */
+const maxModelDiskBytes = computed(() =>
+  installedModels.value.reduce((max, m) => Math.max(max, modelDiskBytes(m)), 0),
+);
 
 function statusDot(s: "connecting" | "ready" | "error"): string {
   switch (s) {
@@ -534,26 +541,24 @@ async function forget() {
           v-if="installedModels.length"
           class="border-edge divide-edge mt-2 divide-y overflow-hidden rounded-control border bg-bench"
         >
-          <li
-            v-for="m in installedModels"
-            :key="m.name"
-            data-test="model-row"
-            class="flex items-center gap-3 px-3 py-2"
-          >
-            <span class="min-w-0 truncate text-body text-ink">{{ m.name }}</span>
-            <span class="edge-code shrink-0">{{ m.family }}</span>
-            <div class="flex-1" />
-            <span class="shrink-0 text-right">
-              <span class="data-mono block text-caption text-ink-2">
-                {{ modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? "Size unavailable" }}
-              </span>
-              <span
-                v-if="modelSizeLabels(m).runtime && modelSizeLabels(m).weights"
-                class="data-mono block text-[10px] text-ink-3"
-              >
-                {{ modelSizeLabels(m).runtime }}
-              </span>
-            </span>
+          <li v-for="m in installedModels" :key="m.name" data-test="model-row">
+            <ModelTableRow
+              :name="m.name"
+              :source="modelSource(m)"
+              :loaded="m.is_loaded"
+              :family="m.family"
+              :page-url="m.hf_repo ? `https://huggingface.co/${m.hf_repo}` : null"
+              :size-primary="
+                modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? 'Size unavailable'
+              "
+              :size-secondary="
+                modelSizeLabels(m).weights && modelSizeLabels(m).runtime
+                  ? modelSizeLabels(m).runtime
+                  : null
+              "
+              :bar-percent="percent(modelDiskBytes(m), maxModelDiskBytes)"
+              class="px-3 py-2"
+            />
           </li>
         </ul>
         <p v-else class="mt-2 text-caption text-ink-3">No installed models reported</p>

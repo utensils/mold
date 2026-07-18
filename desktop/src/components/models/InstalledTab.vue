@@ -4,7 +4,7 @@ import { useModelStore } from "../../stores/models";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
-import SourceGlyph from "../generate/SourceGlyph.vue";
+import ModelTableRow from "./ModelTableRow.vue";
 import { isVideoFamily } from "../../lib/capabilities";
 import {
   groupInstalledModels,
@@ -18,7 +18,6 @@ import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../..
 import { startCatalogDownload } from "../../lib/api/catalog";
 import { ApiError } from "../../lib/api/client";
 import { formatGB, percent } from "../../lib/format";
-import { openExternal } from "../../lib/openExternal";
 import { type MediaType } from "../../lib/modelAvailability";
 import type { ModelComponentStatus, ModelEntry } from "../../lib/api/types";
 
@@ -154,10 +153,6 @@ async function unload(m: LibraryModelEntry) {
   }
 }
 
-function barWidth(m: ModelEntry): string {
-  return `${percent(modelDiskBytes(m), groups.value.maxDiskBytes)}%`;
-}
-
 function componentList(name: string): ModelComponentStatus[] {
   const c = components[name];
   return Array.isArray(c) ? c : [];
@@ -226,82 +221,25 @@ async function repairComponent(m: ModelEntry, c: ModelComponentStatus) {
         </div>
 
         <div v-for="m in list" :key="m.name" class="mb-1.5">
-          <div
-            class="-mx-1 flex items-center gap-2 rounded-control px-1 transition-colors duration-100 hover:bg-bath"
+          <ModelTableRow
+            class="-mx-1 px-1"
+            :name="m.name"
+            :source="modelSource(m)"
+            :loaded="m.is_loaded"
+            :host-labels="hostLabels(m)"
+            :quant="quantTag(m.name)"
+            :page-url="m.hf_repo ? `https://huggingface.co/${m.hf_repo}` : null"
+            :size-primary="
+              modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? 'Size unavailable'
+            "
+            :size-secondary="
+              modelSizeLabels(m).weights && modelSizeLabels(m).runtime
+                ? modelSizeLabels(m).runtime
+                : null
+            "
+            :bar-percent="percent(modelDiskBytes(m), groups.maxDiskBytes)"
           >
-            <!-- residency -->
-            <span
-              class="h-1.5 w-1.5 shrink-0 rounded-full"
-              :class="m.is_loaded ? 'bg-safelight' : 'bg-transparent'"
-              role="img"
-              :title="m.is_loaded ? 'On GPU' : 'Cold'"
-              :aria-label="m.is_loaded ? 'On GPU' : 'Cold'"
-            />
-            <SourceGlyph :source="modelSource(m)" class="text-ink-3" />
-            <span class="truncate text-body text-ink" :title="m.name">{{ m.name }}</span>
-            <span
-              v-for="label in hostLabels(m)"
-              :key="label"
-              data-test="installed-host"
-              class="border-edge data-mono shrink-0 rounded-full border px-1.5 text-caption text-ink-3"
-            >
-              {{ label }}
-            </span>
-            <span
-              v-if="quantTag(m.name)"
-              class="border-edge data-mono rounded-full border px-1.5 text-caption text-ink-2"
-            >
-              {{ quantTag(m.name) }}
-            </span>
-            <button
-              v-if="m.hf_repo"
-              type="button"
-              class="shrink-0 text-ink-3 transition-colors duration-100 hover:text-ink"
-              :aria-label="`Open ${m.name} on Hugging Face`"
-              title="Open on Hugging Face"
-              data-test="model-page-link"
-              @click="void openExternal(`https://huggingface.co/${m.hf_repo}`)"
-            >
-              <svg
-                viewBox="0 0 12 12"
-                width="11"
-                height="11"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M8.5 6.75v2.75a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1h2.75" />
-                <path d="M7 1.5h3.5V5" />
-                <path d="M10.5 1.5 5.75 6.25" />
-              </svg>
-            </button>
-
-            <!-- Primary weights and full runtime footprint are deliberately
-                 separate: the latter includes shared encoders/VAEs. -->
-            <div class="ml-auto flex w-64 items-center gap-2">
-              <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-bath" aria-hidden="true">
-                <div class="h-full bg-halide" :style="{ width: barWidth(m) }" />
-              </div>
-              <span class="w-40 shrink-0 text-right">
-                <span class="data-mono block text-caption text-ink-2">
-                  {{
-                    modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? "Size unavailable"
-                  }}
-                </span>
-                <span
-                  v-if="modelSizeLabels(m).runtime && modelSizeLabels(m).weights"
-                  class="data-mono block text-[10px] text-ink-3"
-                >
-                  {{ modelSizeLabels(m).runtime }}
-                </span>
-              </span>
-            </div>
-
-            <!-- actions -->
-            <div class="flex shrink-0 items-center gap-1">
+            <template #actions>
               <button
                 v-if="!m.is_loaded"
                 type="button"
@@ -341,8 +279,8 @@ async function repairComponent(m: ModelEntry, c: ModelComponentStatus) {
               >
                 {{ confirmingRemove === m.name ? "Remove from disk?" : "✕" }}
               </button>
-            </div>
-          </div>
+            </template>
+          </ModelTableRow>
 
           <!-- components -->
           <div v-if="expanded[m.name]" class="mt-1 ml-4 border-l border-edge pl-3">
