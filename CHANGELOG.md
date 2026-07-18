@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The desktop model picker now dismisses when clicking elsewhere.** Opening the Generate view's model menu no longer leaves it covering the parameter controls after the user moves on to another part of the composer.
+- **Desktop job statuses now use plain language.** The sidebar and full Jobs view say **Finalizing**, **Done**, and **Failed** instead of the darkroom-inspired but ambiguous **Fixing**, **Fixed**, and **Stopped**, while cancelled jobs remain clearly labelled **Cancelled**.
 - **Desktop host pages no longer collapse and rebuild during background health polls.** A host's telemetry, storage, queue, downloads, and model components remain mounted while connectivity changes, preserving the last good snapshot until each live source updates its own values.
 - **Desktop Chains now uses video models installed on connected hosts.** The Chains model picker merges every ready host's installed inventory, routes chain limits, creation, durable job actions, live events, and stage previews through the host that owns the selected model, and no longer disables a remote CUDA LTX-2 model merely because This Mac uses Metal.
 - **The desktop now attempts every remembered host immediately on every launch.** Remote reconnects start in parallel with This Mac instead of waiting for the local engine, and a saved host can no longer be skipped because an older reconnect-marker list is missing or stale. Unreachable hosts remain visible as errored rows and continue to self-heal through polling.

@@ -3,6 +3,7 @@ import {
   applyProgress,
   jobPhase,
   jobProgress,
+  jobStatusCode,
   newJob,
   planBatchRequests,
   resolveBaseSeed,
@@ -74,6 +75,25 @@ describe("generation SSE reducer", () => {
     const job = newJob(req);
     expect(job.total).toBe(4);
     expect(jobProgress(job)).toBe(0);
+  });
+});
+
+describe("job status labels", () => {
+  function withStatus(status: JobStatus, error: string | null = null): Job {
+    return { ...newJob(req), status, error };
+  }
+
+  it("uses plain-language labels for terminal and finalizing states", () => {
+    expect(jobStatusCode(withStatus("finishing"))).toBe("FINALIZING");
+    expect(jobStatusCode(withStatus("complete"))).toBe("DONE");
+    expect(jobStatusCode(withStatus("error", "out of memory"))).toBe("FAILED");
+    expect(jobStatusCode(withStatus("error", "Cancelled"))).toBe("CANCELLED");
+  });
+
+  it("preserves queue, loading, and progress detail", () => {
+    expect(jobStatusCode({ ...withStatus("queued"), queuePosition: 2 })).toBe("QUEUED #2");
+    expect(jobStatusCode(withStatus("loading"))).toBe("LOADING");
+    expect(jobStatusCode({ ...withStatus("denoising"), step: 3, total: 8 })).toBe("3/8");
   });
 });
 
