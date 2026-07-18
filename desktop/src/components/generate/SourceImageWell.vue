@@ -1,8 +1,20 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { base64ToDataUrl, fileToBase64 } from "../../lib/image";
+import {
+  attachmentRoleLabel,
+  attachmentTitleLabel,
+  moveAttachment,
+  reorderAttachment,
+} from "../../lib/editAttachments";
+import { buildControlNetOptions } from "../../lib/controlNetOptions";
+import { fetchCatalogInstalled } from "../../lib/api/catalog";
+import type { CatalogEntry } from "../../lib/api/types";
+import { useAppPrefsStore } from "../../stores/appPrefs";
+import { useHostModelsStore } from "../../stores/hostModels";
+import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 import ImagePickerModal from "./ImagePickerModal.vue";
@@ -11,6 +23,9 @@ import MaskEditorModal from "./MaskEditorModal.vue";
 const props = defineProps<{ form: GenerateForm }>();
 const toasts = useToastStore();
 const models = useModelStore();
+const appPrefs = useAppPrefsStore();
+const hosts = useHostsStore();
+const hostModels = useHostModelsStore();
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 
@@ -24,6 +39,110 @@ function onSourcePicked(picked: PickedImage[]) {
 function onMaskApplied(mask: string) {
   props.form.maskImage = mask;
 }
+
+// ── Qwen-edit Target + Reference strip ──────────────────────────────────────
+// Ordered base64 attachments: index 0 is the primary edit Target, the rest
+// are References (web Composer parity — the order ships as `edit_images`).
+
+const editPickerOpen = ref(false);
+const dragIndex = ref<number | null>(null);
+
+function onEditPicked(picked: PickedImage[]) {
+  if (picked.length === 0) return;
+  props.form.imageAttachments = [...props.form.imageAttachments, ...picked.map((p) => p.base64)];
+}
+function removeAttachmentAt(index: number) {
+  const next = props.form.imageAttachments.slice();
+  next.splice(index, 1);
+  props.form.imageAttachments = next;
+}
+function moveAttachmentBy(index: number, delta: -1 | 1) {
+  props.form.imageAttachments = moveAttachment(props.form.imageAttachments, index, delta);
+}
+function onTileDragStart(index: number, event: DragEvent) {
+  dragIndex.value = index;
+  event.dataTransfer?.setData("text/plain", String(index));
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+function onTileDrop(index: number, event: DragEvent) {
+  const raw = event.dataTransfer?.getData("text/plain");
+  const from = raw && !Number.isNaN(Number(raw)) ? Number(raw) : dragIndex.value;
+  dragIndex.value = null;
+  if (from == null) return;
+  props.form.imageAttachments = reorderAttachment(props.form.imageAttachments, from, index);
+}
+
+// ── ControlNet model picker ─────────────────────────────────────────────────
+// Installed `controlnet`-family models (scoped to the pinned generation host's
+// inventory when one is known) ∪ catalog-installed control-net entries, with a
+// Custom… escape hatch that reveals the legacy free-text input.
+
+const CUSTOM_CONTROL_MODEL = "__custom__";
+const controlCustomMode = ref(false);
+const catalogControlNet = ref<CatalogEntry[]>([]);
+
+/** The sticky generation host (an explicit pick, not Auto / Most capable). */
+const stickyHost = computed(() => {
+  const sel = appPrefs.settings?.generateTargetHost ?? null;
+  if (!sel || sel === "capable") return null;
+  return hosts.all.find((h) => h.id === sel && h.status === "ready" && h.baseUrl) ?? null;
+});
+
+/** Installed-model source: the pinned host's inventory when known, else the
+ * primary's canonical list. */
+const installedControlNetSource = computed(() => {
+  const host = stickyHost.value;
+  if (host && !host.primary) {
+    const entries = hostModels.byHost[host.id]?.entries;
+    if (entries && entries.length > 0) return entries;
+  }
+  return models.all;
+});
+
+const controlNetOptions = computed(() =>
+  buildControlNetOptions(
+    installedControlNetSource.value,
+    catalogControlNet.value,
+    controlCustomMode.value ? "" : props.form.controlModel,
+  ),
+);
+
+const controlSelectValue = computed(() =>
+  controlCustomMode.value ? CUSTOM_CONTROL_MODEL : props.form.controlModel,
+);
+
+function onControlModelChange(e: Event) {
+  const value = (e.target as HTMLSelectElement).value;
+  if (value === CUSTOM_CONTROL_MODEL) {
+    // Keep the current text so the user can edit rather than retype it.
+    controlCustomMode.value = true;
+    return;
+  }
+  controlCustomMode.value = false;
+  props.form.controlModel = value;
+}
+
+// Refetch catalog-installed control-net entries when the family or the pinned
+// host changes; a token guards against stale async writes.
+let controlFetchToken = 0;
+watch(
+  () => [props.form.family, stickyHost.value?.id] as const,
+  async ([family]) => {
+    const token = ++controlFetchToken;
+    catalogControlNet.value = [];
+    if (!generationCapabilitiesForFamily(family).supportsControlNet) return;
+    try {
+      const host = stickyHost.value;
+      const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
+      const res = await fetchCatalogInstalled({ family, kind: "control-net" }, target);
+      if (token !== controlFetchToken) return;
+      catalogControlNet.value = res.entries.filter((e) => e.installed && e.primary_path);
+    } catch {
+      if (token === controlFetchToken) catalogControlNet.value = [];
+    }
+  },
+  { immediate: true },
+);
 
 type Slot = "source" | "mask" | "control";
 const dragOver = ref<Slot | null>(null);
@@ -89,7 +208,93 @@ function setSourceFitMode(e: Event) {
 </script>
 
 <template>
-  <div v-if="caps.supportsImg2img && caps.sourceImageMode === 'single'">
+  <!-- Qwen-edit: reorderable Target + Reference picture strip. -->
+  <div v-if="caps.supportsImg2img && caps.sourceImageMode === 'qwen-edit'">
+    <div class="mt-5 mb-2 flex items-center gap-2">
+      <span class="edge-code">Pictures</span>
+      <div class="border-edge h-px flex-1 border-t" />
+    </div>
+
+    <div class="flex gap-2 overflow-x-auto pb-1" data-test="attachment-strip">
+      <div
+        v-for="(image, index) in form.imageAttachments"
+        :key="`${index}-${image.slice(0, 16)}`"
+        class="relative w-20 shrink-0 overflow-hidden rounded-media border border-control-edge bg-bath"
+        draggable="true"
+        :data-test="`attachment-card-${index}`"
+        @dragstart="onTileDragStart(index, $event)"
+        @dragend="dragIndex = null"
+        @dragover.prevent
+        @drop.prevent="onTileDrop(index, $event)"
+      >
+        <img
+          :src="base64ToDataUrl(image)"
+          class="h-12 w-20 object-cover"
+          :alt="`${attachmentRoleLabel(index)} ${attachmentTitleLabel(index)}`"
+        />
+        <div class="px-1.5 py-1 leading-tight">
+          <div class="edge-code" :data-test="`attachment-role-${index}`">
+            {{ attachmentRoleLabel(index) }}
+          </div>
+          <div class="truncate text-caption text-ink" :data-test="`attachment-title-${index}`">
+            {{ attachmentTitleLabel(index) }}
+          </div>
+        </div>
+        <button
+          v-if="index > 0"
+          type="button"
+          class="absolute top-1 left-1 h-5 w-5 rounded-control bg-bath/90 text-caption text-ink-2 hover:text-ink"
+          :aria-label="`Move ${attachmentTitleLabel(index)} left`"
+          :data-test="`move-attachment-up-${index}`"
+          @click="moveAttachmentBy(index, -1)"
+        >
+          ‹
+        </button>
+        <button
+          v-if="index < form.imageAttachments.length - 1"
+          type="button"
+          class="absolute top-1 left-7 h-5 w-5 rounded-control bg-bath/90 text-caption text-ink-2 hover:text-ink"
+          :aria-label="`Move ${attachmentTitleLabel(index)} right`"
+          :data-test="`move-attachment-down-${index}`"
+          @click="moveAttachmentBy(index, 1)"
+        >
+          ›
+        </button>
+        <button
+          type="button"
+          class="border-edge absolute top-1 right-1 h-5 w-5 rounded-control border bg-bath text-ink-2 hover:text-stop"
+          :aria-label="`Remove ${attachmentTitleLabel(index)}`"
+          :data-test="`remove-attachment-${index}`"
+          @click="removeAttachmentAt(index)"
+        >
+          ✕
+        </button>
+      </div>
+
+      <button
+        type="button"
+        class="flex h-[4.75rem] w-20 shrink-0 cursor-pointer items-center justify-center rounded-media border border-dashed border-control-edge text-body-lg text-ink-3 transition-colors hover:border-safelight hover:text-safelight focus-visible:outline-2 focus-visible:outline-safelight"
+        data-test="add-edit-image"
+        aria-label="Add pictures"
+        @click="editPickerOpen = true"
+      >
+        ＋
+      </button>
+    </div>
+    <p class="mt-1 text-caption text-ink-3">
+      First picture is the edit Target; the rest are References. Drag (or ‹ ›) to reorder.
+    </p>
+
+    <ImagePickerModal
+      :open="editPickerOpen"
+      :multiple="true"
+      title="Add pictures"
+      @pick="onEditPicked"
+      @close="editPickerOpen = false"
+    />
+  </div>
+
+  <div v-else-if="caps.supportsImg2img && caps.sourceImageMode === 'single'">
     <div class="mt-5 mb-2 flex items-center gap-2">
       <span class="edge-code">Source</span>
       <div class="border-edge h-px flex-1 border-t" />
@@ -301,9 +506,38 @@ function setSourceFitMode(e: Event) {
         </div>
       </div>
       <template v-if="form.controlImage">
-        <label class="mt-3 text-caption text-ink-2">Control model</label>
+        <label class="mt-3 block text-caption text-ink-2" for="controlnet-select">
+          Control model
+        </label>
+        <select
+          id="controlnet-select"
+          data-test="controlnet-select"
+          :value="controlSelectValue"
+          class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+          @change="onControlModelChange"
+        >
+          <option value="">None</option>
+          <option
+            v-for="opt in controlNetOptions"
+            :key="opt.value"
+            :value="opt.value"
+            :disabled="opt.disabled"
+          >
+            {{ opt.label }}
+          </option>
+          <option :value="CUSTOM_CONTROL_MODEL">Custom…</option>
+        </select>
+        <p
+          v-if="controlNetOptions.some((o) => o.disabled)"
+          class="mt-1 text-caption text-ink-3"
+          data-test="controlnet-missing-hint"
+        >
+          Greyed-out models aren't downloaded yet — pull them from the Catalog.
+        </p>
         <input
+          v-if="controlCustomMode"
           v-model="form.controlModel"
+          data-test="controlnet-custom-input"
           data-selectable
           type="text"
           placeholder="controlnet-canny-sd15"

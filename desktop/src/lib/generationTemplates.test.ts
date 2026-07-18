@@ -53,6 +53,21 @@ describe("save / load round-trip", () => {
     expect(reloaded?.mediaReferences).toEqual(["source", "mask", "control"]);
   });
 
+  it("strips the qwen-edit picture strip and records an editImages reference", () => {
+    const form = formWith({
+      prompt: "make the sky pink",
+      model: "qwen-image-edit-2511:q4",
+      imageAttachments: [B64, B64],
+    });
+
+    const saved = saveGenerationTemplate("Sky edit", form);
+
+    expect(saved.form.imageAttachments).toEqual([]);
+    expect(saved.mediaReferences).toEqual(["editImages"]);
+    const raw = localStorage.getItem(GENERATION_TEMPLATES_STORAGE_KEY) ?? "";
+    expect(raw).not.toContain(B64);
+  });
+
   it("preserves non-media fields (prompt, model, params, loras)", () => {
     const form = formWith({
       prompt: "neon city",

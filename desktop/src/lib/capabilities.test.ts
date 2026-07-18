@@ -136,6 +136,26 @@ describe("pruneRequestForFamily", () => {
     expect(pruned.mask_image).toBeUndefined();
   });
 
+  // Regression (P7 sanitizer flip): the sanitizer used to strip the image
+  // entirely for qwen-edit — it must now KEEP the ordered edit_images while
+  // still never letting source_image/strength through.
+  it("keeps ordered edit_images for qwen-image-edit while stripping source_image/strength", () => {
+    const withEdit: GenerateRequest = { ...full, edit_images: ["TARGET", "REF_A", "REF_B"] };
+    const pruned = pruneRequestForFamily(withEdit, "qwen-image-edit");
+    expect(pruned.edit_images).toEqual(["TARGET", "REF_A", "REF_B"]);
+    expect(pruned.source_image).toBeUndefined();
+    expect(pruned.strength).toBeUndefined();
+    expect(pruned.mask_image).toBeUndefined();
+    expect(pruned.batch_size).toBe(1);
+  });
+
+  it("strips edit_images from every non-qwen-edit family", () => {
+    const withEdit: GenerateRequest = { ...full, edit_images: ["TARGET"] };
+    for (const family of ["flux", "sd15", "sdxl", "qwen-image", "z-image", "ltx2", "ltx-video"]) {
+      expect(pruneRequestForFamily(withEdit, family).edit_images).toBeUndefined();
+    }
+  });
+
   it("drops img2img + loras for a video family and fixes the format", () => {
     const pruned = pruneRequestForFamily(full, "ltx2");
     expect(pruned.source_image).toBeUndefined();

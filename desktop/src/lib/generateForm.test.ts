@@ -250,6 +250,107 @@ describe("applyModelDefaults resets advanced video on family change", () => {
   });
 });
 
+// ── qwen-edit Target + Reference attachments ────────────────────────────────
+
+function qwenEditModel(): ModelEntry {
+  return {
+    ...ltx2Model(),
+    name: "qwen-image-edit-2511:q4",
+    family: "qwen-image-edit",
+    default_steps: 20,
+    default_guidance: 4,
+    default_width: 1024,
+    default_height: 1024,
+  };
+}
+
+describe("buildRequest — qwen-edit edit_images", () => {
+  function qwenEditForm() {
+    const form = newGenerateForm();
+    applyModelDefaults(form, qwenEditModel());
+    form.prompt = "make the sky pink";
+    return form;
+  }
+
+  it("ships ordered edit_images (first = target, rest = references) and never source_image/strength", () => {
+    const form = qwenEditForm();
+    form.imageAttachments = ["TARGET", "REF_A", "REF_B"];
+    const req = buildRequest(form);
+    expect(req.edit_images).toEqual(["TARGET", "REF_A", "REF_B"]);
+    expect("source_image" in req).toBe(false);
+    expect("strength" in req).toBe(false);
+    expect("mask_image" in req).toBe(false);
+  });
+
+  it("forces batch_size to 1", () => {
+    const form = qwenEditForm();
+    form.imageAttachments = ["TARGET"];
+    form.batchSize = 4; // stale value a template restore could leave behind
+    expect(buildRequest(form).batch_size).toBe(1);
+  });
+
+  it("omits edit_images when no attachments are set (prompt-only edit request)", () => {
+    const req = buildRequest(qwenEditForm());
+    expect("edit_images" in req).toBe(false);
+  });
+
+  it("never ships edit_images for single-mode families", () => {
+    const form = newGenerateForm();
+    form.model = "flux-dev:q8";
+    form.family = "flux";
+    form.prompt = "a cat";
+    form.imageAttachments = ["STALE"];
+    form.sourceImage = "SRC";
+    const req = buildRequest(form);
+    expect("edit_images" in req).toBe(false);
+    expect(req.source_image).toBe("SRC");
+  });
+});
+
+describe("applyModelDefaults — qwen-edit attachment seeding", () => {
+  it("seeds the strip with the single-mode source as Target when switching to qwen-edit", () => {
+    const form = newGenerateForm();
+    form.family = "flux";
+    form.sourceImage = "SRC";
+    applyModelDefaults(form, qwenEditModel());
+    expect(form.imageAttachments).toEqual(["SRC"]);
+    expect(form.sourceImage).toBeNull();
+    expect(form.maskImage).toBeNull();
+  });
+
+  it("keeps existing attachments when re-applying a qwen-edit model", () => {
+    const form = newGenerateForm();
+    form.imageAttachments = ["T", "R"];
+    applyModelDefaults(form, qwenEditModel());
+    expect(form.imageAttachments).toEqual(["T", "R"]);
+  });
+
+  it("promotes the Target back to the single source when leaving qwen-edit", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, qwenEditModel());
+    form.imageAttachments = ["T", "R1", "R2"];
+    applyModelDefaults(form, { ...ltx2Model(), name: "flux:q8", family: "flux" });
+    expect(form.sourceImage).toBe("T");
+    expect(form.imageAttachments).toEqual([]);
+  });
+
+  it("clears attachments when switching to a video family (no img2img)", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, qwenEditModel());
+    form.imageAttachments = ["T"];
+    applyModelDefaults(form, ltx2Model());
+    expect(form.imageAttachments).toEqual([]);
+    expect(form.sourceImage).toBeNull();
+  });
+
+  it("locks the batch size to 1 on switch to qwen-edit", () => {
+    const form = newGenerateForm();
+    form.batchSize = 4;
+    applyModelDefaults(form, qwenEditModel());
+    expect(form.batchSize).toBe(1);
+  });
+});
+
 describe("newGenerateForm source-fit default", () => {
   it("starts on pad-repaint, matching the web SPA's default policy", () => {
     expect(newGenerateForm().sourceFit).toEqual({ mode: "pad-repaint" });
@@ -349,6 +450,7 @@ describe("applyMetadataToForm", () => {
     form.sourceImage = "SRC";
     form.maskImage = "MASK";
     form.controlImage = "CTRL";
+    form.imageAttachments = ["T", "R"];
     form.sourceVideo = { filename: "v.mp4", base64: "V" };
     form.keyframes = [{ frame: 0, image: { filename: "k.png", base64: "K" } }];
     form.audioFile = { filename: "a.wav", base64: "A" };
@@ -358,6 +460,7 @@ describe("applyMetadataToForm", () => {
     expect(form.sourceImage).toBeNull();
     expect(form.maskImage).toBeNull();
     expect(form.controlImage).toBeNull();
+    expect(form.imageAttachments).toEqual([]);
     expect(form.sourceVideo).toBeNull();
     expect(form.keyframes).toEqual([]);
     expect(form.audioFile).toBeNull();
