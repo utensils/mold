@@ -252,12 +252,20 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
 
 const KNOWN_SCHEDULERS: readonly Scheduler[] = ["default", "ddim", "euler-ancestral", "unipc"];
 
+/** Match separator-insensitively: the server's `Display for Scheduler` writes
+ * UniPc as `"uni-pc"` while the form union spells it `"unipc"`, and legacy
+ * rows carry `"uni_pc"` / `"euler_ancestral"`. Squash `-`/`_` to compare. */
+const squash = (name: string): string => name.toLowerCase().replace(/[-_]/g, "");
+const SCHEDULER_BY_SQUASHED = new Map<string, Scheduler>(
+  KNOWN_SCHEDULERS.map((s) => [squash(s), s]),
+);
+
 /** Collapse a metadata scheduler value (`"ddim"` or serde-tagged
  * `{ ddim: … }`) onto the form's string union; anything unknown → default. */
 function normalizeMetadataScheduler(s: OutputMetadata["scheduler"]): Scheduler {
   if (!s) return "default";
   const name = typeof s === "string" ? s : (Object.keys(s)[0] ?? "default");
-  return KNOWN_SCHEDULERS.includes(name as Scheduler) ? (name as Scheduler) : "default";
+  return SCHEDULER_BY_SQUASHED.get(squash(name)) ?? "default";
 }
 
 /** Display name for a LoRA restored from metadata — the path's basename. */

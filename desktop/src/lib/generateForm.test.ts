@@ -341,6 +341,28 @@ describe("applyMetadataToForm", () => {
     applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "warp-drive" }, [sd15Model()]);
     expect(form.scheduler).toBe("default");
   });
+
+  it("accepts the server's hyphenated/underscored scheduler spellings", () => {
+    const form = newGenerateForm();
+
+    // mold-core `Display for Scheduler` serializes UniPc as "uni-pc".
+    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "uni-pc" }, [sd15Model()]);
+    expect(form.scheduler).toBe("unipc");
+
+    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "uni_pc" }, [sd15Model()]);
+    expect(form.scheduler).toBe("unipc");
+
+    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: { "uni-pc": {} } as never }, [
+      sd15Model(),
+    ]);
+    expect(form.scheduler).toBe("unipc");
+
+    // The canonical euler-ancestral spelling still round-trips.
+    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "euler-ancestral" }, [
+      sd15Model(),
+    ]);
+    expect(form.scheduler).toBe("euler-ancestral");
+  });
 });
 
 // ── applyPrefillToForm (composer routing: metadata vs legacy scalar) ────────
