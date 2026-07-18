@@ -45,7 +45,14 @@ vi.mock("../lib/ipc", () => ({
 }));
 vi.mock("../lib/notify", () => ({ notifyPulled: vi.fn() }));
 
+const unloadModel = vi.hoisted(() => vi.fn());
+vi.mock("../lib/api/models", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api/models")>()),
+  unloadModel: (...a: unknown[]) => unloadModel(...a),
+}));
+
 import HostDetailView from "./HostDetailView.vue";
+import { useComposerStore } from "../stores/composer";
 import { useConnectionStore } from "../stores/connection";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
@@ -62,6 +69,8 @@ interface WireQueueEntry {
   started_at_unix_ms: number;
   position: number;
   gpu?: number;
+  seed_pinned?: boolean;
+  metadata?: Record<string, unknown>;
 }
 
 function installApi(status: Partial<ServerStatus> = {}, queueEntries: WireQueueEntry[] = []) {
@@ -110,6 +119,7 @@ async function mountView(path = `/hosts/${REMOTE_ID}`) {
       { path: "/settings", component: stub },
       { path: "/models", component: stub },
       { path: "/jobs", component: stub },
+      { path: "/generate", component: stub },
     ],
   });
   router.push(path);
@@ -161,6 +171,7 @@ function lastStream(path = "/api/resources/stream"): SseCall {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  unloadModel.mockResolvedValue(undefined);
   sseCalls.length = 0;
   appSettingsGet.mockResolvedValue({
     savedHosts: [],
@@ -274,7 +285,7 @@ describe("HostDetailView storage and queue", () => {
     installApi({ queue_depth: 3, queue_capacity: 8 });
     const wrapper = await mountView();
     expect(wrapper.get("[data-test='queue-depth']").text()).toBe("3/8");
-    const chips = wrapper.findAll("[data-test='loaded-model-chip']");
+    const chips = wrapper.findAll("[data-test='loaded-model-name']");
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
   });
 
@@ -549,6 +560,97 @@ describe("HostDetailView models", () => {
   });
 });
 
+describe("HostDetailView queue drawer", () => {
+  const runningEntry = (metadata?: Record<string, unknown>): WireQueueEntry => ({
+    id: "srv-1",
+    model: "qwen-image:bf16",
+    state: "running",
+    started_at_unix_ms: Date.now() - 60_000,
+    position: 0,
+    gpu: 3,
+    ...(metadata ? { metadata } : {}),
+  });
+
+  const wireMetadata = {
+    prompt: "a lighthouse at dusk",
+    negative_prompt: null,
+    model: "qwen-image:bf16",
+    seed: 0,
+    steps: 28,
+    guidance: 3.5,
+    width: 1328,
+    height: 1328,
+  };
+
+  it("opens a queue row's info drawer and loads its settings into Generate", async () => {
+    installApi({}, [runningEntry(wireMetadata)]);
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='host-queue-row']").trigger("click");
+
+    const drawer = wrapper.get("[data-test='queue-entry-drawer']");
+    expect(drawer.text()).toContain("qwen-image:bf16");
+    expect(drawer.get("[data-test='queue-prompt']").text()).toBe("a lighthouse at dusk");
+    expect(drawer.text()).toContain("1328×1328");
+    // Seed 0 on the wire = not pinned.
+    expect(drawer.text()).toContain("Random");
+    expect(drawer.text()).toContain("Other client");
+
+    await drawer.get("[data-test='queue-load-settings']").trigger("click");
+    await flushPromises();
+    const prefill = useComposerStore().prefill as { metadata: Record<string, unknown> };
+    expect(prefill.metadata).toMatchObject({ prompt: "a lighthouse at dusk", seed: null });
+    expect(router.currentRoute.value.path).toBe("/generate");
+    // Loading settings closes the drawer.
+    expect(wrapper.find("[data-test='queue-entry-drawer']").exists()).toBe(false);
+  });
+
+  it("keeps an explicitly pinned seed 0 instead of restoring it as random", async () => {
+    installApi({}, [{ ...runningEntry({ ...wireMetadata }), seed_pinned: true }]);
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='host-queue-row']").trigger("click");
+    const drawer = wrapper.get("[data-test='queue-entry-drawer']");
+    expect(drawer.text()).not.toContain("Random");
+
+    await drawer.get("[data-test='queue-load-settings']").trigger("click");
+    await flushPromises();
+    const prefill = useComposerStore().prefill as { metadata: Record<string, unknown> };
+    expect(prefill.metadata).toMatchObject({ seed: 0 });
+  });
+
+  it("disables Load settings for hosts that don't share them", async () => {
+    installApi({}, [runningEntry()]);
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='host-queue-row']").trigger("click");
+    const button = wrapper.get("[data-test='queue-load-settings']");
+    expect(button.attributes("disabled")).toBeDefined();
+  });
+});
+
+describe("HostDetailView loaded-chip unload", () => {
+  it("unloads the model on THIS host and hides the chip until the poll confirms", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.findAll("[data-test='loaded-model-chip']")).toHaveLength(1);
+
+    await wrapper.get("[data-test='unload-chip']").trigger("click");
+    await flushPromises();
+
+    expect(unloadModel).toHaveBeenCalledWith("flux-dev:q8", {
+      baseUrl: "http://hal9000:7680",
+      apiKey: "sekrit",
+    });
+    // Optimistically hidden — telemetry still lists it until the next poll.
+    expect(wrapper.findAll("[data-test='loaded-model-chip']")).toHaveLength(0);
+  });
+
+  it("keeps the chip and surfaces an error toast when the unload fails", async () => {
+    unloadModel.mockRejectedValueOnce(new Error("model is busy"));
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='unload-chip']").trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll("[data-test='loaded-model-chip']")).toHaveLength(1);
+  });
+});
+
 describe("HostDetailView layout", () => {
   it("shows uptime from /api/status in the telemetry header", async () => {
     installApi({ uptime_secs: 200_000 });
@@ -567,7 +669,7 @@ describe("HostDetailView layout", () => {
   it("labels resident models LOADED so they can't read as queued jobs", async () => {
     const wrapper = await mountView();
     expect(wrapper.get("[data-test='loaded-label']").text()).toBe("LOADED");
-    const chips = wrapper.findAll("[data-test='loaded-model-chip']");
+    const chips = wrapper.findAll("[data-test='loaded-model-name']");
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
   });
 

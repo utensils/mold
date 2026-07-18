@@ -2,10 +2,12 @@
 import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import CatalogDetailDrawer from "../components/models/CatalogDetailDrawer.vue";
+import QueueEntryDrawer from "../components/jobs/QueueEntryDrawer.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
 import ModelTableRow from "../components/models/ModelTableRow.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
 import { startCatalogDownload } from "../lib/api/catalog";
+import { unloadModel } from "../lib/api/models";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
@@ -14,8 +16,15 @@ import { inferBackendFromGpuName } from "../lib/hosts";
 import { modelDiskBytes, modelSizeLabels } from "../lib/models";
 import { modelSource } from "../lib/modelSource";
 import { ipc } from "../lib/ipc";
-import type { GpuSnapshot, ModelEntry, ResourceSnapshot, ServerStatus } from "../lib/api/types";
+import type {
+  GpuSnapshot,
+  ModelEntry,
+  OutputMetadata,
+  ResourceSnapshot,
+  ServerStatus,
+} from "../lib/api/types";
 import { useAppPrefsStore } from "../stores/appPrefs";
+import { useComposerStore } from "../stores/composer";
 import { useDownloadsStore } from "../stores/downloads";
 import { useGenerationStore } from "../stores/generation";
 import { useHostModelsStore } from "../stores/hostModels";
@@ -33,6 +42,7 @@ type DetailSnapshot = ResourceSnapshot & {
 const route = useRoute();
 const router = useRouter();
 const appPrefs = useAppPrefsStore();
+const composer = useComposerStore();
 const downloads = useDownloadsStore();
 const generation = useGenerationStore();
 const hosts = useHostsStore();
@@ -133,6 +143,15 @@ function startReadyServices() {
 const detailModel = ref<ModelEntry | null>(null);
 const drawerRepairing = ref(false);
 
+// Clicking a queue row opens its info drawer (state + submitted settings).
+const queueDetail = ref<EnrichedQueueEntry | null>(null);
+
+// Loaded-model chip unload state — declared here (not with its handlers)
+// because the identity watch's immediate run resets it.
+const unloading = ref<Set<string>>(new Set());
+/** Optimistically hidden until the telemetry poll confirms the unload. */
+const recentlyUnloaded = ref<Set<string>>(new Set());
+
 // Connection identity retargeting is the only event that replaces page data.
 // A health poll changing ready/error state must not clear and rebuild the
 // telemetry, storage, or models sections: those components keep their last
@@ -142,8 +161,13 @@ watch(
   (identity, previous) => {
     const hostChanged = !previous || identity[0] !== previous[0] || identity[1] !== previous[1];
     // A drawer left open for the previous host must not retarget its model
-    // (and Repair action) at the next one.
-    if (hostChanged) detailModel.value = null;
+    // (and Repair action) at the next one — nor may a queue drawer or an
+    // optimistic unload survive a host switch.
+    if (hostChanged) {
+      detailModel.value = null;
+      queueDetail.value = null;
+      recentlyUnloaded.value.clear();
+    }
     startResourceStream(hostChanged);
     void fetchStatus(hostChanged);
     startQueuePolling();
@@ -242,6 +266,55 @@ function entryCode(entry: EnrichedQueueEntry): string {
 function entryElapsed(entry: EnrichedQueueEntry): string | null {
   if (entry.state !== "running" || !entry.started_at_unix_ms) return null;
   return formatEta((Date.now() - entry.started_at_unix_ms) / 1000);
+}
+
+// Each poll rebuilds the entry objects — keep an open drawer tracking its
+// job by id so state/elapsed stay live.
+watch(queueEntries, (entries) => {
+  const open = queueDetail.value;
+  if (!open) return;
+  const updated = entries.find((entry) => entry.id === open.id);
+  if (updated) queueDetail.value = updated;
+});
+
+/** Unpinned seeds restore as random; `seed_pinned` disambiguates an
+ *  explicit seed 0 on newer servers. */
+function loadQueueSettings(metadata: OutputMetadata) {
+  const pinned = queueDetail.value?.seed_pinned ?? metadata.seed !== 0;
+  composer.set({
+    metadata: pinned ? metadata : ({ ...metadata, seed: null } as unknown as OutputMetadata),
+  });
+  queueDetail.value = null;
+  void router.push("/generate");
+}
+
+// ── Loaded-model chips: per-host unload ───────────────────────────────────
+
+const loadedChips = computed(() =>
+  modelsLoaded.value.filter((name) => !recentlyUnloaded.value.has(name)),
+);
+
+watch(modelsLoaded, (models) => {
+  for (const name of [...recentlyUnloaded.value]) {
+    if (!models.includes(name)) recentlyUnloaded.value.delete(name);
+  }
+});
+
+async function unloadChip(name: string) {
+  const h = host.value;
+  if (!h || unloading.value.has(name)) return;
+  unloading.value.add(name);
+  try {
+    await unloadModel(name, hostTarget() ?? undefined);
+    recentlyUnloaded.value.add(name);
+    toasts.push(`Unloaded ${name} on ${h.label}`);
+    void fetchStatus();
+    void hostModels.refresh(true);
+  } catch (err) {
+    toasts.push(err instanceof Error ? err.message : String(err), "error");
+  } finally {
+    unloading.value.delete(name);
+  }
 }
 
 const uptime = computed(() => status.value?.uptime_secs ?? null);
@@ -608,37 +681,51 @@ async function forget() {
           data-test="host-queue"
           class="border-edge divide-edge mt-2 divide-y overflow-hidden rounded-control border bg-bench"
         >
-          <li
-            v-for="entry in queueEntries"
-            :key="entry.id"
-            data-test="host-queue-row"
-            class="flex items-center gap-2.5 px-3 py-1.5"
-          >
-            <span
-              class="h-1.5 w-1.5 shrink-0 rounded-full"
-              :class="entry.state === 'running' ? 'bg-safelight' : 'bg-halide'"
-              aria-hidden="true"
-            />
-            <span class="edge-code shrink-0">{{ entryCode(entry) }}</span>
-            <span class="min-w-0 truncate text-body text-ink">{{ entry.model }}</span>
-            <span v-if="!entry.mine" class="edge-code shrink-0">OTHER CLIENT</span>
-            <div class="flex-1" />
-            <span v-if="entryElapsed(entry)" class="data-mono shrink-0 text-ink-3">
-              {{ entryElapsed(entry) }}
-            </span>
+          <li v-for="entry in queueEntries" :key="entry.id">
+            <button
+              type="button"
+              data-test="host-queue-row"
+              class="flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors duration-100 hover:bg-bath"
+              :aria-label="`Show details for ${entry.model}`"
+              @click="queueDetail = entry"
+            >
+              <span
+                class="h-1.5 w-1.5 shrink-0 rounded-full"
+                :class="entry.state === 'running' ? 'bg-safelight' : 'bg-halide'"
+                aria-hidden="true"
+              />
+              <span class="edge-code shrink-0">{{ entryCode(entry) }}</span>
+              <span class="min-w-0 truncate text-body text-ink">{{ entry.model }}</span>
+              <span v-if="!entry.mine" class="edge-code shrink-0">OTHER CLIENT</span>
+              <div class="flex-1" />
+              <span v-if="entryElapsed(entry)" class="data-mono shrink-0 text-ink-3">
+                {{ entryElapsed(entry) }}
+              </span>
+            </button>
           </li>
         </ul>
         <p v-else class="mt-2 text-caption text-ink-3" data-test="queue-empty">Queue is empty.</p>
-        <div v-if="modelsLoaded.length" class="mt-2 flex flex-wrap items-center gap-1.5">
+        <div v-if="loadedChips.length" class="mt-2 flex flex-wrap items-center gap-1.5">
           <span class="edge-code mr-1" data-test="loaded-label">LOADED</span>
           <span
-            v-for="m in modelsLoaded"
+            v-for="m in loadedChips"
             :key="m"
             data-test="loaded-model-chip"
-            class="border-edge flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-caption text-ink-2"
-            ><span class="h-1.5 w-1.5 shrink-0 rounded-full bg-safelight" aria-hidden="true" />{{
-              m
-            }}</span
+            class="border-edge flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2 text-caption text-ink-2"
+            ><span class="h-1.5 w-1.5 shrink-0 rounded-full bg-safelight" aria-hidden="true" /><span
+              data-test="loaded-model-name"
+              >{{ m }}</span
+            ><button
+              type="button"
+              data-test="unload-chip"
+              class="px-0.5 text-ink-3 transition-colors duration-100 hover:text-stop disabled:opacity-40"
+              :aria-label="`Unload ${m}`"
+              :title="`Unload ${m} from this host's GPU`"
+              :disabled="unloading.has(m)"
+              @click="unloadChip(m)"
+            >
+              {{ unloading.has(m) ? "…" : "✕" }}
+            </button></span
           >
         </div>
         <p v-else class="mt-2 text-caption text-ink-3">
@@ -689,6 +776,16 @@ async function forget() {
           </li>
         </ul>
         <p v-else class="mt-2 text-caption text-ink-3">No installed models reported</p>
+
+        <QueueEntryDrawer
+          v-if="queueDetail"
+          :entry="queueDetail"
+          :host-label="host.label"
+          :state-code="entryCode(queueDetail)"
+          :elapsed="entryElapsed(queueDetail)"
+          @close="queueDetail = null"
+          @load="loadQueueSettings"
+        />
 
         <!-- One consistent model-detail drawer, shared with the catalog. -->
         <CatalogDetailDrawer

@@ -517,42 +517,61 @@ export const useGenerationStore = defineStore("generation", {
                 current.previewUrl = null;
               }
               // Remote prints also land in this Mac's gallery (pref-gated):
-              // the SSE payload is the encoded output file, metadata included,
-              // so no extra download is needed.
+              // the SSE payload is the encoded output file, so no extra
+              // download is needed. Newer servers also send the gallery
+              // filename and recorded metadata — keeping the origin's name
+              // makes the copy and the original one logical print in the
+              // merged gallery, and the metadata gives video copies (which
+              // embed nothing) their true dimensions and provenance.
               if (current.remote && (useAppPrefsStore().settings?.saveRemoteOutputs ?? true)) {
                 const now = Date.now();
+                const meta = complete.metadata ?? null;
+                const originalMeta =
+                  meta && complete.original_width && complete.original_height
+                    ? {
+                        ...meta,
+                        width: complete.original_width,
+                        height: complete.original_height,
+                      }
+                    : meta;
                 const saves = complete.original_image
                   ? [
                       ipc.saveOutputBytes(
-                        suggestOutputFilename(
-                          complete.model,
-                          complete.seed_used,
-                          complete.format,
-                          now,
-                          "original",
-                        ),
+                        complete.original_filename ??
+                          suggestOutputFilename(
+                            complete.model,
+                            complete.seed_used,
+                            complete.format,
+                            now,
+                            "original",
+                          ),
                         complete.original_image,
+                        originalMeta,
                       ),
                       ipc.saveOutputBytes(
-                        suggestOutputFilename(
-                          complete.model,
-                          complete.seed_used,
-                          complete.format,
-                          now,
-                          "upscaled",
-                        ),
+                        complete.filename ??
+                          suggestOutputFilename(
+                            complete.model,
+                            complete.seed_used,
+                            complete.format,
+                            now,
+                            "upscaled",
+                          ),
                         complete.image,
+                        meta,
                       ),
                     ]
                   : [
                       ipc.saveOutputBytes(
-                        suggestOutputFilename(
-                          complete.model,
-                          complete.seed_used,
-                          complete.format,
-                          now,
-                        ),
+                        complete.filename ??
+                          suggestOutputFilename(
+                            complete.model,
+                            complete.seed_used,
+                            complete.format,
+                            now,
+                          ),
                         complete.image,
+                        meta,
                       ),
                     ];
                 Promise.allSettled(saves).then((results) => {

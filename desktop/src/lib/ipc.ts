@@ -6,7 +6,7 @@ import type {
   RunPodOverview,
   RunPodPod,
 } from "./runpod";
-import type { GalleryImage } from "./api/types";
+import type { GalleryImage, OutputMetadata } from "./api/types";
 
 /**
  * Typed wrappers around Tauri IPC. In a plain browser (`bun run dev` /
@@ -254,9 +254,13 @@ export const ipc = {
     return invoke<void>("local_gallery_delete", { filename });
   },
   /** Write encoded output bytes (base64) into this Mac's output dir. */
-  saveOutputBytes(filename: string, dataB64: string): Promise<string> {
+  saveOutputBytes(
+    filename: string,
+    dataB64: string,
+    metadata?: OutputMetadata | null,
+  ): Promise<string> {
     if (!inTauri()) return Promise.reject(new Error("Local saves require the desktop app."));
-    return invoke<string>("save_output_bytes", { filename, dataB64 });
+    return invoke<string>("save_output_bytes", { filename, dataB64, metadata: metadata ?? null });
   },
   clipboardWriteImage(bytes: Uint8Array): Promise<void> {
     if (!inTauri()) return Promise.resolve();

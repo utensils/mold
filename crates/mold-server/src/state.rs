@@ -37,7 +37,7 @@ pub struct ActiveGenerationSnapshot {
 /// Internal SSE message type used by both the queue worker and SSE streams.
 pub enum SseMessage {
     Progress(mold_core::SseProgressEvent),
-    Complete(mold_core::SseCompleteEvent),
+    Complete(Box<mold_core::SseCompleteEvent>),
     UpscaleComplete(mold_core::SseUpscaleCompleteEvent),
     Error(mold_core::SseErrorEvent),
 }

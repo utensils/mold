@@ -192,6 +192,164 @@ describe("merged grid", () => {
   });
 });
 
+describe("identity dedupe", () => {
+  const identified = (
+    filename: string,
+    timestamp: number,
+    seed: number,
+    size: number,
+  ): GalleryImage =>
+    ({ filename, timestamp, size_bytes: size, metadata: { prompt: "p", seed } }) as never;
+
+  it("collapses same-print copies whose filenames differ via seed + byte identity", async () => {
+    connectLocalPlusHal();
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      // The same LTX print: saved on hal9000 under the server's name, and
+      // mirrored locally by an old auto-save that invented its own name.
+      if (url.includes("hal9000"))
+        return Promise.resolve([identified("ltx-video-9000.mp4", 300, 42, 9_000)]) as never;
+      return Promise.resolve([
+        identified("ltx-video-mirror.mp4", 301, 42, 9_000),
+        identified("unrelated.png", 100, 7, 1_234),
+      ]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+
+    expect(gallery.merged).toHaveLength(2);
+    const print = gallery.merged[0]!;
+    // One logical print, the local copy preferred, both locations listed.
+    expect(print.sourceKey).toBe("local");
+    expect(print.availableOn.map((s) => s.key).sort()).toEqual(["hal9000-7680", "local"]);
+  });
+
+  it("recovers the seed from auto-save filenames for synthesized video rows", async () => {
+    connectLocalPlusHal();
+    // The origin recorded real metadata; the old local mirror's row was
+    // synthesized (videos embed nothing) with seed 0 — but the desktop's
+    // auto-save filename encodes the real seed.
+    const origin = {
+      filename: "mold-ltx-2-3-22b-dev-fp8-1721312345678.mp4",
+      timestamp: 300,
+      size_bytes: 9_000,
+      metadata: { prompt: "a cheetah", seed: 852494036 },
+    } as never as GalleryImage;
+    const mirror = {
+      filename: "mold-ltx-2-3-22b-dev-fp8-852494036-1721312349999.mp4",
+      timestamp: 301,
+      size_bytes: 9_000,
+      metadata_synthetic: true,
+      metadata: { prompt: "", seed: 0 },
+    } as never as GalleryImage;
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000")) return Promise.resolve([origin]) as never;
+      return Promise.resolve([mirror]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+
+    expect(gallery.merged).toHaveLength(1);
+    expect(gallery.merged[0]!.availableOn.map((s) => s.key).sort()).toEqual([
+      "hal9000-7680",
+      "local",
+    ]);
+  });
+
+  it("opts synthesized rows without a parseable filename out of identity", async () => {
+    connectLocalPlusHal();
+    // Both rows are synthetic with the placeholder seed 0 and equal sizes —
+    // without a real seed recovered from the filename they must never merge.
+    const synth = (filename: string): GalleryImage =>
+      ({
+        filename,
+        timestamp: 300,
+        size_bytes: 9_000,
+        metadata_synthetic: true,
+        metadata: { prompt: "", seed: 0, model: "unknown" },
+      }) as never;
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000")) return Promise.resolve([synth("clip-a.mp4")]) as never;
+      return Promise.resolve([synth("clip-b.mp4")]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+    expect(gallery.merged).toHaveLength(2);
+  });
+
+  it("never collapses different models that share a seed and byte size", async () => {
+    connectLocalPlusHal();
+    const withModel = (filename: string, model: string): GalleryImage =>
+      ({
+        filename,
+        timestamp: 300,
+        size_bytes: 9_000,
+        metadata: { prompt: "p", seed: 42, model },
+      }) as never;
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000"))
+        return Promise.resolve([withModel("a.png", "flux-dev:q8")]) as never;
+      return Promise.resolve([withModel("b.png", "sd15:fp16")]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+    expect(gallery.merged).toHaveLength(2);
+  });
+
+  it("never collapses identity matches written far apart (re-generations)", async () => {
+    connectLocalPlusHal();
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      // Same seed, size, and model — but two days apart: a re-generation,
+      // not a mirror.
+      if (url.includes("hal9000"))
+        return Promise.resolve([identified("a.png", 200_000, 42, 9_000)]) as never;
+      return Promise.resolve([identified("b.png", 27_200, 42, 9_000)]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+    expect(gallery.merged).toHaveLength(2);
+  });
+
+  it("never collapses rows that lack a seed or byte size", async () => {
+    connectLocalPlusHal();
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000")) return Promise.resolve([img("a.png", 300)]) as never;
+      return Promise.resolve([img("b.png", 301)]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+    expect(gallery.merged).toHaveLength(2);
+  });
+
+  it("existsLocally spots a local copy by identity even on host-chip tiles", async () => {
+    connectLocalPlusHal();
+    vi.mocked(apiJsonTo).mockImplementation((target) => {
+      const url = (target as { baseUrl: string }).baseUrl;
+      if (url.includes("hal9000"))
+        return Promise.resolve([
+          identified("ltx-video-9000.mp4", 300, 42, 9_000),
+          identified("remote-only.mp4", 200, 8, 5_000),
+        ]) as never;
+      return Promise.resolve([identified("ltx-video-mirror.mp4", 301, 42, 9_000)]) as never;
+    });
+    const gallery = useGalleryStore();
+    await gallery.fetchAll();
+
+    gallery.filter = "hal9000-7680";
+    const [mirrored, remoteOnly] = gallery.filtered;
+    // Host-chip tiles only carry their own bucket in availableOn — the
+    // local probe still recognizes the mirrored copy.
+    expect(mirrored!.availableOn.map((s) => s.key)).toEqual(["hal9000-7680"]);
+    expect(gallery.existsLocally(mirrored!)).toBe(true);
+    expect(gallery.existsLocally(remoteOnly!)).toBe(false);
+  });
+});
+
 describe("per-bucket isolation", () => {
   it("one host failing never breaks the others", async () => {
     connectLocalPlusHal();

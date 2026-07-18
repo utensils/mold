@@ -509,18 +509,19 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
             // skipped the DB write, which left freshly-generated files
             // invisible to /api/gallery until the next reconcile on
             // server restart.
+            let metadata = OutputMetadata::from_generate_request(
+                &job.request,
+                response.seed_used,
+                None,
+                mold_core::build_info::version_string(),
+            );
+            let mut saved_names = crate::queue::SavedOutputNames::default();
             if let Some(ref dir) = job.output_dir {
-                let metadata = OutputMetadata::from_generate_request(
-                    &job.request,
-                    response.seed_used,
-                    None,
-                    mold_core::build_info::version_string(),
-                );
                 let generation_time_ms = response.generation_time_ms as i64;
                 let db = job.metadata_db.as_ref().as_ref();
                 let events = Some(job.events.as_ref());
                 if let Some(ref video) = response.video {
-                    save_video_to_dir(
+                    saved_names.output = save_video_to_dir(
                         dir,
                         &video.data,
                         &video.gif_preview,
@@ -532,7 +533,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                         events,
                     );
                 } else {
-                    save_generated_image_outputs(
+                    saved_names = save_generated_image_outputs(
                         dir,
                         original_img.as_ref(),
                         &img,
@@ -552,8 +553,14 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
             // Discord bot silently degraded every LTX-Video / LTX-2 response
             // into an image attachment (the synthesized thumbnail PNG).
             if let Some(ref tx) = job.progress_tx {
-                let event = build_sse_complete_event(&response, &img, original_img.as_ref());
-                let _ = tx.send(SseMessage::Complete(event));
+                let event = build_sse_complete_event(
+                    &response,
+                    &img,
+                    original_img.as_ref(),
+                    Some(&metadata),
+                    &saved_names,
+                );
+                let _ = tx.send(SseMessage::Complete(Box::new(event)));
             }
 
             // Send result through oneshot.

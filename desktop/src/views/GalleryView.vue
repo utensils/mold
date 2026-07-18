@@ -19,6 +19,7 @@ import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
 import { inTauri, ipc } from "../lib/ipc";
 import { copyImageBytesToClipboard } from "../lib/clipboard";
+import { primaryModifierPressed } from "../lib/platform";
 import type { GalleryImage } from "../lib/api/types";
 
 const GAP = 8;
@@ -45,8 +46,11 @@ const canReveal = (entry: MergedPrint) =>
   entry.sourceKey === "local" || gallery.hostFor(entry.sourceKey)?.kind === "local";
 
 /** Prints on a remote host can be pulled into this Mac's gallery. */
+/** Copyable to this Mac: a remote-origin tile with no local copy yet (by
+ *  filename or byte identity). The menu item stays visible and grays out
+ *  once a local copy exists. */
 const canSaveLocally = (entry: MergedPrint) =>
-  inTauri() && gallery.hostFor(entry.sourceKey)?.kind === "remote";
+  inTauri() && gallery.hostFor(entry.sourceKey)?.kind === "remote" && !gallery.existsLocally(entry);
 
 async function blobToBase64(blob: Blob): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -67,8 +71,14 @@ async function fetchItemBase64(entry: MergedPrint): Promise<string> {
 
 async function saveToThisMac(entry: MergedPrint) {
   try {
-    const saved = await ipc.saveOutputBytes(entry.item.filename, await fetchItemBase64(entry));
-    toasts.push(`Saved to this Mac — ${saved}`);
+    // The origin row's metadata rides along so the local DB row matches the
+    // origin exactly — videos embed nothing in the file itself.
+    const saved = await ipc.saveOutputBytes(
+      entry.item.filename,
+      await fetchItemBase64(entry),
+      entry.item.metadata,
+    );
+    toasts.push(`Saved locally — ${saved}`);
     void gallery.refreshHost("local");
   } catch (err) {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
@@ -128,7 +138,7 @@ async function upscaleItem(entry: MergedPrint) {
     // the durable copy.
     const stem = entry.item.filename.replace(/\.[^.]+$/, "");
     const saved = await ipc.saveOutputBytes(`${stem}-upscaled.png`, upscaled);
-    toasts.push(`Upscaled — saved to this Mac as ${saved}`);
+    toasts.push(`Upscaled — saved locally as ${saved}`);
     // The save landed in this Mac's output dir: on a local/external primary
     // the engine bucket reads that same dir; on a remote primary it's the
     // IPC bucket. Refresh whichever of the two is loaded.
@@ -182,7 +192,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
       action: () => void upscaleItem(entry),
     },
     {
-      label: "Save to this Mac",
+      label: "Save locally",
       disabled: !canSaveLocally(entry),
       action: () => void saveToThisMac(entry),
     },
@@ -215,6 +225,7 @@ const rowHeight = ref(180);
 // ── Search + media-kind chips ──────────────────────────────────────────────
 const SEARCH_DEBOUNCE_MS = 200;
 const searchInput = ref(gallery.query);
+const searchEl = ref<HTMLInputElement | null>(null);
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 watch(searchInput, (value) => {
   if (searchTimer) clearTimeout(searchTimer);
@@ -394,6 +405,12 @@ function moveSelection(delta: number) {
 }
 
 function onKeydown(e: KeyboardEvent) {
+  // ⌘F focuses the view's own search — the screen-level filter shortcut.
+  if (e.key === "f" && primaryModifierPressed(e) && !e.altKey) {
+    e.preventDefault();
+    searchEl.value?.focus();
+    return;
+  }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === "ArrowRight") {
     e.preventDefault();
@@ -434,6 +451,27 @@ watch(
     // exist yet (e.g. the host is still connecting) and narrows on its own
     // the moment the source appears.
     gallery.filter = typeof host === "string" && host ? host : "all";
+  },
+  { immediate: true },
+);
+
+// Deep link: /gallery?print=<filename> (a ⌘K gallery result) reveals that
+// print — filters reset so it can't be hidden, then selection + lightbox
+// open once the buckets deliver it. One-shot: the param drops after use so
+// closing the lightbox doesn't re-open it.
+watch(
+  [() => route.query.print, () => gallery.merged.length],
+  ([print]) => {
+    if (typeof print !== "string" || !print) return;
+    const entry = gallery.merged.find((e) => e.item.filename === print);
+    if (!entry) return;
+    gallery.filter = "all";
+    gallery.mediaKind = "all";
+    gallery.query = "";
+    searchInput.value = "";
+    select(entry);
+    lightboxOpen.value = true;
+    void router.replace({ query: { ...route.query, print: undefined } });
   },
   { immediate: true },
 );
@@ -498,6 +536,7 @@ onUnmounted(() => {
         {{ gallery.firstError }}
       </span>
       <input
+        ref="searchEl"
         v-model="searchInput"
         data-selectable
         type="search"
@@ -593,10 +632,12 @@ onUnmounted(() => {
             >
               {{ bulkSelection.has(laid.item.filename) ? "✓" : "" }}
             </span>
+            <!-- The badge yields to the rising edge code on hover — both live
+                 in the tile's bottom margin and must never overlap. -->
             <span
               v-if="showBadges"
               data-test="host-badge"
-              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media"
+              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media transition-opacity duration-100 group-hover:opacity-0"
               :title="`Available on ${availabilityLabel(laid.entry)}`"
             >
               {{ availabilityLabel(laid.entry) }}

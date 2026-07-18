@@ -63,6 +63,58 @@ const emptyBucket = (): GalleryBucket => ({
 });
 
 /**
+ * Seed used for cross-host identity. Video files embed no `mold:parameters`,
+ * so rows for old locally-mirrored videos were synthesized with `seed: 0` —
+ * but the desktop's own auto-save filenames encode the real seed
+ * (`mold-<model>-<seed>-<epochMs>[-role].<ext>`), so synthetic rows recover
+ * it from the name. Non-synthetic rows trust their recorded metadata.
+ */
+export function identitySeed(item: GalleryImage): number | null {
+  if (item.metadata_synthetic) {
+    // A synthesized row's recorded seed is a placeholder 0 ("unknown") — it
+    // must never act as a real seed. Only the auto-save filename pattern
+    // yields a trustworthy seed; otherwise the row opts out of identity.
+    const match = /-(\d+)-(\d+)(?:-(?:original|upscaled))?\.[a-z0-9]+$/i.exec(item.filename);
+    return match ? Number(match[1]) : null;
+  }
+  return item.metadata?.seed ?? null;
+}
+
+/** Filename-style slug of a model name — matches the auto-save filename
+ *  vocabulary, so synthesized rows (model recovered from the name) compare
+ *  equal to origin rows carrying the real `model:tag`. */
+function modelIdentitySlug(model: string | undefined): string {
+  return (model ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Cross-host identity beyond the filename: mirrored copies of one print are
+ * byte-identical, so seed + exact byte size + model pins them together even
+ * when an old auto-save invented its own filename or a video copy
+ * synthesized its metadata (seed and model survive in the filename either
+ * way). Rows missing seed or size opt out of identity matching entirely.
+ */
+export function printIdentity(item: GalleryImage): string | null {
+  const size = item.size_bytes;
+  const seed = identitySeed(item);
+  if (!size || seed == null) return null;
+  return `${seed}:${size}:${modelIdentitySlug(item.metadata?.model)}`;
+}
+
+/** Identity matches only count as one print when the rows were written
+ *  around the same time: mirrors land within seconds of their origin, while
+ *  a genuine re-generation that happens to reuse a seed (and byte length)
+ *  lands much later and must stay a separate print. */
+export const IDENTITY_WINDOW_SECS = 3600;
+
+export function withinIdentityWindow(a: GalleryImage, b: GalleryImage): boolean {
+  return Math.abs(a.timestamp - b.timestamp) <= IDENTITY_WINDOW_SECS;
+}
+
+/**
  * Unified multi-host gallery: one bucket per origin, merged into a single
  * date-sorted grid. Buckets are keyed by "local" (This Mac via native IPC)
  * or a host id from the hosts store; API targets are always resolved at
@@ -117,21 +169,40 @@ export const useGalleryStore = defineStore("gallery", {
      */
     merged(): MergedPrint[] {
       const byFilename = new Map<string, MergedPrint>();
+      // Second-level identity (seed + byte size) collapses copies whose
+      // filenames diverged — auto-saves from before the server shipped its
+      // gallery filename on the complete event minted their own names.
+      const byIdentity = new Map<string, MergedPrint>();
+      const prints: MergedPrint[] = [];
       for (const source of this.sources) {
         const bucket = this.buckets[source.key];
         if (!bucket) continue;
         for (const item of bucket.items) {
-          const existing = byFilename.get(item.filename);
+          const identity = printIdentity(item);
+          let existing = byFilename.get(item.filename);
+          if (!existing && identity) {
+            const candidate = byIdentity.get(identity);
+            if (candidate && withinIdentityWindow(candidate.item, item)) existing = candidate;
+          }
           if (!existing) {
-            byFilename.set(item.filename, {
+            const print: MergedPrint = {
               item,
               sourceKey: source.key,
               hostLabel: source.label,
               availableOn: [source],
-            });
+            };
+            byFilename.set(item.filename, print);
+            if (identity) byIdentity.set(identity, print);
+            prints.push(print);
             continue;
           }
-          existing.availableOn.push(source);
+          // A copy under a different name still joins the print, and its
+          // name is indexed too so further copies under either name merge.
+          byFilename.set(item.filename, existing);
+          if (identity && !byIdentity.has(identity)) byIdentity.set(identity, existing);
+          if (!existing.availableOn.some((s) => s.key === source.key)) {
+            existing.availableOn.push(source);
+          }
           if (source.key === "local" && existing.sourceKey !== "local") {
             existing.item = item;
             existing.sourceKey = source.key;
@@ -139,7 +210,7 @@ export const useGalleryStore = defineStore("gallery", {
           }
         }
       }
-      return [...byFilename.values()].sort((a, b) => b.item.timestamp - a.item.timestamp);
+      return prints.sort((a, b) => b.item.timestamp - a.item.timestamp);
     },
     /**
      * `merged` in All; an individual host remains its complete raw bucket so
@@ -160,6 +231,26 @@ export const useGalleryStore = defineStore("gallery", {
           availableOn: [source],
         }))
         .sort((a, b) => b.item.timestamp - a.item.timestamp);
+    },
+    /**
+     * True when this print already lives in this Mac's gallery — by filename
+     * or by byte identity — whatever source the given tile came from. Host
+     * -chip tiles carry only their own bucket in `availableOn`, so the local
+     * bucket is probed directly.
+     */
+    existsLocally(): (entry: MergedPrint) => boolean {
+      return (entry) => {
+        if (entry.sourceKey === "local") return true;
+        if (entry.availableOn.some((s) => s.key === "local")) return true;
+        const identity = printIdentity(entry.item);
+        return (this.buckets["local"]?.items ?? []).some(
+          (item) =>
+            item.filename === entry.item.filename ||
+            (identity !== null &&
+              printIdentity(item) === identity &&
+              withinIdentityWindow(item, entry.item)),
+        );
+      };
     },
     /** What the Gallery grid renders: host chip → media kind → text query. */
     filtered(): MergedPrint[] {
