@@ -54,6 +54,32 @@ export async function fetchCatalogFamilies(
   return res.families.map((f) => f.family);
 }
 
+export interface CatalogInstalledParams {
+  family?: string | undefined;
+  kind?: string | undefined;
+}
+
+/**
+ * Enumerate installed catalog entries — `GET /api/catalog/installed`, backed
+ * by the per-install sidecar files under the host's `models_dir` (so no
+ * upstream credentials are needed). `family` / `kind` are server-side filters
+ * (e.g. `kind: "control-net"` for the ControlNet picker); entries carry
+ * `installed` + `primary_path`. Same envelope shape as `/api/catalog/search`.
+ */
+export async function fetchCatalogInstalled(
+  params: CatalogInstalledParams,
+  target?: ApiTarget,
+): Promise<CatalogSearchResponse> {
+  const query = new URLSearchParams();
+  if (params.family) query.set("family", params.family);
+  if (params.kind) query.set("kind", params.kind);
+  const qs = query.toString();
+  return apiJsonTo<CatalogSearchResponse>(
+    target ?? currentTarget(),
+    `/api/catalog/installed${qs ? `?${qs}` : ""}`,
+  );
+}
+
 /**
  * Fetch one catalog entry's full detail — `GET /api/catalog/:id`. The single
  * code path for the endpoint: the detail drawer reads everything, lazy card

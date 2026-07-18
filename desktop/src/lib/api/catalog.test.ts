@@ -18,7 +18,7 @@ vi.mock("../catalogCredentials", () => ({
   }),
 }));
 
-import { fetchCatalogDetail } from "./catalog";
+import { fetchCatalogDetail, fetchCatalogInstalled } from "./catalog";
 import type { CatalogEntry } from "./types";
 
 const PRIMARY = { baseUrl: "http://127.0.0.1:49152", apiKey: null };
@@ -75,5 +75,41 @@ describe("fetchCatalogDetail", () => {
     expect(detail.license).toBeUndefined();
     expect(detail.tags).toBeUndefined();
     expect(detail.download_recipe).toBeUndefined();
+  });
+});
+
+describe("fetchCatalogInstalled", () => {
+  it("hits GET /api/catalog/installed with kind/family filters against the current target", async () => {
+    apiJsonTo.mockResolvedValueOnce({ entries: [], page: 1, page_size: 0, total: 0 });
+    await fetchCatalogInstalled({ family: "sd15", kind: "control-net" });
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      PRIMARY,
+      "/api/catalog/installed?family=sd15&kind=control-net",
+    );
+  });
+
+  it("omits absent params from the query string", async () => {
+    apiJsonTo.mockResolvedValueOnce({ entries: [], page: 1, page_size: 0, total: 0 });
+    await fetchCatalogInstalled({ kind: "control-net" });
+    expect(apiJsonTo).toHaveBeenCalledWith(PRIMARY, "/api/catalog/installed?kind=control-net");
+  });
+
+  it("targets an explicit host when given one (multi-host installed listing)", async () => {
+    apiJsonTo.mockResolvedValueOnce({ entries: [], page: 1, page_size: 0, total: 0 });
+    const remote = { baseUrl: "http://hal9000:7680", apiKey: "hk" };
+    await fetchCatalogInstalled({ kind: "lora" }, remote);
+    expect(currentTarget).not.toHaveBeenCalled();
+    expect(apiJsonTo).toHaveBeenCalledWith(remote, "/api/catalog/installed?kind=lora");
+  });
+
+  it("returns the entries envelope untouched", async () => {
+    const envelope = {
+      entries: [{ id: "cv:1", name: "cn", installed: true, primary_path: "/m/cn.safetensors" }],
+      page: 1,
+      page_size: 1,
+      total: 1,
+    };
+    apiJsonTo.mockResolvedValueOnce(envelope);
+    expect(await fetchCatalogInstalled({})).toEqual(envelope);
   });
 });

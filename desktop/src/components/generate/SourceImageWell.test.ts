@@ -10,7 +10,17 @@ import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 vi.mock("../../lib/api/client", () => ({
   apiJson: vi.fn(() => Promise.resolve([])),
   apiFetch: vi.fn(),
+  apiJsonTo: vi.fn(() => Promise.resolve([])),
+  apiFetchTo: vi.fn(),
+  currentTarget: vi.fn(() => ({ baseUrl: "http://127.0.0.1:49152", apiKey: null })),
 }));
+
+const { fetchCatalogInstalled } = vi.hoisted(() => ({
+  fetchCatalogInstalled: vi.fn(() =>
+    Promise.resolve({ entries: [], page: 1, page_size: 0, total: 0 }),
+  ),
+}));
+vi.mock("../../lib/api/catalog", () => ({ fetchCatalogInstalled }));
 
 function formFor(family: string): GenerateForm {
   return reactive({ ...newGenerateForm(), family, model: "m" });
@@ -127,6 +137,194 @@ describe("SourceImageWell", () => {
         upscalerModel: "real-esrgan-x4plus:fp16",
         fit: { mode: "pad-repaint" },
       });
+    });
+  });
+
+  describe("qwen-edit Target + Reference strip", () => {
+    it("renders the picture strip instead of the single well", () => {
+      const form = formFor("qwen-image-edit");
+      form.imageAttachments = ["T", "R"];
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      expect(wrapper.find("[data-test='attachment-strip']").exists()).toBe(true);
+      // The single-mode surface (source fit, strength) must not render.
+      expect(wrapper.find("[data-test='source-fit-policy']").exists()).toBe(false);
+      expect(wrapper.find("[data-test='source-choose-gallery']").exists()).toBe(false);
+    });
+
+    it("keeps the single well for every other family (no strip)", () => {
+      const form = formFor("sd15");
+      form.sourceImage = "SRC";
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      expect(wrapper.find("[data-test='attachment-strip']").exists()).toBe(false);
+    });
+
+    it("labels the first tile Target and the rest Reference, titled Picture N", () => {
+      const form = formFor("qwen-image-edit");
+      form.imageAttachments = ["T", "R1", "R2"];
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      expect(wrapper.get("[data-test='attachment-role-0']").text()).toBe("Target");
+      expect(wrapper.get("[data-test='attachment-role-1']").text()).toBe("Reference");
+      expect(wrapper.get("[data-test='attachment-role-2']").text()).toBe("Reference");
+      expect(wrapper.get("[data-test='attachment-title-0']").text()).toBe("Picture 1");
+      expect(wrapper.get("[data-test='attachment-title-2']").text()).toBe("Picture 3");
+    });
+
+    it("appends picks from the multi-select picker in order", async () => {
+      const form = formFor("qwen-image-edit");
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      await wrapper.get("[data-test='add-edit-image']").trigger("click");
+      const picker = wrapper.findComponent(ImagePickerModal);
+      expect(picker.props("multiple")).toBe(true);
+      picker.vm.$emit("pick", [
+        { filename: "a.png", base64: "A" },
+        { filename: "b.png", base64: "B" },
+      ]);
+      await flushPromises();
+      expect(form.imageAttachments).toEqual(["A", "B"]);
+    });
+
+    it("removes a tile", async () => {
+      const form = formFor("qwen-image-edit");
+      form.imageAttachments = ["T", "R1", "R2"];
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      await wrapper.get("[data-test='remove-attachment-1']").trigger("click");
+      expect(form.imageAttachments).toEqual(["T", "R2"]);
+    });
+
+    it("reorders with the move buttons — a Reference promoted to slot 0 becomes the Target", async () => {
+      const form = formFor("qwen-image-edit");
+      form.imageAttachments = ["T", "R1", "R2"];
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      await wrapper.get("[data-test='move-attachment-up-1']").trigger("click");
+      expect(form.imageAttachments).toEqual(["R1", "T", "R2"]);
+      await wrapper.get("[data-test='move-attachment-down-1']").trigger("click");
+      expect(form.imageAttachments).toEqual(["R1", "R2", "T"]);
+    });
+  });
+
+  describe("controlnet picker", () => {
+    async function mountSd15WithControl(catalogEntries: unknown[] = []) {
+      fetchCatalogInstalled.mockResolvedValue({
+        entries: catalogEntries,
+        page: 1,
+        page_size: catalogEntries.length,
+        total: catalogEntries.length,
+      } as never);
+      const { useModelStore } = await import("../../stores/models");
+      const models = useModelStore();
+      models.all = [
+        { name: "controlnet-canny-sd15", family: "controlnet", downloaded: true },
+        { name: "controlnet-openpose-sd15", family: "controlnet", downloaded: false },
+      ] as (typeof models.all)[number][];
+      const form = formFor("sd15");
+      form.controlImage = "CTRL";
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      await flushPromises();
+      return { wrapper, form };
+    }
+
+    it("renders a select of installed + catalog options, disabling missing downloads", async () => {
+      const { wrapper } = await mountSd15WithControl([
+        {
+          id: "cv:1",
+          name: "cv-control",
+          installed: true,
+          primary_path: "/m/cv-control.safetensors",
+        },
+      ]);
+      const select = wrapper.get("[data-test='controlnet-select']").element as HTMLSelectElement;
+      const options = Array.from(select.options).map((o) => ({
+        value: o.value,
+        disabled: o.disabled,
+      }));
+      expect(options).toContainEqual({ value: "controlnet-canny-sd15", disabled: false });
+      expect(options).toContainEqual({ value: "controlnet-openpose-sd15", disabled: true });
+      expect(options).toContainEqual({ value: "/m/cv-control.safetensors", disabled: false });
+      // No raw free-text input until Custom… is chosen.
+      expect(wrapper.find("[data-test='controlnet-custom-input']").exists()).toBe(false);
+    });
+
+    it("selecting an option sets form.controlModel", async () => {
+      const { wrapper, form } = await mountSd15WithControl();
+      await wrapper.get("[data-test='controlnet-select']").setValue("controlnet-canny-sd15");
+      expect(form.controlModel).toBe("controlnet-canny-sd15");
+    });
+
+    it("Custom… reveals the free-text escape hatch and keeps typed values", async () => {
+      const { wrapper, form } = await mountSd15WithControl();
+      await wrapper.get("[data-test='controlnet-select']").setValue("__custom__");
+      const input = wrapper.get("[data-test='controlnet-custom-input']");
+      await input.setValue("my-handmade-controlnet");
+      expect(form.controlModel).toBe("my-handmade-controlnet");
+    });
+
+    it("scopes to a pinned host that is fetched but has no models (empty ≠ unknown)", async () => {
+      // A sticky non-primary host whose /api/models came back empty must NOT
+      // fall back to the primary's inventory — its inventory is *known* (just
+      // empty), so the picker offers no installed controlnet models.
+      const { useModelStore } = await import("../../stores/models");
+      const models = useModelStore();
+      models.all = [
+        { name: "controlnet-canny-sd15", family: "controlnet", downloaded: true },
+      ] as (typeof models.all)[number][];
+      const { useHostsStore } = await import("../../stores/hosts");
+      useHostsStore().extras = [
+        {
+          id: "h1",
+          label: "h1",
+          url: "http://h1",
+          apiKey: null,
+          status: "ready",
+          error: null,
+          instanceId: null,
+        },
+      ];
+      const { useAppPrefsStore } = await import("../../stores/appPrefs");
+      useAppPrefsStore().settings = { generateTargetHost: "h1" } as never;
+      const { useHostModelsStore } = await import("../../stores/hostModels");
+      useHostModelsStore().byHost = {
+        h1: { entries: [], fetchedAt: Date.now(), error: null },
+      };
+      fetchCatalogInstalled.mockResolvedValue({
+        entries: [],
+        page: 1,
+        page_size: 0,
+        total: 0,
+      } as never);
+
+      const form = formFor("sd15");
+      form.controlImage = "CTRL";
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      await flushPromises();
+      const select = wrapper.get("[data-test='controlnet-select']").element as HTMLSelectElement;
+      const values = Array.from(select.options).map((o) => o.value);
+      expect(values).not.toContain("controlnet-canny-sd15");
+    });
+
+    it("gives the Custom… free-text input an accessible name", async () => {
+      const { wrapper } = await mountSd15WithControl();
+      await wrapper.get("[data-test='controlnet-select']").setValue("__custom__");
+      const input = wrapper.get("[data-test='controlnet-custom-input']");
+      expect(input.attributes("aria-label")?.trim()).toBeTruthy();
+    });
+
+    it("shows an unknown restored value as a selectable option (metadata reuse)", async () => {
+      const { useModelStore } = await import("../../stores/models");
+      useModelStore().all = [];
+      fetchCatalogInstalled.mockResolvedValue({
+        entries: [],
+        page: 1,
+        page_size: 0,
+        total: 0,
+      } as never);
+      const form = formFor("sd15");
+      form.controlImage = "CTRL";
+      form.controlModel = "restored-from-metadata";
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      await flushPromises();
+      const select = wrapper.get("[data-test='controlnet-select']").element as HTMLSelectElement;
+      expect(Array.from(select.options).map((o) => o.value)).toContain("restored-from-metadata");
+      expect(select.value).toBe("restored-from-metadata");
     });
   });
 });

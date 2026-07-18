@@ -26,6 +26,7 @@ export const useGenerateFormStore = defineStore("generateForm", {
       this.form.seed = "";
       this.form.sourceImage = null;
       this.form.maskImage = null;
+      this.form.imageAttachments = [];
     },
     /**
      * Reset every field to defaults. `Object.assign` preserves the form's

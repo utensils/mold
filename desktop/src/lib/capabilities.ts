@@ -149,9 +149,16 @@ export function pruneRequestForFamily(req: GenerateRequest, family: string): Gen
 
   if (caps.forcesBatchSizeOne) next.batch_size = 1;
 
+  // qwen-edit requests carry `edit_images` (ordered: target first, then
+  // references) and NEVER `source_image`/`strength`; every other family is the
+  // exact inverse. The sanitizer used to strip the image entirely for
+  // qwen-edit — keep `edit_images` intact there (P7 regression flip).
   if (!caps.supportsImg2img || caps.sourceImageMode === "qwen-edit") {
     delete next.source_image;
     delete next.strength;
+  }
+  if (!caps.supportsImg2img || caps.sourceImageMode !== "qwen-edit") {
+    delete next.edit_images;
   }
   if (!caps.supportsMask) delete next.mask_image;
   if (!caps.supportsControlNet) {

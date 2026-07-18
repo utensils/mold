@@ -77,6 +77,10 @@ export interface GenerateForm {
   strength: number;
   /** base64, no data-URI prefix. */
   sourceImage: string | null;
+  /** Qwen-Image-Edit picture strip, base64 each (no data-URI prefix). Order is
+   * load-bearing: index 0 is the primary edit Target, the rest are References.
+   * Only read in `sourceImageMode === "qwen-edit"`; empty everywhere else. */
+  imageAttachments: string[];
   /** How a source image that doesn't match width×height maps onto the canvas.
    * Applied client-side on submit (`sourceFitPreprocess.ts`), never wired. */
   sourceFit: SourceFitPolicy;
@@ -125,6 +129,7 @@ export function newGenerateForm(): GenerateForm {
     upscaleModel: "",
     strength: 0.75,
     sourceImage: null,
+    imageAttachments: [],
     sourceFit: { mode: "pad-repaint" },
     maskImage: null,
     controlImage: null,
@@ -169,6 +174,20 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   if (!caps.supportsImg2img) {
     form.sourceImage = null;
     form.maskImage = null;
+    form.imageAttachments = [];
+  } else if (caps.sourceImageMode === "qwen-edit") {
+    // Entering qwen-edit: a single-mode source seeds the strip as the Target
+    // (web parity — the Composer's attachment survives the model switch).
+    if (form.imageAttachments.length === 0 && form.sourceImage) {
+      form.imageAttachments = [form.sourceImage];
+    }
+    form.sourceImage = null;
+    form.maskImage = null;
+  } else if (form.imageAttachments.length > 0) {
+    // Leaving qwen-edit: the Target becomes the single img2img source (web
+    // parity — attachments truncate to one, which single mode reads).
+    if (!form.sourceImage) form.sourceImage = form.imageAttachments[0] ?? null;
+    form.imageAttachments = [];
   }
   if (!caps.supportsMask) form.maskImage = null;
   if (!caps.supportsControlNet) {
@@ -240,6 +259,17 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   }
   if (caps.supportsScheduler && form.scheduler !== "default") req.scheduler = form.scheduler;
   if (caps.supportsCfgPlus && form.cfgPlus) req.cfg_plus = true;
+
+  // qwen-edit ships the ordered picture strip (first = Target, rest =
+  // References) and never source_image/strength; batch is already locked to 1
+  // by forcesBatchSizeOne + pruneRequestForFamily.
+  if (
+    caps.supportsImg2img &&
+    caps.sourceImageMode === "qwen-edit" &&
+    form.imageAttachments.length > 0
+  ) {
+    req.edit_images = [...form.imageAttachments];
+  }
 
   if (caps.supportsImg2img && caps.sourceImageMode === "single" && form.sourceImage) {
     req.source_image = form.sourceImage;
@@ -374,6 +404,7 @@ export function applyMetadataToForm(
   form.sourceImage = null;
   form.maskImage = null;
   form.controlImage = null;
+  form.imageAttachments = [];
   form.sourceVideo = null;
   form.keyframes = [];
   form.audioFile = null;

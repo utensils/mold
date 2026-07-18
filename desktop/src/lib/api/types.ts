@@ -199,6 +199,9 @@ export interface GenerateRequest {
   cfg_plus?: boolean;
   /** img2img source, base64 (no data-URI prefix). */
   source_image?: string | null;
+  /** Qwen-Image-Edit multi-image inputs, base64 each (no data-URI prefix).
+   * Order is load-bearing: first = primary edit target, rest = references. */
+  edit_images?: string[];
   strength?: number;
   /** Inpaint mask, base64. */
   mask_image?: string;
@@ -490,6 +493,9 @@ export interface CatalogEntry {
   likes?: number | null;
   nsfw: boolean;
   installed: boolean;
+  /** Absolute weights path when installed — `GET /api/catalog/installed` fills
+   * it from the sidecar walk; search results usually omit it. */
+  primary_path?: string | null;
   thumbnail_url?: string | null;
   /** Human-facing model page. Additive wire field — absent on older servers. */
   page_url?: string | null;

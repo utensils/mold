@@ -18,7 +18,7 @@ export type GenerationTemplateSort = "updated-desc" | "updated-asc" | "name-asc"
 
 /** Human-facing labels for media that a template could not persist. */
 export type GenerationTemplateMediaField =
-  "source" | "mask" | "control" | "sourceVideo" | "keyframes";
+  "source" | "mask" | "control" | "sourceVideo" | "keyframes" | "editImages";
 
 export interface GenerationTemplate {
   id: string;
@@ -71,6 +71,7 @@ export function collectTemplateMediaReferences(form: GenerateForm): GenerationTe
   if (form.sourceImage) refs.push("source");
   if (form.maskImage) refs.push("mask");
   if (form.controlImage) refs.push("control");
+  if (form.imageAttachments.length > 0) refs.push("editImages");
   if (f.sourceVideo) refs.push("sourceVideo");
   if (Array.isArray(f.keyframes) && f.keyframes.length > 0) refs.push("keyframes");
   return refs;
@@ -82,6 +83,7 @@ function stripTemplateForm(form: GenerateForm): GenerateForm {
   clone.sourceImage = null;
   clone.maskImage = null;
   clone.controlImage = null;
+  clone.imageAttachments = [];
   if ("sourceVideo" in clone) clone.sourceVideo = null;
   if ("keyframes" in clone) clone.keyframes = [];
   return clone as GenerateForm;

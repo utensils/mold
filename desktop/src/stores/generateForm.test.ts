@@ -48,6 +48,7 @@ describe("generateForm store", () => {
     store.form.seed = "42";
     store.form.sourceImage = "base64";
     store.form.maskImage = "base64";
+    store.form.imageAttachments = ["T", "R"];
 
     store.clearComposer();
 
@@ -57,6 +58,7 @@ describe("generateForm store", () => {
     expect(store.form.seed).toBe("");
     expect(store.form.sourceImage).toBeNull();
     expect(store.form.maskImage).toBeNull();
+    expect(store.form.imageAttachments).toEqual([]);
     // Model + shape params survive a ⌘N.
     expect(store.form.model).toBe("flux-dev:q8");
     expect(store.form.family).toBe("flux");
