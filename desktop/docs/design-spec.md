@@ -191,7 +191,10 @@ models stacked above the live catalog — no All / Installed / Available toggle 
 filtered by **All / Images / Video** media chips (`?type=` deep links; the
 Chains and video Generate empty states link straight to `/models?type=video`;
 legacy `?tab=` / `?availability=` params still parse), with active
-**Downloads** pinned at the top.
+**Downloads** pinned at the top. The Table / Grid switcher is an icon
+segmented control whose active segment carries the Safelight fill; **Table is
+the default**, and the choice persists for the app session (ui store, not
+disk).
 
 ```
 │ CATALOG  [All] [Images] [Video]            [Search ⌘F]          [Grid|Table]│
@@ -202,8 +205,8 @@ legacy `?tab=` / `?availability=` params still parse), with active
 │ ── CATALOG — Hugging Face and Civitai ───────────────────────────────────  │
 ```
 
-- **Installed models:** surface first; rows show quant chip, disk usage, residency, and per-row actions. **Info** expands components (`/api/models/:model/components`) with per-component download/verify state and a "Verify checksums" action. Removing warns about shared components: "Keeps t5-xxl (used by 3 models)."
-- **Catalog results:** share the same search and layout controls; already-installed entries are excluded. Grid cards use a bounded preview height and responsive 260px minimum columns; Table rows favor names, source, family, popularity, size, and the Pull action. Civitai previews use one cache-stable 512 px CDN derivative in both layouts, async lazy decoding, and per-card layout/paint containment; the desktop also normalizes raw preview URLs returned by older remote servers. Missing or failed previews use a local family-aware mark at the same dimensions so cards keep their visual rhythm without another fetch. Source, Family, and NSFW filters refine paged `/api/catalog/search` results. Pulling with several ready hosts opens a labelled target dialog; a single-host setup starts immediately. Result cards keep **SIZE vs FETCH** honest.
+- **Installed models:** surface first; rows are shared `ModelTableRow`s in the same divided bench panel as the catalog table and host pages, showing quant chip, disk usage, residency, and per-row Load / Unload / Remove actions. **Clicking a row opens the model detail drawer** (no separate Info button) — the same drawer as the catalog, with an **ON THIS HOST** section listing per-component presence (`/api/models/:model/components`) and per-component Repair, plus whole-model Repair in the footer. This one drawer is the model info surface everywhere: catalog grid cards, catalog table rows, Installed rows, and host-page model rows all open it. Removing warns about shared components: "Keeps t5-xxl (used by 3 models)."
+- **Catalog results:** share the same search and layout controls; already-installed entries are excluded. Grid cards use a bounded preview height and responsive 260px minimum columns; Table rows are the app-wide shared model row (`ModelTableRow` via `CatalogTableRow`) — source glyph, name, family, popularity, `SIZE` / `FETCH` lines, page link, Pull — with **no preview thumbnail**, in the same divided bench panel as the Installed shelf and host pages. Civitai previews use one cache-stable 512 px CDN derivative in both layouts, async lazy decoding, and per-card layout/paint containment; the desktop also normalizes raw preview URLs returned by older remote servers. Missing or failed previews use a local family-aware mark at the same dimensions so cards keep their visual rhythm without another fetch. Source, Family, and NSFW filters refine paged `/api/catalog/search` results. Pulling with several ready hosts opens a labelled target dialog; a single-host setup starts immediately. Result cards keep **SIZE vs FETCH** honest.
 - **Downloads:** pinned above Installed while any connected host's `/api/downloads/stream` has activity: up to two active downloads per host plus each remaining queue, each row with a source glyph (HF / Civitai), its target host (primary rows resolve to the local host's label), progress (bytes + %), and cancellation (✕ → that host's `DELETE /api/downloads/:id`) that stays visibly pending until the engine confirms termination. Companion downloads remain grouped under their primary. Progress bars here are plain Safelight fills; the Develop is reserved for generation.
 - Built-in catalog entries and `hf:`/`cv:` live entries are visually identical; the id chip (`cv:12345`) is copyable.
 
@@ -284,7 +287,35 @@ A RunPod host participates in the unified Gallery like any other connected host 
 
 ### 4.8 Host detail — the machine card
 
-Clicking a host row in the sidebar opens a per-host detail view: bench-style cards with live GPU / CPU / RAM telemetry (that host's `/api/resources/stream`), a storage bar for the models filesystem (`/api/status.models_disk` total vs free — absent on older servers, the bar simply hides), queue state, and the models installed on that host. Background health polls update those mounted components in place; a transient connectivity change preserves the last good snapshot instead of clearing and rebuilding the page. Same Bath/Safelight vocabulary as the Bench rail popover — meters, not dashboards.
+Clicking a host row in the sidebar opens a per-host detail view, ordered identity → controls → machine → engine → library:
+
+```
+│ ● hal9000   REMOTE  v0.17.0                                                │
+│   http://192.168.1.114:7680 · 0f7a2c31-instance                            │
+│   [Use for generations] [Rename…] [Open web UI]      Disconnect  Forget    │
+│ TELEMETRY ─────────────────────────────────── UP 2D 7H  LIVE               │
+│ ┌ NVIDIA GeForce RTX 4090  CUDA                          97% util ┐        │
+│ │ VRAM ▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░  18.0 GB/24.0 GB   │        │
+│ │ CPU  ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  5% · 32 CORES     │        │
+│ │ RAM  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░  41.4 GB/67.1 GB   │        │
+│ │ DISK ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░  651 GB free of 2 TB │      │
+│ └─────────────────────────────────────────────────────────────────┘        │
+│ QUEUE ─────────────────────────────────────────── 2/200  Jobs →            │
+│ ┌ ● RUNNING · GPU 0  flux-dev:q8   OTHER CLIENT          1m 30s ┐          │
+│ │ ○ QUEUED #1        z-image:q8                                 │          │
+│ └────────────────────────────────────────────────────────────────┘         │
+│ LOADED  (● jibmix-flux:fp8)                                                │
+│ MODELS ON THIS HOST ─────────────────────────── 14 · 96.4 GB   Catalog →   │
+│ [this host's active pulls — the downloads tray]                            │
+│ ┌ flux-schnell:q8  flux                          11.8 GB weights ┐         │
+│ │ flux-dev:bf16    flux                          22.2 GB weights │         │
+│ └──────────────────────────────────────────────────────────────────┘       │
+```
+
+- **One instrument panel, not stray cards:** GPU (per-GPU heading with backend + utilization), CPU, RAM, and the models filesystem (`/api/status.models_disk` — absent on older servers, the row simply hides) share a single three-column grid (label / bar / value), so every meter's bar and value align. Telemetry streams from that host's `/api/resources/stream`; the section header carries `UP <uptime>` from `/api/status` and a Safelight `LIVE` chip once the first frame lands. The VRAM fill warms to Safelight while the host has queued/running jobs and goes Stop past 92%.
+- **Queue vs residency, disambiguated:** queue depth/capacity, a Stop-toned `PAUSED` marker, and a `Jobs →` link live in the QUEUE header. Below it, the host's whole server queue renders as compact read-only rows sharing the Jobs view's vocabulary — temperature dot (Safelight running / Halide queued), `RUNNING · GPU 0` / `QUEUED #2` code, model, `OTHER CLIENT` tag, elapsed wall-clock — via a page-scoped 5 s poll of the jobs store (`refreshHost`); management (cancel, lanes, pause) stays in Jobs. Models resident in the engine render under an explicit `LOADED` label with a Safelight residency dot — they must never read as queue entries.
+- **The library owns its pulls:** the host-scoped downloads tray renders inside MODELS ON THIS HOST, above the installed list (mirroring Catalog's downloads-above-installed order), never above the page header. The section header totals count and weights; rows are one divided panel of shared `ModelTableRow`s.
+- Background health polls update mounted components in place; a transient connectivity change preserves the last good snapshot instead of clearing and rebuilding the page. Same Bath/Safelight vocabulary as the Bench rail popover — meters, not dashboards.
 
 ## 5. States
 

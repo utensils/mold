@@ -16,10 +16,11 @@ vi.mock("../../lib/api/models", () => ({
   unloadModel,
 }));
 
-const { startCatalogDownload } = vi.hoisted(() => ({
+const { startCatalogDownload, fetchCatalogDetail } = vi.hoisted(() => ({
   startCatalogDownload: vi.fn(),
+  fetchCatalogDetail: vi.fn().mockRejectedValue(new Error("no detail in tests")),
 }));
-vi.mock("../../lib/api/catalog", () => ({ startCatalogDownload }));
+vi.mock("../../lib/api/catalog", () => ({ startCatalogDownload, fetchCatalogDetail }));
 vi.mock("../../lib/openExternal", () => ({ openExternal: vi.fn() }));
 
 import InstalledTab from "./InstalledTab.vue";
@@ -60,9 +61,8 @@ async function mountWithComponents(components: ModelComponentStatus[]) {
   fetchModelComponents.mockResolvedValue({ model: "sdxl-base:fp16", components });
   const wrapper = mount(InstalledTab, { props: {} });
   await flushPromises();
-  // Expand the Info section to reveal the per-component rows.
-  const info = wrapper.findAll("button").find((b) => b.text() === "Info");
-  await info?.trigger("click");
+  // Clicking the row opens the shared detail drawer, which lists components.
+  await wrapper.get("[data-test='row-title']").trigger("click");
   await flushPromises();
   return wrapper;
 }
@@ -70,9 +70,23 @@ async function mountWithComponents(components: ModelComponentStatus[]) {
 beforeEach(() => {
   vi.clearAllMocks();
   startCatalogDownload.mockResolvedValue(undefined);
+  fetchCatalogDetail.mockRejectedValue(new Error("no detail in tests"));
 });
 
-describe("InstalledTab component repair", () => {
+describe("InstalledTab model info drawer", () => {
+  it("opens the shared detail drawer with the component listing from the owning host", async () => {
+    const wrapper = await mountWithComponents([
+      component({ name: "transformer", kind: "transformer", present: true }),
+      component({ name: "vae", kind: "vae", present: false }),
+    ]);
+
+    const drawer = wrapper.get("[data-test='catalog-detail-drawer']");
+    expect(drawer.text()).toContain("sdxl-base:fp16");
+    // Presence summary + per-component rows in the ON THIS HOST section.
+    expect(drawer.get("[data-test='component-list']").text()).toContain("1/2 present");
+    expect(fetchModelComponents).toHaveBeenCalledWith("sdxl-base:fp16", undefined);
+  });
+
   it("offers Repair only on missing components that carry a repair_model", async () => {
     const wrapper = await mountWithComponents([
       component({ name: "transformer", kind: "transformer", present: true }),
@@ -91,8 +105,9 @@ describe("InstalledTab component repair", () => {
     await flushPromises();
 
     // The download is keyed on the server-provided repair_model and goes to
-    // the same API target the component listing came from (the owning host).
-    expect(startCatalogDownload).toHaveBeenCalledWith("sdxl-base:fp16");
+    // the same API target the component listing came from (the owning host —
+    // the local primary here, so no explicit target or forwarding).
+    expect(startCatalogDownload).toHaveBeenCalledWith("sdxl-base:fp16", undefined, false);
     expect(useToastStore().items.some((t) => /repair/i.test(t.message))).toBe(true);
   });
 

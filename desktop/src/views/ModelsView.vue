@@ -9,6 +9,7 @@ import { useModelStore } from "../stores/models";
 import { useDownloadsStore } from "../stores/downloads";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
+import { useUiStore } from "../stores/ui";
 import { primaryModifierPressed } from "../lib/platform";
 import { mediaTypeFromQuery, type MediaType } from "../lib/modelAvailability";
 
@@ -19,8 +20,7 @@ const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const route = useRoute();
 const router = useRouter();
-type Layout = "grid" | "table";
-const layout = ref<Layout>("grid");
+const ui = useUiStore();
 const query = ref("");
 const searchEl = ref<HTMLInputElement | null>(null);
 const catalogSection = ref<HTMLElement | null>(null);
@@ -127,29 +127,71 @@ onUnmounted(() => {
         class="border-edge ml-auto h-7 min-w-48 flex-1 rounded-control border bg-bath px-2 text-body text-ink placeholder:text-ink-3 sm:max-w-72"
       />
 
+      <!-- View switcher — the Finder-style segmented control: the active
+           segment carries the accent fill so the current view is unambiguous.
+           Session-persisted in the ui store; table is the default. -->
       <div
-        class="flex h-7 items-center rounded-control border border-control-edge bg-bath p-0.5"
+        class="flex h-7 items-center gap-0.5 rounded-control border border-control-edge bg-bath p-0.5"
+        role="radiogroup"
         aria-label="Catalog layout"
       >
         <button
           type="button"
-          class="h-6 rounded-[3px] px-2 text-caption"
-          :class="layout === 'grid' ? 'bg-bench text-ink' : 'text-ink-3 hover:text-ink'"
-          :aria-pressed="layout === 'grid'"
-          title="Grid view"
-          @click="layout = 'grid'"
+          role="radio"
+          data-test="layout-table"
+          class="flex h-6 items-center gap-1.5 rounded-[3px] px-2 text-caption transition-colors duration-100"
+          :class="
+            ui.catalogLayout === 'table'
+              ? 'bg-safelight text-on-accent'
+              : 'text-ink-3 hover:text-ink'
+          "
+          :aria-checked="ui.catalogLayout === 'table'"
+          title="Table view"
+          @click="ui.setCatalogLayout('table')"
         >
-          Grid
+          <svg
+            viewBox="0 0 12 12"
+            width="11"
+            height="11"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M1.75 2.5h8.5M1.75 6h8.5M1.75 9.5h8.5" />
+          </svg>
+          Table
         </button>
         <button
           type="button"
-          class="h-6 rounded-[3px] px-2 text-caption"
-          :class="layout === 'table' ? 'bg-bench text-ink' : 'text-ink-3 hover:text-ink'"
-          :aria-pressed="layout === 'table'"
-          title="Table view"
-          @click="layout = 'table'"
+          role="radio"
+          data-test="layout-grid"
+          class="flex h-6 items-center gap-1.5 rounded-[3px] px-2 text-caption transition-colors duration-100"
+          :class="
+            ui.catalogLayout === 'grid'
+              ? 'bg-safelight text-on-accent'
+              : 'text-ink-3 hover:text-ink'
+          "
+          :aria-checked="ui.catalogLayout === 'grid'"
+          title="Grid view"
+          @click="ui.setCatalogLayout('grid')"
         >
-          Table
+          <svg
+            viewBox="0 0 12 12"
+            width="11"
+            height="11"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            aria-hidden="true"
+          >
+            <rect x="1.5" y="1.5" width="3.6" height="3.6" rx="0.8" />
+            <rect x="6.9" y="1.5" width="3.6" height="3.6" rx="0.8" />
+            <rect x="1.5" y="6.9" width="3.6" height="3.6" rx="0.8" />
+            <rect x="6.9" y="6.9" width="3.6" height="3.6" rx="0.8" />
+          </svg>
+          Grid
         </button>
       </div>
     </header>
@@ -182,7 +224,7 @@ onUnmounted(() => {
         </div>
         <CatalogTab
           :query="query"
-          :layout="layout"
+          :layout="ui.catalogLayout"
           :exclude-installed="true"
           :installed-ids="installedModelIds"
           :media-type="mediaType"

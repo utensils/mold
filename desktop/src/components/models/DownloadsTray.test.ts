@@ -317,3 +317,41 @@ describe("DownloadsTray a11y", () => {
     expect(store.hostStates.hal9000).toBeUndefined();
   });
 });
+
+describe("DownloadsTray host scoping", () => {
+  function seedTwoHostHistory() {
+    const store = useDownloadsStore();
+    store.history = [job({ id: "p1", model: "flux-dev:q8", status: "completed" })];
+    store.hostStates.hal9000 = {
+      label: "hal9000",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
+      activeJobs: [],
+      queued: [],
+      history: [job({ id: "h1", model: "z-image:q8", status: "failed" })],
+      subscribed: true,
+      abort: null,
+      cancelling: [],
+      ready: null,
+    };
+    return store;
+  }
+
+  it("scopes the history section to the given host", () => {
+    seedTwoHostHistory();
+    const wrapper = mount(DownloadsTray, { props: { hostId: "hal9000" } });
+    expect(wrapper.get("[data-test='history-toggle']").text()).toContain("History (1)");
+  });
+
+  it("does not render at all for a host with no downloads or history", () => {
+    seedTwoHostHistory();
+    const wrapper = mount(DownloadsTray, { props: { hostId: "plato" } });
+    // Other hosts' history must not summon this host's tray.
+    expect(wrapper.find("[data-test='downloads-tray']").exists()).toBe(false);
+  });
+
+  it("keeps the unscoped tray's history spanning every host", () => {
+    seedTwoHostHistory();
+    const wrapper = mount(DownloadsTray);
+    expect(wrapper.get("[data-test='history-toggle']").text()).toContain("History (2)");
+  });
+});

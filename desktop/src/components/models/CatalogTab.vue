@@ -10,6 +10,7 @@ import { isVideoFamily } from "../../lib/capabilities";
 import { sortInstalledFirst } from "../../lib/catalog";
 import { type MediaType } from "../../lib/modelAvailability";
 import CatalogCard from "./CatalogCard.vue";
+import CatalogTableRow from "./CatalogTableRow.vue";
 import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
 import DownloadTargetDialog from "./DownloadTargetDialog.vue";
 import type { CatalogEntry } from "../../lib/api/types";
@@ -341,20 +342,29 @@ onMounted(async () => {
       </template>
     </div>
 
-    <!-- Result cards, installed first -->
+    <!-- Results, installed first. Grid keeps preview cards; the table layout
+         is the app-wide model-row shape — clean info, no thumbnails. -->
     <div
       v-else
       :class="
         layout === 'grid'
           ? 'grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-2'
-          : 'flex flex-col gap-1'
+          : 'border-edge divide-edge flex flex-col divide-y overflow-hidden rounded-control border bg-bench'
       "
     >
       <template v-for="entry in displayEntries" :key="entry.id">
         <CatalogCard
+          v-if="layout === 'grid'"
           :entry="entry"
           :pulling="pulling.has(entry.id)"
-          :layout="layout"
+          @pull="pull"
+          @open="detailEntry = $event"
+        />
+        <CatalogTableRow
+          v-else
+          :entry="entry"
+          :pulling="pulling.has(entry.id)"
+          class="px-3 py-2"
           @pull="pull"
           @open="detailEntry = $event"
         />

@@ -1,5 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { formatCount, formatEta, formatGB, percent, timeAgo, vramLevel } from "./format";
+import {
+  formatCount,
+  formatEta,
+  formatGB,
+  formatUptime,
+  percent,
+  timeAgo,
+  vramLevel,
+} from "./format";
+
+describe("formatUptime", () => {
+  it("keeps sub-minute uptimes in seconds", () => {
+    expect(formatUptime(0)).toBe("0s");
+    expect(formatUptime(42)).toBe("42s");
+    expect(formatUptime(-5)).toBe("0s");
+  });
+
+  it("uses whole minutes below an hour", () => {
+    expect(formatUptime(60)).toBe("1m");
+    expect(formatUptime(3_599)).toBe("59m");
+  });
+
+  it("shows hours with minutes, then days with hours", () => {
+    expect(formatUptime(5_400)).toBe("1h 30m");
+    expect(formatUptime(200_000)).toBe("2d 7h");
+  });
+});
 
 describe("formatGB", () => {
   it("formats decimal gigabytes with one decimal", () => {

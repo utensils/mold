@@ -68,7 +68,7 @@ describe("CatalogCard", () => {
     expect(wrapper.get('[data-test="family-placeholder"]').text()).toContain("FLUX");
   });
 
-  it("uses a family-aware placeholder in both catalog layouts when no image exists", async () => {
+  it("uses a family-aware placeholder when no image exists", async () => {
     const grid = mount(CatalogCard, {
       props: { entry: entry({ family: "sdxl", thumbnail_url: null }), pulling: false },
     });
@@ -76,18 +76,6 @@ describe("CatalogCard", () => {
     const gridPlaceholder = grid.get('[data-test="family-placeholder"]');
     expect(gridPlaceholder.attributes("data-layout")).toBe("grid");
     expect(gridPlaceholder.text()).toContain("SDXL");
-
-    const table = mount(CatalogCard, {
-      props: {
-        entry: entry({ family: "qwen-image", thumbnail_url: null }),
-        pulling: false,
-        layout: "table",
-      },
-    });
-    await flushPromises();
-    const tablePlaceholder = table.get('[data-test="family-placeholder"]');
-    expect(tablePlaceholder.attributes("data-layout")).toBe("table");
-    expect(tablePlaceholder.text()).toContain("QWEN");
   });
 
   it("shows a size skeleton while resolving, then the resolved SIZE line", async () => {

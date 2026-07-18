@@ -80,6 +80,19 @@ describe("jobs store", () => {
     expect(q.caps).toEqual({ canPause: true, canCancelAll: true });
   });
 
+  it("refreshHost() snapshots only the given host", async () => {
+    const hosts = seedHosts();
+    installApi();
+    const jobs = useJobsStore();
+    await jobs.refreshHost(hosts.all.find((h) => h.id === "hal9000-7680")!);
+    expect(Object.keys(jobs.queues)).toEqual(["hal9000-7680"]);
+    expect(jobs.queues["hal9000-7680"]?.entries).toHaveLength(2);
+    // Every request went to the host it was asked about.
+    for (const [target] of apiJsonTo.mock.calls as [{ baseUrl: string }, string][]) {
+      expect(target.baseUrl).toBe("http://hal9000:7680");
+    }
+  });
+
   it("pause and resume post against the right host", async () => {
     seedHosts();
     installApi();

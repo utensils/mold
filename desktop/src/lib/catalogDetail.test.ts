@@ -4,8 +4,72 @@ import {
   canDownloadEntry,
   catalogActionLabel,
   downloadContentsTotalBytes,
+  installedModelToEntry,
 } from "./catalogDetail";
-import type { CatalogEntry } from "./api/types";
+import type { CatalogEntry, ModelEntry } from "./api/types";
+
+function installedModel(part: Partial<ModelEntry> = {}): ModelEntry {
+  return {
+    name: "flux-dev:q8",
+    family: "flux",
+    size_gb: 11.8,
+    is_loaded: false,
+    hf_repo: "org/repo",
+    default_steps: 28,
+    default_guidance: 3.5,
+    default_width: 1024,
+    default_height: 1024,
+    description: "The dev model.",
+    downloaded: true,
+    ...part,
+  };
+}
+
+describe("installedModelToEntry", () => {
+  it("adapts an installed model into the drawer's entry shape", () => {
+    expect(installedModelToEntry(installedModel())).toMatchObject({
+      id: "flux-dev:q8",
+      name: "flux-dev:q8",
+      family: "flux",
+      source: "hf",
+      source_id: "org/repo",
+      installed: true,
+      size_bytes: 11_800_000_000,
+      page_url: "https://huggingface.co/org/repo",
+      description: "The dev model.",
+    });
+  });
+
+  it("keeps the upstream version id for Civitai installs and omits unreported fields", () => {
+    const entry = installedModelToEntry(
+      installedModel({ name: "cv:8001", hf_repo: "", size_gb: 0, description: "" }),
+    );
+    expect(entry).toMatchObject({
+      id: "cv:8001",
+      source: "civitai",
+      source_id: "8001",
+      size_bytes: null,
+      page_url: null,
+      description: null,
+    });
+  });
+
+  it("keeps the repo id encoded in hf: catalog install names", () => {
+    expect(
+      installedModelToEntry(installedModel({ name: "hf:org/thing", hf_repo: "" })),
+    ).toMatchObject({
+      source: "hf",
+      source_id: "org/thing",
+      page_url: "https://huggingface.co/org/thing",
+    });
+  });
+
+  it("classifies repo-less models as local files, not Hugging Face", () => {
+    expect(
+      installedModelToEntry(installedModel({ name: "my-finetune", hf_repo: "" })),
+    ).toMatchObject({ source: "local", source_id: null, page_url: null });
+  });
+});
 
 function entry(part: Partial<CatalogEntry> = {}): CatalogEntry {
   return {

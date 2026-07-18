@@ -17,16 +17,15 @@ import type { ModelSource } from "../../lib/modelSource";
 import type { CatalogEntry } from "../../lib/api/types";
 
 /**
- * One catalog search result. Owns its lazy size resolution (HF summary
- * rows arrive without `size_bytes`). Clicking the card body or title emits
- * `open` — the in-app detail drawer; the external-link icon stays a
- * secondary action out to huggingface.co / civitai.com. Install state and
- * the Pull action stay with the parent tab via the `pull` event.
+ * One catalog search result in the grid layout (the table layout uses
+ * `CatalogTableRow`, the shared model-row shape). Owns its lazy size
+ * resolution (HF summary rows arrive without `size_bytes`). Clicking the
+ * card body or title emits `open` — the in-app detail drawer; the
+ * external-link icon stays a secondary action out to huggingface.co /
+ * civitai.com. Install state and the Pull action stay with the parent tab
+ * via the `pull` event.
  */
-const props = withDefaults(
-  defineProps<{ entry: CatalogEntry; pulling: boolean; layout?: "grid" | "table" }>(),
-  { layout: "grid" },
-);
+const props = defineProps<{ entry: CatalogEntry; pulling: boolean }>();
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
   (e: "open", entry: CatalogEntry): void;
@@ -88,12 +87,11 @@ function onCardKeydown(event: KeyboardEvent): void {
 
 <template>
   <div
-    class="catalog-card-contained border-edge cursor-pointer rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench focus-visible:outline-2 focus-visible:outline-safelight"
-    :class="layout === 'grid' ? 'flex flex-col' : 'flex min-h-16 items-center gap-3 p-2'"
+    class="catalog-card-contained border-edge flex cursor-pointer flex-col rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench focus-visible:outline-2 focus-visible:outline-safelight"
     role="button"
     tabindex="0"
     data-test="catalog-card"
-    :data-layout="layout"
+    data-layout="grid"
     :aria-label="`${entry.name} — view details`"
     @click="emit('open', entry)"
     @keydown.enter="onCardKeydown"
@@ -103,11 +101,7 @@ function onCardKeydown(event: KeyboardEvent): void {
          local family mark when no custom image is available. -->
     <div
       v-if="thumbnailUrl && !thumbFailed"
-      :class="
-        layout === 'grid'
-          ? 'relative h-32 w-full overflow-hidden rounded-t-chrome'
-          : 'relative h-12 w-16 shrink-0 overflow-hidden rounded-media'
-      "
+      class="relative h-32 w-full overflow-hidden rounded-t-chrome"
     >
       <div v-if="!thumbLoaded" class="grain-shimmer absolute inset-0" aria-hidden="true" />
       <img
@@ -121,13 +115,10 @@ function onCardKeydown(event: KeyboardEvent): void {
         @error="thumbFailed = true"
       />
     </div>
-    <ModelFamilyPlaceholder v-else :family="entry.family" :layout="layout" />
+    <ModelFamilyPlaceholder v-else :family="entry.family" layout="grid" />
 
-    <div :class="layout === 'grid' ? 'flex min-h-32 flex-1 flex-col gap-1.5 p-3' : 'contents'">
-      <div
-        class="flex min-w-0 items-start justify-between gap-2"
-        :class="layout === 'table' ? 'flex-1' : ''"
-      >
+    <div class="flex min-h-32 flex-1 flex-col gap-1.5 p-3">
+      <div class="flex min-w-0 items-start justify-between gap-2">
         <span class="flex min-w-0 items-center gap-1.5">
           <SourceGlyph :source="glyphSource" :size="16" class="text-ink-3" />
           <button
@@ -172,11 +163,7 @@ function onCardKeydown(event: KeyboardEvent): void {
         </span>
       </div>
 
-      <div
-        v-if="entry.author || counts"
-        class="flex items-center gap-2"
-        :class="layout === 'table' ? 'w-44 shrink-0' : ''"
-      >
+      <div v-if="entry.author || counts" class="flex items-center gap-2">
         <span v-if="entry.author" class="truncate text-caption text-ink-3">{{ entry.author }}</span>
         <span v-if="counts" class="data-mono ml-auto shrink-0 text-caption text-ink-3">
           {{ counts }}
@@ -186,25 +173,19 @@ function onCardKeydown(event: KeyboardEvent): void {
       <div
         v-if="sizePending"
         class="data-mono text-caption text-ink-3"
-        :class="layout === 'table' ? 'w-24 shrink-0' : ''"
         data-test="size-skeleton"
         aria-label="Resolving size"
       >
         SIZE …
       </div>
-      <div
-        v-else-if="hasSizeLine"
-        class="text-caption"
-        :class="layout === 'table' ? 'w-28 shrink-0' : ''"
-      >
+      <div v-else-if="hasSizeLine" class="text-caption">
         <div class="data-mono text-ink-2">{{ catalogSizeLabel(sizeInfo) }}</div>
-        <div v-if="catalogFetchCaption(sizeInfo) && layout === 'grid'" class="text-ink-3">
+        <div v-if="catalogFetchCaption(sizeInfo)" class="text-ink-3">
           {{ catalogFetchCaption(sizeInfo) }}
         </div>
       </div>
-      <div v-else-if="layout === 'table'" class="w-28 shrink-0" />
 
-      <div class="flex shrink-0 justify-end" :class="layout === 'grid' ? 'mt-auto pt-1' : 'w-24'">
+      <div class="mt-auto flex shrink-0 justify-end pt-1">
         <span v-if="entry.installed" class="data-mono text-caption text-halide">● installed</span>
         <button
           v-else
@@ -214,7 +195,7 @@ function onCardKeydown(event: KeyboardEvent): void {
           :disabled="pulling"
           @click.stop="emit('pull', entry)"
         >
-          {{ pulling ? "Pulling…" : layout === "table" ? "Pull" : catalogPullLabel(sizeInfo) }}
+          {{ pulling ? "Pulling…" : catalogPullLabel(sizeInfo) }}
         </button>
       </div>
     </div>

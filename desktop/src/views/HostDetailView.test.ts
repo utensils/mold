@@ -55,7 +55,16 @@ const stub = { template: "<div />" };
 
 const REMOTE_ID = "hal9000-7680";
 
-function installApi(status: Partial<ServerStatus> = {}) {
+interface WireQueueEntry {
+  id: string;
+  model: string;
+  state: "queued" | "running";
+  started_at_unix_ms: number;
+  position: number;
+  gpu?: number;
+}
+
+function installApi(status: Partial<ServerStatus> = {}, queueEntries: WireQueueEntry[] = []) {
   apiJsonTo.mockImplementation((_target: unknown, path: string) => {
     if (path === "/api/status") {
       return Promise.resolve({
@@ -67,6 +76,9 @@ function installApi(status: Partial<ServerStatus> = {}) {
     }
     if (path === "/api/models")
       return Promise.resolve([model("flux-dev:q8", "flux"), model("z-image:q8", "z-image")]);
+    if (path === "/api/queue") return Promise.resolve({ entries: queueEntries });
+    if (path === "/api/capabilities")
+      return Promise.resolve({ queue: { can_pause: true, can_cancel_all: true } });
     return Promise.reject(new Error(`unexpected ${path}`));
   });
 }
@@ -97,6 +109,7 @@ async function mountView(path = `/hosts/${REMOTE_ID}`) {
       { path: "/hosts/:id", component: stub },
       { path: "/settings", component: stub },
       { path: "/models", component: stub },
+      { path: "/jobs", component: stub },
     ],
   });
   router.push(path);
@@ -264,6 +277,81 @@ describe("HostDetailView storage and queue", () => {
     const chips = wrapper.findAll("[data-test='loaded-model-chip']");
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
   });
+
+  it("lists the host's server queue with state codes and ownership tags", async () => {
+    installApi({ queue_depth: 2, queue_capacity: 8 }, [
+      {
+        id: "srv-1",
+        model: "flux-dev:q8",
+        state: "running",
+        started_at_unix_ms: Date.now() - 90_000,
+        position: 0,
+        gpu: 0,
+      },
+      {
+        id: "srv-2",
+        model: "z-image:q8",
+        state: "queued",
+        started_at_unix_ms: Date.now(),
+        position: 1,
+      },
+    ]);
+    const wrapper = await mountView();
+    const rows = wrapper.findAll("[data-test='host-queue-row']");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.text()).toContain("RUNNING · GPU 0");
+    expect(rows[0]!.text()).toContain("flux-dev:q8");
+    // Elapsed wall-clock for the running row (~90s → "1m 30s").
+    expect(rows[0]!.text()).toMatch(/1m \d+s/);
+    expect(rows[1]!.text()).toContain("QUEUED #1");
+    expect(rows[1]!.text()).toContain("z-image:q8");
+    // Neither entry belongs to this app's generation store.
+    expect(rows[0]!.text()).toContain("OTHER CLIENT");
+    expect(wrapper.find("[data-test='queue-empty']").exists()).toBe(false);
+  });
+
+  it("warms the VRAM meter from the polled queue even when the status depth lags", async () => {
+    // status says an empty queue; the live queue poll disagrees (a job runs).
+    installApi({ queue_depth: 0, queue_capacity: 8 }, [
+      {
+        id: "srv-1",
+        model: "flux-dev:q8",
+        state: "running",
+        started_at_unix_ms: Date.now() - 5_000,
+        position: 0,
+        gpu: 0,
+      },
+    ]);
+    const wrapper = await mountView();
+    lastStream().options.onEvent(
+      "snapshot",
+      JSON.stringify({
+        hostname: "hal9000",
+        timestamp: 1,
+        gpus: [
+          {
+            ordinal: 0,
+            name: "NVIDIA GeForce RTX 4090",
+            backend: "cuda",
+            vram_total: 24_000_000_000,
+            vram_used: 18_000_000_000,
+            gpu_utilization: 97,
+          },
+        ],
+        system_ram: { total: 64_000_000_000, used: 21_000_000_000 },
+        cpu: { cores: 16, usage_percent: 43.2 },
+      }),
+    );
+    await flushPromises();
+    expect(wrapper.get("[data-test='gpu-card']").html()).toContain("bg-safelight");
+  });
+
+  it("shows an empty queue line and a PAUSED marker from the queue snapshot", async () => {
+    installApi({ queue_paused: true } as Partial<ServerStatus>);
+    const wrapper = await mountView();
+    expect(wrapper.get("[data-test='queue-empty']").text()).toBe("Queue is empty.");
+    expect(wrapper.get("[data-test='queue-paused']").text()).toBe("PAUSED");
+  });
 });
 
 describe("HostDetailView stale status responses", () => {
@@ -323,6 +411,27 @@ describe("HostDetailView models", () => {
     expect(rows[0]!.text()).toContain("flux-dev:q8");
     expect(rows[0]!.text()).toContain("flux");
     expect(rows[1]!.text()).toContain("z-image:q8");
+  });
+
+  it("opens the shared model detail drawer from a model row", async () => {
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='model-row'] [data-test='row-title']").trigger("click");
+    await flushPromises();
+    const drawer = wrapper.get("[data-test='catalog-detail-drawer']");
+    expect(drawer.text()).toContain("flux-dev:q8");
+  });
+
+  it("closes an open drawer when navigating to a different host", async () => {
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='model-row'] [data-test='row-title']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='catalog-detail-drawer']").exists()).toBe(true);
+
+    // The reused view must not retarget the previous host's model (and its
+    // Repair action) at the next host.
+    await router.push("/hosts/local");
+    await flushPromises();
+    expect(wrapper.find("[data-test='catalog-detail-drawer']").exists()).toBe(false);
   });
 
   it("shows this host's active model-download progress", async () => {
@@ -420,7 +529,10 @@ describe("HostDetailView models", () => {
     expect(sseCalls.filter((call) => call.path === "/api/resources/stream")).toHaveLength(
       resourceStreamCount,
     );
-    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/status")).toHaveLength(2);
+    // Two status readers per fetch round (the view's models-disk poll and the
+    // queue snapshot's paused/gpus join): mount = 2, the ready-flip = 2 more.
+    // The error flip in between must add none.
+    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/status")).toHaveLength(4);
 
     remote.apiKey = "rotated-key";
     await flushPromises();
@@ -434,6 +546,64 @@ describe("HostDetailView models", () => {
       baseUrl: "http://hal9000:7680",
       apiKey: "rotated-key",
     });
+  });
+});
+
+describe("HostDetailView layout", () => {
+  it("shows uptime from /api/status in the telemetry header", async () => {
+    installApi({ uptime_secs: 200_000 });
+    const wrapper = await mountView();
+    expect(wrapper.get("[data-test='host-uptime']").text()).toBe("UP 2d 7h");
+  });
+
+  it("renders the models-disk meter inside the telemetry panel, not a separate section", async () => {
+    installApi({ models_disk: { total_bytes: 2_000_000_000_000, free_bytes: 500_000_000_000 } });
+    const wrapper = await mountView();
+    const panel = wrapper.get("[data-test='telemetry-panel']");
+    expect(panel.find("[data-test='storage-card']").exists()).toBe(true);
+    expect(panel.find("[data-test='gpu-card']").exists()).toBe(true);
+  });
+
+  it("labels resident models LOADED so they can't read as queued jobs", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.get("[data-test='loaded-label']").text()).toBe("LOADED");
+    const chips = wrapper.findAll("[data-test='loaded-model-chip']");
+    expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
+  });
+
+  it("places the downloads tray in the models section, below the queue header", async () => {
+    const wrapper = await mountView();
+    const stream = lastStream("/api/downloads/stream");
+    stream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: {
+          active_jobs: [
+            {
+              id: "pull-1",
+              model: "qwen-image:q4",
+              status: "active",
+              files_done: 1,
+              files_total: 4,
+              bytes_done: 2_500_000_000,
+              bytes_total: 10_000_000_000,
+            },
+          ],
+          queued: [],
+          history: [],
+        },
+      }),
+    );
+    await flushPromises();
+    const queue = wrapper.get("[data-test='queue-depth']").element;
+    const tray = wrapper.get("[data-test='host-downloads']").element;
+    expect(queue.compareDocumentPosition(tray) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("summarizes installed model count and total size in the models header", async () => {
+    const wrapper = await mountView();
+    expect(wrapper.get("[data-test='models-summary']").text()).toBe("2 · 24.8 GB");
   });
 });
 
