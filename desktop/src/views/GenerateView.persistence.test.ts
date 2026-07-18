@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { mount, flushPromises } from "@vue/test-utils";
+import { enableAutoUnmount, mount, flushPromises } from "@vue/test-utils";
 import GenerateView from "./GenerateView.vue";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useModelStore } from "../stores/models";
@@ -18,6 +18,8 @@ vi.mock("../lib/api/client", () => ({
   apiFetch: vi.fn(),
 }));
 vi.mock("../lib/ipc", () => ({ ipc: {} }));
+
+enableAutoUnmount(afterEach);
 
 const model: ModelEntry = {
   name: "flux-dev:q8",

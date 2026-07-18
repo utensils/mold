@@ -95,6 +95,11 @@ describe("job status labels", () => {
     expect(jobStatusCode(withStatus("loading"))).toBe("LOADING");
     expect(jobStatusCode({ ...withStatus("denoising"), step: 3, total: 8 })).toBe("3/8");
   });
+
+  it("keeps malformed or future runtime statuses readable", () => {
+    const unexpected = { ...withStatus("queued"), status: "future" } as unknown as Job;
+    expect(jobStatusCode(unexpected)).toBe("UNKNOWN");
+  });
 });
 
 describe("batch sequencing", () => {

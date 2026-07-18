@@ -172,6 +172,7 @@ export function jobStatusCode(job: Job): string {
     case "error":
       return job.error === "Cancelled" ? "CANCELLED" : "FAILED";
   }
+  return "UNKNOWN";
 }
 
 export function base64ToBlobUrl(b64: string, mime: string): string {
