@@ -3,12 +3,14 @@ import { computed, ref } from "vue";
 import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { base64ToDataUrl, fileToBase64 } from "../../lib/image";
+import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import MaskEditorModal from "./MaskEditorModal.vue";
 
 const props = defineProps<{ form: GenerateForm }>();
 const toasts = useToastStore();
+const models = useModelStore();
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 
@@ -61,6 +63,28 @@ function pick(slot: Slot) {
 }
 function clearSlot(slot: Slot) {
   setSlot(slot, null);
+}
+
+/** Port of the web SPA's `setSourceFitPolicy` mode→policy mapping. */
+function setSourceFitMode(e: Event) {
+  const raw = (e.target as HTMLSelectElement).value;
+  if (raw === "crop-fill") {
+    props.form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
+    return;
+  }
+  if (raw === "lanczos-resize") {
+    props.form.sourceFit = { mode: "lanczos-resize" };
+    return;
+  }
+  if (raw === "upscale-then-fit") {
+    props.form.sourceFit = {
+      mode: "upscale-then-fit",
+      upscalerModel: props.form.upscaleModel || models.upscalers[0]?.name || "",
+      fit: { mode: "pad-repaint" },
+    };
+    return;
+  }
+  props.form.sourceFit = { mode: raw === "pad-fit" ? "pad-fit" : "pad-repaint" };
 }
 </script>
 
@@ -138,6 +162,36 @@ function clearSlot(slot: Slot) {
         step="0.05"
         class="mt-1 w-full accent-[var(--safelight)]"
       />
+    </template>
+
+    <!-- Source fit (how a mismatched source maps onto the target canvas;
+         applied client-side on submit — labels mirror the web SPA) -->
+    <template v-if="form.sourceImage">
+      <label class="mt-3 block text-caption text-ink-2" for="source-fit-policy">Source fit</label>
+      <select
+        id="source-fit-policy"
+        :value="form.sourceFit?.mode ?? 'pad-repaint'"
+        data-test="source-fit-policy"
+        class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+        @change="setSourceFitMode"
+      >
+        <option value="pad-repaint">Pad repaint</option>
+        <option value="crop-fill">Crop fill</option>
+        <option value="pad-fit">Pad fit</option>
+        <option value="lanczos-resize">Lanczos resize</option>
+        <option value="upscale-then-fit">Upscale then fit</option>
+      </select>
+      <p
+        v-if="form.sourceFit?.mode === 'upscale-then-fit'"
+        class="mt-1 text-caption text-ink-3"
+        data-test="source-fit-upscaler-hint"
+      >
+        {{
+          form.sourceFit.upscalerModel
+            ? `Runs ${form.sourceFit.upscalerModel} on the source first`
+            : "No upscaler model available — the source is fit without upscaling"
+        }}
+      </p>
     </template>
 
     <!-- Mask well (inpaint families) -->

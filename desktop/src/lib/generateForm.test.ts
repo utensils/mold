@@ -250,6 +250,19 @@ describe("applyModelDefaults resets advanced video on family change", () => {
   });
 });
 
+describe("newGenerateForm source-fit default", () => {
+  it("starts on pad-repaint, matching the web SPA's default policy", () => {
+    expect(newGenerateForm().sourceFit).toEqual({ mode: "pad-repaint" });
+  });
+
+  it("keeps the chosen policy across a model change (web parity)", () => {
+    const form = newGenerateForm();
+    form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
+    applyModelDefaults(form, ltx2Model());
+    expect(form.sourceFit).toEqual({ mode: "crop-fill", alignX: "center", alignY: "center" });
+  });
+});
+
 // ── applyMetadataToForm (gallery "Reuse settings" full-fidelity restore) ────
 
 function sd15Model(): ModelEntry {

@@ -24,6 +24,7 @@ import {
   outputFormatsForFamily,
   pruneRequestForFamily,
 } from "./capabilities";
+import type { SourceFitPolicy } from "./sourceFit";
 import { findInstalledModel } from "./generateModels";
 
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */
@@ -76,6 +77,9 @@ export interface GenerateForm {
   strength: number;
   /** base64, no data-URI prefix. */
   sourceImage: string | null;
+  /** How a source image that doesn't match width×height maps onto the canvas.
+   * Applied client-side on submit (`sourceFitPreprocess.ts`), never wired. */
+  sourceFit: SourceFitPolicy;
   maskImage: string | null;
   controlImage: string | null;
   controlModel: string;
@@ -121,6 +125,7 @@ export function newGenerateForm(): GenerateForm {
     upscaleModel: "",
     strength: 0.75,
     sourceImage: null,
+    sourceFit: { mode: "pad-repaint" },
     maskImage: null,
     controlImage: null,
     controlModel: "",
