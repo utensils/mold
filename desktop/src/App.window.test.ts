@@ -24,6 +24,7 @@ describe("main window launch", () => {
     expect(linuxConfig.app.windows[0]?.visible).toBe(true);
     expect(macosConfig.app.windows[0]?.visible).toBe(false);
     expect(macosConfig.app.windows[0]?.titleBarStyle).toBe("Overlay");
+    expect(macosConfig.app.windows[0]).not.toHaveProperty("trafficLightPosition");
     expect(tauriConfig.app.windows[0]).not.toHaveProperty("trafficLightPosition");
   });
 });

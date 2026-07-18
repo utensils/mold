@@ -85,7 +85,6 @@ resolver = "2"
         "visible": false, // shown after frontend mounts (no white flash)
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 16, "y": 18 },
       },
     ],
     "security": {
