@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resetCatalogSizeCache, resolveEntrySize } from "./catalogSizes";
-import { apiJson } from "./api/client";
+import { fetchCatalogDetail } from "./api/catalog";
 import type { CatalogEntry } from "./api/types";
 
-vi.mock("./api/client", () => ({
-  apiJson: vi.fn(),
+// Size resolution reads THROUGH the shared detail fetch — one code path for
+// `GET /api/catalog/:id` (drawer detail + lazy card sizes).
+vi.mock("./api/catalog", () => ({
+  fetchCatalogDetail: vi.fn(),
 }));
 
-const apiJsonMock = vi.mocked(apiJson);
+const apiJsonMock = vi.mocked(fetchCatalogDetail);
 
 function entry(part: Partial<CatalogEntry>): CatalogEntry {
   return {
@@ -40,12 +42,11 @@ describe("resolveEntrySize", () => {
     expect(apiJsonMock).not.toHaveBeenCalled();
   });
 
-  it("fetches the single-entry endpoint with the RAW id in the path", async () => {
+  it("resolves the size through the shared catalog detail fetch", async () => {
     apiJsonMock.mockResolvedValueOnce(entry({ size_bytes: 123 }));
     const size = await resolveEntrySize(entry({ id: "hf:author/model" }));
     expect(size).toBe(123);
-    // Raw id — colons and slashes are part of the wildcard route match.
-    expect(apiJsonMock).toHaveBeenCalledWith("/api/catalog/hf:author/model");
+    expect(apiJsonMock).toHaveBeenCalledWith("hf:author/model");
   });
 
   it("memoizes per id — one fetch even for concurrent callers", async () => {
