@@ -1,15 +1,13 @@
 import { defineStore } from "pinia";
+import type { GeneratePrefill } from "../lib/generateForm";
 
-export interface ComposerPrefill {
-  prompt: string;
-  model: string;
-  seed: number | null;
-  width: number;
-  height: number;
-  steps: number;
-  guidance: number;
-  upscaleModel?: string;
-}
+/**
+ * Either the legacy scalar shape (CommandPalette, history, jobs, "Generate
+ * with <model>") or `{ metadata }` carrying a gallery item's full embedded
+ * metadata for full-fidelity "Reuse settings". `GenerateView` routes both
+ * through `applyPrefillToForm`.
+ */
+export type ComposerPrefill = GeneratePrefill;
 
 /** Carries "Reuse settings" from the gallery into the Generate composer. */
 export const useComposerStore = defineStore("composer", {

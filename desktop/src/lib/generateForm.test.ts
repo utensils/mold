@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { applyModelDefaults, buildRequest, newGenerateForm, seedMode } from "./generateForm";
-import type { ModelEntry } from "./api/types";
+import {
+  applyMetadataToForm,
+  applyModelDefaults,
+  applyPrefillToForm,
+  buildRequest,
+  newGenerateForm,
+  seedMode,
+} from "./generateForm";
+import { MAX_LORA_STACK } from "./capabilities";
+import type { ModelEntry, OutputMetadata } from "./api/types";
 
 function ltx2Model(): ModelEntry {
   return {
@@ -162,5 +170,249 @@ describe("applyModelDefaults resets advanced video on family change", () => {
     expect(form.sourceVideo).toBeNull();
     expect(form.audioFile).toBeNull();
     expect(form.spatialUpscale).toBeNull();
+  });
+});
+
+// ── applyMetadataToForm (gallery "Reuse settings" full-fidelity restore) ────
+
+function sd15Model(): ModelEntry {
+  return {
+    ...ltx2Model(),
+    name: "sd15:fp16",
+    family: "sd15",
+    default_steps: 20,
+    default_guidance: 7.5,
+    default_width: 512,
+    default_height: 512,
+  };
+}
+
+function richImageMetadata(): OutputMetadata {
+  return {
+    prompt: "a lighthouse at dusk",
+    negative_prompt: "blurry, low quality",
+    original_prompt: "lighthouse",
+    model: "sd15:fp16",
+    seed: 42,
+    steps: 30,
+    guidance: 7.0,
+    width: 2048,
+    height: 2048,
+    generation_width: 512,
+    generation_height: 768,
+    strength: 0.6,
+    scheduler: "ddim",
+    output_format: "jpeg",
+    cfg_plus: true,
+    loras: [
+      { path: "detail-tweaker.safetensors", scale: 0.8 },
+      { path: "film-grain.safetensors", scale: 0.5 },
+    ],
+    control_model: "sd15-controlnet-canny",
+    control_scale: 0.9,
+    upscale_model: "real-esrgan-x4plus:fp16",
+    version: "0.17.1",
+  };
+}
+
+describe("applyMetadataToForm", () => {
+  it("restores the full serialized parameter set for an installed model", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, richImageMetadata(), [sd15Model()]);
+
+    expect(form.model).toBe("sd15:fp16");
+    expect(form.family).toBe("sd15");
+    expect(form.prompt).toBe("a lighthouse at dusk");
+    expect(form.negativePrompt).toBe("blurry, low quality");
+    expect(form.originalPrompt).toBe("lighthouse");
+    expect(form.steps).toBe(30);
+    expect(form.guidance).toBe(7.0);
+    expect(form.scheduler).toBe("ddim");
+    expect(form.cfgPlus).toBe(true);
+    expect(form.strength).toBe(0.6);
+    expect(form.loras).toEqual([
+      expect.objectContaining({ path: "detail-tweaker.safetensors", scale: 0.8 }),
+      expect.objectContaining({ path: "film-grain.safetensors", scale: 0.5 }),
+    ]);
+    expect(form.controlModel).toBe("sd15-controlnet-canny");
+    expect(form.controlScale).toBe(0.9);
+    expect(form.upscaleModel).toBe("real-esrgan-x4plus:fp16");
+    expect(form.outputFormat).toBe("jpeg");
+  });
+
+  it("prefers the pre-upscale generation canvas over the saved raster size", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, richImageMetadata(), [sd15Model()]);
+    expect(form.width).toBe(512);
+    expect(form.height).toBe(768);
+  });
+
+  it("uses static-seed semantics: the recorded seed lands as a fixed seed", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, richImageMetadata(), [sd15Model()]);
+    expect(form.seed).toBe("42");
+    expect(seedMode(form.seed)).toBe("fixed");
+  });
+
+  it("clears stale binary media — metadata never carries source bytes", () => {
+    const form = newGenerateForm();
+    form.sourceImage = "SRC";
+    form.maskImage = "MASK";
+    form.controlImage = "CTRL";
+    form.sourceVideo = { filename: "v.mp4", base64: "V" };
+    form.keyframes = [{ frame: 0, image: { filename: "k.png", base64: "K" } }];
+    form.audioFile = { filename: "a.wav", base64: "A" };
+
+    applyMetadataToForm(form, richImageMetadata(), [sd15Model()]);
+
+    expect(form.sourceImage).toBeNull();
+    expect(form.maskImage).toBeNull();
+    expect(form.controlImage).toBeNull();
+    expect(form.sourceVideo).toBeNull();
+    expect(form.keyframes).toEqual([]);
+    expect(form.audioFile).toBeNull();
+  });
+
+  it("falls back gracefully when the metadata's model is not installed", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, richImageMetadata(), []);
+    expect(form.model).toBe("sd15:fp16");
+    expect(form.family).toBe("");
+    expect(form.prompt).toBe("a lighthouse at dusk");
+    expect(form.negativePrompt).toBe("blurry, low quality");
+    expect(form.seed).toBe("42");
+  });
+
+  it("restores video params for an ltx2 print", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a ship in a storm",
+        model: "ltx2:q8",
+        seed: 7,
+        steps: 30,
+        guidance: 3,
+        width: 768,
+        height: 512,
+        frames: 121,
+        fps: 30,
+        enable_audio: true,
+        pipeline: "two-stage",
+        spatial_upscale: "x2",
+        output_format: "mp4",
+      },
+      [ltx2Model()],
+    );
+    expect(form.frames).toBe(121);
+    expect(form.fps).toBe(30);
+    expect(form.enableAudio).toBe(true);
+    expect(form.pipeline).toBe("two-stage");
+    expect(form.spatialUpscale).toBe("x2");
+    expect(form.outputFormat).toBe("mp4");
+  });
+
+  it("promotes a legacy single lora/lora_scale pair into the stack", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      { ...richImageMetadata(), loras: null, lora: "old.safetensors", lora_scale: 0.7 },
+      [sd15Model()],
+    );
+    expect(form.loras).toEqual([expect.objectContaining({ path: "old.safetensors", scale: 0.7 })]);
+  });
+
+  it("caps the restored LoRA stack at MAX_LORA_STACK", () => {
+    const form = newGenerateForm();
+    const many = Array.from({ length: 6 }, (_, i) => ({ path: `l${i}.safetensors`, scale: 1 }));
+    applyMetadataToForm(form, { ...richImageMetadata(), loras: many }, [sd15Model()]);
+    expect(form.loras).toHaveLength(MAX_LORA_STACK);
+  });
+
+  it("normalizes unknown or tagged scheduler values instead of crashing", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      { ...richImageMetadata(), scheduler: { ddim: { steps: 4 } } as never },
+      [sd15Model()],
+    );
+    expect(form.scheduler).toBe("ddim");
+
+    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "warp-drive" }, [sd15Model()]);
+    expect(form.scheduler).toBe("default");
+  });
+
+  it("accepts the server's hyphenated/underscored scheduler spellings", () => {
+    const form = newGenerateForm();
+
+    // mold-core `Display for Scheduler` serializes UniPc as "uni-pc".
+    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "uni-pc" }, [sd15Model()]);
+    expect(form.scheduler).toBe("unipc");
+
+    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "uni_pc" }, [sd15Model()]);
+    expect(form.scheduler).toBe("unipc");
+
+    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: { "uni-pc": {} } as never }, [
+      sd15Model(),
+    ]);
+    expect(form.scheduler).toBe("unipc");
+
+    // The canonical euler-ancestral spelling still round-trips.
+    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "euler-ancestral" }, [
+      sd15Model(),
+    ]);
+    expect(form.scheduler).toBe("euler-ancestral");
+  });
+});
+
+// ── applyPrefillToForm (composer routing: metadata vs legacy scalar) ────────
+
+describe("applyPrefillToForm", () => {
+  it("keeps the legacy scalar path byte-for-byte (palette / history / jobs)", () => {
+    const form = newGenerateForm();
+    applyPrefillToForm(
+      form,
+      {
+        prompt: "a cat",
+        model: "sd15:fp16",
+        seed: 99,
+        width: 640,
+        height: 480,
+        steps: 12,
+        guidance: 5,
+        upscaleModel: "real-esrgan-x4plus",
+      },
+      [sd15Model()],
+    );
+    expect(form.prompt).toBe("a cat");
+    expect(form.model).toBe("sd15:fp16");
+    expect(form.family).toBe("sd15");
+    expect(form.seed).toBe("99");
+    expect(form.width).toBe(640);
+    expect(form.height).toBe(480);
+    expect(form.steps).toBe(12);
+    expect(form.guidance).toBe(5);
+    expect(form.upscaleModel).toBe("real-esrgan-x4plus");
+  });
+
+  it("scalar path: null seed means random and missing upscaleModel clears it", () => {
+    const form = newGenerateForm();
+    form.upscaleModel = "stale";
+    applyPrefillToForm(
+      form,
+      { prompt: "p", model: "nope", seed: null, width: 1, height: 2, steps: 3, guidance: 4 },
+      [],
+    );
+    expect(form.seed).toBe("");
+    expect(form.upscaleModel).toBe("");
+    expect(form.family).toBe("");
+  });
+
+  it("routes a metadata prefill through the full-fidelity restore", () => {
+    const form = newGenerateForm();
+    applyPrefillToForm(form, { metadata: richImageMetadata() }, [sd15Model()]);
+    expect(form.negativePrompt).toBe("blurry, low quality");
+    expect(form.loras).toHaveLength(2);
+    expect(form.width).toBe(512);
   });
 });
