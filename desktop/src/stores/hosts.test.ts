@@ -145,6 +145,18 @@ describe("hosts store", () => {
     expect(extra).toMatchObject({ status: "ready", apiKey: "host-key", primary: false });
   });
 
+  it("tries every saved host at boot even when the legacy reconnect set is empty", async () => {
+    installSettings(settings({ savedHosts: [hal], connectedHostIds: [] }));
+    secretGet.mockResolvedValue("host-key");
+    testRemoteHost.mockResolvedValue({ ok: true, version: "0.17.0", error: null });
+
+    const hosts = useHostsStore();
+    await hosts.init();
+
+    expect(testRemoteHost).toHaveBeenCalledWith(hal.url, "host-key");
+    expect(hosts.all.find((host) => host.id === hal.id)).toMatchObject({ status: "ready" });
+  });
+
   it("reconnects the whole remembered host set at boot, local primary first", async () => {
     installSettings(
       settings({
@@ -701,10 +713,9 @@ describe("hosts store", () => {
     expect(final.savedHosts.find((h: SavedHost) => h.id === hal.id)?.name).toBe("render box");
   });
 
-  it("reconcile re-homes the loser's live row when the survivor has no live one", async () => {
-    // hal was used more recently (survivor) but only the IP slug is connected
-    // right now — its working live row must move onto the surviving slug, not
-    // be deleted (the survivor's own address may not even answer).
+  it("reconcile keeps the preferred live row when saved aliases both reconnect", async () => {
+    // Every saved address is attempted at boot. Reconcile still collapses
+    // aliases to the more recently used slug once instance identity arrives.
     const ip: SavedHost = {
       id: "192-168-1-114-7680",
       name: null,
@@ -718,20 +729,21 @@ describe("hosts store", () => {
       }),
     );
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
-    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
-      Promise.resolve({
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) => {
+      const remote = !target.baseUrl.includes("127.0.0.1");
+      return Promise.resolve({
         queue_depth: 0,
         queue_capacity: 8,
         version: null,
-        instance_id: target.baseUrl.includes("192.168.1.114") ? "uuid-shared" : "uuid-local",
-        hostname: target.baseUrl.includes("192.168.1.114") ? "hal9000" : "this-mac",
-      }),
-    );
+        instance_id: remote ? "uuid-shared" : "uuid-local",
+        hostname: remote ? "hal9000" : "this-mac",
+      });
+    });
     const hosts = useHostsStore();
     await hosts.init();
     await hosts.refresh();
     const row = hosts.all.find((h) => h.id === hal.id);
-    expect(row).toMatchObject({ status: "ready", baseUrl: ip.url });
+    expect(row).toMatchObject({ status: "ready", baseUrl: hal.url });
     expect(hosts.all.some((h) => h.id === ip.id)).toBe(false);
     const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
     expect(persisted.connectedHostIds).toEqual([hal.id]);

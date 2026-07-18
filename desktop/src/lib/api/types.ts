@@ -447,6 +447,8 @@ export interface CatalogEntry {
   author?: string | null;
   family: string;
   kind: string;
+  /** Live HF layout; separated repos can contain several checkpoints. */
+  bundling?: "single-file" | "separated" | string | null;
   size_bytes?: number | null;
   download_count?: number | null;
   likes?: number | null;
