@@ -7,6 +7,7 @@ import {
   useGenerationStore,
   jobPhase,
   jobProgress,
+  jobStatusCode,
   railOrder,
   type Job,
 } from "../../stores/generation";
@@ -281,23 +282,6 @@ const railJobs = computed<Job[]>(() => {
   return [...live, ...done];
 });
 
-function statusCode(job: Job): string {
-  switch (job.status) {
-    case "denoising":
-      return `${job.step}/${job.total}`;
-    case "finishing":
-      return "FIXING";
-    case "loading":
-      return "LOADING";
-    case "queued":
-      return job.queuePosition && job.queuePosition > 0 ? `QUEUED #${job.queuePosition}` : "QUEUED";
-    case "complete":
-      return "FIXED";
-    case "error":
-      return job.error === "Cancelled" ? "CANCELLED" : "STOPPED";
-  }
-}
-
 function jobMenu(job: Job): MenuEntry[] {
   const live = job.status !== "complete" && job.status !== "error";
   return [
@@ -458,7 +442,7 @@ function jobMenu(job: Job): MenuEntry[] {
             {{ job.model }}<template v-if="job.hostLabel"> · {{ job.hostLabel }}</template>
           </div>
           <div class="edge-code" :class="job.status === 'error' ? 'text-stop' : ''">
-            {{ statusCode(job) }}
+            {{ jobStatusCode(job) }}
           </div>
         </div>
       </RouterLink>

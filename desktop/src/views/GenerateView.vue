@@ -76,7 +76,13 @@ const promptEl = ref<HTMLTextAreaElement | null>(null);
 const previewRegion = ref<HTMLDivElement | null>(null);
 const previewFrameSize = ref({ width: 0, height: 0 });
 const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
+const pickerEl = ref<HTMLDivElement | null>(null);
 const pickerOpen = ref(false);
+
+function onDocumentPointerDown(event: PointerEvent) {
+  if (!pickerOpen.value || !pickerEl.value) return;
+  if (!event.composedPath().includes(pickerEl.value)) pickerOpen.value = false;
+}
 
 // Live inspector width while dragging its left-edge handle; null follows the
 // persisted preference (appPrefs.generateParamsWidth). Persist only on commit.
@@ -521,6 +527,7 @@ watch(
 );
 
 onMounted(() => {
+  document.addEventListener("pointerdown", onDocumentPointerDown);
   promptEl.value?.focus();
   if (previewRegion.value && typeof ResizeObserver !== "undefined") {
     previewResizeObserver = new ResizeObserver(([entry]) => {
@@ -531,7 +538,10 @@ onMounted(() => {
   resizePreview();
 });
 
-onBeforeUnmount(() => previewResizeObserver?.disconnect());
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", onDocumentPointerDown);
+  previewResizeObserver?.disconnect();
+});
 </script>
 
 <template>
@@ -714,9 +724,10 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
         <span class="edge-code">Model</span>
         <div class="border-edge h-px flex-1 border-t" />
       </div>
-      <div class="relative">
+      <div ref="pickerEl" class="relative">
         <button
           type="button"
+          :aria-expanded="pickerOpen"
           class="border-edge flex min-h-9 w-full items-center justify-between gap-2 rounded-control border bg-bath px-2 py-1.5 text-body text-ink"
           @click="pickerOpen = !pickerOpen"
         >
@@ -729,6 +740,7 @@ onBeforeUnmount(() => previewResizeObserver?.disconnect());
         </button>
         <div
           v-if="pickerOpen"
+          data-test="model-picker-menu"
           class="border-edge absolute z-10 mt-1 max-h-72 w-full overflow-y-auto rounded-chrome border bg-bench shadow-raised"
         >
           <template v-for="[family, list] in pickerFamilies" :key="family">
