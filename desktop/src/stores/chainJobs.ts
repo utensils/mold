@@ -122,6 +122,10 @@ export const useChainJobsStore = defineStore("chainJobs", {
       }
     },
     async create(req: ChainRequest, target: ApiTarget | null = null): Promise<string> {
+      if (!sameTarget(this.target, target)) {
+        this.unwatch();
+        this.live = emptyChainJobLive();
+      }
       this.target = target;
       const init = {
         method: "POST",

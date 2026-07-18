@@ -51,4 +51,22 @@ describe("chain jobs on an explicit host", () => {
       expect.objectContaining({ target }),
     );
   });
+
+  it("stops a previous host watch before creating on a different host", async () => {
+    const store = useChainJobsStore();
+    store.watch("local-chain", { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" });
+    const previousAbort = store.abort!;
+    apiJsonTo.mockImplementation((_target: ApiTarget, path: string, init?: RequestInit) => {
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        expect(previousAbort.signal.aborted).toBe(true);
+        return Promise.resolve({ job_id: "remote-chain-1" });
+      }
+      return Promise.resolve({ jobs: [] });
+    });
+
+    await store.create(request, target);
+
+    expect(previousAbort.signal.aborted).toBe(true);
+    expect(store.target).toEqual(target);
+  });
 });

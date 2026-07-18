@@ -23,6 +23,7 @@ import ChainsView from "./ChainsView.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
+import { useModelStore } from "../stores/models";
 
 const videoModel: ModelEntry = {
   name: "ltx-video-0.9.6:bf16",
@@ -111,5 +112,39 @@ describe("ChainsView multi-host video generation", () => {
 
     expect(wrapper.text()).not.toContain("No video models yet");
     expect(wrapper.get("select").text()).toContain("ltx-video-0.9.6:bf16");
+  });
+
+  it("uses the remote CUDA host when LTX-2 is also installed on local Metal", async () => {
+    const ltx2 = { ...videoModel, name: "ltx-2-19b-distilled:fp8", family: "ltx-2" };
+    installRemoteVideoHost();
+    useHostModelsStore().byHost["hal9000-7680"]!.entries = [ltx2];
+    useHostModelsStore().byHost.local = {
+      entries: [ltx2],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    useHostsStore().telemetry.local = {
+      queueDepth: 0,
+      queueCapacity: 8,
+      version: "0.17.1",
+      modelsLoaded: [],
+      gpuInfo: {
+        backend: "metal",
+        name: "Apple Metal GPU",
+        vram_total_mb: 32_768,
+        vram_used_mb: 0,
+      },
+      instanceId: "local",
+      hostname: "local",
+    };
+    useModelStore().all = [ltx2];
+
+    mount(ChainsView, { shallow: true });
+    await flushPromises();
+
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
+      expect.stringContaining("/api/capabilities/chain-limits"),
+    );
   });
 });

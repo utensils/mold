@@ -61,7 +61,15 @@ const isCudaOnlyOnThisMachine = (m: ModelEntry) => {
   return backend.value === "metal";
 };
 
-const selectedRoute = computed(() => (form.model ? hosts.resolveRoute(null, form.model) : null));
+function routeForModel(model: ModelEntry) {
+  const cudaOnly = model.family === "ltx2" || model.family === "ltx-2";
+  return hosts.resolveRoute(cudaOnly ? "capable" : null, model.name);
+}
+
+const selectedRoute = computed(() => {
+  const model = videoModels.value.find((entry) => entry.name === form.model);
+  return model ? routeForModel(model) : null;
+});
 const watchedHostId = computed(
   () => hosts.all.find((host) => host.baseUrl === chains.target?.baseUrl)?.id ?? null,
 );
@@ -115,7 +123,8 @@ function pickModel(name: string) {
 
 async function loadLimits(model: string) {
   try {
-    const route = hosts.resolveRoute(null, model);
+    const entry = videoModels.value.find((candidate) => candidate.name === model);
+    const route = entry ? routeForModel(entry) : hosts.resolveRoute(null, model);
     const nextLimits = await fetchChainLimits(model, route?.target ?? null);
     if (form.model !== model) return;
     limits.value = nextLimits;
