@@ -7,14 +7,16 @@ import DownloadsTray from "../components/models/DownloadsTray.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useModelStore } from "../stores/models";
 import { useDownloadsStore } from "../stores/downloads";
-import { formatGB } from "../lib/format";
-import { modelDiskBytes } from "../lib/models";
+import { useHostModelsStore } from "../stores/hostModels";
+import { useHostsStore } from "../stores/hosts";
 import { primaryModifierPressed } from "../lib/platform";
 import { mediaTypeFromQuery, type MediaType } from "../lib/modelAvailability";
 
 const conn = useConnectionStore();
 const models = useModelStore();
 const downloads = useDownloadsStore();
+const hostModels = useHostModelsStore();
+const hosts = useHostsStore();
 const route = useRoute();
 const router = useRouter();
 type Layout = "grid" | "table";
@@ -37,10 +39,22 @@ function setMediaType(type: MediaType) {
   void router.replace({ query: type === "all" ? rest : { ...rest, type } });
 }
 
-const installedCount = computed(() => models.installed.length);
-const installedBytes = computed(() =>
-  models.installed.reduce((sum, m) => sum + modelDiskBytes(m), 0),
+const installedModels = computed(() => {
+  const byName = new Map(
+    models.installed.map((entry) => [entry.name, { ...entry, hostIds: ["local"] }]),
+  );
+  for (const entry of hostModels.unionInstalled) {
+    const existing = byName.get(entry.name);
+    if (existing) existing.hostIds = [...new Set([...existing.hostIds, ...entry.hostIds])];
+    else byName.set(entry.name, { ...entry, hostIds: [...entry.hostIds] });
+  }
+  return [...byName.values()];
+});
+const installedCount = computed(() => installedModels.value.length);
+const installedHostCount = computed(
+  () => new Set(installedModels.value.flatMap((entry) => entry.hostIds)).size,
 );
+const installedModelIds = computed(() => installedModels.value.map((entry) => entry.name));
 
 function scrollToCatalog() {
   catalogSection.value?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -61,9 +75,26 @@ watch(
   { immediate: true },
 );
 
+watch(
+  () =>
+    hosts.all
+      .filter((host) => host.status === "ready" && host.baseUrl)
+      .map((host) => `${host.id}:${host.baseUrl}:${host.status}:${host.apiKey ?? ""}`)
+      .join("|"),
+  () => {
+    for (const host of hosts.all.filter((candidate) => candidate.status === "ready")) {
+      void downloads.subscribe(host).catch(() => {
+        // A pre-downloads-API host still participates in the model shelf.
+      });
+    }
+    void hostModels.refresh();
+  },
+  { immediate: true },
+);
+
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
-  downloads.subscribe();
+  void downloads.subscribe();
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
@@ -130,11 +161,17 @@ onUnmounted(() => {
         <div class="flex items-center gap-2 px-4 pt-4">
           <h2 id="installed-models-heading" class="text-body font-semibold text-ink">Installed</h2>
           <span class="data-mono text-caption text-ink-3">
-            {{ installedCount }} · {{ formatGB(installedBytes) }}
+            {{ installedCount }} model{{ installedCount === 1 ? "" : "s" }}
+            <template v-if="installedHostCount > 1"> · {{ installedHostCount }} hosts</template>
           </span>
           <div class="border-edge h-px flex-1 border-t" />
         </div>
-        <InstalledTab :query="query" :media-type="mediaType" @browse-catalog="scrollToCatalog" />
+        <InstalledTab
+          :query="query"
+          :media-type="mediaType"
+          :entries="installedModels"
+          @browse-catalog="scrollToCatalog"
+        />
       </section>
 
       <section ref="catalogSection" aria-labelledby="available-models-heading">
@@ -147,6 +184,7 @@ onUnmounted(() => {
           :query="query"
           :layout="layout"
           :exclude-installed="true"
+          :installed-ids="installedModelIds"
           :media-type="mediaType"
           @clear-media-filter="setMediaType('all')"
         />

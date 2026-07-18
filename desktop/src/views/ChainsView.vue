@@ -2,11 +2,14 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import EmptyState from "../components/shell/EmptyState.vue";
+import ImagePickerModal from "../components/generate/ImagePickerModal.vue";
 import StageCard from "../components/chains/StageCard.vue";
 import SpliceMark from "../components/chains/SpliceMark.vue";
 import ChainJobsList from "../components/chains/ChainJobsList.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useModelStore } from "../stores/models";
+import { useHostModelsStore } from "../stores/hostModels";
+import { useHostsStore } from "../stores/hosts";
 import { useChainJobsStore } from "../stores/chainJobs";
 import { useToastStore } from "../stores/toasts";
 import { isVideoFamily } from "../lib/capabilities";
@@ -26,12 +29,17 @@ import {
 } from "../lib/chainForm";
 import { fetchChainLimits } from "../lib/api/chains";
 import { apiJson } from "../lib/api/client";
+import { base64ToDataUrl } from "../lib/image";
 import { randomSeed } from "../stores/generation";
+import type { PickedImage } from "../lib/generateForm";
+import { mergeInstalledModels } from "../lib/generateModels";
 import type { ChainLimits, ModelEntry, ResourceSnapshot } from "../lib/api/types";
 
 const router = useRouter();
 const conn = useConnectionStore();
 const models = useModelStore();
+const hostModels = useHostModelsStore();
+const hosts = useHostsStore();
 const chains = useChainJobsStore();
 const toasts = useToastStore();
 
@@ -42,12 +50,32 @@ const showToml = ref(false);
 const rendering = ref(false);
 const tomlInput = ref<HTMLInputElement | null>(null);
 
+const installedModels = computed(() =>
+  mergeInstalledModels(models.installed, hostModels.unionInstalled),
+);
 const videoModels = computed<ModelEntry[]>(() =>
-  models.installed.filter((m) => isVideoFamily(m.family)),
+  installedModels.value.filter((m) => isVideoFamily(m.family)),
 );
 // LTX-2 needs CUDA; on a Metal Mac the option shows but can't be selected.
-const isCudaOnlyOnThisMachine = (m: ModelEntry) =>
-  (m.family === "ltx2" || m.family === "ltx-2") && backend.value === "metal";
+const isCudaOnlyOnThisMachine = (m: ModelEntry) => {
+  if (m.family !== "ltx2" && m.family !== "ltx-2") return false;
+  const ownerIds = hostModels.hostsFor(m.name);
+  if (ownerIds.some((id) => id !== "local")) return false;
+  return backend.value === "metal";
+};
+
+function routeForModel(model: ModelEntry) {
+  const cudaOnly = model.family === "ltx2" || model.family === "ltx-2";
+  return hosts.resolveRoute(cudaOnly ? "capable" : null, model.name);
+}
+
+const selectedRoute = computed(() => {
+  const model = videoModels.value.find((entry) => entry.name === form.model);
+  return model ? routeForModel(model) : null;
+});
+const watchedHostId = computed(
+  () => hosts.all.find((host) => host.baseUrl === chains.target?.baseUrl)?.id ?? null,
+);
 
 const wireStages = computed(() => chainFormToScript(form).stage);
 const totalFrames = computed(() => estimatedTotalFrames(wireStages.value, form.motionTailFrames));
@@ -98,10 +126,15 @@ function pickModel(name: string) {
 
 async function loadLimits(model: string) {
   try {
-    limits.value = await fetchChainLimits(model);
+    const entry = videoModels.value.find((candidate) => candidate.name === model);
+    const route = entry ? routeForModel(entry) : hosts.resolveRoute(null, model);
+    const nextLimits = await fetchChainLimits(model, route?.target ?? null);
+    if (form.model !== model) return;
+    limits.value = nextLimits;
+    await chains.fetchJobs(route?.target ?? null);
     if (!limits.value.supports_audio) form.enableAudio = false;
   } catch {
-    limits.value = null;
+    if (form.model === model) limits.value = null;
   }
 }
 
@@ -121,6 +154,24 @@ function moveStage(i: number, delta: number) {
 }
 function randomizeSeed() {
   form.seed = String(randomSeed());
+}
+
+// Image picker target: "start" = the chain-level starting image, a number =
+// that stage's source image, null = closed. One modal serves both.
+const pickerFor = ref<"start" | number | null>(null);
+const pickerTitle = computed(() =>
+  pickerFor.value === "start" ? "Chain start image" : `Stage ${Number(pickerFor.value) + 1} image`,
+);
+
+function onImagePicked(picked: PickedImage[]) {
+  const first = picked[0];
+  const target = pickerFor.value;
+  if (!first || target === null) return;
+  if (target === "start") {
+    form.startImage = first.base64;
+  } else if (form.stages[target]) {
+    form.stages[target]!.sourceImage = first.base64;
+  }
 }
 
 function openToml() {
@@ -160,7 +211,7 @@ async function render() {
   if (!canRender.value) return;
   rendering.value = true;
   try {
-    await chains.create(chainFormToRequest(form));
+    await chains.create(chainFormToRequest(form), selectedRoute.value?.target ?? null);
     toasts.push("Chain queued");
   } catch (err) {
     toasts.push(String(err), "error");
@@ -180,6 +231,16 @@ watch(
         .catch(() => {});
     }
   },
+  { immediate: true },
+);
+
+watch(
+  () =>
+    hosts.all
+      .filter((host) => host.status === "ready")
+      .map((host) => host.id)
+      .join("\n"),
+  () => void hostModels.refresh(),
   { immediate: true },
 );
 
@@ -279,6 +340,47 @@ onMounted(() => {
           </button>
         </div>
       </div>
+      <div>
+        <label class="edge-code">Start image</label>
+        <div class="mt-1 flex items-center gap-1">
+          <button
+            v-if="form.startImage"
+            type="button"
+            data-test="chain-start-thumb"
+            class="border-edge block h-8 w-8 overflow-hidden rounded-media border hover:brightness-110"
+            title="Replace the chain's starting image"
+            aria-label="Replace start image"
+            @click="pickerFor = 'start'"
+          >
+            <img
+              :src="base64ToDataUrl(form.startImage)"
+              alt=""
+              class="h-full w-full object-cover"
+            />
+          </button>
+          <button
+            v-else
+            type="button"
+            data-test="chain-start-attach"
+            class="border-edge h-8 rounded-control border border-dashed px-2 text-caption text-ink-3 hover:text-ink"
+            title="Seed the film from a still — it conditions stage 1"
+            @click="pickerFor = 'start'"
+          >
+            Attach…
+          </button>
+          <button
+            v-if="form.startImage"
+            type="button"
+            data-test="chain-start-clear"
+            class="text-ink-3 hover:text-stop"
+            title="Remove start image"
+            aria-label="Remove start image"
+            @click="form.startImage = null"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
       <label v-if="limits?.supports_audio" class="flex items-center gap-1 text-caption text-ink-2">
         <input v-model="form.enableAudio" type="checkbox" class="accent-[var(--safelight)]" />
         Audio
@@ -310,12 +412,16 @@ onMounted(() => {
           :job-stage="chains.watchingId ? (live.detail?.stages[i] ?? null) : null"
           :progress="chains.watchingId ? (live.progress[i] ?? null) : null"
           :job-id="chains.watchingId"
+          :api-target="chains.target"
+          :host-id="watchedHostId"
           :can-move-left="i > 0"
           :can-move-right="i < form.stages.length - 1"
           :can-remove="form.stages.length > 1"
           @remove="removeStage(i)"
           @move-left="moveStage(i, -1)"
           @move-right="moveStage(i, 1)"
+          @pick-image="pickerFor = i"
+          @clear-image="stage.sourceImage = null"
         />
       </template>
       <button
@@ -386,5 +492,12 @@ onMounted(() => {
     <div class="p-4">
       <ChainJobsList />
     </div>
+
+    <ImagePickerModal
+      :open="pickerFor !== null"
+      :title="pickerTitle"
+      @pick="onImagePicked"
+      @close="pickerFor = null"
+    />
   </div>
 </template>

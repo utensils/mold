@@ -39,26 +39,103 @@ function mountLightbox(selectedItem: GalleryImage = item) {
 }
 
 describe("Lightbox reuse", () => {
-  it("restores generation dimensions instead of the upscaled raster", async () => {
-    const wrapper = mountLightbox({
-      ...item,
-      metadata: {
-        ...item.metadata,
-        width: 4096,
-        height: 4096,
-        generation_width: 1024,
-        generation_height: 1024,
-        upscale_model: "real-esrgan-x4plus:fp16",
-      },
-    });
+  it("hands the composer the full metadata so nothing is dropped", async () => {
+    const metadata = {
+      ...item.metadata,
+      negative_prompt: "blurry",
+      width: 4096,
+      height: 4096,
+      generation_width: 1024,
+      generation_height: 1024,
+      upscale_model: "real-esrgan-x4plus:fp16",
+      scheduler: "ddim",
+      strength: 0.6,
+      loras: [{ path: "detail.safetensors", scale: 0.8 }],
+    };
+    const wrapper = mountLightbox({ ...item, metadata });
 
     await wrapper.get("button.bg-safelight").trigger("click");
 
-    expect(useComposerStore().prefill).toMatchObject({
-      width: 1024,
-      height: 1024,
-      upscaleModel: "real-esrgan-x4plus:fp16",
+    expect(useComposerStore().prefill).toEqual({ metadata });
+  });
+});
+
+describe("Lightbox metadata panel", () => {
+  const richItem: GalleryImage = {
+    filename: "print-0002.mp4",
+    timestamp: 1_700_000_000,
+    format: "mp4",
+    size_bytes: 12_500_000,
+    metadata: {
+      prompt: "a ship in a storm",
+      negative_prompt: "calm seas",
+      original_prompt: "a ship",
+      model: "ltx2:q8",
+      seed: 7,
+      steps: 30,
+      guidance: 3,
+      width: 768,
+      height: 512,
+      strength: 0.6,
+      scheduler: "ddim",
+      cfg_plus: true,
+      frames: 121,
+      fps: 30,
+      loras: [
+        { path: "detail.safetensors", scale: 0.8 },
+        { path: "grain.safetensors", scale: 0.5 },
+      ],
+      output_format: "mp4",
+      version: "0.17.1",
+    },
+  };
+
+  it("renders the full embedded field set when present", () => {
+    const wrapper = mountLightbox(richItem);
+    const text = wrapper.get("aside").text();
+
+    expect(wrapper.get("[data-test='lightbox-negative']").text()).toContain("calm seas");
+    expect(wrapper.get("[data-test='lightbox-original']").text()).toContain("a ship");
+    expect(wrapper.get("[data-test='lightbox-scheduler']").text()).toContain("ddim");
+    expect(wrapper.get("[data-test='lightbox-cfg-plus']").text()).toContain("on");
+    expect(wrapper.get("[data-test='lightbox-strength']").text()).toContain("0.60");
+    expect(wrapper.get("[data-test='lightbox-video']").text()).toContain("121");
+    expect(wrapper.get("[data-test='lightbox-video']").text()).toContain("30 fps");
+    expect(wrapper.get("[data-test='lightbox-file-size']").text()).toContain("12.5 MB");
+    expect(wrapper.get("[data-test='lightbox-format']").text()).toContain("MP4");
+    const loras = wrapper.findAll("[data-test='lightbox-lora']");
+    expect(loras).toHaveLength(2);
+    expect(loras[0]!.text()).toContain("detail.safetensors");
+    expect(loras[0]!.text()).toContain("0.80");
+    expect(text).toContain("mold 0.17.1");
+  });
+
+  it("omits every conditional row when its field is absent", () => {
+    const wrapper = mountLightbox({ ...item, format: null, size_bytes: null });
+    for (const row of [
+      "lightbox-negative",
+      "lightbox-original",
+      "lightbox-scheduler",
+      "lightbox-cfg-plus",
+      "lightbox-strength",
+      "lightbox-video",
+      "lightbox-format",
+      "lightbox-lora",
+      "lightbox-version",
+    ]) {
+      expect(wrapper.find(`[data-test='${row}']`).exists()).toBe(false);
+    }
+  });
+
+  it("shows a legacy single lora/lora_scale pair as a one-row stack", () => {
+    const wrapper = mountLightbox({
+      ...item,
+      metadata: { ...item.metadata, lora: "old.safetensors", lora_scale: 0.7 },
     });
+    const loras = wrapper.findAll("[data-test='lightbox-lora']");
+    expect(loras).toHaveLength(1);
+    expect(loras[0]!.text()).toContain("old.safetensors");
+    expect(loras[0]!.text()).toContain("0.70");
   });
 });
 

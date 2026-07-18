@@ -11,6 +11,14 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
+/** Human name for a metadata scheduler — plain kebab-case string or a
+ * serde-tagged object (`{ ddim: … }`). "default" and empty render as "". */
+export function formatScheduler(s: string | Record<string, unknown> | null | undefined): string {
+  if (!s || s === "default") return "";
+  if (typeof s === "string") return s;
+  return Object.keys(s)[0] ?? "";
+}
+
 /** Compact counts for card metadata: 999 → "999", 12_300 → "12.3k", 4_200_000 → "4.2M". */
 export function formatCount(count: number): string {
   const compact = (value: number, suffix: string): string =>
@@ -35,6 +43,16 @@ export function vramLevel(used: number, total: number): MeterLevel {
 export function percent(used: number, total: number): number {
   if (total <= 0) return 0;
   return Math.min(100, Math.max(0, (used / total) * 100));
+}
+
+/** Compact ETA for download rows: 42 → "42s", 192 → "3m 12s", 3845 → "1h 4m". */
+export function formatEta(seconds: number | null): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "—";
+  const whole = Math.max(0, Math.round(seconds));
+  if (whole < 60) return `${whole}s`;
+  const minutes = Math.floor(whole / 60);
+  if (minutes < 60) return `${minutes}m ${whole % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 /** Compact relative timestamp for MRU lists ("just now", "5m ago", "3d ago"). */
