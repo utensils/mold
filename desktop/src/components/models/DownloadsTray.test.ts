@@ -222,6 +222,15 @@ describe("DownloadsTray a11y", () => {
     expect(wrapper.get('[data-test="download-eta"]').text()).toContain("1m 30s");
   });
 
+  it("shows the ETA placeholder on a stalled active row with no rate samples", () => {
+    const store = useDownloadsStore();
+    store.activeJobs = [job()];
+    const wrapper = mount(DownloadsTray);
+
+    // No rate samples → etaByJob is null; the row still surfaces a dash.
+    expect(wrapper.get('[data-test="download-eta"]').text()).toContain("—");
+  });
+
   it("renders failed jobs in a collapsed history section with their error", async () => {
     const store = useDownloadsStore();
     store.history = [job({ status: "failed", error: "connection reset" })];

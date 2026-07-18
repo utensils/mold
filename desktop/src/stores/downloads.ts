@@ -87,6 +87,15 @@ export function computeEtaSeconds(samples: RateSample[], bytesTotal: number): nu
   return Number.isFinite(eta) ? Math.round(eta) : null;
 }
 
+/**
+ * Newest-first by completion time. Entries without a `completed_at` keep their
+ * incoming (server) order — `Array.prototype.sort` is stable, so equal keys
+ * never reshuffle.
+ */
+function byCompletedDesc(a: DownloadJob, b: DownloadJob): number {
+  return (b.completed_at ?? 0) - (a.completed_at ?? 0);
+}
+
 function synthQueued(id: string, model: string): DownloadJob {
   return {
     id,
@@ -216,13 +225,15 @@ export const useDownloadsStore = defineStore("downloads", {
     },
     /** Settled rows for the tray's history section, newest first per host. */
     hostedHistory(state): HostedDownloadJob[] {
-      const primary = state.history.map((job) => ({
+      const primary = [...state.history].sort(byCompletedDesc).map((job) => ({
         hostId: state.primaryHostId,
         hostLabel: null,
         job,
       }));
       const extra = Object.entries(state.hostStates).flatMap(([hostId, host]) =>
-        host.history.map((job) => ({ hostId, hostLabel: host.label, job })),
+        [...host.history]
+          .sort(byCompletedDesc)
+          .map((job) => ({ hostId, hostLabel: host.label, job })),
       );
       return [...primary, ...extra];
     },

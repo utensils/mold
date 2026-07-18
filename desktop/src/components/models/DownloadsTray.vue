@@ -113,12 +113,7 @@ async function retry(row: HostedDownloadJob) {
           </button>
         </div>
         <div
-          v-if="
-            row.job.status === 'active' &&
-            (row.job.current_file ||
-              row.job.files_total > 0 ||
-              downloads.etaByJob[row.job.id] != null)
-          "
+          v-if="row.job.status === 'active'"
           class="flex items-center gap-3 pl-6 text-caption text-ink-3"
         >
           <span
@@ -132,11 +127,7 @@ async function retry(row: HostedDownloadJob) {
           <span v-if="row.job.files_total > 0" class="shrink-0" data-test="download-files">
             {{ row.job.files_done }}/{{ row.job.files_total }} files
           </span>
-          <span
-            v-if="downloads.etaByJob[row.job.id] != null"
-            class="shrink-0"
-            data-test="download-eta"
-          >
+          <span class="shrink-0" data-test="download-eta">
             ETA {{ formatEta(downloads.etaByJob[row.job.id] ?? null) }}
           </span>
         </div>

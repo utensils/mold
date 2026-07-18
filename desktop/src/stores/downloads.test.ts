@@ -243,6 +243,36 @@ describe("downloads store ETA + history + retry", () => {
     expect(rows[0]!.job.error).toBe("disk full");
   });
 
+  it("orders each host's history newest-first by completion time", () => {
+    const store = useDownloadsStore();
+    store.hostStates["hal9000"] = {
+      label: "hal9000",
+      target: { baseUrl: "http://hal9000:7680", apiKey: null },
+      activeJobs: [],
+      queued: [],
+      history: [
+        failedJob({ id: "old", completed_at: 1_000 }),
+        failedJob({ id: "new", completed_at: 3_000 }),
+        failedJob({ id: "mid", completed_at: 2_000 }),
+      ],
+      subscribed: true,
+      abort: null,
+      cancelling: [],
+      ready: null,
+    };
+    expect(store.hostedHistory.map((r) => r.job.id)).toEqual(["new", "mid", "old"]);
+  });
+
+  it("keeps the server's relative order for history entries without a timestamp", () => {
+    const store = useDownloadsStore();
+    store.history = [
+      failedJob({ id: "first" }),
+      failedJob({ id: "second" }),
+      failedJob({ id: "third" }),
+    ];
+    expect(store.hostedHistory.map((r) => r.job.id)).toEqual(["first", "second", "third"]);
+  });
+
   it("retries a failed job on the same extra host, forwarding credentials", async () => {
     const store = useDownloadsStore();
     store.hostStates["hal9000"] = {
