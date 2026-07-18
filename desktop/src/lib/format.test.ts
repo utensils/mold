@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatCount, formatGB, percent, timeAgo, vramLevel } from "./format";
+import { formatCount, formatEta, formatGB, percent, timeAgo, vramLevel } from "./format";
 
 describe("formatGB", () => {
   it("formats decimal gigabytes with one decimal", () => {
@@ -61,5 +61,18 @@ describe("percent", () => {
     expect(percent(200, 100)).toBe(100);
     expect(percent(-5, 100)).toBe(0);
     expect(percent(1, 0)).toBe(0);
+  });
+});
+
+describe("formatEta", () => {
+  it("renders seconds, minutes, and hours compactly", () => {
+    expect(formatEta(42)).toBe("42s");
+    expect(formatEta(192)).toBe("3m 12s");
+    expect(formatEta(3_845)).toBe("1h 4m");
+  });
+
+  it("renders a dash for unknown ETAs", () => {
+    expect(formatEta(null)).toBe("—");
+    expect(formatEta(Number.POSITIVE_INFINITY)).toBe("—");
   });
 });

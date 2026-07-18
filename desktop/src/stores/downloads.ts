@@ -9,6 +9,7 @@ import {
   type ApiTarget,
 } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
+import { startCatalogDownload } from "../lib/api/catalog";
 import { notifyPulled } from "../lib/notify";
 import { useModelStore } from "./models";
 import { useHostModelsStore } from "./hostModels";
@@ -42,6 +43,58 @@ export interface HostedDownloadJob {
 }
 
 const STREAM_OPEN_TIMEOUT_MS = 10_000;
+
+/** Scope prefix for the primary stream's rate samples (host streams use their id). */
+const PRIMARY_RATE_SCOPE = "primary";
+
+/** One byte-count observation on an active download. */
+export interface RateSample {
+  ts: number;
+  bytes: number;
+}
+
+/** Sliding window width for download-rate sampling. */
+export const RATE_WINDOW_MS = 10_000;
+
+/**
+ * Append a sample and trim entries older than the window. Mutates (and
+ * returns) `samples` in place so reactive arrays keep their identity.
+ */
+export function pushRateSample(
+  samples: RateSample[],
+  bytes: number,
+  now: number = Date.now(),
+): RateSample[] {
+  samples.push({ ts: now, bytes });
+  while (samples.length > 0 && now - samples[0]!.ts > RATE_WINDOW_MS) samples.shift();
+  return samples;
+}
+
+/**
+ * Client-side ETA math — the server only emits raw byte counters. Returns
+ * whole seconds remaining, or null when the window is too small, stalled,
+ * or non-advancing (no rate → no honest ETA).
+ */
+export function computeEtaSeconds(samples: RateSample[], bytesTotal: number): number | null {
+  if (samples.length < 2) return null;
+  const first = samples[0]!;
+  const last = samples[samples.length - 1]!;
+  const deltaBytes = last.bytes - first.bytes;
+  const deltaMs = last.ts - first.ts;
+  if (deltaMs <= 0 || deltaBytes <= 0) return null;
+  const ratePerSec = (deltaBytes * 1000) / deltaMs;
+  const eta = Math.max(0, bytesTotal - last.bytes) / ratePerSec;
+  return Number.isFinite(eta) ? Math.round(eta) : null;
+}
+
+/**
+ * Newest-first by completion time. Entries without a `completed_at` keep their
+ * incoming (server) order — `Array.prototype.sort` is stable, so equal keys
+ * never reshuffle.
+ */
+function byCompletedDesc(a: DownloadJob, b: DownloadJob): number {
+  return (b.completed_at ?? 0) - (a.completed_at ?? 0);
+}
 
 function synthQueued(id: string, model: string): DownloadJob {
   return {
@@ -147,6 +200,8 @@ export const useDownloadsStore = defineStore("downloads", {
     primaryTarget: null as ApiTarget | null,
     primaryHostId: "primary",
     hostStates: {} as Record<string, DownloadHostState>,
+    /** Sliding rate windows keyed `<scope>:<job id>` (scope = "primary" or host id). */
+    rateSamples: {} as Record<string, RateSample[]>,
   }),
   getters: {
     /** In-flight rows for the tray: the active job first, then the queue. */
@@ -168,6 +223,39 @@ export const useDownloadsStore = defineStore("downloads", {
       );
       return [...primary, ...extra];
     },
+    /** Settled rows for the tray's history section, newest first per host. */
+    hostedHistory(state): HostedDownloadJob[] {
+      const primary = [...state.history].sort(byCompletedDesc).map((job) => ({
+        hostId: state.primaryHostId,
+        hostLabel: null,
+        job,
+      }));
+      const extra = Object.entries(state.hostStates).flatMap(([hostId, host]) =>
+        [...host.history]
+          .sort(byCompletedDesc)
+          .map((job) => ({ hostId, hostLabel: host.label, job })),
+      );
+      return [...primary, ...extra];
+    },
+    /** Live ETA (seconds) per active job id, derived from the rate windows. */
+    etaByJob(state): Record<string, number | null> {
+      const out: Record<string, number | null> = {};
+      for (const job of state.activeJobs) {
+        out[job.id] = computeEtaSeconds(
+          state.rateSamples[`${PRIMARY_RATE_SCOPE}:${job.id}`] ?? [],
+          job.bytes_total,
+        );
+      }
+      for (const [hostId, host] of Object.entries(state.hostStates)) {
+        for (const job of host.activeJobs) {
+          out[job.id] = computeEtaSeconds(
+            state.rateSamples[`${hostId}:${job.id}`] ?? [],
+            job.bytes_total,
+          );
+        }
+      }
+      return out;
+    },
     hasActivity(): boolean {
       return this.hostedInFlight.length > 0;
     },
@@ -188,8 +276,48 @@ export const useDownloadsStore = defineStore("downloads", {
       this.activeJobs = next.activeJobs;
       this.queued = next.queued;
       this.history = next.history;
+      this.trackRates(PRIMARY_RATE_SCOPE, ev, next);
       if (ev.type === "job_cancelled" || ev.type === "job_done" || ev.type === "job_failed") {
         this.cancelling = this.cancelling.filter((id) => id !== ev.id);
+      }
+    },
+    /**
+     * Maintain the sliding rate windows behind `etaByJob`. Windows are
+     * scoped per stream so one host's snapshot can't evict another's, and
+     * settled/vanished jobs drop theirs so the map can't grow unbounded.
+     */
+    trackRates(scope: string, ev: DownloadEvent, next: DownloadsState) {
+      switch (ev.type) {
+        case "progress": {
+          if (!next.activeJobs.some((job) => job.id === ev.id)) return;
+          const key = `${scope}:${ev.id}`;
+          const samples = this.rateSamples[key] ?? [];
+          pushRateSample(samples, ev.bytes_done);
+          this.rateSamples[key] = samples;
+          return;
+        }
+        case "job_done":
+        case "job_failed":
+        case "job_cancelled":
+          delete this.rateSamples[`${scope}:${ev.id}`];
+          return;
+        case "snapshot": {
+          const live = new Set(
+            [...next.activeJobs, ...next.queued].map((job) => `${scope}:${job.id}`),
+          );
+          for (const key of Object.keys(this.rateSamples)) {
+            if (key.startsWith(`${scope}:`) && !live.has(key)) delete this.rateSamples[key];
+          }
+          return;
+        }
+        default:
+          return;
+      }
+    },
+    /** Drop every rate window belonging to a stream scope. */
+    clearRates(scope: string) {
+      for (const key of Object.keys(this.rateSamples)) {
+        if (key.startsWith(`${scope}:`)) delete this.rateSamples[key];
       }
     },
     /** Subscribe to a host's download stream. Idempotent for each host. */
@@ -214,6 +342,7 @@ export const useDownloadsStore = defineStore("downloads", {
       this.activeJobs = [];
       this.queued = [];
       this.history = [];
+      this.clearRates(PRIMARY_RATE_SCOPE);
       this.subscribed = true;
       this.primaryTarget = target;
       this.primaryHostId = hostId;
@@ -328,6 +457,7 @@ export const useDownloadsStore = defineStore("downloads", {
       host.activeJobs = next.activeJobs;
       host.queued = next.queued;
       host.history = next.history;
+      this.trackRates(hostId, ev, next);
       if (ev.type === "job_cancelled" || ev.type === "job_done" || ev.type === "job_failed") {
         host.cancelling = host.cancelling.filter((id) => id !== ev.id);
       }
@@ -342,6 +472,7 @@ export const useDownloadsStore = defineStore("downloads", {
     unsubscribeHost(hostId: string) {
       this.hostStates[hostId]?.abort?.abort();
       delete this.hostStates[hostId];
+      this.clearRates(hostId);
     },
     onJobComplete(model: string, hostId?: string) {
       const host = hostId ? this.hostStates[hostId] : null;
@@ -362,6 +493,29 @@ export const useDownloadsStore = defineStore("downloads", {
       } catch (err) {
         if (err instanceof ApiError && err.status === 409) {
           toasts.push(`${model} is already queued.`);
+          return;
+        }
+        throw err;
+      }
+    },
+    /**
+     * Re-start a settled (failed) job's download on the SAME host it ran on.
+     * Reuses the catalog dispatcher path the Catalog view pulls through, so
+     * catalog ids re-enqueue their companions and plain names hit
+     * `/api/downloads`; credentials forward only to explicitly remote hosts.
+     */
+    async retry(hostId: string, job: DownloadJob) {
+      const isPrimary = hostId === this.primaryHostId;
+      const host = isPrimary ? null : this.hostStates[hostId];
+      if (!isPrimary && !host) {
+        throw new Error("That host is no longer connected.");
+      }
+      const target = host?.target ?? this.primaryTarget ?? currentTarget();
+      try {
+        await startCatalogDownload(job.model, target, !isPrimary);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          useToastStore().push(`${job.model} is already queued.`);
           return;
         }
         throw err;
