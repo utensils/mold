@@ -89,12 +89,14 @@ const stickyHost = computed(() => {
 });
 
 /** Installed-model source: the pinned host's inventory when known, else the
- * primary's canonical list. */
+ * primary's canonical list. "Known" is a successful fetch (`fetchedAt > 0`),
+ * not a non-empty list — a host that genuinely has no models must scope to its
+ * own (empty) inventory rather than borrow the primary's. */
 const installedControlNetSource = computed(() => {
   const host = stickyHost.value;
   if (host && !host.primary) {
-    const entries = hostModels.byHost[host.id]?.entries;
-    if (entries && entries.length > 0) return entries;
+    const record = hostModels.byHost[host.id];
+    if (record && record.fetchedAt > 0) return record.entries;
   }
   return models.all;
 });
@@ -540,6 +542,7 @@ function setSourceFitMode(e: Event) {
           data-test="controlnet-custom-input"
           data-selectable
           type="text"
+          aria-label="Custom control model id"
           placeholder="controlnet-canny-sd15"
           class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink placeholder:text-ink-3"
         />

@@ -258,6 +258,56 @@ describe("SourceImageWell", () => {
       expect(form.controlModel).toBe("my-handmade-controlnet");
     });
 
+    it("scopes to a pinned host that is fetched but has no models (empty ≠ unknown)", async () => {
+      // A sticky non-primary host whose /api/models came back empty must NOT
+      // fall back to the primary's inventory — its inventory is *known* (just
+      // empty), so the picker offers no installed controlnet models.
+      const { useModelStore } = await import("../../stores/models");
+      const models = useModelStore();
+      models.all = [
+        { name: "controlnet-canny-sd15", family: "controlnet", downloaded: true },
+      ] as (typeof models.all)[number][];
+      const { useHostsStore } = await import("../../stores/hosts");
+      useHostsStore().extras = [
+        {
+          id: "h1",
+          label: "h1",
+          url: "http://h1",
+          apiKey: null,
+          status: "ready",
+          error: null,
+          instanceId: null,
+        },
+      ];
+      const { useAppPrefsStore } = await import("../../stores/appPrefs");
+      useAppPrefsStore().settings = { generateTargetHost: "h1" } as never;
+      const { useHostModelsStore } = await import("../../stores/hostModels");
+      useHostModelsStore().byHost = {
+        h1: { entries: [], fetchedAt: Date.now(), error: null },
+      };
+      fetchCatalogInstalled.mockResolvedValue({
+        entries: [],
+        page: 1,
+        page_size: 0,
+        total: 0,
+      } as never);
+
+      const form = formFor("sd15");
+      form.controlImage = "CTRL";
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      await flushPromises();
+      const select = wrapper.get("[data-test='controlnet-select']").element as HTMLSelectElement;
+      const values = Array.from(select.options).map((o) => o.value);
+      expect(values).not.toContain("controlnet-canny-sd15");
+    });
+
+    it("gives the Custom… free-text input an accessible name", async () => {
+      const { wrapper } = await mountSd15WithControl();
+      await wrapper.get("[data-test='controlnet-select']").setValue("__custom__");
+      const input = wrapper.get("[data-test='controlnet-custom-input']");
+      expect(input.attributes("aria-label")?.trim()).toBeTruthy();
+    });
+
     it("shows an unknown restored value as a selectable option (metadata reuse)", async () => {
       const { useModelStore } = await import("../../stores/models");
       useModelStore().all = [];
