@@ -142,9 +142,12 @@ async function repairComponent(c: ModelComponentStatus): Promise<void> {
   }
 }
 
-const glyphSource = computed<ModelSource>(() =>
-  merged.value.source === "civitai" ? "civitai" : "hf",
-);
+const glyphSource = computed<ModelSource>(() => {
+  if (merged.value.source === "civitai") return "civitai";
+  // Installed local-file models open this drawer too — keep their disk mark.
+  if (merged.value.source === "local") return "local";
+  return "hf";
+});
 const thumbnailUrl = computed(() =>
   merged.value.thumbnail_url ? catalogThumbnailUrl(merged.value.thumbnail_url) : null,
 );

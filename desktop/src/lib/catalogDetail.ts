@@ -5,6 +5,7 @@
  * Pull-vs-Repair action state. Framework-free so the contracts are unit
  * testable (project test rule).
  */
+import { modelSource } from "./modelSource";
 import type { CatalogEntry, ModelEntry } from "./api/types";
 
 /**
@@ -13,20 +14,25 @@ import type { CatalogEntry, ModelEntry } from "./api/types";
  * as the catalog. Catalog installs are already named by their catalog id
  * (`cv:…` / `hf:…`), and manifest models resolve by name — either way the
  * drawer's `GET /api/catalog/:id` enrichment and component listing key off
- * `id`, and `installed: true` flips the action to Repair.
+ * `id`, and `installed: true` flips the action to Repair. Source follows
+ * the same classification as the row glyphs (`modelSource`), and catalog
+ * ids keep their upstream repo / version id from the name itself.
  */
 export function installedModelToEntry(m: ModelEntry): CatalogEntry {
+  const catalogNamed = m.name.startsWith("cv:") || m.name.startsWith("hf:");
+  const sourceId = catalogNamed ? m.name.slice(3) : m.hf_repo || null;
+  const hfRepo = m.name.startsWith("hf:") ? m.name.slice(3) : m.hf_repo || null;
   return {
     id: m.name,
-    source: m.name.startsWith("cv:") ? "civitai" : "hf",
-    source_id: m.hf_repo || null,
+    source: modelSource(m),
+    source_id: sourceId,
     name: m.name,
     family: m.family,
     kind: "checkpoint",
     nsfw: false,
     installed: true,
     size_bytes: m.size_gb > 0 ? Math.round(m.size_gb * 1_000_000_000) : null,
-    page_url: m.hf_repo ? `https://huggingface.co/${m.hf_repo}` : null,
+    page_url: hfRepo ? `https://huggingface.co/${hfRepo}` : null,
     description: m.description || null,
     thumbnail_url: null,
   };
