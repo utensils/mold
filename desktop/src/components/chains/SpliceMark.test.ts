@@ -10,6 +10,7 @@ function stage(transition: ChainStageForm["transition"]): ChainStageForm {
     frames: 97,
     transition,
     fadeFrames: 8,
+    sourceImage: null,
   };
 }
 

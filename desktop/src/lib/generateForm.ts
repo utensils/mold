@@ -13,15 +13,18 @@ import type {
   Ltx2TemporalUpscale,
   ModelEntry,
   OutputFormat,
+  OutputMetadata,
   Scheduler,
   TimeRange,
 } from "./api/types";
 import {
+  MAX_LORA_STACK,
   defaultOutputFormat,
   generationCapabilitiesForFamily,
   outputFormatsForFamily,
   pruneRequestForFamily,
 } from "./capabilities";
+import { findInstalledModel } from "./generateModels";
 
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */
 export interface FormLora {
@@ -274,4 +277,144 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   }
 
   return pruneRequestForFamily(req, form.family);
+}
+
+const KNOWN_SCHEDULERS: readonly Scheduler[] = ["default", "ddim", "euler-ancestral", "unipc"];
+
+/** Match separator-insensitively: the server's `Display for Scheduler` writes
+ * UniPc as `"uni-pc"` while the form union spells it `"unipc"`, and legacy
+ * rows carry `"uni_pc"` / `"euler_ancestral"`. Squash `-`/`_` to compare. */
+const squash = (name: string): string => name.toLowerCase().replace(/[-_]/g, "");
+const SCHEDULER_BY_SQUASHED = new Map<string, Scheduler>(
+  KNOWN_SCHEDULERS.map((s) => [squash(s), s]),
+);
+
+/** Collapse a metadata scheduler value (`"ddim"` or serde-tagged
+ * `{ ddim: … }`) onto the form's string union; anything unknown → default. */
+function normalizeMetadataScheduler(s: OutputMetadata["scheduler"]): Scheduler {
+  if (!s) return "default";
+  const name = typeof s === "string" ? s : (Object.keys(s)[0] ?? "default");
+  return SCHEDULER_BY_SQUASHED.get(squash(name)) ?? "default";
+}
+
+/** Display name for a LoRA restored from metadata — the path's basename. */
+function loraNameFromPath(path: string): string {
+  const base = path.split("/").pop() ?? path;
+  return base.replace(/\.safetensors$/i, "");
+}
+
+/**
+ * Full-fidelity "Reuse settings": restore every serialized generation knob a
+ * gallery item's embedded metadata carries (port of the web SPA's
+ * `applyMetadataToForm`). Static-seed semantics recreate the print exact-ish;
+ * binary media (source/mask/control/video/audio bytes) is cleared because
+ * output metadata never contains it. When the model isn't installed anywhere,
+ * the name is still set (family blank) and the existing missing-model UI takes
+ * over — reuse never forces a host, so model-aware Auto routing still applies.
+ */
+export function applyMetadataToForm(
+  form: GenerateForm,
+  metadata: OutputMetadata,
+  models: ModelEntry[] = [],
+): void {
+  const model = findInstalledModel(models, metadata.model);
+  if (model) {
+    applyModelDefaults(form, model);
+  } else {
+    form.model = metadata.model;
+    form.family = "";
+  }
+
+  form.prompt = metadata.prompt ?? "";
+  form.originalPrompt = metadata.original_prompt ?? null;
+  form.negativePrompt = metadata.negative_prompt ?? "";
+  // Prefer the pre-upscale generation canvas over the saved raster size.
+  form.width = metadata.generation_width || metadata.width || form.width;
+  form.height = metadata.generation_height || metadata.height || form.height;
+  form.steps = metadata.steps || form.steps;
+  form.guidance = metadata.guidance ?? form.guidance;
+  form.seed = metadata.seed == null ? "" : String(metadata.seed);
+  form.scheduler = normalizeMetadataScheduler(metadata.scheduler);
+  form.cfgPlus = metadata.cfg_plus ?? false;
+  if (metadata.strength != null) form.strength = metadata.strength;
+
+  const loras =
+    metadata.loras ??
+    (metadata.lora ? [{ path: metadata.lora, scale: metadata.lora_scale ?? 1.0 }] : []);
+  form.loras = loras.slice(0, MAX_LORA_STACK).map<FormLora>((l) => ({
+    path: l.path,
+    name: loraNameFromPath(l.path),
+    scale: l.scale,
+    trainedWords: [],
+  }));
+
+  form.controlModel = metadata.control_model ?? "";
+  if (metadata.control_scale != null) form.controlScale = metadata.control_scale;
+  form.upscaleModel = metadata.upscale_model ?? "";
+  if (metadata.output_format) form.outputFormat = metadata.output_format;
+
+  // Video params (`video_frames`/`video_fps` are legacy desktop aliases).
+  const frames = metadata.frames ?? metadata.video_frames;
+  if (frames != null) form.frames = frames;
+  const fps = metadata.fps ?? metadata.video_fps;
+  if (fps != null) form.fps = fps;
+  if (metadata.enable_audio != null) form.enableAudio = metadata.enable_audio;
+  form.pipeline = metadata.pipeline ?? null;
+  form.retakeRange = metadata.retake_range ?? null;
+  form.spatialUpscale = metadata.spatial_upscale ?? null;
+  form.temporalUpscale = metadata.temporal_upscale ?? null;
+
+  // Output metadata never carries source/mask/control/video/audio bytes —
+  // clear any stale attachment instead of silently pairing it with the print.
+  form.sourceImage = null;
+  form.maskImage = null;
+  form.controlImage = null;
+  form.sourceVideo = null;
+  form.keyframes = [];
+  form.audioFile = null;
+}
+
+/** Lossy scalar prefill used by non-gallery callers (palette, history, jobs). */
+export interface ScalarPrefill {
+  prompt: string;
+  model: string;
+  seed: number | null;
+  width: number;
+  height: number;
+  steps: number;
+  guidance: number;
+  upscaleModel?: string;
+}
+
+/** Full-fidelity prefill: the gallery item's embedded metadata, verbatim. */
+export interface MetadataPrefill {
+  metadata: OutputMetadata;
+}
+
+export type GeneratePrefill = ScalarPrefill | MetadataPrefill;
+
+/**
+ * Route a composer prefill into the form: gallery reuse ships full metadata
+ * through {@link applyMetadataToForm}; everything else keeps the legacy
+ * scalar copy exactly as before.
+ */
+export function applyPrefillToForm(
+  form: GenerateForm,
+  prefill: GeneratePrefill,
+  models: ModelEntry[] = [],
+): void {
+  if ("metadata" in prefill) {
+    applyMetadataToForm(form, prefill.metadata, models);
+    return;
+  }
+  form.prompt = prefill.prompt;
+  form.model = prefill.model;
+  form.seed = prefill.seed !== null ? String(prefill.seed) : "";
+  form.width = prefill.width;
+  form.height = prefill.height;
+  form.steps = prefill.steps;
+  form.guidance = prefill.guidance;
+  form.upscaleModel = prefill.upscaleModel ?? "";
+  const m = findInstalledModel(models, prefill.model);
+  if (m) form.family = m.family;
 }

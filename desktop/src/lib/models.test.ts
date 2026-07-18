@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { groupInstalledModels, quantTag } from "./models";
+import { groupInstalledModels, modelSizeLabels, quantTag } from "./models";
 import type { ModelEntry } from "./api/types";
 
-function model(name: string, family: string, disk: number, loaded = false): ModelEntry {
+function model(
+  name: string,
+  family: string,
+  disk: number,
+  loaded = false,
+  sizeGb = disk / 1e9,
+): ModelEntry {
   return {
     name,
     family,
-    size_gb: disk / 1e9,
+    size_gb: sizeGb,
     is_loaded: loaded,
     hf_repo: "",
     default_steps: 20,
@@ -53,5 +59,21 @@ describe("groupInstalledModels", () => {
 
   it("handles an empty list", () => {
     expect(groupInstalledModels([])).toEqual({ families: [], utility: [], maxDiskBytes: 0 });
+  });
+});
+
+describe("modelSizeLabels", () => {
+  it("distinguishes primary weights from a larger shared-runtime footprint", () => {
+    expect(modelSizeLabels(model("flux2-klein:q4", "flux2", 10_800_000_000, false, 2.4))).toEqual({
+      weights: "2.4 GB weights",
+      runtime: "10.8 GB with shared runtime",
+    });
+  });
+
+  it("omits a duplicate runtime label when it matches the model weights", () => {
+    expect(modelSizeLabels(model("sd15:fp16", "sd15", 3_200_000_000))).toEqual({
+      weights: "3.2 GB weights",
+      runtime: null,
+    });
   });
 });

@@ -148,15 +148,9 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     {
       label: "Reuse settings",
       action: () => {
-        composer.set({
-          prompt: m.prompt,
-          model: m.model,
-          seed: m.seed,
-          width: m.width,
-          height: m.height,
-          steps: m.steps,
-          guidance: m.guidance,
-        });
+        // Full metadata → full-fidelity restore (negative prompt, LoRAs,
+        // scheduler, video params, …) via `applyPrefillToForm`.
+        composer.set({ metadata: m });
         void router.push("/generate");
       },
     },

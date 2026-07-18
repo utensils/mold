@@ -273,6 +273,9 @@ export interface CompleteEvent {
 
 // ── Gallery ──────────────────────────────────────────────────────────────
 
+/** Embedded `mold:parameters` metadata (mirrors mold-core `OutputMetadata`).
+ * Everything beyond the required core is optional — the desktop talks to
+ * arbitrary-version remote servers, older ones simply omit newer fields. */
 export interface OutputMetadata {
   prompt: string;
   negative_prompt?: string | null;
@@ -283,15 +286,35 @@ export interface OutputMetadata {
   guidance: number;
   width: number;
   height: number;
+  /** Generation canvas before any post-generate upscaler resized the file. */
   generation_width?: number | null;
   generation_height?: number | null;
   strength?: number | null;
-  scheduler?: string | null;
+  /** Plain kebab-case name, or a serde-tagged object for parameterized
+   * variants (e.g. `{ "ddim": … }`). Normalize before feeding the form. */
+  scheduler?: string | Record<string, unknown> | null;
   output_format?: OutputFormat | null;
+  cfg_plus?: boolean | null;
   lora?: string | null;
   lora_scale?: number | null;
+  loras?: LoraWeight[] | null;
+  control_model?: string | null;
+  control_scale?: number | null;
   upscale_model?: string | null;
+  gif_preview?: boolean | null;
   enable_audio?: boolean | null;
+  audio_file_path?: string | null;
+  source_video_path?: string | null;
+  pipeline?: Ltx2PipelineMode | null;
+  retake_range?: TimeRange | null;
+  spatial_upscale?: Ltx2SpatialUpscale | null;
+  temporal_upscale?: Ltx2TemporalUpscale | null;
+  frames?: number | null;
+  fps?: number | null;
+  /** mold version that produced the print. */
+  version?: string | null;
+  /** Legacy desktop-only aliases for `frames` / `fps`; never sent by current
+   * servers but kept so older synthesized rows still display. */
   video_frames?: number | null;
   video_fps?: number | null;
 }
@@ -424,6 +447,8 @@ export interface CatalogEntry {
   author?: string | null;
   family: string;
   kind: string;
+  /** Live HF layout; separated repos can contain several checkpoints. */
+  bundling?: "single-file" | "separated" | string | null;
   size_bytes?: number | null;
   download_count?: number | null;
   likes?: number | null;
