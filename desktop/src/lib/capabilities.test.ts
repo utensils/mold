@@ -149,6 +149,31 @@ describe("pruneRequestForFamily", () => {
     expect(JSON.stringify(full)).toBe(snapshot);
   });
 
+  it("strips camera-control loras for non-ltx2 families but keeps ordinary loras", () => {
+    const withCamera: GenerateRequest = {
+      ...full,
+      loras: [
+        { path: "/l.safetensors", scale: 1 },
+        { path: "camera-control:dolly-in", scale: 1 },
+      ],
+    };
+    // FLUX supports loras — the ordinary adapter survives, the LTX-2-only
+    // camera-control virtual alias does not.
+    expect(pruneRequestForFamily(withCamera, "flux").loras).toEqual([
+      { path: "/l.safetensors", scale: 1 },
+    ]);
+    // ltx2 keeps the full stack untouched.
+    expect(pruneRequestForFamily(withCamera, "ltx2").loras).toEqual(withCamera.loras);
+  });
+
+  it("drops loras entirely when only a camera-control entry remains after stripping", () => {
+    const onlyCamera: GenerateRequest = {
+      ...full,
+      loras: [{ path: "camera-control:static", scale: 1 }],
+    };
+    expect(pruneRequestForFamily(onlyCamera, "flux").loras).toBeUndefined();
+  });
+
   it("strips LTX-2 advanced video fields for non-ltx2 families", () => {
     const advanced: GenerateRequest = {
       ...full,
