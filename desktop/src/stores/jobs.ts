@@ -74,52 +74,52 @@ export const useJobsStore = defineStore("jobs", {
     targetFor(host: HostView): ApiTarget | null {
       return host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
     },
+    /** Snapshot ONE host's queue — the host detail page polls just its host. */
+    async refreshHost(host: HostView) {
+      const target = this.targetFor(host);
+      if (!target || host.status !== "ready") return;
+      const previous = this.queues[host.id];
+      try {
+        // Capabilities are fetched once per host and cached — they only
+        // change across server upgrades.
+        const caps =
+          previous?.caps ??
+          (await apiJsonTo<{ queue?: { can_pause?: boolean; can_cancel_all?: boolean } }>(
+            target,
+            "/api/capabilities",
+          ).then(
+            (c) => ({
+              canPause: c.queue?.can_pause === true,
+              canCancelAll: c.queue?.can_cancel_all === true,
+            }),
+            () => null,
+          ));
+        const [listing, status] = await Promise.all([
+          apiJsonTo<{ entries: QueueEntry[] }>(target, "/api/queue"),
+          apiJsonTo<ServerStatus & { queue_paused?: boolean }>(target, "/api/status"),
+        ]);
+        this.queues[host.id] = {
+          hostId: host.id,
+          entries: listing.entries,
+          paused: status.queue_paused ?? null,
+          caps,
+          gpuOrdinals: (status.gpus ?? []).map((g) => g.ordinal),
+          error: null,
+        };
+      } catch (err) {
+        this.queues[host.id] = {
+          hostId: host.id,
+          entries: previous?.entries ?? [],
+          paused: previous?.paused ?? null,
+          caps: previous?.caps ?? null,
+          gpuOrdinals: previous?.gpuOrdinals ?? [],
+          error: String(err),
+        };
+      }
+    },
     async refresh() {
       const hosts = useHostsStore();
-      await Promise.all(
-        hosts.all.map(async (host) => {
-          const target = this.targetFor(host);
-          if (!target || host.status !== "ready") return;
-          const previous = this.queues[host.id];
-          try {
-            // Capabilities are fetched once per host and cached — they only
-            // change across server upgrades.
-            const caps =
-              previous?.caps ??
-              (await apiJsonTo<{ queue?: { can_pause?: boolean; can_cancel_all?: boolean } }>(
-                target,
-                "/api/capabilities",
-              ).then(
-                (c) => ({
-                  canPause: c.queue?.can_pause === true,
-                  canCancelAll: c.queue?.can_cancel_all === true,
-                }),
-                () => null,
-              ));
-            const [listing, status] = await Promise.all([
-              apiJsonTo<{ entries: QueueEntry[] }>(target, "/api/queue"),
-              apiJsonTo<ServerStatus & { queue_paused?: boolean }>(target, "/api/status"),
-            ]);
-            this.queues[host.id] = {
-              hostId: host.id,
-              entries: listing.entries,
-              paused: status.queue_paused ?? null,
-              caps,
-              gpuOrdinals: (status.gpus ?? []).map((g) => g.ordinal),
-              error: null,
-            };
-          } catch (err) {
-            this.queues[host.id] = {
-              hostId: host.id,
-              entries: previous?.entries ?? [],
-              paused: previous?.paused ?? null,
-              caps: previous?.caps ?? null,
-              gpuOrdinals: previous?.gpuOrdinals ?? [],
-              error: String(err),
-            };
-          }
-        }),
-      );
+      await Promise.all(hosts.all.map((host) => this.refreshHost(host)));
       // Hosts that disconnected drop out of the map.
       const live = new Set(hosts.all.map((h) => h.id));
       for (const id of Object.keys(this.queues)) {

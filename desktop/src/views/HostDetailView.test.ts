@@ -55,7 +55,16 @@ const stub = { template: "<div />" };
 
 const REMOTE_ID = "hal9000-7680";
 
-function installApi(status: Partial<ServerStatus> = {}) {
+interface WireQueueEntry {
+  id: string;
+  model: string;
+  state: "queued" | "running";
+  started_at_unix_ms: number;
+  position: number;
+  gpu?: number;
+}
+
+function installApi(status: Partial<ServerStatus> = {}, queueEntries: WireQueueEntry[] = []) {
   apiJsonTo.mockImplementation((_target: unknown, path: string) => {
     if (path === "/api/status") {
       return Promise.resolve({
@@ -67,6 +76,9 @@ function installApi(status: Partial<ServerStatus> = {}) {
     }
     if (path === "/api/models")
       return Promise.resolve([model("flux-dev:q8", "flux"), model("z-image:q8", "z-image")]);
+    if (path === "/api/queue") return Promise.resolve({ entries: queueEntries });
+    if (path === "/api/capabilities")
+      return Promise.resolve({ queue: { can_pause: true, can_cancel_all: true } });
     return Promise.reject(new Error(`unexpected ${path}`));
   });
 }
@@ -97,6 +109,7 @@ async function mountView(path = `/hosts/${REMOTE_ID}`) {
       { path: "/hosts/:id", component: stub },
       { path: "/settings", component: stub },
       { path: "/models", component: stub },
+      { path: "/jobs", component: stub },
     ],
   });
   router.push(path);
@@ -264,6 +277,45 @@ describe("HostDetailView storage and queue", () => {
     const chips = wrapper.findAll("[data-test='loaded-model-chip']");
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
   });
+
+  it("lists the host's server queue with state codes and ownership tags", async () => {
+    installApi({ queue_depth: 2, queue_capacity: 8 }, [
+      {
+        id: "srv-1",
+        model: "flux-dev:q8",
+        state: "running",
+        started_at_unix_ms: Date.now() - 90_000,
+        position: 0,
+        gpu: 0,
+      },
+      {
+        id: "srv-2",
+        model: "z-image:q8",
+        state: "queued",
+        started_at_unix_ms: Date.now(),
+        position: 1,
+      },
+    ]);
+    const wrapper = await mountView();
+    const rows = wrapper.findAll("[data-test='host-queue-row']");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.text()).toContain("RUNNING · GPU 0");
+    expect(rows[0]!.text()).toContain("flux-dev:q8");
+    // Elapsed wall-clock for the running row (~90s → "1m 30s").
+    expect(rows[0]!.text()).toMatch(/1m \d+s/);
+    expect(rows[1]!.text()).toContain("QUEUED #1");
+    expect(rows[1]!.text()).toContain("z-image:q8");
+    // Neither entry belongs to this app's generation store.
+    expect(rows[0]!.text()).toContain("OTHER CLIENT");
+    expect(wrapper.find("[data-test='queue-empty']").exists()).toBe(false);
+  });
+
+  it("shows an empty queue line and a PAUSED marker from the queue snapshot", async () => {
+    installApi({ queue_paused: true } as Partial<ServerStatus>);
+    const wrapper = await mountView();
+    expect(wrapper.get("[data-test='queue-empty']").text()).toBe("Queue is empty.");
+    expect(wrapper.get("[data-test='queue-paused']").text()).toBe("PAUSED");
+  });
 });
 
 describe("HostDetailView stale status responses", () => {
@@ -420,7 +472,10 @@ describe("HostDetailView models", () => {
     expect(sseCalls.filter((call) => call.path === "/api/resources/stream")).toHaveLength(
       resourceStreamCount,
     );
-    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/status")).toHaveLength(2);
+    // Two status readers per fetch round (the view's models-disk poll and the
+    // queue snapshot's paused/gpus join): mount = 2, the ready-flip = 2 more.
+    // The error flip in between must add none.
+    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/status")).toHaveLength(4);
 
     remote.apiKey = "rotated-key";
     await flushPromises();

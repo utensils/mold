@@ -6,7 +6,7 @@ import ModelTableRow from "../components/models/ModelTableRow.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
-import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
+import { formatEta, formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import { modelDiskBytes, modelSizeLabels } from "../lib/models";
 import { modelSource } from "../lib/modelSource";
@@ -14,8 +14,10 @@ import { ipc } from "../lib/ipc";
 import type { GpuSnapshot, ResourceSnapshot, ServerStatus } from "../lib/api/types";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useDownloadsStore } from "../stores/downloads";
+import { useGenerationStore } from "../stores/generation";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
+import { enrichQueueEntries, useJobsStore, type EnrichedQueueEntry } from "../stores/jobs";
 import { useToastStore } from "../stores/toasts";
 
 /** `ResourceSnapshot` plus the additive `cpu` wire field (mold-core
@@ -29,8 +31,10 @@ const route = useRoute();
 const router = useRouter();
 const appPrefs = useAppPrefsStore();
 const downloads = useDownloadsStore();
+const generation = useGenerationStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
+const jobs = useJobsStore();
 const toasts = useToastStore();
 
 const hostId = computed(() => String(route.params.id ?? ""));
@@ -71,6 +75,22 @@ function startResourceStream(reset = false) {
       }
     },
   });
+}
+
+// ── Live queue (this host's server queue via the jobs store) ──────────────
+
+let queueTimer: ReturnType<typeof setInterval> | null = null;
+
+function tickQueue() {
+  const current = host.value;
+  if (current) void jobs.refreshHost(current);
+}
+
+/** Poll only THIS host's queue while the page is open (Jobs polls them all). */
+function startQueuePolling() {
+  if (queueTimer) clearInterval(queueTimer);
+  tickQueue();
+  queueTimer = setInterval(tickQueue, 5_000);
 }
 
 let statusAbort: AbortController | null = null;
@@ -115,6 +135,7 @@ watch(
     const hostChanged = !previous || identity[0] !== previous[0] || identity[1] !== previous[1];
     startResourceStream(hostChanged);
     void fetchStatus(hostChanged);
+    startQueuePolling();
     startReadyServices();
   },
   { immediate: true },
@@ -129,6 +150,7 @@ watch(
       // A host may have been unreachable during the identity watch's initial
       // request. Recover status-only fields without clearing the last snapshot.
       void fetchStatus();
+      tickQueue();
       startReadyServices();
     }
   },
@@ -138,6 +160,8 @@ onUnmounted(() => {
   resourceAbort = null;
   statusAbort?.abort();
   statusAbort = null;
+  if (queueTimer) clearInterval(queueTimer);
+  queueTimer = null;
 });
 
 // ── Derived display data ──────────────────────────────────────────────────
@@ -179,6 +203,35 @@ const queueCapacity = computed(
 );
 const modelsLoaded = computed(() => telemetry.value?.modelsLoaded ?? []);
 const installedModels = computed(() => hostModels.installedOn(hostId.value));
+
+const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
+const queuePaused = computed(() => queueSnapshot.value?.paused === true);
+
+/** This host's whole server queue, tagged with what belongs to this app. */
+const queueEntries = computed<EnrichedQueueEntry[]>(() => {
+  const snap = queueSnapshot.value;
+  if (!snap) return [];
+  return enrichQueueEntries(
+    snap.entries,
+    hostId.value,
+    generation.jobs,
+    hosts.primaryHost?.id ?? "local",
+  );
+});
+
+/** Same state vocabulary as the Jobs view: RUNNING · GPU 0 / QUEUED #2. */
+function entryCode(entry: EnrichedQueueEntry): string {
+  if (entry.state === "running") {
+    return entry.gpu !== undefined ? `RUNNING · GPU ${entry.gpu}` : "RUNNING";
+  }
+  return entry.position > 0 ? `QUEUED #${entry.position}` : "QUEUED";
+}
+
+/** Elapsed wall-clock for running entries; re-evaluates on each poll frame. */
+function entryElapsed(entry: EnrichedQueueEntry): string | null {
+  if (entry.state !== "running" || !entry.started_at_unix_ms) return null;
+  return formatEta((Date.now() - entry.started_at_unix_ms) / 1000);
+}
 
 const uptime = computed(() => status.value?.uptime_secs ?? null);
 const hasTelemetry = computed(
@@ -495,15 +548,52 @@ async function forget() {
         </div>
         <p v-else class="mt-2 text-caption text-ink-3">No live telemetry from this host yet.</p>
 
-        <!-- Queue — engine activity: depth in the header, resident models
-             labeled LOADED so they can't read as queued jobs. -->
+        <!-- Queue — the host's whole server queue (other clients' jobs
+             included), with resident models labeled LOADED so they can't
+             read as queued jobs. Management stays in the Jobs view. -->
         <div class="mt-8 flex items-center gap-2">
           <h2 class="edge-code">QUEUE</h2>
           <div class="border-edge h-px flex-1 border-t" />
+          <span
+            v-if="queuePaused"
+            class="data-mono text-caption text-stop"
+            data-test="queue-paused"
+          >
+            PAUSED
+          </span>
           <span class="edge-code" data-test="queue-depth">
             {{ queueDepth ?? "—" }}<template v-if="queueCapacity">/{{ queueCapacity }}</template>
           </span>
+          <RouterLink to="/jobs" class="text-caption text-ink-3 hover:text-ink">
+            Jobs →
+          </RouterLink>
         </div>
+        <ul
+          v-if="queueEntries.length"
+          data-test="host-queue"
+          class="border-edge divide-edge mt-2 divide-y overflow-hidden rounded-control border bg-bench"
+        >
+          <li
+            v-for="entry in queueEntries"
+            :key="entry.id"
+            data-test="host-queue-row"
+            class="flex items-center gap-2.5 px-3 py-1.5"
+          >
+            <span
+              class="h-1.5 w-1.5 shrink-0 rounded-full"
+              :class="entry.state === 'running' ? 'bg-safelight' : 'bg-halide'"
+              aria-hidden="true"
+            />
+            <span class="edge-code shrink-0">{{ entryCode(entry) }}</span>
+            <span class="min-w-0 truncate text-body text-ink">{{ entry.model }}</span>
+            <span v-if="!entry.mine" class="edge-code shrink-0">OTHER CLIENT</span>
+            <div class="flex-1" />
+            <span v-if="entryElapsed(entry)" class="data-mono shrink-0 text-ink-3">
+              {{ entryElapsed(entry) }}
+            </span>
+          </li>
+        </ul>
+        <p v-else class="mt-2 text-caption text-ink-3" data-test="queue-empty">Queue is empty.</p>
         <div v-if="modelsLoaded.length" class="mt-2 flex flex-wrap items-center gap-1.5">
           <span class="edge-code mr-1" data-test="loaded-label">LOADED</span>
           <span
