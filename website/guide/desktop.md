@@ -71,7 +71,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
   (`mold.chain.v1`): per-stage prompts and frame counts (validated `8n+1`),
   splice transitions (smooth / cut / fade) you click to cycle, a live
   fits/duration forecast against `/api/capabilities/chain-limits`, TOML
-  import/export, and a durable jobs list with resume, cancel, and retake.
+  import/export, and a durable jobs list with resume, cancel, and retake. Its
+  picker includes video models installed on every connected host; limits,
+  creation, events, previews, and job actions stay routed to the model's host.
 - **History** — a fast, searchable list of past prompts; ↩ refills the composer.
 - **RunPod** — secure account setup, balance and live spend, GPU and
   datacenter discovery, pod launch/lifecycle/connection, and persistent network

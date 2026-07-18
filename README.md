@@ -89,6 +89,8 @@ Hugging Face repositories, so a pull targets one runnable model instead of an
 entire aggregate repository.
 Every remembered remote host is retried immediately whenever the app launches,
 independently of This Mac's startup; unreachable hosts stay visible and retry.
+Chains also uses the all-host video-model union and keeps creation, progress,
+previews, and durable job actions routed to the selected model's host.
 
 **[Download Mold for macOS](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** · **[Desktop guide](https://utensils.io/mold/guide/desktop)**
 

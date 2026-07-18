@@ -7,6 +7,8 @@ import SpliceMark from "../components/chains/SpliceMark.vue";
 import ChainJobsList from "../components/chains/ChainJobsList.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useModelStore } from "../stores/models";
+import { useHostModelsStore } from "../stores/hostModels";
+import { useHostsStore } from "../stores/hosts";
 import { useChainJobsStore } from "../stores/chainJobs";
 import { useToastStore } from "../stores/toasts";
 import { isVideoFamily } from "../lib/capabilities";
@@ -27,11 +29,14 @@ import {
 import { fetchChainLimits } from "../lib/api/chains";
 import { apiJson } from "../lib/api/client";
 import { randomSeed } from "../stores/generation";
+import { mergeInstalledModels } from "../lib/generateModels";
 import type { ChainLimits, ModelEntry, ResourceSnapshot } from "../lib/api/types";
 
 const router = useRouter();
 const conn = useConnectionStore();
 const models = useModelStore();
+const hostModels = useHostModelsStore();
+const hosts = useHostsStore();
 const chains = useChainJobsStore();
 const toasts = useToastStore();
 
@@ -42,12 +47,24 @@ const showToml = ref(false);
 const rendering = ref(false);
 const tomlInput = ref<HTMLInputElement | null>(null);
 
+const installedModels = computed(() =>
+  mergeInstalledModels(models.installed, hostModels.unionInstalled),
+);
 const videoModels = computed<ModelEntry[]>(() =>
-  models.installed.filter((m) => isVideoFamily(m.family)),
+  installedModels.value.filter((m) => isVideoFamily(m.family)),
 );
 // LTX-2 needs CUDA; on a Metal Mac the option shows but can't be selected.
-const isCudaOnlyOnThisMachine = (m: ModelEntry) =>
-  (m.family === "ltx2" || m.family === "ltx-2") && backend.value === "metal";
+const isCudaOnlyOnThisMachine = (m: ModelEntry) => {
+  if (m.family !== "ltx2" && m.family !== "ltx-2") return false;
+  const ownerIds = hostModels.hostsFor(m.name);
+  if (ownerIds.some((id) => id !== "local")) return false;
+  return backend.value === "metal";
+};
+
+const selectedRoute = computed(() => (form.model ? hosts.resolveRoute(null, form.model) : null));
+const watchedHostId = computed(
+  () => hosts.all.find((host) => host.baseUrl === chains.target?.baseUrl)?.id ?? null,
+);
 
 const wireStages = computed(() => chainFormToScript(form).stage);
 const totalFrames = computed(() => estimatedTotalFrames(wireStages.value, form.motionTailFrames));
@@ -98,10 +115,14 @@ function pickModel(name: string) {
 
 async function loadLimits(model: string) {
   try {
-    limits.value = await fetchChainLimits(model);
+    const route = hosts.resolveRoute(null, model);
+    const nextLimits = await fetchChainLimits(model, route?.target ?? null);
+    if (form.model !== model) return;
+    limits.value = nextLimits;
+    await chains.fetchJobs(route?.target ?? null);
     if (!limits.value.supports_audio) form.enableAudio = false;
   } catch {
-    limits.value = null;
+    if (form.model === model) limits.value = null;
   }
 }
 
@@ -160,7 +181,7 @@ async function render() {
   if (!canRender.value) return;
   rendering.value = true;
   try {
-    await chains.create(chainFormToRequest(form));
+    await chains.create(chainFormToRequest(form), selectedRoute.value?.target ?? null);
     toasts.push("Chain queued");
   } catch (err) {
     toasts.push(String(err), "error");
@@ -180,6 +201,16 @@ watch(
         .catch(() => {});
     }
   },
+  { immediate: true },
+);
+
+watch(
+  () =>
+    hosts.all
+      .filter((host) => host.status === "ready")
+      .map((host) => host.id)
+      .join("\n"),
+  () => void hostModels.refresh(),
   { immediate: true },
 );
 
@@ -310,6 +341,8 @@ onMounted(() => {
           :job-stage="chains.watchingId ? (live.detail?.stages[i] ?? null) : null"
           :progress="chains.watchingId ? (live.progress[i] ?? null) : null"
           :job-id="chains.watchingId"
+          :api-target="chains.target"
+          :host-id="watchedHostId"
           :can-move-left="i > 0"
           :can-move-right="i < form.stages.length - 1"
           :can-remove="form.stages.length > 1"

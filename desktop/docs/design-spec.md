@@ -231,6 +231,7 @@ A horizontal **filmstrip timeline** where transitions are _splices_ — grounded
 - **Frame math is always visible:** per-stage frame count validates 8n+1 live (invalid → Stop underline + "Frames must be 8n+1 (9, 17, 25…)"); the footer totals frames/duration and runs the chain-limits + VRAM preflight (`/api/capabilities/chain-limits`, worst-case estimate) — `✓ fits` / `✗ needs 24.2 GB`.
 - **Authoring parity:** _Open .toml…_ imports `mold.chain.v1`; _Edit as TOML_ flips the editor to a mono source view (two-way). _Validate_ and _Dry run_ mirror the CLI verbs and print results in a console strip.
 - **Durable jobs list:** rows with state chips (Queued/Running/Interrupted/Failed/Done in temperature colors), _Resume_, _Cancel_, _Delete_, and **Retake** — retake opens the finished chain's filmstrip, you click the stage to redo, choose **Cascade** ("re-renders this stage and everything after") or **Splice** ("replaces this stage in place"), optionally new prompt/seed offset. Long-job progress: the sidebar chip shows `stage 2/3 · 41/97`, and the window's dock tile badges overall percent.
+- **Multi-host routing:** the model picker uses the all-host installed video-model union. Selecting a remote-only model routes chain limits, creation, durable job actions, live events, and stage previews to that model's host; a remote CUDA LTX-2 model remains usable when This Mac is Metal.
 
 ### 4.5 History — the notebook
 
