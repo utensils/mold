@@ -74,7 +74,7 @@ Failed jobs "stop-bathe": grain freezes and desaturates to Stop-tinted, never di
 
 ## 3. App shell & navigation
 
-Native single window, minimum 1080×700 and default 1360×860. macOS uses `titleBarStyle: Overlay`, `hiddenTitle: true`, and traffic lights inset at (14, 19); Linux keeps native window-manager decorations and removes the traffic-light inset from the app toolbar.
+Native single window, minimum 1080×700 and default 1360×860. macOS uses `titleBarStyle: Overlay` and `hiddenTitle: true`, leaves the traffic lights at AppKit's native position, and restores the native buttons' gray backing when macOS makes their inactive state fully transparent; Linux keeps native window-manager decorations and removes the traffic-light inset from the app toolbar.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐

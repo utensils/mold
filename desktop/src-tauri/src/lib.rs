@@ -2,6 +2,8 @@ pub mod clipboard;
 pub mod commands;
 pub mod connection;
 pub mod gallery;
+#[cfg(target_os = "macos")]
+mod macos_window;
 pub mod menu;
 pub mod notifications;
 pub mod runpod;
@@ -159,6 +161,12 @@ pub fn run() {
             runpod::runpod_delete,
         ])
         .on_window_event(|window, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::Focused(focused) = event {
+                if let Err(error) = macos_window::set_traffic_light_focus(window, *focused) {
+                    tracing::warn!("failed to update inactive traffic lights: {error}");
+                }
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 // Best-effort engine shutdown; chain jobs are crash-safe and
                 // resumable, so a hard exit is acceptable as fallback.
