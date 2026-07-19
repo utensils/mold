@@ -42,6 +42,15 @@ pub enum SseMessage {
     Error(mold_core::SseErrorEvent),
 }
 
+/// Media bytes included in an SSE completion. Mobile clients request
+/// metadata-only completions and load the saved file with Range support.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SseCompletionPayload {
+    #[default]
+    Full,
+    MetadataOnly,
+}
+
 /// A generation job submitted to the queue worker.
 pub struct GenerationJob {
     /// Server-assigned UUIDv4. Echoed back to the client in the initial
@@ -53,6 +62,7 @@ pub struct GenerationJob {
     /// construct `GenerationJob` directly may leave it empty.
     pub id: String,
     pub request: mold_core::GenerateRequest,
+    pub completion_payload: SseCompletionPayload,
     /// Channel to send SSE progress/complete/error events (None for non-streaming).
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     /// Oneshot to return the final result for non-streaming callers.

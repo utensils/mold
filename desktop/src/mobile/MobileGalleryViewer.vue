@@ -18,8 +18,9 @@ const props = withDefaults(
     thumbnailUrl: string;
     reusing?: boolean;
     reuseError?: string;
+    generationAnnouncement?: string;
   }>(),
-  { reusing: false, reuseError: "" },
+  { reusing: false, reuseError: "", generationAnnouncement: "" },
 );
 
 const emit = defineEmits<{ close: []; reuse: [] }>();
@@ -116,6 +117,9 @@ onBeforeUnmount(() => {
     data-test="gallery-viewer"
     @cancel.prevent="cancelViewer"
   >
+    <p class="sr-only" aria-live="polite" aria-atomic="true">
+      {{ generationAnnouncement }}
+    </p>
     <header class="gallery-viewer-header">
       <button
         ref="closeButton"

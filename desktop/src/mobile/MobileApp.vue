@@ -2,15 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
-import { sseStream } from "../lib/api/sse";
 import { outputFormatsForFamily } from "../lib/capabilities";
-import type {
-  CompleteEvent,
-  GalleryImage,
-  ModelEntry,
-  ProgressEvent,
-  ServerStatus,
-} from "../lib/api/types";
+import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
 import {
   applyModelDefaults,
   buildRequest,
@@ -18,6 +11,13 @@ import {
   type GenerateForm,
 } from "../lib/generateForm";
 import { galleryMediaPath, isVideoItem } from "../lib/gallery/media";
+import {
+  isCancelledError,
+  jobStatusCode,
+  railOrder,
+  useGenerationStore,
+  type Job,
+} from "../stores/generation";
 import { normalizeRemoteAddress, remoteHostId } from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
@@ -66,10 +66,8 @@ const models = ref<ModelEntry[]>([]);
 const modelsHostId = ref("");
 const loadingModels = ref(false);
 const form = reactive<GenerateForm>(newGenerateForm());
-const generating = ref(false);
 const progress = ref("Ready");
-const resultUrl = ref("");
-const resultFormat = ref("");
+const generationAnnouncement = ref("");
 const gallery = ref<GalleryPrint[]>([]);
 const galleryLoading = ref(false);
 const galleryLoadingMore = ref(false);
@@ -78,23 +76,81 @@ const galleryRemaining = ref(0);
 const selectedPrint = ref<GalleryPrint | null>(null);
 const reusingPrint = ref(false);
 const reusePrintError = ref("");
-let generationAbort: AbortController | null = null;
+const latestResultClientId = ref<number | null>(null);
+const resultMediaLoadKey = ref(0);
 const objectUrls = new Set<string>();
+const handledGenerationClientIds = new Set<number>();
 let pendingGallery: PendingGalleryPrint[] = [];
 let modelLoadEpoch = 0;
+let galleryRefreshRequested = false;
+let galleryRefreshDeferred = false;
+let galleryRefreshTask: Promise<void> | null = null;
+let galleryOperationTail: Promise<void> = Promise.resolve();
+let resultMediaRecoveryClientId: number | null = null;
+let resultMediaRecoveryAttempts = 0;
+const generation = useGenerationStore();
 
 const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value));
 const selectedTarget = computed<ApiTarget | null>(() => {
   const host = selectedHost.value;
   return host ? { baseUrl: host.baseUrl, apiKey: host.apiKey || null } : null;
 });
-const resultIsVideo = computed(() => resultFormat.value === "mp4");
 const outputFormats = computed(() => outputFormatsForFamily(form.family));
 const selectedModelAvailable = computed(
   () =>
     modelsHostId.value === selectedHostId.value &&
     models.value.some((model) => model.name === form.model),
 );
+const queuedJobs = computed(() => railOrder(generation.pending));
+const activeGeneration = computed(() => {
+  const active = generation.active;
+  return active && active.status !== "complete" && active.status !== "error" ? active : null;
+});
+const latestResultJob = computed(() => {
+  const latest = generation.jobs.find((job) => job.clientId === latestResultClientId.value);
+  // Once a completion is promoted, never put an older print underneath its
+  // new seed/status while a saved-file URL is loading or has failed.
+  if (latestResultClientId.value !== null) {
+    return latest?.status === "complete" ? latest : null;
+  }
+  for (let index = generation.jobs.length - 1; index >= 0; index -= 1) {
+    const job = generation.jobs[index];
+    if (job?.status === "complete") return job;
+  }
+  return null;
+});
+const resultUrl = computed(() => latestResultJob.value?.resultUrl ?? "");
+const resultIsVideo = computed(() => latestResultJob.value?.result?.format === "mp4");
+const resultPreviewError = computed(() => latestResultJob.value?.resultError ?? "");
+const developButtonLabel = computed(() =>
+  queuedJobs.value.length > 0
+    ? `Develop print (+${queuedJobs.value.length} queued)`
+    : "Develop print",
+);
+const queueAnnouncement = computed(() => {
+  const count = queuedJobs.value.length;
+  return count === 0
+    ? "No active generations."
+    : `${count} active generation${count === 1 ? "" : "s"}.`;
+});
+const generationStatus = computed(() => {
+  const active = activeGeneration.value;
+  if (!active) return progress.value;
+  switch (active.status) {
+    case "queued":
+      return active.queuePosition && active.queuePosition > 0
+        ? `Queued #${active.queuePosition}`
+        : "Queued";
+    case "loading":
+      return active.stage ?? "Loading model";
+    case "denoising":
+      return `Developing ${active.step} / ${active.total}`;
+    case "finishing":
+      return active.stage ?? "Finalizing";
+    default:
+      return jobStatusCode(active);
+  }
+});
 
 function loadHosts(): SavedHost[] {
   try {
@@ -231,83 +287,134 @@ function changeModel(): void {
   if (model) applyModelDefaults(form, model);
 }
 
-function mimeFor(format: string): string {
-  return format === "mp4" ? "video/mp4" : format === "jpeg" ? "image/jpeg" : `image/${format}`;
-}
-
-function base64Url(data: string, format: string): string {
-  const binary = atob(data);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  const url = URL.createObjectURL(new Blob([bytes], { type: mimeFor(format) }));
-  objectUrls.add(url);
-  return url;
-}
-
 function revokeObjectUrl(url: string): void {
   URL.revokeObjectURL(url);
   objectUrls.delete(url);
 }
 
-async function generate(): Promise<void> {
+function generate(): void {
+  const host = selectedHost.value;
   const target = selectedTarget.value;
-  if (!target || !form.prompt.trim() || !selectedModelAvailable.value) return;
-  generationAbort?.abort();
-  const controller = new AbortController();
-  generationAbort = controller;
-  generating.value = true;
-  progress.value = "Submitting";
-  if (resultUrl.value) revokeObjectUrl(resultUrl.value);
-  resultUrl.value = "";
-  await sseStream("/api/generate/stream", {
-    target,
-    method: "POST",
-    body: buildRequest(form),
-    signal: controller.signal,
-    retry: false,
-    onOpen: () => {
-      if (generationAbort === controller) progress.value = "Queued";
-    },
-    onEvent: (event, data) => {
-      if (generationAbort !== controller) return;
-      try {
-        if (event === "progress") {
-          const update = JSON.parse(data) as ProgressEvent;
-          if (update.type === "denoise_step")
-            progress.value = `Developing ${update.step} / ${update.total}`;
-          else if (update.type === "stage_start") progress.value = update.name;
-          else if (update.type === "queued") progress.value = `Queued ${update.position + 1}`;
-          else if (update.type === "info") progress.value = update.message;
-        } else if (event === "complete") {
-          const complete = JSON.parse(data) as CompleteEvent;
-          resultUrl.value = base64Url(complete.image, complete.format);
-          resultFormat.value = complete.format;
-          progress.value = `${(complete.generation_time_ms / 1000).toFixed(1)}s · seed ${complete.seed_used}`;
-          generating.value = false;
-        } else if (event === "error") {
-          progress.value = data;
-          generating.value = false;
-        }
-      } catch {
-        controller.abort();
-        progress.value = "The host returned an invalid generation update.";
-        generating.value = false;
+  if (!host || !target || !form.prompt.trim() || !selectedModelAvailable.value) return;
+
+  // Exactly like desktop: snapshot the request and host for this tap, open a
+  // separate SSE stream immediately, and let the remote engine schedule it.
+  const { settled } = generation.submitBatch(buildRequest(form), 1, {
+    hostId: host.id,
+    label: host.name,
+    kind: "remote",
+    target: { ...target },
+    mirrorRemoteOutput: false,
+    retainEncodedResult: false,
+    metadataOnlyCompletion: true,
+  });
+  progress.value = "Queued";
+  generationAnnouncement.value = "";
+  void settled.then((jobs) => {
+    const job = jobs[0];
+    if (!job) return;
+    handledGenerationClientIds.add(job.clientId);
+    if (job.status === "complete" && job.result) {
+      latestResultClientId.value = job.clientId;
+      if (job.resultError) {
+        progress.value = job.resultError;
+        generationAnnouncement.value = `Generation completed, but its preview is unavailable. ${job.resultError}`;
+      } else {
+        progress.value = `${(job.result.generation_time_ms / 1000).toFixed(1)}s · seed ${job.result.seed_used}`;
+        generationAnnouncement.value = "Generation completed.";
       }
-    },
-    onClose: (error) => {
-      if (generationAbort !== controller) return;
-      if (error) progress.value = error.message;
-      generating.value = false;
-      generationAbort = null;
-    },
+      if (tab.value === "gallery") void refreshGallery();
+    } else if (job.error?.includes("remote cancellation was not confirmed")) {
+      progress.value = job.error;
+      generationAnnouncement.value = `Cancellation failed. ${job.error}`;
+    } else if (job.error && !isCancelledError(job.error)) {
+      progress.value = job.error;
+      generationAnnouncement.value = `Generation failed. ${job.error}`;
+    } else if (isCancelledError(job.error)) {
+      progress.value = "Cancelled";
+      generationAnnouncement.value = "Generation cancelled.";
+    }
+    // Only terminal jobs whose callbacks have run are eligible: multiple
+    // completion microtasks cannot prune one another before they promote the
+    // correct latest result. The UI renders one result, so retain one Blob.
+    generation.prune(1, latestResultClientId.value, handledGenerationClientIds);
+    for (const clientId of handledGenerationClientIds) {
+      if (!generation.jobs.some((candidate) => candidate.clientId === clientId)) {
+        handledGenerationClientIds.delete(clientId);
+      }
+    }
   });
 }
 
-function stopGeneration(): void {
-  generationAbort?.abort();
-  generationAbort = null;
-  generating.value = false;
-  progress.value = "Cancelled";
+async function cancelGeneration(job: Job): Promise<void> {
+  try {
+    await generation.cancel(job.clientId);
+    if (job.status === "complete" && job.result) {
+      latestResultClientId.value = job.clientId;
+      progress.value = `${(job.result.generation_time_ms / 1000).toFixed(1)}s · seed ${job.result.seed_used}`;
+      generationAnnouncement.value = "Generation completed.";
+      if (tab.value === "gallery") void refreshGallery();
+    } else if (job.error && !isCancelledError(job.error)) {
+      progress.value = job.error;
+      generationAnnouncement.value = `Generation failed. ${job.error}`;
+    } else {
+      progress.value = "Cancelled";
+      generationAnnouncement.value = "Generation cancelled.";
+    }
+  } catch (error) {
+    progress.value = error instanceof Error ? error.message : String(error);
+    generationAnnouncement.value = `Cancellation failed. ${progress.value}`;
+  }
+}
+
+function renewGeneratedResult(force: boolean): void {
+  const job = latestResultJob.value;
+  if (!job?.metadataOnlyCompletion || !job.result || job.resultUrlLoading) return;
+  const previousUrl = job.resultUrl;
+  void generation
+    .refreshRemoteResultUrl(job.clientId, force)
+    .then(() => {
+      if (latestResultClientId.value !== job.clientId || job.resultError || !job.resultUrl) return;
+      if (force) resultMediaLoadKey.value += 1;
+      progress.value = `${(job.result!.generation_time_ms / 1000).toFixed(1)}s · seed ${job.result!.seed_used}`;
+      if (force || job.resultUrl !== previousUrl) {
+        generationAnnouncement.value = "Result preview refreshed.";
+      }
+    })
+    .catch(() => {
+      // The store exposes the directed failure through resultError.
+    });
+}
+
+function generatedMediaReady(): void {
+  resultMediaRecoveryClientId = latestResultClientId.value;
+  resultMediaRecoveryAttempts = 0;
+}
+
+function recoverGeneratedMedia(): void {
+  const job = latestResultJob.value;
+  if (!job || job.resultUrlLoading) return;
+  if (resultMediaRecoveryClientId !== job.clientId) {
+    resultMediaRecoveryClientId = job.clientId;
+    resultMediaRecoveryAttempts = 0;
+  }
+  if (resultMediaRecoveryAttempts === 0) {
+    resultMediaRecoveryAttempts = 1;
+    renewGeneratedResult(true);
+    return;
+  }
+
+  if (job.resultUrl && job.resultUrlIsObjectUrl) URL.revokeObjectURL(job.resultUrl);
+  job.resultUrl = null;
+  job.resultUrlIsObjectUrl = false;
+  job.resultUrlExpiresAt = null;
+  job.resultError = "Couldn’t load this generated print from the host.";
+}
+
+function retryGeneratedPreview(): void {
+  resultMediaRecoveryClientId = latestResultClientId.value;
+  resultMediaRecoveryAttempts = 0;
+  renewGeneratedResult(true);
 }
 
 async function thumbnailUrl(target: ApiTarget, filename: string): Promise<string> {
@@ -317,7 +424,50 @@ async function thumbnailUrl(target: ApiTarget, filename: string): Promise<string
   return url;
 }
 
-async function refreshGallery(): Promise<void> {
+function refreshGallery(): Promise<void> {
+  if (selectedPrint.value) {
+    // The viewer uses the grid thumbnail as its placeholder/poster and
+    // returns focus to that tile. Keep both alive until the viewer closes.
+    galleryRefreshDeferred = true;
+    return Promise.resolve();
+  }
+  galleryRefreshRequested = true;
+  if (!galleryRefreshTask) {
+    const operation = enqueueGalleryOperation(async () => {
+      while (galleryRefreshRequested) {
+        if (selectedPrint.value) {
+          galleryRefreshRequested = false;
+          galleryRefreshDeferred = true;
+          break;
+        }
+        galleryRefreshRequested = false;
+        await performGalleryRefresh();
+      }
+    });
+    galleryRefreshTask = operation.then(
+      async () => {
+        galleryRefreshTask = null;
+        // A request can arrive after the loop's final condition but before
+        // this continuation. Adopt the re-armed task so every caller waits
+        // for the refresh it requested.
+        if (galleryRefreshRequested) await refreshGallery();
+      },
+      (error: unknown) => {
+        galleryRefreshTask = null;
+        throw error;
+      },
+    );
+  }
+  return galleryRefreshTask;
+}
+
+function enqueueGalleryOperation(operation: () => Promise<void>): Promise<void> {
+  const task = galleryOperationTail.then(operation, operation);
+  galleryOperationTail = task.catch(() => {});
+  return task;
+}
+
+async function performGalleryRefresh(): Promise<void> {
   galleryLoading.value = true;
   galleryError.value = "";
   const prior = gallery.value;
@@ -340,11 +490,15 @@ async function refreshGallery(): Promise<void> {
     .sort((a, b) => b.timestamp - a.timestamp);
   const failed = results.filter((result) => result.status === "rejected").length;
   if (failed) galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable`;
-  await loadMoreGallery();
+  await loadMoreGalleryPage();
   galleryLoading.value = false;
 }
 
-async function loadMoreGallery(): Promise<void> {
+function loadMoreGallery(): Promise<void> {
+  return enqueueGalleryOperation(loadMoreGalleryPage);
+}
+
+async function loadMoreGalleryPage(): Promise<void> {
   galleryLoadingMore.value = true;
   const page = pendingGallery.splice(0, 40);
   for (let offset = 0; offset < page.length; offset += 4) {
@@ -386,6 +540,9 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       ? `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`
       : "Prompt settings restored";
     selectedPrint.value = null;
+    // The next Gallery visit performs its normal refresh; do not refetch the
+    // grid while navigating directly to the restored prompt.
+    galleryRefreshDeferred = false;
     tab.value = "generate";
     void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
   } finally {
@@ -402,6 +559,16 @@ function closePrint(): void {
   if (reusingPrint.value) return;
   reusePrintError.value = "";
   selectedPrint.value = null;
+  if (galleryRefreshDeferred || galleryRefreshRequested) {
+    galleryRefreshDeferred = false;
+    // The viewer normally restores focus to its tile. A deferred refresh — or
+    // one still queued behind Load older — will replace that tile, so move
+    // focus to the stable Gallery tab first.
+    void nextTick(() => {
+      document.querySelector<HTMLButtonElement>("[data-test='mobile-tab-gallery']")?.focus();
+      void refreshGallery();
+    });
+  }
 }
 
 function reuseSelectedPrint(): void {
@@ -418,6 +585,12 @@ watch(tab, (next) => {
   if (next === "gallery") void refreshGallery();
 });
 
+watch(resultPreviewError, (error) => {
+  if (!error) return;
+  progress.value = error;
+  generationAnnouncement.value = `Generation completed, but its preview is unavailable. ${error}`;
+});
+
 onMounted(async () => {
   await hydrateApiKeys();
   if (selectedHost.value) await refreshModels();
@@ -425,7 +598,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  generationAbort?.abort();
+  generation.resetJobs();
   for (const url of objectUrls) URL.revokeObjectURL(url);
 });
 </script>
@@ -436,6 +609,13 @@ onBeforeUnmount(() => {
       <div class="mobile-wordmark">Mold</div>
       <div class="host-chip">{{ selectedHost?.name ?? "Remote only" }}</div>
     </header>
+
+    <p class="sr-only" aria-live="polite" aria-atomic="true">
+      {{ queueAnnouncement }}
+    </p>
+    <p class="sr-only" aria-live="polite" aria-atomic="true">
+      {{ generationAnnouncement }}
+    </p>
 
     <section class="mobile-content">
       <template v-if="tab === 'generate'">
@@ -531,31 +711,83 @@ onBeforeUnmount(() => {
             </div>
           </template>
           <button
-            v-if="!generating"
             class="primary-button"
             type="button"
             :disabled="!form.prompt.trim() || !selectedModelAvailable"
+            data-test="mobile-develop-button"
             @click="generate"
           >
-            Develop print
+            {{ developButtonLabel }}
           </button>
-          <button v-else class="danger-button" type="button" @click="stopGeneration">
-            Cancel generation
-          </button>
+          <section
+            v-if="queuedJobs.length"
+            class="mobile-generation-queue"
+            aria-label="Generation queue"
+            data-test="mobile-generation-queue"
+          >
+            <div class="mobile-generation-queue-head">
+              <h2>Queue</h2>
+              <span>{{ queuedJobs.length }} active</span>
+            </div>
+            <ol>
+              <li
+                v-for="job in queuedJobs"
+                :key="job.clientId"
+                class="mobile-generation-job"
+                data-test="mobile-generation-job"
+              >
+                <div class="mobile-generation-job-copy">
+                  <p>{{ job.prompt }}</p>
+                  <span>{{ job.model }} · {{ job.hostLabel }}</span>
+                </div>
+                <div class="mobile-generation-job-action">
+                  <span data-test="mobile-generation-status">{{ jobStatusCode(job) }}</span>
+                  <button
+                    class="mobile-generation-cancel"
+                    type="button"
+                    :aria-label="`Cancel ${job.prompt}`"
+                    data-test="mobile-generation-cancel"
+                    @click="cancelGeneration(job)"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </li>
+            </ol>
+          </section>
           <div
             class="status-line"
-            :class="{ 'error-text': progress.toLowerCase().includes('error') }"
+            :class="{ 'error-text': generationStatus.toLowerCase().includes('error') }"
+            data-test="mobile-generation-summary"
           >
-            {{ progress }}
+            {{ generationStatus }}
+          </div>
+          <div v-if="resultPreviewError" class="result-preview-error" role="alert">
+            <p class="status-line error-text">{{ resultPreviewError }}</p>
+            <button class="secondary-button" type="button" @click="retryGeneratedPreview">
+              Try preview again
+            </button>
           </div>
           <video
             v-if="resultUrl && resultIsVideo"
+            :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
             class="result-media"
             :src="resultUrl"
             controls
             playsinline
+            @play="renewGeneratedResult(false)"
+            @loadedmetadata="generatedMediaReady"
+            @error="recoverGeneratedMedia"
           />
-          <img v-else-if="resultUrl" class="result-media" :src="resultUrl" alt="Generated print" />
+          <img
+            v-else-if="resultUrl"
+            :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+            class="result-media"
+            :src="resultUrl"
+            alt="Generated print"
+            @load="generatedMediaReady"
+            @error="recoverGeneratedMedia"
+          />
         </template>
       </template>
 
@@ -584,10 +816,10 @@ onBeforeUnmount(() => {
         </div>
         <div v-else class="empty-state">No prints found.</div>
         <button
-          v-if="galleryRemaining"
+          v-if="!galleryLoading && galleryRemaining"
           class="secondary-button gallery-more"
           type="button"
-          :disabled="galleryLoadingMore"
+          :disabled="galleryLoading || galleryLoadingMore"
           @click="loadMoreGallery"
         >
           {{ galleryLoadingMore ? "Loading…" : `Load older prints (${galleryRemaining})` }}
@@ -685,6 +917,7 @@ onBeforeUnmount(() => {
       :thumbnail-url="selectedPrint.thumbnailUrl"
       :reusing="reusingPrint"
       :reuse-error="reusePrintError"
+      :generation-announcement="generationAnnouncement"
       @close="closePrint"
       @reuse="reuseSelectedPrint"
     />

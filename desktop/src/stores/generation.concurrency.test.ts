@@ -66,12 +66,15 @@ describe("runWithConcurrency", () => {
 
 describe("submitBatch connection cap", () => {
   const mockSse = vi.mocked(sseStream);
-  const streams: Array<{ seed: number; resolve: () => void }> = [];
+  const streams: Array<{
+    seed: number;
+    onEvent: (event: string, data: string) => void;
+    resolve: () => void;
+  }> = [];
 
   function resolveStream(seed: number) {
     const idx = streams.findIndex((c) => c.seed === seed);
     streams[idx]!.resolve();
-    streams.splice(idx, 1);
   }
 
   const req: GenerateRequest = {
@@ -91,7 +94,23 @@ describe("submitBatch connection cap", () => {
     // many held streams the batch opens at once.
     mockSse.mockImplementation((_url, opts) => {
       return new Promise<void>((resolve) => {
-        streams.push({ seed: (opts.body as { seed: number }).seed, resolve });
+        let settled = false;
+        const stream = {
+          seed: (opts.body as { seed: number }).seed,
+          onEvent: opts.onEvent,
+          resolve: () => {},
+        };
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          opts.signal.removeEventListener("abort", finish);
+          const index = streams.indexOf(stream);
+          if (index >= 0) streams.splice(index, 1);
+          resolve();
+        };
+        stream.resolve = finish;
+        opts.signal.addEventListener("abort", finish, { once: true });
+        streams.push(stream);
       });
     });
   });
@@ -111,6 +130,54 @@ describe("submitBatch connection cap", () => {
     resolveStream(100);
     await flushPromises();
     expect(streams.map((s) => s.seed).sort()).toEqual([101, 102]);
+  });
+
+  it("holds at most two streams across separate Generate submissions", async () => {
+    const store = useGenerationStore();
+    const first = store.submitBatch({ ...req, seed: 200 }, 1);
+    const second = store.submitBatch({ ...req, seed: 201 }, 1);
+    const third = store.submitBatch({ ...req, seed: 202 }, 1);
+    await flushPromises();
+
+    expect(streams.map((stream) => stream.seed).sort()).toEqual([200, 201]);
+
+    resolveStream(200);
+    await flushPromises();
+    expect(streams.map((stream) => stream.seed).sort()).toEqual([201, 202]);
+
+    resolveStream(201);
+    resolveStream(202);
+    await Promise.all([first.settled, second.settled, third.settled]);
+  });
+
+  it("releases a slot on a terminal frame even when the peer does not close", async () => {
+    const store = useGenerationStore();
+    const first = store.submitBatch({ ...req, seed: 300 }, 1);
+    const second = store.submitBatch({ ...req, seed: 301 }, 1);
+    const third = store.submitBatch({ ...req, seed: 302 }, 1);
+    await flushPromises();
+    expect(streams.map((stream) => stream.seed).sort()).toEqual([300, 301]);
+
+    streams
+      .find((stream) => stream.seed === 300)!
+      .onEvent(
+        "complete",
+        JSON.stringify({
+          image: btoa("generated"),
+          format: "png",
+          width: 1024,
+          height: 1024,
+          seed_used: 300,
+          generation_time_ms: 100,
+          model: req.model,
+        }),
+      );
+    await flushPromises();
+
+    expect(streams.map((stream) => stream.seed).sort()).toEqual([301, 302]);
+    resolveStream(301);
+    resolveStream(302);
+    await Promise.all([first.settled, second.settled, third.settled]);
   });
 
   it("never opens a stream for a sibling cancelled before its turn", async () => {

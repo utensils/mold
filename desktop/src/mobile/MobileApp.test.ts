@@ -1,4 +1,5 @@
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
+import { createPinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
 import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
@@ -76,6 +77,22 @@ const print: GalleryImage = {
 
 let wrapper: VueWrapper | null = null;
 let objectUrlSequence = 0;
+const openStreams: Array<{
+  options: {
+    body: Record<string, unknown>;
+    headers?: Record<string, string>;
+    signal: AbortSignal;
+    onEvent: (event: string, data: string) => void;
+  };
+  resolve: () => void;
+}> = [];
+
+function mountMobileApp(): VueWrapper {
+  return mount(MobileApp, {
+    attachTo: document.body,
+    global: { plugins: [createPinia()] },
+  });
+}
 
 function fieldControl(label: string): DOMWrapper<Element> {
   const field = wrapper
@@ -114,7 +131,21 @@ beforeEach(() => {
   apiFetchTo.mockReset().mockResolvedValue({
     blob: () => Promise.resolve(new Blob(["thumbnail"])),
   } as Response);
-  sseStream.mockReset();
+  openStreams.length = 0;
+  sseStream.mockReset().mockImplementation(
+    (
+      _path: string,
+      options: {
+        body: Record<string, unknown>;
+        headers?: Record<string, string>;
+        signal: AbortSignal;
+        onEvent: (event: string, data: string) => void;
+      },
+    ) =>
+      new Promise<void>((resolve) => {
+        openStreams.push({ options, resolve });
+      }),
+  );
   streamableMediaUrl.mockReset().mockResolvedValue("https://studio/media/full-video");
   evictMedia.mockReset();
   objectUrlSequence = 0;
@@ -128,9 +159,683 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
+describe("MobileApp generation queue", () => {
+  async function submitPrompt(prompt: string): Promise<void> {
+    await fieldControl("Prompt").setValue(prompt);
+    await wrapper?.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+  }
+
+  it("snapshots multiple prompts, shows their live queue, and cancels only one", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("first prompt");
+    openStreams[0]?.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "denoise_step", step: 3, total: 30, elapsed_ms: 10 }),
+    );
+    await submitPrompt("second prompt");
+    openStreams[1]?.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-2" }),
+    );
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(2);
+    expect(openStreams.map((stream) => stream.options.body.prompt)).toEqual([
+      "first prompt",
+      "second prompt",
+    ]);
+    expect(
+      openStreams.every(
+        (stream) => stream.options.headers?.["X-Mold-SSE-Payload"] === "metadata-only",
+      ),
+    ).toBe(true);
+    expect(openStreams.every((stream) => stream.options.body.model === model.name)).toBe(true);
+    expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
+      "Develop print (+2 queued)",
+    );
+    expect(wrapper.get("[data-test='mobile-generation-queue']").attributes("aria-live")).toBe(
+      undefined,
+    );
+    expect(wrapper.get(".sr-only[aria-live='polite']").text()).toBe("2 active generations.");
+
+    const rows = wrapper.findAll("[data-test='mobile-generation-job']");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.text()).toContain("first prompt");
+    expect(rows[0]?.get("[data-test='mobile-generation-status']").text()).toBe("3/30");
+    expect(rows[1]?.text()).toContain("second prompt");
+    expect(rows[1]?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
+
+    await rows[1]?.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/job-2", { method: "DELETE" });
+    expect(openStreams[0]?.options.signal.aborted).toBe(false);
+    expect(openStreams[1]?.options.signal.aborted).toBe(true);
+    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(1);
+    expect(wrapper.get("[data-test='mobile-generation-job']").text()).toContain("first prompt");
+    expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
+      "Develop print (+1 queued)",
+    );
+    expect(wrapper.get(".sr-only[aria-live='polite']").text()).toBe("1 active generation.");
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
+      "Generation cancelled.",
+    );
+
+    const firstSignal = openStreams[0]?.options.signal;
+    wrapper.unmount();
+    wrapper = null;
+    expect(firstSignal?.aborted).toBe(true);
+  });
+
+  it("keeps a completed result visible while a queued sibling settles independently", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("finished prompt");
+    await submitPrompt("failing prompt");
+    openStreams[1]?.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-failing" }),
+    );
+    openStreams[0]?.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("generated-image"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 42,
+        generation_time_ms: 1_250,
+        model: model.name,
+      }),
+    );
+    openStreams[0]?.resolve();
+    await flushPromises();
+
+    expect(wrapper.find("img.result-media").exists()).toBe(true);
+    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(1);
+    expect(wrapper.get("[data-test='mobile-generation-job']").text()).toContain("failing prompt");
+
+    openStreams[1]?.options.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
+    openStreams[1]?.resolve();
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
+    expect(wrapper.find("img.result-media").exists()).toBe(true);
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
+      "host ran out of memory",
+    );
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
+      "Generation failed. host ran out of memory",
+    );
+  });
+
+  it("promotes the last of simultaneous completions before pruning older results", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("first simultaneous prompt");
+    await submitPrompt("second simultaneous prompt");
+    for (const [index, stream] of openStreams.entries()) {
+      stream.options.onEvent(
+        "complete",
+        JSON.stringify({
+          image: btoa(`generated-${index}`),
+          format: "png",
+          width: 768,
+          height: 512,
+          seed_used: index + 1,
+          generation_time_ms: 500,
+          model: model.name,
+        }),
+      );
+      stream.resolve();
+    }
+    await flushPromises();
+
+    expect(wrapper.get("img.result-media").attributes("src")).toBe("blob:thumbnail-2");
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("0.5s · seed 2");
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:thumbnail-1");
+  });
+
+  it("streams a metadata-only generated video from the host", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("stream this video");
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "mp4",
+        filename: "generated clip.mp4",
+        width: 768,
+        height: 512,
+        seed_used: 23,
+        generation_time_ms: 500,
+        model: model.name,
+        video_frames: 121,
+        video_fps: 30,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    expect(streamableMediaUrl).toHaveBeenCalledWith("/api/gallery/image/generated%20clip.mp4", {
+      target,
+      cacheKey: "studio-id",
+      allowLegacyBlob: false,
+    });
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(wrapper.get("video.result-media").attributes("src")).toBe(
+      "https://studio/media/full-video",
+    );
+  });
+
+  it("does not show an older result when the latest saved result has no filename", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("first successful prompt");
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("first-result"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 1,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+    expect(wrapper.find("img.result-media").exists()).toBe(true);
+
+    await submitPrompt("metadata without a file");
+    openStreams[1]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 2,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[1]!.resolve();
+    await flushPromises();
+
+    expect(wrapper.find(".result-media").exists()).toBe(false);
+    expect(wrapper.get(".result-preview-error").text()).toContain("saved result URL");
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "saved result URL",
+    );
+  });
+
+  it("shows ticket failures and lets the user retry the preview", async () => {
+    streamableMediaUrl
+      .mockRejectedValueOnce(new Error("The host refused the media ticket."))
+      .mockResolvedValueOnce("https://studio/media/retried-image");
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("ticketed image");
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "png",
+        filename: "ticketed image.png",
+        width: 768,
+        height: 512,
+        seed_used: 4,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    expect(wrapper.get(".result-preview-error").text()).toContain("refused the media ticket");
+    expect(wrapper.find(".result-media").exists()).toBe(false);
+    await wrapper.get(".result-preview-error button").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find(".result-preview-error").exists()).toBe(false);
+    expect(wrapper.get("img.result-media").attributes("src")).toBe(
+      "https://studio/media/retried-image",
+    );
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
+      "Result preview refreshed.",
+    );
+  });
+
+  it("renews an expired generated-video ticket when playback starts", async () => {
+    streamableMediaUrl
+      .mockResolvedValueOnce("https://studio/media/video?media_token=old&expires=1")
+      .mockResolvedValueOnce("https://studio/media/video?media_token=new&expires=4102444800");
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("renew this video");
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "mp4",
+        filename: "renew this video.mp4",
+        width: 768,
+        height: 512,
+        seed_used: 5,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+    expect(wrapper.get("video.result-media").attributes("src")).toContain("media_token=old");
+
+    await wrapper.get("video.result-media").trigger("play");
+    await flushPromises();
+
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    expect(wrapper.get("video.result-media").attributes("src")).toContain("media_token=new");
+  });
+
+  it("bounds automatic media recovery and exposes a manual retry", async () => {
+    const unchangedUrl = "https://studio/media/missing?media_token=unchanged&expires=4102444800";
+    streamableMediaUrl.mockResolvedValueOnce(unchangedUrl).mockResolvedValueOnce(unchangedUrl);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("missing generated image");
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "png",
+        filename: "missing.png",
+        width: 768,
+        height: 512,
+        seed_used: 6,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    const originalImage = wrapper.get("img.result-media").element;
+    await wrapper.get("img.result-media").trigger("error");
+    await flushPromises();
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    expect(wrapper.get("img.result-media").attributes("src")).toBe(unchangedUrl);
+    expect(wrapper.get("img.result-media").element).not.toBe(originalImage);
+
+    await wrapper.get("img.result-media").trigger("error");
+    await flushPromises();
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    expect(wrapper.find("img.result-media").exists()).toBe(false);
+    expect(wrapper.get(".result-preview-error").text()).toContain(
+      "Couldn’t load this generated print",
+    );
+    expect(wrapper.get(".result-preview-error button").text()).toBe("Try preview again");
+  });
+
+  it("remounts generated video when forced renewal returns the same URL", async () => {
+    const unchangedUrl =
+      "https://studio/media/missing-video?media_token=unchanged&expires=4102444800";
+    streamableMediaUrl.mockResolvedValueOnce(unchangedUrl).mockResolvedValueOnce(unchangedUrl);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("missing generated video");
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "mp4",
+        filename: "missing-video.mp4",
+        width: 768,
+        height: 512,
+        seed_used: 7,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    const originalVideo = wrapper.get("video.result-media").element;
+    await wrapper.get("video.result-media").trigger("error");
+    await flushPromises();
+
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    expect(wrapper.get("video.result-media").attributes("src")).toBe(unchangedUrl);
+    expect(wrapper.get("video.result-media").element).not.toBe(originalVideo);
+
+    await wrapper.get("video.result-media").trigger("error");
+    await flushPromises();
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    expect(wrapper.find("video.result-media").exists()).toBe(false);
+    expect(wrapper.get(".result-preview-error").text()).toContain(
+      "Couldn’t load this generated print",
+    );
+  });
+
+  it("shows a completion that wins the cancellation race", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("almost finished prompt");
+    openStreams[0]!.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-finishing" }),
+    );
+    apiFetchTo.mockImplementationOnce(async () => {
+      openStreams[0]!.options.onEvent(
+        "complete",
+        JSON.stringify({
+          image: btoa("finished-during-cancel"),
+          format: "png",
+          width: 768,
+          height: 512,
+          seed_used: 91,
+          generation_time_ms: 500,
+          model: model.name,
+        }),
+      );
+      openStreams[0]!.resolve();
+      return new Response(null, { status: 204 });
+    });
+
+    await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
+    expect(wrapper.find("img.result-media").exists()).toBe(true);
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("0.5s · seed 91");
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
+      "Generation completed.",
+    );
+  });
+
+  it("preserves a server failure that wins the cancellation race", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("failing during cancel");
+    openStreams[0]!.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-failing" }),
+    );
+    apiFetchTo.mockImplementationOnce(async () => {
+      openStreams[0]!.options.onEvent(
+        "error",
+        JSON.stringify({ message: "host ran out of memory" }),
+      );
+      openStreams[0]!.resolve();
+      return new Response(null, { status: 204 });
+    });
+
+    await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
+      "host ran out of memory",
+    );
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
+      "Generation failed. host ran out of memory",
+    );
+  });
+
+  it("coalesces simultaneous completion refreshes while Gallery is open", async () => {
+    const galleryResolvers: Array<() => void> = [];
+    let galleryCalls = 0;
+    let galleryInFlight = 0;
+    let maxGalleryInFlight = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") {
+        galleryCalls += 1;
+        galleryInFlight += 1;
+        maxGalleryInFlight = Math.max(maxGalleryInFlight, galleryInFlight);
+        return new Promise<GalleryImage[]>((resolve) => {
+          galleryResolvers.push(() => {
+            galleryInFlight -= 1;
+            resolve([print]);
+          });
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("first gallery prompt");
+    await submitPrompt("second gallery prompt");
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(galleryResolvers).toHaveLength(1));
+
+    for (const [index, stream] of openStreams.entries()) {
+      stream.options.onEvent(
+        "complete",
+        JSON.stringify({
+          image: btoa(`generated-${index}`),
+          format: "png",
+          width: 768,
+          height: 512,
+          seed_used: index + 1,
+          generation_time_ms: 500,
+          model: model.name,
+        }),
+      );
+      stream.resolve();
+    }
+    await flushPromises();
+
+    expect(galleryCalls).toBe(1);
+    expect(maxGalleryInFlight).toBe(1);
+    galleryResolvers[0]!();
+    await vi.waitFor(() => expect(galleryResolvers).toHaveLength(2));
+    expect(galleryCalls).toBe(2);
+    expect(maxGalleryInFlight).toBe(1);
+
+    galleryResolvers[1]!();
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    expect(galleryCalls).toBe(2);
+  });
+
+  it("serializes Load older with a completion-triggered Gallery refresh", async () => {
+    const prints = Array.from({ length: 41 }, (_, index) => ({
+      ...print,
+      filename: `print-${index}.mp4`,
+      timestamp: print.timestamp - index,
+    }));
+    let galleryCalls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") {
+        galleryCalls += 1;
+        return Promise.resolve(prints);
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("refresh after older page");
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("button.gallery-more").exists()).toBe(true));
+
+    const olderThumbnail = { release: null as (() => void) | null };
+    apiFetchTo.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          olderThumbnail.release = () =>
+            resolve({ blob: () => Promise.resolve(new Blob(["older"])) } as Response);
+        }),
+    );
+    await wrapper.get("button.gallery-more").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.get("button.gallery-more").attributes("disabled")).toBeDefined(),
+    );
+
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("generated-before-refresh"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 12,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+    expect(galleryCalls).toBe(1);
+
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
+
+    if (!olderThumbnail.release) throw new Error("Older thumbnail request did not start");
+    olderThumbnail.release();
+    await flushPromises();
+    expect(galleryCalls).toBe(1);
+
+    await wrapper.get("[data-test='gallery-viewer-close']").trigger("click");
+    await vi.waitFor(() => expect(galleryCalls).toBe(2));
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(40));
+    expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
+  });
+
+  it("keeps focus stable when the viewer closes before a queued Gallery refresh starts", async () => {
+    const prints = Array.from({ length: 41 }, (_, index) => ({
+      ...print,
+      filename: `print-${index}.mp4`,
+      timestamp: print.timestamp - index,
+    }));
+    let galleryCalls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") {
+        galleryCalls += 1;
+        return Promise.resolve(prints);
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("refresh after an early viewer close");
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("button.gallery-more").exists()).toBe(true));
+
+    const olderThumbnail = { release: null as (() => void) | null };
+    apiFetchTo.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          olderThumbnail.release = () =>
+            resolve({ blob: () => Promise.resolve(new Blob(["older"])) } as Response);
+        }),
+    );
+    await wrapper.get("button.gallery-more").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.get("button.gallery-more").attributes("disabled")).toBeDefined(),
+    );
+
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("generated-before-refresh"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 13,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+    expect(galleryCalls).toBe(1);
+
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-close']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
+    expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
+    expect(galleryCalls).toBe(1);
+
+    if (!olderThumbnail.release) throw new Error("Older thumbnail request did not start");
+    olderThumbnail.release();
+    await vi.waitFor(() => expect(galleryCalls).toBe(2));
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(40));
+    expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
+  });
+});
+
 describe("MobileApp gallery", () => {
+  it("defers completion refreshes until an open viewer closes", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("complete behind the viewer");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery")).toHaveLength(1);
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("completed behind viewer"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 61,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
+      "Generation completed.",
+    );
+    expect(wrapper.get("[data-test='gallery-viewer'] .sr-only[aria-live='polite']").text()).toBe(
+      "Generation completed.",
+    );
+    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery")).toHaveLength(1);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:thumbnail-1");
+
+    await wrapper.get("[data-test='gallery-viewer-close']").trigger("click");
+    await vi.waitFor(() =>
+      expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery")).toHaveLength(2),
+    );
+    await vi.waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:thumbnail-1"));
+    expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
+  });
+
   it("opens media first, then explicitly reuses the prompt and visible settings", async () => {
-    wrapper = mount(MobileApp, { attachTo: document.body });
+    wrapper = mountMobileApp();
     await flushPromises();
 
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
@@ -209,7 +914,7 @@ describe("MobileApp gallery", () => {
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
 
-    wrapper = mount(MobileApp, { attachTo: document.body });
+    wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
@@ -272,7 +977,7 @@ describe("MobileApp gallery", () => {
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
 
-    wrapper = mount(MobileApp, { attachTo: document.body });
+    wrapper = mountMobileApp();
     await vi.waitFor(() =>
       expect(fieldControl("Model").element).toHaveProperty("value", studioModel.name),
     );

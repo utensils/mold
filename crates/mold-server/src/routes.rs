@@ -22,7 +22,7 @@ use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
 use crate::model_manager;
-use crate::state::{AppState, GenerationJob, SseMessage, SubmitError};
+use crate::state::{AppState, GenerationJob, SseCompletionPayload, SseMessage, SubmitError};
 
 fn submit_error_to_api(e: SubmitError) -> ApiError {
     match e {
@@ -722,6 +722,7 @@ async fn generate(
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
+        completion_payload: SseCompletionPayload::Full,
         progress_tx: None,
         result_tx,
         output_dir,
@@ -1400,11 +1401,30 @@ async fn upscale_stream(
 
 // ── /api/generate/stream (SSE) ───────────────────────────────────────────────
 
+const SSE_PAYLOAD_HEADER: &str = "x-mold-sse-payload";
+
+fn requested_sse_completion_payload(headers: &HeaderMap) -> Result<SseCompletionPayload, ApiError> {
+    let Some(value) = headers.get(SSE_PAYLOAD_HEADER) else {
+        return Ok(SseCompletionPayload::Full);
+    };
+    match value.to_str().ok() {
+        Some("metadata-only") => Ok(SseCompletionPayload::MetadataOnly),
+        _ => Err(ApiError::validation(
+            "X-Mold-SSE-Payload must be 'metadata-only' when provided",
+        )),
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/generate/stream",
     tag = "generation",
     request_body = mold_core::GenerateRequest,
+    params((
+        "X-Mold-SSE-Payload" = Option<String>,
+        Header,
+        description = "Set to metadata-only to omit encoded media and return the saved gallery filename"
+    )),
     responses(
         (status = 200, description = "SSE event stream with progress and result"),
         (status = 404, description = "Model not downloaded"),
@@ -1415,8 +1435,10 @@ async fn upscale_stream(
 )]
 async fn generate_stream(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    let completion_payload = requested_sse_completion_payload(&headers)?;
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
     let typed = (
@@ -1425,6 +1447,11 @@ async fn generate_stream(
         req.model.clone(),
     );
     let (output_dir, dim_warning, preferred_gpu) = prepare_generation(&state, &mut req).await?;
+    if completion_payload == SseCompletionPayload::MetadataOnly && output_dir.is_none() {
+        return Err(ApiError::validation(
+            "metadata-only SSE completions require server gallery output to be enabled",
+        ));
+    }
     record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
 
     tracing::info!(
@@ -1467,6 +1494,7 @@ async fn generate_stream(
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
+        completion_payload,
         progress_tx: Some(tx.clone()),
         result_tx,
         output_dir,

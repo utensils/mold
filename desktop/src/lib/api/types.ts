@@ -274,7 +274,7 @@ export type ProgressEvent =
   | { type: "pull_complete"; model: string };
 
 export interface CompleteEvent {
-  /** Base64 payload — image bytes for images, video bytes for video. */
+  /** Base64 payload — empty when the client requested a metadata-only completion. */
   image: string;
   format: OutputFormat;
   width: number;
@@ -287,6 +287,14 @@ export interface CompleteEvent {
   model: string;
   video_frames?: number | null;
   video_fps?: number | null;
+  /** Large base64 video previews; metadata-only completions omit them. */
+  video_thumbnail?: string | null;
+  video_gif_preview?: string | null;
+  video_has_audio?: boolean;
+  video_duration_ms?: number | null;
+  video_audio_sample_rate?: number | null;
+  video_audio_channels?: number | null;
+  gpu?: number | null;
   /** Gallery filename the server saved this payload under (additive; absent
    * on older servers). Mirrored saves keep it so the local copy and the
    * origin stay one logical print in the merged gallery. */

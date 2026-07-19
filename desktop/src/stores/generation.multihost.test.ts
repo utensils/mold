@@ -7,6 +7,14 @@ vi.mock("../lib/api/sse", () => ({
   sseStream: (...a: unknown[]) => sseStream(...a),
 }));
 
+const streamableMediaUrl = vi.fn().mockResolvedValue("https://hal9000/media/generated-video");
+const evictMedia = vi.fn();
+vi.mock("../lib/gallery/media", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/gallery/media")>()),
+  streamableMediaUrl: (...a: unknown[]) => streamableMediaUrl(...a),
+  evictMedia: (...a: unknown[]) => evictMedia(...a),
+}));
+
 const apiFetchTo = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
 const apiJsonTo = vi.fn().mockResolvedValue([]);
 vi.mock("../lib/api/client", () => ({
@@ -74,6 +82,7 @@ beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
   apiFetchTo.mockResolvedValue(new Response(null, { status: 200 }));
+  streamableMediaUrl.mockResolvedValue("https://hal9000/media/generated-video");
   // Client ids restart with each fresh Pinia, so clear the module-scoped
   // per-job target map (a real session never reuses ids).
   useGenerationStore().resetJobs();
@@ -201,6 +210,233 @@ describe("generation store multi-host routing", () => {
     useAppPrefsStore().settings = { saveRemoteOutputs: false } as never;
     await store.submitBatch(request(), 1, halRoute).settled;
     expect(saveOutputBytes).not.toHaveBeenCalled();
+  });
+
+  it("keeps an iPhone remote job remote without mirroring into a desktop gallery", async () => {
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "complete",
+          JSON.stringify({
+            ...JSON.parse(completeFrame()),
+            video_thumbnail: "large-thumbnail-base64",
+            video_gif_preview: "large-gif-base64",
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1, {
+      ...halRoute,
+      mirrorRemoteOutput: false,
+      retainEncodedResult: false,
+    });
+    await settled;
+
+    expect(jobs[0]).toMatchObject({
+      remote: true,
+      mirrorRemoteOutput: false,
+      retainEncodedResult: false,
+      result: {
+        image: "",
+        original_image: null,
+        video_thumbnail: null,
+        video_gif_preview: null,
+        seed_used: 7,
+      },
+    });
+    expect(saveOutputBytes).not.toHaveBeenCalled();
+  });
+
+  it("loads an iPhone video from its saved host file without decoding SSE media", async () => {
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL");
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "complete",
+          JSON.stringify({
+            ...JSON.parse(completeFrame()),
+            image: "",
+            format: "mp4",
+            filename: "generated clip.mp4",
+            original_image: null,
+            video_frames: 121,
+            video_fps: 30,
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1, {
+      ...halRoute,
+      mirrorRemoteOutput: false,
+      retainEncodedResult: false,
+      metadataOnlyCompletion: true,
+    });
+    await settled;
+    await vi.waitFor(() =>
+      expect(jobs[0]!.resultUrl).toBe("https://hal9000/media/generated-video"),
+    );
+
+    expect(streamableMediaUrl).toHaveBeenCalledWith("/api/gallery/image/generated%20clip.mp4", {
+      target: halRoute.target,
+      cacheKey: halRoute.hostId,
+      allowLegacyBlob: false,
+    });
+    expect(sseStream.mock.calls[0]?.[1]).toMatchObject({
+      headers: { "X-Mold-SSE-Payload": "metadata-only" },
+    });
+    expect(createObjectUrl).not.toHaveBeenCalled();
+    expect(jobs[0]!.result?.image).toBe("");
+  });
+
+  it("loads a metadata-only iPhone image from its saved host file", async () => {
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL");
+    streamableMediaUrl.mockResolvedValueOnce("https://hal9000/media/generated-image");
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "complete",
+          JSON.stringify({
+            ...JSON.parse(completeFrame()),
+            image: "",
+            original_image: null,
+            filename: "generated image.png",
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+
+    const { jobs, settled } = useGenerationStore().submitBatch(request(), 1, {
+      ...halRoute,
+      mirrorRemoteOutput: false,
+      retainEncodedResult: false,
+      metadataOnlyCompletion: true,
+    });
+    await settled;
+    await vi.waitFor(() =>
+      expect(jobs[0]!.resultUrl).toBe("https://hal9000/media/generated-image"),
+    );
+
+    expect(streamableMediaUrl).toHaveBeenCalledWith("/api/gallery/image/generated%20image.png", {
+      target: halRoute.target,
+      cacheKey: halRoute.hostId,
+      allowLegacyBlob: true,
+    });
+    expect(createObjectUrl).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a metadata-only completion that has no saved filename", async () => {
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "complete",
+          JSON.stringify({ ...JSON.parse(completeFrame()), image: "", original_image: null }),
+        );
+        return Promise.resolve();
+      },
+    );
+
+    const { jobs, settled } = useGenerationStore().submitBatch(request(), 1, {
+      ...halRoute,
+      mirrorRemoteOutput: false,
+      retainEncodedResult: false,
+      metadataOnlyCompletion: true,
+    });
+    await settled;
+    await vi.waitFor(() => expect(jobs[0]!.resultError).toContain("saved result URL"));
+
+    expect(jobs[0]).toMatchObject({ status: "complete", resultUrl: null });
+    expect(streamableMediaUrl).not.toHaveBeenCalled();
+  });
+
+  it("renews a ticketed result URL when it is close to expiring", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    streamableMediaUrl
+      .mockResolvedValueOnce(
+        "https://hal9000/media/generated-video?media_token=old&expires=1800000300",
+      )
+      .mockResolvedValueOnce(
+        "https://hal9000/media/generated-video?media_token=new&expires=1800001200",
+      );
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "complete",
+          JSON.stringify({
+            ...JSON.parse(completeFrame()),
+            image: "",
+            format: "mp4",
+            filename: "generated clip.mp4",
+            original_image: null,
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1, {
+      ...halRoute,
+      mirrorRemoteOutput: false,
+      retainEncodedResult: false,
+      metadataOnlyCompletion: true,
+    });
+    await settled;
+    await vi.waitFor(() => expect(jobs[0]!.resultUrl).toContain("media_token=old"));
+
+    await store.refreshRemoteResultUrl(jobs[0]!.clientId);
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(1);
+    now.mockReturnValue(1_800_000_250_000);
+    await store.refreshRemoteResultUrl(jobs[0]!.clientId);
+
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    expect(jobs[0]!.resultUrl).toContain("media_token=new");
+    now.mockRestore();
+  });
+
+  it("evicts a legacy generated-image Blob before a forced retry", async () => {
+    const revokeObjectUrl = vi.spyOn(URL, "revokeObjectURL");
+    streamableMediaUrl
+      .mockResolvedValueOnce("blob:legacy-generated-image")
+      .mockResolvedValueOnce("blob:refetched-generated-image");
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "complete",
+          JSON.stringify({
+            ...JSON.parse(completeFrame()),
+            image: "",
+            filename: "generated image.png",
+            original_image: null,
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch(request(), 1, {
+      ...halRoute,
+      mirrorRemoteOutput: false,
+      retainEncodedResult: false,
+      metadataOnlyCompletion: true,
+    });
+    await settled;
+    await vi.waitFor(() => expect(jobs[0]!.resultUrl).toBe("blob:legacy-generated-image"));
+
+    await store.refreshRemoteResultUrl(jobs[0]!.clientId, true);
+
+    expect(evictMedia).toHaveBeenCalledWith(
+      "/api/gallery/image/generated%20image.png",
+      halRoute.hostId,
+    );
+    expect(evictMedia.mock.invocationCallOrder[0]).toBeLessThan(
+      streamableMediaUrl.mock.invocationCallOrder[1]!,
+    );
+    expect(jobs[0]!.resultUrl).toBe("blob:refetched-generated-image");
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:legacy-generated-image");
   });
 
   it("refreshes the origin host's loaded gallery bucket when a routed job completes", async () => {

@@ -9,6 +9,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
+    use base64::Engine as _;
     use mold_core::chain::{ChainRequest, ChainStage, TransitionMode};
     use mold_core::{
         chain_job::{ChainJobManifest, ChainJobState, JobDirLayout, RetakeMode, StageState},
@@ -41,6 +42,26 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Extract and parse the JSON payload for the first named event in an SSE body.
+    fn sse_json_event(body: &str, event_name: &str) -> serde_json::Value {
+        let mut lines = body.lines();
+        let event_line = format!("event: {event_name}");
+        while let Some(line) = lines.next() {
+            if line == event_line {
+                let data = lines
+                    .next()
+                    .and_then(|line| line.strip_prefix("data: "))
+                    .unwrap_or_else(|| {
+                        panic!("{event_name} event should have a data line: {body}")
+                    });
+                return serde_json::from_str(data).unwrap_or_else(|err| {
+                    panic!("{event_name} data should be JSON: {err}: {data}")
+                });
+            }
+        }
+        panic!("SSE body should contain event {event_name}: {body}");
     }
 
     #[derive(Default)]
@@ -1570,7 +1591,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn config_list_reports_values_with_sources() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let (app, _db) = app_with_settings_db();
         let resp = app
             .oneshot(Request::get("/api/config").body(Body::empty()).unwrap())
@@ -2718,18 +2741,105 @@ mod tests {
             "stream should return text/event-stream, got: {ct}"
         );
 
-        // Collect body and verify it contains a complete event with base64 image
+        // With no payload-selection header, preserve the legacy full-media wire
+        // contract for desktop and older clients.
         let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .unwrap();
         let text = String::from_utf8_lossy(&body);
+        let complete = sse_json_event(&text, "complete");
+        let encoded = complete["image"]
+            .as_str()
+            .expect("complete event should contain a base64 image string");
+        assert!(!encoded.is_empty(), "legacy full payload must not be empty");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("full SSE image should be valid base64"),
+            minimal_png(),
+            "omitting X-Mold-SSE-Payload must preserve the full image bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_invalid_payload_header_returns_422() {
+        let app = app_with(MockEngine::ready());
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("x-mold-sse-payload", "thumbnail-only")
+                    .body(Body::from(generate_body("a robot", 768, 768)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "VALIDATION_ERROR");
+        assert_eq!(
+            body["error"],
+            "X-Mold-SSE-Payload must be 'metadata-only' when provided"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_metadata_only_returns_saved_filename_without_base64_media() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let (state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.config.write().await.output_dir =
+            Some(output_dir.path().to_string_lossy().into_owned());
+        let worker_state = state.clone();
+        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
+        let app = create_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("x-mold-sse-payload", "metadata-only")
+                    .body(Body::from(generate_body("a robot", 768, 768)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        let complete = sse_json_event(&text, "complete");
+
+        assert_eq!(complete["image"], "");
+        assert!(complete.get("original_image").is_none());
+        assert!(complete.get("video_thumbnail").is_none());
+        assert!(complete.get("video_gif_preview").is_none());
+        assert_eq!(complete["format"], "png");
+        assert_eq!(complete["width"], 768);
+        assert_eq!(complete["height"], 768);
+        assert_eq!(complete["seed_used"], 42);
+        assert_eq!(complete["model"], "mock-model");
+        assert_eq!(complete["metadata"]["prompt"], "a robot");
+        assert_eq!(complete["metadata"]["width"], 768);
+        assert_eq!(complete["metadata"]["height"], 768);
+
+        let filename = complete["filename"]
+            .as_str()
+            .expect("metadata-only completion should name the saved gallery output");
         assert!(
-            text.contains("event: complete"),
-            "stream should contain a complete event"
+            filename.ends_with(".png"),
+            "unexpected filename: {filename}"
         );
         assert!(
-            text.contains("\"image\""),
-            "complete event should contain base64 image"
+            output_dir.path().join(filename).is_file(),
+            "metadata-only filename should identify the persisted output"
+        );
+        let encoded_png = base64::engine::general_purpose::STANDARD.encode(minimal_png());
+        assert!(
+            !text.contains(&encoded_png),
+            "metadata-only response must not include base64 media bytes"
         );
     }
 
