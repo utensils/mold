@@ -599,6 +599,17 @@ pub(crate) fn select_server_load_strategy_for_budget(
     .saturating_add(activation);
     let hard_limit = available_bytes.saturating_mul(9) / 10;
 
+    // Paired with the qwen_family admission bypass in the preflight guard:
+    // a Qwen-Image load admitted because its phase-sequential peak fits FREE
+    // VRAM (100%, not 90%) must actually load Sequential — Eager co-resides
+    // transformer + text encoder + VAE, which is exactly what the admission
+    // assumed would NOT happen. Without this branch, a BF16 qwen in the
+    // 90–100%-of-free band was admitted and then handed the Eager strategy.
+    let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
+    if qwen_family && eager_peak > hard_limit && sequential_peak <= available_bytes {
+        return mold_inference::LoadStrategy::Sequential;
+    }
+
     if eager_peak > hard_limit && sequential_peak <= hard_limit {
         mold_inference::LoadStrategy::Sequential
     } else {

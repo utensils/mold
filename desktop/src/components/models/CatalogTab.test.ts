@@ -296,3 +296,40 @@ describe("CatalogTab host fallback when the local engine is down", () => {
     wrapper.unmount();
   });
 });
+
+describe("CatalogTab Installed source chip", () => {
+  it("never fires a live search for the Installed tab and keeps loaded pages intact", async () => {
+    vi.useFakeTimers();
+    setActivePinia(createPinia());
+    searchCatalog.mockResolvedValue({
+      entries: [entry("live-model", "flux")],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+    const wrapper = mount(CatalogTab, {
+      props: { query: "", layout: "grid" as const },
+      global: { plugins: [] },
+    });
+    await vi.runAllTimersAsync();
+    const callsAfterMount = searchCatalog.mock.calls.length;
+
+    const chips = wrapper.get("[data-test='catalog-source-chips']").findAll("button");
+    await chips[3]!.trigger("click"); // Installed
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // No request went out for the pseudo-source (the server would 400 it).
+    expect(searchCatalog.mock.calls.length).toBe(callsAfterMount);
+    expect(
+      searchCatalog.mock.calls.some(
+        (call) => (call[0] as { source?: string }).source === "installed",
+      ),
+    ).toBe(false);
+
+    // Flipping back re-renders the still-loaded results without a blank gap.
+    await chips[0]!.trigger("click");
+    await vi.runAllTimersAsync();
+    expect(wrapper.text()).toContain("live-model");
+    vi.useRealTimers();
+  });
+});

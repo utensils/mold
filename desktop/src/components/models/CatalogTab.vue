@@ -203,6 +203,9 @@ function catalogTarget(): { target: ApiTarget | undefined; forward: boolean } {
 let searchEpoch = 0;
 
 async function runSearch(reset: boolean) {
+  // "installed" is a client-side scope, not a server source — the API would
+  // 400 it, and resetting `entries` would blank the list behind the tab.
+  if (source.value === "installed") return;
   const epoch = ++searchEpoch;
   if (reset) {
     page.value = 1;
@@ -293,13 +296,19 @@ function pullFromDrawer(entry: CatalogEntry) {
   pull(entry);
 }
 
-watch([() => props.query, source, family, includeNsfw], scheduleSearch);
+watch([() => props.query, source, family, includeNsfw], () => {
+  // Entering the Installed tab fires no live search (runSearch also guards);
+  // leaving it re-fires so the list is fresh after a stay on the tab.
+  if (source.value === "installed") return;
+  scheduleSearch();
+});
 
 // Flipping to a media chip with no matching entries loaded yet continues the
 // existing pagination instead of leaving a blank grid behind the chip.
 watch(
   () => props.mediaType,
   () => {
+    if (source.value === "installed") return;
     if ((props.mediaType ?? "all") === "all" || loading.value) return;
     if (!combinedEntries.value.some(matchesMediaType) && hasMore.value) loadMore();
   },

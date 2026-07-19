@@ -420,7 +420,9 @@ export function applyMetadataToForm(
 
   // Output metadata never carries source/mask/control/video/audio bytes —
   // clear any stale attachment instead of silently pairing it with the print.
+  // (The async source restore may repopulate the pair afterwards.)
   form.sourceImage = null;
+  form.sourceImageName = null;
   form.maskImage = null;
   form.controlImage = null;
   form.imageAttachments = [];

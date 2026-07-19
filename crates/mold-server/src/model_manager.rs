@@ -2264,6 +2264,17 @@ mod tests {
             Some(hint),
         );
         assert!(too_small.is_err(), "24 GB must still reject a ~44 GB peak");
+
+        // The admission's justification is the phase-sequential runtime, so
+        // the strategy must match: a load admitted in the 90–100%-of-free
+        // band must run Sequential (encode → drop TE → denoise), never Eager
+        // (which co-resides transformer + text encoder + VAE).
+        let strategy = select_server_load_strategy_for_budget(&paths, Some(46 * GB), Some(hint));
+        assert_eq!(
+            strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "bypass-admitted BF16 qwen must load with the Sequential strategy"
+        );
     }
 
     #[test]

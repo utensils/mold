@@ -700,3 +700,14 @@ describe("source image provenance (Reuse-settings restore)", () => {
     expect(form.sourceImageName).toBeNull();
   });
 });
+
+describe("source label clearing invariants (review findings)", () => {
+  it("applyMetadataToForm clears the label with the image", () => {
+    const form = newGenerateForm();
+    form.sourceImage = "SRC";
+    form.sourceImageName = "pic.png";
+    applyMetadataToForm(form, { ...richImageMetadata() });
+    expect(form.sourceImage).toBeNull();
+    expect(form.sourceImageName).toBeNull();
+  });
+});

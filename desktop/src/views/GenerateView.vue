@@ -539,13 +539,21 @@ watch(
   { immediate: true },
 );
 
+/** Monotonic token: only the latest prefill's async source restore may touch
+ *  the form — a superseded restore (newer prefill, ⌘N, user edits) is
+ *  dropped silently. Bumped by every prefill and by ⌘N. */
+let restoreEpoch = 0;
+
 function applyPrefill() {
   const prefill = composer.take();
   if (!prefill) return;
+  restoreEpoch += 1;
   // Gallery reuse ships full metadata (full-fidelity restore); palette /
   // history / jobs keep the legacy scalar copy.
   applyPrefillToForm(form, prefill, installedModels.value);
-  if ("metadata" in prefill && prefill.metadata) void restorePrefillSource(prefill.metadata);
+  if ("metadata" in prefill && prefill.metadata) {
+    void restorePrefillSource(prefill.metadata, restoreEpoch);
+  }
   void nextTick(() => promptEl.value?.focus());
 }
 
@@ -556,9 +564,10 @@ function applyPrefill() {
  * without provenance keys are silently skipped; a keyed print that can't be
  * found gets a toast.
  */
-async function restorePrefillSource(metadata: OutputMetadata) {
+async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
   if (!metadataReferencesSource(metadata)) return;
   if (!caps.value.supportsImg2img || caps.value.sourceImageMode !== "single") return;
+  const modelAtStart = form.model;
   const restored = await restoreSourceImage(metadata, {
     stashGet: (sha) => ipc.sourceStashGet(sha),
     galleryLookup: async (filename) => {
@@ -576,6 +585,12 @@ async function restorePrefillSource(metadata: OutputMetadata) {
       return blobToBase64(await res.blob());
     },
   });
+  // The lookups can take seconds (cold gallery, cross-host fetch). Bail if
+  // this restore was superseded: a newer prefill or ⌘N bumped the epoch, the
+  // user attached their own source, the model changed under us, or the new
+  // family can't take an image at all.
+  if (epoch !== restoreEpoch || form.sourceImage || form.model !== modelAtStart) return;
+  if (!caps.value.supportsImg2img || caps.value.sourceImageMode !== "single") return;
   if (restored) {
     form.sourceImage = restored.base64;
     form.sourceImageName = restored.filename;
@@ -595,6 +610,7 @@ watch(() => composer.prefill, applyPrefill, { immediate: true });
 watch(
   () => ui.newGenerationTick,
   () => {
+    restoreEpoch += 1; // an in-flight source restore must not repopulate ⌘N
     formStore.clearComposer();
     void nextTick(() => promptEl.value?.focus());
   },
