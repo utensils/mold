@@ -75,13 +75,14 @@ Post-generation upscale persists distinct `-original` and `-upscaled` entries on
 | qwen-image      | ✗          | ✗                      | ✗        | ✗     | ✗     | ✓    | ✗          | single            | ✓    | ✗              |
 | qwen-image-edit | ✗          | ✗                      | ✗        | ✗     | ✗     | ✓    | ✗          | qwen-edit (multi) | ✗    | ✓              |
 | wuerstchen      | ✓          | ✗                      | ✗        | ✗     | ✗     | ✗    | ✗          | single            | ✓    | ✗              |
-| ltx-video       | ✗          | ✗                      | ✗        | ✓     | ✗     | ✓    | ✗          | single            | —    | ✗              |
-| ltx2            | ✗          | ✗                      | ✗        | ✓     | ✓     | ✓    | ✗          | single            | —    | ✗              |
+| ltx-video       | ✗          | ✗                      | ✗        | ✓     | ✗     | ✓    | ✗          | — (no img2vid)    | —    | ✗              |
+| ltx2            | ✗          | ✗                      | ✗        | ✓     | ✓     | ✓    | ✗          | single (img2vid)  | —    | ✗              |
 
 **Quirks:**
 
 - **LTX-2 is CUDA-only** for real generation (CPU correctness-only, Metal unsupported). Has its own MP4+AAC media pipeline. Camera-control LoRA presets currently resolve only Lightricks LTX-2 19B (LTX-2.3 needs explicit .safetensors).
 - Video families: `ltx-video`, `ltx2`. Audio: `ltx2` only (mp4 only).
+- **LTX-2 img2video:** `source_image` is staged as frame-0 conditioning with `strength`; the desktop shows the single source well (no mask — pad-repaint isn't offered, a mask-dependent fit policy coerces to crop-fill). Plain `ltx-video` has no img2vid path in the engine, so the well never renders for it.
 - Z-Image has a bespoke quantized transformer (GGUF naming differs from BF16).
 - Flow-matching families (FLUX, SD3, Z-Image, Flux.2, Qwen-Image) ignore scheduler.
 - H.264 decode baseline for LTX-2 source ingest; `mp4` feature only gates AAC mux.

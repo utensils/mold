@@ -24,7 +24,7 @@ import {
   outputFormatsForFamily,
   pruneRequestForFamily,
 } from "./capabilities";
-import type { SourceFitPolicy } from "./sourceFit";
+import { coerceSourceFitForMaskless, type SourceFitPolicy } from "./sourceFit";
 import { findInstalledModel } from "./generateModels";
 
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */
@@ -189,7 +189,14 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
     if (!form.sourceImage) form.sourceImage = form.imageAttachments[0] ?? null;
     form.imageAttachments = [];
   }
-  if (!caps.supportsMask) form.maskImage = null;
+  if (!caps.supportsMask) {
+    form.maskImage = null;
+    // Maskless img2img (LTX-2 image-to-video) can't repaint pad bands, so a
+    // mask-dependent fit policy flips to crop-fill on entry.
+    if (caps.supportsImg2img && caps.sourceImageMode === "single") {
+      form.sourceFit = coerceSourceFitForMaskless(form.sourceFit);
+    }
+  }
   if (!caps.supportsControlNet) {
     form.controlImage = null;
     form.controlModel = "";

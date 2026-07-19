@@ -44,6 +44,7 @@ import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { decideChainRouting } from "../lib/chainRouting";
 import { applyPrefillToForm, buildRequest } from "../lib/generateForm";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
+import { coerceSourceFitForMaskless } from "../lib/sourceFit";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import type { HostRoute } from "../stores/hosts";
@@ -366,8 +367,12 @@ async function preprocessSourceFit(route: HostRoute | null): Promise<boolean> {
     const result = await applySourceFitPreprocess(
       {
         source: form.sourceImage,
-        mask: form.maskImage,
-        policy: form.sourceFit,
+        // Maskless families (LTX-2 img2video) can't ship the repaint mask —
+        // coerce defensively even if a stale pad-repaint policy survived.
+        mask: caps.value.supportsMask ? form.maskImage : null,
+        policy: caps.value.supportsMask
+          ? form.sourceFit
+          : coerceSourceFitForMaskless(form.sourceFit),
         target: { width: form.width, height: form.height },
       },
       {

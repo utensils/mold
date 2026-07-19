@@ -5,8 +5,10 @@
  * (families, scheduler options, CFG++ gate, negative-prompt gate, LoRA gate,
  * ControlNet gate, qwen-edit mode, batch-size lock). Two desktop additions:
  *   - `supportsImg2img` — whether the SourceImageWell should render at all.
- *     True for every non-video image family; video families (ltx) condition on
- *     source video / keyframes instead, which land in M5.
+ *     True for every non-video image family AND for LTX-2, whose engine
+ *     stages `source_image` as frame-0 conditioning (image-to-video, with
+ *     `strength`). Plain `ltx-video` stays false — that engine has no
+ *     img2vid path and would silently ignore the image.
  *   - `pruneRequestForFamily` — strips request fields the target family does
  *     not support, applied on model change so a leftover value never ships.
  *
@@ -88,9 +90,10 @@ export function generationCapabilitiesForFamily(family: string): GenerationCapab
     supportsAudio: AUDIO_FAMILIES.has(normalized),
     supportsLora: LORA_CAPABLE_FAMILIES.has(normalized),
     supportsControlNet: CONTROLNET_FAMILIES.has(normalized),
-    // The SourceImageWell handles still-image img2img only; video families use
-    // source-video / keyframe conditioning (M5), so gate the well off there.
-    supportsImg2img: !supportsVideo,
+    // LTX-2 accepts a still source_image as frame-0 conditioning (img2video);
+    // ltx-video's engine has no img2vid path, so only the advanced-video
+    // families get the well among video families.
+    supportsImg2img: !supportsVideo || ADVANCED_VIDEO_FAMILIES.has(normalized),
     sourceImageMode: qwenEdit ? "qwen-edit" : "single",
     supportsMask: !qwenEdit && !supportsVideo,
     forcesBatchSizeOne: qwenEdit,

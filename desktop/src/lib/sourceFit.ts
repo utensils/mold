@@ -134,6 +134,22 @@ export function maskPaddingRectangles(t: SourceFitTransform): Rect[] {
   return rects.filter((r) => r.width > 0 && r.height > 0);
 }
 
+/**
+ * Rewrite a fit policy for families that can't ship a repaint mask (video
+ * img2img — LTX-2): pad-repaint would paint pad bands the model can never
+ * repaint, so it becomes a centered crop-fill (which always fills the target).
+ * Applied both when entering such a family and defensively on submit.
+ */
+export function coerceSourceFitForMaskless(policy: SourceFitPolicy): SourceFitPolicy {
+  if (policy.mode === "pad-repaint") {
+    return { mode: "crop-fill", alignX: "center", alignY: "center" };
+  }
+  if (policy.mode === "upscale-then-fit" && policy.fit.mode === "pad-repaint") {
+    return { ...policy, fit: { mode: "crop-fill", alignX: "center", alignY: "center" } };
+  }
+  return policy;
+}
+
 export function describeSourceFit(policy: SourceFitPolicy): string {
   switch (policy.mode) {
     case "pad-repaint":

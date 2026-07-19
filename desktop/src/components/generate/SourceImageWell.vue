@@ -201,7 +201,11 @@ function setSourceFitMode(e: Event) {
     props.form.sourceFit = {
       mode: "upscale-then-fit",
       upscalerModel: props.form.upscaleModel || models.upscalers[0]?.name || "",
-      fit: { mode: "pad-repaint" },
+      // Maskless families (video img2img) can't repaint pad bands — fill the
+      // canvas instead of padding it.
+      fit: caps.value.supportsMask
+        ? { mode: "pad-repaint" }
+        : { mode: "crop-fill", alignX: "center", alignY: "center" },
     };
     return;
   }
@@ -382,7 +386,7 @@ function setSourceFitMode(e: Event) {
         class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
         @change="setSourceFitMode"
       >
-        <option value="pad-repaint">Pad repaint</option>
+        <option v-if="caps.supportsMask" value="pad-repaint">Pad repaint</option>
         <option value="crop-fill">Crop fill</option>
         <option value="pad-fit">Pad fit</option>
         <option value="lanczos-resize">Lanczos resize</option>
