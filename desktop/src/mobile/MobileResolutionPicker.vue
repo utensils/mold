@@ -41,10 +41,41 @@ const aspectOptions = computed(() =>
 const tierOptions = computed(() =>
   currentPreset.value ? sortedResolutionTiers(presets.value, currentPreset.value.aspect) : [],
 );
-const aspectShapeStyle = computed(() => ({
-  aspectRatio: `${width.value} / ${height.value}`,
-  ...(width.value > height.value ? { width: "34px" } : { height: "30px" }),
-}));
+const aspectShapeStyle = computed(() => proportionalShapeStyle(width.value, height.value, 34, 30));
+
+function proportionalShapeStyle(
+  shapeWidth: number,
+  shapeHeight: number,
+  maxWidth: number,
+  maxHeight: number,
+): Record<string, string> {
+  const safeWidth = Math.max(1, shapeWidth);
+  const safeHeight = Math.max(1, shapeHeight);
+  const scale = Math.min(maxWidth / safeWidth, maxHeight / safeHeight);
+  return {
+    width: `${(safeWidth * scale).toFixed(2)}px`,
+    height: `${(safeHeight * scale).toFixed(2)}px`,
+  };
+}
+
+function aspectDimensions(aspect: string): [number, number] {
+  const preset = presets.value.find((candidate) => candidate.aspect === aspect);
+  if (preset) return [preset.width, preset.height];
+  const match = aspect.replace(/^≈/, "").match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
+  if (!match) return [1, 1];
+  return [Number(match[1]), Number(match[2])];
+}
+
+function aspectOptionShapeStyle(aspect: string): Record<string, string> {
+  const [shapeWidth, shapeHeight] = aspectDimensions(aspect);
+  return proportionalShapeStyle(shapeWidth, shapeHeight, 30, 28);
+}
+
+function aspectAccessibleLabel(aspect: string): string {
+  const approximate = aspect.startsWith("≈");
+  const [left, right] = aspect.replace(/^≈/, "").split(":");
+  return `${approximate ? "Approximately " : ""}${left} by ${right} aspect ratio`;
+}
 
 function isOrientationAvailable(orientation: ResolutionOrientation): boolean {
   return presetsForOrientation(presets.value, orientation).length > 0;
@@ -146,7 +177,7 @@ function swapDimensions(): void {
 
     <div class="mobile-resolution-group">
       <span class="mobile-resolution-label">Aspect ratio</span>
-      <div class="mobile-resolution-aspects" aria-label="Aspect ratio presets">
+      <div class="mobile-resolution-aspects" role="group" aria-label="Aspect ratio presets">
         <button
           v-for="aspect in aspectOptions"
           :key="aspect"
@@ -154,10 +185,19 @@ function swapDimensions(): void {
           class="mobile-resolution-aspect"
           :class="{ 'is-selected': currentPreset?.aspect === aspect }"
           :aria-pressed="currentPreset?.aspect === aspect"
+          :aria-label="aspectAccessibleLabel(aspect)"
           :data-aspect="aspect"
           @click="setAspect(aspect)"
         >
-          {{ aspect }}
+          <span class="mobile-resolution-aspect-visual" aria-hidden="true">
+            <span
+              class="mobile-resolution-aspect-shape"
+              data-test="mobile-resolution-aspect-shape"
+              aria-hidden="true"
+              :style="aspectOptionShapeStyle(aspect)"
+            />
+          </span>
+          <span class="mobile-resolution-aspect-label">{{ aspect }}</span>
         </button>
       </div>
     </div>

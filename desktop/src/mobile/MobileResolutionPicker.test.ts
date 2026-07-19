@@ -76,6 +76,26 @@ describe("MobileResolutionPicker", () => {
     expect(state).toMatchObject({ width: 768, height: 1344 });
   });
 
+  it("shows each aspect choice as a proportionally accurate frame", async () => {
+    const { wrapper } = mountPicker(928, 1664, "qwen-image");
+    const choices = wrapper.findAll(".mobile-resolution-aspect");
+
+    expect(choices.map((choice) => choice.text())).toEqual(["7:9", "13:19", "4:7", "≈9:16"]);
+    const frames = choices.map((choice) =>
+      choice.get("[data-test='mobile-resolution-aspect-shape']"),
+    );
+    expect(frames.every((frame) => frame.attributes("aria-hidden") === "true")).toBe(true);
+    expect(frames.every((frame) => frame.attributes("style")?.includes("height: 28px"))).toBe(true);
+
+    const widths = frames.map((frame) =>
+      Number.parseFloat((frame.element as HTMLElement).style.width),
+    );
+    expect(widths[0]).toBeGreaterThan(widths[1]!);
+    expect(widths[1]).toBeGreaterThan(widths[2]!);
+    expect(widths[2]).toBeGreaterThan(widths[3]!);
+    expect(choices[3]?.attributes("aria-label")).toBe("Approximately 9 by 16 aspect ratio");
+  });
+
   it("falls back to iPhone-friendly custom fields and snaps values to 16", async () => {
     const { wrapper, state } = mountPicker(1000, 777);
 

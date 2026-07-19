@@ -204,6 +204,33 @@ describe("MobileApp generation queue", () => {
     });
   });
 
+  it("uses an explicit mobile seed mode and submits the fixed value", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-seed-mode-random']").attributes("aria-pressed")).toBe(
+      "true",
+    );
+    expect(wrapper.find("[data-test='mobile-seed-input']").exists()).toBe(false);
+
+    await wrapper.get("[data-test='mobile-seed-mode-fixed']").trigger("click");
+    await fieldControl("Prompt").setValue("repeat this print");
+    await wrapper.get("[data-test='mobile-seed-input']").setValue("not-a-number");
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+      "disabled",
+    );
+    await wrapper.get("[data-test='mobile-seed-input']").setValue("1234");
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams[0]?.options.body).toMatchObject({ seed: 1234 });
+    await wrapper.get("[data-test='mobile-seed-mode-random']").trigger("click");
+    expect(wrapper.find("[data-test='mobile-seed-input']").exists()).toBe(false);
+  });
+
   it("snapshots multiple prompts, shows their live queue, and cancels only one", async () => {
     wrapper = mountMobileApp();
     await flushPromises();

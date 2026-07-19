@@ -24,6 +24,7 @@ import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 import MobileHostDetail from "./MobileHostDetail.vue";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
+import MobileSeedPicker from "./MobileSeedPicker.vue";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -62,6 +63,7 @@ const models = ref<ModelEntry[]>([]);
 const modelsHostId = ref("");
 const loadingModels = ref(false);
 const form = reactive<GenerateForm>(newGenerateForm());
+const seedValid = ref(true);
 const progress = ref("Ready");
 const generationAnnouncement = ref("");
 const gallery = ref<GalleryPrint[]>([]);
@@ -393,7 +395,8 @@ function revokeObjectUrl(url: string): void {
 function generate(): void {
   const host = selectedHost.value;
   const target = selectedTarget.value;
-  if (!host || !target || !form.prompt.trim() || !selectedModelAvailable.value) return;
+  if (!host || !target || !form.prompt.trim() || !selectedModelAvailable.value || !seedValid.value)
+    return;
 
   // Exactly like desktop: snapshot the request and host for this tap, open a
   // separate SSE stream immediately, and let the remote engine schedule it.
@@ -795,19 +798,20 @@ onBeforeUnmount(() => {
                 inputmode="decimal"
                 step="0.1"
             /></label>
-            <label class="field"
-              ><span>Seed</span
-              ><input v-model="form.seed" class="control" inputmode="numeric" placeholder="Random"
-            /></label>
-            <label class="field"
-              ><span>Format</span
-              ><select v-model="form.outputFormat" class="control">
-                <option v-for="format in outputFormats" :key="format" :value="format">
-                  {{ format.toUpperCase() }}
-                </option>
-              </select></label
-            >
           </div>
+          <MobileSeedPicker
+            v-model="form.seed"
+            :last-seed="generation.lastSeedUsed"
+            @validity-change="seedValid = $event"
+          />
+          <label class="field"
+            ><span>Format</span
+            ><select v-model="form.outputFormat" class="control">
+              <option v-for="format in outputFormats" :key="format" :value="format">
+                {{ format.toUpperCase() }}
+              </option>
+            </select></label
+          >
           <template v-if="form.family.includes('video') || form.family.includes('ltx2')">
             <div class="field-grid">
               <label class="field"
@@ -827,7 +831,7 @@ onBeforeUnmount(() => {
           <button
             class="primary-button"
             type="button"
-            :disabled="!form.prompt.trim() || !selectedModelAvailable"
+            :disabled="!form.prompt.trim() || !selectedModelAvailable || !seedValid"
             data-test="mobile-develop-button"
             @click="generate"
           >
