@@ -22,7 +22,6 @@ prepare_build() {
   if [[ -d gen/apple/build ]]; then
     find gen/apple/build -depth -delete
   fi
-  touch src/lib.rs
 }
 
 command -v xcodebuild >/dev/null || { echo "Xcode command-line tools are required." >&2; exit 1; }

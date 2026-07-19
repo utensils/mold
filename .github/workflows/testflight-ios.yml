@@ -84,7 +84,6 @@ jobs:
         run: |
           set -euo pipefail
           scripts/tests/ios-release-assets.sh
-          touch apps/mobile/src-tauri/src/lib.rs
           cargo test --manifest-path apps/mobile/src-tauri/Cargo.toml --lib --features tauri/custom-protocol packaged_frontend_contains_mobile_entry
           cd apps/mobile/src-tauri
           cargo tauri ios build --ci --target aarch64 --archive-only --no-sign --build-number "$BUILD_NUMBER" -v
