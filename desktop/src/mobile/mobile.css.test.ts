@@ -28,6 +28,13 @@ describe("mobile scrolling", () => {
   });
 });
 
+describe("mobile navigation", () => {
+  it("visually marks the tab exposed as the current page", () => {
+    expect(css).toMatch(/\.mobile-tab\[aria-current="page"\]\s*\{/);
+    expect(css).not.toMatch(/\.mobile-tab\[aria-selected="true"\]\s*\{/);
+  });
+});
+
 describe("mobile safe areas", () => {
   it("keeps the shell inside the dynamic viewport and clears both landscape notches", () => {
     const shell = css.match(/\.mobile-shell\s*\{([^}]*)\}/s);

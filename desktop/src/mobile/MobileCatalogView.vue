@@ -1,5 +1,15 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onActivated,
+  onBeforeUnmount,
+  onDeactivated,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+} from "vue";
 import { apiFetchTo, ApiError, type ApiTarget } from "../lib/api/client";
 import {
   fetchCatalogDetail,
@@ -117,6 +127,7 @@ let targetRestoreFocus: HTMLElement | null = null;
 let inertBackground: HTMLElement | null = null;
 
 let mounted = false;
+let interactionListenersActive = false;
 let searchEpoch = 0;
 let familyEpoch = 0;
 let modelsEpoch = 0;
@@ -781,6 +792,26 @@ function onKeydown(event: KeyboardEvent): void {
   if (detailEntry.value) closeDetail();
 }
 
+function activateInteractions(): void {
+  if (!interactionListenersActive) {
+    window.addEventListener("keydown", onKeydown);
+    interactionListenersActive = true;
+  }
+  void nextTick(() => {
+    updateModalInert();
+    if (targetEntry.value) targetCloseButton.value?.focus();
+    else if (detailEntry.value) detailCloseButton.value?.focus();
+  });
+}
+
+function deactivateInteractions(): void {
+  if (interactionListenersActive) {
+    window.removeEventListener("keydown", onKeydown);
+    interactionListenersActive = false;
+  }
+  clearModalInert();
+}
+
 watch(
   source,
   (next) => {
@@ -824,12 +855,15 @@ watch(
 
 onMounted(() => {
   mounted = true;
-  window.addEventListener("keydown", onKeydown);
+  activateInteractions();
   syncDownloadStreams();
   void refreshModels();
   void loadFamilies();
   void runSearch(true);
 });
+
+onActivated(activateInteractions);
+onDeactivated(deactivateInteractions);
 
 onBeforeUnmount(() => {
   mounted = false;
@@ -838,8 +872,7 @@ onBeforeUnmount(() => {
   ++modelsEpoch;
   ++detailEpoch;
   if (debounce) clearTimeout(debounce);
-  window.removeEventListener("keydown", onKeydown);
-  clearModalInert();
+  deactivateInteractions();
   for (const subscription of subscriptions.values()) subscription.close();
   subscriptions.clear();
 });

@@ -1,4 +1,5 @@
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
+import { defineComponent, h, KeepAlive, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   CatalogEntry,
@@ -361,6 +362,46 @@ describe("MobileCatalogView", () => {
     await flushPromises();
     expect(wrapper.get(".mobile-catalog").attributes()).not.toHaveProperty("inert");
     expect(document.activeElement).toBe(catalogCard!.get(".mobile-catalog-card-open").element);
+  });
+
+  it("suspends global dialog handling while the kept-alive catalog is off-tab", async () => {
+    const active = ref(true);
+    const OtherView = defineComponent({
+      setup: () => () => h("section", { "data-test": "other-view" }, "Other view"),
+    });
+    const Harness = defineComponent({
+      setup: () => () =>
+        h(KeepAlive, null, {
+          default: () =>
+            active.value
+              ? h(MobileCatalogView, { hosts: [studio, renderBox], selectedHostId: studio.id })
+              : h(OtherView),
+        }),
+    });
+
+    wrapper = mount(Harness, { attachTo: document.body });
+    await flushPromises();
+
+    const catalogCard = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Catalog model"));
+    expect(catalogCard).toBeDefined();
+    await catalogCard!.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+
+    const catalog = wrapper.get(".mobile-catalog").element as HTMLElement;
+    expect(catalog.hasAttribute("inert")).toBe(true);
+
+    active.value = false;
+    await nextTick();
+    expect(catalog.hasAttribute("inert")).toBe(false);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    active.value = true;
+    await nextTick();
+    await nextTick();
+    expect(document.querySelector("[data-test='mobile-catalog-detail']")).not.toBeNull();
+    expect(catalog.hasAttribute("inert")).toBe(true);
   });
 
   it("waits for the download stream to open before posting a pull", async () => {

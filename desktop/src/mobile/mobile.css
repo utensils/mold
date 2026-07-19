@@ -100,7 +100,7 @@ button {
   font-size: var(--text-data);
 }
 
-.mobile-tab[aria-selected="true"] {
+.mobile-tab[aria-current="page"] {
   background: color-mix(in srgb, var(--safelight) 12%, transparent);
   color: var(--safelight);
 }
