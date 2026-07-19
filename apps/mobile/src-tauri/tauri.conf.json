@@ -4,8 +4,8 @@
   "version": "0.18.0",
   "identifier": "com.utensils.mold",
   "build": {
-    "beforeDevCommand": "bash -c 'cd ../../../desktop && bun run dev:mobile'",
-    "beforeBuildCommand": "bash -c 'cd ../../../desktop && bun run build:mobile'",
+    "beforeDevCommand": "bash -c 'cd ../../desktop && bun run dev:mobile'",
+    "beforeBuildCommand": "bash -c 'cd ../../desktop && bun run build:mobile'",
     "devUrl": "http://localhost:1431",
     "frontendDist": "../../../desktop/dist-mobile"
   },
