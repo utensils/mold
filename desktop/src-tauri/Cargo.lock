@@ -3978,6 +3978,7 @@ version = "0.17.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "filetime",
  "flate2",
  "hostname",
  "if-addrs",

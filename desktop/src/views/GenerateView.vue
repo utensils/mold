@@ -54,7 +54,17 @@ import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCy
 import { fetchHistory } from "../lib/api/history";
 import { formatGB } from "../lib/format";
 import { randomSeed } from "../stores/generation";
-import type { ModelEntry } from "../lib/api/types";
+import type { ModelEntry, OutputMetadata } from "../lib/api/types";
+import {
+  metadataReferencesSource,
+  restoreSourceImage,
+  sha256HexOfBase64,
+} from "../lib/sourceRestore";
+import { localMediaPath, mediaPath } from "../lib/gallery/media";
+import { apiFetch, apiFetchTo } from "../lib/api/client";
+import { blobToBase64 } from "../lib/image";
+import { ipc } from "../lib/ipc";
+import { useGalleryStore } from "../stores/gallery";
 import { fitAspectRatio } from "../lib/fitAspectRatio";
 import { primaryModifierPressed, shortcutLabel } from "../lib/platform";
 
@@ -69,6 +79,8 @@ const composer = useComposerStore();
 const toasts = useToastStore();
 const ui = useUiStore();
 const contextMenu = useContextMenuStore();
+// Multi-host gallery — source-image restore looks prints up across hosts.
+const hostGallery = useGalleryStore();
 
 // Store-backed so the model, prompt, and params survive navigating away and
 // back — this view unmounts on every route change.
@@ -424,6 +436,15 @@ async function generate() {
   }
   if (!(await preprocessSourceFit(route))) return;
   const request = buildRequest(form);
+  // Stash the exact source bytes by sha (the hash the server records as
+  // source_image_sha256) so Reuse settings can restore uploads and fitted
+  // sources later. Fire-and-forget — never blocks the submit.
+  if (request.source_image) {
+    const sourceB64 = request.source_image;
+    void sha256HexOfBase64(sourceB64)
+      .then((sha) => ipc.sourceStashPut(sha, sourceB64))
+      .catch(() => {});
+  }
   // Submitting while another print develops queues server-side; each job
   // snapshots its own model + params, so tweaking the form afterwards is safe.
   const { settled } = generation.submitBatch(request, batch, route);
@@ -524,7 +545,46 @@ function applyPrefill() {
   // Gallery reuse ships full metadata (full-fidelity restore); palette /
   // history / jobs keep the legacy scalar copy.
   applyPrefillToForm(form, prefill, installedModels.value);
+  if ("metadata" in prefill && prefill.metadata) void restorePrefillSource(prefill.metadata);
   void nextTick(() => promptEl.value?.focus());
+}
+
+/**
+ * Best-effort input-image restore for Reuse settings: local source stash by
+ * sha first (covers uploads and canvas-fitted sources), then a cross-host
+ * gallery filename match fetched from the print's own origin. Old prints
+ * without provenance keys are silently skipped; a keyed print that can't be
+ * found gets a toast.
+ */
+async function restorePrefillSource(metadata: OutputMetadata) {
+  if (!metadataReferencesSource(metadata)) return;
+  if (!caps.value.supportsImg2img || caps.value.sourceImageMode !== "single") return;
+  const restored = await restoreSourceImage(metadata, {
+    stashGet: (sha) => ipc.sourceStashGet(sha),
+    galleryLookup: async (filename) => {
+      await hostGallery.fetchAll().catch(() => {});
+      const entry = hostGallery.merged.find((e) => e.item.filename === filename);
+      if (!entry) return null;
+      if (hostGallery.mediaSourceOf(entry.sourceKey) === "local") {
+        const res = await fetch(localMediaPath(filename));
+        if (!res.ok) return null;
+        return blobToBase64(await res.blob());
+      }
+      const target = hostGallery.targetOf(entry.sourceKey);
+      const path = mediaPath(filename);
+      const res = await (target ? apiFetchTo(target, path) : apiFetch(path));
+      return blobToBase64(await res.blob());
+    },
+  });
+  if (restored) {
+    form.sourceImage = restored.base64;
+    form.sourceImageName = restored.filename;
+  } else {
+    toasts.push(
+      "Couldn't restore the source image — the original file wasn't found on any connected host.",
+      "error",
+    );
+  }
 }
 
 // Apply a prefill whenever one arrives (Reuse settings, history, "Generate

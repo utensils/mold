@@ -95,3 +95,6 @@ metal = ["mold-server/metal"]
 lto = "thin"
 codegen-units = 16
 strip = true
+
+[dev-dependencies]
+filetime = "0.2"
