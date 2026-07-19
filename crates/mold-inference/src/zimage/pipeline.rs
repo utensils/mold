@@ -101,6 +101,14 @@ impl ZImageSafetensorsBackend {
         dtype: DType,
         dev: &Device,
     ) -> candle_core::Result<Tensor> {
+        // A directly-stored name always wins: official Tongyi BF16
+        // checkpoints (z-image-turbo) ship SPLIT diffusers attention tensors
+        // (`to_q`/`to_k`/`to_v`), while single-file/community conversions
+        // fuse them into `attention.qkv`. Only translate a split request
+        // into a fused slice when the split tensor itself isn't stored.
+        if self.resolve_stored_name(name).is_some() {
+            return self.load_cast(name, dtype, dev);
+        }
         if let Some((source_name, component)) = zimage_qkv_request(name) {
             return self.load_qkv_split(&source_name, component, expected_shape, dtype, dev);
         }
@@ -155,10 +163,13 @@ impl candle_nn::var_builder::SimpleBackend for ZImageSafetensorsBackend {
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
+        if self.resolve_stored_name(name).is_some() {
+            return true;
+        }
         if let Some((source_name, _)) = zimage_qkv_request(name) {
             return self.resolve_stored_name(&source_name).is_some();
         }
-        self.resolve_stored_name(name).is_some()
+        false
     }
 }
 
@@ -2107,6 +2118,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(k_norm.to_vec1::<f32>().unwrap(), vec![9.0]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// z-image-turbo:bf16 regression: the official Tongyi checkpoint stores
+    /// SPLIT diffusers attention names (`to_q`/`to_k`/`to_v`, `norm_q`,
+    /// `to_out.0`) — no fused `attention.qkv` anywhere. The backend used to
+    /// translate every split request into a fused load unconditionally and
+    /// die with "cannot find tensor noise_refiner.0.attention.qkv.weight".
+    /// Directly-stored names must win before the fused-QKV adaptation.
+    #[test]
+    fn zimage_backend_serves_split_qkv_checkpoints_directly() {
+        use candle_nn::var_builder::SimpleBackend;
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+        use std::collections::HashMap;
+
+        fn f32_bytes(values: &[f32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        let dir = temp_test_dir("mold-zimage-split-backend");
+        let path = dir.join("zimage-split.safetensors");
+        let q = f32_bytes(&[1.0]);
+        let k = f32_bytes(&[2.0]);
+        let v = f32_bytes(&[3.0]);
+        let out = f32_bytes(&[7.0]);
+        let norm_q = f32_bytes(&[8.0]);
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "noise_refiner.0.attention.to_q.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1, 1], q.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            "noise_refiner.0.attention.to_k.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1, 1], k.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            "noise_refiner.0.attention.to_v.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1, 1], v.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            "noise_refiner.0.attention.to_out.0.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1, 1], out.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            "noise_refiner.0.attention.norm_q.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], norm_q.as_slice()).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+
+        let st = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path.as_path()]) }
+            .unwrap();
+        let backend = ZImageSafetensorsBackend::new(st);
+
+        assert!(backend.contains_tensor("noise_refiner.0.attention.to_q.weight"));
+        let q = backend
+            .get(
+                Shape::from((1, 1)),
+                "noise_refiner.0.attention.to_q.weight",
+                candle_nn::Init::Const(0.0),
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+        assert_eq!(q.to_vec2::<f32>().unwrap(), vec![vec![1.0]]);
+        let v = backend
+            .get_unchecked(
+                "noise_refiner.0.attention.to_v.weight",
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+        assert_eq!(v.to_vec2::<f32>().unwrap(), vec![vec![3.0]]);
+        let out = backend
+            .get_unchecked(
+                "noise_refiner.0.attention.to_out.0.weight",
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+        assert_eq!(out.to_vec2::<f32>().unwrap(), vec![vec![7.0]]);
+        let norm_q = backend
+            .get_unchecked(
+                "noise_refiner.0.attention.norm_q.weight",
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap();
+        assert_eq!(norm_q.to_vec1::<f32>().unwrap(), vec![8.0]);
 
         let _ = std::fs::remove_dir_all(dir);
     }
