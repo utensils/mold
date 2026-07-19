@@ -83,11 +83,18 @@ jobs:
           CARGO_TARGET_AARCH64_APPLE_IOS_LINKER: /usr/bin/clang
         run: |
           set -euo pipefail
+          scripts/tests/ios-release-assets.sh
+          touch apps/mobile/src-tauri/src/lib.rs
+          cargo test --manifest-path apps/mobile/src-tauri/Cargo.toml --lib --features tauri/custom-protocol packaged_frontend_contains_mobile_entry
           cd apps/mobile/src-tauri
           cargo tauri ios build --ci --target aarch64 --archive-only --no-sign --build-number "$BUILD_NUMBER" -v
           archive=$(find gen/apple/build -type d -name '*.xcarchive' -print -quit)
           test -n "$archive"
           test -x "$archive/Products/Applications/Mold.app/Mold"
+          if grep -aFq '/index.mobile.html' "$archive/Products/Applications/Mold.app/Mold"; then
+            echo "archive embedded the mobile source filename instead of index.html" >&2
+            exit 1
+          fi
           bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$archive/Products/Applications/Mold.app/Info.plist")
           {
             echo "ARCHIVE_PATH=$(cd "$(dirname "$archive")" && pwd)/$(basename "$archive")"

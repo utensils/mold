@@ -907,6 +907,12 @@ ios-check          # cross-check the simulator Rust target
 ios-build          # archive/export for App Store Connect
 ```
 
+The mobile source entry is `index.mobile.html`, but Tauri's packaged resolver
+boots `index.html`; `vite.mobile.config.ts` performs that rename. Run
+`scripts/tests/ios-release-assets.sh` before shipping, and use
+`scripts/generate-ios-icons.sh` to regenerate the opaque Apple catalog from the
+desktop icon master.
+
 ## Updating This Skill
 
 This skill is maintained in the mold repository on GitHub. To pull the latest version:
