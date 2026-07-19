@@ -85,7 +85,11 @@ describe("MobileResolutionPicker", () => {
       choice.get("[data-test='mobile-resolution-aspect-shape']"),
     );
     expect(frames.every((frame) => frame.attributes("aria-hidden") === "true")).toBe(true);
-    expect(frames.every((frame) => frame.attributes("style")?.includes("height: 28px"))).toBe(true);
+    expect(
+      frames.every(
+        (frame) => Number.parseFloat((frame.element as HTMLElement).style.height) === 28,
+      ),
+    ).toBe(true);
 
     const widths = frames.map((frame) =>
       Number.parseFloat((frame.element as HTMLElement).style.width),
