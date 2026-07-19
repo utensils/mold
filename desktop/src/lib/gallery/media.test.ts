@@ -1,10 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { apiFetch, apiFetchTo } from "../api/client";
-import { authedMediaUrl, evictHostMedia, evictMedia, galleryMediaPath } from "./media";
+import { ApiError, apiFetch, apiFetchTo, currentTarget } from "../api/client";
+import {
+  authedMediaUrl,
+  evictHostMedia,
+  evictMedia,
+  galleryMediaPath,
+  streamableMediaUrl,
+} from "./media";
 
-vi.mock("../api/client", () => ({
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/client")>()),
   apiFetch: vi.fn(),
   apiFetchTo: vi.fn(),
+  currentTarget: vi.fn(),
 }));
 
 const blobResponse = () =>
@@ -17,9 +25,98 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(apiFetch).mockImplementation(() => Promise.resolve(blobResponse()));
   vi.mocked(apiFetchTo).mockImplementation(() => Promise.resolve(blobResponse()));
+  vi.mocked(currentTarget).mockReturnValue({ baseUrl: "http://primary:7680", apiKey: null });
   revoked.length = 0;
   URL.createObjectURL = vi.fn(() => `blob:mock-${++objectUrlSeq}`);
   URL.revokeObjectURL = vi.fn((url: string) => void revoked.push(url));
+  vi.stubGlobal("fetch", vi.fn());
+});
+
+describe("streamableMediaUrl", () => {
+  it("uses the direct host URL when no API key is required", async () => {
+    const target = { baseUrl: "http://studio.tailnet.ts.net:7680", apiKey: null };
+
+    await expect(
+      streamableMediaUrl("/api/gallery/image/clip.mp4", { target, cacheKey: "studio" }),
+    ).resolves.toBe("http://studio.tailnet.ts.net:7680/api/gallery/image/clip.mp4");
+    expect(apiFetchTo).not.toHaveBeenCalled();
+  });
+
+  it("exchanges an API key for a short-lived streamable gallery URL", async () => {
+    const target = { baseUrl: "https://studio.example", apiKey: "secret" };
+    vi.mocked(apiFetchTo).mockResolvedValueOnce({
+      json: () =>
+        Promise.resolve({
+          token: "short_lived-ticket",
+          expires_at: 1_800_000_000,
+          auth_required: true,
+        }),
+    } as Response);
+
+    const url = await streamableMediaUrl("/api/gallery/image/clip%20one.mp4", {
+      target,
+      cacheKey: "studio",
+    });
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/media-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "/api/gallery/image/clip%20one.mp4" }),
+    });
+    expect(url).toBe(
+      "https://studio.example/api/gallery/image/clip%20one.mp4?media_token=short_lived-ticket&expires=1800000000",
+    );
+  });
+
+  it("uses the direct URL when a current auth-disabled host sees a stale saved key", async () => {
+    const target = { baseUrl: "http://studio:7680", apiKey: "stale-key" };
+    vi.mocked(apiFetchTo).mockResolvedValueOnce({
+      json: () => Promise.resolve({ token: null, expires_at: null, auth_required: false }),
+    } as Response);
+
+    await expect(
+      streamableMediaUrl("/api/gallery/image/clip.mp4", { target, cacheKey: "studio" }),
+    ).resolves.toBe("http://studio:7680/api/gallery/image/clip.mp4");
+  });
+
+  it("probes and directly streams video from an older auth-disabled host", async () => {
+    const target = { baseUrl: "http://old-public:7680", apiKey: "stale-key" };
+    vi.mocked(apiFetchTo).mockRejectedValueOnce(new ApiError("missing", 404));
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: true } as Response);
+
+    await expect(
+      streamableMediaUrl("/api/gallery/image/clip.mp4", { target, cacheKey: "old" }),
+    ).resolves.toBe("http://old-public:7680/api/gallery/image/clip.mp4");
+    expect(fetch).toHaveBeenCalledWith("http://old-public:7680/api/gallery/image/clip.mp4", {
+      method: "HEAD",
+    });
+  });
+
+  it("allows still images on older hosts to use the bounded blob path", async () => {
+    const target = { baseUrl: "http://old-host:7680", apiKey: "secret" };
+    vi.mocked(apiFetchTo)
+      .mockRejectedValueOnce(new ApiError("missing", 404))
+      .mockResolvedValueOnce(blobResponse());
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: false } as Response);
+
+    await expect(
+      streamableMediaUrl("/api/gallery/image/print.png", {
+        target,
+        cacheKey: "old",
+        allowLegacyBlob: true,
+      }),
+    ).resolves.toMatch(/^blob:mock-/);
+  });
+
+  it("refuses to buffer videos from hosts without streaming tickets", async () => {
+    const target = { baseUrl: "http://old-host:7680", apiKey: "secret" };
+    vi.mocked(apiFetchTo).mockRejectedValueOnce(new ApiError("missing", 404));
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: false } as Response);
+
+    await expect(
+      streamableMediaUrl("/api/gallery/image/clip.mp4", { target, cacheKey: "old" }),
+    ).rejects.toThrow("Update this Mold host");
+  });
 });
 
 describe("galleryMediaPath", () => {

@@ -10,10 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Mold for iPhone.** A first-class Tauri iOS companion connects only to remote Mold hosts and focuses the initial release on generation and the merged gallery. It reuses the desktop wire types, capability-aware request builder, and SSE client; supports saved hosts, Keychain-backed API keys, Tailscale MagicDNS names, and native Bonjour discovery of `_mold._tcp`; and ships with simulator CI plus an internal TestFlight nightly pipeline.
+- **The iPhone gallery now opens prints in a full-screen viewer.** Photos are shown uncropped, videos stream with native inline playback controls, and a clearly labeled **Use as prompt** action carries the prompt and visible generation settings into Generate instead of making a gallery tile tap silently replace the composer. Authenticated hosts issue short-lived read-only media tickets so videos can seek without exposing API keys or buffering entire files in phone memory.
 
 ### Fixed
 
 - **iPhone builds now launch the bundled mobile UI and show Mold's real icon.** The mobile Vite build emits the `index.html` entry Tauri boots, every Apple icon size is generated from the Mold bowl on an opaque app-theme background, and CI rejects archives with a missing entry point, stale frontend embed, or stock Tauri icon.
+- **iPhone form fields no longer magnify the app when focused.** Every editable mobile control now uses the 16px minimum that prevents iOS WebKit's automatic input zoom while preserving normal accessibility zoom gestures.
+- **Simulator builds can exercise Keychain-backed remote hosts.** The local iPhone bundle now keeps Xcode's complete ad-hoc bundle signature, so saving and restoring API keys works during simulator UAT instead of failing with a missing-entitlement error.
 
 ## [0.18.0] - 2026-07-19
 

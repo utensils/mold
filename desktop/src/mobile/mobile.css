@@ -19,6 +19,14 @@ select {
   font: inherit;
 }
 
+input,
+textarea,
+select,
+[contenteditable="true"] {
+  /* iOS WebKit magnifies focused editable controls below 16 CSS pixels. */
+  font-size: 16px;
+}
+
 button {
   color: inherit;
 }
@@ -210,6 +218,207 @@ button:disabled {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.gallery-video-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid rgba(245, 239, 255, 0.32);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.68);
+  color: #f5efff;
+  font-size: 13px;
+  line-height: 1;
+  text-indent: 2px;
+  backdrop-filter: blur(8px);
+}
+
+.gallery-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  box-sizing: border-box;
+  margin: 0;
+  border: 0;
+  padding-right: 0;
+  padding-left: 0;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  background: #08070c;
+  color: #f5efff;
+}
+
+.gallery-viewer[open] {
+  display: grid;
+}
+
+.gallery-viewer::backdrop {
+  background: #08070c;
+}
+
+.gallery-viewer-header {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 16px;
+  border-bottom: 1px solid rgba(245, 239, 255, 0.12);
+  background: rgba(8, 7, 12, 0.92);
+}
+
+.gallery-viewer-close {
+  display: inline-flex;
+  min-width: 44px;
+  min-height: 44px;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  padding: 0 4px;
+  background: transparent;
+  color: #f5efff;
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+}
+
+.gallery-viewer-close > span:first-child {
+  font-family: var(--font-body);
+  font-size: 24px;
+  font-weight: 300;
+  line-height: 1;
+}
+
+.gallery-viewer-origin {
+  min-width: 0;
+  text-align: right;
+}
+
+.gallery-viewer-origin h1,
+.gallery-viewer-origin span {
+  display: block;
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gallery-viewer-origin h1 {
+  font-size: var(--text-body-lg);
+  font-weight: 700;
+}
+
+.gallery-viewer-origin span {
+  color: rgba(245, 239, 255, 0.68);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+}
+
+.gallery-viewer-stage {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+.gallery-viewer-media,
+.gallery-viewer-placeholder {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.gallery-viewer-placeholder {
+  filter: brightness(0.55);
+}
+
+.gallery-viewer-loading,
+.gallery-viewer-error {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.32);
+  color: rgba(245, 239, 255, 0.78);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  text-align: center;
+}
+
+.gallery-viewer-error {
+  background: rgba(0, 0, 0, 0.64);
+}
+
+.gallery-viewer-error button {
+  min-height: 44px;
+  border: 1px solid rgba(245, 239, 255, 0.4);
+  border-radius: var(--radius-control);
+  padding: 8px 14px;
+  background: rgba(245, 239, 255, 0.08);
+  color: #f5efff;
+}
+
+.gallery-viewer-details {
+  display: grid;
+  gap: 14px;
+  padding: 14px 16px 16px;
+  border-top: 1px solid rgba(245, 239, 255, 0.12);
+  background: #12101d;
+}
+
+.gallery-viewer-prompt > span {
+  color: rgba(245, 239, 255, 0.62);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.gallery-viewer-prompt p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 5px 0 0;
+  color: #f5efff;
+  font-size: var(--text-body-lg);
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.gallery-viewer-prompt .gallery-viewer-reuse-error {
+  display: block;
+  margin-top: 8px;
+  color: #ffb4ab;
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+}
+
+.gallery-viewer-reuse {
+  flex: none;
+}
+
+@media (min-width: 700px) and (min-height: 700px) {
+  .gallery-viewer-details {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+  }
+
+  .gallery-viewer-reuse {
+    width: auto;
+    min-width: 220px;
+  }
 }
 
 .gallery-more {
