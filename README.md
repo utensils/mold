@@ -101,16 +101,20 @@ live in the desktop guide.
 
 ## iPhone app
 
-Mold for iPhone is a remote-only Tauri companion focused on Generate and
-Gallery. Add a host by LAN discovery, IP address, hostname, or Tailscale
-MagicDNS name; generation and media remain on that remote Mold server. The app
-uses the same HTTP, SSE, model defaults, and generation request contract as the
-desktop app. Prompts can be submitted while other work is queued or developing,
-with independent status and cancellation for every job. Saved results stream
-from the host instead of crossing the iPhone WebView as encoded media. Internal
-TestFlight builds are produced from relevant `main` changes, with release checks
-that verify Tauri's embedded `index.html` and the opaque Mold-branded Apple icon
-catalog before upload.
+Mold for iPhone is a remote-only Tauri companion with first-class Generate,
+Gallery, Catalog, and Hosts views. Add a host by LAN discovery, IP address,
+hostname, or Tailscale MagicDNS name; generation, model management, and media
+remain on that remote Mold server. Host details expose live resources, queue,
+downloads, and installed models, while Catalog can browse one host and send a
+pull to another without silently changing the host selected for generation.
+The app uses the same HTTP, SSE, model defaults, resolution presets, and
+generation request contract as the desktop app. Prompts can be submitted while
+other work is queued or developing, with independent status and cancellation
+for every job. Saved results stream from the host instead of crossing the
+iPhone WebView as encoded media; full-screen images swipe between prints and
+videos retain native playback controls. Internal TestFlight builds are produced
+from relevant `main` changes, with release checks that verify Tauri's embedded
+`index.html` and the opaque Mold-branded Apple icon catalog before upload.
 
 On macOS, `nix develop` exposes `ios-dev`, `ios-run`, `ios-check`, and
 `ios-build`. Xcode, CocoaPods, and Apple signing are required for device and App

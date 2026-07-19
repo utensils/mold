@@ -18,21 +18,14 @@ import {
   useGenerationStore,
   type Job,
 } from "../stores/generation";
-import { normalizeRemoteAddress, remoteHostId } from "./hosts";
+import { mobileHostTarget, normalizeRemoteAddress, remoteHostId, type MobileHost } from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
+import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
+import MobileHostDetail from "./MobileHostDetail.vue";
+import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 
-type Tab = "generate" | "gallery" | "hosts";
-
-interface SavedHost {
-  id: string;
-  name: string;
-  baseUrl: string;
-  apiKey: string;
-  hostname: string | undefined;
-  version: string | undefined;
-  online: boolean;
-}
+type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
 interface DiscoveredHost {
   name: string;
@@ -55,9 +48,12 @@ interface PendingGalleryPrint extends GalleryImage {
 
 const STORAGE_KEY = "mold.mobile.hosts.v1";
 const SELECTED_KEY = "mold.mobile.selected-host.v1";
+const HOST_PROBE_TIMEOUT_MS = 9_000;
 const tab = ref<Tab>("generate");
-const hosts = ref<SavedHost[]>(loadHosts());
+const hosts = ref<MobileHost[]>(loadHosts());
 const selectedHostId = ref(localStorage.getItem(SELECTED_KEY) ?? hosts.value[0]?.id ?? "");
+const catalogHostId = ref(selectedHostId.value || hosts.value[0]?.id || "");
+const hostDetailId = ref("");
 const hostInput = reactive({ name: "", address: "", apiKey: "" });
 const discovered = ref<DiscoveredHost[]>([]);
 const discovering = ref(false);
@@ -88,12 +84,26 @@ let galleryRefreshTask: Promise<void> | null = null;
 let galleryOperationTail: Promise<void> = Promise.resolve();
 let resultMediaRecoveryClientId: number | null = null;
 let resultMediaRecoveryAttempts = 0;
+let hostProbeTimer: ReturnType<typeof setInterval> | null = null;
+let hostProbeEpoch = 0;
+const hostProbes = new Map<
+  string,
+  { epoch: number; controller: AbortController; timeout: ReturnType<typeof setTimeout> }
+>();
 const generation = useGenerationStore();
 
 const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value));
+const hostDetail = computed(() => hosts.value.find((host) => host.id === hostDetailId.value));
+const selectedPrintIndex = computed(() => {
+  const selected = selectedPrint.value;
+  if (!selected) return -1;
+  return gallery.value.findIndex(
+    (print) => print.hostId === selected.hostId && print.filename === selected.filename,
+  );
+});
 const selectedTarget = computed<ApiTarget | null>(() => {
   const host = selectedHost.value;
-  return host ? { baseUrl: host.baseUrl, apiKey: host.apiKey || null } : null;
+  return host ? mobileHostTarget(host) : null;
 });
 const outputFormats = computed(() => outputFormatsForFamily(form.family));
 const selectedModelAvailable = computed(
@@ -152,9 +162,9 @@ const generationStatus = computed(() => {
   }
 });
 
-function loadHosts(): SavedHost[] {
+function loadHosts(): MobileHost[] {
   try {
-    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as SavedHost[];
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as MobileHost[];
     return raw.map((host) => ({ ...host, apiKey: "", online: false }));
   } catch {
     return [];
@@ -183,15 +193,25 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     const baseUrl = normalizeRemoteAddress(address ?? hostInput.address);
     const target = { baseUrl, apiKey: hostInput.apiKey.trim() || null };
     const status = await apiJsonTo<ServerStatus>(target, "/api/status");
-    const id = status.instance_id || remoteHostId(baseUrl);
-    const existing = hosts.value.find((host) => host.id === id || host.baseUrl === baseUrl);
-    const saved: SavedHost = {
+    const instanceId = status.instance_id ?? undefined;
+    const existing = hosts.value.find(
+      (host) =>
+        host.baseUrl === baseUrl ||
+        (instanceId &&
+          (host.instanceId === instanceId || host.id === instanceId) &&
+          (!host.hostname || !status.hostname || host.hostname === status.hostname)),
+    );
+    // URL identity keeps two machines that copied the same MOLD_HOME distinct;
+    // a compatible saved alias keeps its existing keychain id.
+    const id = existing?.id ?? remoteHostId(baseUrl);
+    const saved: MobileHost = {
       id,
       name: hostInput.name.trim() || discoveredName || status.hostname || new URL(baseUrl).hostname,
       baseUrl,
       apiKey: hostInput.apiKey.trim(),
       hostname: status.hostname ?? undefined,
       version: status.version,
+      instanceId,
       online: true,
     };
     if (existing) Object.assign(existing, saved);
@@ -203,6 +223,7 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     }
     persistHosts();
     selectedHostId.value = saved.id;
+    catalogHostId.value = saved.id;
     tab.value = "generate";
     hostInput.name = "";
     hostInput.address = "";
@@ -230,8 +251,67 @@ async function selectHost(id: string): Promise<void> {
   await refreshModels();
 }
 
+function showHostDetail(id: string): void {
+  hostDetailId.value = id;
+}
+
+function renameHost(payload: { id: string; name: string }): void {
+  const host = hosts.value.find((candidate) => candidate.id === payload.id);
+  if (!host) return;
+  host.name = payload.name;
+  persistHosts();
+}
+
+function updateHostStatus(payload: { id: string; status: ServerStatus | null }): void {
+  const host = hosts.value.find((candidate) => candidate.id === payload.id);
+  if (!host) return;
+  host.online = payload.status !== null;
+  if (payload.status) {
+    host.version = payload.status.version;
+    host.hostname = payload.status.hostname ?? undefined;
+    host.instanceId = payload.status.instance_id ?? host.instanceId;
+  }
+}
+
+function cancelHostProbe(id: string): void {
+  const probe = hostProbes.get(id);
+  if (!probe) return;
+  probe.controller.abort();
+  clearTimeout(probe.timeout);
+  hostProbes.delete(id);
+}
+
+async function probeHost(host: MobileHost): Promise<void> {
+  cancelHostProbe(host.id);
+  const controller = new AbortController();
+  const epoch = ++hostProbeEpoch;
+  const timeout = setTimeout(() => controller.abort(), HOST_PROBE_TIMEOUT_MS);
+  const probe = { epoch, controller, timeout };
+  hostProbes.set(host.id, probe);
+  try {
+    const status = await apiJsonTo<ServerStatus>(mobileHostTarget(host), "/api/status", {
+      signal: controller.signal,
+    });
+    if (hostProbes.get(host.id)?.epoch !== epoch) return;
+    updateHostStatus({ id: host.id, status });
+  } catch {
+    if (hostProbes.get(host.id)?.epoch !== epoch) return;
+    updateHostStatus({ id: host.id, status: null });
+  } finally {
+    if (hostProbes.get(host.id)?.epoch === epoch) hostProbes.delete(host.id);
+    clearTimeout(timeout);
+  }
+}
+
+function probeHosts(): void {
+  for (const host of hosts.value) void probeHost(host);
+}
+
 function removeHost(id: string): void {
+  cancelHostProbe(id);
   const removedSelectedHost = selectedHostId.value === id;
+  const removedCatalogHost = catalogHostId.value === id;
+  if (hostDetailId.value === id) hostDetailId.value = "";
   hosts.value = hosts.value.filter((host) => host.id !== id);
   if (removedSelectedHost) {
     selectedHostId.value = hosts.value[0]?.id ?? "";
@@ -239,8 +319,26 @@ function removeHost(id: string): void {
     modelsHostId.value = "";
     void refreshModels();
   }
+  if (removedCatalogHost) catalogHostId.value = hosts.value[0]?.id ?? "";
   persistHosts();
   void invoke("keychain_delete_api_key", { hostId: id });
+}
+
+function selectCatalogHost(id: string): void {
+  if (hosts.value.some((host) => host.id === id)) catalogHostId.value = id;
+}
+
+function openCatalog(id?: string): void {
+  if (id && hosts.value.some((host) => host.id === id)) catalogHostId.value = id;
+  else if (!hosts.value.some((host) => host.id === catalogHostId.value)) {
+    catalogHostId.value = selectedHostId.value || hosts.value[0]?.id || "";
+  }
+  hostDetailId.value = "";
+  tab.value = "catalog";
+}
+
+function catalogModelsChanged(hostId: string): void {
+  if (hostId === selectedHostId.value) void refreshModels();
 }
 
 async function refreshModels(): Promise<boolean> {
@@ -555,6 +653,13 @@ function openPrint(print: GalleryPrint): void {
   selectedPrint.value = print;
 }
 
+function navigateSelectedPrint(delta: -1 | 1): void {
+  const next = gallery.value[selectedPrintIndex.value + delta];
+  if (!next || reusingPrint.value) return;
+  reusePrintError.value = "";
+  selectedPrint.value = next;
+}
+
 function closePrint(): void {
   if (reusingPrint.value) return;
   reusePrintError.value = "";
@@ -583,6 +688,7 @@ watch(selectedHostId, (id) => {
 
 watch(tab, (next) => {
   if (next === "gallery") void refreshGallery();
+  if (next !== "hosts") hostDetailId.value = "";
 });
 
 watch(resultPreviewError, (error) => {
@@ -593,11 +699,25 @@ watch(resultPreviewError, (error) => {
 
 onMounted(async () => {
   await hydrateApiKeys();
-  if (selectedHost.value) await refreshModels();
-  else tab.value = "hosts";
+  // Start the cadence before awaiting individual tailnet hosts. One slow host
+  // must not prevent every other saved host from being probed on schedule.
+  hostProbeTimer = setInterval(probeHosts, 10_000);
+  if (selectedHost.value) {
+    await Promise.all([
+      refreshModels(),
+      ...hosts.value
+        .filter((host) => host.id !== selectedHostId.value)
+        .map((host) => probeHost(host)),
+    ]);
+  } else {
+    tab.value = "hosts";
+  }
 });
 
 onBeforeUnmount(() => {
+  if (hostProbeTimer) clearInterval(hostProbeTimer);
+  hostProbeTimer = null;
+  for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
   generation.resetJobs();
   for (const url of objectUrls) URL.revokeObjectURL(url);
 });
@@ -655,19 +775,13 @@ onBeforeUnmount(() => {
             <span>Negative prompt</span>
             <input v-model="form.negativePrompt" class="control" placeholder="Optional" />
           </label>
+          <MobileResolutionPicker
+            v-model:width="form.width"
+            v-model:height="form.height"
+            :family="form.family"
+            :disabled="loadingModels"
+          />
           <div class="field-grid">
-            <label class="field"
-              ><span>Width</span
-              ><input v-model.number="form.width" class="control" type="number" inputmode="numeric"
-            /></label>
-            <label class="field"
-              ><span>Height</span
-              ><input
-                v-model.number="form.height"
-                class="control"
-                type="number"
-                inputmode="numeric"
-            /></label>
             <label class="field"
               ><span>Steps</span
               ><input v-model.number="form.steps" class="control" type="number" inputmode="numeric"
@@ -826,90 +940,124 @@ onBeforeUnmount(() => {
         </button>
       </template>
 
-      <template v-else>
-        <h1 class="section-title">Hosts</h1>
-        <p class="section-note">LAN discovery, Tailscale MagicDNS, or an address</p>
-        <button
-          class="secondary-button"
-          type="button"
-          :disabled="discovering"
-          @click="discoverHosts"
-        >
-          {{ discovering ? "Scanning…" : "Discover nearby" }}
-        </button>
-        <div v-for="host in discovered" :key="`${host.host}:${host.port}`" class="host-row">
-          <div class="host-row-head">
-            <div>
-              <div class="host-name">{{ host.name }}</div>
-              <div class="host-url">{{ host.host }}:{{ host.port }}</div>
+      <template v-else-if="tab === 'hosts'">
+        <MobileHostDetail
+          v-if="hostDetail"
+          :host="hostDetail"
+          :active="hostDetail.id === selectedHostId"
+          @back="hostDetailId = ''"
+          @select="selectHost"
+          @rename="renameHost"
+          @forget="removeHost"
+          @catalog="openCatalog"
+          @status="updateHostStatus"
+        />
+        <template v-else>
+          <h1 class="section-title">Hosts</h1>
+          <p class="section-note">LAN discovery, Tailscale MagicDNS, or an address</p>
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="discovering"
+            @click="discoverHosts"
+          >
+            {{ discovering ? "Scanning…" : "Discover nearby" }}
+          </button>
+          <div v-for="host in discovered" :key="`${host.host}:${host.port}`" class="host-row">
+            <div class="host-row-head">
+              <div>
+                <div class="host-name">{{ host.name }}</div>
+                <div class="host-url">{{ host.host }}:{{ host.port }}</div>
+              </div>
+              <button
+                class="secondary-button"
+                type="button"
+                @click="connectHost(`${host.host}:${host.port}`, host.name)"
+              >
+                Connect
+              </button>
             </div>
-            <button
-              class="secondary-button"
-              type="button"
-              @click="connectHost(`${host.host}:${host.port}`, host.name)"
-            >
-              Connect
-            </button>
           </div>
-        </div>
-        <form style="margin-top: 20px" @submit.prevent="connectHost()">
-          <label class="field"
-            ><span>Name</span
-            ><input
-              v-model="hostInput.name"
-              class="control"
-              placeholder="Studio Mac (optional)"
-              autocomplete="off"
-          /></label>
-          <label class="field"
-            ><span>Address or MagicDNS name</span
-            ><input
-              v-model="hostInput.address"
-              class="control"
-              placeholder="studio.tailnet.ts.net or 192.168.1.20"
-              autocapitalize="none"
-              autocomplete="url"
-              required
-          /></label>
-          <label class="field"
-            ><span>API key</span
-            ><input
-              v-model="hostInput.apiKey"
-              class="control"
-              type="password"
-              placeholder="If required"
-              autocomplete="off"
-          /></label>
-          <button class="primary-button" type="submit">Test and save</button>
-        </form>
-        <p v-if="hostError" class="status-line error-text">{{ hostError }}</p>
-        <div v-for="host in hosts" :key="host.id" class="host-row">
-          <div class="host-row-head">
-            <div>
-              <div class="host-name">{{ host.name }}</div>
-              <div class="host-url">{{ host.baseUrl }}</div>
+          <form style="margin-top: 20px" @submit.prevent="connectHost()">
+            <label class="field"
+              ><span>Name</span
+              ><input
+                v-model="hostInput.name"
+                class="control"
+                placeholder="Studio Mac (optional)"
+                autocomplete="off"
+            /></label>
+            <label class="field"
+              ><span>Address or MagicDNS name</span
+              ><input
+                v-model="hostInput.address"
+                class="control"
+                placeholder="studio.tailnet.ts.net or 192.168.1.20"
+                autocapitalize="none"
+                autocomplete="url"
+                required
+            /></label>
+            <label class="field"
+              ><span>API key</span
+              ><input
+                v-model="hostInput.apiKey"
+                class="control"
+                type="password"
+                placeholder="If required"
+                autocomplete="off"
+            /></label>
+            <button class="primary-button" type="submit">Test and save</button>
+          </form>
+          <p v-if="hostError" class="status-line error-text">{{ hostError }}</p>
+          <div v-for="host in hosts" :key="host.id" class="host-row">
+            <button
+              class="host-row-button"
+              type="button"
+              :aria-label="`View ${host.name}`"
+              data-test="mobile-host-row"
+              @click="showHostDetail(host.id)"
+            >
+              <span class="host-row-head">
+                <span>
+                  <span class="host-name">{{ host.name }}</span>
+                  <span class="host-url">{{ host.baseUrl }}</span>
+                </span>
+                <span class="host-row-state">
+                  <span class="status-dot" :class="host.online ? 'is-ready' : 'is-error'" />
+                  <span class="host-chip">{{
+                    host.online ? `v${host.version ?? ""}` : "offline"
+                  }}</span>
+                  <span aria-hidden="true">›</span>
+                </span>
+              </span>
+            </button>
+            <div class="row-actions">
+              <button
+                class="secondary-button"
+                type="button"
+                :disabled="host.id === selectedHostId"
+                @click="selectHost(host.id)"
+              >
+                {{ host.id === selectedHostId ? "Active" : "Use host" }}
+              </button>
             </div>
-            <span class="host-chip">{{ host.online ? `v${host.version ?? ""}` : "offline" }}</span>
           </div>
-          <div class="row-actions">
-            <button
-              class="secondary-button"
-              type="button"
-              :disabled="host.id === selectedHostId"
-              @click="selectHost(host.id)"
-            >
-              {{ host.id === selectedHostId ? "Active" : "Use host" }}</button
-            ><button class="danger-button" type="button" @click="removeHost(host.id)">
-              Remove
-            </button>
-          </div>
-        </div>
+        </template>
       </template>
+
+      <KeepAlive>
+        <MobileCatalogView
+          v-if="tab === 'catalog'"
+          :hosts="hosts"
+          :selected-host-id="catalogHostId"
+          @select-host="selectCatalogHost"
+          @models-changed="catalogModelsChanged"
+        />
+      </KeepAlive>
     </section>
 
     <MobileGalleryViewer
       v-if="selectedPrint"
-      :key="`${selectedPrint.hostId}:${selectedPrint.filename}`"
       :item="selectedPrint"
       :target="selectedPrint.target"
       :cache-key="selectedPrint.hostId"
@@ -918,15 +1066,21 @@ onBeforeUnmount(() => {
       :reusing="reusingPrint"
       :reuse-error="reusePrintError"
       :generation-announcement="generationAnnouncement"
+      :position="selectedPrintIndex + 1"
+      :total="gallery.length"
+      :has-previous="selectedPrintIndex > 0"
+      :has-next="selectedPrintIndex >= 0 && selectedPrintIndex < gallery.length - 1"
       @close="closePrint"
       @reuse="reuseSelectedPrint"
+      @previous="navigateSelectedPrint(-1)"
+      @next="navigateSelectedPrint(1)"
     />
 
     <nav class="mobile-tabs" aria-label="Primary">
       <button
         class="mobile-tab"
         type="button"
-        :aria-selected="tab === 'generate'"
+        :aria-current="tab === 'generate' ? 'page' : undefined"
         data-test="mobile-tab-generate"
         @click="tab = 'generate'"
       >
@@ -935,7 +1089,7 @@ onBeforeUnmount(() => {
       <button
         class="mobile-tab"
         type="button"
-        :aria-selected="tab === 'gallery'"
+        :aria-current="tab === 'gallery' ? 'page' : undefined"
         data-test="mobile-tab-gallery"
         @click="tab = 'gallery'"
       >
@@ -944,7 +1098,17 @@ onBeforeUnmount(() => {
       <button
         class="mobile-tab"
         type="button"
-        :aria-selected="tab === 'hosts'"
+        :aria-current="tab === 'catalog' ? 'page' : undefined"
+        data-test="mobile-tab-catalog"
+        @click="openCatalog()"
+      >
+        Catalog
+      </button>
+      <button
+        class="mobile-tab"
+        type="button"
+        :aria-current="tab === 'hosts' ? 'page' : undefined"
+        data-test="mobile-tab-hosts"
         @click="tab = 'hosts'"
       >
         Hosts
