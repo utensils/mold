@@ -2,6 +2,16 @@
 
 A native macOS (Apple Silicon / Metal) and x86_64 Linux (CUDA) desktop app for mold with full feature parity against the web SPA and a shared Safelight design. The backend and frontend stay platform-neutral; Tauri platform configs own window chrome and bundle details.
 
+## iOS companion
+
+The iPhone app is a separate thin Tauri crate at `apps/mobile/src-tauri`, with
+its Vue entry at `desktop/src/mobile`. It never embeds an engine: every request
+targets a saved remote host, so the typed HTTP/SSE client and pure generation
+form builder are shared while desktop stores that assume **This device** remain
+desktop-only. Native DNS-SD browses `_mold._tcp`; manual host entry also accepts
+Tailscale MagicDNS and HTTPS names. The initial navigation is Generate,
+Gallery, and Hosts, laid out for iPhone safe areas and touch targets.
+
 ---
 
 ## 1. Location & workspace strategy — DECISION: `desktop/` at repo root, own cargo root, root `[workspace] exclude`

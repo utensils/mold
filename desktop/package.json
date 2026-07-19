@@ -6,7 +6,9 @@
   "description": "Mold — native desktop app for local AI image/video generation.",
   "scripts": {
     "dev": "vite",
+    "dev:mobile": "vite --config vite.mobile.config.ts",
     "build": "vue-tsc -b && vite build",
+    "build:mobile": "vue-tsc -b && vite build --config vite.mobile.config.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "fmt": "prettier --write .",

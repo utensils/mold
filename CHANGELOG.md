@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Mold for iPhone.** A first-class Tauri iOS companion connects only to remote Mold hosts and focuses the initial release on generation and the merged gallery. It reuses the desktop wire types, capability-aware request builder, and SSE client; supports saved hosts, Keychain-backed API keys, Tailscale MagicDNS names, and native Bonjour discovery of `_mold._tcp`; and ships with simulator CI plus an internal TestFlight nightly pipeline.
+
 ## [0.18.0] - 2026-07-19
 
 ### Added

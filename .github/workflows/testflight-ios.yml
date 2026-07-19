@@ -1,0 +1,112 @@
+name: iOS TestFlight nightly
+
+on:
+  workflow_run:
+    workflows: [iOS]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: Optional CFBundleVersion override
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight-${{ github.event.workflow_run.head_sha || github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_NAME: Mold
+  APP_BUNDLE_ID: com.utensils.mold
+  DEVELOPMENT_TEAM: 28X9H69QGE
+
+jobs:
+  upload:
+    name: Build, upload, and validate
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/mobile/src-tauri
+          key: mold-testflight-ios
+      - name: Install dependencies
+        run: |
+          cd desktop
+          bun install --frozen-lockfile
+          cargo install tauri-cli --version 2.11.4 --locked
+      - name: Install App Store Connect key
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          test -n "$APPLE_API_PRIVATE_KEY" && test -n "$APPLE_API_KEY" && test -n "$APPLE_API_ISSUER"
+          key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key"
+          chmod 600 "$key"
+          {
+            echo "ASC_KEY_PATH=$key"
+            echo "ASC_KEY_ID=$APPLE_API_KEY"
+            echo "ASC_ISSUER_ID=$APPLE_API_ISSUER"
+          } >> "$GITHUB_ENV"
+      - name: Resolve version
+        env:
+          REQUESTED_BUILD: ${{ inputs.build_number }}
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/mobile/src-tauri/Cargo.toml | head -1)
+          build=${REQUESTED_BUILD:-$(git rev-list --count HEAD)}
+          {
+            echo "MARKETING_VERSION=$version"
+            echo "BUILD_NUMBER=$build"
+            echo "BUNDLE_VERSION=$version.$build"
+          } >> "$GITHUB_ENV"
+      - name: Build signed archive
+        env:
+          CC: /usr/bin/cc
+          CXX: /usr/bin/c++
+          CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER: /usr/bin/cc
+          CARGO_TARGET_AARCH64_APPLE_IOS_LINKER: /usr/bin/clang
+        run: |
+          set -euo pipefail
+          cd apps/mobile/src-tauri
+          cargo tauri ios build --ci --target aarch64 --archive-only --no-sign --build-number "$BUILD_NUMBER" -v
+          archive=$(find gen/apple/build -type d -name '*.xcarchive' -print -quit)
+          test -n "$archive"
+          test -x "$archive/Products/Applications/Mold.app/Mold"
+          bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$archive/Products/Applications/Mold.app/Info.plist")
+          {
+            echo "ARCHIVE_PATH=$(cd "$(dirname "$archive")" && pwd)/$(basename "$archive")"
+            echo "BUNDLE_VERSION=$bundle_version"
+          } >> "$GITHUB_ENV"
+      - name: Export and upload
+        run: |
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>destination</key><string>upload</string>
+          <key>method</key><string>app-store-connect</string>
+          <key>signingStyle</key><string>automatic</string>
+          <key>teamID</key><string>$DEVELOPMENT_TEAM</string>
+          <key>testFlightInternalTestingOnly</key><true/>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$ARCHIVE_PATH" -exportPath "$RUNNER_TEMP/export" -exportOptionsPlist "$RUNNER_TEMP/export.plist" -allowProvisioningUpdates -authenticationKeyPath "$ASC_KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+      - name: Wait for VALID processing
+        run: |
+          PRIVATE_KEY=$(cat "$ASC_KEY_PATH")
+          export PRIVATE_KEY
+          ruby scripts/wait-for-testflight.rb "$APP_BUNDLE_ID" "$MARKETING_VERSION" "$BUNDLE_VERSION"

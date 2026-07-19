@@ -5,9 +5,8 @@
 #   1. CHANGELOG.md is hand-maintained (Keep a Changelog), so promote the
 #      [Unreleased] section to the new version heading and refresh the
 #      compare-link references at the bottom of the file.
-#   2. The Tauri desktop app is its own cargo root (excluded from the
-#      workspace), so mirror the workspace version into
-#      desktop/src-tauri/Cargo.toml, its Cargo.lock, and desktop/package.json.
+#   2. The Tauri desktop and mobile apps are standalone cargo roots, so mirror
+#      the workspace version into their manifests, locks, and configs.
 #
 # Idempotent: a second run on an already-synced tree changes nothing.
 #
@@ -79,3 +78,28 @@ awk -v ver="$version" '
   && mv desktop/package.json.tmp desktop/package.json
 
 echo "desktop: synced to $version"
+
+# --- 3. iOS app version ----------------------------------------------------
+sed -E "0,/^version = \"[^\"]+\"/s//version = \"$version\"/" \
+  apps/mobile/src-tauri/Cargo.toml > apps/mobile/src-tauri/Cargo.toml.tmp \
+  && mv apps/mobile/src-tauri/Cargo.toml.tmp apps/mobile/src-tauri/Cargo.toml
+
+awk -v ver="$version" '
+  /^name = "mold-mobile"$/ { print; sync = 1; next }
+  sync && /^version = / { print "version = \"" ver "\""; sync = 0; next }
+  { print }
+' apps/mobile/src-tauri/Cargo.lock > apps/mobile/src-tauri/Cargo.lock.tmp \
+  && mv apps/mobile/src-tauri/Cargo.lock.tmp apps/mobile/src-tauri/Cargo.lock
+
+python3 - "$version" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path("apps/mobile/src-tauri/tauri.conf.json")
+data = json.loads(path.read_text())
+data["version"] = sys.argv[1]
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+
+echo "ios: synced to $version"

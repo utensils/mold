@@ -85,6 +85,10 @@
               "rustfmt"
               "clippy"
             ];
+            targets = lib.optionals isDarwin [
+              "aarch64-apple-ios"
+              "aarch64-apple-ios-sim"
+            ];
           };
 
           craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
@@ -1050,6 +1054,30 @@
                   fi
                   cargo run -p mold-ai-inference --features dev-bins --bin ltx2_review -- "$@"
                 '';
+              }
+              {
+                category = "ios";
+                name = "ios-dev";
+                help = "run the iPhone app with Tauri hot reload";
+                command = "./scripts/ios.sh dev \"$@\"";
+              }
+              {
+                category = "ios";
+                name = "ios-run";
+                help = "build and run the production app on an iPhone or simulator";
+                command = "./scripts/ios.sh run \"$@\"";
+              }
+              {
+                category = "ios";
+                name = "ios-check";
+                help = "cross-check the thin Tauri shell for the Apple Silicon simulator";
+                command = "./scripts/ios.sh check \"$@\"";
+              }
+              {
+                category = "ios";
+                name = "ios-build";
+                help = "archive and export the iPhone app for App Store Connect";
+                command = "./scripts/ios.sh build \"$@\"";
               }
               {
                 category = "desktop";

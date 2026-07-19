@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Mold discovers and connects to generation hosts on your local network.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_mold._tcp</string>
+  </array>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+    <!-- User-configured Mold engines may be reached over direct Tailnet HTTP.
+         Keep this scoped to WKWebView traffic; the app never navigates to or
+         embeds arbitrary third-party pages. -->
+    <key>NSAllowsArbitraryLoadsInWebContent</key>
+    <true/>
+  </dict>
+</dict>
+</plist>

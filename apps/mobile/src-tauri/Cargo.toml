@@ -1,0 +1,27 @@
+[package]
+name = "mold-mobile"
+version = "0.18.0"
+edition = "2024"
+license = "MIT"
+description = "Mold iOS companion for remote generation and gallery access"
+authors = ["James Brink <brink.james@gmail.com>"]
+
+[workspace]
+
+[lib]
+name = "mold_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+security-framework = "3"
+
+[features]
+default = []

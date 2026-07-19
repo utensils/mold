@@ -1,0 +1,71 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      [
+        "apps/mobile/**",
+        "desktop/src/mobile/**",
+        "desktop/src/lib/**",
+        "desktop/package.json",
+        "desktop/bun.lock",
+        "desktop/vite.mobile.config.ts",
+        "desktop/index.mobile.html",
+        "scripts/ios.sh",
+        "flake.nix",
+        ".github/workflows/ios.yml",
+        ".github/workflows/testflight-ios.yml",
+      ]
+  pull_request:
+    paths:
+      [
+        "apps/mobile/**",
+        "desktop/src/mobile/**",
+        "desktop/src/lib/**",
+        "desktop/package.json",
+        "desktop/bun.lock",
+        "desktop/vite.mobile.config.ts",
+        "desktop/index.mobile.html",
+        "scripts/ios.sh",
+        "flake.nix",
+        ".github/workflows/ios.yml",
+        ".github/workflows/testflight-ios.yml",
+      ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Mobile frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build:mobile
+      - run: bun run fmt:check
+
+  simulator-rust:
+    name: iOS simulator Rust
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: apps/mobile/src-tauri
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/mobile/src-tauri
+      - run: cargo fmt -- --check
+      - run: cargo check --target aarch64-apple-ios-sim
+      - run: cargo clippy --target aarch64-apple-ios-sim -- -D warnings

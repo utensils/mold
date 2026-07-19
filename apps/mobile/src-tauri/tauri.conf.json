@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Mold",
+  "version": "0.18.0",
+  "identifier": "com.utensils.mold",
+  "build": {
+    "beforeDevCommand": "bash -c 'cd \"$(git rev-parse --show-toplevel)/desktop\" && bun run dev:mobile'",
+    "beforeBuildCommand": "bash -c 'cd \"$(git rev-parse --show-toplevel)/desktop\" && bun run build:mobile'",
+    "devUrl": "http://localhost:1431",
+    "frontendDist": "../../../desktop/dist-mobile"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "label": "main", "title": "Mold" }],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["../../../desktop/src-tauri/icons/icon.png"],
+    "publisher": "James Brink",
+    "category": "GraphicsAndDesign",
+    "shortDescription": "Generate with remote Mold hosts from iPhone.",
+    "longDescription": "Mold for iPhone connects to remote Mold engines over your LAN or Tailscale for generation and gallery access.",
+    "iOS": {
+      "developmentTeam": "28X9H69QGE",
+      "minimumSystemVersion": "17.0"
+    }
+  }
+}
