@@ -382,26 +382,34 @@ impl GpuPool {
             return loaded_idle.first().map(|w| (*w).clone());
         }
 
-        // 2. Loaded but busy — least in-flight wins.
+        // 2. Idle GPU with no model that FITS the estimate — spread beats
+        //    queueing behind a busy warm card: the cold load is paid once,
+        //    then that GPU is warm and tier 1 takes over for later jobs.
+        //    (Warm-busy used to outrank this, which serialized same-model
+        //    jobs on one card of a multi-GPU box while siblings sat idle.)
+        idle_empty.sort_by_key(|w| w.gpu.total_vram_bytes);
+        if let Some(w) = idle_empty
+            .iter()
+            .find(|w| w.gpu.total_vram_bytes >= estimated_vram)
+        {
+            return Some((*w).clone());
+        }
+
+        // 3. Loaded but busy — least in-flight wins. Reached only when no
+        //    idle GPU can hold the model: waiting for the warm card beats
+        //    cold-loading onto a card that would have to offload.
         if !loaded_busy.is_empty() {
             loaded_busy.sort_by_key(|w| w.in_flight.load(Ordering::SeqCst));
             return loaded_busy.first().map(|w| (*w).clone());
         }
 
-        // 3. Idle GPU with no model — spread! Prefer smallest GPU that fits.
+        // 4. Idle GPU that doesn't fit — largest wins; block offloading may
+        //    still make the model viable there.
         if !idle_empty.is_empty() {
-            idle_empty.sort_by_key(|w| w.gpu.total_vram_bytes);
-            if let Some(w) = idle_empty
-                .iter()
-                .find(|w| w.gpu.total_vram_bytes >= estimated_vram)
-            {
-                return Some((*w).clone());
-            }
-            // No idle GPU fits — pick the largest idle GPU.
             return idle_empty.last().map(|w| (*w).clone());
         }
 
-        // 4. All GPUs busy with other models — most headroom first (evict LRU there).
+        // 5. All GPUs busy with other models — most headroom first (evict LRU there).
         let mut busy = other;
         busy.sort_by(|a, b| {
             let a_headroom = a.gpu.total_vram_bytes.saturating_sub(estimated_vram);
@@ -574,8 +582,13 @@ mod tests {
         assert_eq!(picked.gpu.ordinal, 0);
     }
 
+    /// A second job for the model that's RUNNING on GPU 0 must spread to an
+    /// idle empty sibling instead of queueing behind the warm-but-busy card.
+    /// The cold load is paid once; afterwards that sibling is warm too and
+    /// tier 1 takes over. (Previously warm-busy beat idle-empty, so a 4-GPU
+    /// box serialized same-model jobs on one card while three sat idle.)
     #[test]
-    fn select_worker_keeps_queueing_behind_busy_warm_worker() {
+    fn select_worker_spreads_same_model_to_idle_gpu_over_busy_warm_worker() {
         let (warm_busy, _warm_busy_rx) = test_worker(0, 24_000_000_000);
         let (cold_idle, _cold_idle_rx) = test_worker(1, 24_000_000_000);
 
@@ -593,8 +606,41 @@ mod tests {
 
         let picked = pool
             .select_worker("flux-dev:q4", 6_000_000_000)
-            .expect("warm worker should be preferred");
-        assert_eq!(picked.gpu.ordinal, 0);
+            .expect("idle sibling should be preferred");
+        assert_eq!(
+            picked.gpu.ordinal, 1,
+            "same-model job must run in parallel on the idle GPU, not queue \
+             behind the busy warm one"
+        );
+    }
+
+    /// The spread only happens when the idle GPU can actually hold the
+    /// model: if no idle card fits, queueing behind the warm busy worker
+    /// beats cold-loading onto a card that would have to offload.
+    #[test]
+    fn select_worker_queues_behind_warm_worker_when_no_idle_gpu_fits() {
+        let (warm_busy, _warm_busy_rx) = test_worker(0, 48_000_000_000);
+        let (small_idle, _small_idle_rx) = test_worker(1, 12_000_000_000);
+
+        warm_busy.in_flight.store(1, Ordering::SeqCst);
+        *warm_busy.active_generation.write().unwrap() = Some(ActiveGeneration {
+            model: "ltx-2.3-22b-dev:fp8".to_string(),
+            prompt_sha256: String::new(),
+            started_at_unix_ms: 0,
+            started_at: Instant::now(),
+        });
+
+        let pool = GpuPool {
+            workers: vec![warm_busy.clone(), small_idle.clone()],
+        };
+
+        let picked = pool
+            .select_worker("ltx-2.3-22b-dev:fp8", 34_000_000_000)
+            .expect("a worker should be selected");
+        assert_eq!(
+            picked.gpu.ordinal, 0,
+            "a too-small idle GPU must not win over the warm busy worker"
+        );
     }
 
     #[test]
