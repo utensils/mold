@@ -1294,7 +1294,9 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 // ── Multi-GPU queue dispatcher ──────────────────────────────────────────────
 
 /// Runs the multi-GPU dispatch loop. Routes each generation job to the best
-/// GPU worker based on the placement strategy (model-loaded > idle > evict LRU).
+/// GPU worker per `select_worker`'s tier order: model loaded + idle > idle
+/// empty GPU that fits > model loaded but busy > idle empty GPU that does
+/// not fit > most-headroom fallback (evict LRU there).
 /// Uses a small lookahead buffer so an interleaved queue (`[A, B, A, B]`)
 /// doesn't force a sibling worker to swap models when one already has the
 /// right one warm.
