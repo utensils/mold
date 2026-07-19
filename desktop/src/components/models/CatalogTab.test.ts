@@ -64,7 +64,7 @@ beforeEach(() => {
 });
 
 describe("CatalogTab media filter under pagination", () => {
-  it("excludes an installed model by name when its catalog id is source-prefixed", async () => {
+  it("shows an installed model ONCE, host-tagged, when a live catalog copy also matches", async () => {
     setActivePinia(createPinia());
     searchCatalog.mockResolvedValue({
       entries: [entry("flux-dev:q8", "flux")],
@@ -77,15 +77,36 @@ describe("CatalogTab media filter under pagination", () => {
       props: {
         query: "",
         layout: "grid" as const,
-        excludeInstalled: true,
-        installedIds: ["flux-dev:q8"],
+        installedEntries: [
+          {
+            name: "flux-dev:q8",
+            family: "flux",
+            size_gb: 12,
+            is_loaded: false,
+            hf_repo: "org/repo",
+            default_steps: 4,
+            default_guidance: 1,
+            default_width: 1024,
+            default_height: 1024,
+            description: "",
+            downloaded: true,
+            hostIds: ["local", "hal9000-7680"],
+          },
+        ],
       },
       global: { plugins: [] },
     });
     await flushPromises();
 
-    expect(wrapper.text()).not.toContain("flux-dev:q8");
-    expect(wrapper.get("[data-test='catalog-empty']").text()).toContain("already installed");
+    // One card, not the installed row plus the untagged live duplicate.
+    const cards = wrapper.findAll("[data-test='catalog-card']");
+    const occurrences = wrapper.text().split("flux-dev:q8").length - 1;
+    expect(occurrences).toBe(1);
+    expect(cards.length).toBeLessThanOrEqual(1);
+    // Host chips are the "you have this" indicator.
+    const chips = wrapper.findAll("[data-test='installed-host']").map((c) => c.text());
+    expect(chips).toContain("This device");
+    expect(wrapper.text()).toContain("● installed");
   });
 
   it("offers safe manifest variants and hides aggregate HF rows for the same repo", async () => {
@@ -273,5 +294,42 @@ describe("CatalogTab host fallback when the local engine is down", () => {
     expect(forward).toBe(false);
     expect(target).toBeUndefined();
     wrapper.unmount();
+  });
+});
+
+describe("CatalogTab Installed source chip", () => {
+  it("never fires a live search for the Installed tab and keeps loaded pages intact", async () => {
+    vi.useFakeTimers();
+    setActivePinia(createPinia());
+    searchCatalog.mockResolvedValue({
+      entries: [entry("live-model", "flux")],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+    const wrapper = mount(CatalogTab, {
+      props: { query: "", layout: "grid" as const },
+      global: { plugins: [] },
+    });
+    await vi.runAllTimersAsync();
+    const callsAfterMount = searchCatalog.mock.calls.length;
+
+    const chips = wrapper.get("[data-test='catalog-source-chips']").findAll("button");
+    await chips[3]!.trigger("click"); // Installed
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // No request went out for the pseudo-source (the server would 400 it).
+    expect(searchCatalog.mock.calls.length).toBe(callsAfterMount);
+    expect(
+      searchCatalog.mock.calls.some(
+        (call) => (call[0] as { source?: string }).source === "installed",
+      ),
+    ).toBe(false);
+
+    // Flipping back re-renders the still-loaded results without a blank gap.
+    await chips[0]!.trigger("click");
+    await vi.runAllTimersAsync();
+    expect(wrapper.text()).toContain("live-model");
+    vi.useRealTimers();
   });
 });

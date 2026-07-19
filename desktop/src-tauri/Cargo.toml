@@ -61,6 +61,8 @@ flate2 = "1"
 plist = "1"
 tar = "0.4"
 tempfile = "3"
+filetime = "0.2"
+sha2 = "0.10"
 mold-core = { path = "../../crates/mold-core", package = "mold-ai-core", version = "0.17.1" }
 mold-db = { path = "../../crates/mold-db", package = "mold-ai-db", version = "0.17.1" }
 mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.17.1", features = [
@@ -95,3 +97,5 @@ metal = ["mold-server/metal"]
 lto = "thin"
 codegen-units = 16
 strip = true
+
+[dev-dependencies]

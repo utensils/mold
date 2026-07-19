@@ -3978,6 +3978,7 @@ version = "0.17.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "filetime",
  "flate2",
  "hostname",
  "if-addrs",
@@ -3997,6 +3998,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tar",
  "tauri",
  "tauri-build",

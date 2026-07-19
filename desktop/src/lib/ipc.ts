@@ -262,6 +262,17 @@ export const ipc = {
     if (!inTauri()) return Promise.reject(new Error("Local saves require the desktop app."));
     return invoke<string>("save_output_bytes", { filename, dataB64, metadata: metadata ?? null });
   },
+  /** Stash the exact img2img source bytes under their sha256 (fire-and-forget
+   * at submit) so Reuse settings can restore uploads that live nowhere else. */
+  sourceStashPut(sha256: string, dataB64: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("source_stash_put", { sha256, dataB64 });
+  },
+  /** Read a stashed source back by sha256; null when absent (or pruned). */
+  sourceStashGet(sha256: string): Promise<string | null> {
+    if (!inTauri()) return Promise.resolve(null);
+    return invoke<string | null>("source_stash_get", { sha256 });
+  },
   clipboardWriteImage(bytes: Uint8Array): Promise<void> {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("clipboard_write_image", { bytes });

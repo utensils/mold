@@ -475,6 +475,7 @@ impl ChainRequest {
             cfg_plus: None,
             edit_images: None,
             source_image: first.source_image.clone(),
+            source_image_name: None,
             strength: self.strength,
             mask_image: None,
             control_image: None,

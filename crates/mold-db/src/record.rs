@@ -146,6 +146,8 @@ mod tests {
             generation_width: Some(4),
             generation_height: Some(5),
             strength: None,
+            source_image_name: None,
+            source_image_sha256: None,
             scheduler: None,
             output_format: Some(OutputFormat::Png),
             cfg_plus: None,

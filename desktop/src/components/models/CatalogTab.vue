@@ -13,13 +13,18 @@ import CatalogCard from "./CatalogCard.vue";
 import CatalogTableRow from "./CatalogTableRow.vue";
 import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
 import DownloadTargetDialog from "./DownloadTargetDialog.vue";
-import type { CatalogEntry } from "../../lib/api/types";
+import InstalledTab from "./InstalledTab.vue";
+import { installedModelToEntry } from "../../lib/catalogDetail";
+import type { CatalogEntry, ModelEntry } from "../../lib/api/types";
+
+type LibraryModelEntry = ModelEntry & { hostIds?: string[] };
 
 const props = defineProps<{
   query: string;
   layout: "grid" | "table";
-  excludeInstalled?: boolean;
-  installedIds?: string[];
+  /** Installed models (all hosts, with hostIds) merged into the unified
+   *  list as host-tagged rows; the Installed source tab scopes to them. */
+  installedEntries?: LibraryModelEntry[];
   mediaType?: MediaType;
 }>();
 
@@ -38,7 +43,7 @@ const PAGE_SIZE = 24;
  * has content or the results run out.
  */
 const MAX_AUTO_PAGES = 5;
-type Source = "all" | "hf" | "civitai";
+type Source = "all" | "hf" | "civitai" | "installed";
 
 const source = ref<Source>("all");
 const family = ref("");
@@ -69,8 +74,34 @@ function matchesMediaType(entry: CatalogEntry): boolean {
  * recipe; the manifest registry already describes the actual per-model files,
  * so those variants must win over a hundreds-of-GB whole-repo pull.
  */
+const installedNames = computed(() => new Set((props.installedEntries ?? []).map((m) => m.name)));
+
+/** Installed models as catalog-shaped rows for the unified list — the host
+ *  chips are the visual "you have this" indicator. */
+const installedCatalogEntries = computed<(CatalogEntry & { hostIds?: string[] })[]>(() => {
+  const q = props.query.trim().toLowerCase();
+  return (props.installedEntries ?? [])
+    .filter((m) => !q || m.name.toLowerCase().includes(q))
+    .filter((m) => !family.value || m.family === family.value)
+    .map((m) => ({ ...installedModelToEntry(m), hostIds: m.hostIds ?? [] }))
+    .filter(
+      (entry) =>
+        source.value === "all" ||
+        (source.value === "hf" && entry.source === "hf") ||
+        (source.value === "civitai" && entry.source === "civitai"),
+    );
+});
+
+/** Host chip labels for an installed row (host ids → display labels). */
+function hostLabelsFor(entry: CatalogEntry & { hostIds?: string[] }): string[] {
+  return (entry.hostIds ?? []).map(
+    (id) =>
+      hosts.all.find((host) => host.id === id)?.label ?? (id === "local" ? "This device" : id),
+  );
+}
+
 const manifestEntries = computed<CatalogEntry[]>(() => {
-  const installed = new Set(props.installedIds ?? []);
+  const installed = installedNames.value;
   const q = props.query.trim().toLowerCase();
   if (source.value === "civitai") return [];
   return models.all
@@ -113,24 +144,25 @@ const combinedEntries = computed(() => {
           Boolean(entry.source_id && knownRepos.has(entry.source_id)))
       ),
   );
-  const byId = new Map<string, CatalogEntry>();
-  for (const entry of [...manifestEntries.value, ...safeLive]) {
+  const byId = new Map<string, CatalogEntry & { hostIds?: string[] }>();
+  // Installed rows win the dedup — a live-catalog copy of an installed
+  // model must not appear untagged next to it.
+  const installedByName = new Set(installedCatalogEntries.value.map((entry) => entry.name));
+  for (const entry of [
+    ...installedCatalogEntries.value,
+    ...manifestEntries.value,
+    ...safeLive.filter((entry) => !installedByName.has(entry.name)),
+  ]) {
     if (!byId.has(entry.id)) byId.set(entry.id, entry);
   }
   return [...byId.values()];
 });
 
-// What you already have surfaces first; the divider marks where "available"
-// begins so installed models are visible at a glance. The media-type filter
-// is client-side on `entry.family` — the server query stays unchanged.
+// What you already have surfaces first (host-tagged); the divider marks
+// where "available" begins. The media-type filter is client-side on
+// `entry.family` — the server query stays unchanged.
 const displayEntries = computed(() =>
-  sortInstalledFirst(combinedEntries.value).filter(
-    (entry) =>
-      !(
-        props.excludeInstalled &&
-        (entry.installed || (props.installedIds ?? []).includes(entry.name))
-      ) && matchesMediaType(entry),
-  ),
+  sortInstalledFirst(combinedEntries.value).filter(matchesMediaType),
 );
 
 /** Why the grid is empty while entries exist — names the active filter. */
@@ -171,6 +203,9 @@ function catalogTarget(): { target: ApiTarget | undefined; forward: boolean } {
 let searchEpoch = 0;
 
 async function runSearch(reset: boolean) {
+  // "installed" is a client-side scope, not a server source — the API would
+  // 400 it, and resetting `entries` would blank the list behind the tab.
+  if (source.value === "installed") return;
   const epoch = ++searchEpoch;
   if (reset) {
     page.value = 1;
@@ -261,13 +296,19 @@ function pullFromDrawer(entry: CatalogEntry) {
   pull(entry);
 }
 
-watch([() => props.query, source, family, includeNsfw], scheduleSearch);
+watch([() => props.query, source, family, includeNsfw], () => {
+  // Entering the Installed tab fires no live search (runSearch also guards);
+  // leaving it re-fires so the list is fresh after a stay on the tab.
+  if (source.value === "installed") return;
+  scheduleSearch();
+});
 
 // Flipping to a media chip with no matching entries loaded yet continues the
 // existing pagination instead of leaving a blank grid behind the chip.
 watch(
   () => props.mediaType,
   () => {
+    if (source.value === "installed") return;
     if ((props.mediaType ?? "all") === "all" || loading.value) return;
     if (!combinedEntries.value.some(matchesMediaType) && hasMore.value) loadMore();
   },
@@ -288,34 +329,56 @@ onMounted(async () => {
   <div class="flex flex-col gap-3 p-4">
     <!-- Filter chips -->
     <div class="flex flex-wrap items-center gap-2">
-      <div class="flex items-center gap-1">
+      <div class="flex items-center gap-1" data-test="catalog-source-chips">
         <button
-          v-for="s in ['all', 'hf', 'civitai'] as const"
+          v-for="s in ['all', 'hf', 'civitai', 'installed'] as const"
           :key="s"
           type="button"
           class="border-edge h-7 rounded-full border px-2.5 text-caption"
           :class="source === s ? 'bg-safelight text-on-accent' : 'text-ink-2 hover:text-ink'"
+          :aria-pressed="source === s"
           @click="source = s"
         >
-          {{ s === "all" ? "All" : s === "hf" ? "HuggingFace" : "Civitai" }}
+          {{
+            s === "all"
+              ? "All"
+              : s === "hf"
+                ? "HuggingFace"
+                : s === "civitai"
+                  ? "Civitai"
+                  : "Installed"
+          }}
         </button>
       </div>
 
-      <select
-        v-model="family"
-        class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
-      >
-        <option value="">All families</option>
-        <option v-for="f in families" :key="f" :value="f">{{ f }}</option>
-      </select>
+      <template v-if="source !== 'installed'">
+        <select
+          v-model="family"
+          class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
+        >
+          <option value="">All families</option>
+          <option v-for="f in families" :key="f" :value="f">{{ f }}</option>
+        </select>
 
-      <label class="flex items-center gap-1 text-caption text-ink-2">
-        <input v-model="includeNsfw" type="checkbox" class="accent-[var(--safelight)]" />
-        NSFW
-      </label>
+        <label class="flex items-center gap-1 text-caption text-ink-2">
+          <input v-model="includeNsfw" type="checkbox" class="accent-[var(--safelight)]" />
+          NSFW
+        </label>
+      </template>
     </div>
 
-    <p v-if="error" class="text-caption text-stop">{{ error }}</p>
+    <!-- Installed tab: the full-featured installed rows (Load / unload /
+         delete / per-host actions) scoped to what you already have. -->
+    <InstalledTab
+      v-if="source === 'installed'"
+      class="-mx-4 -mt-3"
+      :query="query"
+      :media-type="mediaType"
+      :entries="installedEntries"
+      @browse-catalog="source = 'all'"
+    />
+
+    <p v-else-if="error" class="text-caption text-stop">{{ error }}</p>
 
     <!-- Empty state — keyed on the FILTERED list so an all-image page under
          the Video chip explains itself instead of rendering a blank grid. -->
@@ -357,6 +420,7 @@ onMounted(async () => {
           v-if="layout === 'grid'"
           :entry="entry"
           :pulling="pulling.has(entry.id)"
+          :hosts="hostLabelsFor(entry)"
           @pull="pull"
           @open="detailEntry = $event"
         />
@@ -364,6 +428,7 @@ onMounted(async () => {
           v-else
           :entry="entry"
           :pulling="pulling.has(entry.id)"
+          :hosts="hostLabelsFor(entry)"
           class="px-3 py-2"
           @pull="pull"
           @open="detailEntry = $event"
@@ -372,7 +437,7 @@ onMounted(async () => {
     </div>
 
     <button
-      v-if="hasMore"
+      v-if="source !== 'installed' && hasMore"
       type="button"
       class="border-edge mx-auto h-8 rounded-control border px-4 text-body text-ink-2 hover:text-ink disabled:opacity-50"
       :disabled="loading"

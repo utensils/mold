@@ -463,6 +463,17 @@ fn build_request(
     } else {
         (None, source_image, params.strength, mask_image)
     };
+    // Provenance label: the picked file's name, so clients (and the desktop's
+    // Reuse settings) can attempt to restore the input image. The label
+    // rides ONLY with an actual `source_image` — qwen-edit moves the image
+    // into `edit_images` and must not ship a dangling name.
+    let source_image_name = source_image.as_ref().and_then(|_| {
+        params.source_image_path.as_ref().and_then(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+        })
+    });
 
     GenerateRequest {
         prompt: prompt.to_string(),
@@ -480,6 +491,7 @@ fn build_request(
         cfg_plus: None,
         edit_images,
         source_image,
+        source_image_name,
         strength,
         mask_image,
         control_image,

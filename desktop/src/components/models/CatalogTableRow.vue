@@ -14,7 +14,13 @@ import type { CatalogEntry } from "../../lib/api/types";
  * `size_bytes`), SIZE/FETCH as the two size lines, and Pull / installed
  * state in the actions column. Clicking the row opens the detail drawer.
  */
-const props = defineProps<{ entry: CatalogEntry; pulling: boolean }>();
+const props = defineProps<{
+  entry: CatalogEntry;
+  pulling: boolean;
+  /** Labels of hosts that have this model installed — the unified list's
+   *  "you have this" indicator. */
+  hosts?: string[];
+}>();
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
   (e: "open", entry: CatalogEntry): void;
@@ -65,6 +71,7 @@ const counts = computed(() => {
     :name="entry.name"
     :source="glyphSource"
     :family="entry.family"
+    :host-labels="hosts ?? []"
     :page-url="pageUrl"
     :size-primary="sizePrimary"
     :size-secondary="sizeSecondary"
@@ -73,6 +80,13 @@ const counts = computed(() => {
     @open="emit('open', entry)"
   >
     <template #meta>
+      <span
+        v-if="entry.nsfw"
+        class="data-mono shrink-0 rounded-control border border-stop/50 px-1 text-caption text-stop"
+        data-test="nsfw-tag"
+      >
+        NSFW
+      </span>
       <span v-if="entry.author" class="min-w-0 shrink truncate text-caption text-ink-3">
         {{ entry.author }}
       </span>

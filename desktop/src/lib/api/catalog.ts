@@ -106,18 +106,25 @@ export async function startCatalogDownload(
   id: string,
   target: ApiTarget = currentTarget(),
   forwardCredentials = false,
-): Promise<void> {
+): Promise<string | null> {
   const headers = await catalogCredentialHeaders(forwardCredentials);
   if (isCatalogId(id)) {
-    await apiFetchTo(target, `/api/catalog/${id}/download`, { method: "POST", headers });
-    return;
+    const res = await apiFetchTo(target, `/api/catalog/${id}/download`, {
+      method: "POST",
+      headers,
+    });
+    // The primary job id lets pull-and-resume watch THIS pull exactly.
+    const body = (await res.json().catch(() => null)) as CatalogDownloadResponse | null;
+    return body?.primary_job_id ?? null;
   }
   headers.set("Content-Type", "application/json");
-  await apiFetchTo(target, "/api/downloads", {
+  const res = await apiFetchTo(target, "/api/downloads", {
     method: "POST",
     headers,
     body: JSON.stringify({ model: id }),
   });
+  const body = (await res.json().catch(() => null)) as { id?: string } | null;
+  return body?.id ?? null;
 }
 
 export type { CatalogDownloadResponse };

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import InstalledTab from "../components/models/InstalledTab.vue";
 import CatalogTab from "../components/models/CatalogTab.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
 import { useConnectionStore } from "../stores/connection";
@@ -23,7 +22,6 @@ const router = useRouter();
 const ui = useUiStore();
 const query = ref("");
 const searchEl = ref<HTMLInputElement | null>(null);
-const catalogSection = ref<HTMLElement | null>(null);
 
 const MEDIA_TYPES: { value: MediaType; label: string }[] = [
   { value: "all", label: "All" },
@@ -50,15 +48,6 @@ const installedModels = computed(() => {
   }
   return [...byName.values()];
 });
-const installedCount = computed(() => installedModels.value.length);
-const installedHostCount = computed(
-  () => new Set(installedModels.value.flatMap((entry) => entry.hostIds)).size,
-);
-const installedModelIds = computed(() => installedModels.value.map((entry) => entry.name));
-
-function scrollToCatalog() {
-  catalogSection.value?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === "f" && primaryModifierPressed(e) && !e.altKey) {
@@ -199,38 +188,15 @@ onUnmounted(() => {
     <div class="min-h-0 flex-1 overflow-y-auto">
       <DownloadsTray />
 
-      <section aria-labelledby="installed-models-heading">
-        <div class="flex items-center gap-2 px-4 pt-4">
-          <h2 id="installed-models-heading" class="text-body font-semibold text-ink">Installed</h2>
-          <span class="data-mono text-caption text-ink-3">
-            {{ installedCount }} model{{ installedCount === 1 ? "" : "s" }}
-            <template v-if="installedHostCount > 1"> · {{ installedHostCount }} hosts</template>
-          </span>
-          <div class="border-edge h-px flex-1 border-t" />
-        </div>
-        <InstalledTab
-          :query="query"
-          :media-type="mediaType"
-          :entries="installedModels"
-          @browse-catalog="scrollToCatalog"
-        />
-      </section>
-
-      <section ref="catalogSection" aria-labelledby="available-models-heading">
-        <div class="flex items-center gap-2 px-4 pt-4">
-          <h2 id="available-models-heading" class="text-body font-semibold text-ink">Catalog</h2>
-          <span class="text-caption text-ink-3">Hugging Face and Civitai</span>
-          <div class="border-edge h-px flex-1 border-t" />
-        </div>
-        <CatalogTab
-          :query="query"
-          :layout="ui.catalogLayout"
-          :exclude-installed="true"
-          :installed-ids="installedModelIds"
-          :media-type="mediaType"
-          @clear-media-filter="setMediaType('all')"
-        />
-      </section>
+      <!-- One unified list: catalog results with installed models merged in
+           and host-tagged; the Installed source tab scopes to what you have. -->
+      <CatalogTab
+        :query="query"
+        :layout="ui.catalogLayout"
+        :installed-entries="installedModels"
+        :media-type="mediaType"
+        @clear-media-filter="setMediaType('all')"
+      />
     </div>
   </div>
 </template>

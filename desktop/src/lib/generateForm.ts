@@ -77,6 +77,10 @@ export interface GenerateForm {
   strength: number;
   /** base64, no data-URI prefix. */
   sourceImage: string | null;
+  /** Provenance label for `sourceImage` — the gallery filename or upload
+   * name it came from. Ships as `source_image_name` so Reuse settings can
+   * restore the input image later; always cleared with the image. */
+  sourceImageName: string | null;
   /** Qwen-Image-Edit picture strip, base64 each (no data-URI prefix). Order is
    * load-bearing: index 0 is the primary edit Target, the rest are References.
    * Only read in `sourceImageMode === "qwen-edit"`; empty everywhere else. */
@@ -129,6 +133,7 @@ export function newGenerateForm(): GenerateForm {
     upscaleModel: "",
     strength: 0.75,
     sourceImage: null,
+    sourceImageName: null,
     imageAttachments: [],
     sourceFit: { mode: "pad-repaint" },
     maskImage: null,
@@ -173,6 +178,7 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   if (caps.forcesBatchSizeOne) form.batchSize = 1;
   if (!caps.supportsImg2img) {
     form.sourceImage = null;
+    form.sourceImageName = null;
     form.maskImage = null;
     form.imageAttachments = [];
   } else if (caps.sourceImageMode === "qwen-edit") {
@@ -182,11 +188,16 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
       form.imageAttachments = [form.sourceImage];
     }
     form.sourceImage = null;
+    // The picture strip carries no per-image labels.
+    form.sourceImageName = null;
     form.maskImage = null;
   } else if (form.imageAttachments.length > 0) {
     // Leaving qwen-edit: the Target becomes the single img2img source (web
     // parity — attachments truncate to one, which single mode reads).
-    if (!form.sourceImage) form.sourceImage = form.imageAttachments[0] ?? null;
+    if (!form.sourceImage) {
+      form.sourceImage = form.imageAttachments[0] ?? null;
+      form.sourceImageName = null;
+    }
     form.imageAttachments = [];
   }
   if (!caps.supportsMask) {
@@ -280,6 +291,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
 
   if (caps.supportsImg2img && caps.sourceImageMode === "single" && form.sourceImage) {
     req.source_image = form.sourceImage;
+    if (form.sourceImageName) req.source_image_name = form.sourceImageName;
     req.strength = form.strength;
     if (caps.supportsMask && form.maskImage) req.mask_image = form.maskImage;
     if (caps.supportsControlNet && form.controlImage) {
@@ -408,7 +420,9 @@ export function applyMetadataToForm(
 
   // Output metadata never carries source/mask/control/video/audio bytes —
   // clear any stale attachment instead of silently pairing it with the print.
+  // (The async source restore may repopulate the pair afterwards.)
   form.sourceImage = null;
+  form.sourceImageName = null;
   form.maskImage = null;
   form.controlImage = null;
   form.imageAttachments = [];

@@ -230,7 +230,8 @@ pub(crate) fn preflight_memory_guard_with_available(
     let flux_offload = (hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
         && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1"))
         || large_flux_bf16_should_auto_offload(paths, hint);
-    let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
+    let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
+    let qwen_quantized = qwen_family
         && paths
             .transformer
             .extension()
@@ -244,7 +245,13 @@ pub(crate) fn preflight_memory_guard_with_available(
     let activation = activation_memory_for_estimate(hint, qwen_quantized);
     let peak_with_activation = peak.saturating_add(activation);
     let effective_available = available_bytes.saturating_add(active_vram_bytes);
-    if qwen_quantized && peak_with_activation <= effective_available {
+    // Qwen-Image runs phase-sequential on BOTH runtimes — GGUF and BF16 drop
+    // the text encoder before the transformer loads (encode → drop TE →
+    // denoise → VAE) — so the flat 90% cap double-penalizes a peak estimate
+    // that already carries 2 GB of headroom plus the activation budget.
+    // Accept whenever the estimated peak simply fits in free VRAM (a 41 GB
+    // BF16 qwen on a 46 GB card was rejected with ~5 GB of real slack).
+    if qwen_family && peak_with_activation <= effective_available {
         return Ok(());
     }
     let suggestion = rejection_suggestion(hint);
@@ -591,6 +598,17 @@ pub(crate) fn select_server_load_strategy_for_budget(
     )
     .saturating_add(activation);
     let hard_limit = available_bytes.saturating_mul(9) / 10;
+
+    // Paired with the qwen_family admission bypass in the preflight guard:
+    // a Qwen-Image load admitted because its phase-sequential peak fits FREE
+    // VRAM (100%, not 90%) must actually load Sequential — Eager co-resides
+    // transformer + text encoder + VAE, which is exactly what the admission
+    // assumed would NOT happen. Without this branch, a BF16 qwen in the
+    // 90–100%-of-free band was admitted and then handed the Eager strategy.
+    let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
+    if qwen_family && eager_peak > hard_limit && sequential_peak <= available_bytes {
+        return mold_inference::LoadStrategy::Sequential;
+    }
 
     if eager_peak > hard_limit && sequential_peak <= hard_limit {
         mold_inference::LoadStrategy::Sequential

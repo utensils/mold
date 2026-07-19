@@ -656,3 +656,58 @@ describe("LTX-2 img2img (image-to-video)", () => {
     expect(req.mask_image).toBeUndefined();
   });
 });
+
+describe("source image provenance (Reuse-settings restore)", () => {
+  it("ships source_image_name only alongside a source image", () => {
+    const form = newGenerateForm();
+    form.model = "flux-dev:q8";
+    form.family = "flux";
+    form.prompt = "a cat";
+    form.sourceImageName = "mold-flux-1-2.png";
+    // Name without an image never ships.
+    expect(buildRequest(form).source_image_name).toBeUndefined();
+
+    form.sourceImage = "SRC";
+    const req = buildRequest(form);
+    expect(req.source_image).toBe("SRC");
+    expect(req.source_image_name).toBe("mold-flux-1-2.png");
+  });
+
+  it("clears the label whenever the source is cleared on model switch", () => {
+    const form = newGenerateForm();
+    form.sourceImage = "SRC";
+    form.sourceImageName = "pic.png";
+    applyModelDefaults(form, { ...ltx2Model(), name: "ltx-video:q8", family: "ltx-video" });
+    expect(form.sourceImage).toBeNull();
+    expect(form.sourceImageName).toBeNull();
+  });
+
+  it("keeps the label when the source survives a switch into ltx2", () => {
+    const form = newGenerateForm();
+    form.sourceImage = "SRC";
+    form.sourceImageName = "pic.png";
+    applyModelDefaults(form, ltx2Model());
+    expect(form.sourceImage).toBe("SRC");
+    expect(form.sourceImageName).toBe("pic.png");
+  });
+
+  it("drops the label when entering qwen-edit (attachments are unlabeled)", () => {
+    const form = newGenerateForm();
+    form.sourceImage = "SRC";
+    form.sourceImageName = "pic.png";
+    applyModelDefaults(form, qwenEditModel());
+    expect(form.imageAttachments).toEqual(["SRC"]);
+    expect(form.sourceImageName).toBeNull();
+  });
+});
+
+describe("source label clearing invariants (review findings)", () => {
+  it("applyMetadataToForm clears the label with the image", () => {
+    const form = newGenerateForm();
+    form.sourceImage = "SRC";
+    form.sourceImageName = "pic.png";
+    applyMetadataToForm(form, { ...richImageMetadata() });
+    expect(form.sourceImage).toBeNull();
+    expect(form.sourceImageName).toBeNull();
+  });
+});

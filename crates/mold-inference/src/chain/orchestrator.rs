@@ -362,6 +362,7 @@ fn build_stage_generate_request(
         // path at a non-zero frame with soft strength — turning it into a
         // durable identity anchor rather than a frame-0 replacement.
         source_image: stage.source_image.clone(),
+        source_image_name: None,
         edit_images: None,
         // Replacement strength from the chain request is only meaningful
         // for stage 0's frame-0 i2v pin. Continuations override this at

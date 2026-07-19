@@ -458,6 +458,7 @@ pub async fn run(
         cfg_plus,
         edit_images: edit_images.clone(),
         source_image: source_image.clone(),
+        source_image_name: None,
         strength,
         mask_image: mask_image.clone(),
         control_image: control_image.clone(),

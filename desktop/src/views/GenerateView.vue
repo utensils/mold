@@ -17,6 +17,7 @@ import SourceImageWell from "../components/generate/SourceImageWell.vue";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
 import HostSelector from "../components/generate/HostSelector.vue";
+import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
 import SourceGlyph from "../components/generate/SourceGlyph.vue";
 import PanelResizeHandle from "../components/shell/PanelResizeHandle.vue";
 import { modelSource } from "../lib/modelSource";
@@ -54,7 +55,21 @@ import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCy
 import { fetchHistory } from "../lib/api/history";
 import { formatGB } from "../lib/format";
 import { randomSeed } from "../stores/generation";
-import type { ModelEntry } from "../lib/api/types";
+import type { GenerateRequest, ModelEntry, OutputMetadata } from "../lib/api/types";
+import {
+  metadataReferencesSource,
+  restoreSourceImage,
+  sha256HexOfBase64,
+} from "../lib/sourceRestore";
+import { isMissingModelError } from "../lib/generateErrors";
+import { startCatalogDownload } from "../lib/api/catalog";
+import { useDownloadsStore } from "../stores/downloads";
+import { usePullResumeStore } from "../stores/pullResume";
+import { localMediaPath, mediaPath } from "../lib/gallery/media";
+import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
+import { blobToBase64 } from "../lib/image";
+import { ipc } from "../lib/ipc";
+import { useGalleryStore } from "../stores/gallery";
 import { fitAspectRatio } from "../lib/fitAspectRatio";
 import { primaryModifierPressed, shortcutLabel } from "../lib/platform";
 
@@ -69,6 +84,82 @@ const composer = useComposerStore();
 const toasts = useToastStore();
 const ui = useUiStore();
 const contextMenu = useContextMenuStore();
+// Multi-host gallery — source-image restore looks up prints across hosts.
+const hostGallery = useGalleryStore();
+const downloads = useDownloadsStore();
+const pullResume = usePullResumeStore();
+
+/** A generate that 404'd (model not on the routed host) awaiting the user's
+ *  pull-and-resume decision. */
+const missingModel = ref<{
+  model: string;
+  route: HostRoute | null;
+  request: GenerateRequest;
+  batch: number;
+} | null>(null);
+
+const missingModelHostLabel = computed(
+  () => missingModel.value?.route?.label ?? hosts.primaryHost?.label ?? "this host",
+);
+/** Known weights size when the model is installed on another host. */
+const missingModelSizeGb = computed(() => {
+  const name = missingModel.value?.model;
+  if (!name) return null;
+  return installedModels.value.find((m) => m.name === name)?.size_gb ?? null;
+});
+
+/** Start the pull on the routed host and arm the auto-resume. */
+async function pullMissingModel() {
+  const info = missingModel.value;
+  if (!info) return;
+  missingModel.value = null;
+  const route = info.route;
+  const host = route ? (hosts.all.find((h) => h.id === route.hostId) ?? null) : null;
+  const label = route?.label ?? hosts.primaryHost?.label ?? "this host";
+  // The primary's downloads live in the top-level bucket, not hostStates.
+  const bucketId = route && route.hostId !== "local" ? route.hostId : null;
+  const armed = {
+    model: info.model,
+    hostId: bucketId,
+    hostLabel: label,
+    request: info.request,
+    batch: info.batch,
+    route,
+  };
+  // The resume watcher is fed by this stream — a dead stream means the
+  // promise "generation starts when it's ready" could never be kept, so
+  // fail loudly instead of arming a resume that can't fire.
+  try {
+    await downloads.subscribe(host ?? undefined);
+  } catch {
+    toasts.push(
+      `Couldn't watch downloads on ${label} — pull ${info.model} from the Catalog instead.`,
+      "error",
+    );
+    return;
+  }
+  try {
+    // Watch the EXACT job the server enqueues; a stale completed pull of the
+    // same model in history can then never trigger a premature resume.
+    const jobId = await startCatalogDownload(info.model, route?.target, route?.kind === "remote");
+    pullResume.arm({ ...armed, jobId });
+    toasts.push(`Pulling ${info.model} on ${label} — generation starts when it's ready`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      // Already downloading (another client or an earlier click) — watch by
+      // model; the running job is live, not terminal, so it can't be stale.
+      pullResume.arm({ ...armed, jobId: null });
+      toasts.push(`${info.model} is already downloading on ${label} — will generate when ready`);
+    } else if (/unknown model/i.test(String(err))) {
+      toasts.push(
+        `${label} can't pull ${info.model} by name — pull it from the Catalog there, then generate again.`,
+        "error",
+      );
+    } else {
+      toasts.push(String(err), "error");
+    }
+  }
+}
 
 // Store-backed so the model, prompt, and params survive navigating away and
 // back — this view unmounts on every route change.
@@ -424,6 +515,15 @@ async function generate() {
   }
   if (!(await preprocessSourceFit(route))) return;
   const request = buildRequest(form);
+  // Stash the exact source bytes by sha (the hash the server records as
+  // source_image_sha256) so Reuse settings can restore uploads and fitted
+  // sources later. Fire-and-forget — never blocks the submit.
+  if (request.source_image) {
+    const sourceB64 = request.source_image;
+    void sha256HexOfBase64(sourceB64)
+      .then((sha) => ipc.sourceStashPut(sha, sourceB64))
+      .catch(() => {});
+  }
   // Submitting while another print develops queues server-side; each job
   // snapshots its own model + params, so tweaking the form afterwards is safe.
   const { settled } = generation.submitBatch(request, batch, route);
@@ -438,7 +538,20 @@ async function generate() {
     // Gallery refresh is handled by the generation store's complete hook
     // (per-origin bucket) plus the SSE / fallback-poll paths.
   } else if (failed?.error && failed.error !== "Cancelled") {
-    toasts.push(failed.error, "error");
+    // A 404 also fires on proxy/base-URL mismatches — only offer the pull
+    // when the availability snapshot doesn't CONTRADICT "model missing"
+    // (unknown availability still offers; the pull endpoint will say no).
+    const routedId = route?.hostId ?? "local";
+    const hostSaysInstalled =
+      (hostModels.byHost[routedId]?.fetchedAt ?? 0) > 0 &&
+      hostModels.installedOn(routedId).some((m) => m.name === request.model);
+    if (isMissingModelError(failed.error) && !hostSaysInstalled) {
+      // The routed host doesn't have the model — offer pull-and-resume
+      // instead of the raw HTTP error.
+      missingModel.value = { model: request.model, route, request, batch };
+    } else {
+      toasts.push(failed.error, "error");
+    }
   }
 }
 
@@ -518,13 +631,67 @@ watch(
   { immediate: true },
 );
 
+/** Monotonic token: only the latest prefill's async source restore may touch
+ *  the form — a superseded restore (newer prefill, ⌘N, user edits) is
+ *  dropped silently. Bumped by every prefill and by ⌘N. */
+let restoreEpoch = 0;
+
 function applyPrefill() {
   const prefill = composer.take();
   if (!prefill) return;
+  restoreEpoch += 1;
   // Gallery reuse ships full metadata (full-fidelity restore); palette /
   // history / jobs keep the legacy scalar copy.
   applyPrefillToForm(form, prefill, installedModels.value);
+  if ("metadata" in prefill && prefill.metadata) {
+    void restorePrefillSource(prefill.metadata, restoreEpoch);
+  }
   void nextTick(() => promptEl.value?.focus());
+}
+
+/**
+ * Best-effort input-image restore for Reuse settings: local source stash by
+ * sha first (covers uploads and canvas-fitted sources), then a cross-host
+ * gallery filename match fetched from the print's own origin. Old prints
+ * without provenance keys are silently skipped; a keyed print that can't be
+ * found gets a toast.
+ */
+async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
+  if (!metadataReferencesSource(metadata)) return;
+  if (!caps.value.supportsImg2img || caps.value.sourceImageMode !== "single") return;
+  const modelAtStart = form.model;
+  const restored = await restoreSourceImage(metadata, {
+    stashGet: (sha) => ipc.sourceStashGet(sha),
+    galleryLookup: async (filename) => {
+      await hostGallery.fetchAll().catch(() => {});
+      const entry = hostGallery.merged.find((e) => e.item.filename === filename);
+      if (!entry) return null;
+      if (hostGallery.mediaSourceOf(entry.sourceKey) === "local") {
+        const res = await fetch(localMediaPath(filename));
+        if (!res.ok) return null;
+        return blobToBase64(await res.blob());
+      }
+      const target = hostGallery.targetOf(entry.sourceKey);
+      const path = mediaPath(filename);
+      const res = await (target ? apiFetchTo(target, path) : apiFetch(path));
+      return blobToBase64(await res.blob());
+    },
+  });
+  // The lookups can take seconds (cold gallery, cross-host fetch). Bail if
+  // this restore was superseded: a newer prefill or ⌘N bumped the epoch, the
+  // user attached their own source, the model changed under us, or the new
+  // family can't take an image at all.
+  if (epoch !== restoreEpoch || form.sourceImage || form.model !== modelAtStart) return;
+  if (!caps.value.supportsImg2img || caps.value.sourceImageMode !== "single") return;
+  if (restored) {
+    form.sourceImage = restored.base64;
+    form.sourceImageName = restored.filename;
+  } else {
+    toasts.push(
+      "Couldn't restore the source image — the original file wasn't found on any connected host.",
+      "error",
+    );
+  }
 }
 
 // Apply a prefill whenever one arrives (Reuse settings, history, "Generate
@@ -535,6 +702,7 @@ watch(() => composer.prefill, applyPrefill, { immediate: true });
 watch(
   () => ui.newGenerationTick,
   () => {
+    restoreEpoch += 1; // an in-flight source restore must not repopulate ⌘N
     formStore.clearComposer();
     void nextTick(() => promptEl.value?.focus());
   },
@@ -850,6 +1018,15 @@ onBeforeUnmount(() => {
       @resize="onAsideResize"
       @commit="onAsideCommit"
       @reset="onAsideReset"
+    />
+
+    <MissingModelDialog
+      v-if="missingModel"
+      :model="missingModel.model"
+      :host-label="missingModelHostLabel"
+      :size-gb="missingModelSizeGb"
+      @confirm="pullMissingModel"
+      @close="missingModel = null"
     />
   </div>
 </template>

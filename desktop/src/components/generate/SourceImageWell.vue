@@ -34,7 +34,11 @@ const maskOpen = ref(false);
 
 function onSourcePicked(picked: PickedImage[]) {
   const first = picked[0];
-  if (first) props.form.sourceImage = first.base64;
+  if (first) {
+    props.form.sourceImage = first.base64;
+    // Provenance label for Reuse-settings source restore.
+    props.form.sourceImageName = first.filename || null;
+  }
 }
 function onMaskApplied(mask: string) {
   props.form.maskImage = mask;
@@ -154,9 +158,12 @@ const inputEls = ref<Record<Slot, HTMLInputElement | null>>({
   control: null,
 });
 
-function setSlot(slot: Slot, b64: string | null) {
-  if (slot === "source") props.form.sourceImage = b64;
-  else if (slot === "mask") props.form.maskImage = b64;
+function setSlot(slot: Slot, b64: string | null, name: string | null = null) {
+  if (slot === "source") {
+    props.form.sourceImage = b64;
+    // The label lives and dies with the image (Reuse-settings restore).
+    props.form.sourceImageName = b64 ? name : null;
+  } else if (slot === "mask") props.form.maskImage = b64;
   else props.form.controlImage = b64;
 }
 async function ingest(slot: Slot, file: File | undefined | null) {
@@ -166,7 +173,7 @@ async function ingest(slot: Slot, file: File | undefined | null) {
     return;
   }
   try {
-    setSlot(slot, await fileToBase64(file));
+    setSlot(slot, await fileToBase64(file), file.name || null);
   } catch {
     toasts.push("Couldn't read the image.", "error");
   }

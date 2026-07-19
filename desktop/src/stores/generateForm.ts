@@ -25,6 +25,7 @@ export const useGenerateFormStore = defineStore("generateForm", {
       this.form.negativePrompt = "";
       this.form.seed = "";
       this.form.sourceImage = null;
+      this.form.sourceImageName = null;
       this.form.maskImage = null;
       this.form.imageAttachments = [];
     },

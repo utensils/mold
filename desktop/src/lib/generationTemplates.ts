@@ -81,6 +81,7 @@ export function collectTemplateMediaReferences(form: GenerateForm): GenerationTe
 function stripTemplateForm(form: GenerateForm): GenerateForm {
   const clone = JSON.parse(JSON.stringify(form)) as FormWithOptionalMedia;
   clone.sourceImage = null;
+  clone.sourceImageName = null;
   clone.maskImage = null;
   clone.controlImage = null;
   clone.imageAttachments = [];

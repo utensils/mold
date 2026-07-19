@@ -199,6 +199,9 @@ export interface GenerateRequest {
   cfg_plus?: boolean;
   /** img2img source, base64 (no data-URI prefix). */
   source_image?: string | null;
+  /** Provenance label for the source image (gallery filename or upload
+   * name) — recorded into OutputMetadata for Reuse-settings restore. */
+  source_image_name?: string;
   /** Qwen-Image-Edit multi-image inputs, base64 each (no data-URI prefix).
    * Order is load-bearing: first = primary edit target, rest = references. */
   edit_images?: string[];
@@ -314,6 +317,11 @@ export interface OutputMetadata {
   generation_width?: number | null;
   generation_height?: number | null;
   strength?: number | null;
+  /** Provenance label of the img2img source (additive; newer servers only). */
+  source_image_name?: string | null;
+  /** SHA-256 (hex) of the exact source bytes used — local stash lookup key
+   * for Reuse-settings source restore (additive; newer servers only). */
+  source_image_sha256?: string | null;
   /** Plain kebab-case name, or a serde-tagged object for parameterized
    * variants (e.g. `{ "ddim": … }`). Normalize before feeding the form. */
   scheduler?: string | Record<string, unknown> | null;

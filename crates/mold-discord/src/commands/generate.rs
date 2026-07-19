@@ -230,6 +230,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         cfg_plus: None,
         edit_images: None,
         source_image: params.source_image,
+        source_image_name: None,
         strength: params.strength.unwrap_or(0.75),
         mask_image: None,
         control_image: None,

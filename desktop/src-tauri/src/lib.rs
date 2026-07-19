@@ -10,6 +10,7 @@ pub mod runpod;
 pub mod secrets;
 pub mod server;
 pub mod settings;
+pub mod source_stash;
 pub mod updater;
 
 use tauri::Manager;
@@ -147,6 +148,8 @@ pub fn run() {
             gallery::local_gallery_list,
             gallery::local_gallery_delete,
             gallery::save_output_bytes,
+            source_stash::source_stash_put,
+            source_stash::source_stash_get,
             clipboard::clipboard_write_image,
             commands::secret_get,
             commands::secret_set,

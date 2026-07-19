@@ -190,6 +190,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
         .build()?;
 
     let help = SubmenuBuilder::new(app, "Help")
+        .item(&MenuItemBuilder::with_id("help:docs", "Mold Documentation").build(app)?)
         .item(&MenuItemBuilder::with_id("help:api", "API Reference").build(app)?)
         .item(&MenuItemBuilder::with_id("help:logs", "Open Logs").build(app)?)
         .build()?;
@@ -211,6 +212,12 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
                         window.open_devtools();
                     }
                 }
+            }
+            "help:docs" => {
+                use tauri_plugin_opener::OpenerExt;
+                let _ = app
+                    .opener()
+                    .open_url("https://utensils.io/mold/", None::<&str>);
             }
             "help:logs" => {
                 use tauri_plugin_opener::OpenerExt;
