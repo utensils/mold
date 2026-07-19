@@ -12,7 +12,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-mkdir -p "$tmp/desktop/src-tauri"
+mkdir -p "$tmp/desktop/src-tauri" "$tmp/apps/mobile/src-tauri"
 
 cat > "$tmp/Cargo.toml" <<'EOF'
 [workspace]
@@ -83,6 +83,29 @@ cat > "$tmp/desktop/package.json" <<'EOF'
 }
 EOF
 
+cat > "$tmp/apps/mobile/src-tauri/Cargo.toml" <<'EOF'
+[package]
+name = "mold-mobile"
+version = "0.14.0"
+edition = "2024"
+EOF
+
+cat > "$tmp/apps/mobile/src-tauri/Cargo.lock" <<'EOF'
+version = 4
+
+[[package]]
+name = "mold-mobile"
+version = "0.14.0"
+EOF
+
+cat > "$tmp/apps/mobile/src-tauri/tauri.conf.json" <<'EOF'
+{
+  "productName": "Mold",
+  "version": "0.14.0",
+  "identifier": "com.utensils.mold"
+}
+EOF
+
 "$script" "$tmp" > /dev/null
 
 grep -q '^## \[Unreleased\]$' "$tmp/CHANGELOG.md" || fail "[Unreleased] heading missing after promotion"
@@ -103,6 +126,9 @@ grep -q '"version": "0.15.0"' "$tmp/desktop/package.json" || fail "desktop packa
 awk '/^name = "mold-desktop"$/{getline; exit ($0 == "version = \"0.15.0\"") ? 0 : 1}' "$tmp/desktop/src-tauri/Cargo.lock" || fail "Cargo.lock mold-desktop version not synced"
 awk '/^name = "mold-ai-core"$/{getline; exit ($0 == "version = \"0.15.0\"") ? 0 : 1}' "$tmp/desktop/src-tauri/Cargo.lock" || fail "Cargo.lock mold-ai-core version not synced"
 awk '/^name = "serde"$/{getline; exit ($0 == "version = \"1.0.0\"") ? 0 : 1}' "$tmp/desktop/src-tauri/Cargo.lock" || fail "Cargo.lock touched serde"
+grep -q '^version = "0.15.0"$' "$tmp/apps/mobile/src-tauri/Cargo.toml" || fail "mobile Cargo.toml version not synced"
+awk '/^name = "mold-mobile"$/{getline; exit ($0 == "version = \"0.15.0\"") ? 0 : 1}' "$tmp/apps/mobile/src-tauri/Cargo.lock" || fail "mobile Cargo.lock version not synced"
+grep -q '"version": "0.15.0"' "$tmp/apps/mobile/src-tauri/tauri.conf.json" || fail "mobile tauri config version not synced"
 
 # Idempotency: second run must not change anything.
 cp -R "$tmp" "$tmp.before"

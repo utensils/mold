@@ -99,6 +99,19 @@ through Nix or as source/CI artifacts; tagged releases do not publish an
 AppImage yet. Detailed setup, multi-host behavior, and update-channel guidance
 live in the desktop guide.
 
+## iPhone app
+
+Mold for iPhone is a remote-only Tauri companion focused on Generate and
+Gallery. Add a host by LAN discovery, IP address, hostname, or Tailscale
+MagicDNS name; generation and media remain on that remote Mold server. The app
+uses the same HTTP, SSE, model defaults, and generation request contract as the
+desktop app. Internal TestFlight builds are produced from relevant `main`
+changes.
+
+On macOS, `nix develop` exposes `ios-dev`, `ios-run`, `ios-check`, and
+`ios-build`. Xcode, CocoaPods, and Apple signing are required for device and App
+Store builds.
+
 ## Usage
 
 ```bash

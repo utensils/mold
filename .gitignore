@@ -24,6 +24,10 @@ docs/superpowers/specs/*
 # Stray tool caches at the repo root (nothing here should ever install deps)
 /node_modules/
 
+# Tauri frontend bundles
+desktop/dist/
+desktop/dist-mobile/
+
 # Website
 website/node_modules/
 website/.vitepress/cache/
@@ -46,6 +50,8 @@ web/*.tsbuildinfo
 !docs/**/*.png
 !website/public/**/*.png
 !web/public/**/*.png
+!apps/mobile/src-tauri/gen/apple/Assets.xcassets/**/*.png
+apps/mobile/src-tauri/gen/schemas/
 result
 *.swo
 *.swp

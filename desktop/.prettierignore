@@ -1,4 +1,5 @@
 dist
+dist-mobile
 node_modules
 src-tauri/target
 src-tauri/gen

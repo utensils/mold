@@ -887,6 +887,11 @@ Signed builds also expose **Settings → Updates** with persisted **Stable** and
 
 Maintainer note: updater publishing additionally requires the GitHub Actions secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Keep the private key out of source and logs, retain a controlled offline backup, and treat rotation as a staged release: existing clients must first receive the replacement public key in an artifact signed by the old key.
 
+The iPhone companion is a separate, remote-only Tauri shell in
+`apps/mobile/src-tauri`, with its shared Vue entry in `desktop/src/mobile`.
+Its initial surfaces are Generate, Gallery, and Hosts; it accepts direct and
+Tailscale MagicDNS names and discovers LAN engines through `_mold._tcp`.
+
 Devshell commands (run inside `nix develop`):
 
 ```bash
@@ -896,6 +901,10 @@ desktop-check      # CI gate: rustfmt, clippy, vue-tsc, prettier
 desktop-test       # cargo test + vitest
 desktop-ui         # frontend-only Vite server (pair with a running `serve`)
 desktop-bun-lock   # regenerate desktop/bun.nix from bun.lock
+ios-dev            # run the iPhone app with Tauri hot reload
+ios-run            # production run on an iPhone or simulator
+ios-check          # cross-check the simulator Rust target
+ios-build          # archive/export for App Store Connect
 ```
 
 ## Updating This Skill

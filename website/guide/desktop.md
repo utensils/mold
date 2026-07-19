@@ -1,4 +1,10 @@
-# Desktop App
+# Desktop and iPhone Apps
+
+Mold for iPhone is a remote-only companion focused on Generate and Gallery.
+Add the desktop or server by Bonjour discovery, an IP/hostname, or its Tailscale
+MagicDNS name. The phone does not run inference or download models; it uses the
+same authenticated HTTP/SSE contract and the remote host remains the source of
+truth for models, jobs, and gallery media.
 
 mold ships a native macOS and Linux desktop app — a Tauri 2 shell around a
 Vue 3 + TypeScript frontend with its own **Safelight** design language, a warm,

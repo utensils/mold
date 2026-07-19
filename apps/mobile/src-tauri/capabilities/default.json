@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "Mold mobile capability set",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
