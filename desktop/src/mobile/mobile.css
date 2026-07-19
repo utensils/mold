@@ -212,6 +212,11 @@ button:disabled {
   object-fit: cover;
 }
 
+.gallery-more {
+  width: 100%;
+  margin-top: 14px;
+}
+
 .host-row {
   padding: 14px 0;
   border-bottom: 1px solid var(--edge);

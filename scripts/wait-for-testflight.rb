@@ -29,7 +29,9 @@ def get(path)
   uri = URI("https://api.appstoreconnect.apple.com#{path}")
   request = Net::HTTP::Get.new(uri)
   request["Authorization"] = "Bearer #{token}"
-  response = Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |http| http.request(request) }
+  response = Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 15, read_timeout: 60) do |http|
+    http.request(request)
+  end
   raise "App Store Connect #{response.code}: #{response.body}" unless response.is_a?(Net::HTTPSuccess)
   JSON.parse(response.body)
 end

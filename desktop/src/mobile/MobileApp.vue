@@ -43,6 +43,12 @@ interface GalleryPrint extends GalleryImage {
   mediaUrl: string;
 }
 
+interface PendingGalleryPrint extends GalleryImage {
+  hostId: string;
+  hostName: string;
+  target: ApiTarget;
+}
+
 const STORAGE_KEY = "mold.mobile.hosts.v1";
 const SELECTED_KEY = "mold.mobile.selected-host.v1";
 const tab = ref<Tab>("generate");
@@ -61,9 +67,12 @@ const resultUrl = ref("");
 const resultFormat = ref("");
 const gallery = ref<GalleryPrint[]>([]);
 const galleryLoading = ref(false);
+const galleryLoadingMore = ref(false);
 const galleryError = ref("");
+const galleryRemaining = ref(0);
 let generationAbort: AbortController | null = null;
 const objectUrls = new Set<string>();
+let pendingGallery: PendingGalleryPrint[] = [];
 
 const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value));
 const selectedTarget = computed<ApiTarget | null>(() => {
@@ -203,6 +212,11 @@ function base64Url(data: string, format: string): string {
   return url;
 }
 
+function revokeObjectUrl(url: string): void {
+  URL.revokeObjectURL(url);
+  objectUrls.delete(url);
+}
+
 async function generate(): Promise<void> {
   const target = selectedTarget.value;
   if (!target || !form.prompt.trim() || !form.model) return;
@@ -210,7 +224,7 @@ async function generate(): Promise<void> {
   generationAbort = new AbortController();
   generating.value = true;
   progress.value = "Submitting";
-  if (resultUrl.value) URL.revokeObjectURL(resultUrl.value);
+  if (resultUrl.value) revokeObjectUrl(resultUrl.value);
   resultUrl.value = "";
   await sseStream("/api/generate/stream", {
     target,
@@ -220,21 +234,27 @@ async function generate(): Promise<void> {
     retry: false,
     onOpen: () => (progress.value = "Queued"),
     onEvent: (event, data) => {
-      if (event === "progress") {
-        const update = JSON.parse(data) as ProgressEvent;
-        if (update.type === "denoise_step")
-          progress.value = `Developing ${update.step} / ${update.total}`;
-        else if (update.type === "stage_start") progress.value = update.name;
-        else if (update.type === "queued") progress.value = `Queued ${update.position + 1}`;
-        else if (update.type === "info") progress.value = update.message;
-      } else if (event === "complete") {
-        const complete = JSON.parse(data) as CompleteEvent;
-        resultUrl.value = base64Url(complete.image, complete.format);
-        resultFormat.value = complete.format;
-        progress.value = `${(complete.generation_time_ms / 1000).toFixed(1)}s · seed ${complete.seed_used}`;
-        generating.value = false;
-      } else if (event === "error") {
-        progress.value = data;
+      try {
+        if (event === "progress") {
+          const update = JSON.parse(data) as ProgressEvent;
+          if (update.type === "denoise_step")
+            progress.value = `Developing ${update.step} / ${update.total}`;
+          else if (update.type === "stage_start") progress.value = update.name;
+          else if (update.type === "queued") progress.value = `Queued ${update.position + 1}`;
+          else if (update.type === "info") progress.value = update.message;
+        } else if (event === "complete") {
+          const complete = JSON.parse(data) as CompleteEvent;
+          resultUrl.value = base64Url(complete.image, complete.format);
+          resultFormat.value = complete.format;
+          progress.value = `${(complete.generation_time_ms / 1000).toFixed(1)}s · seed ${complete.seed_used}`;
+          generating.value = false;
+        } else if (event === "error") {
+          progress.value = data;
+          generating.value = false;
+        }
+      } catch {
+        generationAbort?.abort();
+        progress.value = "The host returned an invalid generation update.";
         generating.value = false;
       }
     },
@@ -266,27 +286,44 @@ async function refreshGallery(): Promise<void> {
   galleryError.value = "";
   const prior = gallery.value;
   gallery.value = [];
-  for (const item of prior) URL.revokeObjectURL(item.mediaUrl);
+  for (const item of prior) revokeObjectUrl(item.mediaUrl);
   const results = await Promise.allSettled(
     hosts.value.map(async (host) => {
       const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
       const prints = await apiJsonTo<GalleryImage[]>(target, "/api/gallery");
-      return Promise.all(
-        prints.map(async (print) => ({
-          ...print,
-          hostId: host.id,
-          hostName: host.name,
-          mediaUrl: await mediaUrl(target, print.filename),
-        })),
-      );
+      return prints.map((print) => ({
+        ...print,
+        hostId: host.id,
+        hostName: host.name,
+        target,
+      }));
     }),
   );
-  gallery.value = results
+  pendingGallery = results
     .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
     .sort((a, b) => b.timestamp - a.timestamp);
   const failed = results.filter((result) => result.status === "rejected").length;
   if (failed) galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable`;
+  await loadMoreGallery();
   galleryLoading.value = false;
+}
+
+async function loadMoreGallery(): Promise<void> {
+  galleryLoadingMore.value = true;
+  const page = pendingGallery.splice(0, 40);
+  for (let offset = 0; offset < page.length; offset += 4) {
+    const batch = await Promise.allSettled(
+      page.slice(offset, offset + 4).map(async ({ target, ...print }) => ({
+        ...print,
+        mediaUrl: await mediaUrl(target, print.filename),
+      })),
+    );
+    gallery.value.push(
+      ...batch.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
+    );
+  }
+  galleryRemaining.value = pendingGallery.length;
+  galleryLoadingMore.value = false;
 }
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
@@ -480,6 +517,15 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <div v-else class="empty-state">No prints found.</div>
+        <button
+          v-if="galleryRemaining"
+          class="secondary-button gallery-more"
+          type="button"
+          :disabled="galleryLoadingMore"
+          @click="loadMoreGallery"
+        >
+          {{ galleryLoadingMore ? "Loading…" : `Load older prints (${galleryRemaining})` }}
+        </button>
       </template>
 
       <template v-else>
